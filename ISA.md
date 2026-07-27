@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 71/229
+progress: 78/229
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -231,15 +231,15 @@ suite green on `headless` against a test double.
 - [ ] ISC-107: Every cloud invocation, permitted or refused, appears in the run ledger.
 - [ ] ISC-108: A worker completing 3 turns with zero tool calls is classified `failed:no_tool_calls`.
 - [ ] ISC-109: With 6 workers up and `max_concurrent: 2`, at most 2 have an in-flight generation at any sampled moment.
-- [ ] ISC-110: A worker queued behind others is not killed as wedged before `event_stall_warn` elapses.
+- [x] ISC-110: A worker queued behind others is not killed as wedged before `event_stall_warn` elapses.
 - [ ] ISC-111: A dialog `extension_ui_request` is answered `{cancelled:true}` within 5s.
 - [ ] ISC-112: An `editor` extension UI request does not hang the run.
 - [ ] ISC-113: Fire-and-forget UI methods receive no response and are logged.
 - [ ] ISC-114: Exceeding `tokens_ceiling` halts dispatch and exits 5, with artifacts still harvested.
-- [ ] ISC-115: Exceeding `tokens_ceiling` halts a run whose reported cost is 0 throughout.
+- [x] ISC-115: Exceeding `tokens_ceiling` halts a run whose reported cost is 0 throughout.
 - [ ] ISC-116: A task exceeding `deadline_s` is aborted and reported `timed_out` with exit 4.
 - [ ] ISC-117: A wedged agent (no events, live heartbeat) is killed at `event_stall_kill`.
-- [ ] ISC-118: A wedged supervisor is reaped by the daemon.
+- [x] ISC-118: A wedged supervisor is reaped by the daemon.
 - [ ] ISC-119: A repo carrying `.pi/extensions/hostile.ts` and a hostile `AGENTS.md` changes nothing about the run.
 - [ ] ISC-120: An envelope naming `/Users/dan/.env` is refused before dereference.
 - [ ] ISC-121: A symlink in `<outbox>/files` pointing outside the outbox is refused.
@@ -279,7 +279,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-143: The epoch high-water-mark is durable before dispatch; allocate → crash → restart does not re-issue the same epoch.
 - [ ] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
 - [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
-- [ ] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
+- [x] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
 - [ ] ISC-147: Across every hostile scenario, completion is never declared while the agent will still emit output.
 - [ ] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree.
 - [ ] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment.
@@ -288,7 +288,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`.
 - [ ] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
 - [ ] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing).
-- [ ] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
+- [x] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
 - [ ] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
 - [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
 - [ ] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output.
@@ -335,9 +335,9 @@ Open — carried forward, not fixed here:
 - [ ] ISC-188: `render.ts` and `run/paths.ts` compute the run directory once, not twice (`outbox`, `skills`, `env`, briefing paths, and `PIFLEET_RUNS_DIR` honoured).
 - [ ] ISC-189: `up` refuses to run against an image that is absent or fails `verify`.
 - [ ] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
-- [ ] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
+- [x] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
 - [ ] ISC-192: A ledger or state file written under an older schema version is read under a pinned policy rather than failing.
-- [ ] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
+- [x] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
 
 ### Group P — CI portability (added 2026-07-27, found the first time CI actually ran the probes)
 
