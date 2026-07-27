@@ -374,23 +374,59 @@ async function scanGitConfig(worktreeRoot: string, opts: RepoHazardScanOptions, 
   // match `key = value` lines. Git treats section and key names
   // case-insensitively; subsections keep their case and are folded into the
   // dotted form the CONFIG_HAZARDS patterns match against.
-  const lines = text.split("\n");
+  //
+  // Two forms this walk used to miss, both of which git itself honours:
+  //
+  //   [core] hooksPath = /tmp/evil        header and key on ONE line
+  //   [core]\r\n\thooksPath = ...\r\n     CRLF line endings
+  //
+  // The first slipped through because the header pattern was anchored `\]\s*$`
+  // while the key pattern required the line to START with a key — a line
+  // carrying both matched NEITHER, so it was invisible rather than
+  // half-parsed. The second because `.` in a JS regex excludes `\r`, so the
+  // value capture could never reach `$`; the header line still parsed, which
+  // made that failure selective and silent instead of total.
+  //
+  // Both were found by a probe that asks `git config --get` for the effective
+  // value and prints it beside this scanner's verdict, so neither side can be
+  // graded against the other's assumptions. It is the regression test now.
+  const rawLines = text.split("\n");
   let section = "";
-  const offenders: Array<{ index: number; kind: RepoHazard["kind"]; why: string; shown: string }> = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const sec = /^\s*\[([^\]\s"]+)(?:\s+"((?:[^"\\]|\\.)*)")?\]\s*$/.exec(line);
+  const offenders: Array<{
+    index: number;
+    kind: RepoHazard["kind"];
+    why: string;
+    shown: string;
+    /** The `[section]` text if it shared this line with the key, else "". */
+    header: string;
+    /** The line with `\r` stripped and any leading header removed. */
+    tail: string;
+  }> = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i]!.replace(/\r$/, "");
+    // Not anchored at end: a header may be followed by a key on the same line.
+    const sec = /^(\s*\[([^\]\s"]+)(?:\s+"((?:[^"\\]|\\.)*)")?\])/.exec(line);
+    let header = "";
+    let tail = line;
     if (sec !== null) {
-      section = sec[2] !== undefined ? `${sec[1]!.toLowerCase()}.${sec[2]}` : sec[1]!.toLowerCase();
-      continue;
+      section = sec[3] !== undefined ? `${sec[2]!.toLowerCase()}.${sec[3]}` : sec[2]!.toLowerCase();
+      header = sec[1]!;
+      tail = line.slice(header.length);
     }
-    const kv = /^\s*([A-Za-z][A-Za-z0-9-]*)\s*=\s*(.*)$/.exec(line);
+    const kv = /^\s*([A-Za-z][A-Za-z0-9-]*)\s*=\s*(.*)$/.exec(tail);
     if (kv === null) continue;
     const key = kv[1]!.toLowerCase();
     for (const h of CONFIG_HAZARDS) {
       if (h.section.test(section) && h.key.test(key)) {
         // Clipped, not escaped — `record` is the single escaper.
-        offenders.push({ index: i, kind: h.kind, why: h.why, shown: `${section}.${key} = ${kv[2]!.slice(0, 128)}` });
+        offenders.push({
+          index: i,
+          kind: h.kind,
+          why: h.why,
+          shown: `${section}.${key} = ${kv[2]!.slice(0, 128)}`,
+          header,
+          tail,
+        });
         break;
       }
     }
@@ -401,14 +437,24 @@ async function scanGitConfig(worktreeRoot: string, opts: RepoHazardScanOptions, 
   let note = "detected only; not neutralized";
   if (opts.neutralize) {
     for (const o of offenders) {
-      lines[o.index] = `; pifleet-quarantined ${lines[o.index]!}`;
+      // A key sharing its line with a `[section]` header cannot simply be
+      // commented out: that would comment out the HEADER too, and every
+      // following indented key would silently re-attach to whatever section
+      // preceded this one — turning a neutralization into a semantic edit of
+      // unrelated settings. Split instead: header kept on its own line, key
+      // quarantined beneath it. Emitting "\n" inside one element is safe
+      // because the join happens after every index has been addressed.
+      rawLines[o.index] =
+        o.header === ""
+          ? `; pifleet-quarantined ${o.tail}`
+          : `${o.header}\n; pifleet-quarantined ${o.tail}`;
     }
     try {
       // Plain truncate-write, no tmp+rename dance: this runs on the host
       // BEFORE the container exists, so there is no concurrent writer to
       // race, and a torn write here fails loudly on the next parse rather
       // than silently passing.
-      await writeFile(abs, lines.join("\n"), "utf8");
+      await writeFile(abs, rawLines.join("\n"), "utf8");
       neutralized = true;
       note = "offending lines commented out with a pifleet-quarantined marker";
     } catch (err) {
