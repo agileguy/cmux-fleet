@@ -13,8 +13,10 @@ import { join } from "node:path";
 import {
   daemonScratchRoot,
   makeDaemonScratch,
+  makeWorkerAccessible,
   probeMountVisibility,
   probeWriteThrough,
+  WORKER_UID,
 } from "../../src/container/mounts.ts";
 import type { Exec, ExecResult } from "../../src/container/run.ts";
 
@@ -154,5 +156,64 @@ describe("probeWriteThrough", () => {
       await probeWriteThrough("img", async () => ok(""), { PIFLEET_SCRATCH_DIR: root });
       expect(await readdir(root)).toEqual([]);
     });
+  });
+});
+
+/**
+ * The ownership half of the mount rule.
+ *
+ * A Linux bind mount passes host ownership straight through, so a directory the
+ * host created at `mkdtemp`'s 0700 is unusable to the container's uid 10001 —
+ * it cannot even traverse it. The macOS VM squashes ownership instead, so the
+ * symptom is invisible on this machine and appears only on a Linux host, where
+ * seven container probes failed at once: `/workspace` unwritable, `/skills`
+ * unreadable, and the verbgate ledger never created (ENOENT on the append).
+ *
+ * The mode is therefore the thing to assert. These tests cannot observe the
+ * Linux failure, but they pin the invariant whose absence causes it, and they
+ * fail on any platform if the chmod is dropped.
+ */
+describe("worker-uid accessibility", () => {
+  const mode = async (p: string): Promise<number> => (await stat(p)).mode & 0o777;
+
+  const withRoot = async (fn: (root: string) => Promise<void>): Promise<void> => {
+    const root = await mkdtemp(join(tmpdir(), "perm-root-"));
+    try {
+      await fn(root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  test("a scratch directory is writable by another uid, not mkdtemp's 0700", async () => {
+    await withRoot(async (root) => {
+      const dir = await makeDaemonScratch("perm", { PIFLEET_SCRATCH_DIR: root });
+      expect(await mode(dir)).toBe(0o777);
+    });
+  });
+
+  test("the scratch ROOT is at least traversable, or nothing beneath it is reachable", async () => {
+    await withRoot(async (root) => {
+      await makeDaemonScratch("perm", { PIFLEET_SCRATCH_DIR: root });
+      // A 0700 root makes every 0777 child unreachable — the child's own mode
+      // is not sufficient, because traversal is checked at every component.
+      expect((await mode(root)) & 0o055).toBe(0o055);
+    });
+  });
+
+  test("a read-only mount gets traverse+read but not write", async () => {
+    await withRoot(async (root) => {
+      const dir = await makeDaemonScratch("ro", { PIFLEET_SCRATCH_DIR: root });
+      await makeWorkerAccessible(dir, false);
+      expect(await mode(dir)).toBe(0o755);
+      expect((await mode(dir)) & 0o002).toBe(0); // world-writable would be wrong here
+    });
+  });
+
+  test("the uid constant matches the Dockerfile's USER", async () => {
+    // If these drift, the permissions above are opened for the wrong account
+    // and every mount silently reverts to the broken state.
+    const dockerfile = await Bun.file("docker/Dockerfile").text();
+    expect(dockerfile).toContain(`USER ${WORKER_UID}:${WORKER_UID}`);
   });
 });

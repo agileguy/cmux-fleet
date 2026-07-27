@@ -9,6 +9,7 @@ import { LedgerWriter } from "../../run/ledger.ts";
 import { registryCall } from "../../run/registry.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { createHeadlessBackend } from "../../backends/headless/index.ts";
+import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
 
 /** ISC-70: every worker reaches `idle` within this budget. */
@@ -63,6 +64,11 @@ export function register(program: Command): void {
       await mkdir(run.inboxDir, { recursive: true });
       await mkdir(run.sessionsDir, { recursive: true });
       await mkdir(run.workersDir, { recursive: true });
+      // `sessions` is bind-mounted rw into every worker, which runs as uid
+      // 10001. A Linux bind mount passes host ownership through, so the default
+      // 0755 leaves the worker unable to write its own transcript; the macOS VM
+      // squashes ownership and hides this entirely.
+      await makeWorkerAccessible(run.sessionsDir, true);
 
       await writeJsonAtomic(run.runJson, {
         schema: "pifleet.run/v1",

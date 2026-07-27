@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { makeDaemonScratch } from "../../src/container/mounts.ts";
+import { makeDaemonScratch, makeWorkerAccessible } from "../../src/container/mounts.ts";
 
 const IMAGE = process.env.PIFLEET_TEST_IMAGE ?? "pifleet/pi-worker:verify";
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -42,6 +42,12 @@ async function makeSandbox(allow = "kubectl rollout restart\n"): Promise<{
   scratches.push(host);
   await mkdir(join(host, "outbox", "ledger"), { recursive: true });
   await mkdir(join(host, "policy"), { recursive: true });
+  // The scratch root's mode does not descend. `mkdir` gives 0755, so on Linux —
+  // where a bind mount passes host ownership through untouched — the worker's
+  // uid 10001 cannot create the ledger file and every gate decision is lost
+  // with an ENOENT nobody sees. macOS squashes ownership and hides it.
+  await makeWorkerAccessible(join(host, "outbox"), true);
+  await makeWorkerAccessible(join(host, "outbox", "ledger"), true);
   const policy = join(host, "policy", "cloud-allow");
   await writeFile(policy, allow);
   await chmod(policy, 0o444);
@@ -251,6 +257,8 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       scratches.push(host);
       await mkdir(join(host, "outbox", "ledger"), { recursive: true });
       await mkdir(join(host, "policy"), { recursive: true });
+      await makeWorkerAccessible(join(host, "outbox"), true);
+      await makeWorkerAccessible(join(host, "outbox", "ledger"), true);
       await writeFile(join(host, "policy", "cloud-allow"), "*\n");
       await chmod(join(host, "policy", "cloud-allow"), 0o666);
       await chmod(join(host, "policy"), 0o777);

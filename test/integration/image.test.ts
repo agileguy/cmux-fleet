@@ -13,7 +13,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
 import { buildImage, imageTag, verifyImage } from "../../src/container/image.ts";
-import { makeDaemonScratch } from "../../src/container/mounts.ts";
+import { makeDaemonScratch, makeWorkerAccessible } from "../../src/container/mounts.ts";
 import { realExec } from "../../src/container/run.ts";
 
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -245,6 +245,11 @@ describe("verbgate (SRD §5.10)", () => {
     const host = await makeDaemonScratch("imgverbgate");
     try {
       await mkdir(join(host, "outbox", "ledger"), { recursive: true });
+      // 0755 from mkdir leaves the container's uid 10001 unable to append; on
+      // Linux the gate decision is then lost to an ENOENT the test only sees as
+      // a missing ledger.
+      await makeWorkerAccessible(join(host, "outbox"), true);
+      await makeWorkerAccessible(join(host, "outbox", "ledger"), true);
       const policy = join(host, "cloud-allow");
       await writeFile(policy, "kubectl delete\n");
       const r = await runInImage(

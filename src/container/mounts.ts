@@ -17,9 +17,30 @@
  * So: anything pifleet intends to bind-mount lives under `$HOME`, and the
  * assumption is probed rather than trusted. Docker Desktop shares `/Users` by
  * default, which contains `$HOME`, so the same rule holds there.
+ *
+ * ---
+ *
+ * The second way a bind mount silently does not work is OWNERSHIP, and it hides
+ * on macOS for the same reason the first one hides on Linux.
+ *
+ * The worker image runs as uid 10001 (`docker/Dockerfile`). A Linux bind mount
+ * passes host ownership through untouched, so a directory the host created —
+ * `mkdtemp` gives 0700, `mkdir` gives 0755 — is unwritable, and at 0700 not
+ * even traversable, to that uid. The macOS VM's shared filesystem squashes
+ * ownership to the container user instead, so all of these paths work here and
+ * none of them work there. Seven container probes failed at once on the first
+ * Linux runner: `/workspace` unwritable, `/skills` unreadable, and the verbgate
+ * ledger never created — an ENOENT on the append, which reads as "the gate made
+ * no decisions" rather than as a mount fault.
+ *
+ * Matching uids is not available: the image bakes in uid 10001 with a home
+ * directory to match, and the host uid is whatever the operator happens to be.
+ * So the host side opens the permission bits instead — scoped to the run
+ * directory and the scratch root, both under `$HOME` and containing only
+ * material pifleet itself put there.
  */
 
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { realExec, type Exec } from "./run.ts";
@@ -37,14 +58,43 @@ export function daemonScratchRoot(
   return env["PIFLEET_SCRATCH_DIR"] ?? join(homedir(), ".pifleet", "scratch");
 }
 
-/** Create a fresh scratch directory under the daemon-visible root. */
+/** The uid the worker image runs as. Must track `USER` in `docker/Dockerfile`. */
+export const WORKER_UID = 10001;
+
+/**
+ * Open a host directory's permissions so the worker uid can use it.
+ *
+ * `writable: true` for a mount the worker writes (its outbox, its workspace);
+ * `false` for one it only reads (`:ro` skills, policy), which still needs the
+ * execute bit to traverse.
+ *
+ * This is a deliberate widening of host-side permissions, which is why callers
+ * must only point it at directories pifleet created under the run root — never
+ * at a user's repository or home directory.
+ */
+export async function makeWorkerAccessible(dir: string, writable: boolean): Promise<void> {
+  await chmod(dir, writable ? 0o777 : 0o755);
+}
+
+/**
+ * Create a fresh scratch directory under the daemon-visible root.
+ *
+ * `mkdtemp` deliberately creates 0700 — correct for a private temp directory,
+ * fatal for one about to be handed to another uid, so the mode is reopened
+ * immediately rather than left to each caller to remember.
+ */
 export async function makeDaemonScratch(
   prefix: string,
   env: Record<string, string | undefined> = process.env,
 ): Promise<string> {
   const root = daemonScratchRoot(env);
   await mkdir(root, { recursive: true });
-  return mkdtemp(join(root, `${prefix}-`));
+  // A root left at 0700 by an earlier run makes every 0777 child unreachable:
+  // traversal is checked at every path component, not just the leaf.
+  await chmod(root, 0o755).catch(() => {});
+  const dir = await mkdtemp(join(root, `${prefix}-`));
+  await makeWorkerAccessible(dir, true);
+  return dir;
 }
 
 /** What to tell a user whose bind mount came up empty. */
