@@ -17,8 +17,16 @@
  */
 
 import { z } from "zod";
+import type { WorkerState } from "../contracts.ts";
+import {
+  HeartbeatMonitor,
+  reapStale,
+  type ReaperOps,
+  type ReapReport,
+} from "../safety/reaper.ts";
 import { writeJsonAtomic, LineSplitter, parseLine } from "../util/jsonl.ts";
-import type { RunPaths } from "./paths.ts";
+import { workerPaths, type RunPaths } from "./paths.ts";
+import { readWorkerState } from "./state.ts";
 
 // ---------------------------------------------------------------------------
 // Process identity — pid + start time, never pid alone.
@@ -210,6 +218,38 @@ export async function socketRequest(
 
 export interface RegistryDaemon {
   stop(): Promise<void>;
+  /**
+   * One reaper scan (ISC-236). The interval calls this; tests call it directly
+   * so a reap can be driven deterministically rather than waited for — a test
+   * that races a timer is the anti-pattern this whole suite avoids.
+   */
+  reapOnce(): Promise<ReapReport[]>;
+}
+
+/**
+ * Reaper wiring for the daemon (SRD §13.1, F31).
+ *
+ * The reaper module scans and kills; it deliberately does not deregister,
+ * because `registry.json` has a single writer and that writer is here. So the
+ * loop lives in the daemon: `reapStale` returns what it reaped, and the daemon
+ * removes exactly those entries through the same serialized chain every other
+ * mutation uses. A second write path to registry.json would reintroduce the
+ * lost-update race the chain exists to prevent.
+ */
+export interface ReaperConfig {
+  /** `run.heartbeat_interval`, in ms. Staleness is 3× this (§13.1). */
+  heartbeatIntervalMs: number;
+  /** Scan period. Defaults to the heartbeat interval. */
+  scanIntervalMs?: number;
+  ops?: ReaperOps;
+  /** Overridable so tests need no real state files on disk. */
+  readState?: (worker: string) => Promise<WorkerState | null>;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  termGraceMs?: number;
+  killGraceMs?: number;
+  /** Observability hook — the CLI writes these to the ledger. */
+  onReap?: (reports: ReapReport[]) => void;
 }
 
 /**
@@ -219,7 +259,7 @@ export interface RegistryDaemon {
  */
 export async function startRegistryDaemon(
   run: RunPaths,
-  opts: { onShutdown?: () => void } = {},
+  opts: { onShutdown?: () => void; reaper?: ReaperConfig } = {},
 ): Promise<RegistryDaemon> {
   const started = (await processStartTime(process.pid)) ?? "";
   let registry: Registry = (await readRegistry(run)) ?? {
@@ -288,11 +328,80 @@ export async function startRegistryDaemon(
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Reaper loop (ISC-236)
+  // -------------------------------------------------------------------------
+
+  const monitor = new HeartbeatMonitor(opts.reaper?.now);
+  const readState =
+    opts.reaper?.readState ??
+    ((worker: string) => readWorkerState(workerPaths(run, worker)));
+
+  /**
+   * A scan takes a SNAPSHOT of the worker set and reaps against it. Reaping is
+   * slow — a kill ladder waits out two grace periods — and registrations land
+   * during it, so the reports are applied by NAME against whatever the
+   * registry holds at write time rather than by overwriting the snapshot. A
+   * worker that registered mid-scan must not be erased by a scan that started
+   * before it existed.
+   */
+  const reapOnce = async (): Promise<ReapReport[]> => {
+    const cfg = opts.reaper;
+    if (cfg === undefined) return [];
+    const reports = await reapStale({
+      registry,
+      readState,
+      monitor,
+      heartbeatIntervalMs: cfg.heartbeatIntervalMs,
+      ops: cfg.ops,
+      termGraceMs: cfg.termGraceMs,
+      killGraceMs: cfg.killGraceMs,
+      now: cfg.now,
+      sleep: cfg.sleep,
+    });
+    if (reports.length > 0) {
+      await serialized(async () => {
+        const workers = { ...registry.workers };
+        for (const r of reports) delete workers[r.worker];
+        registry = { ...registry, workers };
+        await writeJsonAtomic(run.registryJson, RegistrySchema.parse(registry));
+      });
+      cfg.onReap?.(reports);
+    }
+    return reports;
+  };
+
+  let scanning = false;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  if (opts.reaper !== undefined) {
+    const period = opts.reaper.scanIntervalMs ?? opts.reaper.heartbeatIntervalMs;
+    timer = setInterval(() => {
+      // A scan outlasting its period must not stack: the ladder's grace
+      // periods are seconds long, and overlapping scans would aim two kill
+      // ladders at one pid — the second at whatever inherits it.
+      if (scanning) return;
+      scanning = true;
+      void reapOnce()
+        .catch(() => {
+          // A failed scan is not fatal to the daemon; the next one retries.
+        })
+        .finally(() => {
+          scanning = false;
+        });
+    }, period);
+    // The socket server already holds the loop open; the reaper must not be
+    // the reason a daemon refuses to exit.
+    timer.unref?.();
+  }
+
   const daemon: RegistryDaemon = {
     async stop() {
+      if (timer !== null) clearInterval(timer);
+      timer = null;
       await server?.stop();
       server = null;
     },
+    reapOnce,
   };
   onShutdown = () => {
     void daemon.stop().then(() => opts.onShutdown?.());

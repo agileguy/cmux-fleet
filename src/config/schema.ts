@@ -168,6 +168,16 @@ export const TimersSchema = z
   .strict()
   .prefault({});
 
+/**
+ * The heartbeat interval a run gets when no config is reachable, in ms.
+ *
+ * Derived from the schema rather than restated, so the fallback the daemon
+ * reaps by can never drift from the default a config that omits the key
+ * actually gets. A literal `5_000` here would be correct today and silently
+ * wrong the first time the default moves.
+ */
+export const DEFAULT_HEARTBEAT_INTERVAL_MS = TimersSchema.parse({}).heartbeat_interval * 1000;
+
 export const RunSchema = z
   .object({
     root: shortStr.default("~/.pifleet/runs"),

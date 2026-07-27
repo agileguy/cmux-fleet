@@ -32,9 +32,10 @@ import {
   type Presentation,
   type WorkerState,
 } from "../contracts.ts";
+import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../config/schema.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import { emptyFence, type FenceSnapshot } from "../rpc/epoch.ts";
-import type { WorkerPaths } from "./paths.ts";
+import type { RunPaths, WorkerPaths } from "./paths.ts";
 
 // ---------------------------------------------------------------------------
 // Worker state
@@ -42,6 +43,26 @@ import type { WorkerPaths } from "./paths.ts";
 
 export async function readWorkerState(paths: WorkerPaths): Promise<WorkerState | null> {
   return readValidated(paths.stateJson, (v) => WorkerStateSchema.parse(v));
+}
+
+/**
+ * The staleness threshold the daemon reaps by, as `up` recorded it (ISC-236).
+ *
+ * Deliberately forgiving: a run directory written before this field existed,
+ * or assembled by hand in a test, must still start a daemon rather than fail
+ * to. But the fallback is only for a MISSING value — a present one that is not
+ * a positive number means the run dir disagrees with itself about how long a
+ * silent supervisor may live, and silently substituting a default there would
+ * hide it.
+ */
+export async function readRunHeartbeatIntervalMs(run: RunPaths): Promise<number> {
+  const doc = await readValidated(run.runJson, (v) =>
+    z
+      .object({ heartbeat_interval_ms: z.number().positive().optional() })
+      .loose()
+      .parse(v),
+  );
+  return doc?.heartbeat_interval_ms ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
 }
 
 export async function writeWorkerState(paths: WorkerPaths, state: WorkerState): Promise<void> {

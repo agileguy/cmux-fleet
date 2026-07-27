@@ -4,6 +4,138 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-27 — Phase 2: artifacts and safety
+
+A worker's self-report is now adjudicated against independent evidence, and a
+run can be stopped before it spends everything.
+
+### Added
+- **Outbox contract (A1)** — `result.json` is untrusted input. It is
+  schema-validated before any field is dereferenced; a path naming anything
+  outside the mount table is refused *before* the path is opened; a symlink
+  under `files/` pointing out of the outbox is refused via `lstat` + `realpath`
+  rather than followed first; an oversized file is refused rather than buffered.
+- **Repository harvest (A2)** — diff, commits and changed files from the
+  worker's branch, gated on `git merge-base --is-ancestor <base> HEAD`. Without
+  that gate a rewritten base still produces a plausible, much smaller diff
+  through the surviving merge-base, and a worker that changed nothing looks
+  clean.
+- **Transcript harvest (A4) and usage (A6)** — reuses the existing `TailReader`.
+  `U+2028` inside a JSON string survives (`readline` splits on it and silently
+  drops the record); a 4-byte codepoint split across a poll boundary produces no
+  `U+FFFD`; a session file rewritten in place is re-read from zero. Usage
+  merges element-wise-max across sources, because an undercount feeding a token
+  ceiling is a ceiling that never trips.
+- **Acceptance runner** — commands are resolved from the **base SHA** and
+  executed in a fresh clone outside the worker's worktree with no inherited
+  environment. Independence is a property of *where the command is resolved
+  from*, not of who runs it: the command string routes through `package.json`
+  scripts, `conftest.py`, `.git/hooks` and the Makefile, every one of which is
+  inside the worker's mutable surface.
+- **Adjudicator** — the `failed < blocked < partial < success` lattice with
+  `unknown` as the identity element, the harness-surface cap, discrepancy
+  detection, and a hashed derived-fact bundle so an adjudication can be
+  replayed. The hash covers the facts and not the verdict, so "same hash,
+  different verdict" and "different hash" are distinguishable failures.
+- **Budget ceilings** — on **tokens**, with an up-front reservation released on
+  settle. Local models are unpriced, so a ceiling watching dollars never trips
+  and is a comment rather than a control. The reservation doubles as the
+  admission slot, which is also what distinguishes a *queued* worker from a
+  *wedged* one — they look identical if you only watch event silence.
+- **Kill ladder** — re-validates `(pid, started)` at every rung. A pid is not an
+  identity: pids are reused, and a ladder escalating on an unvalidated pid
+  eventually SIGKILLs a process that merely inherited the number.
+- **Reaper** — staleness by monotonic change-detection, not by subtracting a
+  wall-clock heartbeat label written by another process. Subtraction would
+  mass-reap the whole fleet when a laptop resumes from sleep.
+- **`src/util/clock.ts`** — the single home for monotonic time. The rule that no
+  timing path may read `Date.now()` is now a test rather than a convention.
+
+### Fixed
+- A timed-out acceptance run adjudicated to `unknown`, and `unknown` being the
+  lattice identity meant the worker's claim was adopted verbatim — so a task
+  whose exam never finished was reported `success`. The route needed no harness
+  edit: ship a change that makes an existing command hang, claim success,
+  collect it. An attempted command that returns no answer now caps the verdict.
+  It is still never `failed` — a timeout proves nothing about the code.
+- Symlink containment canonicalizes its root. On macOS `/var` is a symlink to
+  `/private/var`, so an uncanonicalized root made every legitimate in-outbox
+  symlink compare as escaping.
+
+### Notes
+- The SRD's `CompactionEntry.retainedTail` does not exist in Pi 0.79.6; the
+  installed session format spells the same concept as `summary` plus
+  `firstKeptEntryId`. Implemented against the binary. Erratum in `ISA.md`.
+
+### Security — found by adversarial review of this phase
+- **`git diff` no longer executes what the graded repository tells it to.** A
+  `.gitattributes` in the tree assigns a diff driver per path and
+  `[diff "name"] command` in the repository's own config names a program git
+  runs — on the host, as the harvester, outside the container the worker is
+  confined to. Neutralized on the command line, because `GIT_CONFIG_GLOBAL`
+  and `GIT_CONFIG_SYSTEM` do not suppress `.git/config` and nothing in the
+  environment can. `runGit` also no longer spreads `process.env`, which had
+  been handing that subprocess the harvester's cloud credentials.
+- **Outbox containment is checked at the roots.** `files/` was walked directly
+  and so never met the per-entry symlink branch: a worker that replaced it
+  with a link to `~/.ssh` had every key returned as a safe artifact with
+  nothing refused. A symlinked task directory separately re-rooted containment
+  onto the attacker's own directory, after which escaping links were approved.
+  Accepted files are canonicalized and refused when their link count shows a
+  second name elsewhere.
+- **Envelope paths carrying control characters are refused.** A NUL is a single
+  contained path as a JavaScript string and truncates to a different file at
+  the C boundary; the same characters let a worker rewrite the harvest report
+  that is judging it, since these paths reach an operator's terminal.
+- **The harness surface covers what the test command resolves *through*.** The
+  pattern list omitted `bunfig.toml` — the config for the runner this
+  repository itself uses, whose `[test] preload` executes before any test — so
+  a worker could turn a red suite green with the implementation still wrong and
+  have nothing classified as harness. Runner config, inherited config
+  (`tsconfig` `extends`, Makefile `include`) and toolchain selection are now
+  included. A denylist cannot express this completely; the allowlist redesign
+  is tracked as ISC-243.
+
+### Fixed — found by mutation and adversarial review
+- **One unharvestable task no longer destroys the run's harvest.**
+  `readResultEnvelope` opened the file outside its own guard, so an envelope
+  that `lstat`'d cleanly but could not be opened threw out of a function whose
+  contract promises it never throws, propagated through an unguarded loop, and
+  exited `artifacts` with code 2 and no JSON at all — losing every healthy
+  task's harvest with the poisoned one.
+- **The adjudicator is on the live path.** `artifacts` reached the two-argument
+  lattice combinator, so the module implementing the evidence rules — the
+  harness cap, the replay hash, the moved-tree void, the inconclusive-exam cap
+  — had a full passing test suite and no production caller. This also settles a
+  contradiction between two implementations of F5: SRD §880 makes
+  *disagreement* between the envelope and the diff a hard failure class,
+  unqualified, so concealment now fails as fabrication already did.
+- **`facts_hash` is recorded, not just computed** — ISC-153 asks for hashed
+  *and* recorded, and the hash was being dropped.
+- **Flaky supervisor tests fixed at the root.** `socketPath` hashes
+  `(run_id, worker_id)` into the shared `os.tmpdir()`, so tests using hardcoded
+  run ids made concurrent test processes share a control socket and answer each
+  other's RPCs. Six parallel lanes went from 5/6 failing to 6/6 green.
+
+### Added — wiring completed after review
+- **`artifacts --run-acceptance` holds the exam.** SRD §8.2 has the harvester
+  re-run the acceptance commands *itself*; the runner existed, was unit-tested,
+  and had no production caller, so `derived.acceptance` was always empty and a
+  worker's self-report was the only thing grading it. Commands are resolved
+  from the base SHA, not the worker's tree — independence is a property of
+  where a command is resolved from, not of who runs it. Opt-in, because the
+  default must stay a pure read: a read that silently clones a repository and
+  executes code out of it is a different operation wearing the same name.
+  Running in a fresh *container* rather than a fresh clone remains ISC-233.
+- The daemon runs the reaper on an interval and deregisters what it reaps
+  (ISC-236); the staleness threshold travels with the run in `run.json`, so the
+  detached daemon judges by the interval the fleet was started under. This also
+  makes `up --config` do something, which it previously accepted and ignored.
+- `workerOutboxDir` has one definition (ISC-231). It was computed
+  independently by the mount builder and the harvester, and a divergence there
+  does not throw — harvest would find an empty directory and report a task that
+  produced artifacts as having produced none.
+
 ## [0.2.0] — 2026-07-27 — Phase 1: container and headless core
 
 `up → dispatch → wait → down` runs end to end on the `headless` backend against

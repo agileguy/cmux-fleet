@@ -108,28 +108,11 @@ interface Pending {
 }
 
 /**
- * Monotonic stopwatch with an injectable clock. Deadlines and stall timers
- * must never be computed from `Date.now()`: wall clock jumps under host sleep
- * and NTP steps, and a deadline that jumps with it either fires years early or
- * never. Wall-clock time is for ledger timestamps only.
+ * Re-exported from `util/clock.ts`, which now owns every timing primitive.
+ * Kept here so the existing importers (`wait`, `down`, the supervisor) do not
+ * all have to change in the same commit that introduces the clock module.
  */
-export class Stopwatch {
-  readonly #now: () => number;
-  #start: number;
-
-  constructor(now: () => number = () => performance.now()) {
-    this.#now = now;
-    this.#start = now();
-  }
-
-  elapsedMs(): number {
-    return this.#now() - this.#start;
-  }
-
-  restart(): void {
-    this.#start = this.#now();
-  }
-}
+export { Stopwatch } from "../util/clock.ts";
 
 export class RpcClient {
   readonly #sink: { write(data: string): unknown; flush?(): unknown };

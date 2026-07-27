@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 71/229
+progress: 104/236
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -206,21 +206,21 @@ suite green on `headless` against a test double.
 
 ### Group I — Artifacts
 
-- [ ] ISC-88: `artifacts --task T --json` validates against the `pifleet.result/v1` schema.
-- [ ] ISC-89: The `verdict` field validates against the SRD §7.3 domain.
-- [ ] ISC-90: The reported diff equals `git diff` on the worker's branch.
-- [ ] ISC-91: Killing a worker after edits but before `result.json` still yields a reconstructed verdict.
-- [ ] ISC-92: A worker claiming a file it did not change is flagged.
-- [ ] ISC-93: A worker whose envelope says `success` with an empty diff is reported failed.
-- [ ] ISC-94: A missing envelope does not downgrade a task with a clean diff and green acceptance commands.
-- [ ] ISC-95: `session_path` in `state.json` equals the path `get_state` reported; no globbing occurs.
-- [ ] ISC-96: A worker that dies before its first assistant message is distinguishable from one with a wrong path.
-- [ ] ISC-97: Harvesting a transcript mid-write succeeds and resumes on the next poll.
-- [ ] ISC-98: A transcript containing `U+2028` inside a JSON string parses correctly.
-- [ ] ISC-99: A 4-byte codepoint split across a poll boundary produces no `U+FFFD`.
-- [ ] ISC-100: A session file that shrinks or changes inode is re-read from offset 0.
-- [ ] ISC-101: `transcript --html` produces an openable file.
-- [ ] ISC-102: The outbox envelope contract is enforced by schema before any field is dereferenced.
+- [x] ISC-88: `artifacts --task T --json` validates against the `pifleet.result/v1` schema.
+- [x] ISC-89: The `verdict` field validates against the SRD §7.3 domain.
+- [x] ISC-90: The reported diff equals `git diff` on the worker's branch.
+- [x] ISC-91: Killing a worker after edits but before `result.json` still yields a reconstructed verdict.
+- [x] ISC-92: A worker claiming a file it did not change is flagged.
+- [x] ISC-93: A worker whose envelope says `success` with an empty diff is reported failed.
+- [x] ISC-94: A missing envelope does not downgrade a task with a clean diff and green acceptance commands.
+- [x] ISC-95: `session_path` in `state.json` equals the path `get_state` reported; no globbing occurs.
+- [x] ISC-96: A worker that dies before its first assistant message is distinguishable from one with a wrong path.
+- [x] ISC-97: Harvesting a transcript mid-write succeeds and resumes on the next poll.
+- [x] ISC-98: A transcript containing `U+2028` inside a JSON string parses correctly.
+- [x] ISC-99: A 4-byte codepoint split across a poll boundary produces no `U+FFFD`.
+- [x] ISC-100: A session file that shrinks or changes inode is re-read from offset 0.
+- [x] ISC-101: `transcript --html` produces an openable file.
+- [x] ISC-102: The outbox envelope contract is enforced by schema before any field is dereferenced.
 
 ### Group J — Safety and security
 
@@ -231,19 +231,19 @@ suite green on `headless` against a test double.
 - [ ] ISC-107: Every cloud invocation, permitted or refused, appears in the run ledger.
 - [ ] ISC-108: A worker completing 3 turns with zero tool calls is classified `failed:no_tool_calls`.
 - [ ] ISC-109: With 6 workers up and `max_concurrent: 2`, at most 2 have an in-flight generation at any sampled moment.
-- [ ] ISC-110: A worker queued behind others is not killed as wedged before `event_stall_warn` elapses.
+- [x] ISC-110: A worker queued behind others is not killed as wedged before `event_stall_warn` elapses.
 - [ ] ISC-111: A dialog `extension_ui_request` is answered `{cancelled:true}` within 5s.
 - [ ] ISC-112: An `editor` extension UI request does not hang the run.
 - [ ] ISC-113: Fire-and-forget UI methods receive no response and are logged.
 - [ ] ISC-114: Exceeding `tokens_ceiling` halts dispatch and exits 5, with artifacts still harvested.
-- [ ] ISC-115: Exceeding `tokens_ceiling` halts a run whose reported cost is 0 throughout.
+- [x] ISC-115: Exceeding `tokens_ceiling` halts a run whose reported cost is 0 throughout.
 - [ ] ISC-116: A task exceeding `deadline_s` is aborted and reported `timed_out` with exit 4.
 - [ ] ISC-117: A wedged agent (no events, live heartbeat) is killed at `event_stall_kill`.
-- [ ] ISC-118: A wedged supervisor is reaped by the daemon.
+- [x] ISC-118: A wedged supervisor is reaped by the daemon.
 - [ ] ISC-119: A repo carrying `.pi/extensions/hostile.ts` and a hostile `AGENTS.md` changes nothing about the run.
-- [ ] ISC-120: An envelope naming `/Users/dan/.env` is refused before dereference.
-- [ ] ISC-121: A symlink in `<outbox>/files` pointing outside the outbox is refused.
-- [ ] ISC-122: An oversized envelope field is rejected without OOM.
+- [x] ISC-120: An envelope naming `/Users/dan/.env` is refused before dereference.
+- [x] ISC-121: A symlink in `<outbox>/files` pointing outside the outbox is refused.
+- [x] ISC-122: An oversized envelope field is rejected without OOM.
 - [ ] ISC-123: No ref outside `fleet/<run-id>/*` moves during a run.
 - [ ] ISC-124: The main checkout's `git status --porcelain` is unchanged after a run.
 - [ ] ISC-125: A seeded escape attempt from inside a container is detected and reported.
@@ -279,16 +279,16 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-143: The epoch high-water-mark is durable before dispatch; allocate → crash → restart does not re-issue the same epoch.
 - [ ] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
 - [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
-- [ ] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
+- [x] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
 - [ ] ISC-147: Across every hostile scenario, completion is never declared while the agent will still emit output.
-- [ ] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree.
-- [ ] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment.
-- [ ] ISC-150: A diff touching the test-harness surface caps the verdict at `blocked` or `unknown` and can never yield `success`.
-- [ ] ISC-151: `git merge-base --is-ancestor <base_ref> HEAD` is verified at harvest, so a rewritten base cannot shrink the diff to nothing.
-- [ ] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`.
-- [ ] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
-- [ ] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing).
-- [ ] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
+- [x] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree. [live via `artifacts --run-acceptance`]
+- [x] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment. [live via `artifacts --run-acceptance`; fresh CONTAINER is still ISC-233]
+- [x] ISC-150: A diff touching the test-harness surface caps the verdict at `blocked` or `unknown` and can never yield `success`.
+- [x] ISC-151: `git merge-base --is-ancestor <base_ref> HEAD` is verified at harvest, so a rewritten base cannot shrink the diff to nothing.
+- [x] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`. [live via `artifacts --run-acceptance`]
+- [x] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
+- [ ] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing). [LIVE but INERT — nothing populates `tree_hash_quiesce`/`tree_hash_harvest`, so the check cannot fire; needs supervisor cooperation]
+- [x] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
 - [ ] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
 - [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
 - [ ] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output.
@@ -335,9 +335,9 @@ Open — carried forward, not fixed here:
 - [ ] ISC-188: `render.ts` and `run/paths.ts` compute the run directory once, not twice (`outbox`, `skills`, `env`, briefing paths, and `PIFLEET_RUNS_DIR` honoured).
 - [ ] ISC-189: `up` refuses to run against an image that is absent or fails `verify`.
 - [ ] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
-- [ ] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
+- [x] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
 - [ ] ISC-192: A ledger or state file written under an older schema version is read under a pinned policy rather than failing.
-- [ ] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
+- [x] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
 
 ### Group P — CI portability (added 2026-07-27, found the first time CI actually ran the probes)
 
@@ -398,6 +398,27 @@ of the same class it repaired.
 - [x] ISC-227: The `willRetry` e2e states plainly that its discrimination comes from `completion.test.ts`, not from itself — the double reports `isStreaming: true` for a retrying `agent_end`.
 - [ ] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
 - [ ] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
+
+### Group S — Phase 2 findings (added 2026-07-27)
+
+- [x] ISC-230: An acceptance command that was attempted and returned no answer caps the verdict — a timed-out exam cannot certify success, and the worker's claim is not adopted.
+- [x] ISC-231: `workerOutboxDir()` lives in `run/paths.ts`, computed once, rather than duplicating the expression inlined in `render.ts`.
+- [ ] ISC-232: Harness-surface patterns come from config; `DEFAULT_HARNESS_PATTERNS` is the fallback, not the source of truth.
+- [ ] ISC-233: Acceptance commands run in a fresh CONTAINER from the same image, not only a fresh clone (SRD §8.2).
+- [ ] ISC-234: The control socket answers `export_html`, so `transcript --html` uses the live path rather than the local-render fallback.
+- [ ] ISC-235: `BudgetManager.admit` is called on the dispatch path and its snapshot persisted; `budgetExitCode` folds into `worstExit` after harvest.
+- [x] ISC-236: The daemon calls `reapStale` on an interval and deregisters the workers it reports.
+- [x] ISC-237: `runGit` executes nothing the graded repository names — no external diff driver, textconv or fsmonitor, and no inherited environment.
+- [x] ISC-238: One task that cannot be harvested degrades to `harvest_status` alone; `artifacts --all` still emits valid JSON and exits 0 for every other task.
+- [x] ISC-239: Containment under the outbox is checked at the ROOTS, so a symlinked `files/` or task directory cannot launder outside content into `safe`.
+- [x] ISC-240: An envelope path containing a control character is refused; nothing worker-authored reaches an operator's terminal unescaped.
+- [x] ISC-241: `pifleet artifacts` adjudicates through `harvest/adjudicate.ts`; the evidence rules are on the live path, not only under test.
+- [x] ISC-242: The harness surface covers files the test command RESOLVES THROUGH — runner config, inherited config, toolchain selection — not only files that look like tests.
+- [ ] ISC-243: Anti: the harness surface is a denylist and cannot be complete; a graded allowlist of the resolution surface replaces it.
+- [x] ISC-244: Validation COST is bounded, not just envelope bytes — array lengths are checked before the schema, so an element-packed envelope cannot allocate an issue object per element.
+- [x] ISC-245: A worker-controlled filename cannot forge lines in the harvest report; every refusal is escaped and truncated at one choke point.
+- [ ] ISC-246: `scanOutboxFiles` returns file DESCRIPTORS, not path strings — a validated path re-opened later is a TOCTOU window, and `nlink` can be raised after the scan. Latent while `safe` has no consumers; arms the moment E3 attaches artifacts.
+- [ ] ISC-247: A backslash in an envelope path is refused. Harmless on POSIX, a separator anywhere else; not a control character, so the ISC-240 filter does not catch it.
 
 ## Test Strategy
 
@@ -514,6 +535,22 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 ## Changelog
 
 
+- **conjectured:** the 4 MiB byte cap also bounds the COST of validating an envelope, so ISC-122 needs
+  no element-count limb. I measured 1,048,550 elements at 127 MB / 46 ms — about 30x — and recorded the
+  reported 2.88 GB figure as quantitatively refuted.
+  **refuted by:** my own measurement, of the wrong shape. The reviewer's elements were INVALID for their
+  field; mine were valid. zod type-validates every element and allocates one issue object per FAILING
+  element before it ever reports the length violation, so the cost is a function of how many elements are
+  wrong, not how many there are. Re-measured with invalid elements: 2,097,101 of them in exactly 4,194,304
+  bytes cost **2.66 GB and 1.2 s** — matching the original report, and 20x my own number.
+  **learned:** two measurements of "the same thing" that differ by 20x are measuring different things, and
+  the discrepancy was the finding rather than noise around it. I had published the refutation before
+  looking for a shape that would explain the gap. A byte cap cannot bound validation cost when elements
+  can be 2 bytes and each wrong one allocates an object — and only `issues[0]` is ever read, so the other
+  2,097,100 issue objects are built to be discarded.
+  **criterion now:** ISC-122 gains an element-count limb. Array lengths are checked on the parsed value
+  BEFORE the schema, so zod never sees an oversized array: same envelope now refused in 18 ms at 55 MB.
+
 - **conjectured:** the SRD's epoch-window rule was sufficient to attribute terminal events to epochs.
   **refuted by:** a commitment-boundary review pointing out that events carry no correlation id, so a
   late `agent_end` for epoch N and a real one for N+1 are byte-identical under a wall-clock window.
@@ -529,6 +566,23 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   command is resolved and executed, not of *who* runs it. **criterion now:** ISC-148..150 require
   base-SHA resolution, a fresh clone outside the worktree, and a verdict cap when the diff touches
   the harness surface.
+
+- **conjectured:** the SRD's `CompactionEntry.retainedTail` named a real field of the Pi session
+  format. **refuted by:** the installed `docs/session-format.md` for 0.79.6, which spells the same
+  concept as `summary` plus `firstKeptEntryId` — `retainedTail` does not exist. **learned:** the
+  SRD's §8.2 reconstruction rule was written from the concept rather than from the binary, the
+  same failure mode §18 records eleven of. Ground truth is the installed version.
+  **criterion now:** ISC-91's leaf-to-root walk is specified against `firstKeptEntryId`; SRD §8.2
+  carries an erratum.
+
+- **conjectured:** `unknown` as the lattice identity was safe in every direction, so a task with
+  no independent evidence could adopt the worker's claim. **refuted by:** probing a timed-out
+  acceptance run against a claimed `success` — verdict `success`, for a worker whose exam never
+  finished, reachable without touching a single harness file by shipping a change that makes an
+  existing command hang. **learned:** identity is right for a missing CLAIM and wrong for missing
+  EVIDENCE; the two had been conflated because ISC-94 only ever exercised the first.
+  **criterion now:** ISC-230 caps the verdict when an attempted command returns no answer, while
+  ISC-152 still forbids calling it `failed`.
 
 ## Verification
 

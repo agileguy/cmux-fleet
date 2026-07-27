@@ -49,6 +49,25 @@ async function freshRoot(): Promise<string> {
   return root;
 }
 
+/**
+ * A run id no other process on this machine will pick.
+ *
+ * The scratch ROOT is already unique per test, but the control socket is not
+ * derived from it: `socketPath` hashes `(run_id, worker_id)` into
+ * `os.tmpdir()`, deliberately, so the CLI can find a live supervisor without a
+ * lookup. `os.tmpdir()` is shared by every process on the box — so two test
+ * processes using a hardcoded `int-run-a` derive the SAME socket, and one
+ * test's `shutdown` reaches the other's supervisor.
+ *
+ * That is what made these tests flaky, and the symptom pointed the wrong way:
+ * the supervisor "died" mid-test, which is exactly what the ISC-212 probe
+ * exists to detect, so a cross-process collision read as the defect under
+ * test. Unique ids per process fix it at the source; raising the timeouts
+ * would only have made the collision rarer.
+ */
+const RUN_TAG = `${process.pid.toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+const testRunId = (name: string): string => `int-run-${name}-${RUN_TAG}`;
+
 function piCommand(scenario: string): string {
   return `${process.execPath} ${FAKE_PI} --scenario ${join(SCENARIOS, scenario)}`;
 }
@@ -110,7 +129,7 @@ describe("detached supervisor — process tree (ISC-77/78)", () => {
     "the supervisor is a session leader: pgid == pid, no controlling tty",
     async () => {
       const root = await freshRoot();
-      const runId = "int-run-a";
+      const runId = testRunId("a");
       const { pid, pgid } = await processLauncher.launchDetached({
         runId,
         runDir: join(root, runId),
@@ -154,7 +173,7 @@ describe("detached supervisor — process tree (ISC-77/78)", () => {
     "the supervisor survives its launcher, reparents to PID 1, and the run re-attaches (ISC-75/76)",
     async () => {
       const root = await freshRoot();
-      const runId = "int-run-b";
+      const runId = testRunId("b");
       const run = runPaths(runId, root);
       const wp = workerPaths(run, "eng-1");
 
@@ -245,13 +264,13 @@ describe("detached supervisor — process tree (ISC-77/78)", () => {
 describe("state.json durability", () => {
   test("round-trips atomically and leaves no tmp file behind", async () => {
     const root = await freshRoot();
-    const run = runPaths("int-run-c", root);
+    const run = runPaths(testRunId("c"), root);
     const wp = workerPaths(run, "eng-1");
     await mkdir(wp.dir, { recursive: true });
 
     const state = initialWorkerState({
       worker: "eng-1",
-      runId: "int-run-c",
+      runId: testRunId("c"),
       pid: 4242,
       pgid: 4242,
       startedAt: new Date().toISOString(),
@@ -271,7 +290,7 @@ describe("state.json durability", () => {
     "SIGKILL mid-write: the previous state stays readable and the ledger still parses (ISC-156)",
     async () => {
       const root = await freshRoot();
-      const runId = "int-run-d";
+      const runId = testRunId("d");
       const run = runPaths(runId, root);
       const wp = workerPaths(run, "eng-1");
       await mkdir(wp.dir, { recursive: true });
@@ -425,7 +444,7 @@ describe("settle() failure does not kill the supervisor (ISC-212)", () => {
     async () => {
       const { chmod } = await import("node:fs/promises");
       const root = await freshRoot();
-      const runId = "int-run-settlefail";
+      const runId = testRunId("settlefail");
       const { pid, pgid } = await processLauncher.launchDetached({
         runId,
         runDir: join(root, runId),
@@ -466,8 +485,21 @@ describe("settle() failure does not kill the supervisor (ISC-212)", () => {
         await chmod(wp.tasksDir, 0o755).catch(() => {});
       });
 
-      // deadline (1s) + ABORT_GRACE_MS (5s) + margin.
-      await new Promise((r) => setTimeout(r, 9_000));
+      // Wait for the escalation to have HAPPENED, rather than sleeping for as
+      // long as it usually takes. A fixed `setTimeout(9_000)` here — deadline
+      // 1s + ABORT_GRACE_MS 5s + margin — is the same anti-pattern this suite
+      // avoids everywhere else: on a loaded machine the escalation lands after
+      // the sleep and the assertion below reads a supervisor that has not yet
+      // been asked to do the failing write, so the test passes without
+      // exercising anything.
+      //
+      // The observable event is the epoch leaving the fence: the supervisor
+      // settles the task (failing to record it) and returns to idle.
+      const escalated = await waitFor(async () => {
+        const s = await readWorkerState(wp);
+        return s !== null && s.phase !== "busy";
+      }, 30_000);
+      expect(escalated).toBe(true);
 
       // THE assertion. An unhandled rejection exits the process; a caught one
       // does not. Nothing else here distinguishes the two.

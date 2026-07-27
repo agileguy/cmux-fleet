@@ -20,6 +20,7 @@
 
 import { join, resolve } from "node:path";
 import { imageTag } from "../container/image.ts";
+import { workerOutboxDir } from "../run/paths.ts";
 import { ConfigError, expandPath, resolveWorker, type LoadedConfig, type ResolvedWorker } from "./load.ts";
 
 /** Container path the briefing file is mounted at. */
@@ -134,7 +135,7 @@ export function buildDockerArgv(
       // No code mount at all — the role works against live systems, not the repo.
       break;
   }
-  argv.push("-v", `${join(opts.runDir, "outbox", w.id)}:/outbox`);
+  argv.push("-v", `${workerOutboxDir(opts.runDir, w.id)}:/outbox`);
   argv.push("-v", `${join(opts.runDir, "sessions")}:/sessions`);
   argv.push("-v", `${join(opts.runDir, "skills", w.role)}:/skills:ro`);
   // The verbgate policy is mounted READ-ONLY and separately from /outbox. It
