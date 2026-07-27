@@ -100,6 +100,14 @@ async function main(): Promise<void> {
   const pgid = (await pgidOf(process.pid)) ?? process.pid;
   const started = (await processStartTime(process.pid)) ?? "";
 
+  // Serialize events.jsonl appends so two async writes cannot interleave.
+  let eventsChain: Promise<unknown> = Promise.resolve();
+  const logEvent = (record: Record<string, unknown>): void => {
+    eventsChain = eventsChain
+      .then(() => appendJsonl(wp.eventsJsonl, { ts: new Date().toISOString(), ...record }))
+      .catch(() => {});
+  };
+
   // In-memory state, flushed atomically on every transition and heartbeat.
   const state: WorkerState = initialWorkerState({
     worker: argv.workerId,
@@ -108,7 +116,26 @@ async function main(): Promise<void> {
     pgid,
     startedAt: new Date().toISOString(),
   });
-  await writeWorkerState(wp, state);
+
+  /**
+   * ALL state.json writes go through one chain. `writeJsonAtomic` derives its
+   * tmp name from (pid, millisecond); two concurrent writes to the same path
+   * from one process can collide on that name, and the loser's rename throws
+   * ENOENT after the winner consumed the tmp file. The integration suite
+   * caught this as a supervisor crash mid-dispatch: an awaited fence write
+   * racing a fire-and-forget one from the event path. Serializing per file is
+   * the fix at this layer; the chain always writes the CURRENT state, so the
+   * last write wins with the freshest data.
+   */
+  let stateChain: Promise<void> = Promise.resolve();
+  const flushState = (): Promise<void> => {
+    stateChain = stateChain
+      .then(() => writeWorkerState(wp, state))
+      .catch((err) => logEvent({ type: "state_write_failed", message: String(err) }));
+    return stateChain;
+  };
+
+  await flushState();
   await ledger.append("worker_started", { worker: argv.workerId });
 
   // Register with the daemon when there is one. The supervisor must also work
@@ -129,14 +156,6 @@ async function main(): Promise<void> {
     { optional: true },
   );
 
-  // Serialize events.jsonl appends so two async writes cannot interleave.
-  let eventsChain: Promise<unknown> = Promise.resolve();
-  const logEvent = (record: Record<string, unknown>): void => {
-    eventsChain = eventsChain
-      .then(() => appendJsonl(wp.eventsJsonl, { ts: new Date().toISOString(), ...record }))
-      .catch(() => {});
-  };
-
   // -------------------------------------------------------------------------
   // Spawn the Pi process (the double, in this phase).
   // -------------------------------------------------------------------------
@@ -144,7 +163,7 @@ async function main(): Promise<void> {
   const piCommand = process.env["PIFLEET_PI_COMMAND"];
   if (piCommand === undefined || piCommand.trim() === "") {
     state.phase = "dead";
-    await writeWorkerState(wp, state);
+    await flushState();
     process.stderr.write("supervisor: PIFLEET_PI_COMMAND is required in Phase 1\n");
     process.exit(3);
   }
@@ -166,8 +185,23 @@ async function main(): Promise<void> {
   let probing = false;
   let shuttingDown = false;
 
-  const persistFence = async (): Promise<void> => {
-    await writeFence(wp, argv.workerId, em.snapshot());
+  /**
+   * Fence writes are serialized for the same tmp-name-collision reason as
+   * state writes — but a fence write that FAILS is fail-stop: a supervisor
+   * that cannot persist its high-water-mark durably must not keep allocating
+   * epochs, or a crash re-issues one. The snapshot is captured at call time so
+   * each queued write persists the fence as of the decision it records.
+   */
+  let fenceChain: Promise<void> = Promise.resolve();
+  const persistFence = (): Promise<void> => {
+    const snap = em.snapshot();
+    fenceChain = fenceChain
+      .then(() => writeFence(wp, argv.workerId, snap))
+      .catch((err) => {
+        logEvent({ type: "fence_write_failed", message: String(err) });
+        void beginShutdown();
+      });
+    return fenceChain;
   };
 
   // A previous incarnation crashed mid-epoch: the epoch is burned and the task
@@ -224,7 +258,7 @@ async function main(): Promise<void> {
     state.phase = shuttingDown ? state.phase : "idle";
     state.task_id = null;
     state.completed_epochs = [...state.completed_epochs, settled.epoch];
-    await writeWorkerState(wp, state);
+    await flushState();
     await ledger.append("settled", {
       worker: argv.workerId,
       task_id: settled.task_id,
@@ -244,7 +278,7 @@ async function main(): Promise<void> {
       await settle("failed", "worker_died");
       state.phase = "dead";
     }
-    await writeWorkerState(wp, state);
+    await flushState();
     await ledger.append("worker_exit", {
       worker: argv.workerId,
       detail: { code, signal },
@@ -411,6 +445,15 @@ async function main(): Promise<void> {
     if (buffer.length > 0) logEvent({ type: "stderr_line", line: buffer });
   })();
 
+  // -------------------------------------------------------------------------
+  // Control socket — started BEFORE the phase can ever read `idle`. "Idle"
+  // means "dispatchable"; a state file that says idle while the socket is not
+  // yet listening sends the first dispatch into a stale socket file left by a
+  // SIGKILLed predecessor (found by the ISC-75/76 integration test).
+  // -------------------------------------------------------------------------
+
+  const server = await startControlServer();
+
   // Initial get_state: records the session path verbatim and proves the RPC
   // stream is live — the idle gate ISC-70 measures.
   try {
@@ -420,7 +463,7 @@ async function main(): Promise<void> {
   } catch {
     state.phase = "dead";
   }
-  await writeWorkerState(wp, state);
+  await flushState();
 
   // -------------------------------------------------------------------------
   // Heartbeat: liveness, session-file transition, monotonic deadline.
@@ -441,14 +484,15 @@ async function main(): Promise<void> {
       logEvent({ type: "deadline_exceeded", task_id: em.live.task_id, epoch: em.live.epoch });
       void client.send("abort").catch(() => {});
     }
-    void writeWorkerState(wp, state);
+    void flushState();
   }, HEARTBEAT_MS);
 
   // -------------------------------------------------------------------------
-  // Control socket
+  // Control socket handler (started earlier, before idle was writable).
   // -------------------------------------------------------------------------
 
-  const server = await serveJsonlSocket(wp.controlSock, async (msg) => {
+  async function startControlServer(): ReturnType<typeof serveJsonlSocket> {
+    return serveJsonlSocket(wp.controlSock, async (msg) => {
     switch (msg["cmd"]) {
       case "ping":
         return { ok: true, worker: argv.workerId, pid: process.pid };
@@ -482,7 +526,7 @@ async function main(): Promise<void> {
         state.epoch = decision.epoch;
         state.task_id = envelope.task_id;
         state.phase = "busy";
-        await writeWorkerState(wp, state);
+        await flushState();
         deadline.restart();
         deadlineMs = envelope.deadline_s * 1000;
 
@@ -545,7 +589,8 @@ async function main(): Promise<void> {
       default:
         return { ok: false, error: `unknown cmd: ${String(msg["cmd"])}` };
     }
-  });
+    });
+  }
 
   async function beginShutdown(): Promise<void> {
     if (shuttingDown) return;
