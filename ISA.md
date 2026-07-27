@@ -381,6 +381,15 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 - **2026-07-27 — show your math on delegation.** Two engineers per phase rather than four: the
   Phase 1 surface splits cleanly along a config/container seam and an RPC/lifecycle seam with one
   shared contracts module, and a third writer would have to touch one of those two territories.
+- **2026-07-27 — SRD Q1 answered by measurement: oMLX batches, it does not serialize.**
+  Probed live on `:8000` with `Qwen3-Coder-30B-A3B-Instruct-4bit`: a single short request took
+  1.51s; four concurrent finished in 1.77s wall (3.40x), and the speedup plateaus near 4.1-4.3x
+  at N=8-12. So F40's premise — that N workers queue behind one inference server — is wrong as
+  stated. The honest caveat is that these were 80-token requests with negligible KV cache, and a
+  real agentic turn carries a far larger context, so the memory-bound ceiling will sit below the
+  compute-bound one measured here. `max_concurrent: 2` stays the default as a memory-safety
+  margin rather than a throughput necessity, and ISC-158 (16 workers, no starvation) is what
+  would justify raising it.
 
 ## Changelog
 
