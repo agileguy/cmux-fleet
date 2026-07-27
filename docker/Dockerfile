@@ -10,12 +10,15 @@
 # contract is version-specific — the SRD itself is one casualty of assuming
 # otherwise.
 
+# Globals: an ARG used in a FROM stage name must be declared BEFORE the first
+# FROM; stages that consume a value re-declare it locally below.
 ARG NODE_TAG=24-bookworm-slim
-FROM node:${NODE_TAG} AS base
-
 ARG PI_VERSION=0.79.6
 ARG TOOLCHAIN=base          # base | node | python | go | full
 ARG EXTRA_APT_PACKAGES=""   # config `image.apt_packages`, appended as a layer (§5.3)
+
+FROM node:${NODE_TAG} AS base
+
 ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,9 +43,26 @@ RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm
 # shim is defence-in-depth against the CASUAL destructive action — a worker
 # with bash can still reach the .real path, which is why impersonation remains
 # the stronger control.
-RUN mkdir -p /usr/local/libexec \
- && for b in gcloud kubectl helm; do \
-      mv "$(command -v $b)" "/usr/local/libexec/${b}.real"; \
+# `mv` alone is wrong here. The Cloud SDK installs /usr/bin/gcloud as a
+# *relative* symlink to ../lib/google-cloud-sdk/bin/gcloud, which resolves under
+# /usr/lib. Moving that link into /usr/local/libexec/ re-anchors it at
+# /usr/local/lib, where nothing exists — the link survives the move, the build
+# succeeds, and every gcloud and kubectl call in the finished image exits 127.
+# Resolve to the absolute target before relocating, and re-link rather than move
+# when the source was a symlink so the SDK's own layout stays intact.
+RUN set -eux; \
+    mkdir -p /usr/local/libexec; \
+    for b in gcloud kubectl helm; do \
+      src="$(command -v "$b")"; \
+      real="$(readlink -f "$src")"; \
+      if [ "$real" != "$src" ]; then \
+        ln -sfn "$real" "/usr/local/libexec/${b}.real"; \
+        rm -f "$src"; \
+      else \
+        mv "$src" "/usr/local/libexec/${b}.real"; \
+      fi; \
+      # Fail the build here rather than ship an image whose tools are all 127.
+      test -x "/usr/local/libexec/${b}.real"; \
     done
 COPY --chmod=0755 docker/verbgate /usr/local/bin/gcloud
 COPY --chmod=0755 docker/verbgate /usr/local/bin/kubectl
@@ -79,6 +99,18 @@ RUN if [ -n "${EXTRA_APT_PACKAGES}" ]; then \
 
 # --ignore-scripts: install-time scripts are an unnecessary supply-chain surface.
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
+
+# Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl
+# (§5.3). Executing each one at build time is the difference between an image
+# that *contains* the tools and an image where they *run*: the relocation above
+# once produced a build that passed every presence check and exited 127 on use.
+RUN set -eux; \
+    gcloud version >/dev/null; \
+    kubectl version --client >/dev/null; \
+    helm version >/dev/null; \
+    jq --version >/dev/null; \
+    curl --version >/dev/null; \
+    pi --version >/dev/null
 
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.
 RUN groupadd -g 10001 pi && useradd -u 10001 -g 10001 -m -s /bin/bash pi

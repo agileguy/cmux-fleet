@@ -50,6 +50,14 @@ verbs=${verbs# }
 
 # $1=decision  $2=display-verb  rest=original argv. Best-effort: a full outbox
 # must not turn a permitted read into a failure, but refusals stay refusals.
+#
+# The `--` before "$@" is load-bearing. jq 1.6's `--args` does NOT stop option
+# parsing, so an argv containing any flag (`kubectl version --client`) makes jq
+# exit with "Unknown option" — which this function's own error suppression then
+# swallows, silently dropping the row. The ledger therefore lost precisely the
+# invocations that carry flags, including the flags-before-verb evasion pattern
+# the gate exists to catch. The `printf` fallback guarantees a row survives even
+# if jq fails for some other reason; it drops argv rather than dropping the fact.
 log_ledger() {
   decision=$1
   dverb=$2
@@ -63,7 +71,11 @@ log_ledger() {
     --arg task_id "${task}" \
     --arg epoch "${PIFLEET_EPOCH:-0}" \
     '{ts:$ts,tool:$tool,verb:$verb,decision:$decision,task_id:$task_id,epoch:($epoch|tonumber? // 0),argv:$ARGS.positional}' \
-    --args "$@" >> "${ledger}" 2>/dev/null || true
+    --args -- "$@" >> "${ledger}" 2>/dev/null \
+  || printf '{"ts":"%s","tool":"%s","verb":"%s","decision":"%s","task_id":"%s","epoch":%s,"argv_unencoded":true}\n' \
+       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${tool}" "${dverb}" "${decision}" "${task}" \
+       "${PIFLEET_EPOCH:-0}" >> "${ledger}" 2>/dev/null \
+  || true
 }
 
 # --- classify: read verbs pass through, always (SRD §5.10 flow chart) --------
