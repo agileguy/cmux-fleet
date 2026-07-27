@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 58/219
+progress: 63/219
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -102,10 +102,10 @@ suite green on `headless` against a test double.
 - [x] ISC-5: `ISA.md` exists at the repo root and parses as valid YAML frontmatter plus twelve sections.
 - [x] ISC-6: A GitHub Actions workflow runs typecheck, unit, integration, and e2e as separate named steps.
 - [ ] ISC-7: CI passes on the default branch.
-- [ ] ISC-8: `README.md` documents install, `pifleet doctor`, and the six-phase status.
+- [x] ISC-8: `README.md` documents install, `pifleet doctor`, and the six-phase status.
 - [x] ISC-9: `CHANGELOG.md` exists and has an entry for every merged phase.
 - [x] ISC-10: `git log --format=%B` over all commits contains no AI/LLM/Claude attribution string.
-- [ ] ISC-11: The repo has a remote and `gh pr list --state all` returns one PR per completed phase.
+- [x] ISC-11: The repo has a remote and `gh pr list --state all` returns one PR per completed phase.
 - [x] ISC-12: `package.json` pins `commander`, `zod`, and `yaml`; the lockfile is committed.
 - [x] ISC-13: `src/` compiles under `strict: true` with `noUncheckedIndexedAccess`.
 - [x] ISC-14: `bun run src/cli/index.ts --help` lists every command in SRD §10.
@@ -114,9 +114,9 @@ suite green on `headless` against a test double.
 
 - [x] ISC-15: `test/unit`, `test/integration`, and `test/e2e` each contain at least one test file and run independently via their own script.
 - [x] ISC-16: `bun test test/unit` completes in under 30s with no Docker daemon running.
-- [ ] ISC-17: `pifleet-fake-pi` (the test double) speaks the RPC framing and is invoked by the e2e suite.
-- [ ] ISC-18: The double can be scripted to emit an arbitrary event sequence from a fixture file.
-- [ ] ISC-19: The e2e suite runs `up → dispatch → wait → artifacts` end-to-end against the double.
+- [x] ISC-17: `pifleet-fake-pi` (the test double) speaks the RPC framing and is invoked by the e2e suite.
+- [x] ISC-18: The double can be scripted to emit an arbitrary event sequence from a fixture file.
+- [x] ISC-19: The e2e suite runs `up → dispatch → wait → artifacts` end-to-end against the double.
 - [x] ISC-20: Integration tests exercise real subprocess spawning, real filesystem, and real git, with no network.
 - [x] ISC-21: No test in the `headless` suite requires network egress.
 - [ ] ISC-22: A test-coverage report can be produced and lists every `src/` module.
