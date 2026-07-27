@@ -1,3 +1,4 @@
+import { EXIT } from "../contracts.ts";
 /**
  * Config loading, resolution, and the role merge (SRD §6.1).
  *
@@ -37,6 +38,9 @@ import {
 // ---------------------------------------------------------------------------
 
 export class ConfigError extends Error {
+  /** A bad or missing config is a usage failure, not a crash (SRD §10). */
+  readonly exitCode = EXIT.USAGE;
+
   constructor(message: string) {
     super(message);
     this.name = "ConfigError";

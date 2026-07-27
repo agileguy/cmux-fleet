@@ -8,7 +8,7 @@
  */
 
 import { Command } from "commander";
-import { EXIT, type ExitCode } from "../contracts.ts";
+import { EXIT, type ExitCode, isExitCoded } from "../contracts.ts";
 
 /** Thrown by a command to exit with a specific ladder code and a clean message. */
 export class CliError extends Error {
@@ -66,6 +66,12 @@ async function main(argv: string[]): Promise<number> {
     if (err instanceof CliError) {
       process.stderr.write(`pifleet: ${err.message}\n`);
       return err.code;
+    }
+    // Any module-defined error that declares an exit code is a diagnosed
+    // failure and gets the same one-line treatment.
+    if (isExitCoded(err)) {
+      process.stderr.write(`pifleet: ${err.message}\n`);
+      return err.exitCode;
     }
     throw err;
   }
