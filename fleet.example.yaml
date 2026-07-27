@@ -1,0 +1,133 @@
+# pifleet configuration — the SRD §6.2 worked example.
+#
+# Merge is `defaults ← roles ← per-worker overrides`, shallow, with three
+# exceptions (SRD §6.1): arrays replace (but `pifleet-worker` is re-injected
+# into skills post-merge), a `:thinking` model suffix outranks any `thinking:`
+# key, and relative paths resolve against THIS FILE's directory.
+
+version: 2
+name: paisley-feature-fleet
+
+backend:
+  kind: cmux                 # cmux | tmux | headless
+  workspace: pifleet         # matched on custom_title; recorded by id in registry.json
+  split: alternate           # alternate | columns | rows  (pifleet-side split sequence)
+  focus_on_dispatch: false
+
+docker:
+  image_prefix: pifleet/pi-worker
+  pi_version: "0.79.6"       # pinned; must match SRD §4.2's protocol contract
+  network: pifleet-egress
+  memory: 4g
+  cpus: 2
+  pids_limit: 512
+  read_only_root: true
+
+run:
+  root: ~/.pifleet/runs
+  repo: ~/repos/paisley
+  isolation: worktree        # worktree | shared-ro | none
+  branch_prefix: fleet
+  max_concurrent: 2          # bounded by oMLX throughput, not pane count (§5.9)
+  budget:
+    tokens_ceiling: 6000000  # THE ceiling — local models have no price table
+    per_task_reserve_tokens: 400000
+    soft_stop_at: 0.80
+    per_task_timeout: 25m
+    run_timeout: 2h
+  timers:
+    ui_request_timeout: 5s
+    event_stall_warn: 3m
+    event_stall_kill: 25m
+    heartbeat_interval: 5s
+
+llm:                         # ALWAYS local oMLX on the Docker host — see §5.9
+  provider: omlx
+  base_url: http://host.docker.internal:8000/v1
+  api_key_env: OMLX_API_KEY  # local server credential, injected by the supervisor
+  model: Qwen3-Coder-30B-A3B-Instruct-4bit
+  thinking: medium
+  models_allowlist:          # checked against GET /v1/models at `up`
+    - Qwen3-Coder-30B-A3B-Instruct-4bit
+    - Qwen3.5-35B-A3B-8bit
+    - GLM-4.5-Air-MLX-4bit
+  require_native_tool_calls: true   # `up` probes each model — see §5.9
+
+cloud:
+  adc: true                  # inherit the launching Claude instance's Google identity
+  adc_mode: token            # token (1h, default) | file (refresh token — opt-in)
+  quota_project: gen-lang-client-0675968762
+  impersonate_service_account: null    # strongly preferred where one exists
+  kubeconfig: null           # path to a FILTERED kubeconfig; never the host default
+  token_refresh: 45m
+
+secrets:
+  env_allowlist: []          # NEVER provider keys — see §12.4
+
+defaults:
+  pane_mode: rpc
+  toolchain: base
+  cloud_access: false        # ADC is NOT granted unless a role opts in
+  skills: [pifleet-worker]
+  exclude_tools: []
+  no_context_files: true     # repo AGENTS.md/CLAUDE.md is untrusted input
+
+roles:
+  # ---- SRE / cloud-ops: the primary role set ----
+  sre:                                    # diagnoses AND remediates
+    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    toolchain: base                       # gcloud/kubectl/helm are in every image
+    tools: [read, write, edit, bash, grep, find, ls]
+    skills: [pifleet-worker, sre]
+    cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
+    isolation: worktree                   # manifest/IaC edits land on a branch
+    append_system_prompt_file: ./roles/sre.md
+  investigator:                           # read-only diagnosis; never mutates
+    model: Qwen3.5-35B-A3B-8bit
+    thinking: high
+    toolchain: base
+    tools: [read, bash, grep, find, ls]   # bash for kubectl/gcloud READ verbs
+    skills: [pifleet-worker, sre]
+    cloud_access: true
+    isolation: none
+    append_system_prompt_file: ./roles/investigator.md
+  verifier:                               # confirms a remediation actually worked
+    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    toolchain: base
+    tools: [read, bash, grep, find, ls]
+    skills: [pifleet-worker, sre]
+    cloud_access: true
+    isolation: none
+    append_system_prompt_file: ./roles/verifier.md
+
+  # ---- code roles: available, secondary ----
+  engineer:
+    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    toolchain: node
+    tools: [read, write, edit, bash, grep, find, ls]
+    skills: [pifleet-worker, tdd, diagnose]
+    append_system_prompt_file: ./roles/engineer.md
+  reviewer:
+    model: Qwen3.5-35B-A3B-8bit
+    thinking: high
+    toolchain: base
+    tools: [read, grep, find, ls]        # NO bash — see §12.1
+    skills: [pifleet-worker]
+    append_system_prompt_file: ./roles/reviewer.md
+    isolation: shared-ro
+  tester:
+    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    toolchain: node
+    tools: [read, bash, grep, find, ls]
+    skills: [pifleet-worker]
+    append_system_prompt_file: ./roles/tester.md
+
+workers:
+  # 6 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
+  # admission control does the queuing against the single oMLX server.
+  - {id: sre-1,  role: sre}
+  - {id: sre-2,  role: sre}
+  - {id: inv-1,  role: investigator}
+  - {id: ver-1,  role: verifier}
+  - {id: eng-1,  role: engineer}
+  - {id: rev-1,  role: reviewer}
