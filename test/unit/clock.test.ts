@@ -118,6 +118,9 @@ describe("Anti: no timing path reads Date.now()", () => {
     "src/cli/commands/wait.ts",
     "src/cli/commands/down.ts",
     "src/util/clock.ts",
+    "src/safety/budget.ts",
+    "src/safety/kill.ts",
+    "src/safety/reaper.ts",
   ];
 
   test("no timing module computes an interval from Date.now()", async () => {
