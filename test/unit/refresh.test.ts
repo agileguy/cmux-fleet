@@ -249,4 +249,64 @@ describe("a failed refresh is loud and does not strand a dead token", () => {
     clock.advance(60_000);
     expect((await r.tick()).status).toBe("injected");
   });
+
+  /**
+   * `run()` is the production driver and the only part of this class a test
+   * cannot drive with a fake clock, so it was the only part with no coverage —
+   * and it held two defects.
+   *
+   * Fails if: abort is observed only after the sleep resolves. The loop
+   * condition alone makes the wait for a 45-minute interval genuinely 45
+   * minutes; measured, `abort()` returned at once and `run()` was still
+   * pending three seconds later.
+   *
+   * The real deadline is deliberately far longer than the interval under test,
+   * so a regression fails by TIMING OUT rather than by hanging the suite.
+   */
+  test("run() returns promptly when its signal aborts mid-sleep", async () => {
+    const { r } = makeRefresher();
+    const ac = new AbortController();
+    const started = performance.now();
+    const done = r.run(ac.signal);
+    // Let the first tick land and the loop enter its long sleep.
+    await new Promise((res) => setTimeout(res, 20));
+    ac.abort();
+    await done;
+    // Interval is 45 minutes; anything in this neighbourhood means it woke on
+    // the signal rather than on the timer.
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  /**
+   * Fails if: the sleep timer is not `unref`'d. An un-unref'd timer is itself
+   * a reason for the event loop to stay open, so a refresher whose work was
+   * finished still outlived it — the probe that found this needed SIGKILL with
+   * a 45-minute timer pending.
+   *
+   * Asserted out-of-process because "does the event loop stay alive" is not
+   * observable from inside the run that would be kept alive by it.
+   */
+  test("a pending refresh timer does not keep the process alive", async () => {
+    // NB: this script is a string, so it is NOT typechecked. Every required
+    // field of the options object has to be present by hand — omitting
+    // `onFailure` made the subprocess exit 1 from inside the mint catch block,
+    // which reads exactly like the timer failure this test is looking for.
+    const script = `
+      import { TokenRefresher } from "${new URL("../../src/security/refresh.ts", import.meta.url).pathname}";
+      const r = new TokenRefresher({
+        worker: "eng-1", mode: "token", intervalS: 2700,
+        mint: async () => ({ token: "t", identity: "me", expiresAt: "2099-01-01T00:00:00Z" }),
+        inject: async () => {},
+        onInjected: () => {},
+        onFailure: () => {},
+      });
+      void r.run(new AbortController().signal);
+    `;
+    const p = Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe" });
+    const timeout = setTimeout(() => p.kill("SIGKILL"), 10_000);
+    const code = await p.exited;
+    clearTimeout(timeout);
+    // SIGKILL surfaces as a non-zero/negative code; a clean exit is 0.
+    expect(code).toBe(0);
+  }, 20_000);
 });

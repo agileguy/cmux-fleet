@@ -175,14 +175,46 @@ export class TokenRefresher {
    * that sleeps real minutes cannot be probed and a mocked sleep proves only
    * the mock. The 250ms floor keeps a pathological clock from busy-spinning.
    */
-  async run(signal: AbortSignal, sleep: (ms: number) => Promise<void> = defaultSleep): Promise<void> {
+  async run(
+    signal: AbortSignal,
+    sleep: (ms: number, signal?: AbortSignal) => Promise<void> = defaultSleep,
+  ): Promise<void> {
     while (!signal.aborted) {
       await this.tick();
-      await sleep(Math.max(this.dueInMs(), 250));
+      // The signal is passed INTO the sleep, not merely re-checked after it.
+      // The loop condition alone means abort is observed no sooner than the
+      // next wake — at the documented 45-minute interval, `abort()` returned
+      // immediately while `run()` was still pending three seconds later and
+      // the process would not exit at all.
+      await sleep(Math.max(this.dueInMs(), 250), signal);
     }
   }
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Sleep that both wakes early on abort and never keeps the process alive.
+ *
+ * Two separate defects, one line apart. A bare `setTimeout` resolves only on
+ * expiry, so an aborted refresher went on sleeping for the rest of its
+ * interval; and an un-`unref`'d timer is itself a reason for the event loop to
+ * stay open, so the process outlived every piece of work it had — observed
+ * needing SIGKILL after a 3s probe with a 45-minute timer pending.
+ *
+ * `unref` is the fix for the second and NOT for the first: an unref'd timer
+ * still delays whatever awaits it, it just stops being a reason to stay
+ * running. Both are needed, and the listener is removed on either path so a
+ * long-lived signal does not accumulate one per tick.
+ */
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted === true) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    timer.unref?.();
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
