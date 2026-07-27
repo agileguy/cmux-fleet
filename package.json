@@ -1,6 +1,6 @@
 {
   "name": "cmux-fleet",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Orchestrate a fleet of containerized Pi coding agents across cmux panes",
   "type": "module",
   "private": true,

@@ -4,6 +4,69 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-27 — Phase 2: artifacts and safety
+
+A worker's self-report is now adjudicated against independent evidence, and a
+run can be stopped before it spends everything.
+
+### Added
+- **Outbox contract (A1)** — `result.json` is untrusted input. It is
+  schema-validated before any field is dereferenced; a path naming anything
+  outside the mount table is refused *before* the path is opened; a symlink
+  under `files/` pointing out of the outbox is refused via `lstat` + `realpath`
+  rather than followed first; an oversized file is refused rather than buffered.
+- **Repository harvest (A2)** — diff, commits and changed files from the
+  worker's branch, gated on `git merge-base --is-ancestor <base> HEAD`. Without
+  that gate a rewritten base still produces a plausible, much smaller diff
+  through the surviving merge-base, and a worker that changed nothing looks
+  clean.
+- **Transcript harvest (A4) and usage (A6)** — reuses the existing `TailReader`.
+  `U+2028` inside a JSON string survives (`readline` splits on it and silently
+  drops the record); a 4-byte codepoint split across a poll boundary produces no
+  `U+FFFD`; a session file rewritten in place is re-read from zero. Usage
+  merges element-wise-max across sources, because an undercount feeding a token
+  ceiling is a ceiling that never trips.
+- **Acceptance runner** — commands are resolved from the **base SHA** and
+  executed in a fresh clone outside the worker's worktree with no inherited
+  environment. Independence is a property of *where the command is resolved
+  from*, not of who runs it: the command string routes through `package.json`
+  scripts, `conftest.py`, `.git/hooks` and the Makefile, every one of which is
+  inside the worker's mutable surface.
+- **Adjudicator** — the `failed < blocked < partial < success` lattice with
+  `unknown` as the identity element, the harness-surface cap, discrepancy
+  detection, and a hashed derived-fact bundle so an adjudication can be
+  replayed. The hash covers the facts and not the verdict, so "same hash,
+  different verdict" and "different hash" are distinguishable failures.
+- **Budget ceilings** — on **tokens**, with an up-front reservation released on
+  settle. Local models are unpriced, so a ceiling watching dollars never trips
+  and is a comment rather than a control. The reservation doubles as the
+  admission slot, which is also what distinguishes a *queued* worker from a
+  *wedged* one — they look identical if you only watch event silence.
+- **Kill ladder** — re-validates `(pid, started)` at every rung. A pid is not an
+  identity: pids are reused, and a ladder escalating on an unvalidated pid
+  eventually SIGKILLs a process that merely inherited the number.
+- **Reaper** — staleness by monotonic change-detection, not by subtracting a
+  wall-clock heartbeat label written by another process. Subtraction would
+  mass-reap the whole fleet when a laptop resumes from sleep.
+- **`src/util/clock.ts`** — the single home for monotonic time. The rule that no
+  timing path may read `Date.now()` is now a test rather than a convention.
+
+### Fixed
+- A timed-out acceptance run adjudicated to `unknown`, and `unknown` being the
+  lattice identity meant the worker's claim was adopted verbatim — so a task
+  whose exam never finished was reported `success`. The route needed no harness
+  edit: ship a change that makes an existing command hang, claim success,
+  collect it. An attempted command that returns no answer now caps the verdict.
+  It is still never `failed` — a timeout proves nothing about the code.
+- Symlink containment canonicalizes its root. On macOS `/var` is a symlink to
+  `/private/var`, so an uncanonicalized root made every legitimate in-outbox
+  symlink compare as escaping.
+
+### Notes
+- The SRD's `CompactionEntry.retainedTail` does not exist in Pi 0.79.6; the
+  installed session format spells the same concept as `summary` plus
+  `firstKeptEntryId`. Implemented against the binary. Erratum in `ISA.md`.
+
 ## [0.2.0] — 2026-07-27 — Phase 1: container and headless core
 
 `up → dispatch → wait → down` runs end to end on the `headless` backend against
