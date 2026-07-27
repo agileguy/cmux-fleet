@@ -12,7 +12,10 @@ import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { createHeadlessBackend } from "../../backends/headless/index.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
-import { loadConfig } from "../../config/load.ts";
+import { expandPath, loadConfig, resolveWorker } from "../../config/load.ts";
+import { describeCredentialPlan, planCredential } from "../../security/adc.ts";
+import { ensureEgressNetwork } from "../../security/network.ts";
+import { neutralizeRepoHazards } from "../../security/repo-hazards.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
 
 /** ISC-70: every worker reaches `idle` within this budget. */
@@ -94,11 +97,37 @@ export function register(program: Command): void {
        * that omitted the key would have produced anyway.
        */
       let heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
+      let egressNetwork: string | null = null;
+      let repoRoot: string | null = null;
+      let loadedConfig: Awaited<ReturnType<typeof loadConfig>> | null = null;
       try {
-        const loaded = await loadConfig(opts.config);
-        heartbeatIntervalMs = loaded.config.run.timers.heartbeat_interval * 1000;
+        loadedConfig = await loadConfig(opts.config);
+        heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
+        egressNetwork = loadedConfig.config.docker.network;
+        repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
       } catch {
         // No reachable config; the schema default stands.
+      }
+
+      /**
+       * The egress network must exist, and must be INTERNAL, before any
+       * container is attached to it.
+       *
+       * `render.ts` already puts every worker on `docker.network`, so the
+       * attachment was never the gap — creation was. An absent network makes
+       * `docker run` fail, which is loud and fine. A network of that name that
+       * someone created WITHOUT `--internal` is the dangerous case: every
+       * worker gets unrestricted egress while the fleet reports deny-all, and
+       * nothing anywhere would say so. `ensureEgressNetwork` refuses to adopt
+       * one rather than quietly using it (SRD §5.6, §12).
+       */
+      let egressInternal: boolean | null = null;
+      if (egressNetwork !== null) {
+        try {
+          egressInternal = (await ensureEgressNetwork(egressNetwork)).internal;
+        } catch (err) {
+          throw new CliError(String(err), EXIT.BACKEND_UNAVAILABLE);
+        }
       }
 
       await writeJsonAtomic(run.runJson, {
@@ -111,6 +140,48 @@ export function register(program: Command): void {
       });
       const ledger = new LedgerWriter(run, "cli-up");
       await ledger.append("run_created", { detail: { workers, backend: opts.backend } });
+      if (egressNetwork !== null) {
+        await ledger.append("egress_network_ready", {
+          detail: { network: egressNetwork, internal: egressInternal },
+        });
+      }
+
+      /**
+       * Neutralize the checked-out repository BEFORE any worker can read it.
+       *
+       * A repository is input, and several files in it are read by the agent
+       * as INSTRUCTIONS — `AGENTS.md`, `.pi/extensions/`, `core.hooksPath`,
+       * MCP configs. A checkout can therefore rewrite the behaviour of the
+       * thing grading it with no exploit at all, just a committed file, which
+       * is why this runs before the supervisors rather than as part of
+       * harvest (SRD §12.2).
+       *
+       * Every hazard is recorded whether or not it was defused: `detected`
+       * and `neutralized` are separate fields precisely so "we saw it and
+       * left it" cannot read as "we defused it", and a worker whose
+       * legitimate AGENTS.md was moved must be able to find out why.
+       */
+      if (repoRoot !== null) {
+        try {
+          const hazards = await neutralizeRepoHazards(repoRoot);
+          for (const h of hazards) {
+            await ledger.append("repo_hazard", {
+              detail: { path: h.path, kind: h.kind, neutralized: h.neutralized, detail: h.detail },
+            });
+          }
+          if (hazards.length > 0 && opts.json !== true) {
+            const undefused = hazards.filter((h) => !h.neutralized).length;
+            process.stdout.write(
+              `neutralized ${hazards.length - undefused}/${hazards.length} repository hazard(s)\n`,
+            );
+            for (const h of hazards.filter((x) => !x.neutralized)) {
+              process.stderr.write(`  NOT neutralized: ${h.kind} at ${h.path}\n`);
+            }
+          }
+        } catch (err) {
+          throw new CliError(`repository hazard scan failed: ${String(err)}`, EXIT.USAGE);
+        }
+      }
 
       // The daemon: detached like the supervisors, single writer of registry.json.
       const cliEntry = new URL("../index.ts", import.meta.url).pathname;
@@ -153,6 +224,41 @@ export function register(program: Command): void {
           worker: workerId,
           detail: { pid, pgid },
         });
+      }
+
+      /**
+       * The Google grant is never silent (SRD §5.8).
+       *
+       * Per worker, one line saying what identity it got or that it got none.
+       * `cloud_access: false` produces a `none` PLAN rather than an early
+       * return, so "this worker has no credential" is a statement the run
+       * makes rather than something an operator has to infer from the absence
+       * of any mention.
+       *
+       * Planning only. Minting and the refresh loop attach to a running
+       * container, and the headless path does not start one — wiring them to
+       * a container that does not exist would be wiring to nothing. Tracked as
+       * ISC-248 rather than faked.
+       */
+      if (loadedConfig !== null) {
+        const cloud = loadedConfig.config.cloud;
+        for (const workerId of workers) {
+          let cloudAccess = false;
+          try {
+            cloudAccess = resolveWorker(loadedConfig, workerId).cloudAccess;
+          } catch {
+            // Worker not in config (Phase 1 --workers can name any id).
+          }
+          const plan = planCredential({
+            cloudAccess,
+            adcMode: cloud.adc_mode,
+            impersonateServiceAccount: cloud.impersonate_service_account,
+            quotaProject: cloud.quota_project,
+          });
+          const line = describeCredentialPlan(plan);
+          await ledger.append("credential_plan", { worker: workerId, detail: { plan: line } });
+          if (opts.json !== true) process.stdout.write(`  ${workerId}: ${line}\n`);
+        }
       }
 
       // ISC-70: block until every worker is idle, fail loudly otherwise.
