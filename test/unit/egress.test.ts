@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { EgressSchema } from "../../src/config/schema.ts";
 import { EgressDecisionSchema, type EgressDecision } from "../../src/contracts.ts";
 import {
   decide,
@@ -322,6 +323,49 @@ describe("normalizeHost", () => {
     for (const bad of ["", ".", "..", "a b", "http://x", "x:80", `${"a".repeat(5000)}`]) {
       expect(normalizeHost(bad)).toBeNull();
     }
+  });
+});
+
+describe("config egress section (schema wiring)", () => {
+  test("defaults: the ADC/GKE Google endpoints, no extra rules", () => {
+    const e = EgressSchema.parse({});
+    expect(e.google_hosts).toEqual([
+      "oauth2.googleapis.com",
+      "*.googleapis.com",
+      "accounts.google.com",
+    ]);
+    expect(e.allow).toEqual([]);
+  });
+
+  test("the parsed defaults feed policyFromConfig end-to-end", () => {
+    const p = policyFromConfig({
+      llm: { base_url: "http://host.docker.internal:8000/v1" },
+      egress: EgressSchema.parse({}),
+    });
+    expect(decide("storage.googleapis.com", 443, p).allowed).toBe(true);
+    expect(decide("host.docker.internal", 8000, p).allowed).toBe(true);
+    expect(decide("example.com", 443, p).allowed).toBe(false);
+  });
+
+  test("a dead allow rule is a loud field-level error, not a silent no-match", () => {
+    const r = EgressSchema.safeParse({ allow: [{ host: "*", port: 443 }] });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const issue = r.error.issues[0]!;
+      expect(issue.path).toEqual(["allow", 0, "host"]);
+      expect(issue.message).toContain("deny-all");
+    }
+  });
+
+  test("google_hosts entries are validated with the same predicate", () => {
+    expect(EgressSchema.safeParse({ google_hosts: ["*.com"] }).success).toBe(false);
+    expect(EgressSchema.safeParse({ google_hosts: ["*.googleapis.com"] }).success).toBe(true);
+  });
+
+  test("ports outside 1..65535 and unknown keys are refused", () => {
+    expect(EgressSchema.safeParse({ allow: [{ host: "pypi.org", port: 0 }] }).success).toBe(false);
+    expect(EgressSchema.safeParse({ allow: [{ host: "pypi.org", port: 70000 }] }).success).toBe(false);
+    expect(EgressSchema.safeParse({ allow: [{ host: "pypi.org", port: 443, x: 1 }] }).success).toBe(false);
   });
 });
 
