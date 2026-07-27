@@ -1,0 +1,31 @@
+{
+  "name": "cmux-fleet",
+  "version": "0.1.0",
+  "description": "Orchestrate a fleet of containerized Pi coding agents across cmux panes",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "pifleet": "./src/cli/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test test/integration",
+    "test:e2e": "bun test test/e2e",
+    "lint": "tsc --noEmit",
+    "pifleet": "bun run src/cli/index.ts"
+  },
+  "dependencies": {
+    "commander": "^14.0.2",
+    "zod": "^4.1.13",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}
