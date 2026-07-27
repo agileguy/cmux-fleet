@@ -115,10 +115,17 @@ export async function parseConfig(text: string, path: string): Promise<LoadedCon
   }
   const result = FleetConfigSchema.safeParse(doc);
   if (!result.success) {
-    const issues: FieldIssue[] = result.error.issues.map((i) => ({
-      path: i.path.map(String).join("."),
-      message: i.message,
-    }));
+    const issues: FieldIssue[] = result.error.issues.flatMap((i) => {
+      // zod reports a stray key at the PARENT's path with a `keys` list; the
+      // useful diagnostic names the key itself, so unroll it.
+      if (i.code === "unrecognized_keys") {
+        return (i as unknown as { keys: string[] }).keys.map((k) => ({
+          path: [...i.path.map(String), k].join("."),
+          message: "unrecognized key",
+        }));
+      }
+      return [{ path: i.path.map(String).join("."), message: i.message }];
+    });
     throw new ConfigValidationError(path, issues);
   }
   return { config: result.data, path, dir: dirname(path) };
