@@ -64,6 +64,12 @@ const HEARTBEAT_MS = 250;
 const REPROBE_MS = 50;
 const PROMPT_ACK_TIMEOUT_MS = 5_000;
 const SHUTDOWN_GRACE_MS = 2_000;
+/**
+ * How long a deadline `abort` gets to produce a terminal event before the
+ * supervisor settles the task itself and kills the child. `abort` is advisory
+ * and a wedged agent may never honour it.
+ */
+const ABORT_GRACE_MS = 5_000;
 
 interface Argv {
   runsRoot: string;
@@ -181,6 +187,8 @@ async function main(): Promise<void> {
   const tracker = new CompletionTracker();
   const deadline = new Stopwatch();
   let deadlineMs: number | null = null;
+  /** Pending kill ladder armed when a deadline `abort` goes unanswered. */
+  let abortEscalation: ReturnType<typeof setTimeout> | null = null;
   let livePromptId: string | null = null;
   let probing = false;
   let shuttingDown = false;
@@ -242,6 +250,13 @@ async function main(): Promise<void> {
     probing = false;
     livePromptId = null;
     deadlineMs = null;
+    // Disarm the kill ladder: the epoch is over. Leaving it armed would keep
+    // the event loop alive and, worse, let a timer from a settled epoch fire
+    // against whatever epoch is live by then.
+    if (abortEscalation !== null) {
+      clearTimeout(abortEscalation);
+      abortEscalation = null;
+    }
     tracker.reset();
     await persistFence();
     await writeTaskRecord(taskRecordPath(wp, settled.task_id), {
@@ -483,6 +498,21 @@ async function main(): Promise<void> {
       void persistFence();
       logEvent({ type: "deadline_exceeded", task_id: em.live.task_id, epoch: em.live.epoch });
       void client.send("abort").catch(() => {});
+      // `abort` is advisory: an agent blocked inside a tool call may never act
+      // on it, and settle is reachable only through `agent_end`. Without a
+      // terminal escalation the epoch stays live forever — and because
+      // `allocate` refuses while an epoch is live, that strands the whole
+      // worker, not just this task. Arm the same kill ladder shutdown uses.
+      abortEscalation = setTimeout(() => {
+        abortEscalation = null;
+        if (em.live === null) return; // the abort landed; nothing to escalate.
+        logEvent({ type: "deadline_escalated", epoch: em.live.epoch });
+        void settle("timed_out", "deadline_exceeded_no_terminal_event").finally(() => {
+          // Death must be unambiguous: a child that ignored abort is not
+          // trustworthy to run the next task.
+          child.kill();
+        });
+      }, ABORT_GRACE_MS);
     }
     void flushState();
   }, HEARTBEAT_MS);
@@ -535,13 +565,26 @@ async function main(): Promise<void> {
           const sent = await client.send(
             "prompt",
             { message, streamingBehavior: "followUp", epoch: decision.epoch },
-            { timeoutMs: PROMPT_ACK_TIMEOUT_MS },
+            {
+              timeoutMs: PROMPT_ACK_TIMEOUT_MS,
+              // The fence post must be set the instant the ack is parsed, not
+              // when this await resumes. Pi may emit the ack and `agent_start`
+              // in one write; handling is synchronous within a chunk, so an
+              // ack recorded a microtask later leaves `ack_seq` null for that
+              // `agent_start`, which is then filed as a prior epoch's. The
+              // window never opens and every subsequent event — `agent_end`
+              // included — is discarded, hanging the task and the worker.
+              onAck: (seq) => em.noteAck(seq),
+            },
           );
           if (!sent.response.success) {
             await settle("failed", `prompt_rejected: ${sent.response.error ?? "unknown"}`);
             return { accepted: false, reason: "prompt_rejected", error: sent.response.error ?? null };
           }
           livePromptId = sent.response.id ?? null;
+          // Belt and braces: onAck has already recorded this exact seq, and
+          // noteAck is first-write-wins per epoch, so this is a no-op on the
+          // normal path and the fallback if the hook is ever bypassed.
           em.noteAck(sent.seq);
           await persistFence();
         } catch (err) {

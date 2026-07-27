@@ -137,6 +137,11 @@ export function buildDockerArgv(
   argv.push("-v", `${join(opts.runDir, "outbox", w.id)}:/outbox`);
   argv.push("-v", `${join(opts.runDir, "sessions")}:/sessions`);
   argv.push("-v", `${join(opts.runDir, "skills", w.role)}:/skills:ro`);
+  // The verbgate policy is mounted READ-ONLY and separately from /outbox. It
+  // used to be read out of /outbox, which the worker owns — so the subject of
+  // the policy could rewrite the policy, and the task-scoped cloud grant was a
+  // suggestion rather than a control.
+  argv.push("-v", `${join(opts.runDir, "workers", w.id, "cloud-allow")}:/policy/cloud-allow:ro`);
   // Container-local Pi state — NEVER the host ~/.pi/agent, which holds real
   // auth and sessions (SRD §5.5).
   argv.push("-v", `pifleet-piagent-${w.id}:/home/pi/.pi/agent`);

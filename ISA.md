@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 4/165
+progress: 25/193
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -302,6 +302,42 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [x] ISC-163: A failed visibility probe reports that the daemon cannot see the path and names the override, rather than surfacing the bare `cat: No such file` beneath it.
 - [x] ISC-164: `doctor` probes the runs root for mount visibility and exits nonzero when a worker's outbox would mount empty.
 - [ ] ISC-165: Anti: no `:ro` refusal test passes against a mount whose contents were never readable.
+
+### Group O — PR #1 review findings (added 2026-07-27)
+
+Fixed in this phase:
+
+- [x] ISC-166: The epoch fence post is recorded before any event that follows the ack, including when the ack and the event arrive in one stdout chunk.
+- [x] ISC-167: A deadline whose `abort` produces no terminal event still settles the task and kills the child; the worker never stays `busy` forever.
+- [x] ISC-168: `writeJsonAtomic` produces a parseable file under concurrent same-path writes and leaves no temp files behind.
+- [x] ISC-169: A truncated or wrong-shaped state file exits on the ladder with one line, never a stack trace — including from `down`.
+- [x] ISC-170: Every commander-diagnosed usage error exits 2; `--help`/`--version` exit 0; naming no command exits 2.
+- [x] ISC-171: A dead child's EPIPE, a `null` record, and a throwing event handler each surface as a diagnosed failure rather than killing the supervisor.
+- [x] ISC-173: `TailReader` detects replacement by identity, not size, and never returns a fragment of a record as a complete line.
+- [x] ISC-174: `MAX_LINE_UNITS` bounds every emitted line, not only the unterminated residue.
+- [x] ISC-175: A role or worker that is `read_only` with no explicit tools is rejected — the effective set is every builtin, `bash` included.
+- [x] ISC-176: `unknown` maps to `EXIT.PARTIAL`; only `reason === "worker_died"` maps to `EXIT.WORKER_DIED`.
+- [x] ISC-177: `wait` against a run id that names nothing exits 2, never 0.
+- [x] ISC-178: `CliError` satisfies the structural `ExitCoded` protocol.
+- [x] ISC-179: The verbgate policy path and ledger path are constants; a worker cannot supply its own policy or redirect its own audit trail.
+- [x] ISC-180: verbgate refuses every verb (exit 78) when it finds its policy file writable by the current uid.
+- [x] ISC-181: gcloud classification stops at the first recognized verb, so a read-keyword positional cannot outvote a mutating verb.
+- [x] ISC-182: No verbgate classification path is influenced by the working directory (globbing disabled).
+- [x] ISC-183: `gsutil` and `bq` are gated on the same rules as gcloud/kubectl/helm.
+- [x] ISC-184: Known global flags before a verb are parsed past; unknown flag shapes still fail closed.
+- [x] ISC-185: No ledger row can be forged by control characters in argv, at any argv size.
+- [x] ISC-186: Registry writes are serialized, so concurrent registrations cannot lose a worker.
+- [x] ISC-187: `image verify`'s read-only-root check proves the tmpfs is writable as well as that `/` is not.
+
+Open — carried forward, not fixed here:
+
+- [ ] ISC-172: The verbgate ledger is collected outside the container, so a worker cannot truncate its own audit trail.
+- [ ] ISC-188: `render.ts` and `run/paths.ts` compute the run directory once, not twice (`outbox`, `skills`, `env`, briefing paths, and `PIFLEET_RUNS_DIR` honoured).
+- [ ] ISC-189: `up` refuses to run against an image that is absent or fails `verify`.
+- [ ] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
+- [ ] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
+- [ ] ISC-192: A ledger or state file written under an older schema version is read under a pinned policy rather than failing.
+- [ ] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
 
 ## Test Strategy
 

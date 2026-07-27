@@ -9,7 +9,7 @@
  */
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
 import { buildImage, imageTag, verifyImage } from "../../src/container/image.ts";
@@ -235,33 +235,43 @@ describe("verbgate (SRD §5.10)", () => {
     expect(r.stderr).toContain("not authorized");
   }, PROBE_TIMEOUT);
 
+  /**
+   * The policy now arrives on a read-only mount, not through the environment.
+   * It was env-configurable, which meant the worker could hand the gate its own
+   * allow file — so this test used to configure the very control it was
+   * verifying.
+   */
   it("an allowlisted verb prefix reaches the real binary and lands in the ledger", async () => {
-    const r = await runInImage(
-      [
-        "-c",
-        [
-          'printf "kubectl delete\\n" > /tmp/allow',
-          "kubectl delete pod x --dry-run=client 2>/dev/null",
-          'echo "gate=$?"', // != 77 proves the gate opened; kubectl then fails on no cluster
-          "cat /tmp/ledger.jsonl",
-        ].join("; "),
-      ],
-      {
-        entrypoint: "/bin/sh",
-        env: {
-          PIFLEET_CLOUD_ALLOW_FILE: "/tmp/allow",
-          PIFLEET_VERBGATE_LEDGER: "/tmp/ledger.jsonl",
-          PIFLEET_TASK_ID: "T-test",
+    const host = await makeDaemonScratch("imgverbgate");
+    try {
+      await mkdir(join(host, "outbox", "ledger"), { recursive: true });
+      const policy = join(host, "cloud-allow");
+      await writeFile(policy, "kubectl delete\n");
+      const r = await runInImage(
+        ["-c", 'kubectl delete pod x --dry-run=client 2>/dev/null; echo "gate=$?"'],
+        {
+          entrypoint: "/bin/sh",
+          env: { PIFLEET_TASK_ID: "T-test" },
+          extra: [
+            "-v", `${join(host, "outbox")}:/outbox`,
+            "-v", `${policy}:/policy/cloud-allow:ro`,
+          ],
         },
-      },
-    );
-    expect(r.code).toBe(0);
-    expect(r.stdout).not.toContain("gate=77");
-    const rows = r.stdout
-      .split("\n")
-      .filter((l) => l.startsWith("{"))
-      .map((l) => JSON.parse(l) as { decision: string; task_id: string; verb: string });
-    expect(rows.some((row) => row.decision === "allow_listed" && row.task_id === "T-test")).toBe(true);
+      );
+      expect(r.code).toBe(0);
+      // != 77 proves the gate opened; kubectl then fails on no cluster.
+      expect(r.stdout).not.toContain("gate=77");
+      const ledger = await readFile(join(host, "outbox", "ledger", "verbgate.jsonl"), "utf8");
+      const rows = ledger
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .map((l) => JSON.parse(l) as { decision: string; task_id: string; verb: string });
+      expect(rows.some((row) => row.decision === "allow_listed" && row.task_id === "T-test")).toBe(
+        true,
+      );
+    } finally {
+      await rm(host, { recursive: true, force: true });
+    }
   }, PROBE_TIMEOUT);
 
   it("flag reordering does not sneak a mutating verb past the gate", async () => {

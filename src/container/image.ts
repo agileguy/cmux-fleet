@@ -184,15 +184,25 @@ export async function verifyImage(
     detail: `id -u → "${uid.stdout.trim()}"`,
   });
 
-  // Read-only root refuses a write outside the tmpfs.
+  // Read-only root refuses a write outside the tmpfs — while the tmpfs itself
+  // still accepts one. Testing only "the write failed" accepted any failure at
+  // all: a nonexistent image exits 125 and an image with no shell exits 127,
+  // both of which read as "root is read-only". The positive half is what makes
+  // the negative half mean something.
   const ro = await exec([
     "docker", "run", ...RUN_HARDENED, "--entrypoint", "/bin/sh", tag,
-    "-c", "touch /probe-should-fail 2>/dev/null",
+    "-c", "touch /tmp/probe-should-work && echo TMPFS_OK; touch /probe-should-fail 2>/dev/null && echo ROOT_WRITABLE; true",
   ]);
+  const tmpfsOk = ro.stdout.includes("TMPFS_OK");
+  const rootWritable = ro.stdout.includes("ROOT_WRITABLE");
   checks.push({
     name: "read-only-root",
-    ok: ro.code !== 0,
-    detail: ro.code !== 0 ? "write to / refused" : "write to / SUCCEEDED — root is writable",
+    ok: ro.code === 0 && tmpfsOk && !rootWritable,
+    detail: !tmpfsOk
+      ? `container did not run (exit ${ro.code}): ${ro.stderr.trim() || "no output"}`
+      : rootWritable
+        ? "write to / SUCCEEDED — root is writable"
+        : "write to / refused, tmpfs writable",
   });
 
   // tini is the entrypoint (PID 1). Static, because with the default entrypoint

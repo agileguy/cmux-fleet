@@ -229,7 +229,29 @@ export async function startRegistryDaemon(
     workers: {},
   };
   registry = { ...registry, daemon: { pid: process.pid, started } };
-  await writeJsonAtomic(run.registryJson, RegistrySchema.parse(registry));
+
+  /**
+   * Registry writes are serialized through one chain.
+   *
+   * Each socket line is handled in its own detached async task, so N
+   * supervisors registering during `up` land in one tick and interleave
+   * read-modify-write on a shared object. Unique temp names stop the file from
+   * TEARING, but not from losing an update: two handlers can both snapshot
+   * `registry`, and the second write erases the first worker. The supervisor
+   * already serializes its own state and fence writes for exactly this reason;
+   * the daemon did not, and a lost registration silently downgrades liveness
+   * detection to the pid-only path.
+   */
+  let chain: Promise<unknown> = Promise.resolve();
+  const serialized = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = chain.then(fn, fn);
+    chain = next.catch(() => {});
+    return next;
+  };
+  const persist = () =>
+    serialized(() => writeJsonAtomic(run.registryJson, RegistrySchema.parse(registry)));
+
+  await persist();
   await writeJsonAtomic(run.daemonPid, { pid: process.pid, started });
 
   let server: SocketServer | null = null;
@@ -245,7 +267,7 @@ export async function startRegistryDaemon(
           ...registry,
           workers: { ...registry.workers, [worker.worker]: worker },
         };
-        await writeJsonAtomic(run.registryJson, RegistrySchema.parse(registry));
+        await persist();
         return { ok: true };
       }
       case "deregister_worker": {
@@ -253,7 +275,7 @@ export async function startRegistryDaemon(
         const workers = { ...registry.workers };
         delete workers[name];
         registry = { ...registry, workers };
-        await writeJsonAtomic(run.registryJson, RegistrySchema.parse(registry));
+        await persist();
         return { ok: true };
       }
       case "get_registry":

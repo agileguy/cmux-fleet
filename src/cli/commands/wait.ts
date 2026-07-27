@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { CliError } from "../index.ts";
 import { EXIT, worstExit, type ExitCode } from "../../contracts.ts";
@@ -48,6 +49,17 @@ export function register(program: Command): void {
       const runId = opts.run ?? (await latestRunId(root));
       if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
       const run = runPaths(runId, root);
+      // A run id that names nothing is a usage error, not an empty wait. The
+      // inbox scan below cannot tell "no tasks dispatched yet" from "this run
+      // does not exist", and reporting exit 0 for a typo'd --run tells an
+      // orchestrator its work succeeded.
+      //
+      // The predicate is the run DIRECTORY, not run.json: a supervisor can be
+      // launched against a run dir that `up` did not build, and requiring the
+      // manifest would reject those while catching no additional typos.
+      if (!existsSync(run.root)) {
+        throw new CliError(`no such run: ${runId} (looked in ${root})`, EXIT.USAGE);
+      }
       const timeoutMs = parseDuration(opts.timeout);
 
       const targets = async (): Promise<string[]> => {
@@ -183,7 +195,13 @@ function exitFor(t: WaitedTask): ExitCode {
     case "timed_out":
       return EXIT.TIMEOUT;
     case "unknown":
-      return EXIT.WORKER_DIED;
+      // `unknown` is the lattice's IDENTITY element, not its bottom
+      // (contracts.ts): it means "no evidence either way", which is what a
+      // live-but-unadjudicated outcome looks like. WORKER_DIED is a specific
+      // diagnosis and it outranks TIMEOUT and PARTIAL, so mapping `unknown` to
+      // it lets one unadjudicated task report the whole fleet as dead. A real
+      // death arrives as `reason === "worker_died"`, handled above.
+      return EXIT.PARTIAL;
     default:
       // failed | blocked | partial | aborted — "some tasks not success".
       return EXIT.PARTIAL;

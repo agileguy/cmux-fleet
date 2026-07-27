@@ -96,6 +96,13 @@ export interface RpcClientOptions {
 interface Pending {
   command: string;
   resolve: (r: SentResponse) => void;
+  /**
+   * Called with the response's stream seq synchronously during line handling,
+   * before any later line in the same chunk is dispatched. Epoch fencing needs
+   * this: the fence post must be in place before the first event that follows
+   * the ack, and a promise resolution cannot guarantee that ordering.
+   */
+  onAck?: (seq: number) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -197,7 +204,7 @@ export class RpcClient {
   send(
     command: string,
     params: Record<string, unknown> = {},
-    opts: { timeoutMs?: number } = {},
+    opts: { timeoutMs?: number; onAck?: (seq: number) => void } = {},
   ): Promise<SentResponse> {
     if (this.#closed) return Promise.reject(this.#closed);
     const id = `${this.#opts.idPrefix ?? "rpc"}-${this.#nextId++}`;
@@ -211,11 +218,37 @@ export class RpcClient {
         this.#remember(id, command);
         reject(new RpcTimeoutError(command, id, timeoutMs));
       }, timeoutMs);
-      this.#pending.set(id, { command, resolve, reject, timer });
+      this.#pending.set(id, {
+        command,
+        resolve,
+        reject,
+        timer,
+        ...(opts.onAck !== undefined ? { onAck: opts.onAck } : {}),
+      });
     });
 
-    this.#sink.write(`${JSON.stringify({ id, type: command, ...params })}\n`);
-    this.#sink.flush?.();
+    // The sink is the child's stdin. When the child dies the write throws
+    // EPIPE synchronously — and every caller treats send() as returning a
+    // promise, so the throw escaped while the pending entry stayed registered.
+    // Its timer then rejected a promise nobody held, which Bun turns into an
+    // unhandled rejection and a dead supervisor. Failures belong on the
+    // promise channel the callers already handle.
+    try {
+      this.#sink.write(`${JSON.stringify({ id, type: command, ...params })}\n`);
+      this.#sink.flush?.();
+    } catch (err) {
+      const p = this.#pending.get(id);
+      if (p) {
+        clearTimeout(p.timer);
+        this.#pending.delete(id);
+        this.#remember(id, command);
+      }
+      // Swallow the original rejection path; the caller gets this one instead.
+      promise.catch(() => {});
+      return Promise.reject(
+        new RpcClosedError(`write failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    }
     return promise;
   }
 
@@ -228,6 +261,15 @@ export class RpcClient {
       return;
     }
     if (msg === undefined) return; // blank line — not a record, no seq
+    // A bare `null` (or any scalar) parses fine but is not a record. Only
+    // `undefined` meant "blank", so `null` slipped through and was dereferenced
+    // downstream — throwing out of feed(), past the deliberate
+    // RpcProtocolError path, and out of the reader's void-ed async IIFE as an
+    // unhandled rejection that kills the supervisor.
+    if (msg === null || typeof msg !== "object") {
+      this.#fatal(new RpcProtocolError(line, new TypeError("record is not an object")));
+      return;
+    }
     const seq = ++this.#seq;
 
     if (isRpcResponse(msg)) {
@@ -237,6 +279,13 @@ export class RpcClient {
         this.#pending.delete(id);
         clearTimeout(pending.timer);
         this.#remember(id, pending.command);
+        // Synchronously, BEFORE the loop in feed() reaches the next line.
+        // Resolving the promise only schedules a microtask, so a caller that
+        // records the fence post after `await send(...)` records it one turn
+        // too late — and when the peer packs the ack and the first event into
+        // a single write, that event is misattributed to the previous epoch
+        // and the epoch window never opens. See the note on `onAck`.
+        pending.onAck?.(seq);
         pending.resolve({ response: msg, seq });
       } else {
         const kind: StrayKind = id !== undefined && this.#resolved.has(id) ? "late" : "unknown";
@@ -244,7 +293,15 @@ export class RpcClient {
       }
       return;
     }
-    this.#opts.onEvent(msg, seq);
+    // A handler that throws must not escape the reader loop as an unhandled
+    // rejection. The supervisor's onEvent runs epoch attribution, the
+    // completion tracker and the probe scheduler; any of them throwing used to
+    // kill the process instead of surfacing as a protocol failure.
+    try {
+      this.#opts.onEvent(msg, seq);
+    } catch (err) {
+      this.#fatal(new RpcProtocolError(line, err));
+    }
   }
 
   #remember(id: string, command: string): void {

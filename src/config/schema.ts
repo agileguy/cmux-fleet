@@ -264,15 +264,25 @@ export const FleetConfigSchema = z
     // ISC-59: `read_only: true` combined with `bash` in the MERGED tool set.
     // Checked at the level that completes the combination, so the error points
     // at the document position a human would edit.
+    // Omitting `tools` is NOT "no tools" — pifleet then passes no `--tools`
+    // flag and Pi grants every builtin, `bash` among them. Resolving the
+    // omission to the builtin set before the check is what makes the guard
+    // catch the default case; testing `tools?.includes` let the most common
+    // shape of the violation through silently.
     const defaultTools = cfg.defaults.tools;
+    const effective = (declared: readonly ToolName[] | undefined): readonly ToolName[] =>
+      declared ?? PI_BUILTIN_TOOLS;
     for (const [name, role] of Object.entries(cfg.roles)) {
       const readOnly = role.read_only ?? cfg.defaults.read_only ?? false;
-      const tools = role.tools ?? defaultTools;
-      if (readOnly && tools?.includes("bash")) {
+      const tools = effective(role.tools ?? defaultTools);
+      if (readOnly && tools.includes("bash")) {
         ctx.addIssue({
           code: "custom",
           path: ["roles", name, "tools"],
-          message: `role "${name}" is read_only: true but its tools include "bash" — a shell can write; drop one`,
+          message:
+            (role.tools ?? defaultTools) === undefined
+              ? `role "${name}" is read_only: true with no explicit tools — Pi then grants every builtin, "bash" included; declare a tools list without "bash"`
+              : `role "${name}" is read_only: true but its tools include "bash" — a shell can write; drop one`,
         });
       }
     }
@@ -280,12 +290,16 @@ export const FleetConfigSchema = z
       const role = cfg.roles[w.role];
       if (!role) return; // already reported above
       const readOnly = w.read_only ?? role.read_only ?? cfg.defaults.read_only ?? false;
-      const tools = w.tools ?? role.tools ?? defaultTools;
-      if (readOnly && tools?.includes("bash")) {
+      const declared = w.tools ?? role.tools ?? defaultTools;
+      const tools = effective(declared);
+      if (readOnly && tools.includes("bash")) {
         ctx.addIssue({
           code: "custom",
           path: ["workers", i, "tools"],
-          message: `worker "${w.id}" resolves to read_only: true with "bash" in its tools — a shell can write; drop one`,
+          message:
+            declared === undefined
+              ? `worker "${w.id}" resolves to read_only: true with no explicit tools — Pi then grants every builtin, "bash" included; declare a tools list without "bash"`
+              : `worker "${w.id}" resolves to read_only: true with "bash" in its tools — a shell can write; drop one`,
         });
       }
     });

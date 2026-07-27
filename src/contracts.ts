@@ -305,7 +305,10 @@ export interface RpcEvent {
 export type RpcMessage = RpcResponse | RpcEvent;
 
 export function isRpcResponse(m: RpcMessage): m is RpcResponse {
-  return (m as RpcResponse).type === "response";
+  // Defensive against a null/scalar record: the caller is a stream reader and
+  // a dereference here escapes as an unhandled rejection rather than a
+  // protocol error. The type says this cannot happen; the wire disagrees.
+  return typeof m === "object" && m !== null && (m as RpcResponse).type === "response";
 }
 
 /** `agent_end` carries the retry discriminator that makes completion detectable. */

@@ -50,10 +50,14 @@ RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm
 # succeeds, and every gcloud and kubectl call in the finished image exits 127.
 # Resolve to the absolute target before relocating, and re-link rather than move
 # when the source was a symlink so the SDK's own layout stays intact.
+# gsutil and bq ship with google-cloud-cli, share the same credentials, and are
+# fully mutating (`gsutil rm -r`, `bq rm`). Wrapping only gcloud/kubectl/helm
+# left two ungated destructive CLIs on PATH. The SDK also installs a second
+# kubectl copy under its own bin dir, which is relocated for the same reason.
 RUN set -eux; \
     mkdir -p /usr/local/libexec; \
-    for b in gcloud kubectl helm; do \
-      src="$(command -v "$b")"; \
+    for b in gcloud kubectl helm gsutil bq; do \
+      src="$(command -v "$b")" || continue; \
       real="$(readlink -f "$src")"; \
       if [ "$real" != "$src" ]; then \
         ln -sfn "$real" "/usr/local/libexec/${b}.real"; \
@@ -64,9 +68,18 @@ RUN set -eux; \
       # Fail the build here rather than ship an image whose tools are all 127.
       test -x "/usr/local/libexec/${b}.real"; \
     done
+# NOTE: the SDK's own bin dir keeps copies of some of these, and they are not
+# hidden. Hardening them is pointless theatre while `.real` is reachable by
+# design (see the shim header): a determined worker with bash does not need a
+# second copy. PATH ordering is what routes the CASUAL call through the gate,
+# and credential scoping is the control that actually binds. An earlier attempt
+# to chmod these away also broke the wrappers outright, because the relocated
+# `.real` entries are symlinks INTO this directory.
 COPY --chmod=0755 docker/verbgate /usr/local/bin/gcloud
 COPY --chmod=0755 docker/verbgate /usr/local/bin/kubectl
 COPY --chmod=0755 docker/verbgate /usr/local/bin/helm
+COPY --chmod=0755 docker/verbgate /usr/local/bin/gsutil
+COPY --chmod=0755 docker/verbgate /usr/local/bin/bq
 
 # --- optional toolchain layers, selected by build arg (§5.3) ---
 FROM base AS toolchain-base
@@ -115,9 +128,15 @@ RUN set -eux; \
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.
 RUN groupadd -g 10001 pi && useradd -u 10001 -g 10001 -m -s /bin/bash pi
 
-RUN mkdir -p /workspace /outbox /sessions /skills /creds \
+# /policy holds the task's cloud_allow[] and is deliberately NOT chowned to the
+# worker: it was previously read from /outbox, which the worker owns, so the
+# subject of the policy could rewrite the policy. Root-owned and mounted
+# read-only; verbgate refuses every verb if it finds this path writable.
+RUN mkdir -p /workspace /outbox /sessions /skills /creds /policy \
              /home/pi/.pi/agent /home/pi/.config/gcloud /home/pi/.kube \
- && chown -R 10001:10001 /workspace /outbox /sessions /home/pi
+ && chown -R 10001:10001 /workspace /outbox /sessions /home/pi \
+ && chown -R 0:0 /policy \
+ && chmod 0555 /policy
 
 # Entry wrapper renders ~/.pi/agent/models.json from env before exec'ing pi —
 # Pi reads oMLX provider config from that file, NOT from env (SRD Q9).

@@ -10,15 +10,34 @@
 import { Command } from "commander";
 import { EXIT, type ExitCode, isExitCoded } from "../contracts.ts";
 
-/** Thrown by a command to exit with a specific ladder code and a clean message. */
+/**
+ * Thrown by a command to exit with a specific ladder code and a clean message.
+ *
+ * The field is `exitCode`, not `code`, so that `CliError` satisfies the
+ * structural `ExitCoded` protocol in contracts.ts. It previously did not, and
+ * the ladder worked only because the `instanceof` branch below runs first —
+ * meaning the structural path the protocol exists to provide was exercised by
+ * nothing, and any module-identity split (a duplicated import, a bundling
+ * boundary) would have demoted every CLI error to exit 1 plus a stack trace.
+ */
 export class CliError extends Error {
   constructor(
     message: string,
-    readonly code: ExitCode = EXIT.USAGE,
+    readonly exitCode: ExitCode = EXIT.USAGE,
   ) {
     super(message);
     this.name = "CliError";
   }
+}
+
+/** A commander-thrown error: has a dotted `commander.*` code and was printed already. */
+function isCommanderError(e: unknown): e is { code: string; exitCode: number } {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    typeof (e as { code?: unknown }).code === "string" &&
+    (e as { code: string }).code.startsWith("commander.")
+  );
 }
 
 export function buildProgram(): Command {
@@ -28,6 +47,11 @@ export function buildProgram(): Command {
     .description("Orchestrate a fleet of containerized Pi coding agents")
     .version("0.1.0")
     .showHelpAfterError()
+    // Without this commander calls process.exit(1) itself, so the most common
+    // error in the whole CLI — a typo'd flag or an unknown subcommand — never
+    // reached the ladder and exited 1, a code the SRD §10 ladder does not
+    // define. exitOverride routes it through main()'s catch instead.
+    .exitOverride()
     .enablePositionalOptions();
   return program;
 }
@@ -59,21 +83,40 @@ async function main(argv: string[]): Promise<number> {
   ]);
   for (const m of modules) m.register(program);
 
+  // No subcommand at all did nothing and reported success. Naming no command
+  // is a usage error, and an orchestrator switching on the integer has to be
+  // able to tell "did nothing" from "succeeded".
+  if (argv.length <= 2) {
+    program.outputHelp();
+    return EXIT.USAGE;
+  }
+
   try {
     await program.parseAsync(argv);
     return EXIT.SUCCESS;
   } catch (err) {
-    if (err instanceof CliError) {
-      process.stderr.write(`pifleet: ${err.message}\n`);
-      return err.code;
+    // `--help` and `--version` reach here as CommanderErrors after commander
+    // has already printed; they are successes, not failures. Everything else
+    // commander diagnoses is a usage error. Detected structurally so the
+    // commander import stays an implementation detail of this file.
+    if (isCommanderError(err)) {
+      return err.code === "commander.helpDisplayed" ||
+        err.code === "commander.help" ||
+        err.code === "commander.version"
+        ? EXIT.SUCCESS
+        : EXIT.USAGE;
     }
-    // Any module-defined error that declares an exit code is a diagnosed
-    // failure and gets the same one-line treatment.
+    // One branch: CliError satisfies ExitCoded structurally, so the protocol
+    // is the only path and is therefore actually exercised.
     if (isExitCoded(err)) {
       process.stderr.write(`pifleet: ${err.message}\n`);
       return err.exitCode;
     }
-    throw err;
+    // Undiagnosed. Still no stack trace on stderr and still a ladder code:
+    // exit 1 is not in the SRD §10 ladder, so a caller switching on the
+    // integer would fall through every case it knows about.
+    process.stderr.write(`pifleet: ${err instanceof Error ? err.message : String(err)}\n`);
+    return EXIT.USAGE;
   }
 }
 

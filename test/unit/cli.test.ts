@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildProgram, CliError } from "../../src/cli/index.ts";
-import { EXIT } from "../../src/contracts.ts";
+import { EXIT, isExitCoded } from "../../src/contracts.ts";
 
 /** Every command named in SRD §10's CLI surface table. */
 const SRD_COMMANDS = [
@@ -62,12 +62,23 @@ describe("CLI surface", () => {
 
 describe("CliError", () => {
   test("defaults to the usage exit code", () => {
-    expect(new CliError("bad").code).toBe(EXIT.USAGE);
+    expect(new CliError("bad").exitCode).toBe(EXIT.USAGE);
   });
 
   test("carries an explicit ladder code when given one", () => {
-    expect(new CliError("no backend", EXIT.BACKEND_UNAVAILABLE).code).toBe(
+    expect(new CliError("no backend", EXIT.BACKEND_UNAVAILABLE).exitCode).toBe(
       EXIT.BACKEND_UNAVAILABLE,
     );
+  });
+
+  /**
+   * The entry point routes every diagnosed failure through the structural
+   * protocol. CliError naming its field `code` meant it did NOT satisfy that
+   * protocol, and the ladder survived only because an `instanceof` branch ran
+   * first — leaving the structural path dead and one module-identity split
+   * away from demoting every CLI error to exit 1 with a stack trace.
+   */
+  test("satisfies the structural ExitCoded protocol", () => {
+    expect(isExitCoded(new CliError("bad", EXIT.TIMEOUT))).toBe(true);
   });
 });

@@ -24,6 +24,7 @@
 
 import { z } from "zod";
 import {
+  EXIT,
   PresentationSchema,
   VerdictSchema,
   WorkerStateSchema,
@@ -161,9 +162,46 @@ export async function writeTaskRecord(path: string, record: TaskRecord): Promise
 // Shared read helper
 // ---------------------------------------------------------------------------
 
+/**
+ * A state file that is truncated, or valid JSON of the wrong shape, is a
+ * diagnosable condition — not a crash. Both failures used to escape as raw
+ * `SyntaxError` / `ZodError` stack traces with exit 1, which is not on the
+ * §10 ladder, and they landed on `status` and `down` — the commands you reach
+ * for precisely when a run is in a bad state.
+ */
+export class StateReadError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+  constructor(
+    readonly path: string,
+    cause: unknown,
+  ) {
+    // A ZodError's `message` is a pretty-printed JSON array, so its first line
+    // is a bare "[". Summarise the issues instead — the field path is the
+    // whole diagnostic value here.
+    const issues = (cause as { issues?: Array<{ path: unknown[]; message: string }> }).issues;
+    const detail = Array.isArray(issues)
+      ? issues.map((i) => `${i.path.map(String).join(".") || "<root>"}: ${i.message}`).join("; ")
+      : cause instanceof Error
+        ? (cause.message.split("\n")[0] ?? cause.message)
+        : String(cause);
+    super(`unreadable state file ${path}: ${detail}`);
+    this.name = "StateReadError";
+  }
+}
+
 async function readValidated<T>(path: string, parse: (v: unknown) => T): Promise<T | null> {
   const file = Bun.file(path);
   if (!(await file.exists())) return null;
   const text = await file.text();
-  return parse(JSON.parse(text));
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw new StateReadError(path, err);
+  }
+  try {
+    return parse(doc);
+  } catch (err) {
+    throw new StateReadError(path, err);
+  }
 }

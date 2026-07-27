@@ -61,6 +61,15 @@ export class LineSplitter {
     for (;;) {
       const nl = this.#buffer.indexOf("\n", start);
       if (nl === -1) break;
+      // The cap has to be enforced HERE, on each completed line, not only on
+      // the unterminated residue afterwards. Checking only the residue meant
+      // any line that arrived whole within a single push sailed through at any
+      // size — and TailReader hands its entire appended range to one push, so
+      // a transcript with one huge line bypassed the bound completely.
+      if (nl - start > MAX_LINE_UNITS) {
+        this.#buffer = this.#buffer.slice(nl + 1);
+        throw new LineTooLongError(nl - start);
+      }
       out.push(stripCr(this.#buffer.slice(start, nl)));
       start = nl + 1;
     }
@@ -133,7 +142,8 @@ export async function* readJsonl<T = unknown>(
  */
 export class TailReader {
   #offset = 0;
-  #size = 0;
+  /** `dev:ino:birthtime` of the file this reader's offset refers to. */
+  #identity: string | null = null;
   #splitter = new LineSplitter();
 
   constructor(readonly path: string) {}
@@ -144,21 +154,34 @@ export class TailReader {
 
   /** Read everything appended since the last poll. */
   async poll(): Promise<string[]> {
-    const file = Bun.file(this.path);
-    if (!(await file.exists())) return [];
-    const size = file.size;
+    const { stat } = await import("node:fs/promises");
+    let st: Awaited<ReturnType<typeof stat>>;
+    try {
+      st = await stat(this.path);
+    } catch {
+      return []; // not there yet
+    }
 
-    if (size < this.#size) {
-      // Truncated or replaced: everything we know about the old file is void.
+    // Size alone cannot detect replacement. A session file recreated at the
+    // same path with the same length looked like "nothing appended", and one
+    // recreated LARGER made the reader resume from the old offset — slicing
+    // out of the middle of a record and handing back the tail fragment as a
+    // complete line. Identity is what distinguishes append from replace, and
+    // this class's own doc-comment already claimed to track it.
+    const identity = `${st.dev}:${st.ino}:${st.birthtimeMs}`;
+    const size = st.size;
+    if (this.#identity !== null && (identity !== this.#identity || size < this.#offset)) {
       this.#offset = 0;
       this.#splitter = new LineSplitter();
     }
-    this.#size = size;
+    this.#identity = identity;
     if (size <= this.#offset) return [];
 
-    const slice = file.slice(this.#offset, size);
+    const slice = Bun.file(this.path).slice(this.#offset, size);
     const bytes = new Uint8Array(await slice.arrayBuffer());
-    this.#offset = size;
+    // Advance by what was actually read, not by the stat's size: a truncation
+    // between the stat and the read would otherwise skip past unread content.
+    this.#offset += bytes.length;
     return this.#splitter.push(bytes);
   }
 
@@ -181,21 +204,37 @@ export class TailReader {
  * envelopes both go through here (SRD §7.6).
  */
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  const { open, rename, mkdir } = await import("node:fs/promises");
+  const { open, rename, mkdir, unlink } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
+  const { randomUUID } = await import("node:crypto");
   const dir = dirname(path);
   await mkdir(dir, { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  // The temp name must be unique PER CALL, not per process-millisecond. It was
+  // `${pid}-${Date.now()}`, so two writes to one path in the same millisecond —
+  // routine when several supervisors register at once — opened the same temp
+  // inode with "w" and both wrote at offset 0. A short payload landing on a
+  // long one leaves the long one's tail behind, producing a file that is not
+  // valid JSON, and the loser's rename fails ENOENT. The supervisor had
+  // already noticed and works around it with a per-file write chain; every
+  // other caller was still exposed.
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   const body = `${JSON.stringify(value, null, 2)}\n`;
 
-  const fh = await open(tmp, "w");
   try {
-    await fh.writeFile(body, "utf8");
-    await fh.sync();
-  } finally {
-    await fh.close();
+    const fh = await open(tmp, "w");
+    try {
+      await fh.writeFile(body, "utf8");
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    await rename(tmp, path);
+  } catch (err) {
+    // Never leave the temp behind: a crash-loop would otherwise fill the run
+    // directory with them, and nothing reaps them.
+    await unlink(tmp).catch(() => {});
+    throw err;
   }
-  await rename(tmp, path);
 
   const dh = await open(dir, "r");
   try {

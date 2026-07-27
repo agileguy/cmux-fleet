@@ -167,11 +167,19 @@ export class EpochManager {
     return { ok: true, epoch: next, replayed: false };
   }
 
-  /** Record the stream seq of the live epoch's prompt ack — the fence post. */
+  /**
+   * Record the stream seq of the live epoch's prompt ack — the fence post.
+   *
+   * First write wins for a given epoch. The seq is recorded synchronously as
+   * the ack line is parsed; a later call carrying the same seq is the awaited
+   * fallback path and must not move the fence, and a later call carrying a
+   * HIGHER seq would silently orphan every event in between.
+   */
   noteAck(seq: number): void {
     if (this.#s.live === null) return;
-    this.#s.ack_seq = seq;
     this.#s.last_seq = Math.max(this.#s.last_seq, seq);
+    if (this.#s.ack_seq !== null) return;
+    this.#s.ack_seq = seq;
   }
 
   /**
