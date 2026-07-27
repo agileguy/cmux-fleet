@@ -2,8 +2,8 @@
 project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
-phase: think
-progress: 0/140
+phase: build
+progress: 0/160
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -88,7 +88,7 @@ it is a convenience for attended debugging, not the supported path.
 `pifleet` is a Bun CLI that brings up a configurable fleet of containerized Pi 0.79.6 workers
 — optionally surfaced as cmux panes — accepts typed task envelopes, detects completion
 authoritatively via `agent_end{willRetry:false}` plus a correlated `get_state` fence, and
-returns adjudicated structured artifacts, with all 140 criteria below passing and the full
+returns adjudicated structured artifacts, with all 160 criteria below passing and the full
 suite green on `headless` against a test double.
 
 ## Criteria
@@ -269,6 +269,32 @@ suite green on `headless` against a test double.
 - [ ] ISC-139: Anti: no generated commit, branch, or PR body contains AI attribution.
 - [ ] ISC-140: Anti: no acceptance test in the `headless` suite requires provider spend or a cloud endpoint.
 
+### Group M — Review findings (added 2026-07-27, post-advisor)
+
+Criteria that came out of the commitment-boundary review. Several correct the SRD
+rather than merely implementing it; SRD errata are recorded in `## Changelog`.
+
+- [ ] ISC-141: Epoch attribution uses the RPC stream offset, and the SRD §7.5 interleaving is decided correctly when offset is the only distinguishing signal.
+- [ ] ISC-142: A dispatch whose epoch is `<=` the worker's persisted `last_accepted_epoch` is rejected at the worker side, not merely bookkept by the allocator.
+- [ ] ISC-143: The epoch high-water-mark is durable before dispatch; allocate → crash → restart does not re-issue the same epoch.
+- [ ] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
+- [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
+- [ ] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
+- [ ] ISC-147: Across every hostile scenario, completion is never declared while the agent will still emit output.
+- [ ] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree.
+- [ ] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment.
+- [ ] ISC-150: A diff touching the test-harness surface caps the verdict at `blocked` or `unknown` and can never yield `success`.
+- [ ] ISC-151: `git merge-base --is-ancestor <base_ref> HEAD` is verified at harvest, so a rewritten base cannot shrink the diff to nothing.
+- [ ] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`.
+- [ ] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
+- [ ] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing).
+- [ ] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
+- [ ] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
+- [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
+- [ ] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output.
+- [ ] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
+- [ ] ISC-160: A stale image is not silently reused after the Dockerfile changed.
+
 ## Test Strategy
 
 | isc | type | check | threshold | tool |
@@ -333,9 +359,47 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 - **2026-07-27 — Phase order follows SRD §16 unchanged.** Phases 1–3 are load-bearing; Phase 3
   precedes any real-repo run because the kill ladder and budget ceilings must exist first.
 
+- **2026-07-27 — refined: epoch attribution moves from a wall-clock window to a stream offset.**
+  The SRD discards terminal events "outside an open epoch window", which is not a causal order —
+  a late `agent_end` for epoch N is byte-identical to N+1's. Pi's events and responses share one
+  ordered stdout stream, so a monotonic per-record `streamSeq` plus the `ackSeq` recorded at
+  dispatch gives a real happens-before relation. SRD erratum; see ISC-141.
+- **2026-07-27 — the fence is enforced at the worker, not only at the allocator.** "Sole epoch
+  allocator" is an assumption a detached supervisor plus a CLI relaunch can violate. The worker
+  side persists `last_accepted_epoch` and rejects stale dispatch; the run-dir lease keys on pid
+  plus process start-time because pid reuse would otherwise resurrect a dead supervisor. ISC-142..144.
+- **2026-07-27 — the harvester's independence was overstated.** Re-running the acceptance commands
+  executes an artifact the gradee authored: the command string resolves through `package.json`
+  scripts, `conftest.py`, `.git/hooks`, `Makefile` — all inside the mutable surface. Acceptance
+  now resolves from the base SHA and runs in a fresh clone outside the worktree, and a diff
+  touching the harness surface caps the verdict. This is the single largest correction to the
+  SRD's §8.2 adjudication story. ISC-148..151.
+- **2026-07-27 — gauges cannot prove quiescence.** `pendingMessageCount:0` sampled twice does not
+  mean zero in between, and `isStreaming:false` also describes the gap between a tool call and the
+  next turn. The stream-offset fence is the primary defence; monotonic-counter equality is the
+  secondary one. ISC-147.
+- **2026-07-27 — show your math on delegation.** Two engineers per phase rather than four: the
+  Phase 1 surface splits cleanly along a config/container seam and an RPC/lifecycle seam with one
+  shared contracts module, and a third writer would have to touch one of those two territories.
+
 ## Changelog
 
-*(Conjecture / refuted-by / learned / criterion-now entries land here as phases complete.)*
+
+- **conjectured:** the SRD's epoch-window rule was sufficient to attribute terminal events to epochs.
+  **refuted by:** a commitment-boundary review pointing out that events carry no correlation id, so a
+  late `agent_end` for epoch N and a real one for N+1 are byte-identical under a wall-clock window.
+  **learned:** the ordering signal was already available and unused — events and responses share one
+  stdout stream, so a per-record sequence number yields a genuine happens-before relation.
+  **criterion now:** ISC-141 requires the §7.5 interleaving to be decided when stream offset is the
+  only distinguishing signal.
+- **conjectured:** re-running the acceptance commands gave the harvester facts independent of the
+  worker being graded. **refuted by:** the observation that the command string resolves through
+  `package.json` scripts, `conftest.py`, `.git/hooks` and the Makefile, every one of which is inside
+  the worker's mutable surface — so "independently re-run the tests" grades the worker using the
+  worker's own harness. **learned:** independence is a property of *where and from which tree* the
+  command is resolved and executed, not of *who* runs it. **criterion now:** ISC-148..150 require
+  base-SHA resolution, a fresh clone outside the worktree, and a verdict cap when the diff touches
+  the harness surface.
 
 ## Verification
 
