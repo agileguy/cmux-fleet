@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 30/200
+progress: 45/200
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -95,30 +95,30 @@ suite green on `headless` against a test double.
 
 ### Group A — Repository foundation (Phase 0)
 
-- [ ] ISC-1: `bun install` in a clean clone exits 0.
-- [ ] ISC-2: `bun run typecheck` exits 0 with zero errors.
-- [ ] ISC-3: `bun test` exits 0 with at least one passing test.
-- [ ] ISC-4: `Docs/SRD.md` exists in the repo and is byte-identical to the source SRD at the commit that imported it.
-- [ ] ISC-5: `ISA.md` exists at the repo root and parses as valid YAML frontmatter plus twelve sections.
-- [ ] ISC-6: A GitHub Actions workflow runs typecheck, unit, integration, and e2e as separate named steps.
+- [x] ISC-1: `bun install` in a clean clone exits 0.
+- [x] ISC-2: `bun run typecheck` exits 0 with zero errors.
+- [x] ISC-3: `bun test` exits 0 with at least one passing test.
+- [x] ISC-4: `Docs/SRD.md` exists in the repo and is byte-identical to the source SRD at the commit that imported it.
+- [x] ISC-5: `ISA.md` exists at the repo root and parses as valid YAML frontmatter plus twelve sections.
+- [x] ISC-6: A GitHub Actions workflow runs typecheck, unit, integration, and e2e as separate named steps.
 - [ ] ISC-7: CI passes on the default branch.
 - [ ] ISC-8: `README.md` documents install, `pifleet doctor`, and the six-phase status.
-- [ ] ISC-9: `CHANGELOG.md` exists and has an entry for every merged phase.
-- [ ] ISC-10: `git log --format=%B` over all commits contains no AI/LLM/Claude attribution string.
+- [x] ISC-9: `CHANGELOG.md` exists and has an entry for every merged phase.
+- [x] ISC-10: `git log --format=%B` over all commits contains no AI/LLM/Claude attribution string.
 - [ ] ISC-11: The repo has a remote and `gh pr list --state all` returns one PR per completed phase.
-- [ ] ISC-12: `package.json` pins `commander`, `zod`, and `yaml`; the lockfile is committed.
-- [ ] ISC-13: `src/` compiles under `strict: true` with `noUncheckedIndexedAccess`.
-- [ ] ISC-14: `bun run src/cli/index.ts --help` lists every command in SRD §10.
+- [x] ISC-12: `package.json` pins `commander`, `zod`, and `yaml`; the lockfile is committed.
+- [x] ISC-13: `src/` compiles under `strict: true` with `noUncheckedIndexedAccess`.
+- [x] ISC-14: `bun run src/cli/index.ts --help` lists every command in SRD §10.
 
 ### Group B — Test infrastructure
 
-- [ ] ISC-15: `test/unit`, `test/integration`, and `test/e2e` each contain at least one test file and run independently via their own script.
-- [ ] ISC-16: `bun test test/unit` completes in under 30s with no Docker daemon running.
+- [x] ISC-15: `test/unit`, `test/integration`, and `test/e2e` each contain at least one test file and run independently via their own script.
+- [x] ISC-16: `bun test test/unit` completes in under 30s with no Docker daemon running.
 - [ ] ISC-17: `pifleet-fake-pi` (the test double) speaks the RPC framing and is invoked by the e2e suite.
 - [ ] ISC-18: The double can be scripted to emit an arbitrary event sequence from a fixture file.
 - [ ] ISC-19: The e2e suite runs `up → dispatch → wait → artifacts` end-to-end against the double.
-- [ ] ISC-20: Integration tests exercise real subprocess spawning, real filesystem, and real git, with no network.
-- [ ] ISC-21: No test in the `headless` suite requires network egress.
+- [x] ISC-20: Integration tests exercise real subprocess spawning, real filesystem, and real git, with no network.
+- [x] ISC-21: No test in the `headless` suite requires network egress.
 - [ ] ISC-22: A test-coverage report can be produced and lists every `src/` module.
 
 ### Group C — Container image
@@ -489,3 +489,30 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 ## Verification
 
 *(Evidence per ISC, appended as each criterion passes.)*
+
+### Phase 1 close-out — 2026-07-27
+
+- ISC-1: `bun install --frozen-lockfile` → `rc=0`.
+- ISC-2: `bun run typecheck` (`tsc --noEmit`) → `rc=0`, zero diagnostics.
+- ISC-3: `bun test` → `220 pass, 38 skip, 1 todo, 0 fail` across 15 files.
+- ISC-4: `cmp Docs/SRD.md <source>` → `IDENTICAL`.
+- ISC-5: frontmatter parses; twelve section headers present.
+- ISC-6: `.github/workflows/ci.yml` carries named steps `Typecheck`, `Unit tests`,
+  `Integration tests`, `E2E tests`, plus a separate `container` job.
+- ISC-9: `CHANGELOG.md` has an entry for Phase 0 (0.1.0) and Phase 1 (0.2.0).
+- ISC-10: `git log --format=%B | rg -ci "claude|co-authored-by|generated with|LLM|AI-assisted"`
+  → `0 matches` across all commits.
+- ISC-12: `commander ^14.0.2`, `zod ^4.1.13`, `yaml ^2.8.1`; `bun.lock` committed.
+- ISC-13: `tsconfig.json` sets `"strict": true` and `"noUncheckedIndexedAccess": true`;
+  ISC-2's clean typecheck is the proof it holds.
+- ISC-14: `--help` lists all 19 SRD §10 commands: abort artifacts attach config
+  daemon dispatch doctor down exec harvest image logs render report status steer
+  transcript up wait.
+- ISC-15/16/20/21: unit, integration and e2e directories each carry files and run
+  independently; the unit suite completes with no Docker daemon and no network.
+- ISC-161..164, 166..187: covered by `test/unit/review-regressions.test.ts` (15
+  tests, each of which fails against the pre-fix code) and the Docker-gated
+  `test/integration/verbgate.test.ts` (18 tests).
+- ISC-194..198: `PIFLEET_DOCKER=1 bun test test/integration/{image,verbgate}.test.ts`
+  → `38 pass, 0 fail` on macOS; the Linux CI `container` job is the probe that
+  matters, and it executed its assertions for the first time this session.
