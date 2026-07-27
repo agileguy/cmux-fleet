@@ -23,7 +23,7 @@ import {
 import { describeCredentialPlan, planCredential, resolveIdentity } from "../../security/adc.ts";
 import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
-import { neutralizeRepoHazards } from "../../security/repo-hazards.ts";
+import { detectRepoHazards } from "../../security/repo-hazards.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
 
 /** ISC-70: every worker reaches `idle` within this budget. */
@@ -190,7 +190,7 @@ export function register(program: Command): void {
       }
 
       /**
-       * Neutralize the checked-out repository BEFORE any worker can read it.
+       * REPORT on the checked-out repository before any worker can read it.
        *
        * A repository is input, and several files in it are read by the agent
        * as INSTRUCTIONS — `AGENTS.md`, `.pi/extensions/`, `core.hooksPath`,
@@ -199,26 +199,45 @@ export function register(program: Command): void {
        * is why this runs before the supervisors rather than as part of
        * harvest (SRD §12.2).
        *
-       * Every hazard is recorded whether or not it was defused: `detected`
-       * and `neutralized` are separate fields precisely so "we saw it and
-       * left it" cannot read as "we defused it", and a worker whose
-       * legitimate AGENTS.md was moved must be able to find out why.
+       * DETECT, never neutralize, and the distinction is the whole point:
+       * `config.run.repo` is the OPERATOR'S working repository, not a
+       * disposable per-worker tree. `render.ts` mounts
+       * `<repo>/.worktrees/<worker>` as `/workspace`, so the tree a worker
+       * actually reads is not this one — and nothing in this phase creates
+       * those worktrees yet. Quarantining here therefore defended nothing and
+       * damaged the operator: it renamed their real `AGENTS.md` aside and
+       * commented out their `filter.lfs.*` definitions while leaving
+       * `filter.lfs.required = true` intact, which hard-fails every subsequent
+       * `git add` and `checkout` on an LFS-tracked path. SRD §12.8 requires
+       * this checkout be left unchanged, and a linked worktree materializes
+       * committed files from git objects at checkout time anyway, so renaming
+       * in the parent could not have suppressed them.
+       *
+       * The load-bearing controls are elsewhere and are unaffected: the Pi
+       * argv flags (`--no-extensions --no-skills --no-context-files`) and the
+       * per-spawn `-c` hardening in `harvest/git.ts`. `repo-hazards.ts` says
+       * so itself. Neutralization belongs on the per-worker worktree at the
+       * moment it is created — ISC-249 is OPEN until that exists, rather than
+       * met by a call aimed at the wrong tree.
+       *
+       * Every hazard is still recorded, with `detected` and `neutralized` as
+       * separate fields precisely so "we saw it and left it" cannot read as
+       * "we defused it".
        */
       if (repoRoot !== null) {
         try {
-          const hazards = await neutralizeRepoHazards(repoRoot);
+          const hazards = await detectRepoHazards(repoRoot);
           for (const h of hazards) {
             await ledger.append("repo_hazard", {
               detail: { path: h.path, kind: h.kind, neutralized: h.neutralized, detail: h.detail },
             });
           }
           if (hazards.length > 0 && opts.json !== true) {
-            const undefused = hazards.filter((h) => !h.neutralized).length;
             process.stdout.write(
-              `neutralized ${hazards.length - undefused}/${hazards.length} repository hazard(s)\n`,
+              `detected ${hazards.length} repository hazard(s) in ${repoRoot} (reported, NOT modified)\n`,
             );
-            for (const h of hazards.filter((x) => !x.neutralized)) {
-              process.stderr.write(`  NOT neutralized: ${h.kind} at ${h.path}\n`);
+            for (const h of hazards) {
+              process.stderr.write(`  hazard: ${h.kind} at ${h.path}\n`);
             }
           }
         } catch (err) {

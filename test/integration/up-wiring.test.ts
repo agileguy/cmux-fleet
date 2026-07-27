@@ -211,17 +211,23 @@ describe("up wires the security controls, in order (review finding 2)", () => {
       expect(egress!.detail?.["network"]).toBe(NETWORK);
       expect(egress!.detail?.["internal"]).toBe(true);
 
-      // The seeded hazard was found AND defused, per the ledger…
+      // The seeded hazard was found and REPORTED, per the ledger…
       const hazards = cliUp.filter((r) => r.event === "repo_hazard");
       const agentsMd = hazards.find((h) => h.detail?.["kind"] === "agents_md");
       expect(agentsMd).toBeDefined();
-      expect(agentsMd!.detail?.["neutralized"]).toBe(true);
+      // Reported as NOT neutralized: `config.run.repo` is the operator's own
+      // working repository, and `up` only detects there.
+      expect(agentsMd!.detail?.["neutralized"]).toBe(false);
 
-      // …and per the filesystem, which is the part `up` cannot merely claim:
-      // renamed aside with content intact, nothing deleted.
-      expect(await Bun.file(join(rig.repo, "AGENTS.md")).exists()).toBe(false);
-      const quarantined = await Bun.file(join(rig.repo, `AGENTS.md${QUARANTINE_SUFFIX}`)).text();
-      expect(quarantined).toContain("MANDATORY");
+      // …and the operator's repository is BYTE-FOR-BYTE UNTOUCHED, which is
+      // the part `up` cannot merely claim. Quarantining here renamed the
+      // operator's real AGENTS.md aside and commented out their
+      // `filter.lfs.*` definitions while leaving `filter.lfs.required = true`,
+      // hard-failing every later `git add` on an LFS-tracked path — while
+      // defending nothing, because workers read `<repo>/.worktrees/<id>`, not
+      // this tree. SRD §12.8 requires this checkout be left unchanged.
+      expect(await Bun.file(join(rig.repo, "AGENTS.md")).text()).toContain("MANDATORY");
+      expect(await Bun.file(join(rig.repo, `AGENTS.md${QUARANTINE_SUFFIX}`)).exists()).toBe(false);
 
       // ORDER. Both controls precede the first supervisor launch — a hazard
       // neutralized after the agent starts is not neutralized, and a worker
