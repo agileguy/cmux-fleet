@@ -367,6 +367,17 @@ export async function runAcceptance(spec: AcceptanceSpec): Promise<AcceptanceRes
     timeout_s: Math.ceil(spec.per_command_timeout_ms / 1000),
   });
 
+  // An already-exhausted budget is reported as what it is. Letting the clone
+  // "run" with a zero timeout would report "clone failed" — blaming git for a
+  // budget decision, which is exactly the kind of lying diagnosis that wastes
+  // an hour later.
+  if (spec.deadline.remainingMs() <= 0) {
+    return {
+      context,
+      runs: allNotRun(spec.commands, "run budget exhausted before the fresh clone could be created"),
+    };
+  }
+
   await mkdir(scratchAbs, { recursive: true });
 
   // Fresh clone by SHA. `--no-checkout` then a detached checkout of the exact
@@ -380,7 +391,10 @@ export async function runAcceptance(spec: AcceptanceSpec): Promise<AcceptanceRes
     spec.deadline.boundedBy(GIT_TIMEOUT_MS),
   );
   if (clone.timedOut || clone.exit !== 0) {
-    return { context, runs: allNotRun(spec.commands, `fresh clone failed: ${clone.excerpt}`) };
+    const why = clone.timedOut
+      ? "fresh clone timed out under the run budget"
+      : `fresh clone failed: ${clone.excerpt}`;
+    return { context, runs: allNotRun(spec.commands, why) };
   }
   const checkout = await execBounded(
     ["git", "-C", cloneDir, "checkout", "--quiet", "--detach", spec.head_sha],
