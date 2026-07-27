@@ -17,7 +17,7 @@
  */
 
 import type { z } from "zod";
-import { DerivedFactsSchema, FileChangeSchema, type DerivedFacts } from "../contracts.ts";
+import { DerivedFactsSchema, FileChangeSchema, MAX_ITEMS, type DerivedFacts } from "../contracts.ts";
 
 /** contracts.ts exports the schema without a named type; derive it once here. */
 export type FileChange = z.infer<typeof FileChangeSchema>;
@@ -52,7 +52,7 @@ export interface GitResult {
  * and system files, but the REPOSITORY config (`.git/config`) is not
  * suppressible by env at all, and it is inside the mount the worker writes to.
  */
-const GIT_HARDENING: readonly string[] = [
+export const GIT_HARDENING: readonly string[] = [
   "--no-pager",
   "-c",
   "core.fsmonitor=",
@@ -62,7 +62,52 @@ const GIT_HARDENING: readonly string[] = [
   "core.attributesFile=/dev/null",
   "-c",
   "diff.external=",
+  // `ext::` URLs name a command in the URL itself — the same "a repository
+  // decides what runs" primitive as a diff driver, reached through a different
+  // door. Nothing here clones a remote today, so this blocks nothing that
+  // works; it is here so that the day someone adds `--recurse-submodules`, a
+  // `.gitmodules` with an `ext::` URL is already inert.
+  "-c",
+  "protocol.ext.allow=never",
 ];
+
+/**
+ * The environment for EVERY git spawn in the harvest subsystem — built from a
+ * literal, never from `process.env`.
+ *
+ * The harvester runs git inside the tree a graded worker just wrote to, on the
+ * host, OUTSIDE the container that worker is confined to. Inheriting this
+ * process's environment would hand that subprocess
+ * `GOOGLE_APPLICATION_CREDENTIALS`, `CLOUDSDK_*`, `KUBECONFIG` and any shell
+ * tokens — turning a contained code-execution primitive into credential
+ * exfiltration. This module spread `process.env` once already; the docstring
+ * saying so is not a control, which is why `test/unit/harvest-git.test.ts`
+ * asserts the spawned env EQUALS this key set exactly, with an independently
+ * written literal rather than an import of this one (importing it would make
+ * the assertion agree with any mutation applied here).
+ *
+ * `GIT_CONFIG_GLOBAL=/dev/null` covers `~/.gitconfig` AND `$XDG_CONFIG_HOME/
+ * git/config`, but NOT `$HOME/.config/git/attributes` — the global ATTRIBUTES
+ * file has no `GIT_CONFIG_*` equivalent and is reachable only via
+ * `core.attributesFile` on the command line (verified: with HOME pointed at a
+ * repo, a committed `.config/git/attributes` naming a diff driver is honoured
+ * and the driver executes). `GIT_ATTR_NOSYSTEM` closes the system-wide
+ * attributes file, which has no command-line control at all.
+ */
+export const HERMETIC_GIT_ENV: Readonly<Record<string, string>> = {
+  // Repo content is untrusted (§12.2). PATH is needed to find git itself;
+  // nothing else from the harvester's environment crosses this boundary.
+  PATH: process.env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
+  HOME: "/dev/null",
+  LC_ALL: "C",
+  TERM: "dumb",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_ATTR_NOSYSTEM: "1",
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_ASKPASS: "",
+  GIT_EXTERNAL_DIFF: "",
+};
 
 /**
  * `--no-ext-diff` and `--no-textconv` disable the two per-path diff drivers a
@@ -98,36 +143,32 @@ const EXT_DIFF_COMMANDS = new Set(["diff", "log", "show", "diff-tree", "diff-ind
 const DIFF_DRIVER_FLAGS: readonly string[] = ["--no-ext-diff", "--no-textconv"];
 
 /**
- * Spawn git in `cwd`. Argv array in, decoded streams out — no shell, ever.
+ * Build the complete hardened argv for a git invocation in `cwd`.
  *
- * The environment is built from a LITERAL, mirroring `harvest/acceptance.ts`.
- * It used to spread `process.env`, which handed the harvester's whole
- * environment — cloud credentials, tokens, the operator's `HOME` — to a
- * subprocess operating on a tree the graded worker controls. The sibling
- * module got this right and this one did not; the asymmetry was the bug.
+ * Exported because `runGit` is NOT the only place this subsystem spawns git:
+ * `harvest/acceptance.ts` runs `show`, `clone` and `checkout` against the same
+ * worker-controlled repository. Those three carried their own flagless argv
+ * for a whole phase, so the hardening this file documents in detail simply did
+ * not apply to them. A second list would have drifted the same way a second
+ * time; there is one list, and every git spawn is built by this function.
  */
-export async function runGit(cwd: string, args: string[]): Promise<GitResult> {
+export function hardenedGitArgv(cwd: string, args: readonly string[]): string[] {
   const sub = args[0] ?? "";
   const argv = EXT_DIFF_COMMANDS.has(sub)
     ? [sub, ...DIFF_DRIVER_FLAGS.filter((f) => !args.includes(f)), ...args.slice(1)]
-    : args;
-  const p = Bun.spawn(["git", "-C", cwd, ...GIT_HARDENING, ...argv], {
+    : [...args];
+  return ["git", "-C", cwd, ...GIT_HARDENING, ...argv];
+}
+
+/**
+ * Spawn git in `cwd`. Argv array in, decoded streams out — no shell, ever.
+ */
+export async function runGit(cwd: string, args: string[]): Promise<GitResult> {
+  const p = Bun.spawn(hardenedGitArgv(cwd, args), {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-    env: {
-      // Repo content is untrusted (§12.2). PATH is needed to find git itself;
-      // nothing else from the harvester's environment crosses this boundary.
-      PATH: process.env["PATH"] ?? "/usr/bin:/bin",
-      HOME: "/dev/null",
-      LC_ALL: "C",
-      TERM: "dumb",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_SYSTEM: "/dev/null",
-      GIT_TERMINAL_PROMPT: "0",
-      GIT_ASKPASS: "",
-      GIT_EXTERNAL_DIFF: "",
-    },
+    env: { ...HERMETIC_GIT_ENV },
   });
   const [stdout, stderr, code] = await Promise.all([
     new Response(p.stdout).text(),
@@ -362,17 +403,35 @@ export async function deriveGitFacts(
     .split("\n")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  if (commits.length > 1_000) {
+  if (commits.length > MAX_ITEMS) {
     // MAX_ITEMS on the schema would reject the whole bundle; keeping the most
     // recent 1000 with a recorded reason preserves the facts we CAN report.
-    reasons.push(`commit list truncated from ${commits.length} to 1000 (schema MAX_ITEMS)`);
-    commits = commits.slice(0, 1_000);
+    reasons.push(`commit list truncated from ${commits.length} to ${MAX_ITEMS} (schema MAX_ITEMS)`);
+    commits = commits.slice(0, MAX_ITEMS);
   }
 
-  const filesChanged = mergeLineCounts(
+  let filesChanged = mergeLineCounts(
     parseNameStatusZ(nameStatus.stdout),
     parseNumstatZ(numstat.stdout),
   );
+  if (filesChanged.length > MAX_ITEMS) {
+    // The same truncation the commit list has had all along. Without it, a
+    // worker touching 1001 files made `DerivedFactsSchema.parse` THROW out of
+    // a module whose contract is "return {ok, reasons}, never throw" — and
+    // 1001 changed files is an ordinary large refactor, not an attack.
+    //
+    // Truncation happens HERE, before the schema sees the array, not by
+    // catching the ZodError afterwards. Zod validates elements BEFORE
+    // enforcing the array's `.max()`, so an over-length array of INVALID
+    // elements allocates one issue object per element: measured at length
+    // 100000, the valid case cost 20 MB and 77 ms while the invalid case cost
+    // 1122 MB and 511 ms — 56x the memory, for input a worker chooses freely.
+    // Guarding the count is what keeps that array from ever being parsed.
+    reasons.push(
+      `file list truncated from ${filesChanged.length} to ${MAX_ITEMS} (schema MAX_ITEMS)`,
+    );
+    filesChanged = filesChanged.slice(0, MAX_ITEMS);
+  }
 
   const diffBytes = Buffer.byteLength(diff.stdout, "utf8");
   let diffText: string | null = diff.stdout;
