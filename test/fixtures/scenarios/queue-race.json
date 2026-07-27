@@ -1,0 +1,21 @@
+{
+  "scenario": "queue-race",
+  "_comment": "Both get_state samples read quiet, but a queue_update with non-empty steering lands BETWEEN the two responses on the stream. One quiet gauge sample must not beat evidence of pending output: the task must not settle.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    },
+    {
+      "on": "get_state",
+      "respond": { "isStreaming": false, "pendingMessageCount": 0 },
+      "emit_after_respond": [
+        { "type": "queue_update", "steering": ["queued mid-probe steer"], "followUp": [] }
+      ]
+    }
+  ]
+}

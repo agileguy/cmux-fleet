@@ -1,0 +1,22 @@
+{
+  "scenario": "aborted",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "delay_ms": 30000 },
+        { "type": "agent_end", "messages": [], "willRetry": false }
+      ]
+    },
+    {
+      "on": "abort",
+      "cancel_active": true,
+      "emit": [
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}

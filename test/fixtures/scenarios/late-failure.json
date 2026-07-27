@@ -1,0 +1,11 @@
+{
+  "scenario": "late-failure",
+  "_comment": "prompt acks success, then a SECOND response with the same id arrives with success:false. The epoch must fail (ISC-86), not sit accepted forever.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [{ "type": "agent_start" }, { "type": "turn_start" }],
+      "late": { "delay_ms": 150, "success": false, "error": "provider rejected the request" }
+    }
+  ]
+}
