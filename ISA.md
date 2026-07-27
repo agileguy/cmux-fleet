@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 78/229
+progress: 104/236
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -206,21 +206,21 @@ suite green on `headless` against a test double.
 
 ### Group I — Artifacts
 
-- [ ] ISC-88: `artifacts --task T --json` validates against the `pifleet.result/v1` schema.
-- [ ] ISC-89: The `verdict` field validates against the SRD §7.3 domain.
-- [ ] ISC-90: The reported diff equals `git diff` on the worker's branch.
-- [ ] ISC-91: Killing a worker after edits but before `result.json` still yields a reconstructed verdict.
-- [ ] ISC-92: A worker claiming a file it did not change is flagged.
-- [ ] ISC-93: A worker whose envelope says `success` with an empty diff is reported failed.
-- [ ] ISC-94: A missing envelope does not downgrade a task with a clean diff and green acceptance commands.
-- [ ] ISC-95: `session_path` in `state.json` equals the path `get_state` reported; no globbing occurs.
-- [ ] ISC-96: A worker that dies before its first assistant message is distinguishable from one with a wrong path.
-- [ ] ISC-97: Harvesting a transcript mid-write succeeds and resumes on the next poll.
-- [ ] ISC-98: A transcript containing `U+2028` inside a JSON string parses correctly.
-- [ ] ISC-99: A 4-byte codepoint split across a poll boundary produces no `U+FFFD`.
-- [ ] ISC-100: A session file that shrinks or changes inode is re-read from offset 0.
-- [ ] ISC-101: `transcript --html` produces an openable file.
-- [ ] ISC-102: The outbox envelope contract is enforced by schema before any field is dereferenced.
+- [x] ISC-88: `artifacts --task T --json` validates against the `pifleet.result/v1` schema.
+- [x] ISC-89: The `verdict` field validates against the SRD §7.3 domain.
+- [x] ISC-90: The reported diff equals `git diff` on the worker's branch.
+- [x] ISC-91: Killing a worker after edits but before `result.json` still yields a reconstructed verdict.
+- [x] ISC-92: A worker claiming a file it did not change is flagged.
+- [x] ISC-93: A worker whose envelope says `success` with an empty diff is reported failed.
+- [x] ISC-94: A missing envelope does not downgrade a task with a clean diff and green acceptance commands.
+- [x] ISC-95: `session_path` in `state.json` equals the path `get_state` reported; no globbing occurs.
+- [x] ISC-96: A worker that dies before its first assistant message is distinguishable from one with a wrong path.
+- [x] ISC-97: Harvesting a transcript mid-write succeeds and resumes on the next poll.
+- [x] ISC-98: A transcript containing `U+2028` inside a JSON string parses correctly.
+- [x] ISC-99: A 4-byte codepoint split across a poll boundary produces no `U+FFFD`.
+- [x] ISC-100: A session file that shrinks or changes inode is re-read from offset 0.
+- [x] ISC-101: `transcript --html` produces an openable file.
+- [x] ISC-102: The outbox envelope contract is enforced by schema before any field is dereferenced.
 
 ### Group J — Safety and security
 
@@ -241,9 +241,9 @@ suite green on `headless` against a test double.
 - [ ] ISC-117: A wedged agent (no events, live heartbeat) is killed at `event_stall_kill`.
 - [x] ISC-118: A wedged supervisor is reaped by the daemon.
 - [ ] ISC-119: A repo carrying `.pi/extensions/hostile.ts` and a hostile `AGENTS.md` changes nothing about the run.
-- [ ] ISC-120: An envelope naming `/Users/dan/.env` is refused before dereference.
-- [ ] ISC-121: A symlink in `<outbox>/files` pointing outside the outbox is refused.
-- [ ] ISC-122: An oversized envelope field is rejected without OOM.
+- [x] ISC-120: An envelope naming `/Users/dan/.env` is refused before dereference.
+- [x] ISC-121: A symlink in `<outbox>/files` pointing outside the outbox is refused.
+- [x] ISC-122: An oversized envelope field is rejected without OOM.
 - [ ] ISC-123: No ref outside `fleet/<run-id>/*` moves during a run.
 - [ ] ISC-124: The main checkout's `git status --porcelain` is unchanged after a run.
 - [ ] ISC-125: A seeded escape attempt from inside a container is detected and reported.
@@ -281,13 +281,13 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
 - [x] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
 - [ ] ISC-147: Across every hostile scenario, completion is never declared while the agent will still emit output.
-- [ ] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree.
-- [ ] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment.
-- [ ] ISC-150: A diff touching the test-harness surface caps the verdict at `blocked` or `unknown` and can never yield `success`.
-- [ ] ISC-151: `git merge-base --is-ancestor <base_ref> HEAD` is verified at harvest, so a rewritten base cannot shrink the diff to nothing.
-- [ ] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`.
-- [ ] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
-- [ ] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing).
+- [x] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree.
+- [x] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment.
+- [x] ISC-150: A diff touching the test-harness surface caps the verdict at `blocked` or `unknown` and can never yield `success`.
+- [x] ISC-151: `git merge-base --is-ancestor <base_ref> HEAD` is verified at harvest, so a rewritten base cannot shrink the diff to nothing.
+- [x] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`.
+- [x] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
+- [x] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing).
 - [x] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
 - [ ] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
 - [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
@@ -398,6 +398,16 @@ of the same class it repaired.
 - [x] ISC-227: The `willRetry` e2e states plainly that its discrimination comes from `completion.test.ts`, not from itself — the double reports `isStreaming: true` for a retrying `agent_end`.
 - [ ] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
 - [ ] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
+
+### Group S — Phase 2 findings (added 2026-07-27)
+
+- [x] ISC-230: An acceptance command that was attempted and returned no answer caps the verdict — a timed-out exam cannot certify success, and the worker's claim is not adopted.
+- [ ] ISC-231: `workerOutboxDir()` lives in `run/paths.ts`, computed once, rather than duplicating the expression inlined in `render.ts`.
+- [ ] ISC-232: Harness-surface patterns come from config; `DEFAULT_HARNESS_PATTERNS` is the fallback, not the source of truth.
+- [ ] ISC-233: Acceptance commands run in a fresh CONTAINER from the same image, not only a fresh clone (SRD §8.2).
+- [ ] ISC-234: The control socket answers `export_html`, so `transcript --html` uses the live path rather than the local-render fallback.
+- [ ] ISC-235: `BudgetManager.admit` is called on the dispatch path and its snapshot persisted; `budgetExitCode` folds into `worstExit` after harvest.
+- [ ] ISC-236: The daemon calls `reapStale` on an interval and deregisters the workers it reports.
 
 ## Test Strategy
 
@@ -529,6 +539,23 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   command is resolved and executed, not of *who* runs it. **criterion now:** ISC-148..150 require
   base-SHA resolution, a fresh clone outside the worktree, and a verdict cap when the diff touches
   the harness surface.
+
+- **conjectured:** the SRD's `CompactionEntry.retainedTail` named a real field of the Pi session
+  format. **refuted by:** the installed `docs/session-format.md` for 0.79.6, which spells the same
+  concept as `summary` plus `firstKeptEntryId` — `retainedTail` does not exist. **learned:** the
+  SRD's §8.2 reconstruction rule was written from the concept rather than from the binary, the
+  same failure mode §18 records eleven of. Ground truth is the installed version.
+  **criterion now:** ISC-91's leaf-to-root walk is specified against `firstKeptEntryId`; SRD §8.2
+  carries an erratum.
+
+- **conjectured:** `unknown` as the lattice identity was safe in every direction, so a task with
+  no independent evidence could adopt the worker's claim. **refuted by:** probing a timed-out
+  acceptance run against a claimed `success` — verdict `success`, for a worker whose exam never
+  finished, reachable without touching a single harness file by shipping a change that makes an
+  existing command hang. **learned:** identity is right for a missing CLAIM and wrong for missing
+  EVIDENCE; the two had been conflated because ISC-94 only ever exercised the first.
+  **criterion now:** ISC-230 caps the verdict when an attempted command returns no answer, while
+  ISC-152 still forbids calling it `failed`.
 
 ## Verification
 
