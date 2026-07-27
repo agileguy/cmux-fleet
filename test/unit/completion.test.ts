@@ -9,7 +9,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { CompletionTracker } from "../../src/rpc/completion.ts";
+import { EpochManager } from "../../src/rpc/epoch.ts";
 import type { RpcEvent, RpcSessionState } from "../../src/contracts.ts";
 
 const QUIET: RpcSessionState = { isStreaming: false, pendingMessageCount: 0 };
@@ -267,5 +270,194 @@ describe("CompletionTracker — hostile sequences", () => {
     expect(t.eligible).toBe(true);
     const token = t.beginProbe();
     expect(t.confirm(token, quiet(), quiet())).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The scenario property (ISC-147): completion is never declared while the
+// agent will still emit output.
+//
+// Driven as a table over test/fixtures/scenarios/ so a scenario added later
+// FAILS the suite until it declares its expected settles — silently-untested
+// hostile scenarios are how false completions come back.
+//
+// The harness composes the two real machines — EpochManager (stream-offset
+// attribution) and CompletionTracker (four-condition detection with the
+// double-read probe) — and replays each scenario's emissions with the same
+// routing the supervisor uses, answering get_state probes the way fake-pi
+// does: honestly from what has been emitted so far, with scripted overrides
+// and mid-probe injections honoured.
+// ---------------------------------------------------------------------------
+
+interface ScenarioStep {
+  on: string;
+  respond?: Record<string, unknown>;
+  emit?: Array<Record<string, unknown>>;
+  emit_after_respond?: Array<Record<string, unknown>>;
+}
+interface ScenarioFile {
+  scenario: string;
+  steps: ScenarioStep[];
+}
+
+/**
+ * Expected settle epochs per scenario. An entry here is a REVIEWED claim
+ * about the scenario's semantics; a missing entry fails the suite by design.
+ */
+const EXPECTED_SETTLES: Record<string, number[]> = {
+  "happy.json": [1],
+  "will-retry.json": [1],
+  "no-tool-calls.json": [1],
+  "duplicate-end.json": [1], // one settle; the duplicate end is prior, never a second
+  "aborted.json": [1], // the harness never aborts, so the turn ends naturally
+  "stale-epoch.json": [1],
+  "bad-correlation.json": [1], // the injected response never reaches the tracker
+  "interleave.json": [1], // epoch 2's empty prompt must NEVER settle
+  "late-failure.json": [], // no terminal event: the late response fails it elsewhere
+  "late-response.json": [], // nothing is ever dispatched or emitted
+  "truncated.json": [], // the stream dies mid-record; no settle is fabricated
+  "queue-race.json": [], // quiet gauges lose to the queued steer, every probe
+};
+
+function simulate(scenario: ScenarioFile): { settles: number[] } {
+  const em = new EpochManager();
+  const tracker = new CompletionTracker();
+  const settles: number[] = [];
+
+  let seq = 0;
+  let streaming = false;
+  let turnsStarted = 0;
+  let probing = false;
+
+  const getStateSteps = scenario.steps.filter((s) => s.on === "get_state");
+  let gsCursor = 0;
+  const nextGetState = (): { data: RpcSessionState; after: Array<Record<string, unknown>> } => {
+    const step = getStateSteps[Math.min(gsCursor, Math.max(0, getStateSteps.length - 1))];
+    if (getStateSteps.length > 0) gsCursor++;
+    const data = {
+      isStreaming: streaming,
+      pendingMessageCount: 0,
+      turnsStarted,
+      ...(step?.respond ?? {}),
+    } as RpcSessionState;
+    seq++; // the response occupies a stream position
+    return { data, after: step?.emit_after_respond ?? [] };
+  };
+
+  const track = (e: Record<string, unknown>): void => {
+    if (e["type"] === "agent_start") {
+      streaming = true;
+      turnsStarted++;
+    }
+    if (e["type"] === "agent_end") streaming = e["willRetry"] === true;
+  };
+
+  const probe = (): void => {
+    if (probing) return;
+    probing = true;
+    // Bounded re-probe, mirroring the supervisor's timer-driven retries.
+    for (let attempt = 0; attempt < 4 && em.windowOpen && tracker.eligible; attempt++) {
+      const token = tracker.beginProbe();
+      const r1 = nextGetState();
+      for (const ev of r1.after) feed(ev); // lands BETWEEN the two reads
+      const r2 = nextGetState();
+      const confirmed = tracker.confirm(token, r1.data, r2.data);
+      if (confirmed) {
+        const settled = em.settle("success", "sim");
+        if (settled !== null) settles.push(settled.epoch);
+      }
+      for (const ev of r2.after) feed(ev); // lands after the second read
+      if (confirmed || !tracker.eligible) break;
+    }
+    probing = false;
+  };
+
+  const feed = (e: Record<string, unknown>): void => {
+    seq++;
+    if (e["type"] === "response") return; // the client routes these as strays
+    track(e);
+    const event = e as RpcEvent;
+    if (event.type === "agent_start" && em.live !== null && !em.windowOpen) {
+      if (em.bindStart(seq)) {
+        tracker.reset();
+        tracker.observe(event);
+        if (!probing) probe();
+        return;
+      }
+      return;
+    }
+    if (em.attribute(seq) === "live" && em.windowOpen) {
+      tracker.observe(event);
+      if (!probing) probe();
+    }
+    // else: prior epoch — recorded by the supervisor, invisible to the tracker.
+  };
+
+  const promptSteps = scenario.steps.filter((s) => s.on === "prompt");
+  let task = 0;
+  for (const step of promptSteps) {
+    task++;
+    const decision = em.allocate(`T-${task}`, `sim-a${task}`, null);
+    if (!decision.ok) continue; // busy: the previous epoch never settled
+    seq++; // the prompt ack occupies a stream position
+    em.noteAck(seq);
+    let dead = false;
+    for (const entry of step.emit ?? []) {
+      if ("delay_ms" in entry || "partial" in entry) continue; // markers, not records
+      if ("exit" in entry) {
+        dead = true;
+        break; // the process died; nothing further arrives, ever
+      }
+      feed(entry);
+    }
+    if (dead) break;
+  }
+
+  return { settles };
+}
+
+describe("scenario property — never complete while output is still coming (ISC-147)", () => {
+  const scenariosDir = join(new URL("../../", import.meta.url).pathname, "test/fixtures/scenarios");
+
+  test("every scenario on disk has a reviewed expectation", async () => {
+    const files = (await readdir(scenariosDir)).filter((f) => f.endsWith(".json")).sort();
+    for (const f of files) {
+      expect(
+        EXPECTED_SETTLES[f],
+        `${f} has no entry in EXPECTED_SETTLES — a new scenario must declare its expected settles`,
+      ).toBeDefined();
+    }
+    // And no stale expectations for deleted scenarios.
+    for (const name of Object.keys(EXPECTED_SETTLES)) {
+      expect(files, `${name} is expected but missing from scenarios/`).toContain(name);
+    }
+  });
+
+  for (const [file, expected] of Object.entries(EXPECTED_SETTLES)) {
+    test(`${file}: settles exactly ${JSON.stringify(expected)}`, async () => {
+      const scenario = JSON.parse(
+        await Bun.file(join(scenariosDir, file)).text(),
+      ) as ScenarioFile;
+      const { settles } = simulate(scenario);
+      expect(settles).toEqual(expected);
+    });
+  }
+
+  test("will-retry: no settle is possible before the retry chain resolves", async () => {
+    // The sharpened form of ISC-82: truncate the scenario right after the
+    // first agent_end{willRetry:true} and assert the machine cannot settle.
+    const scenario = JSON.parse(
+      await Bun.file(join(scenariosDir, "will-retry.json")).text(),
+    ) as ScenarioFile;
+    const promptStep = scenario.steps.find((s) => s.on === "prompt")!;
+    const firstEnd = promptStep.emit!.findIndex((e) => e["type"] === "agent_end");
+    const truncated: ScenarioFile = {
+      scenario: "will-retry-prefix",
+      steps: [
+        { ...promptStep, emit: promptStep.emit!.slice(0, firstEnd + 1) },
+        ...scenario.steps.filter((s) => s.on !== "prompt"),
+      ],
+    };
+    expect(simulate(truncated).settles).toEqual([]);
   });
 });

@@ -172,6 +172,10 @@ export function register(program: Command): void {
 }
 
 function exitFor(t: WaitedTask): ExitCode {
+  // Order matters: a wait that timed out on a LIVE worker is a timeout, not a
+  // dead worker — and WORKER_DIED outranks TIMEOUT in the ladder, so mapping
+  // the unknown verdict first would misreport every slow task as a death.
+  if (t.reason === "wait_timeout") return EXIT.TIMEOUT;
   if (t.reason === "worker_died") return EXIT.WORKER_DIED;
   switch (t.verdict) {
     case "success":

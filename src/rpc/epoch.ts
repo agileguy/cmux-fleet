@@ -243,5 +243,5 @@ export class EpochManager {
 }
 
 function attemptKey(taskId: string, attemptId: string): string {
-  return `${taskId} ${attemptId}`;
+  return `${taskId}\0${attemptId}`;
 }
