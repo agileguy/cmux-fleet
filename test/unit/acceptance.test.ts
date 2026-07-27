@@ -185,6 +185,43 @@ describe("harnessSurface covers runner configuration, not just test files", () =
    * cap every verdict at `unknown` and quietly disable grading altogether —
    * which looks like safety and is the opposite.
    */
+  /**
+   * Case and depth variants, measured as live misses. Globs are
+   * case-sensitive and the test-tree glob was root-anchored with no
+   * recursive form, so a monorepo's nested test directory and an ordinary
+   * capitalised `Tests` directory both walked straight past the cap.
+   */
+  const variants = [
+    "Tests/helper.ts",
+    "Test/helper.ts",
+    "packages/api/test/thing.ts",
+    "sub/scripts/test.sh",
+    "sub/pytest.ini",
+    "sub/makefile",
+    "Justfile",
+    ".github/actions/setup/action.yml",
+    "Cargo.toml",
+    "go.mod",
+  ] as const;
+  for (const file of variants) {
+    test(`${file} is harness (case/depth variant)`, () => {
+      expect(harnessSurface([file]).touched).toEqual([file]);
+    });
+  }
+
+  /**
+   * The one-hop indirection: a CLASSIFIED config naming an UNCLASSIFIED code
+   * file. `jest.config.*` was matched while the `setupFiles` it points at was
+   * not, so the config could stay byte-identical while the executed code was
+   * swapped underneath it.
+   */
+  const indirection = ["jest.setup.ts", ".mocharc.yml", "vitest.workspace.ts", ".pnpmfile.cjs"] as const;
+  for (const file of indirection) {
+    test(`${file} is harness (config names code)`, () => {
+      expect(harnessSurface([file]).touched).toEqual([file]);
+    });
+  }
+
   test("ordinary source is not harness", () => {
     expect(
       harnessSurface(["src/index.ts", "README.md", "src/lib/parse.ts", "docs/design.md"]).touched,

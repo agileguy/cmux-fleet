@@ -137,6 +137,58 @@ export const DEFAULT_HARNESS_PATTERNS: readonly string[] = [
   ".github/workflows/**",
   ".githooks/**",
   "scripts/test*",
+  // Config that names CODE to execute. Classifying the config and not its
+  // target leaves a one-hop indirection open: `jest.config.*` is matched, but
+  // the `setupFiles` it points at was not, so the config could stay byte
+  // identical while the code it runs was swapped.
+  "jest.setup.*",
+  "**/jest.setup.*",
+  "vitest.workspace.*",
+  "vitest.setup.*",
+  ".mocharc.*",
+  "**/.mocharc.*",
+  ".pnpmfile.cjs",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  // Case and depth variants. Globs are case-sensitive and `test/**` had no
+  // `**/` form, so `Tests/`, `TEST/` and `a/b/test/` were all misses — and
+  // `Tests/` is an ordinary directory name, not an exotic one.
+  "[Tt]est/**",
+  "[Tt]ests/**",
+  "TEST/**",
+  "TESTS/**",
+  "[Ss]pec/**",
+  "**/test/**",
+  "**/tests/**",
+  "**/__tests__/**",
+  "**/spec/**",
+  "**/scripts/test*",
+  // Python harness resolution at depth.
+  "**/pytest.ini",
+  "**/tox.ini",
+  "**/setup.cfg",
+  "**/pyproject.toml",
+  "noxfile.py",
+  // Make and task runners: case, extension and depth siblings.
+  "**/makefile",
+  "**/GNUmakefile",
+  "[Jj]ustfile",
+  ".justfile",
+  "**/justfile",
+  "Taskfile.yaml",
+  // CI beyond GitHub workflows, including composite actions workflows call.
+  ".github/actions/**",
+  ".gitlab-ci.yml",
+  ".circleci/config.yml",
+  "Jenkinsfile",
+  // Other ecosystems' build/test definitions.
+  "go.mod",
+  "Cargo.toml",
+  "build.rs",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "Rakefile",
 ] as const;
 
 /**

@@ -531,21 +531,21 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 ## Changelog
 
 
-- **conjectured:** a cap-legal `result.json` could drive the harvester to a 2.88 GB RSS spike, because
-  zod applies `.max(MAX_ITEMS)` only after type-validating every element — reported as an OOM primitive
-  against a memory-constrained harvester.
-  **refuted by:** direct measurement. Maximising element COUNT within the 4 MiB byte cap (`blockers`,
-  the cheapest element at 4 bytes) yields 1,048,550 elements, and `readResultEnvelope` refuses it in
-  **46 ms with a 127 MB transient delta** — roughly 30x amplification, not the 686x reported, and two
-  orders of magnitude below the figure that made it look like an OOM. `harvestAll` is sequential, so
-  the cost is per-task and does not accumulate.
-  **learned:** the byte cap does its job — it bounds the element count too, because elements have a
-  minimum serialized size. The finding was directionally right (validation cost is not proportional to
-  the cap) and quantitatively wrong by ~20x, which is the difference between a denial-of-service and a
-  transient allocation. No guard added: complexity paid for a 127 MB transient is complexity wasted,
-  and a pre-parse element count cannot be had without parsing.
-  **criterion now:** unchanged. ISC-122 remains a BYTE cap, and the measurement is the evidence that a
-  byte cap is sufficient.
+- **conjectured:** the 4 MiB byte cap also bounds the COST of validating an envelope, so ISC-122 needs
+  no element-count limb. I measured 1,048,550 elements at 127 MB / 46 ms — about 30x — and recorded the
+  reported 2.88 GB figure as quantitatively refuted.
+  **refuted by:** my own measurement, of the wrong shape. The reviewer's elements were INVALID for their
+  field; mine were valid. zod type-validates every element and allocates one issue object per FAILING
+  element before it ever reports the length violation, so the cost is a function of how many elements are
+  wrong, not how many there are. Re-measured with invalid elements: 2,097,101 of them in exactly 4,194,304
+  bytes cost **2.66 GB and 1.2 s** — matching the original report, and 20x my own number.
+  **learned:** two measurements of "the same thing" that differ by 20x are measuring different things, and
+  the discrepancy was the finding rather than noise around it. I had published the refutation before
+  looking for a shape that would explain the gap. A byte cap cannot bound validation cost when elements
+  can be 2 bytes and each wrong one allocates an object — and only `issues[0]` is ever read, so the other
+  2,097,100 issue objects are built to be discarded.
+  **criterion now:** ISC-122 gains an element-count limb. Array lengths are checked on the parsed value
+  BEFORE the schema, so zod never sees an oversized array: same envelope now refused in 18 ms at 55 MB.
 
 - **conjectured:** the SRD's epoch-window rule was sufficient to attribute terminal events to epochs.
   **refuted by:** a commitment-boundary review pointing out that events carry no correlation id, so a
