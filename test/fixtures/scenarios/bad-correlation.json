@@ -1,0 +1,15 @@
+{
+  "scenario": "bad-correlation",
+  "_comment": "A response-shaped record with an id nobody issued, injected mid-stream. Must surface as an UNKNOWN stray and change nothing about the run.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "response", "command": "prompt", "id": "never-issued-7", "success": true },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}

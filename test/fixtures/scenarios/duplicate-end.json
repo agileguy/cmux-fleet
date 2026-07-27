@@ -1,0 +1,16 @@
+{
+  "scenario": "duplicate-end",
+  "_comment": "agent_end{willRetry:false} emitted twice. The first settles the epoch; the duplicate must be attributed to the settled epoch (prior), never to a fresh window.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] },
+        { "delay_ms": 150 },
+        { "type": "agent_end", "messages": [], "willRetry": false }
+      ]
+    }
+  ]
+}

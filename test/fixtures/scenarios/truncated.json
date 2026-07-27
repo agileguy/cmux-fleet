@@ -1,0 +1,15 @@
+{
+  "scenario": "truncated",
+  "_comment": "The stream dies mid-JSON-line. The partial line is an incomplete write, not a record; the epoch must fail on worker death, never settle on a fabricated event.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "partial": "{\"type\":\"agent_end\",\"willRe" },
+        { "exit": 1 }
+      ]
+    }
+  ]
+}

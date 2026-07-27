@@ -217,7 +217,10 @@ export interface RegistryDaemon {
  * registry is thin by design (SRD §3.3) — it holds no RPC stream and owns no
  * container, so one crash cannot take the fleet.
  */
-export async function startRegistryDaemon(run: RunPaths): Promise<RegistryDaemon> {
+export async function startRegistryDaemon(
+  run: RunPaths,
+  opts: { onShutdown?: () => void } = {},
+): Promise<RegistryDaemon> {
   const started = (await processStartTime(process.pid)) ?? "";
   let registry: Registry = (await readRegistry(run)) ?? {
     schema: "pifleet.registry/v1",
@@ -269,7 +272,9 @@ export async function startRegistryDaemon(run: RunPaths): Promise<RegistryDaemon
       server = null;
     },
   };
-  onShutdown = () => void daemon.stop();
+  onShutdown = () => {
+    void daemon.stop().then(() => opts.onShutdown?.());
+  };
   return daemon;
 }
 

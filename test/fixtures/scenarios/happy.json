@@ -1,0 +1,18 @@
+{
+  "scenario": "happy",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "delay_ms": 200 },
+        { "type": "tool_execution_start", "tool": "bash" },
+        { "type": "tool_execution_end", "tool": "bash", "isError": false },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}
