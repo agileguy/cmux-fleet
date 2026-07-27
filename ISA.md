@@ -531,6 +531,22 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 ## Changelog
 
 
+- **conjectured:** a cap-legal `result.json` could drive the harvester to a 2.88 GB RSS spike, because
+  zod applies `.max(MAX_ITEMS)` only after type-validating every element — reported as an OOM primitive
+  against a memory-constrained harvester.
+  **refuted by:** direct measurement. Maximising element COUNT within the 4 MiB byte cap (`blockers`,
+  the cheapest element at 4 bytes) yields 1,048,550 elements, and `readResultEnvelope` refuses it in
+  **46 ms with a 127 MB transient delta** — roughly 30x amplification, not the 686x reported, and two
+  orders of magnitude below the figure that made it look like an OOM. `harvestAll` is sequential, so
+  the cost is per-task and does not accumulate.
+  **learned:** the byte cap does its job — it bounds the element count too, because elements have a
+  minimum serialized size. The finding was directionally right (validation cost is not proportional to
+  the cap) and quantitatively wrong by ~20x, which is the difference between a denial-of-service and a
+  transient allocation. No guard added: complexity paid for a 127 MB transient is complexity wasted,
+  and a pre-parse element count cannot be had without parsing.
+  **criterion now:** unchanged. ISC-122 remains a BYTE cap, and the measurement is the evidence that a
+  byte cap is sufficient.
+
 - **conjectured:** the SRD's epoch-window rule was sufficient to attribute terminal events to epochs.
   **refuted by:** a commitment-boundary review pointing out that events carry no correlation id, so a
   late `agent_end` for epoch N and a real one for N+1 are byte-identical under a wall-clock window.

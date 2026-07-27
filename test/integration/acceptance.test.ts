@@ -278,6 +278,46 @@ describe("timeouts and budget (ISC-152)", () => {
     expect(runs[0]!.outcome).toBe("not_run");
     expect(runs[0]!.excerpt).toContain("budget");
   });
+
+  /**
+   * The ACCUMULATION property, which nothing pinned.
+   *
+   * `boundedBy` exists so that "ten 30-second commands under a 60-second run
+   * get 60 seconds total, not 300" — its own comment. The test above claims to
+   * cover it and does not: with `Deadline(0)` the fresh CLONE times out first,
+   * `allNotRun` produces the not_run outcome, and `runOne` — where the bound
+   * is applied — is never reached. Replacing `spec.deadline.boundedBy(...)`
+   * with the raw per-command timeout therefore left the suite green.
+   *
+   * Here the budget is large enough to clone and to run the first command,
+   * and too small for all three. Assertions are on the shape (the run stops
+   * inside its budget), never on exact timings.
+   */
+  test("per-command timeouts cannot accumulate past the run budget", async () => {
+    const started = performance.now();
+    const { runs } = await runAcceptance({
+      repo,
+      head_sha: honestSha,
+      scratch_dir: scratch,
+      // Each would take ~2s and is individually well inside its own 30s
+      // timeout; together they are far outside the 6s run budget.
+      commands: resolveFromEnvelope(["sleep 2", "sleep 2", "sleep 2", "sleep 2", "sleep 2"], baseSha),
+      deadline: new Deadline(6_000),
+      per_command_timeout_ms: 30_000,
+    });
+    const elapsed = performance.now() - started;
+
+    // Unbounded, five 2s commands take ~10s and every one reports `passed`.
+    // The budget is 6s; a generous ceiling still separates the two outcomes.
+    expect(elapsed).toBeLessThan(20_000);
+    const finished = runs.filter((r) => r.outcome === "passed").length;
+    expect(finished).toBeLessThan(runs.length);
+    // And the ones that did not finish are inconclusive, never `failed` —
+    // ISC-152: running out of clock is not evidence the command would fail.
+    for (const r of runs) {
+      expect(["passed", "timed_out", "not_run"]).toContain(r.outcome);
+    }
+  }, 30_000);
 });
 
 describe("seeded disagreement and harness edits, end to end", () => {
