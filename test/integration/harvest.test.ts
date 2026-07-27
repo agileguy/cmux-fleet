@@ -181,6 +181,54 @@ beforeAll(async () => {
       files_changed: [{ path: "phantom.ts", change: "modified" }],
     }),
   );
+
+  // T-conceal: real work, envelope reports only PART of the diff. The other
+  // direction of F5 (§880) — concealment, not fabrication.
+  await writeFile(
+    join(runDir, "inbox", "T-conceal.json"),
+    JSON.stringify(taskEnvelope("T-conceal", "w1", worktree)),
+  );
+  await mkdir(join(runDir, "outbox", "w1", "T-conceal"), { recursive: true });
+  await writeFile(
+    join(runDir, "outbox", "w1", "T-conceal", "result.json"),
+    JSON.stringify({
+      schema: "pifleet.result/v1",
+      task_id: "T-conceal",
+      epoch: 1,
+      worker: "w1",
+      status: "success",
+      summary: "touched one file, honest",
+      // The diff also contains NASTY and src/new.ts. Both are omitted.
+      files_changed: [{ path: "a.txt", change: "modified" }],
+    }),
+  );
+
+  // T-harness: a worker whose diff edits the test runner's own config. The
+  // ISC-150 cap must refuse to certify success over a suite the graded actor
+  // could have rewritten.
+  const hw = join(repo, ".worktrees", "w3");
+  await git(repo, "worktree", "add", "-q", "-b", `fleet/${RUN_ID}/w3`, hw, baseSha);
+  await writeFile(join(hw, "bunfig.toml"), '[test]\npreload = ["./sneak.ts"]\n');
+  await writeFile(join(hw, "sneak.ts"), "// makes the red suite green\n");
+  await git(hw, "add", ".");
+  await git(hw, "commit", "-q", "-m", "adjust test config");
+  await writeFile(join(runDir, "inbox", "T-harness.json"), JSON.stringify(taskEnvelope("T-harness", "w3", hw)));
+  await mkdir(join(runDir, "outbox", "w3", "T-harness"), { recursive: true });
+  await writeFile(
+    join(runDir, "outbox", "w3", "T-harness", "result.json"),
+    JSON.stringify({
+      schema: "pifleet.result/v1",
+      task_id: "T-harness",
+      epoch: 1,
+      worker: "w3",
+      status: "success",
+      summary: "all tests pass",
+      files_changed: [
+        { path: "bunfig.toml", change: "added" },
+        { path: "sneak.ts", change: "added" },
+      ],
+    }),
+  );
 });
 
 afterAll(async () => {
@@ -304,6 +352,73 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(h.discrepancies.join(" ")).toContain("phantom.ts");
   });
 
+  /**
+   * The other direction of F5, on the live CLI path.
+   *
+   * SRD §880 makes *disagreement* between the envelope's `files_changed` and
+   * the diff a hard failure class, unqualified. Two implementations of that
+   * rule existed and contradicted each other: the one `artifacts` actually
+   * reached treated under-claiming as "sloppy, not falsifying" and only
+   * floored the verdict for over-claiming, while the one with the test suite
+   * — and no production caller — called under-claiming concealment and failed
+   * it. Wiring the spec-correct module is what makes this test possible; it
+   * would have passed as `success` before.
+   */
+  test("concealing a file the diff does contain is also failed (F5, §880)", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-conceal", "--json"]);
+    expect(r.code).toBe(0);
+    const h = HarvestSchema.parse(JSON.parse(r.stdout));
+    expect(h.verdict).toBe("failed");
+    expect(h.discrepancies.join(" ")).toContain("src/new.ts");
+  });
+
+  /**
+   * ISC-150 on the live CLI path, which is the part that was missing: the cap
+   * was implemented and unit-tested in a module `artifacts` did not call, and
+   * `facts.harness` was never populated, so `touched` was permanently empty
+   * and the cap could not fire whatever the worker edited.
+   *
+   * `bunfig.toml` is the specific file the bypass was found through — the
+   * config for the runner this repository itself uses.
+   */
+  test("a diff touching the runner's own config caps the verdict (ISC-150)", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-harness", "--json"]);
+    expect(r.code).toBe(0);
+    const h = HarvestSchema.parse(JSON.parse(r.stdout));
+    // Claimed success, real commits, honest file list — and still not success,
+    // because the actor could have rewritten the exam.
+    expect(h.verdict).not.toBe("success");
+    expect(h.reasons.join(" ")).toContain("harness");
+  });
+
+  /**
+   * ISC-153 is "hashed AND recorded". The hash was being computed and dropped,
+   * which satisfies neither half: a verdict whose evidence cannot be
+   * identified is not reviewable, and an operator disputing one needs to know
+   * whether the facts have changed since.
+   *
+   * Asserted as a REPLAY KEY, not as a string: stable across identical reads,
+   * and different for a task whose facts differ. Pinning a literal digest
+   * would test the hash function instead.
+   */
+  test("the recorded facts_hash identifies the evidence (ISC-153)", async () => {
+    const read = async (task: string) => {
+      const r = await runCli(["artifacts", "--run", RUN_ID, "--task", task, "--json"]);
+      expect(r.code).toBe(0);
+      return HarvestSchema.parse(JSON.parse(r.stdout));
+    };
+    const a = await read("T-1");
+    const b = await read("T-1");
+    const other = await read("T-3");
+
+    expect(a.facts_hash).not.toBeNull();
+    expect(a.facts_hash).toMatch(/^[0-9a-f]{64}$/);
+    // Same facts, same key — otherwise it cannot be used to detect change.
+    expect(b.facts_hash).toBe(a.facts_hash);
+    // Different facts, different key — otherwise it detects nothing.
+    expect(other.facts_hash).not.toBe(a.facts_hash);
+  });
+
   // The §8.4 pure-read rule. Would fail if an unknown task became a CliError:
   // a machine consumer must read `harvest_status`, never the exit code, to
   // tell "no artifacts" from "tool broke".
@@ -323,7 +438,13 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(r.code).toBe(0);
     const obj = JSON.parse(r.stdout) as { run_id: string; tasks: Array<Record<string, unknown>> };
     expect(obj.run_id).toBe(RUN_ID);
-    expect(obj.tasks.map((t) => t["task_id"]).sort()).toEqual(["T-1", "T-2", "T-3", "T-4"]);
+    // Containment, not equality: another test in this file creates a task of
+    // its own, so an exact list makes this assertion depend on test ORDER —
+    // green today, red the day the runner reorders. Every dispatched fixture
+    // must appear, which is what "covers every dispatched task" means; an
+    // extra one from a sibling test is not a failure of that property.
+    const ids = obj.tasks.map((t) => t["task_id"]);
+    for (const id of ["T-1", "T-2", "T-3", "T-4", "T-conceal"]) expect(ids).toContain(id);
     for (const t of obj.tasks) HarvestSchema.parse(t); // ISC-88 for the fanout shape
   });
 

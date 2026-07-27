@@ -16,8 +16,9 @@
 
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { adjudicate as adjudicateFacts } from "./adjudicate.ts";
+import { harnessSurface } from "./acceptance.ts";
 import {
-  adjudicate,
   DerivedFactsSchema,
   HarvestSchema,
   TaskEnvelopeSchema,
@@ -68,27 +69,6 @@ function deriveRepoVerdict(git: GitFacts): Verdict {
   if (!git.facts.base_is_ancestor) return "unknown";
   if (git.facts.commits.length === 0 && git.facts.files_changed.length === 0) return "failed";
   return "unknown";
-}
-
-/**
- * F5 — self-report disagrees with the diff (SRD §8.2, §13). Claiming a file
- * the diff does not contain is the lying direction and is a hard failure
- * class; the derived diff naming files the envelope omitted is recorded but
- * does not floor the verdict — under-reporting is sloppy, not falsifying.
- */
-function fileClaimDiscrepancies(
-  claimed: readonly { path: string }[],
-  derived: readonly { path: string }[],
-): { hard: string[]; soft: string[] } {
-  const derivedSet = new Set(derived.map((f) => f.path));
-  const claimedSet = new Set(claimed.map((f) => f.path));
-  const hard = [...claimedSet]
-    .filter((p) => !derivedSet.has(p))
-    .map((p) => `claimed change to ${p}, which the diff does not contain (F5)`);
-  const soft = [...derivedSet]
-    .filter((p) => !claimedSet.has(p))
-    .map((p) => `diff contains ${p}, which the envelope did not claim`);
-  return { hard, soft };
 }
 
 /** A harvest for a task the run has no dispatch record for. */
@@ -202,11 +182,9 @@ export async function harvestTask(
     }
   }
 
-  let f5 = false;
+  const claimed = outbox.kind === "ok" ? outbox.envelope : null;
+
   if (outbox.kind === "ok" && git.ok && git.facts.base_is_ancestor) {
-    const d = fileClaimDiscrepancies(outbox.envelope.files_changed, git.facts.files_changed);
-    discrepancies.push(...d.hard, ...d.soft);
-    f5 = d.hard.length > 0;
     if (
       outbox.envelope.branch !== undefined &&
       git.facts.branch !== null &&
@@ -218,14 +196,55 @@ export async function harvestTask(
     }
   }
 
-  const claimed = outbox.kind === "ok" ? outbox.envelope : null;
-  let verdict = adjudicate(derivedVerdict, claimed?.status);
-  if (f5 && verdict !== "aborted" && verdict !== "timed_out") {
-    // Hard failure class (F5): a self-report contradicted by the diff means
-    // the claims are not testimony but noise, and the §13 table pins the
-    // response — failure, at the top of the report.
-    verdict = "failed";
-    reasons.push("verdict forced to failed: files_changed contradicts the diff (F5)");
+  /**
+   * Adjudication runs through `harvest/adjudicate.ts` — the module that owns
+   * the evidence rules — not through the two-argument lattice combinator in
+   * contracts.ts.
+   *
+   * This wiring is the point. The rich adjudicator, and every criterion it
+   * implements (the ISC-150 harness cap, the ISC-153 replay hash, the ISC-154
+   * moved-tree void, the ISC-230 inconclusive-exam cap), had a full passing
+   * test suite and ZERO production callers: `artifacts` reached the lattice
+   * combinator instead, so those criteria were satisfied only inside tests of
+   * a module nothing ran. A tested mechanism with no live call site is
+   * indistinguishable at runtime from one that was never written, and the
+   * green suite is what made it look done.
+   *
+   * It also settles a contradiction between the two implementations of F5.
+   * The version here treated under-claiming as "sloppy, not falsifying" and
+   * only floored the verdict for over-claiming; SRD §880 says *disagreement*
+   * between the envelope's `files_changed` and the diff is a hard failure
+   * class, unqualified. The stricter module — which calls under-claiming
+   * concealment — is the one that matches the spec, and now the one that runs.
+   */
+  /**
+   * The harness surface is derived HERE, from the diff, before adjudication.
+   *
+   * It is computable from facts the harvester already holds — no acceptance
+   * execution required — and leaving it at the schema default meant
+   * `facts.harness.touched` was permanently empty, so the ISC-150 cap could
+   * never fire no matter what the worker edited. The cap was live code
+   * guarding a field nothing filled in.
+   *
+   * The changed-file list comes from the DERIVED diff, never from the
+   * envelope: the envelope is the actor being graded, and a worker asked to
+   * self-declare whether it touched the tests has an obvious answer.
+   */
+  const factsWithHarness: DerivedFacts = {
+    ...git.facts,
+    harness: harnessSurface(git.facts.files_changed.map((f) => f.path)),
+  };
+
+  const adj = adjudicateFacts(factsWithHarness, claimed);
+  let verdict = adj.verdict;
+  reasons.push(...adj.reasons);
+  discrepancies.push(...adj.discrepancies);
+
+  // The supervisor's terminal verdicts outrank derived evidence: `aborted`
+  // and `timed_out` are facts about the RUN, not inferences from the tree
+  // (§7.3), and no amount of clean diff makes an aborted task complete.
+  if (derivedVerdict === "aborted" || derivedVerdict === "timed_out") {
+    verdict = derivedVerdict;
   }
 
   // --- Harvest trustworthiness (§8.4), orthogonal to the verdict.
@@ -258,9 +277,13 @@ export async function harvestTask(
     },
     discrepancies,
     session_path: state?.session_path ?? null,
+    facts_hash: adj.facts_hash,
   });
 
-  return { harvest, facts: git.facts, harvestStatus };
+  // The returned facts are the ones the verdict was actually reached from —
+  // harness surface included. Returning `git.facts` here would hand callers a
+  // bundle whose hash does not match the `facts_hash` beside it.
+  return { harvest, facts: factsWithHarness, harvestStatus };
 }
 
 /** Every dispatched task in the run — the single end-of-fanout call (§8.4). */

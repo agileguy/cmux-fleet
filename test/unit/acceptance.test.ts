@@ -146,3 +146,48 @@ describe("runAcceptance spec guards (ISC-149)", () => {
     ).rejects.toThrow(/40-char SHA/);
   });
 });
+
+/**
+ * The harness surface must cover the files through which a command's MEANING
+ * resolves, not only the files that look like tests.
+ *
+ * Found by attacking the real `runAcceptance`: a worker committing a
+ * `bunfig.toml` with a `[test] preload` plus the preload script turned a red
+ * suite green — the implementation still returning the wrong value — while
+ * `harness.touched` came back EMPTY, so the ISC-150 cap never fired. Every
+ * ISC-149 control (fresh clone by SHA, no hooks, hermetic env) held and was
+ * irrelevant: the sabotage arrived as ordinary committed source.
+ *
+ * These are regression pins for that class. A denylist cannot fully express
+ * "files the command resolves through" — recorded as ISC-237 — so each entry
+ * here is a known bypass that has been closed, not a claim of completeness.
+ */
+describe("harnessSurface covers runner configuration, not just test files", () => {
+  const bypasses = [
+    ["bunfig.toml", "bun test [test] preload runs before every test file"],
+    ["packages/api/bunfig.toml", "the same file, nested"],
+    [".npmrc", "npm node-options injects flags into the runner"],
+    ["tsconfig.base.json", "tsconfig extends: the entry point keeps its contents, changes its meaning"],
+    ["common.mk", "Makefile include: same trick for make"],
+    [".tool-versions", "changing WHICH interpreter runs the suite"],
+    [".nvmrc", "node version selection"],
+    ["deno.json", "deno task/test configuration"],
+  ] as const;
+
+  for (const [file, why] of bypasses) {
+    test(`${file} is harness — ${why}`, () => {
+      expect(harnessSurface([file]).touched).toEqual([file]);
+    });
+  }
+
+  /**
+   * The complement. A pattern list broad enough to match everything would
+   * cap every verdict at `unknown` and quietly disable grading altogether —
+   * which looks like safety and is the opposite.
+   */
+  test("ordinary source is not harness", () => {
+    expect(
+      harnessSurface(["src/index.ts", "README.md", "src/lib/parse.ts", "docs/design.md"]).touched,
+    ).toEqual([]);
+  });
+});

@@ -280,6 +280,18 @@ export const HarvestSchema = z.object({
   /** Claims contradicted by derived facts, e.g. a file the worker did not touch. */
   discrepancies: z.array(text).max(MAX_ITEMS).default([]),
   session_path: shortStr.nullable().default(null),
+  /**
+   * sha256 over the canonical form of the fact bundle the verdict was reached
+   * from (ISC-153) — the replay key.
+   *
+   * "Hashed AND RECORDED" is the criterion; the hash was being computed and
+   * dropped on the floor, which satisfies neither half of what it is for. An
+   * operator disputing a verdict needs to know whether the facts have since
+   * changed, and a verdict whose evidence cannot be identified is not
+   * reviewable. Nullable because a task with no dispatch record has no facts
+   * to hash.
+   */
+  facts_hash: shortStr.nullable().default(null),
 });
 export type Harvest = z.infer<typeof HarvestSchema>;
 

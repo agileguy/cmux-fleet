@@ -101,6 +101,38 @@ export const DEFAULT_HARNESS_PATTERNS: readonly string[] = [
   "playwright.config.*",
   "karma.conf.*",
   "tsconfig.json",
+  // Runner configuration that executes code BEFORE any test does.
+  //
+  // `bunfig.toml` was the hole this list was found through: it is the config
+  // for `bun test` — the runner this repository itself uses — and its
+  // `[test] preload` names a module executed ahead of every test file. A
+  // worker committing a `bunfig.toml` plus a preload script turned a red
+  // suite green while the implementation stayed wrong, and because neither
+  // file matched anything above, `harness.touched` came back empty and the
+  // ISC-150 cap never fired. `.npmrc` (`node-options`), the yarn equivalents
+  // and `deno.json` are the same primitive for the other runners.
+  "bunfig.toml",
+  "**/bunfig.toml",
+  ".npmrc",
+  "**/.npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  "deno.json",
+  "deno.jsonc",
+  // Files the resolution above INHERITS from. `tsconfig.json` was listed but
+  // `extends` makes any other tsconfig equally load-bearing, and a Makefile
+  // `include` does the same for make. Matching only the entry point means the
+  // entry point can keep its contents and change its meaning.
+  "tsconfig.*.json",
+  "**/tsconfig*.json",
+  "*.mk",
+  "**/*.mk",
+  "Makefile.*",
+  // Toolchain selection: changing WHICH interpreter runs the suite changes
+  // what the suite proves, without touching a line of test code.
+  ".mise.toml",
+  ".tool-versions",
+  ".nvmrc",
   // CI definitions and hook trees a repo can point `core.hooksPath` at.
   ".github/workflows/**",
   ".githooks/**",
