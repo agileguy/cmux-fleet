@@ -1,0 +1,17 @@
+{
+  "scenario": "settle-after-retry",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "agent_end", "messages": [], "willRetry": true },
+        { "delay_ms": 200 },
+        { "type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 100 },
+        { "type": "auto_retry_end", "success": true, "attempt": 1 },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}

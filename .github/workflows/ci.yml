@@ -22,3 +22,70 @@ jobs:
         run: bun test test/integration
       - name: E2E tests
         run: bun test test/e2e
+
+  # The container suite is a separate job because it builds the worker image
+  # (google-cloud-cli, kubectl, helm — many minutes) and must not gate fast
+  # feedback. It is NOT optional: without it, every Group C and Group J
+  # criterion reports green having never executed, because the tests self-skip
+  # when PIFLEET_DOCKER is unset.
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - run: bun install --frozen-lockfile || bun install
+      - name: Confirm a Docker daemon is present
+        run: docker info
+      - name: Build the worker image
+        run: bun run src/cli/index.ts image build -c fleet.example.yaml --toolchain node
+      - name: Tag it for the verbgate suite
+        run: |
+          set -eux
+          # `image list --json` emits a bare array, not {images: [...]}. Reading
+          # the wrong shape threw before `set -e` could report which step failed,
+          # so this job was red from the day it was added and no container
+          # criterion had ever actually executed. Fail loudly on an empty list.
+          tag="$(bun run src/cli/index.ts image list -c fleet.example.yaml --json \
+                 | bun -e 'const d = JSON.parse(await Bun.stdin.text());
+                           const t = Array.isArray(d) ? d[0]?.tag : undefined;
+                           if (!t) { console.error("image list returned no images"); process.exit(1); }
+                           console.log(t);')"
+          docker tag "$tag" pifleet/pi-worker:verify
+      - name: Container and verbgate probes
+        env:
+          PIFLEET_DOCKER: "1"
+        run: bun test test/integration/image.test.ts test/integration/verbgate.test.ts
+      - name: Fail if the container probes silently skipped
+        env:
+          PIFLEET_DOCKER: "1"
+          # Every test in both files must run. Raise this when probes are added;
+          # a mismatch is the point, not an inconvenience.
+          EXPECTED: "42"
+        run: |
+          set -eu
+          # A skip prints an announcement and still exits 0, so a green job is
+          # not evidence the probes ran.
+          #
+          # The previous guard could not fire. `*SKIP*` is uppercase and bun
+          # prints `18 skip` and `[skip] …` in lowercase, so the only live arm
+          # was `*"0 pass"*` — which needs EVERYTHING to skip, and which also
+          # false-positives on any count ending in zero ("30 pass" matches).
+          # Docker up but the image missing would have run half the probes and
+          # passed this check, which is exactly what it claims to prevent.
+          #
+          # So: assert the exact number that ran, and that none skipped.
+          out="$(bun test test/integration/image.test.ts test/integration/verbgate.test.ts 2>&1)"
+          echo "$out"
+          pass="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) pass$/\1/p' | tail -1)"
+          skip="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) skip$/\1/p' | tail -1)"
+          : "${pass:=0}" "${skip:=0}"
+          echo "parsed: pass=$pass skip=$skip expected=$EXPECTED"
+          if [ "$skip" -ne 0 ]; then
+            echo "::error::$skip container probes skipped — they must all execute here"; exit 1
+          fi
+          if [ "$pass" -ne "$EXPECTED" ]; then
+            echo "::error::expected $EXPECTED container probes, $pass ran — update EXPECTED if probes were added"; exit 1
+          fi

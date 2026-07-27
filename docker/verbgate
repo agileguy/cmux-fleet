@@ -1,0 +1,276 @@
+#!/bin/sh
+# verbgate — mutating cloud verbs are gated (SRD §5.10).
+#
+# Installed on PATH as `gcloud`, `kubectl`, `helm`, `gsutil` and `bq`; the real
+# binaries live at /usr/local/libexec/<name>.real. Read verbs exec the real
+# binary unconditionally. Mutating verbs require a normalized VERB-PREFIX match
+# against the task's cloud_allow[] — matching is on verb tokens with flags
+# excluded entirely, never a regex over the whole command line, because a
+# substring match is trivially defeated by flag reordering. Refusal exits 77.
+# Every invocation, permitted or refused, is appended to the ledger.
+#
+# This stops the CASUAL destructive action — the confused agent, the injected
+# "delete the failing deployment". It does not stop a determined one: bash can
+# reach the .real path directly. Credential scoping (impersonation) is the
+# stronger control; this is defence-in-depth on top, not a substitute (§5.10).
+#
+# PATHS ARE CONSTANTS, NOT ENVIRONMENT. They used to be overridable, which made
+# the gate self-service: `PIFLEET_CLOUD_ALLOW_FILE=/tmp/mine kubectl delete …`
+# supplied its own policy, and `PIFLEET_VERBGATE_LEDGER=/dev/null` discarded the
+# evidence. A control the subject can reconfigure is not a control.
+#
+# The policy file lives on a read-only mount the worker does not own. If it is
+# writable by the current user the gate refuses everything (exit 78) rather than
+# consulting a policy its subject can rewrite.
+#
+# KNOWN REMAINING EXPOSURE, stated plainly: the ledger is written by the worker,
+# so a determined worker can still truncate it. Making the audit trail
+# tamper-proof needs a collector outside the container — tracked as ISC-172, not
+# solved here. Everything below reduces forgery and evasion; none of it makes
+# the ledger authoritative against a hostile worker.
+#
+# Environment (provenance only — never paths, never policy):
+#   PIFLEET_TASK_ID / PIFLEET_EPOCH
+set -u
+# Globbing off for the whole script: verb classification iterates over token
+# words, and an unquoted expansion let an argument of `*` re-expand against the
+# CWD. A worker could drop a file named `describe` beside itself and have a
+# `delete` classified as a read.
+set -f
+
+tool=$(basename "$0")
+real="/usr/local/libexec/${tool}.real"
+allow_file="/policy/cloud-allow"
+ledger="/outbox/ledger/verbgate.jsonl"
+task="${PIFLEET_TASK_ID:-<none>}"
+
+# --- ledger ------------------------------------------------------------------
+# $1=decision  $2=display-verb  rest=original argv. Best-effort: a full outbox
+# must not turn a permitted read into a failure, but refusals stay refusals.
+#
+# The `--` before "$@" is load-bearing. jq 1.6's `--args` does NOT stop option
+# parsing, so an argv containing any flag (`kubectl version --client`) makes jq
+# exit with "Unknown option" — which this function's own error suppression then
+# swallows, silently dropping the row. The ledger therefore lost precisely the
+# invocations that carry flags, including the flags-before-verb evasion pattern
+# the gate exists to catch. The `printf` fallback guarantees a row survives even
+# if jq fails for some other reason; it drops argv rather than dropping the fact.
+log_ledger() {
+  decision=$1
+  dverb=$2
+  shift 2
+  mkdir -p "$(dirname "${ledger}")" 2>/dev/null || true
+  # The fallback interpolates the verb into a JSON string with no escaping, and
+  # the verb is built from raw argv. jq fails on an oversized argv (E2BIG), so
+  # a token containing a newline used to split one row into two and let an
+  # attacker append a forged row through the crack. Strip anything that can
+  # break out of a JSON string and bound the length.
+  # Every field interpolated into the fallback must be filtered, not just the
+  # verb. `task` is PIFLEET_TASK_ID and `epoch` is PIFLEET_EPOCH — both are
+  # environment the WORKER controls, and both landed in the JSON raw. A task id
+  # of  T-1","decision":"allow_read  appends a duplicate `decision` key, and
+  # JSON.parse takes the last one: a refused destructive verb reads back from
+  # the audit trail as permitted. Sanitizing one of three interpolations closed
+  # nothing.
+  safe_verb=$(printf '%s' "${dverb}" | tr -d '\000-\037\177"\\' | cut -c1-200)
+  safe_task=$(printf '%s' "${task}" | tr -d '\000-\037\177"\\' | cut -c1-200)
+  # Digits only, and never empty — this one is emitted unquoted, so anything
+  # else is a syntax break rather than a string escape.
+  safe_epoch=$(printf '%s' "${PIFLEET_EPOCH:-0}" | tr -cd '0-9' | cut -c1-18)
+  [ -n "${safe_epoch}" ] || safe_epoch=0
+  jq -cn \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg tool "${tool}" \
+    --arg verb "${dverb}" \
+    --arg decision "${decision}" \
+    --arg task_id "${task}" \
+    --arg epoch "${PIFLEET_EPOCH:-0}" \
+    '{ts:$ts,tool:$tool,verb:$verb,decision:$decision,task_id:$task_id,epoch:($epoch|tonumber? // 0),argv:$ARGS.positional}' \
+    --args -- "$@" >> "${ledger}" 2>/dev/null \
+  || printf '{"ts":"%s","tool":"%s","verb":"%s","decision":"%s","task_id":"%s","epoch":%s,"argv_unencoded":true}\n' \
+       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${tool}" "${safe_verb}" "${decision}" "${safe_task}" \
+       "${safe_epoch}" >> "${ledger}" 2>/dev/null \
+  || true
+}
+
+# --- policy integrity --------------------------------------------------------
+# A policy the subject can edit is not a policy. Refuse before classifying, so
+# there is no path where a tampered allow file is consulted.
+if [ -w "${allow_file}" ] || [ -w "$(dirname "${allow_file}")" ]; then
+  log_ledger policy_writable "(policy-integrity)" "$@"
+  printf "verbgate: policy file %s is writable by uid %s — refusing every verb\n" \
+    "${allow_file}" "$(id -u)" >&2
+  exit 78
+fi
+
+# --- collect leading non-flag tokens -----------------------------------------
+# The verb words come before the first flag in every sane invocation — with one
+# exception that matters: global flags that precede the verb. `kubectl -n kube-
+# system get pods` is the single most common form there is, and blanket-refusing
+# it trained operators to wildcard cloud_allow[] or route around the shim, which
+# dismantles the control entirely. So known global flags are skipped (with their
+# values), and anything else flag-shaped still FAILS CLOSED.
+skip_next=0
+verbs=""
+count=0
+for arg in "$@"; do
+  if [ "${skip_next}" = "1" ]; then
+    skip_next=0
+    continue
+  fi
+  case "${arg}" in
+    --) break ;;
+    # Global flags that take a separate value: skip the flag AND the value.
+    -n|--namespace|--context|--kube-context|--kubeconfig|--cluster|--user|--server \
+      |--project|--account|--configuration|--region|--zone|--impersonate-service-account)
+      skip_next=1
+      continue
+      ;;
+    # Same flags in --flag=value form, plus boolean globals: skip the token.
+    --namespace=*|--context=*|--kube-context=*|--kubeconfig=*|--cluster=*|--user=*|--server=* \
+      |--project=*|--account=*|--configuration=*|--region=*|--zone=*|--impersonate-service-account=* \
+      |--verbosity=*|--quiet|-q|--no-user-output-enabled)
+      continue
+      ;;
+    -*) break ;;
+    *)
+      verbs="${verbs} ${arg}"
+      count=$((count + 1))
+      [ "${count}" -ge 6 ] && break
+      ;;
+  esac
+done
+verbs=${verbs# }
+
+# --- classify: read verbs pass through, always (SRD §5.10 flow chart) --------
+first=${verbs%% *}
+is_read=0
+case "${tool}" in
+  kubectl)
+    case "${first}" in
+      get|describe|logs|top|explain|api-resources|version|diff|help) is_read=1 ;;
+    esac
+    ;;
+  helm)
+    case "${first}" in
+      list|get|status|history|version|template|lint|help) is_read=1 ;;
+    esac
+    ;;
+  gsutil)
+    # Read set is closed; everything else (cp, mv, rm, rsync, mb, rb, setmeta,
+    # acl/iam set …) is mutating. `gsutil rm -r` is as destructive as
+    # `kubectl delete` and was previously not gated at all.
+    case "${first}" in
+      ls|cat|stat|du|hash|version|help) is_read=1 ;;
+    esac
+    ;;
+  bq)
+    # `bq query` can carry DML, so it is deliberately NOT in the read set.
+    case "${first}" in
+      ls|show|head|version|help) is_read=1 ;;
+    esac
+    ;;
+  gcloud)
+    # gcloud's grammar is `gcloud GROUP... VERB [POSITIONAL...]`. The old rule
+    # was "any leading token matching a read keyword", which is the substring
+    # match this shim's own header promises never to do — and it failed OPEN:
+    # `gcloud compute instances delete real-vm list` classified as a read
+    # because a POSITIONAL was named `list`.
+    #
+    # Classify on the FIRST token that is a recognized verb, read or mutating,
+    # and stop there. A positional can then never outvote the verb, because the
+    # verb always precedes it.
+    for t in ${verbs}; do
+      case "${t}" in
+        # Credential-minting verbs are NOT reads, whatever their name suggests.
+        # `print-access-token` matched `print-*` and sailed through as an
+        # allow-listed read; curl is in the image, so the agent could mint a
+        # bearer token and issue any mutating REST call with zero gate rows and
+        # zero refusals — the containment story inverted by a glob. It is also
+        # the first thing a confused agent tries after a 77.
+        # `get-credentials` writes a kubeconfig, so it is mutating too.
+        print-access-token|print-identity-token|get-credentials)
+          is_read=0
+          break
+          ;;
+        list|describe|version|info|help|get-*|print-*|search|check|wait|tail)
+          is_read=1
+          break
+          ;;
+        create|delete|update|patch|set-*|add-*|remove-*|enable|disable|deploy \
+          |apply|import|restore|resize|restart|start|stop|reset|revoke|undelete \
+          |rollback|promote|migrate|drain|clear|unset|set|add|remove|attach|detach \
+          |ssh|scp|copy-files|run|submit|cancel|abandon|acknowledge|purge|sign|activate)
+          is_read=0
+          break
+          ;;
+      esac
+    done
+    ;;
+esac
+
+# Bare `--help` / `--version` with no verb tokens is harmless. Anything else
+# that hides its verb behind flags (`kubectl --kubeconfig x delete …`) cannot
+# be classified and FAILS CLOSED into the mutating path.
+if [ -z "${verbs}" ]; then
+  only_help=1
+  for arg in "$@"; do
+    case "$arg" in
+      --help|-h|--version) ;;
+      *) only_help=0 ;;
+    esac
+  done
+  if [ $# -eq 0 ] || [ "${only_help}" = "1" ]; then
+    is_read=1
+  fi
+fi
+
+if [ "${is_read}" = "1" ]; then
+  log_ledger allow_read "${verbs:-${first:-"(help)"}}" "$@"
+  exec "${real}" "$@"
+fi
+
+# --- mutating: token-prefix match against cloud_allow[] ----------------------
+allowed=0
+if [ -r "${allow_file}" ]; then
+  while IFS= read -r line || [ -n "${line}" ]; do
+    # trim
+    line=$(printf '%s' "${line}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -z "${line}" ] && continue
+    if [ "${line}" = "*" ]; then
+      allowed=1
+      break
+    fi
+    entry_tool=${line%% *}
+    [ "${entry_tool}" = "${tool}" ] || continue
+    entry=${line#* }
+    if [ "${entry}" = "${line}" ]; then
+      # Entry was the bare tool name: every verb of this tool is allowed.
+      allowed=1
+      break
+    fi
+    # Token-wise prefix: "kubectl rollout restart" matches verbs beginning
+    # ["rollout","restart"], exactly at a token boundary.
+    if [ "${verbs}" = "${entry}" ]; then
+      allowed=1
+      break
+    fi
+    case "${verbs}" in
+      "${entry} "*)
+        allowed=1
+        break
+        ;;
+    esac
+  done < "${allow_file}"
+fi
+
+display=${verbs:-"(flags-before-verb)"}
+if [ "${allowed}" = "1" ]; then
+  log_ledger allow_listed "${display}" "$@"
+  exec "${real}" "$@"
+fi
+
+log_ledger refuse "${display}" "$@"
+printf "verbgate: '%s %s' not authorized for task %s; add it to cloud_allow[] to permit\n" \
+  "${tool}" "${display}" "${task}" >&2
+exit 77

@@ -2,8 +2,8 @@
 project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
-phase: think
-progress: 0/140
+phase: build
+progress: 71/229
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -88,37 +88,37 @@ it is a convenience for attended debugging, not the supported path.
 `pifleet` is a Bun CLI that brings up a configurable fleet of containerized Pi 0.79.6 workers
 — optionally surfaced as cmux panes — accepts typed task envelopes, detects completion
 authoritatively via `agent_end{willRetry:false}` plus a correlated `get_state` fence, and
-returns adjudicated structured artifacts, with all 140 criteria below passing and the full
+returns adjudicated structured artifacts, with all 160 criteria below passing and the full
 suite green on `headless` against a test double.
 
 ## Criteria
 
 ### Group A — Repository foundation (Phase 0)
 
-- [ ] ISC-1: `bun install` in a clean clone exits 0.
-- [ ] ISC-2: `bun run typecheck` exits 0 with zero errors.
-- [ ] ISC-3: `bun test` exits 0 with at least one passing test.
-- [ ] ISC-4: `Docs/SRD.md` exists in the repo and is byte-identical to the source SRD at the commit that imported it.
-- [ ] ISC-5: `ISA.md` exists at the repo root and parses as valid YAML frontmatter plus twelve sections.
-- [ ] ISC-6: A GitHub Actions workflow runs typecheck, unit, integration, and e2e as separate named steps.
+- [x] ISC-1: `bun install` in a clean clone exits 0.
+- [x] ISC-2: `bun run typecheck` exits 0 with zero errors.
+- [x] ISC-3: `bun test` exits 0 with at least one passing test.
+- [x] ISC-4: `Docs/SRD.md` exists in the repo and is byte-identical to the source SRD at the commit that imported it.
+- [x] ISC-5: `ISA.md` exists at the repo root and parses as valid YAML frontmatter plus twelve sections.
+- [x] ISC-6: A GitHub Actions workflow runs typecheck, unit, integration, and e2e as separate named steps.
 - [ ] ISC-7: CI passes on the default branch.
-- [ ] ISC-8: `README.md` documents install, `pifleet doctor`, and the six-phase status.
-- [ ] ISC-9: `CHANGELOG.md` exists and has an entry for every merged phase.
-- [ ] ISC-10: `git log --format=%B` over all commits contains no AI/LLM/Claude attribution string.
-- [ ] ISC-11: The repo has a remote and `gh pr list --state all` returns one PR per completed phase.
-- [ ] ISC-12: `package.json` pins `commander`, `zod`, and `yaml`; the lockfile is committed.
-- [ ] ISC-13: `src/` compiles under `strict: true` with `noUncheckedIndexedAccess`.
-- [ ] ISC-14: `bun run src/cli/index.ts --help` lists every command in SRD §10.
+- [x] ISC-8: `README.md` documents install, `pifleet doctor`, and the six-phase status.
+- [x] ISC-9: `CHANGELOG.md` exists and has an entry for every merged phase.
+- [x] ISC-10: `git log --format=%B` over all commits contains no AI/LLM/Claude attribution string.
+- [x] ISC-11: The repo has a remote and `gh pr list --state all` returns one PR per completed phase.
+- [x] ISC-12: `package.json` pins `commander`, `zod`, and `yaml`; the lockfile is committed.
+- [x] ISC-13: `src/` compiles under `strict: true` with `noUncheckedIndexedAccess`.
+- [x] ISC-14: `bun run src/cli/index.ts --help` lists every command in SRD §10.
 
 ### Group B — Test infrastructure
 
-- [ ] ISC-15: `test/unit`, `test/integration`, and `test/e2e` each contain at least one test file and run independently via their own script.
-- [ ] ISC-16: `bun test test/unit` completes in under 30s with no Docker daemon running.
-- [ ] ISC-17: `pifleet-fake-pi` (the test double) speaks the RPC framing and is invoked by the e2e suite.
-- [ ] ISC-18: The double can be scripted to emit an arbitrary event sequence from a fixture file.
-- [ ] ISC-19: The e2e suite runs `up → dispatch → wait → artifacts` end-to-end against the double.
-- [ ] ISC-20: Integration tests exercise real subprocess spawning, real filesystem, and real git, with no network.
-- [ ] ISC-21: No test in the `headless` suite requires network egress.
+- [x] ISC-15: `test/unit`, `test/integration`, and `test/e2e` each contain at least one test file and run independently via their own script.
+- [x] ISC-16: `bun test test/unit` completes in under 30s with no Docker daemon running.
+- [x] ISC-17: `pifleet-fake-pi` (the test double) speaks the RPC framing and is invoked by the e2e suite.
+- [x] ISC-18: The double can be scripted to emit an arbitrary event sequence from a fixture file.
+- [x] ISC-19: The e2e suite runs `up → dispatch → wait → artifacts` end-to-end against the double.
+- [x] ISC-20: Integration tests exercise real subprocess spawning, real filesystem, and real git, with no network.
+- [x] ISC-21: No test in the `headless` suite requires network egress.
 - [ ] ISC-22: A test-coverage report can be produced and lists every `src/` module.
 
 ### Group C — Container image
@@ -269,6 +269,136 @@ suite green on `headless` against a test double.
 - [ ] ISC-139: Anti: no generated commit, branch, or PR body contains AI attribution.
 - [ ] ISC-140: Anti: no acceptance test in the `headless` suite requires provider spend or a cloud endpoint.
 
+### Group M — Review findings (added 2026-07-27, post-advisor)
+
+Criteria that came out of the commitment-boundary review. Several correct the SRD
+rather than merely implementing it; SRD errata are recorded in `## Changelog`.
+
+- [ ] ISC-141: Epoch attribution uses the RPC stream offset, and the SRD §7.5 interleaving is decided correctly when offset is the only distinguishing signal.
+- [ ] ISC-142: A dispatch whose epoch is `<=` the worker's persisted `last_accepted_epoch` is rejected at the worker side, not merely bookkept by the allocator.
+- [ ] ISC-143: The epoch high-water-mark is durable before dispatch; allocate → crash → restart does not re-issue the same epoch.
+- [ ] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
+- [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
+- [ ] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
+- [ ] ISC-147: Across every hostile scenario, completion is never declared while the agent will still emit output.
+- [ ] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree.
+- [ ] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment.
+- [ ] ISC-150: A diff touching the test-harness surface caps the verdict at `blocked` or `unknown` and can never yield `success`.
+- [ ] ISC-151: `git merge-base --is-ancestor <base_ref> HEAD` is verified at harvest, so a rewritten base cannot shrink the diff to nothing.
+- [ ] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`.
+- [ ] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
+- [ ] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing).
+- [ ] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
+- [ ] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
+- [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
+- [ ] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output.
+- [ ] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
+- [ ] ISC-160: A stale image is not silently reused after the Dockerfile changed.
+
+### Group N — Mount visibility (added 2026-07-27, found by the Docker-gated suite)
+
+- [x] ISC-161: No host path that pifleet intends to bind-mount is derived from `os.tmpdir()`.
+- [x] ISC-162: A bind mount is judged visible only by reading back a host-written sentinel, never by the mount succeeding or by `docker run` exiting 0.
+- [x] ISC-163: A failed visibility probe reports that the daemon cannot see the path and names the override, rather than surfacing the bare `cat: No such file` beneath it.
+- [x] ISC-164: `doctor` probes the runs root for mount visibility and exits nonzero when a worker's outbox would mount empty.
+- [ ] ISC-165: Anti: no `:ro` refusal test passes against a mount whose contents were never readable.
+
+### Group O — PR #1 review findings (added 2026-07-27)
+
+Fixed in this phase:
+
+- [x] ISC-166: The epoch fence post is recorded before any event that follows the ack, including when the ack and the event arrive in one stdout chunk.
+- [x] ISC-167: A deadline whose `abort` produces no terminal event still settles the task and kills the child; the worker never stays `busy` forever.
+- [x] ISC-168: `writeJsonAtomic` produces a parseable file under concurrent same-path writes and leaves no temp files behind.
+- [x] ISC-169: A truncated or wrong-shaped state file exits on the ladder with one line, never a stack trace — including from `down`.
+- [x] ISC-170: Every commander-diagnosed usage error exits 2; `--help`/`--version` exit 0; naming no command exits 2.
+- [x] ISC-171: A dead child's EPIPE, a `null` record, and a throwing event handler each surface as a diagnosed failure rather than killing the supervisor.
+- [x] ISC-173: `TailReader` detects replacement by identity, not size, and never returns a fragment of a record as a complete line.
+- [x] ISC-174: `MAX_LINE_UNITS` bounds every emitted line, not only the unterminated residue.
+- [x] ISC-175: A role or worker that is `read_only` with no explicit tools is rejected — the effective set is every builtin, `bash` included.
+- [x] ISC-176: `unknown` maps to `EXIT.PARTIAL`; only `reason === "worker_died"` maps to `EXIT.WORKER_DIED`.
+- [x] ISC-177: `wait` against a run id that names nothing exits 2, never 0.
+- [x] ISC-178: `CliError` satisfies the structural `ExitCoded` protocol.
+- [x] ISC-179: The verbgate policy path and ledger path are constants; a worker cannot supply its own policy or redirect its own audit trail.
+- [x] ISC-180: verbgate refuses every verb (exit 78) when it finds its policy file writable by the current uid.
+- [x] ISC-181: gcloud classification stops at the first recognized verb, so a read-keyword positional cannot outvote a mutating verb.
+- [x] ISC-182: No verbgate classification path is influenced by the working directory (globbing disabled).
+- [x] ISC-183: `gsutil` and `bq` are gated on the same rules as gcloud/kubectl/helm.
+- [x] ISC-184: Known global flags before a verb are parsed past; unknown flag shapes still fail closed.
+- [x] ISC-185: No ledger row can be forged by control characters in argv, at any argv size.
+- [ ] ISC-186: Registry writes are serialized, so concurrent registrations cannot lose a worker.
+- [x] ISC-187: `image verify`'s read-only-root check proves the tmpfs is writable as well as that `/` is not.
+
+Open — carried forward, not fixed here:
+
+- [ ] ISC-172: The verbgate ledger is collected outside the container, so a worker cannot truncate its own audit trail.
+- [ ] ISC-188: `render.ts` and `run/paths.ts` compute the run directory once, not twice (`outbox`, `skills`, `env`, briefing paths, and `PIFLEET_RUNS_DIR` honoured).
+- [ ] ISC-189: `up` refuses to run against an image that is absent or fails `verify`.
+- [ ] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
+- [ ] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
+- [ ] ISC-192: A ledger or state file written under an older schema version is read under a pinned policy rather than failing.
+- [ ] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
+
+### Group P — CI portability (added 2026-07-27, found the first time CI actually ran the probes)
+
+The container job had been red since it was added: it read `d.images[0].tag` from
+`image list --json`, which emits a bare array, so the TypeError killed the step
+before it could tag the image. Every Group C and Group J criterion had therefore
+been reported against a job that never executed a single probe. Fixing the
+extraction ran them for the first time and seven failed at once.
+
+- [x] ISC-194: The container CI job tags the built image from the real `image list --json` shape and fails loudly on an empty list.
+- [x] ISC-195: A host directory pifleet bind-mounts is accessible to the worker's uid, not left at `mkdtemp`'s 0700 or `mkdir`'s 0755.
+- [x] ISC-196: The scratch root itself is traversable, since a 0700 parent makes every 0777 child unreachable.
+- [x] ISC-197: `WORKER_UID` is pinned against the Dockerfile's `USER`, so the permission widening cannot drift onto the wrong account.
+- [x] ISC-198: A read-only mount is made traversable and readable without being made world-writable.
+- [ ] ISC-199: Anti: no assertion in the suite encodes a platform-specific spelling of a POSIX observation (`ps` printing `??` versus `?`).
+- [x] ISC-200: Anti: no CI step can fail in a way that leaves its job green, or pass in a way that never executed its probes.
+
+### Group Q — Round-2 review findings (added 2026-07-27)
+
+Mutation testing was the finding that mattered: five separate mutations of
+production code — each reverting a fix a test is *named* after — left the suite
+green. A regression test that cannot fail is worse than no test, because it
+retires the criterion.
+
+- [x] ISC-201: The epoch placeholder predicate is exported and tested directly; the test no longer re-implements the expression it guards.
+- [x] ISC-202: `assertNoAtPaths` is tested against argv that actually contains an `@`, and both call sites are pinned.
+- [x] ISC-203: The `willRetry` e2e waits for the retrying `agent_end` to be observed, rather than sleeping for less time than the settle path takes.
+- [x] ISC-204: `up`'s call to `makeWorkerAccessible` is pinned by an assertion on the run directory's mode, not only by unit tests of the helper.
+- [x] ISC-205: `TailReader` detects an in-place rewrite that regrows past the old offset — inode identity alone cannot see it, and the enabled test returned a record fragment.
+- [x] ISC-206: A plain append is never misread as a rewrite; the head fingerprint covers a fixed, already-consumed prefix.
+- [x] ISC-207: An oversized line does not discard the records completed before it in the same chunk.
+- [x] ISC-208: An oversized unterminated residue is dropped rather than re-thrown on every later push.
+- [x] ISC-209: The verbgate ledger fallback sanitizes `task_id` and `epoch`, so a worker cannot append a duplicate `decision` key that `JSON.parse` prefers.
+- [x] ISC-210: `gcloud auth print-access-token`, `print-identity-token` and `get-credentials` are refused despite matching the `print-*`/`get-*` read globs.
+- [x] ISC-211: Genuine gcloud reads (`list`, `describe`) still reach the real binary and record `allow_read`.
+- [x] ISC-212: No `void settle(...)` can turn a durable-write failure into an unhandled rejection that exits the supervisor.
+- [x] ISC-213: The CI anti-skip guard asserts an exact probe count and zero skips, instead of a case pattern that cannot match bun's output.
+- [ ] ISC-214: `RpcClient` stops dispatching the remainder of a chunk once `#fatal` has closed it.
+- [ ] ISC-215: The EPIPE write path sets `#closed`, so the error does not assert a state the object is not in.
+- [ ] ISC-216: An undiagnosed internal error is distinguishable by exit code from a usage error.
+- [ ] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
+- [ ] ISC-218: `writeJsonAtomic`'s directory-fsync failure cannot report a durable write as failed after the rename succeeded.
+- [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses.
+
+### Group R — Round-3 mutation review (added 2026-07-27)
+
+Round 3 mutation-tested the round-2 *fixes*. Three of six were genuinely covered
+(dispatch, jsonl, verbgate); three were not, and one fix introduced a new defect
+of the same class it repaired.
+
+- [x] ISC-220: The `@`-guard sits in the data path and returns its argv, so a disabled call site fails to compile rather than passing a source-text grep.
+- [x] ISC-221: Anti: no test asserts a production invariant by grepping the source text of the file that implements it.
+- [x] ISC-222: A `settle()` rejection is observably survivable — the supervisor is still alive and answering after every durable write in the settle path fails.
+- [x] ISC-223: The oversized-line drop resyncs to the next newline, so the continuation of the rejected record is never emitted as a complete line.
+- [x] ISC-224: A resync spanning several pushes still emits no fragment.
+- [x] ISC-225: An unreadable head fingerprint is treated as unknown, not as changed, so a transient read error cannot replay the whole file as new records.
+- [x] ISC-226: A failed head anchor is retried on later polls rather than silently disabling rewrite detection for the reader's lifetime.
+- [x] ISC-227: The `willRetry` e2e states plainly that its discrimination comes from `completion.test.ts`, not from itself — the double reports `isStreaming: true` for a retrying `agent_end`.
+- [ ] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
+- [ ] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
+
 ## Test Strategy
 
 | isc | type | check | threshold | tool |
@@ -333,10 +463,100 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 - **2026-07-27 — Phase order follows SRD §16 unchanged.** Phases 1–3 are load-bearing; Phase 3
   precedes any real-repo run because the kill ladder and budget ceilings must exist first.
 
+- **2026-07-27 — refined: epoch attribution moves from a wall-clock window to a stream offset.**
+  The SRD discards terminal events "outside an open epoch window", which is not a causal order —
+  a late `agent_end` for epoch N is byte-identical to N+1's. Pi's events and responses share one
+  ordered stdout stream, so a monotonic per-record `streamSeq` plus the `ackSeq` recorded at
+  dispatch gives a real happens-before relation. SRD erratum; see ISC-141.
+- **2026-07-27 — the fence is enforced at the worker, not only at the allocator.** "Sole epoch
+  allocator" is an assumption a detached supervisor plus a CLI relaunch can violate. The worker
+  side persists `last_accepted_epoch` and rejects stale dispatch; the run-dir lease keys on pid
+  plus process start-time because pid reuse would otherwise resurrect a dead supervisor. ISC-142..144.
+- **2026-07-27 — the harvester's independence was overstated.** Re-running the acceptance commands
+  executes an artifact the gradee authored: the command string resolves through `package.json`
+  scripts, `conftest.py`, `.git/hooks`, `Makefile` — all inside the mutable surface. Acceptance
+  now resolves from the base SHA and runs in a fresh clone outside the worktree, and a diff
+  touching the harness surface caps the verdict. This is the single largest correction to the
+  SRD's §8.2 adjudication story. ISC-148..151.
+- **2026-07-27 — gauges cannot prove quiescence.** `pendingMessageCount:0` sampled twice does not
+  mean zero in between, and `isStreaming:false` also describes the gap between a tool call and the
+  next turn. The stream-offset fence is the primary defence; monotonic-counter equality is the
+  secondary one. ISC-147.
+- **2026-07-27 — show your math on delegation.** Two engineers per phase rather than four: the
+  Phase 1 surface splits cleanly along a config/container seam and an RPC/lifecycle seam with one
+  shared contracts module, and a third writer would have to touch one of those two territories.
+- **2026-07-27 — SRD Q1 answered by measurement: oMLX batches, it does not serialize.**
+  Probed live on `:8000` with `Qwen3-Coder-30B-A3B-Instruct-4bit`: a single short request took
+  1.51s; four concurrent finished in 1.77s wall (3.40x), and the speedup plateaus near 4.1-4.3x
+  at N=8-12. So F40's premise — that N workers queue behind one inference server — is wrong as
+  stated. The honest caveat is that these were 80-token requests with negligible KV cache, and a
+  real agentic turn carries a far larger context, so the memory-bound ceiling will sit below the
+  compute-bound one measured here. `max_concurrent: 2` stays the default as a memory-safety
+  margin rather than a throughput necessity, and ISC-158 (16 workers, no starvation) is what
+  would justify raising it.
+- **2026-07-27 — refined: engineer briefs are sized per subsystem, not per phase.** Both Phase 1
+  engineers were truncated at a context ceiling (226k and 241k tokens), not finished — each stopped
+  on a statement of intent, and the harness reported it as completion. Engineer B's brief listed 24
+  files across seven subsystems. Remaining phases dispatch ~10-14 files per engineer, keep image
+  builds in the parent so build logs do not consume an engineer's budget, and treat integration and
+  e2e suites as their own dispatch unit because that is reliably what gets cut.
+- **2026-07-27 — scratch directories that get bind-mounted live under `$HOME`, never `os.tmpdir()`.**
+  Measured on this machine: Colima shares `$HOME` and shares neither `/tmp` nor
+  `/var/folders/...`. An unshared `-v` source does not error — the daemon mounts an empty
+  directory in its place. `image verify` therefore failed on a perfectly good image, and the
+  same mistake in the worker launch path would give every worker an empty `/workspace` and an
+  outbox the harvester never sees, with exit 0 throughout. Scratch allocation moves to
+  `container/mounts.ts` (`PIFLEET_SCRATCH_DIR`, default `~/.pifleet/scratch`), visibility is
+  proved by reading back a sentinel rather than by a successful mount, and `doctor` probes the
+  runs root so the failure is loud and early. The default runs root was already under `$HOME`
+  and was never affected; `PIFLEET_RUNS_DIR` pointing elsewhere was, which is what ISC-164 guards.
+
 ## Changelog
 
-*(Conjecture / refuted-by / learned / criterion-now entries land here as phases complete.)*
+
+- **conjectured:** the SRD's epoch-window rule was sufficient to attribute terminal events to epochs.
+  **refuted by:** a commitment-boundary review pointing out that events carry no correlation id, so a
+  late `agent_end` for epoch N and a real one for N+1 are byte-identical under a wall-clock window.
+  **learned:** the ordering signal was already available and unused — events and responses share one
+  stdout stream, so a per-record sequence number yields a genuine happens-before relation.
+  **criterion now:** ISC-141 requires the §7.5 interleaving to be decided when stream offset is the
+  only distinguishing signal.
+- **conjectured:** re-running the acceptance commands gave the harvester facts independent of the
+  worker being graded. **refuted by:** the observation that the command string resolves through
+  `package.json` scripts, `conftest.py`, `.git/hooks` and the Makefile, every one of which is inside
+  the worker's mutable surface — so "independently re-run the tests" grades the worker using the
+  worker's own harness. **learned:** independence is a property of *where and from which tree* the
+  command is resolved and executed, not of *who* runs it. **criterion now:** ISC-148..150 require
+  base-SHA resolution, a fresh clone outside the worktree, and a verdict cap when the diff touches
+  the harness surface.
 
 ## Verification
 
 *(Evidence per ISC, appended as each criterion passes.)*
+
+### Phase 1 close-out — 2026-07-27
+
+- ISC-1: `bun install --frozen-lockfile` → `rc=0`.
+- ISC-2: `bun run typecheck` (`tsc --noEmit`) → `rc=0`, zero diagnostics.
+- ISC-3: `bun test` → `220 pass, 38 skip, 1 todo, 0 fail` across 15 files.
+- ISC-4: `cmp Docs/SRD.md <source>` → `IDENTICAL`.
+- ISC-5: frontmatter parses; twelve section headers present.
+- ISC-6: `.github/workflows/ci.yml` carries named steps `Typecheck`, `Unit tests`,
+  `Integration tests`, `E2E tests`, plus a separate `container` job.
+- ISC-9: `CHANGELOG.md` has an entry for Phase 0 (0.1.0) and Phase 1 (0.2.0).
+- ISC-10: `git log --format=%B | rg -ci "claude|co-authored-by|generated with|LLM|AI-assisted"`
+  → `0 matches` across all commits.
+- ISC-12: `commander ^14.0.2`, `zod ^4.1.13`, `yaml ^2.8.1`; `bun.lock` committed.
+- ISC-13: `tsconfig.json` sets `"strict": true` and `"noUncheckedIndexedAccess": true`;
+  ISC-2's clean typecheck is the proof it holds.
+- ISC-14: `--help` lists all 19 SRD §10 commands: abort artifacts attach config
+  daemon dispatch doctor down exec harvest image logs render report status steer
+  transcript up wait.
+- ISC-15/16/20/21: unit, integration and e2e directories each carry files and run
+  independently; the unit suite completes with no Docker daemon and no network.
+- ISC-161..164, 166..187: covered by `test/unit/review-regressions.test.ts` (15
+  tests, each of which fails against the pre-fix code) and the Docker-gated
+  `test/integration/verbgate.test.ts` (18 tests).
+- ISC-194..198: `PIFLEET_DOCKER=1 bun test test/integration/{image,verbgate}.test.ts`
+  → `38 pass, 0 fail` on macOS; the Linux CI `container` job is the probe that
+  matters, and it executed its assertions for the first time this session.

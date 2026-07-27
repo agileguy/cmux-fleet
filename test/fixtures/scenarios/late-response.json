@@ -1,0 +1,11 @@
+{
+  "scenario": "late-response",
+  "_comment": "get_session_stats answers 300ms late - after a short client timeout has already fired. The straggler must surface as a LATE stray, not be mistaken for hostile input.",
+  "steps": [
+    {
+      "on": "get_session_stats",
+      "respond_delay_ms": 300,
+      "respond": { "tokens": { "input": 11, "output": 7 }, "cost": 0 }
+    }
+  ]
+}

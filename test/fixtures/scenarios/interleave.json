@@ -1,0 +1,19 @@
+{
+  "scenario": "interleave",
+  "_comment": "SRD 7.5: abort issued, but the turn completes naturally before the abort lands. The abort step emits nothing and cancels nothing; a straggler duplicate terminal event follows later. The second prompt (T-005) emits nothing at all - it must never be reported complete off the back of epoch N's events.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "delay_ms": 150 },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] },
+        { "delay_ms": 400 },
+        { "type": "agent_end", "messages": [], "willRetry": false }
+      ]
+    },
+    { "on": "abort", "cancel_active": false, "emit": [] },
+    { "on": "prompt", "emit": [] }
+  ]
+}

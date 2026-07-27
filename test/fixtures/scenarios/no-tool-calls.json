@@ -1,0 +1,20 @@
+{
+  "scenario": "no-tool-calls",
+  "_comment": "Three turns, zero tool calls. Settles cleanly here; classifying it failed:no_tool_calls is the harvester's job (acceptance #61, Phase 2).",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "type": "turn_end" },
+        { "type": "turn_start" },
+        { "type": "turn_end" },
+        { "type": "turn_start" },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}

@@ -305,7 +305,10 @@ export interface RpcEvent {
 export type RpcMessage = RpcResponse | RpcEvent;
 
 export function isRpcResponse(m: RpcMessage): m is RpcResponse {
-  return (m as RpcResponse).type === "response";
+  // Defensive against a null/scalar record: the caller is a stream reader and
+  // a dereference here escapes as an unhandled rejection rather than a
+  // protocol error. The type says this cannot happen; the wire disagrees.
+  return typeof m === "object" && m !== null && (m as RpcResponse).type === "response";
 }
 
 /** `agent_end` carries the retry discriminator that makes completion detectable. */
@@ -337,6 +340,31 @@ export const EXIT = {
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
+
+/**
+ * Any error carrying a numeric `exitCode` is a *diagnosed* failure: the CLI
+ * prints its message and exits with that code, rather than letting a stack
+ * trace reach the user.
+ *
+ * This is a structural protocol rather than a base class on purpose. A missing
+ * config file threw a `ConfigError` the entry point's catch did not recognise,
+ * so a one-character typo in a path produced a TypeScript stack trace and exit
+ * 1 instead of a one-line message and exit 2. Any module can opt in without
+ * importing the CLI, and a module that forgets is the only thing that regresses.
+ */
+export interface ExitCoded {
+  readonly exitCode: ExitCode;
+  readonly message: string;
+}
+
+export function isExitCoded(e: unknown): e is ExitCoded {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    typeof (e as ExitCoded).exitCode === "number" &&
+    typeof (e as ExitCoded).message === "string"
+  );
+}
 
 /** Severity order for `wait --all`, which can legitimately trip several at once. */
 const EXIT_SEVERITY: readonly ExitCode[] = [

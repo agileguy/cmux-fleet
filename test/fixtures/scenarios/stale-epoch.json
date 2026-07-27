@@ -1,0 +1,14 @@
+{
+  "scenario": "stale-epoch",
+  "_comment": "Exercises the WORKER-side epoch fence: fake-pi itself rejects a prompt whose epoch is at or below its high-water-mark, regardless of what any allocator believes. The test speaks raw RPC and replays an epoch.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}
