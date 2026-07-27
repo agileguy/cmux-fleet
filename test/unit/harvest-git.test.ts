@@ -307,24 +307,29 @@ describe("runGit's environment is a literal, never process.env (finding 2)", () 
   });
 
   /**
-   * `toEqual` above already rejects extra keys, but it rejects them against a
-   * list written by hand — so it can only catch what that list anticipates.
-   * A canary planted in `process.env` at run time catches the spread by its
-   * mechanism instead of by its contents, and names the leak in the failure.
+   * `toEqual` above rejects extra keys against a list written by hand, so it
+   * catches only what that list anticipates. This one checks the MECHANISM: no
+   * entry may carry a value passed through from `process.env`.
+   *
+   * `PATH` is the single legitimate passthrough and is excluded by name. Note
+   * that a run-time canary (planting a variable in `process.env` inside the
+   * test) does NOT work here and was tried: `HERMETIC_GIT_ENV` is a
+   * module-level const, so a spread evaluates at import — before any test body
+   * runs — and the canary is invisible to it. Comparing values catches the
+   * spread whenever it happened, and catches "restore the real HOME" too.
    */
-  test("nothing from process.env reaches the subprocess, canary included", async () => {
-    const canary = "PIFLEET_ENV_CANARY_FINDING_2";
-    process.env[canary] = "leaked";
-    try {
-      const env = await captureSpawnEnv();
-      expect(Object.keys(env)).not.toContain(canary);
-      expect(Object.values(env)).not.toContain("leaked");
-      // The harvester's real HOME and any credential paths are the actual
-      // prize: GOOGLE_APPLICATION_CREDENTIALS, CLOUDSDK_*, KUBECONFIG.
-      expect(env["HOME"]).toBe("/dev/null");
-      expect(env["HOME"]).not.toBe(process.env["HOME"]);
-    } finally {
-      delete process.env[canary];
+  test("no value is passed through from process.env, PATH excepted", async () => {
+    const env = await captureSpawnEnv();
+    const passthrough = Object.entries(env).filter(
+      ([k, v]) => k !== "PATH" && process.env[k] === v,
+    );
+    expect(passthrough).toEqual([]);
+    // The harvester's real HOME is the prize alongside
+    // GOOGLE_APPLICATION_CREDENTIALS, CLOUDSDK_* and KUBECONFIG.
+    expect(env["HOME"]).toBe("/dev/null");
+    expect(env["HOME"]).not.toBe(process.env["HOME"]);
+    for (const secret of ["GOOGLE_APPLICATION_CREDENTIALS", "KUBECONFIG", "AWS_SECRET_ACCESS_KEY"]) {
+      expect(Object.keys(env)).not.toContain(secret);
     }
   });
 });
