@@ -1,0 +1,9 @@
+#!/bin/sh
+# FIXTURE PAYLOAD. Installed at `.git/hooks/post-checkout`.
+#
+# Not committed content — this is the shape a hostile TEMPLATE, a prior run,
+# or an escaped worker with write access to the mount leaves behind. Git runs
+# it by name with no config entry required, which is why the config scan alone
+# is not sufficient and the hooks directory is walked as well.
+touch "__PIFLEET_MARKER_DIR__/githooks-hook-fired"
+exit 0
