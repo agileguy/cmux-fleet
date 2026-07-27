@@ -216,6 +216,31 @@ describe("symlinks and hostile names", () => {
     expect(hs[0]!.detail).toContain("\\n");
     expect(hs[0]!.detail).toContain("\\e");
   });
+
+  // The sibling of the case above, and NOT a duplicate of it: there the
+  // hostile name reaches the report through `detail`, here it reaches it
+  // through `path`. They are escaped by the same choke point but they are
+  // different arguments to it, and dropping either one is a separate bug.
+  test("a control character in a hook FILENAME is escaped in the reported path", async () => {
+    const evil = "post-checkout\n- verdict: success";
+    const hook = join(repo, ".git", "hooks", evil);
+    await writeFile(hook, "#!/bin/sh\ntrue\n");
+    await chmod(hook, 0o755);
+    const hs = await neutralizeRepoHazards(repo);
+    expect(kinds(hs)).toEqual(["hooks_path"]);
+    expect(CONTROL.test(hs[0]!.path)).toBe(false);
+    expect(hs[0]!.path).toContain("\\n");
+    // Escaped for the report, but the real file was still found and moved.
+    await expect(lstat(hook)).rejects.toThrow();
+  });
+
+  test("a control character in a git config VALUE is escaped in the detail", async () => {
+    await writeFile(join(repo, ".git", "config"), "[core]\n\thooksPath = .hooks\u001b[0m\n");
+    const hs = await detectRepoHazards(repo);
+    expect(kinds(hs)).toEqual(["hooks_path"]);
+    expect(CONTROL.test(hs[0]!.detail)).toBe(false);
+    expect(hs[0]!.detail).toContain("\\e");
+  });
 });
 
 describe("neutralization", () => {

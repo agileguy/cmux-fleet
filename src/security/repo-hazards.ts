@@ -147,10 +147,15 @@ export async function scanRepoHazards(
   const out: RepoHazard[] = [];
 
   /**
-   * The ONLY way a hazard enters the result — a single choke point, so a
-   * later `push` cannot forget the schema or leak an unescaped name. `path`
-   * and `detail` are already escaped by the callers below; the parse pins the
-   * shape to the shared seam so this module cannot drift from `contracts.ts`.
+   * The ONLY way a hazard enters the result — and the ONLY place text is
+   * escaped for the report.
+   *
+   * Callers pass RAW filesystem names and raw detail text on purpose. An
+   * earlier version escaped names at each discovery site as well as here, and
+   * the redundancy was not free: with two layers, neither one was pinnable —
+   * deleting the escaping *here* left every test green, because the callers
+   * had already sanitized. Defence that cannot be observed failing is
+   * indistinguishable from defence that is not there. One choke point, tested.
    */
   const record = (kind: RepoHazard["kind"], relPath: string, neutralized: boolean, detail: string): void => {
     out.push(
@@ -275,7 +280,8 @@ export async function scanRepoHazards(
     // The whole directory is quarantined as ONE unit — per-entry renames
     // would leave the directory itself discoverable and turn one hazard into
     // a race against however many files the repo committed.
-    const shown = names.slice(0, DETAIL_NAME_LIMIT).map((n) => safeForReport(n, 64));
+    // Length-clipped only; ESCAPING belongs to `record` alone (see above).
+    const shown = names.slice(0, DETAIL_NAME_LIMIT).map((n) => n.slice(0, 64));
     const more = names.length > shown.length ? ` (+${names.length - shown.length} more)` : "";
     const d = await defuse(abs);
     record(dir.kind, dir.rel, d.neutralized, `${dir.why}; entries: ${shown.join(", ")}${more}; ${d.note}`);
@@ -383,7 +389,8 @@ async function scanGitConfig(worktreeRoot: string, opts: RepoHazardScanOptions, 
     const key = kv[1]!.toLowerCase();
     for (const h of CONFIG_HAZARDS) {
       if (h.section.test(section) && h.key.test(key)) {
-        offenders.push({ index: i, kind: h.kind, why: h.why, shown: `${section}.${key} = ${safeForReport(kv[2]!, 128)}` });
+        // Clipped, not escaped — `record` is the single escaper.
+        offenders.push({ index: i, kind: h.kind, why: h.why, shown: `${section}.${key} = ${kv[2]!.slice(0, 128)}` });
         break;
       }
     }
