@@ -1,0 +1,159 @@
+#!/bin/sh
+# verbgate — mutating cloud verbs are gated (SRD §5.10).
+#
+# Installed on PATH as `gcloud`, `kubectl`, and `helm`; the real binaries live
+# at /usr/local/libexec/<name>.real. Read verbs exec the real binary
+# unconditionally. Mutating verbs require a normalized VERB-PREFIX match
+# against the task's cloud_allow[] — matching is on verb tokens with flags
+# excluded entirely, never a regex over the whole command line, because a
+# substring match is trivially defeated by flag reordering. Refusal exits 77.
+# Every invocation, permitted or refused, is appended to the ledger.
+#
+# This stops the CASUAL destructive action — the confused agent, the injected
+# "delete the failing deployment". It does not stop a determined one: bash can
+# reach the .real path directly. Credential scoping (impersonation) is the
+# stronger control; this is defence-in-depth on top, not a substitute (§5.10).
+#
+# Environment:
+#   PIFLEET_CLOUD_ALLOW_FILE  newline-delimited allow entries, e.g.
+#                             "kubectl rollout restart"; "*" allows everything.
+#                             Rewritten per task by the supervisor — the grant
+#                             is task-scoped and expires with the envelope.
+#   PIFLEET_VERBGATE_LEDGER   JSONL ledger path (default /outbox/ledger/verbgate.jsonl)
+#   PIFLEET_TASK_ID / PIFLEET_EPOCH  provenance for ledger rows
+set -u
+
+tool=$(basename "$0")
+real="/usr/local/libexec/${tool}.real"
+allow_file="${PIFLEET_CLOUD_ALLOW_FILE:-/outbox/cloud-allow}"
+ledger="${PIFLEET_VERBGATE_LEDGER:-/outbox/ledger/verbgate.jsonl}"
+task="${PIFLEET_TASK_ID:-<none>}"
+
+# --- collect leading non-flag tokens -----------------------------------------
+# The verb words come before the first flag in every sane invocation of all
+# three tools. Everything from the first `-token` on is flags-and-values and
+# is excluded from classification, which is exactly what makes reordering
+# attacks pointless.
+verbs=""
+count=0
+for arg in "$@"; do
+  case "$arg" in
+    -*) break ;;
+    *)
+      verbs="${verbs} ${arg}"
+      count=$((count + 1))
+      [ "$count" -ge 6 ] && break
+      ;;
+  esac
+done
+verbs=${verbs# }
+
+# $1=decision  $2=display-verb  rest=original argv. Best-effort: a full outbox
+# must not turn a permitted read into a failure, but refusals stay refusals.
+log_ledger() {
+  decision=$1
+  dverb=$2
+  shift 2
+  mkdir -p "$(dirname "${ledger}")" 2>/dev/null || true
+  jq -cn \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg tool "${tool}" \
+    --arg verb "${dverb}" \
+    --arg decision "${decision}" \
+    --arg task_id "${task}" \
+    --arg epoch "${PIFLEET_EPOCH:-0}" \
+    '{ts:$ts,tool:$tool,verb:$verb,decision:$decision,task_id:$task_id,epoch:($epoch|tonumber? // 0),argv:$ARGS.positional}' \
+    --args "$@" >> "${ledger}" 2>/dev/null || true
+}
+
+# --- classify: read verbs pass through, always (SRD §5.10 flow chart) --------
+first=${verbs%% *}
+is_read=0
+case "${tool}" in
+  kubectl)
+    case "${first}" in
+      get|describe|logs|top|explain|api-resources|version|diff|help) is_read=1 ;;
+    esac
+    ;;
+  helm)
+    case "${first}" in
+      list|get|status|history|version|template|lint|help) is_read=1 ;;
+    esac
+    ;;
+  gcloud)
+    # gcloud's verb terminates the group chain (gcloud compute instances LIST),
+    # so any read verb among the leading tokens means the action is a read —
+    # positional args only ever follow the verb.
+    for t in ${verbs}; do
+      case "${t}" in
+        list|describe|version|info|help|get-*|print-*) is_read=1 ;;
+      esac
+    done
+    ;;
+esac
+
+# Bare `--help` / `--version` with no verb tokens is harmless. Anything else
+# that hides its verb behind flags (`kubectl --kubeconfig x delete …`) cannot
+# be classified and FAILS CLOSED into the mutating path.
+if [ -z "${verbs}" ]; then
+  only_help=1
+  for arg in "$@"; do
+    case "$arg" in
+      --help|-h|--version) ;;
+      *) only_help=0 ;;
+    esac
+  done
+  if [ $# -eq 0 ] || [ "${only_help}" = "1" ]; then
+    is_read=1
+  fi
+fi
+
+if [ "${is_read}" = "1" ]; then
+  log_ledger allow_read "${verbs:-${first:-"(help)"}}" "$@"
+  exec "${real}" "$@"
+fi
+
+# --- mutating: token-prefix match against cloud_allow[] ----------------------
+allowed=0
+if [ -r "${allow_file}" ]; then
+  while IFS= read -r line || [ -n "${line}" ]; do
+    # trim
+    line=$(printf '%s' "${line}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -z "${line}" ] && continue
+    if [ "${line}" = "*" ]; then
+      allowed=1
+      break
+    fi
+    entry_tool=${line%% *}
+    [ "${entry_tool}" = "${tool}" ] || continue
+    entry=${line#* }
+    if [ "${entry}" = "${line}" ]; then
+      # Entry was the bare tool name: every verb of this tool is allowed.
+      allowed=1
+      break
+    fi
+    # Token-wise prefix: "kubectl rollout restart" matches verbs beginning
+    # ["rollout","restart"], exactly at a token boundary.
+    if [ "${verbs}" = "${entry}" ]; then
+      allowed=1
+      break
+    fi
+    case "${verbs}" in
+      "${entry} "*)
+        allowed=1
+        break
+        ;;
+    esac
+  done < "${allow_file}"
+fi
+
+display=${verbs:-"(flags-before-verb)"}
+if [ "${allowed}" = "1" ]; then
+  log_ledger allow_listed "${display}" "$@"
+  exec "${real}" "$@"
+fi
+
+log_ledger refuse "${display}" "$@"
+printf "verbgate: '%s %s' not authorized for task %s; add it to cloud_allow[] to permit\n" \
+  "${tool}" "${display}" "${task}" >&2
+exit 77
