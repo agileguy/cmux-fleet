@@ -43,9 +43,10 @@ export interface GitResult {
  * tree can assign a diff driver per path, and `[diff "name"] command = …` in
  * the repo's own config then names a program git EXECUTES — on the host, as
  * the harvester, outside the container the worker is confined to. Textconv
- * and `core.fsmonitor` are the same primitive by other names. Every one of
- * them is disabled here rather than in the caller, because the caller that
- * forgets is the one that runs `diff`.
+ * and `core.fsmonitor` are the same primitive by other names, and each needs
+ * its own control — see `EXT_DIFF_COMMANDS` below for why disabling one of
+ * them is what ACTIVATES another. They are disabled here rather than in the
+ * caller, because the caller that forgets is the one that runs `diff`.
  *
  * `-c` beats the environment: `GIT_CONFIG_*=/dev/null` neutralizes the global
  * and system files, but the REPOSITORY config (`.git/config`) is not
@@ -64,17 +65,37 @@ const GIT_HARDENING: readonly string[] = [
 ];
 
 /**
- * `--no-ext-diff` is the control that actually disables per-path diff drivers,
- * and it is a DIFF-FAMILY option, not a top-level one: passing it to `git`
- * itself makes every invocation fail with "unknown option". So it is appended
- * only for the commands that accept it.
+ * `--no-ext-diff` and `--no-textconv` disable the two per-path diff drivers a
+ * repository can point at a program. BOTH are required, and the reason is the
+ * least obvious thing in this file:
  *
- * Found by running the reproduction rather than by reading the man page — the
- * first version of this hardening put it in the global list, where it broke
- * `init`, `rev-parse` and `merge-base` while the unit tests, which only
+ * `.gitattributes` assigns `diff=name`; `[diff "name"]` may then define EITHER
+ * `command` (an external diff) OR `textconv` (a filter git runs to render a
+ * blob as text). When both are defined, `command` wins and `textconv` is never
+ * reached. So adding `--no-ext-diff` alone does not remove the execution — it
+ * removes the winner and git FALLS BACK to running textconv. The first version
+ * of this hardening did exactly that, turning a dormant driver into a live one:
+ *
+ *   unhardened          ext-diff ran,  textconv did not
+ *   --no-ext-diff only  ext-diff none, TEXTCONV RAN   <- worse than before
+ *   both flags          neither ran
+ *
+ * The integration test named "executes nothing" passed throughout, because its
+ * fixture only defined `command`. A test pins the driver it was written for,
+ * not the invariant in its title.
+ *
+ * Both are DIFF-FAMILY options, not top-level ones: passing either to `git`
+ * itself fails every invocation with "unknown option" (verified: `rev-parse`,
+ * `merge-base` and `init` all exit 129). So they are appended only for the
+ * commands that accept them. The first version of `--no-ext-diff` put it in
+ * the global list, where it broke those three while the unit tests, which only
  * exercise the output parsers, stayed green.
+ *
+ * Both findings came from running the reproduction, not from reading the man
+ * page.
  */
 const EXT_DIFF_COMMANDS = new Set(["diff", "log", "show", "diff-tree", "diff-index", "whatchanged"]);
+const DIFF_DRIVER_FLAGS: readonly string[] = ["--no-ext-diff", "--no-textconv"];
 
 /**
  * Spawn git in `cwd`. Argv array in, decoded streams out — no shell, ever.
@@ -87,10 +108,9 @@ const EXT_DIFF_COMMANDS = new Set(["diff", "log", "show", "diff-tree", "diff-ind
  */
 export async function runGit(cwd: string, args: string[]): Promise<GitResult> {
   const sub = args[0] ?? "";
-  const argv =
-    EXT_DIFF_COMMANDS.has(sub) && !args.includes("--no-ext-diff")
-      ? [sub, "--no-ext-diff", ...args.slice(1)]
-      : args;
+  const argv = EXT_DIFF_COMMANDS.has(sub)
+    ? [sub, ...DIFF_DRIVER_FLAGS.filter((f) => !args.includes(f)), ...args.slice(1)]
+    : args;
   const p = Bun.spawn(["git", "-C", cwd, ...GIT_HARDENING, ...argv], {
     stdout: "pipe",
     stderr: "pipe",
