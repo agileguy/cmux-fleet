@@ -46,6 +46,7 @@ import {
   type HarnessSurface,
 } from "../contracts.ts";
 import { Deadline, Stopwatch, isoNow } from "../util/clock.ts";
+import { HERMETIC_GIT_ENV, hardenedGitArgv } from "./git.ts";
 
 // ---------------------------------------------------------------------------
 // Harness surface (ISC-150)
@@ -268,9 +269,9 @@ export async function resolveFromTree(
 ): Promise<ResolvedCommand[]> {
   requireSha40(baseSha, "resolveFromTree base");
   const r = await execBounded(
-    ["git", "-C", resolve(repo), "show", `${baseSha}:${path}`],
+    hardenedGitArgv(resolve(repo), ["show", `${baseSha}:${path}`]),
     resolve(repo),
-    buildEnv(env, resolve(repo)),
+    gitEnv(env),
     GIT_TIMEOUT_MS,
   );
   if (r.timedOut || r.exit !== 0) {
@@ -388,9 +389,14 @@ const GIT_TIMEOUT_MS = 120_000;
 const EXCERPT_MAX = 4_096;
 
 /**
- * Environment built from a literal. `HOME` points into scratch so git cannot
- * read `~/.gitconfig`, and the two `GIT_CONFIG_*` pins close the remaining
- * config doors. Nothing here came from this process's environment.
+ * Environment for the ACCEPTANCE COMMANDS — the graded test suites, not git.
+ *
+ * Built from a literal; nothing here came from this process's environment.
+ * `HOME` points into scratch because a real test suite legitimately writes
+ * there (caches, tool state), and it is outside the worker's worktree.
+ *
+ * This is deliberately NOT the environment the git plumbing runs under — see
+ * `gitEnv` for why the two must not be the same object.
  */
 function buildEnv(
   extra: Readonly<Record<string, string>> | undefined,
@@ -407,6 +413,32 @@ function buildEnv(
     GIT_TERMINAL_PROMPT: "0",
     ...extra,
   };
+}
+
+/**
+ * Environment for this module's git plumbing (`show`, `clone`, `checkout`),
+ * shared verbatim with `harvest/git.ts` rather than assembled again here.
+ *
+ * These three spawns used to run under `buildEnv`, which differs from the
+ * hermetic git environment in one way that matters: `resolveFromTree` passed
+ * `HOME: resolve(repo)` — HOME pointed INTO the tree the graded worker writes
+ * to. `GIT_CONFIG_GLOBAL=/dev/null` blocks `~/.gitconfig`, but the global
+ * ATTRIBUTES file, `$HOME/.config/git/attributes`, has no `GIT_CONFIG_*`
+ * equivalent. Verified against git 2.50.1: with HOME pointed at a repo, a
+ * committed `.config/git/attributes` naming `diff=evil` IS honoured and the
+ * repo-config `[diff "evil"] textconv` it names DOES execute.
+ *
+ * Today's `git show <sha>:<path>` does not itself request textconv, so the
+ * chain stopped one link short of running anything — the probe fires under
+ * `cat-file --textconv` and not under `show`. That is not a reason to leave it:
+ * the difference between "inert" and "executes" was a flag on an argv this
+ * module builds, and the whole history of this hardening is argv changing while
+ * the hardening stayed behind. `core.attributesFile=/dev/null` in the shared
+ * flag list closes it whichever subcommand is used (re-verified: with the
+ * hardening applied, the forced-textconv probe no longer runs the driver).
+ */
+function gitEnv(extra: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  return { ...HERMETIC_GIT_ENV, ...extra };
 }
 
 /**
@@ -469,9 +501,9 @@ export async function runAcceptance(spec: AcceptanceSpec): Promise<AcceptanceRes
   // being graded. A local clone transfers committed objects only — no dirty
   // files, no hooks, no caches — which is the entire point.
   const clone = await execBounded(
-    ["git", "clone", "--quiet", "--no-checkout", repoAbs, cloneDir],
+    hardenedGitArgv(scratchAbs, ["clone", "--quiet", "--no-checkout", repoAbs, cloneDir]),
     scratchAbs,
-    env,
+    gitEnv(spec.env),
     spec.deadline.boundedBy(GIT_TIMEOUT_MS),
   );
   if (clone.timedOut || clone.exit !== 0) {
@@ -481,9 +513,9 @@ export async function runAcceptance(spec: AcceptanceSpec): Promise<AcceptanceRes
     return { context, runs: allNotRun(spec.commands, why) };
   }
   const checkout = await execBounded(
-    ["git", "-C", cloneDir, "checkout", "--quiet", "--detach", spec.head_sha],
+    hardenedGitArgv(cloneDir, ["checkout", "--quiet", "--detach", spec.head_sha]),
     cloneDir,
-    env,
+    gitEnv(spec.env),
     spec.deadline.boundedBy(GIT_TIMEOUT_MS),
   );
   if (checkout.timedOut || checkout.exit !== 0) {

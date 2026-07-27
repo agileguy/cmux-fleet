@@ -10,12 +10,15 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { MAX_ITEMS } from "../../src/contracts.ts";
 import {
   MAX_DIFF_BYTES,
   deriveGitFacts,
+  hardenedGitArgv,
   mergeLineCounts,
   parseNameStatusZ,
   parseNumstatZ,
+  runGit,
   type GitResult,
 } from "../../src/harvest/git.ts";
 
@@ -191,5 +194,185 @@ describe("deriveGitFacts — the branches only a broken git reaches", () => {
     );
     expect(facts.diffText).toBeNull();
     expect(facts.reasons.join(" ")).toContain("withheld");
+  });
+
+  /**
+   * Review finding 3. `commits` was truncated with a recorded reason from the
+   * start; `files_changed` went straight into `.max(MAX_ITEMS)`, so the 1001st
+   * changed file made `DerivedFactsSchema.parse` throw out of a module whose
+   * contract is "return {ok, reasons}, never throw". A worker touching 1001
+   * files is an ordinary large refactor, not an attack — measured before the
+   * fix: N=1000 returned ok, N=1001 threw a ZodError.
+   */
+  function nameStatusFor(n: number): string {
+    const fields: string[] = [];
+    for (let i = 0; i < n; i++) fields.push("M", `src/f${i}.ts`);
+    return `${fields.join("\0")}\0`;
+  }
+
+  async function factsForFileCount(n: number) {
+    return deriveGitFacts(
+      "/nowhere",
+      sha,
+      fakeGit({
+        "rev-parse": { code: 0, stdout: `${sha}\n`, stderr: "" },
+        "merge-base": { code: 0, stdout: "", stderr: "" },
+        diff: { code: 0, stdout: nameStatusFor(n), stderr: "" },
+      }),
+    );
+  }
+
+  test(`exactly MAX_ITEMS changed files is reported whole, with no truncation reason`, async () => {
+    const facts = await factsForFileCount(MAX_ITEMS);
+    expect(facts.ok).toBe(true);
+    expect(facts.facts.files_changed.length).toBe(MAX_ITEMS);
+    expect(facts.reasons.join(" ")).not.toContain("file list truncated");
+  });
+
+  // Would fail (by THROWING, not by asserting) against the pre-fix module.
+  test("one file past MAX_ITEMS truncates with a reason instead of throwing", async () => {
+    const facts = await factsForFileCount(MAX_ITEMS + 1);
+    expect(facts.ok).toBe(true);
+    expect(facts.facts.files_changed.length).toBe(MAX_ITEMS);
+    expect(facts.reasons.join(" ")).toContain(`file list truncated from ${MAX_ITEMS + 1}`);
+  });
+
+  /**
+   * The count must be guarded BEFORE the schema sees the array, not by
+   * catching the ZodError after. Zod validates every element before enforcing
+   * the array's `.max()`, so a long array reaches element validation first:
+   * measured at N=100000, parsing cost 77 ms and 20 MB of heap for valid
+   * elements and 511 ms / 1122 MB for invalid ones. Guarding the count means
+   * that array is never parsed at all — which is why this stays fast.
+   */
+  test("a 100k-file diff truncates cheaply rather than parsing 100k elements", async () => {
+    const t0 = performance.now();
+    const facts = await factsForFileCount(100_000);
+    const elapsed = performance.now() - t0;
+    expect(facts.ok).toBe(true);
+    expect(facts.facts.files_changed.length).toBe(MAX_ITEMS);
+    expect(facts.reasons.join(" ")).toContain("file list truncated from 100000");
+    // Generous by 10x against the measured pre-fix 77 ms parse; this fails
+    // loudly if the guard ever moves back to after the schema.
+    expect(elapsed).toBeLessThan(2_000);
+  });
+});
+
+/**
+ * Review finding 2 — the environment scrub had ZERO coverage.
+ *
+ * Mutation-confirmed before this suite existed: replacing the literal in
+ * `git.ts` with a `...process.env` spread left the whole suite green, as did
+ * pointing `GIT_CONFIG_GLOBAL` at the operator's real `~/.gitconfig` and
+ * restoring the real `HOME`. The docstring said the spread had already been a
+ * bug once; a docstring is not a control.
+ *
+ * The expected environment below is written out LONGHAND on purpose. Importing
+ * `HERMETIC_GIT_ENV` and comparing it to itself would agree with any mutation
+ * applied to it, which is precisely the failure mode being fixed.
+ */
+describe("runGit's environment is a literal, never process.env (finding 2)", () => {
+  /** Capture the options object `runGit` hands to Bun.spawn. */
+  async function captureSpawnEnv(): Promise<Record<string, string>> {
+    const real = Bun.spawn;
+    let captured: Record<string, string> | undefined;
+    try {
+      Bun.spawn = ((...args: unknown[]) => {
+        const opts = args[1] as { env?: Record<string, string> } | undefined;
+        captured = opts?.env;
+        return (real as unknown as (...a: unknown[]) => unknown)(...args);
+      }) as typeof Bun.spawn;
+      await runGit(process.cwd(), ["--version"]);
+    } finally {
+      Bun.spawn = real;
+    }
+    if (captured === undefined) throw new Error("Bun.spawn was never called with an env");
+    return captured;
+  }
+
+  test("the spawned environment equals the intended key set and values exactly", async () => {
+    const env = await captureSpawnEnv();
+    expect(env).toEqual({
+      PATH: process.env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin",
+      HOME: "/dev/null",
+      LC_ALL: "C",
+      TERM: "dumb",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_ATTR_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_ASKPASS: "",
+      GIT_EXTERNAL_DIFF: "",
+    });
+  });
+
+  /**
+   * `toEqual` above rejects extra keys against a list written by hand, so it
+   * catches only what that list anticipates. This one checks the MECHANISM: no
+   * entry may carry a value passed through from `process.env`.
+   *
+   * `PATH` is the single legitimate passthrough and is excluded by name. Note
+   * that a run-time canary (planting a variable in `process.env` inside the
+   * test) does NOT work here and was tried: `HERMETIC_GIT_ENV` is a
+   * module-level const, so a spread evaluates at import — before any test body
+   * runs — and the canary is invisible to it. Comparing values catches the
+   * spread whenever it happened, and catches "restore the real HOME" too.
+   */
+  test("no value is passed through from process.env, PATH excepted", async () => {
+    const env = await captureSpawnEnv();
+    const passthrough = Object.entries(env).filter(
+      ([k, v]) => k !== "PATH" && process.env[k] === v,
+    );
+    expect(passthrough).toEqual([]);
+    // The harvester's real HOME is the prize alongside
+    // GOOGLE_APPLICATION_CREDENTIALS, CLOUDSDK_* and KUBECONFIG.
+    expect(env["HOME"]).toBe("/dev/null");
+    expect(env["HOME"]).not.toBe(process.env["HOME"]);
+    for (const secret of ["GOOGLE_APPLICATION_CREDENTIALS", "KUBECONFIG", "AWS_SECRET_ACCESS_KEY"]) {
+      expect(Object.keys(env)).not.toContain(secret);
+    }
+  });
+});
+
+/**
+ * The hardening flag list is shared with `harvest/acceptance.ts`, which spawns
+ * git at three more sites. Nothing pinned the shape of that list, and the two
+ * regressions this file's header describes were both about WHERE a flag went
+ * rather than whether it existed.
+ */
+describe("hardenedGitArgv (finding 1)", () => {
+  test("every spawn carries the config pins that stop the repo choosing programs", () => {
+    const argv = hardenedGitArgv("/repo", ["show", "abc:file"]);
+    expect(argv.slice(0, 3)).toEqual(["git", "-C", "/repo"]);
+    const joined = argv.join(" ");
+    for (const pin of [
+      "core.fsmonitor=",
+      "core.hooksPath=/dev/null",
+      "core.attributesFile=/dev/null",
+      "diff.external=",
+      "protocol.ext.allow=never",
+      "--no-pager",
+    ]) {
+      expect(joined).toContain(pin);
+    }
+  });
+
+  // The exact regression the module header records: these two are diff-family
+  // options, and putting them in the global list breaks init/rev-parse/merge-base
+  // with "unknown option" while the parser unit tests stay green.
+  test("driver flags attach to diff-family subcommands only", () => {
+    expect(hardenedGitArgv("/r", ["diff", "a...b"])).toContain("--no-ext-diff");
+    expect(hardenedGitArgv("/r", ["diff", "a...b"])).toContain("--no-textconv");
+    expect(hardenedGitArgv("/r", ["show", "a:b"])).toContain("--no-textconv");
+    expect(hardenedGitArgv("/r", ["rev-parse", "HEAD"])).not.toContain("--no-ext-diff");
+    expect(hardenedGitArgv("/r", ["merge-base", "a", "b"])).not.toContain("--no-ext-diff");
+    expect(hardenedGitArgv("/r", ["clone", "--quiet", "/src", "/dst"])).not.toContain("--no-ext-diff");
+    expect(hardenedGitArgv("/r", ["checkout", "--detach", "sha"])).not.toContain("--no-textconv");
+  });
+
+  test("the driver flags land after the subcommand, not before it", () => {
+    const argv = hardenedGitArgv("/r", ["diff", "--numstat", "a...b"]);
+    expect(argv.indexOf("diff")).toBeLessThan(argv.indexOf("--no-ext-diff"));
+    expect(argv[argv.length - 1]).toBe("a...b");
   });
 });
