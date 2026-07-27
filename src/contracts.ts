@@ -382,3 +382,188 @@ export function worstExit(codes: readonly ExitCode[]): ExitCode {
   for (const c of EXIT_SEVERITY) if (codes.includes(c)) return c;
   return EXIT.SUCCESS;
 }
+
+// ---------------------------------------------------------------------------
+// Acceptance execution (SRD §8.2; ISC-148..152)
+// ---------------------------------------------------------------------------
+
+/**
+ * One acceptance command, as RESOLVED — not as the worker reported it.
+ *
+ * The distinction is the whole point. §8.2 makes the repository authoritative
+ * "and the exit codes of acceptance commands *the harvester re-runs itself*".
+ * A worker that can edit the file the commands are read from can otherwise
+ * write its own exam, so `source` records where the text came from and
+ * `resolved_from` pins the SHA it was read at (ISC-148).
+ */
+export const AcceptanceRunSchema = z.object({
+  cmd: text,
+  /** The envelope's `acceptance[]` is authored at dispatch; `tree` is read from the repo. */
+  source: z.enum(["envelope", "tree"]),
+  /** SHA the command text was resolved from. Never the worker's HEAD (ISC-148). */
+  resolved_from: sha40,
+  /**
+   * `timed_out` is NOT `failed` (ISC-152). A command that ran out of wall clock
+   * proves nothing about the code; collapsing it into failure invents evidence.
+   */
+  outcome: z.enum(["passed", "failed", "timed_out", "not_run"]),
+  exit_code: z.number().int().nullable().default(null),
+  duration_ms: z.number().int().nonnegative().default(0),
+  excerpt: text.default(""),
+});
+export type AcceptanceRun = z.infer<typeof AcceptanceRunSchema>;
+
+/**
+ * Where the acceptance commands actually executed.
+ *
+ * ISC-149 requires a fresh clone by SHA, outside the worker's worktree, with no
+ * inherited environment — so that a worker cannot pre-seed a node_modules, a
+ * cache, or an env var that makes a red suite green. Recording the clone path
+ * and the env-inheritance flag makes that auditable after the fact rather than
+ * a property of code nobody re-reads.
+ */
+export const AcceptanceContextSchema = z.object({
+  clone_path: shortStr,
+  clone_sha: sha40,
+  inherited_env: z.boolean(),
+  image: shortStr.nullable().default(null),
+  timeout_s: z.number().int().positive(),
+});
+export type AcceptanceContext = z.infer<typeof AcceptanceContextSchema>;
+
+/**
+ * Files whose modification makes the acceptance result self-certified.
+ *
+ * ISC-150: a diff touching the test-harness surface caps the verdict at
+ * `blocked`/`unknown` and can NEVER yield `success` — a worker that edits the
+ * test that grades it has produced an unfalsifiable claim, and the correct
+ * response is to refuse to grade rather than to trust or to fail.
+ */
+export const HarnessSurfaceSchema = z.object({
+  /** Repo-relative globs, from config; the defaults live in the config schema. */
+  patterns: z.array(shortStr).max(MAX_ITEMS).default([]),
+  /** Which of the worker's changed files matched. Empty means the cap did not fire. */
+  touched: z.array(shortStr).max(MAX_ITEMS).default([]),
+});
+export type HarnessSurface = z.infer<typeof HarnessSurfaceSchema>;
+
+// ---------------------------------------------------------------------------
+// Derived-fact bundle (ISC-153) — an adjudication that can be replayed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything the adjudicator was allowed to look at, plus a hash of it.
+ *
+ * A verdict is only trustworthy if you can re-derive it. The hash covers the
+ * canonical JSON of the facts — NOT the verdict — so a replay that produces a
+ * different verdict from the same hash is a bug in the adjudicator, and a
+ * replay whose hash differs is a bug in the harvester. Those are different
+ * failures and the bundle is what tells them apart.
+ */
+export const DerivedFactsSchema = z.object({
+  branch: shortStr.nullable(),
+  base_ref: sha40.nullable(),
+  head_ref: sha40.nullable(),
+  /** ISC-151: false when `git merge-base --is-ancestor base HEAD` failed. */
+  base_is_ancestor: z.boolean(),
+  commits: z.array(sha40).max(MAX_ITEMS).default([]),
+  files_changed: z.array(FileChangeSchema).max(MAX_ITEMS).default([]),
+  diff_bytes: z.number().int().nonnegative().default(0),
+  acceptance: z.array(AcceptanceRunSchema).max(MAX_ITEMS).default([]),
+  acceptance_context: AcceptanceContextSchema.nullable().default(null),
+  harness: HarnessSurfaceSchema,
+  /**
+   * ISC-154: the worktree hash at quiesce and at harvest end. Differing values
+   * mean something kept writing after the worker was supposed to be done, so
+   * every fact above may describe a tree that no longer exists → `unknown`.
+   */
+  tree_hash_quiesce: shortStr.nullable().default(null),
+  tree_hash_harvest: shortStr.nullable().default(null),
+});
+export type DerivedFacts = z.infer<typeof DerivedFactsSchema>;
+
+/** Stable-key JSON, so the bundle hash does not depend on property order. */
+export function canonicalJson(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  const o = v as Record<string, unknown>;
+  const body = Object.keys(o)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+    .join(",");
+  return `{${body}}`;
+}
+
+// ---------------------------------------------------------------------------
+// Harvest status (SRD §8.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the harvest itself is trustworthy — orthogonal to the verdict.
+ *
+ * §8.4: `artifacts` is a pure read that "exits 0 whenever it emitted valid
+ * JSON". A machine consumer must never distinguish "no artifacts" from "tool
+ * broke" by exit code, so the distinction has to live in the payload.
+ */
+export const HarvestStatusSchema = z.enum(["complete", "partial", "unavailable"]);
+export type HarvestStatus = z.infer<typeof HarvestStatusSchema>;
+
+// ---------------------------------------------------------------------------
+// Budget (ISC-114, ISC-115, ISC-193)
+// ---------------------------------------------------------------------------
+
+/**
+ * A token/cost ceiling and the reservation held against it.
+ *
+ * ISC-115 is the load-bearing one: the ceiling must halt a run whose reported
+ * cost is 0 throughout, because local models have no price table (SRD §5.9).
+ * Budgeting on dollars alone therefore never trips locally — tokens are the
+ * primary axis and `usd` is advisory.
+ *
+ * `reserved` exists because dispatch and accounting are not simultaneous: a
+ * task admitted at 99% of the ceiling would otherwise be allowed to run to
+ * completion and blow through it. Admission subtracts a reservation up front
+ * and reconciles against actuals when the task settles.
+ */
+export const BudgetStateSchema = z.object({
+  schema: z.literal("pifleet.budget/v1"),
+  run_id: shortStr,
+  tokens_ceiling: z.number().int().nonnegative().nullable().default(null),
+  usd_ceiling: z.number().nonnegative().nullable().default(null),
+  tokens_spent: z.number().int().nonnegative().default(0),
+  usd_spent: z.number().nonnegative().default(0),
+  /** Per-task up-front holds, keyed by task id; released on settle. */
+  reserved: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  /** Set once, when a ceiling is first crossed. Dispatch refuses from here on. */
+  halted_at: z.string().nullable().default(null),
+  halted_reason: shortStr.nullable().default(null),
+});
+export type BudgetState = z.infer<typeof BudgetStateSchema>;
+
+/** Why admission refused. `ok` carries the reservation the caller now holds. */
+export type AdmissionDecision =
+  | { ok: true; reserved: number }
+  | { ok: false; reason: "budget_halted" | "would_exceed" | "max_concurrent"; detail: string };
+
+// ---------------------------------------------------------------------------
+// Process identity (ISC-191) — the kill ladder's unit.
+// ---------------------------------------------------------------------------
+
+/**
+ * A pid plus the start time that disambiguates it.
+ *
+ * A pid alone is not an identity: pids are reused, and a kill ladder that
+ * escalates on a pid it has not re-validated will eventually SIGKILL an
+ * innocent process that inherited the number. `started` is read from the OS at
+ * the same instant the pid is, and every rung of the ladder re-checks the pair.
+ */
+export const ProcIdSchema = z.object({
+  pid: z.number().int().positive(),
+  /** Opaque, platform-specific, compared only for equality. */
+  started: shortStr,
+});
+export type ProcId = z.infer<typeof ProcIdSchema>;
+
+export function sameProc(a: ProcId | null, b: ProcId | null): boolean {
+  return a !== null && b !== null && a.pid === b.pid && a.started === b.started;
+}
