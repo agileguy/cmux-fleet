@@ -178,3 +178,34 @@ describe("epoch fence — the ack is recorded before the next line in the chunk"
     expect(em.attribute(11)).toBe("live");
   });
 });
+
+describe("dispatch — the mandatory epoch placeholder", () => {
+  /**
+   * `epoch` is required by TaskEnvelopeSchema and 0 is documented as the
+   * placeholder the supervisor replaces. Allocated epochs start at 1, so 0 can
+   * never be a genuine re-dispatch request — but dispatch treated any number as
+   * one, so every hand-written envelope was rejected `stale_epoch` for
+   * supplying the one value the schema forces its author to supply.
+   *
+   * Found by dispatching a real task to a real Pi worker, not by a test.
+   */
+  test("epoch 0 allocates rather than requesting", () => {
+    const em = new EpochManager();
+    const requested = (raw: unknown) => (typeof raw === "number" && raw > 0 ? raw : null);
+    expect(em.allocate("T-1", "A-1", requested(0))).toMatchObject({ ok: true, epoch: 1 });
+  });
+
+  test("a positive epoch is still honoured as an explicit request", () => {
+    const em = new EpochManager();
+    const requested = (raw: unknown) => (typeof raw === "number" && raw > 0 ? raw : null);
+    expect(em.allocate("T-1", "A-1", requested(1))).toMatchObject({ ok: true, epoch: 1 });
+  });
+
+  test("a genuinely stale epoch is still rejected", () => {
+    const em = new EpochManager();
+    em.allocate("T-1", "A-1", null);
+    em.settle("success", new Date(0).toISOString());
+    const requested = (raw: unknown) => (typeof raw === "number" && raw > 0 ? raw : null);
+    expect(em.allocate("T-2", "A-2", requested(1))).toMatchObject({ ok: false });
+  });
+});
