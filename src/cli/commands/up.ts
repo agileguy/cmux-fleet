@@ -7,6 +7,7 @@ import { newRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
 import { readWorkerState, writePresentation } from "../../run/state.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { registryCall } from "../../run/registry.ts";
+import { ensureControlAuth } from "../../security/control-auth.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { createHeadlessBackend } from "../../backends/headless/index.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
@@ -71,6 +72,12 @@ export function register(program: Command): void {
       // 0755 leaves the worker unable to write its own transcript; the macOS VM
       // squashes ownership and hides this entirely.
       await makeWorkerAccessible(run.sessionsDir, true);
+
+      // Mint the run's control-socket secret (SRD §12.7) before launching
+      // anything that listens or calls: the daemon and every supervisor read
+      // this file, and every control-plane request must carry its value. It
+      // is 0600, never mounted into a container, and never logged.
+      await ensureControlAuth(run);
 
       /**
        * The reaper's staleness threshold has to travel WITH the run.
