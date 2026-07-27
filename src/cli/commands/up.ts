@@ -12,8 +12,16 @@ import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { createHeadlessBackend } from "../../backends/headless/index.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
-import { expandPath, loadConfig, resolveWorker } from "../../config/load.ts";
-import { describeCredentialPlan, planCredential } from "../../security/adc.ts";
+import {
+  ConfigError,
+  expandPath,
+  parseConfig,
+  resolveConfigPath,
+  resolveWorker,
+  type LoadedConfig,
+} from "../../config/load.ts";
+import { describeCredentialPlan, planCredential, resolveIdentity } from "../../security/adc.ts";
+import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
 import { neutralizeRepoHazards } from "../../security/repo-hazards.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
@@ -99,14 +107,49 @@ export function register(program: Command): void {
       let heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
       let egressNetwork: string | null = null;
       let repoRoot: string | null = null;
-      let loadedConfig: Awaited<ReturnType<typeof loadConfig>> | null = null;
+      let loadedConfig: LoadedConfig | null = null;
+
+      /**
+       * Resolution and loading are two DISTINCT steps here because their
+       * failures mean opposite things, and only resolution can tell them
+       * apart.
+       *
+       * "No config anywhere" is the legitimate Phase 1 shape above — the
+       * schema defaults stand. But a config that RESOLVED and then failed to
+       * load (unreadable, malformed YAML, schema violation) must refuse to
+       * start: `docker.network` and `run.repo` come from that file, so
+       * "could not load it, carried on" IS "no egress network verified, no
+       * repository hazard scan", silently — a one-character typo in
+       * fleet.yaml produced an unhardened run indistinguishable from a
+       * hardened one (review finding 1; a bare catch conflated all three
+       * failure classes). An explicit `--config` that does not resolve
+       * refuses for the same reason: the operator named a file and did not
+       * get it, and defaults would wear the shape of the config they asked
+       * for.
+       */
+      let configPath: string | null = null;
       try {
-        loadedConfig = await loadConfig(opts.config);
+        configPath = await resolveConfigPath(opts.config);
+      } catch (err) {
+        if (opts.config !== undefined || !(err instanceof ConfigError)) {
+          throw new CliError(err instanceof Error ? err.message : String(err), EXIT.USAGE);
+        }
+        // Implicit resolution found nothing; the schema defaults stand.
+      }
+      if (configPath !== null) {
+        try {
+          loadedConfig = await parseConfig(await Bun.file(configPath).text(), configPath);
+        } catch (err) {
+          throw new CliError(
+            `refusing to start: config ${configPath} exists but could not be loaded — ` +
+              `the egress network and repository hazard scan are configured there, so ` +
+              `proceeding would run unhardened. ${err instanceof Error ? err.message : String(err)}`,
+            EXIT.USAGE,
+          );
+        }
         heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
         egressNetwork = loadedConfig.config.docker.network;
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
-      } catch {
-        // No reachable config; the schema default stands.
       }
 
       /**
@@ -179,7 +222,12 @@ export function register(program: Command): void {
             }
           }
         } catch (err) {
-          throw new CliError(`repository hazard scan failed: ${String(err)}`, EXIT.USAGE);
+          // The scan failing is an environment problem (unreadable repo,
+          // permissions), not an operator mistake — `2` misfiled it as usage
+          // (review finding 4). `3` matches the egress guard above, which is
+          // the same failure class: a configured control that could not be
+          // established, refusing rather than proceeding without it.
+          throw new CliError(`repository hazard scan failed: ${String(err)}`, EXIT.BACKEND_UNAVAILABLE);
         }
       }
 
@@ -241,21 +289,55 @@ export function register(program: Command): void {
        * ISC-248 rather than faked.
        */
       if (loadedConfig !== null) {
-        const cloud = loadedConfig.config.cloud;
-        for (const workerId of workers) {
+        const cfg = loadedConfig;
+        const cloud = cfg.config.cloud;
+        const plans = workers.map((workerId) => {
           let cloudAccess = false;
           try {
-            cloudAccess = resolveWorker(loadedConfig, workerId).cloudAccess;
+            cloudAccess = resolveWorker(cfg, workerId).cloudAccess;
           } catch {
             // Worker not in config (Phase 1 --workers can name any id).
           }
-          const plan = planCredential({
-            cloudAccess,
-            adcMode: cloud.adc_mode,
-            impersonateServiceAccount: cloud.impersonate_service_account,
-            quotaProject: cloud.quota_project,
-          });
-          const line = describeCredentialPlan(plan);
+          return {
+            workerId,
+            plan: planCredential({
+              cloudAccess,
+              adcMode: cloud.adc_mode,
+              impersonateServiceAccount: cloud.impersonate_service_account,
+              quotaProject: cloud.quota_project,
+            }),
+          };
+        });
+
+        /**
+         * ISC-251 says the grant line names the identity each worker was
+         * GIVEN — and without impersonation that identity is the host's
+         * gcloud account, which `describeCredentialPlan` cannot know on its
+         * own. Its "(adc user)" fallback is a placeholder wearing the shape
+         * of an answer, and printing it unconditionally overclaimed the ISC
+         * (review finding 3). `resolveIdentity` reads local gcloud config —
+         * no network round-trip, no token minting — so being truthful costs
+         * one subprocess, paid only when some worker's plan actually injects
+         * as the ADC user. Resolution failing (no gcloud on the host, no
+         * account configured) degrades to the placeholder with a note on
+         * stderr rather than failing `up`: in Phase 1 the plan is a
+         * statement, not a mint, and a missing gcloud is loud enough at the
+         * first real mint.
+         */
+        let adcIdentity: string | undefined;
+        if (plans.some((p) => p.plan.kind === "inject" && p.plan.impersonateServiceAccount === null)) {
+          try {
+            adcIdentity = await resolveIdentity(realExec, null);
+          } catch (err) {
+            process.stderr.write(
+              `note: could not resolve the host gcloud account for the credential plan: ` +
+                `${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+        }
+
+        for (const { workerId, plan } of plans) {
+          const line = describeCredentialPlan(plan, adcIdentity);
           await ledger.append("credential_plan", { worker: workerId, detail: { plan: line } });
           if (opts.json !== true) process.stdout.write(`  ${workerId}: ${line}\n`);
         }
