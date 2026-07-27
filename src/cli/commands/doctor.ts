@@ -1,3 +1,4 @@
+import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Command } from "commander";
@@ -6,7 +7,9 @@ import { EXIT } from "../../contracts.ts";
 import { ConfigError, loadConfig, type LoadedConfig } from "../../config/load.ts";
 import { resolveAllWorkers } from "../../config/load.ts";
 import { imageTag } from "../../container/image.ts";
+import { probeMountVisibility, type MountVisibility } from "../../container/mounts.ts";
 import { realExec, type Exec } from "../../container/run.ts";
+import { runsRoot } from "../../run/paths.ts";
 
 /**
  * `pifleet doctor` (SRD §10, §11): probe docker, cmux, tmux, pi, git, and
@@ -233,6 +236,27 @@ export function register(program: Command): void {
         }
       }
 
+      // Mount visibility (see container/mounts.ts). An unshared runs root does
+      // not fail a `docker run` — it mounts empty, so every worker writes an
+      // outbox the harvester will never see and still exits 0. Probing needs a
+      // built image; without one there is nothing to run the check inside.
+      let mount: MountVisibility & { dir: string } = {
+        visible: false,
+        detail: "not probed",
+        dir: runsRoot(),
+      };
+      const probeTag = images.find((i) => i.present)?.tag;
+      if (dockerOk && probeTag !== undefined) {
+        await mkdir(mount.dir, { recursive: true });
+        const r = await probeMountVisibility(mount.dir, probeTag, exec);
+        mount = { ...r, dir: mount.dir };
+        if (!r.visible) {
+          diagnoses.push({ name: "runs-dir-not-mountable", message: r.detail });
+        }
+      } else {
+        mount.detail = dockerOk ? "no worker image built yet" : "docker unavailable";
+      }
+
       const omlx = await probeOmlx(loaded);
 
       for (const p of probes) {
@@ -258,6 +282,7 @@ export function register(program: Command): void {
               backends,
               cmux: { socket_mode: cmux.socketMode, missing_commands: cmux.missingCommands },
               images,
+              mounts: { runs_dir: mount.dir, visible: mount.visible, detail: mount.detail },
               omlx: {
                 ok: omlx.ok,
                 base_url: omlx.baseUrl,
@@ -281,6 +306,7 @@ export function register(program: Command): void {
         console.log(`backends: ${Object.entries(backends).map(([k, v]) => `${k}=${v ? "yes" : "no"}`).join(" ")}`);
         if (cmux.probe.ok) console.log(`cmux socket mode: ${cmux.socketMode}`);
         for (const i of images) console.log(`image ${i.present ? "present" : "ABSENT "}: ${i.tag}`);
+        console.log(`mounts: runs dir ${mount.visible ? "visible" : "NOT VISIBLE"} — ${mount.detail}`);
         console.log(
           `omlx: ${omlx.ok ? "ok" : "FAIL"} ${omlx.detail}` +
             (omlx.listLatencyMs !== null ? ` — /models ${omlx.listLatencyMs}ms` : "") +

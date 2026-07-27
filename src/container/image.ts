@@ -10,10 +10,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FleetConfig, Toolchain } from "../config/schema.ts";
+import { probeWriteThrough } from "./mounts.ts";
 import { realExec, repoRoot, type Exec } from "./run.ts";
 
 // ---------------------------------------------------------------------------
@@ -211,28 +210,12 @@ export async function verifyImage(
     detail: `entrypoint = ${JSON.stringify(entrypoint)}`,
   });
 
-  // /workspace write-through, both directions (ISC-27/28).
-  const host = await mkdtemp(join(tmpdir(), "pifleet-verify-"));
-  try {
-    await writeFile(join(host, "from-host"), "host-wrote-this\n");
-    const wt = await exec([
-      "docker", "run", ...RUN_HARDENED, "-v", `${host}:/workspace`, "--entrypoint", "/bin/sh", tag,
-      "-c", "cat /workspace/from-host && echo container-wrote-this > /workspace/from-container",
-    ]);
-    let roundTrip = false;
-    try {
-      roundTrip = (await readFile(join(host, "from-container"), "utf8")).includes("container-wrote-this");
-    } catch {
-      roundTrip = false;
-    }
-    checks.push({
-      name: "workspace-write-through",
-      ok: wt.code === 0 && wt.stdout.includes("host-wrote-this") && roundTrip,
-      detail: wt.code === 0 ? "both directions visible" : `exit ${wt.code}: ${wt.stderr.trim()}`,
-    });
-  } finally {
-    await rm(host, { recursive: true, force: true });
-  }
+  // /workspace write-through, both directions (ISC-27/28). The scratch dir comes
+  // from container/mounts.ts, not os.tmpdir(): on macOS the daemon cannot see
+  // os.tmpdir() and mounts an empty directory in its place, which failed this
+  // check on every Colima install while the image itself was fine.
+  const wt = await probeWriteThrough(tag, exec);
+  checks.push({ name: "workspace-write-through", ok: wt.visible, detail: wt.detail });
 
   return { tag, ok: checks.every((c) => c.ok), checks };
 }

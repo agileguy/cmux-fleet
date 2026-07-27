@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 0/160
+progress: 4/165
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -295,6 +295,14 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
 - [ ] ISC-160: A stale image is not silently reused after the Dockerfile changed.
 
+### Group N — Mount visibility (added 2026-07-27, found by the Docker-gated suite)
+
+- [x] ISC-161: No host path that pifleet intends to bind-mount is derived from `os.tmpdir()`.
+- [x] ISC-162: A bind mount is judged visible only by reading back a host-written sentinel, never by the mount succeeding or by `docker run` exiting 0.
+- [x] ISC-163: A failed visibility probe reports that the daemon cannot see the path and names the override, rather than surfacing the bare `cat: No such file` beneath it.
+- [x] ISC-164: `doctor` probes the runs root for mount visibility and exits nonzero when a worker's outbox would mount empty.
+- [ ] ISC-165: Anti: no `:ro` refusal test passes against a mount whose contents were never readable.
+
 ## Test Strategy
 
 | isc | type | check | threshold | tool |
@@ -390,6 +398,22 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   compute-bound one measured here. `max_concurrent: 2` stays the default as a memory-safety
   margin rather than a throughput necessity, and ISC-158 (16 workers, no starvation) is what
   would justify raising it.
+- **2026-07-27 — refined: engineer briefs are sized per subsystem, not per phase.** Both Phase 1
+  engineers were truncated at a context ceiling (226k and 241k tokens), not finished — each stopped
+  on a statement of intent, and the harness reported it as completion. Engineer B's brief listed 24
+  files across seven subsystems. Remaining phases dispatch ~10-14 files per engineer, keep image
+  builds in the parent so build logs do not consume an engineer's budget, and treat integration and
+  e2e suites as their own dispatch unit because that is reliably what gets cut.
+- **2026-07-27 — scratch directories that get bind-mounted live under `$HOME`, never `os.tmpdir()`.**
+  Measured on this machine: Colima shares `$HOME` and shares neither `/tmp` nor
+  `/var/folders/...`. An unshared `-v` source does not error — the daemon mounts an empty
+  directory in its place. `image verify` therefore failed on a perfectly good image, and the
+  same mistake in the worker launch path would give every worker an empty `/workspace` and an
+  outbox the harvester never sees, with exit 0 throughout. Scratch allocation moves to
+  `container/mounts.ts` (`PIFLEET_SCRATCH_DIR`, default `~/.pifleet/scratch`), visibility is
+  proved by reading back a sentinel rather than by a successful mount, and `doctor` probes the
+  runs root so the failure is loud and early. The default runs root was already under `$HOME`
+  and was never affected; `PIFLEET_RUNS_DIR` pointing elsewhere was, which is what ISC-164 guards.
 
 ## Changelog
 

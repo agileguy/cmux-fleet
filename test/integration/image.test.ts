@@ -9,11 +9,11 @@
  */
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
 import { buildImage, imageTag, verifyImage } from "../../src/container/image.ts";
+import { makeDaemonScratch } from "../../src/container/mounts.ts";
 import { realExec } from "../../src/container/run.ts";
 
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -122,7 +122,8 @@ describe("container posture", () => {
 
   // ISC-27/28: /workspace write-through, both directions.
   it("/workspace writes are visible on the host and vice versa", async () => {
-    const host = await mkdtemp(join(tmpdir(), "pifleet-ws-"));
+    // Not os.tmpdir(): the macOS daemon cannot see it and mounts an empty dir.
+    const host = await makeDaemonScratch("ws");
     try {
       await writeFile(join(host, "from-host"), "host-wrote-this\n");
       const r = await runInImage(
@@ -137,14 +138,24 @@ describe("container posture", () => {
     }
   }, PROBE_TIMEOUT);
 
-  // ISC-29: /skills is read-only; a write attempt fails.
-  it("/skills mounted ro refuses writes", async () => {
-    const host = await mkdtemp(join(tmpdir(), "pifleet-skills-"));
+  /**
+   * ISC-29: /skills is read-only; a write attempt fails.
+   *
+   * The read assertion is not decoration. A mount the daemon cannot see comes
+   * up as an empty directory, and an empty `:ro` mount refuses writes too — so
+   * "touch failed" alone passes just as happily against a broken mount as a
+   * working one. Reading a host-written file first is what makes the refusal
+   * mean `ro` rather than `absent`.
+   */
+  it("/skills mounted ro refuses writes but serves reads", async () => {
+    const host = await makeDaemonScratch("skills");
     try {
-      const r = await runInImage(["-c", "touch /skills/x"], {
+      await writeFile(join(host, "SKILL.md"), "skill-content\n");
+      const r = await runInImage(["-c", "cat /skills/SKILL.md && touch /skills/x"], {
         entrypoint: "/bin/sh",
         extra: ["-v", `${host}:/skills:ro`],
       });
+      expect(r.stdout).toContain("skill-content");
       expect(r.code).not.toBe(0);
     } finally {
       await rm(host, { recursive: true, force: true });
