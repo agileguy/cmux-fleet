@@ -287,7 +287,10 @@ describe("reapStale: one scan over a real registry shape", () => {
 describe("the daemon reaps and deregisters", () => {
   async function scratchRun(): Promise<{ run: RunPaths; cleanup: () => Promise<void> }> {
     const root = await mkdtemp(join(tmpdir(), "pifleet-daemon-"));
-    const run = runPaths("r-reap", root);
+    // Unique per process: `socketPath` hashes (run_id, worker) into the SHARED
+    // os.tmpdir(), so a fixed id makes two concurrent test processes bind the
+    // same daemon socket and answer each other's RPCs.
+    const run = runPaths(`r-reap-${process.pid.toString(36)}${Math.random().toString(36).slice(2, 8)}`, root);
     await mkdir(run.root, { recursive: true });
     return { run, cleanup: () => rm(root, { recursive: true, force: true }) };
   }

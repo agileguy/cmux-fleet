@@ -241,7 +241,28 @@ function emptyFacts(): DerivedFacts {
  * here with guesses would let this module quietly take over an adjudication
  * input that has its own ISCs (ISC-148..150, ISC-154).
  */
-export async function deriveGitFacts(worktree: string, baseRef: string): Promise<GitFacts> {
+export async function deriveGitFacts(
+  worktree: string,
+  baseRef: string,
+  /**
+   * The git runner, injectable for one reason: two branches below are
+   * reachable only when git itself misbehaves, and a real repository cannot
+   * be persuaded to produce them on demand.
+   *
+   * `merge-base --is-ancestor` exiting >=2 means git FAILED, which must not be
+   * read as "not an ancestor" — the responses differ (unknown facts vs a
+   * rewritten base), and a mutation collapsing the two left the whole suite
+   * green while producing full diff facts with `base_is_ancestor: true`. The
+   * 32 MiB withhold-not-truncate rule (ISC-90) is the same: no fixture builds
+   * a diff that large, so nothing held it in place.
+   *
+   * A seam this narrow — one function, defaulted, used by tests only — is
+   * worth more than two invariants documented in comments and pinned by
+   * nothing.
+   */
+  run: (cwd: string, args: string[]) => Promise<GitResult> = runGit,
+): Promise<GitFacts> {
+  const runGit = run;
   const reasons: string[] = [];
 
   const head = await runGit(worktree, ["rev-parse", "HEAD"]);

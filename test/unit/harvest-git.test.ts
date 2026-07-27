@@ -11,9 +11,12 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_DIFF_BYTES,
+  deriveGitFacts,
   mergeLineCounts,
   parseNameStatusZ,
   parseNumstatZ,
+  type GitResult,
 } from "../../src/harvest/git.ts";
 
 describe("parseNameStatusZ", () => {
@@ -109,5 +112,84 @@ describe("mergeLineCounts", () => {
       { path: "a.txt", change: "modified", lines_added: 4, lines_removed: 1 },
       { path: "bin.png", change: "added" },
     ]);
+  });
+});
+
+/**
+ * Two branches of `deriveGitFacts` that a real repository cannot be made to
+ * take, pinned through the injectable runner.
+ *
+ * Both were found by mutation: reverting each left the entire suite green,
+ * because no fixture can build a 32 MiB diff and no healthy repo makes
+ * `merge-base` fail. Both failure modes report UNKNOWN facts as verified
+ * ones, which is the specific error class this module's header is about.
+ */
+describe("deriveGitFacts — the branches only a broken git reaches", () => {
+  const sha = "a".repeat(40);
+
+  /** A runner that answers each git subcommand from a table. */
+  function fakeGit(table: Record<string, GitResult>): (cwd: string, args: string[]) => Promise<GitResult> {
+    return (_cwd, args) => {
+      const key = args.find((a) => !a.startsWith("-")) ?? args[0] ?? "";
+      const sub = args[0] ?? "";
+      const hit = table[`${sub} ${key}`] ?? table[sub];
+      return Promise.resolve(hit ?? { code: 0, stdout: "", stderr: "" });
+    };
+  }
+
+  /**
+   * ISC-151's other half. Exit 0 = ancestor, 1 = not, anything else = git
+   * broke — and "git broke" must not be reported as facts. The mutation that
+   * survived made an exit >= 2 fall through BOTH branches and emit a full
+   * fact bundle with `base_is_ancestor: true`.
+   */
+  test("merge-base failing (exit >= 2) yields no facts, not confirmed ancestry", async () => {
+    const facts = await deriveGitFacts(
+      "/nowhere",
+      sha,
+      fakeGit({
+        "rev-parse": { code: 0, stdout: `${sha}\n`, stderr: "" },
+        "merge-base": { code: 128, stdout: "", stderr: "fatal: not a valid object name" },
+      }),
+    );
+    expect(facts.ok).toBe(false);
+    expect(facts.facts.base_is_ancestor).toBe(false);
+    expect(facts.reasons.join(" ")).toContain("merge-base");
+  });
+
+  test("exit 1 is still 'not an ancestor', which is a different answer", async () => {
+    const facts = await deriveGitFacts(
+      "/nowhere",
+      sha,
+      fakeGit({
+        "rev-parse": { code: 0, stdout: `${sha}\n`, stderr: "" },
+        "merge-base": { code: 1, stdout: "", stderr: "" },
+      }),
+    );
+    // `ok` — the harvest succeeded; it is the DIFF that is withheld.
+    expect(facts.ok).toBe(true);
+    expect(facts.facts.base_is_ancestor).toBe(false);
+    expect(facts.reasons.join(" ")).toContain("not an ancestor");
+  });
+
+  /**
+   * ISC-90: withheld, never truncated. A truncated diff is indistinguishable
+   * from a small one to every consumer, so shipping the first 32 MiB while
+   * the reason string still says "withheld" is the exact conflation the rule
+   * exists to prevent.
+   */
+  test("an over-cap diff is withheld entirely, not truncated to the cap", async () => {
+    const huge = "x".repeat(MAX_DIFF_BYTES + 1024);
+    const facts = await deriveGitFacts(
+      "/nowhere",
+      sha,
+      fakeGit({
+        "rev-parse": { code: 0, stdout: `${sha}\n`, stderr: "" },
+        "merge-base": { code: 0, stdout: "", stderr: "" },
+        diff: { code: 0, stdout: huge, stderr: "" },
+      }),
+    );
+    expect(facts.diffText).toBeNull();
+    expect(facts.reasons.join(" ")).toContain("withheld");
   });
 });
