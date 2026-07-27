@@ -229,6 +229,42 @@ beforeAll(async () => {
       ],
     }),
   );
+
+  // T-abort: real work and a claimed success, but the SUPERVISOR settled the
+  // epoch as aborted. A fact about the run outranks any inference from the tree.
+  await writeFile(join(runDir, "inbox", "T-abort.json"), JSON.stringify(taskEnvelope("T-abort", "w1", worktree)));
+  await mkdir(join(runDir, "outbox", "w1", "T-abort"), { recursive: true });
+  await writeFile(
+    join(runDir, "outbox", "w1", "T-abort", "result.json"),
+    JSON.stringify({
+      schema: "pifleet.result/v1",
+      task_id: "T-abort",
+      epoch: 1,
+      worker: "w1",
+      status: "success",
+      summary: "finished cleanly, honest",
+      files_changed: [
+        { path: "a.txt", change: "modified" },
+        { path: NASTY, change: "added" },
+        { path: "src/new.ts", change: "added" },
+      ],
+    }),
+  );
+  await mkdir(join(runDir, "workers", "w1", "tasks"), { recursive: true });
+  await writeFile(
+    join(runDir, "workers", "w1", "tasks", "T-abort.json"),
+    JSON.stringify({
+      schema: "pifleet.taskrecord/v1",
+      task_id: "T-abort",
+      attempt_id: "att-1",
+      worker: "w1",
+      run_id: RUN_ID,
+      epoch: 1,
+      verdict: "aborted",
+      reason: "operator abort",
+      settled_at: new Date().toISOString(),
+    }),
+  );
 });
 
 afterAll(async () => {
@@ -417,6 +453,24 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(b.facts_hash).toBe(a.facts_hash);
     // Different facts, different key — otherwise it detects nothing.
     expect(other.facts_hash).not.toBe(a.facts_hash);
+  });
+
+  /**
+   * A supervisor-terminal verdict outranks derived evidence (§7.3). `aborted`
+   * and `timed_out` are facts about the RUN, not inferences from the tree, so
+   * no amount of clean diff and no self-report makes an aborted task complete.
+   *
+   * Pinned because the adjudicator rewiring restructured exactly this branch:
+   * the override used to be tangled with the F5 special case, and a task the
+   * operator killed silently reporting `success` is the worst way to find out
+   * it was dropped.
+   */
+  test("a supervisor-aborted epoch reports aborted, whatever the diff says", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-abort", "--json"]);
+    expect(r.code).toBe(0);
+    const h = HarvestSchema.parse(JSON.parse(r.stdout));
+    expect(h.verdict).toBe("aborted");
+    expect(h.reasons.join(" ")).toContain("aborted");
   });
 
   // The §8.4 pure-read rule. Would fail if an unknown task became a CliError:
