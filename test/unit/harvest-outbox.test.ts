@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -306,5 +306,110 @@ describe("scanOutboxFiles — ISC-121 symlinks under files/", () => {
     const scan = await scanOutboxFiles(loc);
     expect(scan.safe).toHaveLength(0);
     expect(scan.refused[0]?.reason).toContain("regular file");
+  });
+});
+
+/**
+ * SRD §12.5 containment, at the roots rather than the leaves.
+ *
+ * The per-entry symlink check was the only containment in `scanOutboxFiles`,
+ * which left three ways past it — each confirmed against the real function:
+ * the `files/` directory being a symlink (walked directly, so it never met the
+ * per-entry branch), the task outbox being a symlink (realpath re-roots
+ * containment onto the attacker's directory, after which escaping links are
+ * APPROVED), and hard links (a second name for an inode that realpath cannot
+ * distinguish from a real artifact).
+ *
+ * Each test asserts the escaping content is absent from `safe` — not merely
+ * that something was refused. A scan that refuses the right path for the wrong
+ * reason still passes a `refused.length > 0` assertion.
+ */
+describe("scanOutboxFiles — containment holds at the roots (§12.5)", () => {
+  async function outboxWithSecret(): Promise<{ tmp: string; loc: OutboxLocation; secret: string }> {
+    const tmp = await mkdtemp(join(tmpdir(), "pifleet-esc-"));
+    const loc = {
+      workerOutboxDir: join(tmp, "outbox", "w1"),
+      taskId: "T-1",
+      epoch: 1,
+      hostWorkdir: join(tmp, "wt"),
+      containerWorkdir: "/workspace",
+    } as OutboxLocation;
+    const secretDir = join(tmp, "private");
+    await mkdir(secretDir, { recursive: true });
+    const secret = join(secretDir, "id_rsa");
+    await writeFile(secret, "PRIVATE KEY\n");
+    return { tmp, loc, secret };
+  }
+
+  test("files/ being a symlink out does not launder the target into safe", async () => {
+    const { tmp, loc, secret } = await outboxWithSecret();
+    try {
+      await mkdir(join(loc.workerOutboxDir, "T-1"), { recursive: true });
+      await symlink(join(tmp, "private"), join(loc.workerOutboxDir, "T-1", "files"));
+      const scan = await scanOutboxFiles(loc);
+      expect(scan.safe).toEqual([]);
+      expect(scan.safe.some((p) => p.includes("id_rsa"))).toBe(false);
+      expect(await Bun.file(secret).exists()).toBe(true); // untouched, not read
+
+      // The REASON is asserted, not just that something was refused. Two
+      // independent controls can stop this attack — the root check and the
+      // per-entry containment check — so an outcome-only assertion stays
+      // green when either one is deleted, and the pair can be dismantled one
+      // commit at a time with the suite passing throughout. Naming the root
+      // check pins the root check.
+      expect(scan.refused.map((r) => r.reason).join(" ")).toContain("files/ is a symlink");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the task outbox being a symlink does not re-root containment", async () => {
+    const { tmp, loc } = await outboxWithSecret();
+    try {
+      // The attacker's own tree, complete with a link escaping it. If the
+      // scan re-roots onto `elsewhere`, that link reads as contained.
+      const elsewhere = join(tmp, "elsewhere");
+      await mkdir(join(elsewhere, "files"), { recursive: true });
+      await symlink(join(tmp, "private", "id_rsa"), join(elsewhere, "files", "leak"));
+      await mkdir(loc.workerOutboxDir, { recursive: true });
+      await symlink(elsewhere, join(loc.workerOutboxDir, "T-1"));
+
+      const scan = await scanOutboxFiles(loc);
+      expect(scan.safe).toEqual([]);
+      expect(JSON.stringify(scan.safe)).not.toContain("leak");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a hard link to a file outside the outbox is refused", async () => {
+    const { tmp, loc, secret } = await outboxWithSecret();
+    try {
+      const files = join(loc.workerOutboxDir, "T-1", "files");
+      await mkdir(files, { recursive: true });
+      // realpath resolves this INSIDE the outbox — the inode's other name is
+      // invisible from here, which is exactly why nlink is the check.
+      await link(secret, join(files, "innocent.txt"));
+      const scan = await scanOutboxFiles(loc);
+      expect(scan.safe).toEqual([]);
+      expect(scan.refused.map((r) => r.reason).join(" ")).toContain("link");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("an ordinary artifact is still accepted — the fix is not a blanket refusal", async () => {
+    const { tmp, loc } = await outboxWithSecret();
+    try {
+      const files = join(loc.workerOutboxDir, "T-1", "files");
+      await mkdir(join(files, "sub"), { recursive: true });
+      await writeFile(join(files, "note.md"), "real artifact\n");
+      await writeFile(join(files, "sub", "deep.txt"), "also real\n");
+      const scan = await scanOutboxFiles(loc);
+      expect(scan.refused).toEqual([]);
+      expect(scan.safe.map((p) => p.replace(files, "")).sort()).toEqual(["/note.md", "/sub/deep.txt"]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });

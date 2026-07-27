@@ -11,7 +11,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarvestSchema, VerdictSchema } from "../../src/contracts.ts";
@@ -328,6 +328,46 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
   });
 
   // Usage errors are the one legitimate nonzero: neither task nor all named.
+  /**
+   * §8.4, the whole-run guarantee. `--all` reads N tasks' worker-controlled
+   * files; one of them failing in a way no refusal path anticipated used to
+   * throw out of `harvestAll`'s unguarded loop and out of the command, which
+   * exited 2 having emitted NO JSON — so a single poisoned task destroyed
+   * every healthy task's harvest in the same run.
+   *
+   * A mode-000 `result.json` is the cheapest real instance: it lstats fine and
+   * the `open` fails, which is also an EACCES/ENFILE race in production.
+   */
+  test("an unreadable envelope degrades that task alone, not the run", async () => {
+    const poisoned = join(runDir, "outbox", "w1", "T-poison", "result.json");
+    await writeFile(join(runDir, "inbox", "T-poison.json"), JSON.stringify(taskEnvelope("T-poison", "w1", worktree)));
+    await mkdir(join(runDir, "outbox", "w1", "T-poison"), { recursive: true });
+    await writeFile(poisoned, JSON.stringify({ schema: "pifleet.result/v1", task_id: "T-poison", epoch: 1, worker: "w1", status: "success" }));
+    await chmod(poisoned, 0o000);
+    try {
+      const r = await runCli(["artifacts", "--run", RUN_ID, "--all", "--json"]);
+      expect(r.code).toBe(0);
+      const payload = JSON.parse(r.stdout) as { tasks: Array<Record<string, unknown>> };
+      const byId = new Map(payload.tasks.map((t) => [t["task_id"], t]));
+
+      // `partial`, not `unavailable`: the repository facts WERE harvested and
+      // only the envelope was refused, and conflating those would tell an
+      // operator the whole task is unreadable when A2 is intact. The refusal
+      // is named rather than silently dropped, which would read as "this task
+      // simply produced no envelope".
+      const poisonedTask = byId.get("T-poison");
+      expect(poisonedTask?.["harvest_status"]).toBe("partial");
+      expect(JSON.stringify(poisonedTask?.["reasons"])).toContain("could not be opened");
+
+      // And the healthy task is intact, which is the actual regression: it
+      // used to vanish along with the whole payload.
+      expect(byId.get("T-1")?.["harvest_status"]).toBe("complete");
+      expect(byId.get("T-1")?.["verdict"]).toBe("success");
+    } finally {
+      await chmod(poisoned, 0o644);
+    }
+  });
+
   test("naming neither --task nor --all is a usage error", async () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--json"]);
     expect(r.code).toBe(2);

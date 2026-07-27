@@ -278,6 +278,20 @@ export async function harvestAll(run: RunPaths, opts: HarvestOptions = {}): Prom
   const out: TaskHarvest[] = [];
   // Sequential on purpose: several tasks can share a worktree, and concurrent
   // `git` invocations against one worktree contend on the index lock (F23).
-  for (const id of taskIds) out.push(await harvestTask(run, id, opts));
+  //
+  // Each task is isolated. Harvest reads worker-controlled files with a
+  // filesystem underneath them, so a task CAN fail in a way no refusal path
+  // anticipated — and an unguarded loop turns that into the loss of every
+  // other task's harvest in the run, which is the §8.4 failure: `artifacts`
+  // exits nonzero having emitted no JSON, and the healthy work is gone with
+  // the poisoned task. One task that cannot be harvested is one task with
+  // `harvest_status: "unavailable"`.
+  for (const id of taskIds) {
+    try {
+      out.push(await harvestTask(run, id, opts));
+    } catch (err) {
+      out.push(unavailableHarvest(id, `harvest failed: ${String(err)}`));
+    }
+  }
   return out;
 }

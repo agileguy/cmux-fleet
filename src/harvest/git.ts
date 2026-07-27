@@ -36,18 +36,77 @@ export interface GitResult {
   stderr: string;
 }
 
-/** Spawn git in `cwd`. Argv array in, decoded streams out — no shell, ever. */
+/**
+ * Flags that stop a worker-controlled repository from choosing what git runs.
+ *
+ * `git diff` is not the inert reader it looks like. A `.gitattributes` in the
+ * tree can assign a diff driver per path, and `[diff "name"] command = …` in
+ * the repo's own config then names a program git EXECUTES — on the host, as
+ * the harvester, outside the container the worker is confined to. Textconv
+ * and `core.fsmonitor` are the same primitive by other names. Every one of
+ * them is disabled here rather than in the caller, because the caller that
+ * forgets is the one that runs `diff`.
+ *
+ * `-c` beats the environment: `GIT_CONFIG_*=/dev/null` neutralizes the global
+ * and system files, but the REPOSITORY config (`.git/config`) is not
+ * suppressible by env at all, and it is inside the mount the worker writes to.
+ */
+const GIT_HARDENING: readonly string[] = [
+  "--no-pager",
+  "-c",
+  "core.fsmonitor=",
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.attributesFile=/dev/null",
+  "-c",
+  "diff.external=",
+];
+
+/**
+ * `--no-ext-diff` is the control that actually disables per-path diff drivers,
+ * and it is a DIFF-FAMILY option, not a top-level one: passing it to `git`
+ * itself makes every invocation fail with "unknown option". So it is appended
+ * only for the commands that accept it.
+ *
+ * Found by running the reproduction rather than by reading the man page — the
+ * first version of this hardening put it in the global list, where it broke
+ * `init`, `rev-parse` and `merge-base` while the unit tests, which only
+ * exercise the output parsers, stayed green.
+ */
+const EXT_DIFF_COMMANDS = new Set(["diff", "log", "show", "diff-tree", "diff-index", "whatchanged"]);
+
+/**
+ * Spawn git in `cwd`. Argv array in, decoded streams out — no shell, ever.
+ *
+ * The environment is built from a LITERAL, mirroring `harvest/acceptance.ts`.
+ * It used to spread `process.env`, which handed the harvester's whole
+ * environment — cloud credentials, tokens, the operator's `HOME` — to a
+ * subprocess operating on a tree the graded worker controls. The sibling
+ * module got this right and this one did not; the asymmetry was the bug.
+ */
 export async function runGit(cwd: string, args: string[]): Promise<GitResult> {
-  const p = Bun.spawn(["git", "-C", cwd, ...args], {
+  const sub = args[0] ?? "";
+  const argv =
+    EXT_DIFF_COMMANDS.has(sub) && !args.includes("--no-ext-diff")
+      ? [sub, "--no-ext-diff", ...args.slice(1)]
+      : args;
+  const p = Bun.spawn(["git", "-C", cwd, ...GIT_HARDENING, ...argv], {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
     env: {
-      ...process.env,
-      // Repo content is untrusted (§12.2): a worktree can carry hooks or a
-      // config that executes on invocation. Core commands here don't run
-      // hooks, but belt-and-braces costs one env var.
+      // Repo content is untrusted (§12.2). PATH is needed to find git itself;
+      // nothing else from the harvester's environment crosses this boundary.
+      PATH: process.env["PATH"] ?? "/usr/bin:/bin",
+      HOME: "/dev/null",
+      LC_ALL: "C",
+      TERM: "dumb",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_SYSTEM: "/dev/null",
       GIT_TERMINAL_PROMPT: "0",
+      GIT_ASKPASS: "",
+      GIT_EXTERNAL_DIFF: "",
     },
   });
   const [stdout, stderr, code] = await Promise.all([
