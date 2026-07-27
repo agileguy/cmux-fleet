@@ -103,6 +103,25 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
   };
 }
 
+/**
+ * Host directory mounted at `/outbox` for a worker (SRD §5.5).
+ *
+ * Both ends of the outbox contract need this path and they sit in different
+ * subsystems: `config/render.ts` builds the `-v` mount that creates it, and
+ * `harvest/` reads what the worker left behind in it. It was computed
+ * independently in each — the exact hazard this module's first rule exists to
+ * prevent, and a worse one than usual, because a divergence here does not
+ * throw. Harvest would simply find an empty directory and report a task that
+ * produced artifacts as having produced none (ISC-231).
+ *
+ * Takes the run ROOT rather than `RunPaths`: render works from a run-dir
+ * string it is handed, and requiring the full struct there would have kept the
+ * duplicate alive purely as a type accommodation.
+ */
+export function workerOutboxDir(runRoot: string, workerId: string): string {
+  return join(runRoot, "outbox", workerId);
+}
+
 /** Ledger shards are per writer (SRD §7.7); the shard name is the writer id. */
 export function ledgerShard(run: RunPaths, writerId: string): string {
   return join(run.ledgerDir, `${writerId}.jsonl`);

@@ -27,7 +27,7 @@ import {
   type TaskEnvelope,
   type Verdict,
 } from "../contracts.ts";
-import { workerPaths, taskRecordPath, type RunPaths } from "../run/paths.ts";
+import { workerOutboxDir, workerPaths, taskRecordPath, type RunPaths } from "../run/paths.ts";
 import { readTaskRecord, readWorkerState } from "../run/state.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
@@ -48,15 +48,6 @@ export interface TaskHarvest {
   /** The replayable fact bundle (ISC-153); E3 fields sit at schema defaults. */
   facts: DerivedFacts;
   harvestStatus: HarvestStatus;
-}
-
-/**
- * Host directory mounted at `/outbox` for a worker (SRD §5.5). Duplicates the
- * expression in config/render.ts; run/paths.ts is the proper home for it but
- * is a shared read-only seam this phase — flagged for consolidation there.
- */
-export function workerOutboxDir(run: RunPaths, workerId: string): string {
-  return join(run.root, "outbox", workerId);
 }
 
 /**
@@ -177,7 +168,7 @@ export async function harvestTask(
 
   // --- A1: the envelope, advisory and untrusted (§7.2, §12.5).
   const loc: OutboxLocation = {
-    workerOutboxDir: workerOutboxDir(run, envelope.worker),
+    workerOutboxDir: workerOutboxDir(run.root, envelope.worker),
     taskId,
     epoch: envelope.epoch,
     containerWorkdir: envelope.container_workdir,

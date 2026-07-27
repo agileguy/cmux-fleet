@@ -402,12 +402,12 @@ of the same class it repaired.
 ### Group S — Phase 2 findings (added 2026-07-27)
 
 - [x] ISC-230: An acceptance command that was attempted and returned no answer caps the verdict — a timed-out exam cannot certify success, and the worker's claim is not adopted.
-- [ ] ISC-231: `workerOutboxDir()` lives in `run/paths.ts`, computed once, rather than duplicating the expression inlined in `render.ts`.
+- [x] ISC-231: `workerOutboxDir()` lives in `run/paths.ts`, computed once, rather than duplicating the expression inlined in `render.ts`.
 - [ ] ISC-232: Harness-surface patterns come from config; `DEFAULT_HARNESS_PATTERNS` is the fallback, not the source of truth.
 - [ ] ISC-233: Acceptance commands run in a fresh CONTAINER from the same image, not only a fresh clone (SRD §8.2).
 - [ ] ISC-234: The control socket answers `export_html`, so `transcript --html` uses the live path rather than the local-render fallback.
 - [ ] ISC-235: `BudgetManager.admit` is called on the dispatch path and its snapshot persisted; `budgetExitCode` folds into `worstExit` after harvest.
-- [ ] ISC-236: The daemon calls `reapStale` on an interval and deregisters the workers it reports.
+- [x] ISC-236: The daemon calls `reapStale` on an interval and deregisters the workers it reports.
 
 ## Test Strategy
 

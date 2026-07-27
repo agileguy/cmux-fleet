@@ -21,6 +21,7 @@ import {
   BRIEFING_MOUNT,
 } from "../../src/config/render.ts";
 import { configHash, imageInputs } from "../../src/container/image.ts";
+import { runPaths, workerOutboxDir } from "../../src/run/paths.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -293,6 +294,30 @@ describe("docker argv (SRD §5.6)", () => {
     // NEVER the host ~/.pi/agent — a named volume keeps Dan's auth out (§5.5).
     expect(r.docker).toContain("pifleet-piagent-eng-1:/home/pi/.pi/agent");
     expect(r.docker.some((a) => a.includes(join("/.pi", "agent")) && a.startsWith("/"))).toBe(false);
+  });
+
+  /**
+   * ISC-231. The mount and the harvest read are computed in different
+   * subsystems, and a divergence between them does not throw — harvest would
+   * find an empty directory and report a task that produced artifacts as
+   * having produced none. So the agreement is asserted directly, against the
+   * host path harvest actually hands to the outbox reader, rather than trusting
+   * that both sides happen to still call the same helper.
+   */
+  test("the /outbox mount is the same directory harvest reads from", async () => {
+    const { dir, loaded } = await fixture();
+    const r = await renderWorker(loaded, "eng-1");
+    const runDir = join(dir, "runs", "dry");
+
+    const mounted = r.docker
+      .find((a) => a.endsWith(":/outbox"))
+      ?.slice(0, -":/outbox".length);
+    expect(mounted).toBe(workerOutboxDir(runDir, "eng-1"));
+
+    // And that shared path is the one the harvest side resolves for the same
+    // worker, through the RunPaths struct it works from.
+    const run = runPaths("dry", join(dir, "runs"));
+    expect(mounted).toBe(workerOutboxDir(run.root, "eng-1"));
   });
 
   test("kubeconfig mounts read-only only for cloud_access workers with cloud.kubeconfig set", async () => {

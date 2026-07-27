@@ -11,6 +11,8 @@ import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { createHeadlessBackend } from "../../backends/headless/index.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
+import { loadConfig } from "../../config/load.ts";
+import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
 
 /** ISC-70: every worker reaches `idle` within this budget. */
 const IDLE_TIMEOUT_MS = 60_000;
@@ -34,7 +36,7 @@ export function register(program: Command): void {
     .option("--backend-fallback <kind>", "backend to use if the primary is unavailable")
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers: string; backend: string; json?: boolean }) => {
+    .action(async (opts: { workers: string; backend: string; config?: string; json?: boolean }) => {
       if (opts.backend !== "headless") {
         // Panes are Phase 4. Refusing beats pretending (exit 3, SRD §11).
         throw new CliError(
@@ -70,12 +72,35 @@ export function register(program: Command): void {
       // squashes ownership and hides this entirely.
       await makeWorkerAccessible(run.sessionsDir, true);
 
+      /**
+       * The reaper's staleness threshold has to travel WITH the run.
+       *
+       * The daemon is launched detached, with `PIFLEET_RUNS_DIR` and nothing
+       * else — no cwd it can trust and no `--config` to inherit — so it cannot
+       * re-resolve `fleet.yaml` later, and a config edited or moved mid-run
+       * would in any case give it a threshold the fleet was never started
+       * under. Resolved once here and written into the run dir instead.
+       *
+       * Optional by design: Phase 1 `up` needs no config otherwise, and
+       * refusing to start a run because none was found would be a regression.
+       * The fallback is the schema's own default, which is the value a config
+       * that omitted the key would have produced anyway.
+       */
+      let heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
+      try {
+        const loaded = await loadConfig(opts.config);
+        heartbeatIntervalMs = loaded.config.run.timers.heartbeat_interval * 1000;
+      } catch {
+        // No reachable config; the schema default stands.
+      }
+
       await writeJsonAtomic(run.runJson, {
         schema: "pifleet.run/v1",
         run_id: runId,
         created_at: new Date().toISOString(),
         backend: opts.backend,
         workers,
+        heartbeat_interval_ms: heartbeatIntervalMs,
       });
       const ledger = new LedgerWriter(run, "cli-up");
       await ledger.append("run_created", { detail: { workers, backend: opts.backend } });

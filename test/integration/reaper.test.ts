@@ -16,7 +16,16 @@
 
 import { describe, expect, test } from "bun:test";
 import { WorkerStateSchema, type WorkerState } from "../../src/contracts.ts";
-import { RegistrySchema } from "../../src/run/registry.ts";
+import {
+  RegistrySchema,
+  readRegistry,
+  socketRequest,
+  startRegistryDaemon,
+} from "../../src/run/registry.ts";
+import { runPaths, type RunPaths } from "../../src/run/paths.ts";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { realProcessOps } from "../../src/safety/kill.ts";
 import {
   HeartbeatMonitor,
@@ -259,6 +268,223 @@ describe("reapStale: one scan over a real registry shape", () => {
       expect(await alive(victim.pid)).toBeNull();
     } finally {
       victim.kill();
+    }
+  });
+});
+
+/**
+ * The daemon's reaper loop (ISC-236).
+ *
+ * `reapStale` had full coverage above while nothing in production called it —
+ * a tested mechanism with no live call site, which is indistinguishable from
+ * a dead one at runtime. These probes go through `startRegistryDaemon`, so
+ * they fail if the wiring is removed, if the reaper config stops being passed,
+ * or if the reap stops being reflected in `registry.json`.
+ *
+ * Cycles are driven with `reapOnce()` rather than by waiting for the interval:
+ * a test that sleeps past a timer is racing the path it is trying to prove.
+ */
+describe("the daemon reaps and deregisters", () => {
+  async function scratchRun(): Promise<{ run: RunPaths; cleanup: () => Promise<void> }> {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-daemon-"));
+    const run = runPaths("r-reap", root);
+    await mkdir(run.root, { recursive: true });
+    return { run, cleanup: () => rm(root, { recursive: true, force: true }) };
+  }
+
+  function entry(worker: string, proc: { pid: number; started: string }) {
+    return {
+      worker,
+      pid: proc.pid,
+      pgid: 0,
+      started: proc.started,
+      registered_at: "2026-07-27T09:00:00Z",
+    };
+  }
+
+  function state(worker: string, heartbeatAt: string): WorkerState {
+    return WorkerStateSchema.parse({
+      schema: "pifleet.state/v1",
+      worker,
+      run_id: "r-reap",
+      pid: 1,
+      pgid: 0,
+      started_at: "2026-07-27T09:00:00Z",
+      phase: "busy",
+      epoch: 1,
+      heartbeat_at: heartbeatAt,
+      container: null,
+    });
+  }
+
+  test("a wedged supervisor is killed, deregistered, and persisted as gone", async () => {
+    const { run, cleanup } = await scratchRun();
+    const victim = await spawnVictim(["sleep", "300"]);
+    let clock = 0;
+    let label = "2026-07-27T10:00:00Z";
+    const announced: string[] = [];
+    const { ops } = opsWithFakeDocker();
+
+    const daemon = await startRegistryDaemon(run, {
+      reaper: {
+        heartbeatIntervalMs: 1_000,
+        // Long enough that the interval cannot fire during the test: every
+        // cycle here is one this test asked for.
+        scanIntervalMs: 3_600_000,
+        readState: (w) => Promise.resolve(state(w, label)),
+        now: () => clock,
+        ops,
+        onReap: (rs) => announced.push(...rs.map((r) => r.worker)),
+        ...FAST,
+      },
+    });
+
+    try {
+      await socketRequest(run.daemonSock, {
+        cmd: "register_worker",
+        entry: entry("w-1", victim),
+      });
+      expect((await readRegistry(run))?.workers["w-1"]).toBeDefined();
+
+      // First cycle only observes: a worker seen once is not yet stale.
+      expect(await daemon.reapOnce()).toEqual([]);
+      expect(await alive(victim.pid)).toBe(victim.started);
+      expect((await readRegistry(run))?.workers["w-1"]).toBeDefined();
+      expect(announced).toEqual([]);
+
+      // The label freezes while the daemon's own clock passes 3x the interval.
+      clock += 60_000;
+      const reports = await daemon.reapOnce();
+      expect(reports.map((r) => r.worker)).toEqual(["w-1"]);
+      expect(["terminated", "killed"]).toContain(reports[0]!.supervisor);
+
+      // Really dead, and really gone from the registry ON DISK — the file is
+      // what `status` and `down` read, so an in-memory-only removal would
+      // leave a reaped worker looking registered to every other process.
+      expect(await alive(victim.pid)).toBeNull();
+      expect((await readRegistry(run))?.workers["w-1"]).toBeUndefined();
+      // The observability hook is how `daemon` gets a `worker_reaped` ledger
+      // row; a reap nobody is told about is one nobody can audit afterwards.
+      expect(announced).toEqual(["w-1"]);
+    } finally {
+      await daemon.stop();
+      victim.kill();
+      await cleanup();
+    }
+  });
+
+  test("a healthy worker survives every cycle", async () => {
+    const { run, cleanup } = await scratchRun();
+    const victim = await spawnVictim(["sleep", "300"]);
+    let clock = 0;
+    let beat = 0;
+    const { ops } = opsWithFakeDocker();
+
+    const daemon = await startRegistryDaemon(run, {
+      reaper: {
+        heartbeatIntervalMs: 1_000,
+        scanIntervalMs: 3_600_000,
+        // A label that keeps MOVING is a live supervisor, whatever the clocks
+        // disagree about.
+        readState: (w) => Promise.resolve(state(w, `2026-07-27T10:00:${beat++}Z`)),
+        now: () => clock,
+        ops,
+        ...FAST,
+      },
+    });
+
+    try {
+      await socketRequest(run.daemonSock, {
+        cmd: "register_worker",
+        entry: entry("w-1", victim),
+      });
+      for (let i = 0; i < 4; i++) {
+        clock += 60_000;
+        expect(await daemon.reapOnce()).toEqual([]);
+      }
+      expect(await alive(victim.pid)).toBe(victim.started);
+      expect((await readRegistry(run))?.workers["w-1"]).toBeDefined();
+    } finally {
+      await daemon.stop();
+      victim.kill();
+      await cleanup();
+    }
+  });
+  /**
+   * A scan reaps against the worker set it STARTED with. Reaping is slow — the
+   * kill ladder waits out two grace periods — and `up` registers workers
+   * concurrently, so a scan that wrote back its own snapshot would erase every
+   * worker that appeared while it ran. Those workers are alive and supervised;
+   * losing them from the registry means `down` never stops them and `status`
+   * never shows them.
+   *
+   * The probe holds the scan open inside `readState` and registers a second
+   * worker while it is suspended.
+   */
+  test("a worker registered mid-scan is not erased by that scan", async () => {
+    const { run, cleanup } = await scratchRun();
+    const victim = await spawnVictim(["sleep", "300"]);
+    const bystander = await spawnVictim(["sleep", "300"]);
+    let clock = 0;
+    const { ops } = opsWithFakeDocker();
+
+    let releaseScan: () => void = () => {};
+    const scanReachedWorker = new Promise<void>((resolve) => {
+      releaseScan = resolve;
+    });
+    let held = false;
+
+    const daemon = await startRegistryDaemon(run, {
+      reaper: {
+        heartbeatIntervalMs: 1_000,
+        scanIntervalMs: 3_600_000,
+        readState: async (w) => {
+          if (!held) {
+            held = true;
+            await scanReachedWorker;
+          }
+          return state(w, "2026-07-27T10:00:00Z");
+        },
+        now: () => clock,
+        ops,
+        ...FAST,
+      },
+    });
+
+    try {
+      await socketRequest(run.daemonSock, {
+        cmd: "register_worker",
+        entry: entry("w-1", victim),
+      });
+      // Observe once so w-1 has a frozen label to go stale against.
+      held = true; // the gate is for the SECOND scan, not this one
+      expect(await daemon.reapOnce()).toEqual([]);
+
+      clock += 60_000;
+      held = false;
+      const scan = daemon.reapOnce();
+
+      // The scan is now suspended inside readState, holding a snapshot that
+      // contains only w-1. Register w-2 into the live registry underneath it.
+      await socketRequest(run.daemonSock, {
+        cmd: "register_worker",
+        entry: entry("w-2", bystander),
+      });
+      releaseScan();
+
+      const reports = await scan;
+      expect(reports.map((r) => r.worker)).toEqual(["w-1"]);
+
+      const after = await readRegistry(run);
+      expect(after?.workers["w-1"]).toBeUndefined();
+      // The whole point: w-2 arrived after the snapshot and must survive it.
+      expect(after?.workers["w-2"]).toBeDefined();
+      expect(await alive(bystander.pid)).toBe(bystander.started);
+    } finally {
+      await daemon.stop();
+      victim.kill();
+      bystander.kill();
+      await cleanup();
     }
   });
 });
