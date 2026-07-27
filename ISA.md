@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 25/193
+progress: 30/200
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -338,6 +338,22 @@ Open — carried forward, not fixed here:
 - [ ] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
 - [ ] ISC-192: A ledger or state file written under an older schema version is read under a pinned policy rather than failing.
 - [ ] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
+
+### Group P — CI portability (added 2026-07-27, found the first time CI actually ran the probes)
+
+The container job had been red since it was added: it read `d.images[0].tag` from
+`image list --json`, which emits a bare array, so the TypeError killed the step
+before it could tag the image. Every Group C and Group J criterion had therefore
+been reported against a job that never executed a single probe. Fixing the
+extraction ran them for the first time and seven failed at once.
+
+- [x] ISC-194: The container CI job tags the built image from the real `image list --json` shape and fails loudly on an empty list.
+- [x] ISC-195: A host directory pifleet bind-mounts is accessible to the worker's uid, not left at `mkdtemp`'s 0700 or `mkdir`'s 0755.
+- [x] ISC-196: The scratch root itself is traversable, since a 0700 parent makes every 0777 child unreachable.
+- [x] ISC-197: `WORKER_UID` is pinned against the Dockerfile's `USER`, so the permission widening cannot drift onto the wrong account.
+- [x] ISC-198: A read-only mount is made traversable and readable without being made world-writable.
+- [ ] ISC-199: Anti: no assertion in the suite encodes a platform-specific spelling of a POSIX observation (`ps` printing `??` versus `?`).
+- [ ] ISC-200: Anti: no CI step can fail in a way that leaves its job green, or pass in a way that never executed its probes.
 
 ## Test Strategy
 
