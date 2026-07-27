@@ -44,6 +44,7 @@ export function register(program: Command): void {
     .option("--task <id>", "single task id")
     .option("--all", "every task in the run")
     .option("--include <kinds>", "extra payloads to include, e.g. diff")
+    .option("--run-acceptance", "re-run the task's acceptance commands and grade on the result")
     .option("--json", "emit machine-readable output")
     .action(
       async (opts: {
@@ -51,8 +52,19 @@ export function register(program: Command): void {
         task?: string;
         all?: boolean;
         include?: string;
+        runAcceptance?: boolean;
         json?: boolean;
       }) => {
+        /**
+         * `--run-acceptance` is opt-in because the default must stay a pure
+         * read. Without it `artifacts` inspects files; with it, it clones the
+         * repository and EXECUTES commands out of it, which is a different
+         * operation with a different cost and a different risk, and silently
+         * doing that under a name documented as a read would be the wrong
+         * default however useful the result.
+         */
+        const runAcceptance = opts.runAcceptance === true;
+
         const single = opts.task !== undefined;
         const all = opts.all === true;
         if (single === all) {
@@ -71,7 +83,7 @@ export function register(program: Command): void {
         const run = runPaths(runId, root);
 
         if (single) {
-          const t = await harvestTask(run, opts.task as string, { includeDiff });
+          const t = await harvestTask(run, opts.task as string, { includeDiff, runAcceptance });
           if (opts.json === true) process.stdout.write(`${JSON.stringify(serialize(t))}\n`);
           else printHuman(t);
           return;
@@ -79,7 +91,7 @@ export function register(program: Command): void {
 
         // --all: the single end-of-fanout call (§8.4). An empty run emits an
         // empty task list — still valid JSON, still exit 0.
-        const tasks = await harvestAll(run, { includeDiff });
+        const tasks = await harvestAll(run, { includeDiff, runAcceptance });
         if (opts.json === true) {
           process.stdout.write(`${JSON.stringify({ run_id: runId, tasks: tasks.map(serialize) })}\n`);
         } else {

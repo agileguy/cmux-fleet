@@ -281,11 +281,11 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
 - [x] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
 - [ ] ISC-147: Across every hostile scenario, completion is never declared while the agent will still emit output.
-- [ ] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree. [IMPLEMENTED + UNIT-VERIFIED, NOT WIRED — `artifacts` does not execute acceptance; see ISC-233]
-- [ ] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment. [IMPLEMENTED + UNIT-VERIFIED, NOT WIRED — see ISC-233]
+- [x] ISC-148: Acceptance commands are resolved from the base SHA, not read out of the worker's tree. [live via `artifacts --run-acceptance`]
+- [x] ISC-149: Acceptance commands run in a fresh clone by SHA, outside the worker's worktree, with no inherited environment. [live via `artifacts --run-acceptance`; fresh CONTAINER is still ISC-233]
 - [x] ISC-150: A diff touching the test-harness surface caps the verdict at `blocked` or `unknown` and can never yield `success`.
 - [x] ISC-151: `git merge-base --is-ancestor <base_ref> HEAD` is verified at harvest, so a rewritten base cannot shrink the diff to nothing.
-- [ ] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`. [IMPLEMENTED + UNIT-VERIFIED, NOT WIRED — no acceptance runs on the live path; see ISC-233]
+- [x] ISC-152: A timed-out acceptance command yields `unknown`, not `failed`. [live via `artifacts --run-acceptance`]
 - [x] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
 - [ ] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing). [LIVE but INERT — nothing populates `tree_hash_quiesce`/`tree_hash_harvest`, so the check cannot fire; needs supervisor cooperation]
 - [x] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.

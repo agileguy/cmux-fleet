@@ -58,8 +58,14 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
   return { code: await p.exited, stdout, stderr };
 }
 
-function taskEnvelope(taskId: string, worker: string, workdir: string): Record<string, unknown> {
+function taskEnvelope(
+  taskId: string,
+  worker: string,
+  workdir: string,
+  acceptance: string[] = [],
+): Record<string, unknown> {
   return {
+    acceptance,
     schema: "pifleet.task/v1",
     task_id: taskId,
     run_id: RUN_ID,
@@ -265,6 +271,30 @@ beforeAll(async () => {
       settled_at: new Date().toISOString(),
     }),
   );
+
+  // T-exam-*: the harvester re-runs the FLEET's acceptance commands itself.
+  // Both tasks are identical work with an identical honest envelope; only the
+  // exam differs, so any verdict difference is the exam's doing.
+  for (const [id, cmd] of [["T-exam-pass", "grep -q CHANGED a.txt"], ["T-exam-fail", "grep -q NEVER_PRESENT a.txt"]] as const) {
+    await writeFile(join(runDir, "inbox", `${id}.json`), JSON.stringify(taskEnvelope(id, "w1", worktree, [cmd])));
+    await mkdir(join(runDir, "outbox", "w1", id), { recursive: true });
+    await writeFile(
+      join(runDir, "outbox", "w1", id, "result.json"),
+      JSON.stringify({
+        schema: "pifleet.result/v1",
+        task_id: id,
+        epoch: 1,
+        worker: "w1",
+        status: "success",
+        summary: "all criteria met",
+        files_changed: [
+          { path: "a.txt", change: "modified" },
+          { path: NASTY, change: "added" },
+          { path: "src/new.ts", change: "added" },
+        ],
+      }),
+    );
+  }
 });
 
 afterAll(async () => {
@@ -471,6 +501,44 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.verdict).toBe("aborted");
     expect(h.reasons.join(" ")).toContain("aborted");
+  });
+
+  /**
+   * §8.2: the harvester re-runs the acceptance commands ITSELF, and the
+   * result decides. Before this wiring the runner existed, was unit-tested,
+   * and had no production caller — so `derived.acceptance` was always empty
+   * and a worker's self-report was the only thing grading it.
+   *
+   * The two tasks differ ONLY in their acceptance command, so the verdict
+   * difference cannot come from anywhere else.
+   */
+  test("a failing acceptance command overrides a claimed success", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-exam-fail", "--run-acceptance", "--json"]);
+    expect(r.code).toBe(0);
+    const h = HarvestSchema.parse(JSON.parse(r.stdout));
+    expect(h.derived.acceptance).toHaveLength(1);
+    expect(h.derived.acceptance[0]!.met).toBe(false);
+    expect(h.verdict).not.toBe("success");
+  }, 60_000);
+
+  test("a passing acceptance command lets the claimed success stand", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-exam-pass", "--run-acceptance", "--json"]);
+    expect(r.code).toBe(0);
+    const h = HarvestSchema.parse(JSON.parse(r.stdout));
+    expect(h.derived.acceptance[0]!.met).toBe(true);
+    expect(h.verdict).toBe("success");
+  }, 60_000);
+
+  /**
+   * The default stays a pure read. Without the flag no clone is made and no
+   * command runs — a read that silently executes code out of the repository
+   * it is inspecting would be a different command wearing the same name.
+   */
+  test("without --run-acceptance no exam is held", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-exam-fail", "--json"]);
+    expect(r.code).toBe(0);
+    const h = HarvestSchema.parse(JSON.parse(r.stdout));
+    expect(h.derived.acceptance).toEqual([]);
   });
 
   // The §8.4 pure-read rule. Would fail if an unknown task became a CliError:

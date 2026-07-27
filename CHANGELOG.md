@@ -118,6 +118,15 @@ run can be stopped before it spends everything.
   other's RPCs. Six parallel lanes went from 5/6 failing to 6/6 green.
 
 ### Added — wiring completed after review
+- **`artifacts --run-acceptance` holds the exam.** SRD §8.2 has the harvester
+  re-run the acceptance commands *itself*; the runner existed, was unit-tested,
+  and had no production caller, so `derived.acceptance` was always empty and a
+  worker's self-report was the only thing grading it. Commands are resolved
+  from the base SHA, not the worker's tree — independence is a property of
+  where a command is resolved from, not of who runs it. Opt-in, because the
+  default must stay a pure read: a read that silently clones a repository and
+  executes code out of it is a different operation wearing the same name.
+  Running in a fresh *container* rather than a fresh clone remains ISC-233.
 - The daemon runs the reaper on an interval and deregisters what it reaps
   (ISC-236); the staleness threshold travels with the run in `run.json`, so the
   detached daemon judges by the interval the fleet was started under. This also

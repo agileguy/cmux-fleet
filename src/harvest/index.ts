@@ -14,10 +14,12 @@
  * "task failed" alike.
  */
 
-import { readdir } from "node:fs/promises";
+import { mkdtemp, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adjudicate as adjudicateFacts } from "./adjudicate.ts";
-import { harnessSurface } from "./acceptance.ts";
+import { harnessSurface, resolveFromEnvelope, runAcceptance } from "./acceptance.ts";
+import { Deadline } from "../util/clock.ts";
 import {
   DerivedFactsSchema,
   HarvestSchema,
@@ -41,6 +43,26 @@ import {
 export interface HarvestOptions {
   /** Attach the full diff text to `derived.diff` (`--include diff`, §8.4). */
   includeDiff?: boolean;
+  /**
+   * Re-run the task's acceptance commands and grade on the result (§8.2).
+   *
+   * OFF by default, and the default is the important part: `artifacts` is
+   * documented as a pure read, and a read that silently executes commands
+   * from the repository under inspection is a different command wearing the
+   * same name. Opting in is the caller saying "spend time and run code".
+   *
+   * With it off, `derived.acceptance` is empty and the adjudicator has no
+   * exam to weigh — which is why a real diff can only ever derive `unknown`
+   * and the worker's own claim decides. That is the honest position when
+   * nothing was verified, not a bug.
+   */
+  runAcceptance?: boolean;
+  /** Scratch root for the fresh clone. Defaults to the OS temp dir. */
+  acceptanceScratch?: string;
+  /** Whole-run budget for acceptance execution. */
+  acceptanceBudgetMs?: number;
+  /** Per-command ceiling, itself bounded by the run budget. */
+  acceptancePerCommandMs?: number;
 }
 
 export interface TaskHarvest {
@@ -235,6 +257,40 @@ export async function harvestTask(
     harness: harnessSurface(git.facts.files_changed.map((f) => f.path)),
   };
 
+  /**
+   * The exam (§8.2): the harvester re-runs the acceptance commands itself.
+   *
+   * Commands are resolved from the BASE SHA, never from the worker's tree —
+   * independence is a property of where the command is resolved from, not of
+   * who runs it, because the command string routes through `package.json`
+   * scripts, `conftest.py` and the Makefile, all of which the worker can
+   * edit. The envelope's own `acceptance` array is a CLAIM and is never
+   * executed; the task envelope's is the fleet-authored one.
+   *
+   * Requires a real head SHA and a worktree to clone from. Without either
+   * there is nothing to examine, and the runs stay empty rather than being
+   * filled with a guess.
+   */
+  if (opts.runAcceptance === true && git.ok && git.facts.head_ref !== null && hasWorktree) {
+    const scratchRoot = opts.acceptanceScratch ?? (await mkdtemp(join(tmpdir(), "pifleet-accept-")));
+    try {
+      const result = await runAcceptance({
+        repo: envelope.host_workdir,
+        head_sha: git.facts.head_ref,
+        scratch_dir: scratchRoot,
+        commands: resolveFromEnvelope([...envelope.acceptance], envelope.base_ref),
+        deadline: new Deadline(opts.acceptanceBudgetMs ?? 600_000),
+        per_command_timeout_ms: opts.acceptancePerCommandMs ?? 120_000,
+      });
+      factsWithHarness.acceptance = result.runs;
+      factsWithHarness.acceptance_context = result.context;
+    } catch (err) {
+      // An exam that could not be held is not an exam the worker failed
+      // (ISC-152). Recorded as a reason so the verdict stays uncertifiable.
+      reasons.push(`acceptance could not be run: ${String(err)}`);
+    }
+  }
+
   const adj = adjudicateFacts(factsWithHarness, claimed);
   let verdict = adj.verdict;
   reasons.push(...adj.reasons);
@@ -272,8 +328,22 @@ export async function harvestTask(
       commits: git.facts.commits,
       files_changed: git.facts.files_changed,
       diff: opts.includeDiff === true ? git.diffText : null,
-      // E3's surface (ISC-148..150): stays empty until acceptance execution.
-      acceptance: [],
+      /**
+       * The harvester's OWN exam results, projected into the report's claim
+       * shape (criterion / met / evidence). Empty unless `--run-acceptance`
+       * asked for the exam to be held.
+       *
+       * `met` is true only for `passed`. A timed-out or unrun command is not
+       * a met criterion and is not a failed one either (ISC-152) — the
+       * distinction survives in `evidence`, and the verdict cap that acts on
+       * it lives in the adjudicator, which reads the full runs rather than
+       * this projection.
+       */
+      acceptance: factsWithHarness.acceptance.map((r) => ({
+        criterion: r.cmd,
+        met: r.outcome === "passed",
+        evidence: `${r.outcome}${r.exit_code === null ? "" : ` (exit ${r.exit_code})`}`,
+      })),
     },
     discrepancies,
     session_path: state?.session_path ?? null,
