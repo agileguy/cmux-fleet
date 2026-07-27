@@ -61,12 +61,31 @@ jobs:
       - name: Fail if the container probes silently skipped
         env:
           PIFLEET_DOCKER: "1"
+          # Every test in both files must run. Raise this when probes are added;
+          # a mismatch is the point, not an inconvenience.
+          EXPECTED: "42"
         run: |
           set -eu
           # A skip prints an announcement and still exits 0, so a green job is
-          # not evidence the probes ran. Count them.
+          # not evidence the probes ran.
+          #
+          # The previous guard could not fire. `*SKIP*` is uppercase and bun
+          # prints `18 skip` and `[skip] …` in lowercase, so the only live arm
+          # was `*"0 pass"*` — which needs EVERYTHING to skip, and which also
+          # false-positives on any count ending in zero ("30 pass" matches).
+          # Docker up but the image missing would have run half the probes and
+          # passed this check, which is exactly what it claims to prevent.
+          #
+          # So: assert the exact number that ran, and that none skipped.
           out="$(bun test test/integration/image.test.ts test/integration/verbgate.test.ts 2>&1)"
           echo "$out"
-          case "$out" in
-            *"0 pass"*|*SKIP*) echo "container probes did not execute"; exit 1 ;;
-          esac
+          pass="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) pass$/\1/p' | tail -1)"
+          skip="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) skip$/\1/p' | tail -1)"
+          : "${pass:=0}" "${skip:=0}"
+          echo "parsed: pass=$pass skip=$skip expected=$EXPECTED"
+          if [ "$skip" -ne 0 ]; then
+            echo "::error::$skip container probes skipped — they must all execute here"; exit 1
+          fi
+          if [ "$pass" -ne "$EXPECTED" ]; then
+            echo "::error::expected $EXPECTED container probes, $pass ran — update EXPECTED if probes were added"; exit 1
+          fi

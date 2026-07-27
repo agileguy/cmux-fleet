@@ -65,7 +65,19 @@ log_ledger() {
   # a token containing a newline used to split one row into two and let an
   # attacker append a forged row through the crack. Strip anything that can
   # break out of a JSON string and bound the length.
+  # Every field interpolated into the fallback must be filtered, not just the
+  # verb. `task` is PIFLEET_TASK_ID and `epoch` is PIFLEET_EPOCH — both are
+  # environment the WORKER controls, and both landed in the JSON raw. A task id
+  # of  T-1","decision":"allow_read  appends a duplicate `decision` key, and
+  # JSON.parse takes the last one: a refused destructive verb reads back from
+  # the audit trail as permitted. Sanitizing one of three interpolations closed
+  # nothing.
   safe_verb=$(printf '%s' "${dverb}" | tr -d '\000-\037\177"\\' | cut -c1-200)
+  safe_task=$(printf '%s' "${task}" | tr -d '\000-\037\177"\\' | cut -c1-200)
+  # Digits only, and never empty — this one is emitted unquoted, so anything
+  # else is a syntax break rather than a string escape.
+  safe_epoch=$(printf '%s' "${PIFLEET_EPOCH:-0}" | tr -cd '0-9' | cut -c1-18)
+  [ -n "${safe_epoch}" ] || safe_epoch=0
   jq -cn \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg tool "${tool}" \
@@ -76,8 +88,8 @@ log_ledger() {
     '{ts:$ts,tool:$tool,verb:$verb,decision:$decision,task_id:$task_id,epoch:($epoch|tonumber? // 0),argv:$ARGS.positional}' \
     --args -- "$@" >> "${ledger}" 2>/dev/null \
   || printf '{"ts":"%s","tool":"%s","verb":"%s","decision":"%s","task_id":"%s","epoch":%s,"argv_unencoded":true}\n' \
-       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${tool}" "${safe_verb}" "${decision}" "${task}" \
-       "${PIFLEET_EPOCH:-0}" >> "${ledger}" 2>/dev/null \
+       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${tool}" "${safe_verb}" "${decision}" "${safe_task}" \
+       "${safe_epoch}" >> "${ledger}" 2>/dev/null \
   || true
 }
 
@@ -170,6 +182,17 @@ case "${tool}" in
     # verb always precedes it.
     for t in ${verbs}; do
       case "${t}" in
+        # Credential-minting verbs are NOT reads, whatever their name suggests.
+        # `print-access-token` matched `print-*` and sailed through as an
+        # allow-listed read; curl is in the image, so the agent could mint a
+        # bearer token and issue any mutating REST call with zero gate rows and
+        # zero refusals — the containment story inverted by a glob. It is also
+        # the first thing a confused agent tries after a 77.
+        # `get-credentials` writes a kubeconfig, so it is mutating too.
+        print-access-token|print-identity-token|get-credentials)
+          is_read=0
+          break
+          ;;
         list|describe|version|info|help|get-*|print-*|search|check|wait|tail)
           is_read=1
           break

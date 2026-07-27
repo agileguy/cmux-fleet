@@ -8,6 +8,25 @@ import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 
 /**
+ * Read the envelope's `epoch` as a re-dispatch REQUEST, or `null` to allocate.
+ *
+ * `epoch` is mandatory in `TaskEnvelopeSchema` and 0 is the documented
+ * placeholder the supervisor replaces. Allocated epochs start at 1, so 0 can
+ * never name a real epoch — but treating any number as a request rejected every
+ * hand-written envelope with `stale_epoch`, for supplying the one value the
+ * schema forces its author to supply.
+ *
+ * Exported solely so the regression test can exercise THIS expression. It was
+ * previously inline, and the test that guards it re-declared an identical
+ * predicate of its own — so reverting the fix in this file left the suite green.
+ * A test that copies the code under test asserts only that the copy is
+ * self-consistent.
+ */
+export function requestedEpochFrom(raw: unknown): number | null {
+  return typeof raw === "number" && raw > 0 ? raw : null;
+}
+
+/**
  * Register `pifleet dispatch` (SRD §10, §7.1).
  *
  * The supervisor — not this command — is the sole epoch allocator (SRD §7.5):
@@ -58,15 +77,7 @@ export function register(program: Command): void {
         if (taskId === "") throw new CliError("task file needs a task_id", EXIT.USAGE);
         const attemptId =
           typeof partial["attempt_id"] === "string" ? partial["attempt_id"] : randomUUID();
-        // `epoch` is MANDATORY in the envelope schema, and 0 is documented as
-        // the placeholder the supervisor replaces. Allocated epochs start at 1,
-        // so 0 can never be a genuine re-dispatch request — treating it as one
-        // rejected every hand-written envelope with `stale_epoch`, which is the
-        // one value the schema forces an author to supply. Found by dispatching
-        // a real task.
-        const rawEpoch = partial["epoch"];
-        const requestedEpoch =
-          typeof rawEpoch === "number" && rawEpoch > 0 ? (rawEpoch as number) : null;
+        const requestedEpoch = requestedEpochFrom(partial["epoch"]);
 
         // Fill the envelope; epoch 0 is a placeholder the supervisor replaces
         // with its allocation before anything durable records it.

@@ -417,7 +417,14 @@ async function main(): Promise<void> {
       response.id !== undefined &&
       response.id === livePromptId
     ) {
-      void settle("failed", `late_prompt_failure: ${response.error ?? "unknown"}`);
+      // Same hazard as the deadline escalation: an unguarded `void settle(...)`
+      // turns a durable-write failure into an unhandled rejection that exits
+      // the supervisor.
+      void settle("failed", `late_prompt_failure: ${response.error ?? "unknown"}`).catch(
+        (err: unknown) => {
+          logEvent({ type: "settle_failed", reason: String(err) });
+        },
+      );
     }
   };
 
@@ -507,11 +514,22 @@ async function main(): Promise<void> {
         abortEscalation = null;
         if (em.live === null) return; // the abort landed; nothing to escalate.
         logEvent({ type: "deadline_escalated", epoch: em.live.epoch });
-        void settle("timed_out", "deadline_exceeded_no_terminal_event").finally(() => {
-          // Death must be unambiguous: a child that ignored abort is not
-          // trustworthy to run the next task.
-          child.kill();
-        });
+        // `.catch` BEFORE `.finally`, and not the other way round. `settle()`
+        // awaits writeTaskRecord and ledger.append, neither guarded; on ENOSPC
+        // or EROFS it rejects, and a bare `void p.finally(...)` re-raises that
+        // as an unhandled rejection which takes the whole supervisor down —
+        // killing the child with no worker_exit row, no deregistration, and
+        // state.json frozen mid-transition, leaving the run unreapable. The
+        // kill must still happen, which is why it stays in `finally`.
+        void settle("timed_out", "deadline_exceeded_no_terminal_event")
+          .catch((err: unknown) => {
+            logEvent({ type: "settle_failed", reason: String(err) });
+          })
+          .finally(() => {
+            // Death must be unambiguous: a child that ignored abort is not
+            // trustworthy to run the next task.
+            child.kill();
+          });
       }, ABORT_GRACE_MS);
     }
     void flushState();

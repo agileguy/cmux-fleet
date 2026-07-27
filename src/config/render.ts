@@ -159,8 +159,17 @@ export function buildDockerArgv(
   return argv;
 }
 
-/** Refuse any `@`-prefixed element (ISC-66) — see the header for why. */
-function assertNoAtPaths(argv: string[], what: string): void {
+/**
+ * Refuse any `@`-prefixed element (ISC-66) — see the header for why.
+ *
+ * Exported for direct test. This is an invariant on argv *this module builds*,
+ * not a validation of user input: `--skill` prefixes its value with `/skills/`
+ * and the briefing path is a constant, so almost no config can produce an `@`.
+ * That makes it untestable through `renderWorker` alone — deleting both call
+ * sites left the entire suite green, because the fixture contains no `@` and
+ * the test was asserting a property of the fixture.
+ */
+export function assertNoAtPaths(argv: string[], what: string): void {
   for (const a of argv) {
     if (a.startsWith("@")) {
       throw new ConfigError(

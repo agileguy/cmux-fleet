@@ -10,12 +10,12 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPaths, taskRecordPath, workerPaths } from "../../src/run/paths.ts";
-import { readTaskRecord } from "../../src/run/state.ts";
+import { readTaskRecord, readWorkerState } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
 import { controlCall } from "../../src/supervisor/launch.ts";
 
@@ -87,6 +87,18 @@ async function fleetUp(scenario: string): Promise<Fleet> {
   expect(parsed.run_id).toBeTruthy(); // ISC-69: up returns a run_id
   fleet.runId = parsed.run_id;
   fleets.push(fleet);
+
+  /**
+   * ISC-195: the sessions directory is bind-mounted rw into every worker, which
+   * runs as uid 10001, so `up` must open its mode. Nothing else pinned the call
+   * site — deleting the `makeWorkerAccessible` line from `up.ts` left the whole
+   * suite green, because the unit tests cover the helper and the headless path
+   * never starts a container. Asserting it here binds the helper to its only
+   * production caller.
+   */
+  const sessionsMode = (await stat(join(root, fleet.runId, "sessions"))).mode & 0o777;
+  expect(sessionsMode).toBe(0o777);
+
   return fleet;
 }
 
@@ -264,10 +276,31 @@ describe("e2e — the Phase 1 exit criterion", () => {
       const d = await cli(fleet, ["dispatch", "--worker", "eng-1", "--task", taskFile, "--json"]);
       expect(json<{ accepted: boolean }>(d).accepted).toBe(true);
 
-      // The first agent_end{willRetry:true} was emitted at ack time; the real
-      // end comes ~200ms later. Right now there must be NO settlement.
-      await new Promise((r) => setTimeout(r, 50));
+      /**
+       * The first `agent_end{willRetry:true}` is emitted at ack time; the real
+       * end comes ~200ms later.
+       *
+       * This used to `sleep(50)` and assert the record was null, which proved
+       * nothing: 50ms is shorter than observe→probe→get_state→settle→write, so
+       * the record is null whether or not `willRetry` is honoured. Changing
+       * `completion.ts` to ignore `willRetry` entirely left this green.
+       *
+       * Instead: wait for the retrying `agent_end` to actually be OBSERVED —
+       * a positive signal, not a timer — and only then assert that nothing
+       * settled. A build that ignores `willRetry` settles on that very event,
+       * so by the time it reaches the log the record exists and the phase has
+       * left `busy`.
+       */
+      const sawRetryEnd = await waitUntil(async () => {
+        const text = await Bun.file(wp.eventsJsonl)
+          .text()
+          .catch(() => "");
+        return text.includes('"agent_end"');
+      }, 10_000);
+      expect(sawRetryEnd).toBe(true);
+
       expect(await readTaskRecord(taskRecordPath(wp, "T-RT"))).toBeNull();
+      expect((await readWorkerState(wp))?.phase).toBe("busy");
 
       // And after the retry completes, it settles success.
       const w = await cli(fleet, ["wait", "--task", "T-RT", "--timeout", "15s", "--json"]);

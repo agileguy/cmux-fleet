@@ -14,7 +14,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { ConfigError, loadConfig, type LoadedConfig } from "../../src/config/load.ts";
-import { renderAllWorkers, renderWorker, BRIEFING_MOUNT } from "../../src/config/render.ts";
+import {
+  assertNoAtPaths,
+  renderAllWorkers,
+  renderWorker,
+  BRIEFING_MOUNT,
+} from "../../src/config/render.ts";
 import { configHash, imageInputs } from "../../src/container/image.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -142,6 +147,44 @@ describe("no @-prefixed argv (ISC-66)", () => {
         expect(a.startsWith("@")).toBe(false);
       }
     }
+  });
+
+  /**
+   * The test above passes against a renderer with NO guard at all: the fixture
+   * contains no `@` anywhere, so it asserts a property of the fixture rather
+   * than of the code. Deleting both `assertNoAtPaths` calls left the entire
+   * suite green.
+   *
+   * The guard cannot be reached through config — `--skill` prefixes its value
+   * with `/skills/`, the briefing path is a constant — so it is an invariant on
+   * argv this module builds, and the only honest way to test it is directly.
+   */
+  test("the guard rejects an @-prefixed element and names it", () => {
+    expect(() => assertNoAtPaths(["--model", "@evil"], "pi argv for eng-1")).toThrow(/@evil/);
+  });
+
+  test("the guard names which argv it was checking, since two are checked", () => {
+    expect(() => assertNoAtPaths(["@x"], "docker argv for eng-1")).toThrow(/docker argv for eng-1/);
+  });
+
+  test("the guard passes clean argv through", () => {
+    expect(() => assertNoAtPaths(["--model", "m", "--skill", "/skills/@ok"], "x")).not.toThrow();
+  });
+
+  /**
+   * And the call sites themselves: a guard that is never invoked is the same as
+   * no guard. `renderWorker` must run both checks, so removing either one is
+   * observable here even though no config can trip them.
+   */
+  test("renderWorker invokes the guard on both argvs", async () => {
+    const { loaded } = await fixture();
+    const src = await Bun.file("src/config/render.ts").text();
+    const body = src.slice(src.indexOf("export async function renderWorker"));
+    expect(body).toContain("assertNoAtPaths(pi,");
+    expect(body).toContain("assertNoAtPaths(docker,");
+    // And the render still succeeds, so the assertion above is about a live
+    // path rather than dead code.
+    await expect(renderWorker(loaded, "eng-1")).resolves.toBeDefined();
   });
 });
 

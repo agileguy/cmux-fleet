@@ -26,7 +26,19 @@
 export const MAX_LINE_UNITS = 8 * 1024 * 1024;
 
 export class LineTooLongError extends Error {
-  constructor(readonly units: number) {
+  /**
+   * Lines that were already complete when the oversized one was hit.
+   *
+   * They are valid records and the caller must not lose them: a stream reader
+   * that treats this as fatal (RpcClient does) can still drain them, and one
+   * that recovers (TailReader, readJsonl) must. Dropping them would make one
+   * huge tool result destroy the records around it — the precise failure the
+   * completion detector cannot survive.
+   */
+  constructor(
+    readonly units: number,
+    readonly completed: readonly string[] = [],
+  ) {
     super(`JSONL line exceeded ${MAX_LINE_UNITS} code units (saw ${units})`);
     this.name = "LineTooLongError";
   }
@@ -68,14 +80,24 @@ export class LineSplitter {
       // a transcript with one huge line bypassed the bound completely.
       if (nl - start > MAX_LINE_UNITS) {
         this.#buffer = this.#buffer.slice(nl + 1);
-        throw new LineTooLongError(nl - start);
+        // Carry the lines already completed in this push. Throwing bare
+        // discarded `out`, so a single oversized record silently destroyed
+        // every good record that arrived before it in the same chunk —
+        // `{"a":1}\n{"b":2}\n<huge>\n{"c":3}\n` yielded only `{"c":3}`. That is
+        // exactly the dropped-record failure this module's contract forbids.
+        throw new LineTooLongError(nl - start, out);
       }
       out.push(stripCr(this.#buffer.slice(start, nl)));
       start = nl + 1;
     }
     if (start > 0) this.#buffer = this.#buffer.slice(start);
     if (this.#buffer.length > MAX_LINE_UNITS) {
-      throw new LineTooLongError(this.#buffer.length);
+      // Drop the offending residue as well. Leaving it made every subsequent
+      // push re-throw on a line the caller had already been told about, so one
+      // oversized tail wedged the splitter permanently.
+      const n = this.#buffer.length;
+      this.#buffer = "";
+      throw new LineTooLongError(n, out);
     }
     return out;
   }
@@ -140,10 +162,38 @@ export async function* readJsonl<T = unknown>(
  * path — the reader restarts from offset 0 rather than reading garbage from the
  * middle of a new file.
  */
+/** How many leading bytes identify a file's *content* generation. */
+const HEAD_FINGERPRINT_BYTES = 64;
+
+/**
+ * Hash of exactly the first `n` bytes of `path`, or `null` if unreadable.
+ *
+ * `n` is FIXED by the caller across polls and never derived from the current
+ * size. Hashing `min(size, 64)` instead looks right and is not: an append grows
+ * the file, so the next poll hashes a longer range, the digest differs, and a
+ * perfectly ordinary append is misread as a rewrite — the reader then replays
+ * records it has already returned.
+ */
+async function headHash(path: string, n: number): Promise<string | null> {
+  if (n <= 0) return null;
+  try {
+    const bytes = new Uint8Array(await Bun.file(path).slice(0, n).arrayBuffer());
+    if (bytes.length < n) return null; // shrank under us; caller treats as replace
+    const h = new Bun.CryptoHasher("sha256");
+    h.update(bytes);
+    return h.digest("hex").slice(0, 16);
+  } catch {
+    return null;
+  }
+}
+
 export class TailReader {
   #offset = 0;
   /** `dev:ino:birthtime` of the file this reader's offset refers to. */
   #identity: string | null = null;
+  /** Byte count the head fingerprint covers; fixed once, never size-derived. */
+  #headLen = 0;
+  #headHash: string | null = null;
   #splitter = new LineSplitter();
 
   constructor(readonly path: string) {}
@@ -166,12 +216,33 @@ export class TailReader {
     // same path with the same length looked like "nothing appended", and one
     // recreated LARGER made the reader resume from the old offset — slicing
     // out of the middle of a record and handing back the tail fragment as a
-    // complete line. Identity is what distinguishes append from replace, and
-    // this class's own doc-comment already claimed to track it.
-    const identity = `${st.dev}:${st.ino}:${st.birthtimeMs}`;
+    // complete line.
+    //
+    // Inode identity alone cannot detect it either, and this is where the
+    // first fix fell short: Pi rewrites the session file IN PLACE on
+    // load-time migration and on auto-compaction, so `dev`, `ino` and
+    // `birthtimeMs` all survive unchanged. Regrown past the old offset, that
+    // is byte-for-byte indistinguishable from an append — the enabled test
+    // produced `"ed":true}` as a "complete line".
+    //
+    // So identity is (dev, ino, birthtime) AND a fingerprint of the head. A
+    // rewrite changes the first bytes; an append never does. Reading 64 bytes
+    // per poll is the cost of not silently corrupting a transcript.
     const size = st.size;
-    if (this.#identity !== null && (identity !== this.#identity || size < this.#offset)) {
+    const identity = `${st.dev}:${st.ino}:${st.birthtimeMs}`;
+    // The head is re-hashed over the SAME byte count that was hashed last
+    // time — a prefix this reader has already consumed, which an append can
+    // never alter and a rewrite almost always does.
+    const head = this.#headLen > 0 ? await headHash(this.path, this.#headLen) : null;
+    const replaced =
+      this.#identity !== null &&
+      (identity !== this.#identity ||
+        size < this.#offset ||
+        (this.#headLen > 0 && head !== this.#headHash));
+    if (replaced) {
       this.#offset = 0;
+      this.#headLen = 0;
+      this.#headHash = null;
       this.#splitter = new LineSplitter();
     }
     this.#identity = identity;
@@ -182,6 +253,13 @@ export class TailReader {
     // Advance by what was actually read, not by the stat's size: a truncation
     // between the stat and the read would otherwise skip past unread content.
     this.#offset += bytes.length;
+
+    // Re-anchor the head fingerprint on bytes now known to be consumed. Fixing
+    // the length here is what keeps the next poll's comparison apples-to-apples.
+    if (this.#headLen === 0 && this.#offset > 0) {
+      this.#headLen = Math.min(this.#offset, HEAD_FINGERPRINT_BYTES);
+      this.#headHash = await headHash(this.path, this.#headLen);
+    }
     return this.#splitter.push(bytes);
   }
 

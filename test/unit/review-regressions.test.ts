@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { EXIT, isExitCoded } from "../../src/contracts.ts";
 import { CliError } from "../../src/cli/index.ts";
+import { requestedEpochFrom } from "../../src/cli/commands/dispatch.ts";
 import { parseConfig } from "../../src/config/load.ts";
 import { EpochManager } from "../../src/rpc/epoch.ts";
 import { RpcClient } from "../../src/rpc/client.ts";
@@ -191,21 +192,33 @@ describe("dispatch — the mandatory epoch placeholder", () => {
    */
   test("epoch 0 allocates rather than requesting", () => {
     const em = new EpochManager();
-    const requested = (raw: unknown) => (typeof raw === "number" && raw > 0 ? raw : null);
-    expect(em.allocate("T-1", "A-1", requested(0))).toMatchObject({ ok: true, epoch: 1 });
+    expect(em.allocate("T-1", "A-1", requestedEpochFrom(0))).toMatchObject({ ok: true, epoch: 1 });
   });
 
   test("a positive epoch is still honoured as an explicit request", () => {
     const em = new EpochManager();
-    const requested = (raw: unknown) => (typeof raw === "number" && raw > 0 ? raw : null);
-    expect(em.allocate("T-1", "A-1", requested(1))).toMatchObject({ ok: true, epoch: 1 });
+    expect(em.allocate("T-1", "A-1", requestedEpochFrom(1))).toMatchObject({ ok: true, epoch: 1 });
   });
 
   test("a genuinely stale epoch is still rejected", () => {
     const em = new EpochManager();
     em.allocate("T-1", "A-1", null);
     em.settle("success", new Date(0).toISOString());
-    const requested = (raw: unknown) => (typeof raw === "number" && raw > 0 ? raw : null);
-    expect(em.allocate("T-2", "A-2", requested(1))).toMatchObject({ ok: false });
+    expect(em.allocate("T-2", "A-2", requestedEpochFrom(1))).toMatchObject({ ok: false });
+  });
+
+  /**
+   * The predicate itself, at its boundaries. The three tests above route
+   * through `EpochManager`, which can mask a predicate change behind
+   * allocation behaviour; these cannot.
+   */
+  test("only a positive number is a request — everything else allocates", () => {
+    expect(requestedEpochFrom(0)).toBeNull();
+    expect(requestedEpochFrom(-1)).toBeNull();
+    expect(requestedEpochFrom(undefined)).toBeNull();
+    expect(requestedEpochFrom("1")).toBeNull();
+    expect(requestedEpochFrom(null)).toBeNull();
+    expect(requestedEpochFrom(1)).toBe(1);
+    expect(requestedEpochFrom(7)).toBe(7);
   });
 });

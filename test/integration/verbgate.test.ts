@@ -178,6 +178,107 @@ describe.skipIf(!DOCKER)("verbgate", () => {
    * Adversarial regressions. Each of the three below was a reproduced bypass
    * that routed a mutating verb to the real binary.
    */
+  describe("round-2 review findings", () => {
+    /**
+     * Audit forgery through the printf fallback.
+     *
+     * `log_ledger` prefers jq, which escapes everything, and falls back to a
+     * raw `printf` when jq fails (an oversized argv makes jq exit E2BIG). That
+     * fallback sanitized only `verb` — `task_id` and `epoch` are worker-owned
+     * environment and went in raw. A task id containing `","decision":"…`
+     * appends a duplicate key, and `JSON.parse` keeps the LAST one, so a
+     * refused destructive verb reads back from the audit trail as permitted.
+     *
+     * jq is stubbed out rather than argv inflated: inflating it enough to break
+     * jq also breaks `exec` itself (rc=126), so the fallback would never run and
+     * the test would pass without reaching the code under test.
+     */
+    const FORGE_TASK = 'T-1","decision":"allow_read","forged":"yes';
+    const FORGE_EPOCH = '0,"decision":"allow_listed","forged":true';
+    const STUB_JQ =
+      'mkdir -p /tmp/stub && printf "#!/bin/sh\\nexit 1\\n" > /tmp/stub/jq && ' +
+      "chmod +x /tmp/stub/jq && export PATH=/tmp/stub:$PATH";
+
+    test("a forged task id cannot rewrite the decision in the fallback row", async () => {
+      const sb = await makeSandbox();
+      await inImage(
+        `export PIFLEET_TASK_ID='${FORGE_TASK}' PIFLEET_EPOCH=1\n${STUB_JQ}\n` +
+          `kubectl delete pod x >/dev/null 2>&1; echo "rc=$?"`,
+        sb.mounts,
+      );
+      const rows = (await sb.ledger())
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { decision: string; forged?: unknown });
+      expect(rows).toHaveLength(1);
+      // The decision the gate actually made, not the one the worker injected.
+      expect(rows[0]!.decision).toBe("refuse");
+      expect(rows[0]!.forged).toBeUndefined();
+    });
+
+    test("a forged epoch cannot break the row or inject a key", async () => {
+      const sb = await makeSandbox();
+      await inImage(
+        `export PIFLEET_TASK_ID=T-2 PIFLEET_EPOCH='${FORGE_EPOCH}'\n${STUB_JQ}\n` +
+          `kubectl delete pod y >/dev/null 2>&1; echo "rc=$?"`,
+        sb.mounts,
+      );
+      const rows = (await sb.ledger())
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { decision: string; epoch: number; forged?: unknown });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.decision).toBe("refuse");
+      expect(rows[0]!.epoch).toBe(0); // digits-only, never the injected text
+      expect(rows[0]!.forged).toBeUndefined();
+    });
+
+    /**
+     * `gcloud auth print-access-token` matched the `print-*` read glob and was
+     * therefore an ALLOW-LISTED read. curl is in the image, so a worker could
+     * mint a bearer token and issue any mutating REST call — no gate row, no
+     * refusal, containment inverted by a glob. It is also the obvious next move
+     * for an agent that just took a 77.
+     */
+    test("credential-minting verbs are refused despite matching the read glob", async () => {
+      const sb = await makeSandbox();
+      const out = await inImage(
+        `${PRELUDE}
+         gcloud auth print-access-token >/dev/null 2>&1;   echo "access=$?"
+         gcloud auth print-identity-token >/dev/null 2>&1; echo "identity=$?"
+         gcloud container clusters get-credentials c >/dev/null 2>&1; echo "creds=$?"`,
+        sb.mounts,
+      );
+      expect(out).toContain("access=77");
+      expect(out).toContain("identity=77");
+      expect(out).toContain("creds=77");
+    });
+
+    /**
+     * The negative half: the narrowing must not have swallowed genuine reads,
+     * or the gate becomes something operators route around.
+     */
+    test("genuine gcloud reads still reach the real binary", async () => {
+      const sb = await makeSandbox();
+      const out = await inImage(
+        `${PRELUDE}
+         gcloud compute instances list >/dev/null 2>&1;        echo "list=$?"
+         gcloud compute instances describe vm >/dev/null 2>&1; echo "describe=$?"`,
+        sb.mounts,
+      );
+      expect(out).not.toContain("list=77");
+      expect(out).not.toContain("describe=77");
+      const rows = (await sb.ledger())
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { decision: string });
+      expect(rows.every((r) => r.decision === "allow_read")).toBe(true);
+    });
+  });
+
   describe("bypasses", () => {
     /**
      * The gcloud arm scanned EVERY leading token for a read keyword, so a

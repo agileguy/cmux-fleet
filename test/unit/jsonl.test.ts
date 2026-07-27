@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { LineSplitter, parseLine, readJsonl, writeJsonAtomic, TailReader } from "../../src/util/jsonl.ts";
+import {
+  LineSplitter,
+  LineTooLongError,
+  MAX_LINE_UNITS,
+  parseLine,
+  readJsonl,
+  writeJsonAtomic,
+  TailReader,
+} from "../../src/util/jsonl.ts";
 import { mkdtemp, readFile, writeFile, appendFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -139,5 +147,33 @@ describe("TailReader", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Round-2 review: the oversized-line path was destroying good records.
+ */
+describe("LineTooLongError carries what was already complete", () => {
+  test("an oversized line does not destroy the records before it", () => {
+    const s = new LineSplitter();
+    const huge = "x".repeat(MAX_LINE_UNITS + 10);
+    const chunk = new TextEncoder().encode(`{"a":1}\n{"b":2}\n${huge}\n{"c":3}\n`);
+    try {
+      s.push(chunk);
+      throw new Error("expected LineTooLongError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LineTooLongError);
+      // Previously `[]` — every record before the huge one was silently lost.
+      expect((err as LineTooLongError).completed).toEqual(['{"a":1}', '{"b":2}']);
+    }
+  });
+
+  test("an oversized unterminated residue does not wedge the splitter forever", () => {
+    const s = new LineSplitter();
+    const enc = new TextEncoder();
+    expect(() => s.push(enc.encode("y".repeat(MAX_LINE_UNITS + 5)))).toThrow(LineTooLongError);
+    // The residue is dropped, so the next push is judged on its own merits
+    // rather than re-throwing on a line the caller was already told about.
+    expect(s.push(enc.encode('{"ok":1}\n'))).toEqual(['{"ok":1}']);
   });
 });

@@ -259,12 +259,16 @@ describe("TailReader — rotation identity", () => {
     }
   });
 
-  // KNOWN GAP (reported upstream to the owner of util/jsonl.ts): TailReader
-  // tracks size only. A file replaced and regrown PAST the old offset within
-  // one poll interval is indistinguishable from an append, and the reader
-  // returns garbage from the middle of the new content. Detection needs
-  // (dev, ino) identity per SRD §8.3 — size alone cannot see it.
-  test.todo("replace-and-regrow past the old offset within one poll is re-read from 0", async () => {
+  /**
+   * ISC-173. The fix shipped identity tracking, but the test that would prove
+   * it stayed `test.todo` and the comment above it still described the bug as
+   * open — so reverting `util/jsonl.ts` wholesale left the suite green.
+   *
+   * This is the case size alone cannot see: replaced and regrown PAST the old
+   * offset within one poll interval, which is byte-for-byte indistinguishable
+   * from an append unless the reader tracks file identity.
+   */
+  test("replace-and-regrow past the old offset within one poll is re-read from 0", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pifleet-tail-"));
     try {
       const p = join(dir, "t.jsonl");

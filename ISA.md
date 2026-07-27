@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 45/200
+progress: 58/219
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -326,7 +326,7 @@ Fixed in this phase:
 - [x] ISC-183: `gsutil` and `bq` are gated on the same rules as gcloud/kubectl/helm.
 - [x] ISC-184: Known global flags before a verb are parsed past; unknown flag shapes still fail closed.
 - [x] ISC-185: No ledger row can be forged by control characters in argv, at any argv size.
-- [x] ISC-186: Registry writes are serialized, so concurrent registrations cannot lose a worker.
+- [ ] ISC-186: Registry writes are serialized, so concurrent registrations cannot lose a worker.
 - [x] ISC-187: `image verify`'s read-only-root check proves the tmpfs is writable as well as that `/` is not.
 
 Open — carried forward, not fixed here:
@@ -353,7 +353,34 @@ extraction ran them for the first time and seven failed at once.
 - [x] ISC-197: `WORKER_UID` is pinned against the Dockerfile's `USER`, so the permission widening cannot drift onto the wrong account.
 - [x] ISC-198: A read-only mount is made traversable and readable without being made world-writable.
 - [ ] ISC-199: Anti: no assertion in the suite encodes a platform-specific spelling of a POSIX observation (`ps` printing `??` versus `?`).
-- [ ] ISC-200: Anti: no CI step can fail in a way that leaves its job green, or pass in a way that never executed its probes.
+- [x] ISC-200: Anti: no CI step can fail in a way that leaves its job green, or pass in a way that never executed its probes.
+
+### Group Q — Round-2 review findings (added 2026-07-27)
+
+Mutation testing was the finding that mattered: five separate mutations of
+production code — each reverting a fix a test is *named* after — left the suite
+green. A regression test that cannot fail is worse than no test, because it
+retires the criterion.
+
+- [x] ISC-201: The epoch placeholder predicate is exported and tested directly; the test no longer re-implements the expression it guards.
+- [x] ISC-202: `assertNoAtPaths` is tested against argv that actually contains an `@`, and both call sites are pinned.
+- [x] ISC-203: The `willRetry` e2e waits for the retrying `agent_end` to be observed, rather than sleeping for less time than the settle path takes.
+- [x] ISC-204: `up`'s call to `makeWorkerAccessible` is pinned by an assertion on the run directory's mode, not only by unit tests of the helper.
+- [x] ISC-205: `TailReader` detects an in-place rewrite that regrows past the old offset — inode identity alone cannot see it, and the enabled test returned a record fragment.
+- [x] ISC-206: A plain append is never misread as a rewrite; the head fingerprint covers a fixed, already-consumed prefix.
+- [x] ISC-207: An oversized line does not discard the records completed before it in the same chunk.
+- [x] ISC-208: An oversized unterminated residue is dropped rather than re-thrown on every later push.
+- [x] ISC-209: The verbgate ledger fallback sanitizes `task_id` and `epoch`, so a worker cannot append a duplicate `decision` key that `JSON.parse` prefers.
+- [x] ISC-210: `gcloud auth print-access-token`, `print-identity-token` and `get-credentials` are refused despite matching the `print-*`/`get-*` read globs.
+- [x] ISC-211: Genuine gcloud reads (`list`, `describe`) still reach the real binary and record `allow_read`.
+- [x] ISC-212: No `void settle(...)` can turn a durable-write failure into an unhandled rejection that exits the supervisor.
+- [x] ISC-213: The CI anti-skip guard asserts an exact probe count and zero skips, instead of a case pattern that cannot match bun's output.
+- [ ] ISC-214: `RpcClient` stops dispatching the remainder of a chunk once `#fatal` has closed it.
+- [ ] ISC-215: The EPIPE write path sets `#closed`, so the error does not assert a state the object is not in.
+- [ ] ISC-216: An undiagnosed internal error is distinguishable by exit code from a usage error.
+- [ ] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
+- [ ] ISC-218: `writeJsonAtomic`'s directory-fsync failure cannot report a durable write as failed after the rename succeeded.
+- [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses.
 
 ## Test Strategy
 
