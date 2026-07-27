@@ -128,8 +128,12 @@ describe("detached supervisor — process tree (ISC-77/78)", () => {
       // ISC-78: a session distinct from the launcher's. macOS ps reports sess
       // as 0 for everything, so assert the observable session-leader facts:
       // no controlling terminal, unlike any pane/CLI child.
-      const tty = await psField(pid, "tty");
-      expect(tty).toBe("??");
+      //
+      // The glyph for "no tty" is platform-specific — BSD ps prints `??`,
+      // procps prints `?` — so match the invariant rather than the spelling.
+      // Asserting the macOS glyph made this pass locally and fail in CI.
+      const tty = (await psField(pid, "tty")).trim();
+      expect(tty).toMatch(/^\?+$/);
 
       // And it must have come up for real: state.json reaches idle.
       const run = runPaths(runId, root);

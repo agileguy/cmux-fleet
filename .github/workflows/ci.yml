@@ -44,8 +44,15 @@ jobs:
       - name: Tag it for the verbgate suite
         run: |
           set -eux
+          # `image list --json` emits a bare array, not {images: [...]}. Reading
+          # the wrong shape threw before `set -e` could report which step failed,
+          # so this job was red from the day it was added and no container
+          # criterion had ever actually executed. Fail loudly on an empty list.
           tag="$(bun run src/cli/index.ts image list -c fleet.example.yaml --json \
-                 | bun -e 'const d=JSON.parse(await Bun.stdin.text()); console.log(d.images[0].tag)')"
+                 | bun -e 'const d = JSON.parse(await Bun.stdin.text());
+                           const t = Array.isArray(d) ? d[0]?.tag : undefined;
+                           if (!t) { console.error("image list returned no images"); process.exit(1); }
+                           console.log(t);')"
           docker tag "$tag" pifleet/pi-worker:verify
       - name: Container and verbgate probes
         env:
