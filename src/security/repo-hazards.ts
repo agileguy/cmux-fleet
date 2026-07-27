@@ -76,11 +76,27 @@ const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
 const MCP_FILES = [".mcp.json", join(".pi", "mcp.json")] as const;
 
 /**
+ * Settings files Pi reads from the workspace root.
+ *
+ * Separate from `PI_DIRS` because these are FILES, and called out here because
+ * the docstring below used to claim `.pi/settings.json` "rides along" while
+ * `PI_DIRS` contained no such entry and nothing else in the module mentioned
+ * it. The comment asserted a control the code had never had — the same defect
+ * class as a test whose name promises more than its fixture covers, and it
+ * survived precisely because a reader checking for coverage finds the sentence
+ * and stops.
+ *
+ * It matters because a settings file can re-enable the very discovery
+ * `--no-extensions --no-skills --no-context-files` denies, and those argv flags
+ * are the load-bearing control here: in-tree quarantine is undoable by the
+ * worker, the flags are not.
+ */
+const PI_SETTINGS_FILES = [join(".pi", "settings.json")] as const;
+
+/**
  * Discovery directories Pi probes from the workspace root (§4.2). Extensions
  * are the in-process-execution case and get their own kind; the rest are
- * instruction-bearing and reported as `other`. `.pi/settings.json` rides
- * along because a settings file can re-enable the very discovery the argv
- * flags deny.
+ * instruction-bearing and reported as `other`.
  */
 const PI_DIRS: ReadonlyArray<{ rel: string; kind: RepoHazard["kind"]; why: string }> = [
   { rel: join(".pi", "extensions"), kind: "pi_extension", why: "TypeScript executed in-process by Pi" },
@@ -106,7 +122,39 @@ const CONFIG_HAZARDS: ReadonlyArray<{
   { section: /^include(if)?(\.|$)/, key: /^path$/, kind: "other", why: "pulls additional config from a repo-controlled path" },
   { section: /^diff\./, key: /^(command|textconv)$/, kind: "other", why: "names a program git runs to produce diffs" },
   { section: /^filter\./, key: /^(clean|smudge|process)$/, kind: "other", why: "names a program git runs on checkout/add" },
+  // The set below all name a program too, and were absent while the five above
+  // were present. `runGit` suppresses only what it lists in `-c`, and the three
+  // git spawns in `harvest/acceptance.ts` historically carried no `-c` at all,
+  // so "the harvester is hardened anyway" was never a reason to leave a key
+  // undetected. Detection is also what makes a hazard VISIBLE to the operator,
+  // which suppression alone never does.
+  { section: /^core$/, key: /^(pager|sshcommand|editor)$/, kind: "other", why: "names a program git runs" },
+  { section: /^pager\./, key: /^.+$/, kind: "other", why: "names a per-command pager program git runs" },
+  { section: /^sequence$/, key: /^editor$/, kind: "other", why: "names a program git runs during interactive rebase" },
+  { section: /^credential(\.|$)/, key: /^helper$/, kind: "other", why: "names a program git runs to supply credentials" },
+  { section: /^gpg(\.|$)/, key: /^program$/, kind: "other", why: "names a program git runs to verify or make signatures" },
+  { section: /^uploadpack$/, key: /^packobjectshook$/, kind: "other", why: "names a program git runs when serving objects" },
 ];
+
+/**
+ * Attribute files that assign a driver to a path.
+ *
+ * `.gitattributes` is tracked content and lands in the tree; `.git/info/attributes`
+ * is the repository-local equivalent and is NOT tracked — which is exactly why
+ * it was missed. `-c core.attributesFile=/dev/null` does not suppress it: that
+ * flag overrides only the global/user attributes file. Confirmed by running —
+ * with no `.gitattributes` anywhere, a `.git/info/attributes` naming a filter
+ * ran the filter's smudge program on checkout.
+ *
+ * An attributes file names no program by itself; it is the half that makes an
+ * otherwise-inert `[filter "x"]` or `[diff "x"]` entry APPLY to files. Both
+ * halves are recorded, because a scanner that reports only the config half
+ * describes a loaded gun and omits that it is pointed somewhere.
+ */
+const ATTRIBUTE_FILES = [join(".git", "info", "attributes")] as const;
+
+/** `path pattern` lines assigning a diff/filter driver, e.g. `*.bin filter=pwn`. */
+const ATTRIBUTE_DRIVER = /(^|\s)(diff|filter)=(\S+)/;
 
 export interface RepoHazardScanOptions {
   /** When true, each hazard is defused as it is found and the outcome recorded. */
@@ -237,6 +285,20 @@ export async function scanRepoHazards(
     record("mcp_config", rel, d.neutralized, `MCP server config in the tree; ${d.note}`);
   }
 
+  // ---- Pi settings files ---------------------------------------------------
+  // Same symlinked-parent guard as the MCP loop above, for the same reason.
+  for (const rel of PI_SETTINGS_FILES) {
+    if (rel.includes("/") && (await isSymlink(join(worktreeRoot, rel.split("/")[0]!)))) continue;
+    const abs = join(worktreeRoot, rel);
+    try {
+      await lstat(abs);
+    } catch {
+      continue;
+    }
+    const d = await defuse(abs);
+    record("other", rel, d.neutralized, `Pi settings file in the tree; can re-enable denied discovery; ${d.note}`);
+  }
+
   // ---- Pi discovery directories -------------------------------------------
   // Parent dot-dirs first: if `.pi` or `.agents` is itself a symlink, every
   // path through it resolves wherever the link points — outside the worktree
@@ -309,11 +371,98 @@ export async function scanRepoHazards(
       // flagging it on every run trains the operator to ignore the field.
     } else if (gitSt.isDirectory()) {
       await scanGitConfig(worktreeRoot, opts, record);
+      await scanGitAttributes(worktreeRoot, opts, record);
       await scanGitHooks(worktreeRoot, opts, record, defuse);
     }
   }
 
   return out;
+}
+
+/**
+ * Flag driver assignments in the repository-local attributes file.
+ *
+ * Quarantined the same way `.git/config` is — the offending line commented out
+ * behind a marker, content preserved and meaning removed — rather than by
+ * renaming the file aside, because `.git/info/attributes` can legitimately
+ * carry unrelated entries (`export-ignore`, `binary`, merge drivers) that a
+ * rename would take with it.
+ *
+ * `#` is the comment character here, unlike `.git/config` which also accepts
+ * `;`. Using the wrong one would leave the line live while reporting it
+ * neutralized, so the marker matches this file's own syntax.
+ */
+async function scanGitAttributes(
+  worktreeRoot: string,
+  opts: RepoHazardScanOptions,
+  record: Record_,
+): Promise<void> {
+  for (const rel of ATTRIBUTE_FILES) {
+    const abs = join(worktreeRoot, rel);
+    let st: Awaited<ReturnType<typeof lstat>>;
+    try {
+      st = await lstat(abs);
+    } catch {
+      continue; // absent — the common case
+    }
+    if (st.isSymbolicLink()) {
+      const d = opts.neutralize
+        ? await renamePlain(abs)
+        : { neutralized: false, note: "detected only; not neutralized" };
+      record("other", rel, d.neutralized, `${rel} is a symlink (not followed); ${d.note}`);
+      continue;
+    }
+    if (!st.isFile()) {
+      record("other", rel, false, `${rel} is not a regular file; left untouched`);
+      continue;
+    }
+    if (st.size > MAX_GIT_CONFIG_BYTES) {
+      record("other", rel, false, `${rel} is ${st.size} bytes (cap ${MAX_GIT_CONFIG_BYTES}); not parsed, not neutralized`);
+      continue;
+    }
+
+    let text: string;
+    try {
+      text = await readFile(abs, "utf8");
+    } catch (err) {
+      record("other", rel, false, `${rel} could not be read: ${String(err)}`);
+      continue;
+    }
+
+    const lines = text.split("\n");
+    const offenders: Array<{ index: number; shown: string }> = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!.replace(/\r$/, "");
+      if (line.trimStart().startsWith("#")) continue;
+      const m = ATTRIBUTE_DRIVER.exec(line);
+      if (m === null) continue;
+      offenders.push({ index: i, shown: `${m[2]}=${m[3]} in ${line.trim().slice(0, 128)}` });
+    }
+    if (offenders.length === 0) continue;
+
+    let neutralized = false;
+    let note = "detected only; not neutralized";
+    if (opts.neutralize) {
+      for (const o of offenders) {
+        lines[o.index] = `# pifleet-quarantined ${lines[o.index]!}`;
+      }
+      try {
+        await writeFile(abs, lines.join("\n"), "utf8");
+        neutralized = true;
+        note = "offending lines commented out with a pifleet-quarantined marker";
+      } catch (err) {
+        note = `neutralization FAILED: ${String(err)}`;
+      }
+    }
+    for (const o of offenders) {
+      record(
+        "other",
+        rel,
+        neutralized,
+        `${o.shown} — assigns a driver that makes a repo-defined program apply to matching paths; ${note}`,
+      );
+    }
+  }
 }
 
 async function isSymlink(abs: string): Promise<boolean> {

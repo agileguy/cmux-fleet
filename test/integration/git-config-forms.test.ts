@@ -28,7 +28,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../src/security/repo-hazards.ts";
@@ -99,12 +99,85 @@ describe("the .git/config scanner sees every form git honours", () => {
    * silently re-parenting every following indented key to the previous section.
    */
   test("quarantining a shared line preserves the section for the keys below it", async () => {
-    const dir = await repoWithConfig('[core] hooksPath = /tmp/evil\n\teditor = keepme\n');
+    // `ignorecase` deliberately: the sibling must be a key that names no
+    // program, or it is itself a hazard and gets quarantined too — which is
+    // correct behaviour that would make this test fail for the wrong reason.
+    const dir = await repoWithConfig('[core] hooksPath = /tmp/evil\n\tignorecase = true\n');
     try {
-      expect(await gitConfigGet(dir, "core.editor")).toBe("keepme");
+      expect(await gitConfigGet(dir, "core.ignorecase")).toBe("true");
       await neutralizeRepoHazards(dir);
       expect(await gitConfigGet(dir, "core.hookspath")).toBeNull();
-      expect(await gitConfigGet(dir, "core.editor")).toBe("keepme");
+      expect(await gitConfigGet(dir, "core.ignorecase")).toBe("true");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * `.git/info/attributes` is the untracked, repository-local twin of
+   * `.gitattributes`, and `-c core.attributesFile=/dev/null` does NOT suppress
+   * it — that flag overrides only the global/user file. Confirmed by running:
+   * with no `.gitattributes` anywhere in the tree, a driver assigned here ran
+   * the filter's smudge program on checkout.
+   */
+  test(".git/info/attributes driver assignments are detected", async () => {
+    const dir = await repoWithConfig("");
+    try {
+      await mkdir(join(dir, ".git", "info"), { recursive: true });
+      await writeFile(join(dir, ".git", "info", "attributes"), "*.bin filter=pwn\n", "utf8");
+      // Precondition: git really does honour this file.
+      const p = Bun.spawn(["git", "-C", dir, "check-attr", "filter", "--", "x.bin"], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(await new Response(p.stdout).text()).toContain("filter: pwn");
+
+      const hazards = await detectRepoHazards(dir);
+      expect(hazards.some((h) => h.path.includes("attributes"))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test(".git/info/attributes stops assigning the driver after neutralization", async () => {
+    const dir = await repoWithConfig("");
+    try {
+      await mkdir(join(dir, ".git", "info"), { recursive: true });
+      // An unrelated entry that must survive — a rename-aside quarantine would
+      // take it with the hazard, which is why this file is commented in place.
+      await writeFile(join(dir, ".git", "info", "attributes"), "*.bin filter=pwn\n*.txt text\n", "utf8");
+      const hazards = await neutralizeRepoHazards(dir);
+      expect(hazards.every((h) => h.neutralized)).toBe(true);
+
+      const attr = async (key: string, path: string): Promise<string> => {
+        const p = Bun.spawn(["git", "-C", dir, "check-attr", key, "--", path], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        return await new Response(p.stdout).text();
+      };
+      expect(await attr("filter", "x.bin")).not.toContain("filter: pwn");
+      expect(await attr("text", "x.txt")).toContain("text: set");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The module's docstring claimed `.pi/settings.json` was covered while the
+   * scan list contained no such entry — a comment asserting a control that had
+   * never existed.
+   */
+  test(".pi/settings.json is detected and neutralized", async () => {
+    const dir = await repoWithConfig("");
+    try {
+      await mkdir(join(dir, ".pi"), { recursive: true });
+      await writeFile(join(dir, ".pi", "settings.json"), '{"extensions":{"enabled":true}}', "utf8");
+      const hazards = await neutralizeRepoHazards(dir);
+      const hit = hazards.filter((h) => h.path.includes("settings.json"));
+      expect(hit).toHaveLength(1);
+      expect(hit[0]!.neutralized).toBe(true);
+      expect(await Bun.file(join(dir, ".pi", "settings.json")).exists()).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
