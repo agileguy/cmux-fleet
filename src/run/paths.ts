@@ -44,6 +44,8 @@ export interface RunPaths {
   root: string;
   runJson: string;
   registryJson: string;
+  /** Per-run control-socket secret (SRD §12.7), mode 0600. Never mounted. */
+  controlAuthJson: string;
   daemonPid: string;
   daemonLog: string;
   daemonSock: string;
@@ -60,6 +62,7 @@ export function runPaths(runId: string, root: string = runsRoot()): RunPaths {
     root: base,
     runJson: join(base, "run.json"),
     registryJson: join(base, "registry.json"),
+    controlAuthJson: join(base, "control-auth.json"),
     daemonPid: join(base, "daemon.pid"),
     daemonLog: join(base, "daemon.log"),
     daemonSock: socketPath(runId, "@daemon"),

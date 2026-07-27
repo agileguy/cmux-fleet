@@ -55,6 +55,7 @@ import {
 } from "../run/state.ts";
 import { LedgerWriter } from "../run/ledger.ts";
 import { processStartTime, registryCall, serveJsonlSocket } from "../run/registry.ts";
+import { ensureControlAuth } from "../security/control-auth.ts";
 import { pgidOf } from "./launch.ts";
 
 /** Event types that end or could end a turn — logged when attributed prior. */
@@ -101,6 +102,12 @@ async function main(): Promise<void> {
   await mkdir(wp.dir, { recursive: true });
   await mkdir(wp.tasksDir, { recursive: true });
   await mkdir(run.sessionsDir, { recursive: true });
+
+  // The run's control secret (SRD §12.7), before ANY socket work: the control
+  // server refuses requests without it, and registration with the daemon
+  // sends it. `up` normally minted it already; the exclusive-create fallback
+  // covers supervisors launched directly against a bare run directory.
+  const controlAuth = await ensureControlAuth(run);
 
   const ledger = new LedgerWriter(run, argv.workerId);
   const pgid = (await pgidOf(process.pid)) ?? process.pid;
@@ -650,7 +657,7 @@ async function main(): Promise<void> {
       default:
         return { ok: false, error: `unknown cmd: ${String(msg["cmd"])}` };
     }
-    });
+    }, { secret: controlAuth.secret });
   }
 
   async function beginShutdown(): Promise<void> {
