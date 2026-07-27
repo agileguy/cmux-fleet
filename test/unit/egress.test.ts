@@ -224,6 +224,14 @@ describe("decide: IP literals", () => {
     expect(decide("[::FFFF:1]", 8000, p).allowed).toBe(false);
   });
 
+  test("IPv6 hex case is normalized — the one place toLowerCase is load-bearing", () => {
+    // domainToASCII lowercases DOMAINS on its own; IP literals bypass it, so
+    // without the explicit lowercase an uppercase-hex spelling of an allowed
+    // address would be silently denied — a fail-closed bug, but still a bug.
+    const p: EgressPolicy = { rules: [makeRule("v6", "::ffff:1", 8000)] };
+    expect(decide("[::FFFF:1]", 8000, p).allowed).toBe(true);
+  });
+
   test("a non-canonical IPv6 spelling fails CLOSED against a canonical rule", () => {
     // Documented shortcut: no numeric canonicalization. The miss is a denial,
     // never an allow, so the failure mode is an operator writing the rule in
