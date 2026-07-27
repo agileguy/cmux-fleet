@@ -166,15 +166,37 @@ const CASES: Case[] = [
     want: "unknown",
     wantReason: "ISC-152",
   },
-  // The identity rule cuts both ways — with no independent evidence the claim
-  // stands (SRD §7.3 defines unknown as identity). Fails if unknown is made
-  // the bottom, which would also break ISC-94.
+  // ISC-230. `unknown` as identity is about a missing CLAIM, not missing
+  // EVIDENCE. Adopting a success claim when the exam timed out gave a worker a
+  // grading bypass that needs no harness edit: ship a change that makes an
+  // existing command hang, claim success, collect it. An exam that did not
+  // finish cannot certify success, so the claim is not adopted.
+  //
+  // Fails if the ISC-230 cap is removed from adjudicate() — the verdict then
+  // reverts to "success", which is how this was found.
   {
-    name: "timed-out acceptance + claimed success falls back to the claim (unknown is identity)",
+    name: "timed-out acceptance does NOT let a success claim through (ISC-230)",
     facts: facts({ acceptance: [run("timed_out")] }),
     claimed: claim("success"),
+    want: "unknown",
+    wantReason: "an unfinished exam cannot certify success",
+  },
+  // The cap must not become a downgrade-blocker: negative claims still land.
+  // Fails if the cap is applied unconditionally rather than only above blocked.
+  {
+    name: "a timed-out exam still lets the worker's own failure claim through",
+    facts: facts({ acceptance: [run("timed_out")] }),
+    claimed: claim("failed"),
+    want: "failed",
+  },
+  // And ISC-94 is untouched: no exam configured at all is not an unfinished
+  // exam. Fails if the cap keys on "not all passed" instead of "attempted and
+  // inconclusive".
+  {
+    name: "an empty acceptance list is not an unfinished exam (ISC-94 preserved)",
+    facts: facts({ acceptance: [] }),
+    claimed: claim("success"),
     want: "success",
-    wantReason: "adopting the worker's claim",
   },
   // Mixed evidence: one green run does not certify a suite that did not
   // finish. Fails if the evidence function returns success on any-passed.
@@ -328,8 +350,12 @@ describe("facts hash (ISC-153)", () => {
   // bug; different hash = harvester bug. The hash must therefore ignore the
   // claim entirely. Fails if the claim (or the verdict) leaks into the hash.
   test("the hash covers the facts, not the claim or the verdict", () => {
-    const f = facts({ acceptance: [run("timed_out")] });
-    const withClaim = adjudicate(f, claim("success"));
+    // A GREEN exam, so the claim is what moves the verdict: no claim yields
+    // success, a `partial` claim downgrades it. A timed-out fixture no longer
+    // works here — ISC-230 caps both branches to `unknown`, which would make
+    // the "different verdict" leg pass vacuously rather than prove anything.
+    const f = facts({ acceptance: [run("passed")] });
+    const withClaim = adjudicate(f, claim("partial"));
     const withoutClaim = adjudicate(f, null);
     expect(withClaim.facts_hash).toBe(withoutClaim.facts_hash);
     expect(withClaim.verdict).not.toBe(withoutClaim.verdict); // same hash, different claim input

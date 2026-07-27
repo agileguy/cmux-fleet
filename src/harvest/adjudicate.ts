@@ -222,5 +222,37 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
     }
   }
 
+  /**
+   * ISC-230: an exam that did not FINISH cannot certify success either.
+   *
+   * `unknown` being the lattice identity is right for a missing CLAIM — a task
+   * with a clean diff and green acceptance must not be downgraded because the
+   * worker forgot to write an envelope (ISC-94). It is wrong for missing
+   * EVIDENCE. Combining a timed-out acceptance to `unknown` and then adopting
+   * the claim produced `success` for a worker whose exam never completed, and
+   * the route there needs no harness edit at all: ship a change that makes an
+   * existing command hang, claim success, collect it. That is precisely the
+   * inversion the harness cap exists to prevent, reached by a different door,
+   * and it contradicts the SRD's own principle that a self-report is
+   * adjudicated against independent evidence *before* it is believed.
+   *
+   * So: a command that was ATTEMPTED and returned no answer caps the verdict,
+   * exactly like a touched harness. ISC-152 still holds — the outcome is
+   * `blocked`/`unknown`, never `failed`, because a timeout proves nothing
+   * about the code. An EMPTY acceptance list is untouched: no exam was ever
+   * set, which is a config decision rather than anything the worker did.
+   */
+  const inconclusive = facts.acceptance.filter(
+    (a) => a.outcome === "timed_out" || a.outcome === "not_run",
+  );
+  if (inconclusive.length > 0 && rank(verdict) > rank("blocked")) {
+    reasons.push(
+      `acceptance did not complete (${inconclusive
+        .map((a) => `${a.cmd} → ${a.outcome}`)
+        .join("; ")}): an unfinished exam cannot certify success, so the claim is not adopted (ISC-230)`,
+    );
+    verdict = "unknown";
+  }
+
   return { verdict, reasons, discrepancies, facts_hash };
 }
