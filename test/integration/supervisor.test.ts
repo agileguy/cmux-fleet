@@ -401,3 +401,86 @@ describe("fake-pi worker-side epoch fence", () => {
     15_000,
   );
 });
+
+/**
+ * The unhandled-rejection guards on `settle()` (ISC-212).
+ *
+ * Round 2 found two `void settle(...)` sites with no `.catch()`. `settle()`
+ * awaits `persistFence`, `writeTaskRecord`, `flushState` and `ledger.append` —
+ * four unguarded disk writes — so an ENOSPC or EROFS rejects it, and a bare
+ * `void p.finally(...)` re-raises that as an unhandled rejection which exits
+ * the supervisor: child killed, no `worker_exit` row, no deregistration, and
+ * `state.json` frozen mid-transition leaving the run unreapable.
+ *
+ * Round 3 then found the fix had NO test — removing either `.catch()` left the
+ * suite at 228 pass. This is that test. It makes the writes genuinely fail by
+ * revoking write permission on the worker directory, drives the deadline
+ * escalation with an agent that ignores `abort`, and asserts the one thing that
+ * distinguishes a guarded rejection from an unguarded one: the supervisor is
+ * still running afterwards.
+ */
+describe("settle() failure does not kill the supervisor (ISC-212)", () => {
+  test(
+    "a deadline escalation whose durable writes all fail leaves the supervisor alive",
+    async () => {
+      const { chmod } = await import("node:fs/promises");
+      const root = await freshRoot();
+      const runId = "int-run-settlefail";
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("deaf-abort.json") },
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      expect(await waitFor(async () => (await readWorkerState(wp))?.phase === "idle", 20_000)).toBe(
+        true,
+      );
+
+      // A deadline short enough to fire during the test, against an agent that
+      // will not answer `abort` — so the 5s escalation ladder is reached.
+      const envelope = makeEnvelope(runId, "eng-1", "T-SETTLEFAIL");
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: { ...envelope, deadline_s: 1 },
+        attempt_id: "int-attempt-settlefail",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      // Make ONLY the task-record write fail: 0555 on `tasks/` keeps it
+      // readable but refuses new files, so writeTaskRecord's temp-file create
+      // returns EACCES while state.json and fence.json still write normally.
+      //
+      // Revoking the whole worker directory does NOT work as a probe: a failed
+      // fence write deliberately triggers beginShutdown(), so the supervisor
+      // exits on purpose and the test cannot tell an orderly shutdown from an
+      // unhandled-rejection death — which is what it exists to distinguish.
+      await chmod(wp.tasksDir, 0o555);
+      cleanups.push(async () => {
+        await chmod(wp.tasksDir, 0o755).catch(() => {});
+      });
+
+      // deadline (1s) + ABORT_GRACE_MS (5s) + margin.
+      await new Promise((r) => setTimeout(r, 9_000));
+
+      // THE assertion. An unhandled rejection exits the process; a caught one
+      // does not. Nothing else here distinguishes the two.
+      expect(await processStartTime(pid)).not.toBeNull();
+
+      // And it is still answering, not merely un-exited.
+      await chmod(wp.tasksDir, 0o755);
+      const pong = await controlCall(run, "eng-1", { cmd: "ping" }).catch(() => null);
+      expect(pong).not.toBeNull();
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    45_000,
+  );
+});

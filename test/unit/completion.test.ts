@@ -310,6 +310,17 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
   "no-tool-calls.json": [1],
   "duplicate-end.json": [1], // one settle; the duplicate end is prior, never a second
   "aborted.json": [1], // the harness never aborts, so the turn ends naturally
+  // Like aborted.json: the simulator replays the emitted sequence and does not
+  // honour `delay_ms`, and the harness never aborts, so the turn ends naturally
+  // on the scenario's own agent_end. The scenario's value is elsewhere — in the
+  // supervisor integration test, where a real `abort` goes unanswered and the
+  // deadline kill ladder has to fire. Settlement there is a supervisor fact,
+  // not a completion-tracker one.
+  //
+  // I first declared this `[]` and the property test refuted it. Recording that
+  // rather than quietly editing it: the table is a reviewed CLAIM, and this is
+  // what it is for.
+  "deaf-abort.json": [1],
   "stale-epoch.json": [1],
   "bad-correlation.json": [1], // the injected response never reaches the tracker
   "interleave.json": [1], // epoch 2's empty prompt must NEVER settle

@@ -169,7 +169,7 @@ export function buildDockerArgv(
  * sites left the entire suite green, because the fixture contains no `@` and
  * the test was asserting a property of the fixture.
  */
-export function assertNoAtPaths(argv: string[], what: string): void {
+export function assertNoAtPaths(argv: string[], what: string): string[] {
   for (const a of argv) {
     if (a.startsWith("@")) {
       throw new ConfigError(
@@ -177,6 +177,13 @@ export function assertNoAtPaths(argv: string[], what: string): void {
       );
     }
   }
+  // Returns the argv so the check can sit IN the data path rather than beside
+  // it. As a bare statement it was disable-able three ways — deletion, a
+  // comment, `if (false)` — and only deletion was observable, because the test
+  // that pinned the call sites grepped this file's source text. A dead call
+  // site is the same as no call site. Threaded through the value, removing it
+  // fails to compile.
+  return argv;
 }
 
 /** Render one worker. Reads briefing files; spawns nothing; writes nothing. */
@@ -194,17 +201,19 @@ export async function renderWorker(
   const hasBriefing = content !== null;
 
   const image = imageTag(loaded.config, w.toolchain);
-  const pi = buildPiArgv(w, hasBriefing);
-  const docker = buildDockerArgv(loaded, w, {
-    runId,
-    runDir,
-    image,
-    piFlags: pi.slice(1),
-    hasBriefing,
-  });
-
-  assertNoAtPaths(pi, `pi argv for ${w.id}`);
-  assertNoAtPaths(docker, `docker argv for ${w.id}`);
+  // The `@` guard is applied AS the value is produced, not as a statement
+  // afterwards. Both argvs must pass through it to exist at all.
+  const pi = assertNoAtPaths(buildPiArgv(w, hasBriefing), `pi argv for ${w.id}`);
+  const docker = assertNoAtPaths(
+    buildDockerArgv(loaded, w, {
+      runId,
+      runDir,
+      image,
+      piFlags: pi.slice(1),
+      hasBriefing,
+    }),
+    `docker argv for ${w.id}`,
+  );
 
   return {
     workerId: w.id,

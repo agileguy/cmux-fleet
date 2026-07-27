@@ -287,9 +287,18 @@ describe("e2e — the Phase 1 exit criterion", () => {
        *
        * Instead: wait for the retrying `agent_end` to actually be OBSERVED —
        * a positive signal, not a timer — and only then assert that nothing
-       * settled. A build that ignores `willRetry` settles on that very event,
-       * so by the time it reaches the log the record exists and the phase has
-       * left `busy`.
+       * settled.
+       *
+       * Be clear about what this does and does not prove. It removes the race,
+       * but it does NOT discriminate a build that ignores `willRetry`: the
+       * double reports `isStreaming: true` for a retrying `agent_end`
+       * (`test/fixtures/fake-pi.ts`), so completion condition 4 fails whatever
+       * condition 1 decided, and mutating `completion.ts` to ignore `willRetry`
+       * leaves this file green. That mutation IS caught — by
+       * `test/unit/completion.test.ts`, which fails 3 assertions — and that is
+       * where the coverage for ISC-82 actually lives. Claiming it here would be
+       * the same fixture-property error this comment block was written to
+       * correct, one level up.
        */
       const sawRetryEnd = await waitUntil(async () => {
         const text = await Bun.file(wp.eventsJsonl)

@@ -168,12 +168,40 @@ describe("LineTooLongError carries what was already complete", () => {
     }
   });
 
-  test("an oversized unterminated residue does not wedge the splitter forever", () => {
+  /**
+   * The residue is an UNTERMINATED line, so the bytes that follow it are the
+   * continuation of the record just rejected — not a new one.
+   *
+   * A first version simply cleared the buffer, which made the next "complete
+   * line" a tail fragment of the oversized record, handed to the caller as if
+   * valid. That is exactly the corruption the TailReader identity fix exists to
+   * prevent, reintroduced one layer down. The splitter must resync to the next
+   * newline, not to the next push.
+   */
+  test("after dropping an oversized residue, the continuation is discarded too", () => {
+    const s = new LineSplitter();
+    const enc = new TextEncoder();
+    expect(() => s.push(enc.encode(`{"huge":"${"y".repeat(MAX_LINE_UNITS)}`))).toThrow(
+      LineTooLongError,
+    );
+    // These bytes are the TAIL of the rejected record, then a real one.
+    expect(s.push(enc.encode('rest-of-the-huge-record"}\n{"ok":1}\n'))).toEqual(['{"ok":1}']);
+  });
+
+  test("resync spanning several pushes never emits a fragment", () => {
     const s = new LineSplitter();
     const enc = new TextEncoder();
     expect(() => s.push(enc.encode("y".repeat(MAX_LINE_UNITS + 5)))).toThrow(LineTooLongError);
-    // The residue is dropped, so the next push is judged on its own merits
-    // rather than re-throwing on a line the caller was already told about.
-    expect(s.push(enc.encode('{"ok":1}\n'))).toEqual(['{"ok":1}']);
+    expect(s.push(enc.encode("still-inside-the-rejected-record"))).toEqual([]);
+    expect(s.push(enc.encode("and-still-inside"))).toEqual([]);
+    expect(s.push(enc.encode('\n{"ok":1}\n'))).toEqual(['{"ok":1}']);
+  });
+
+  test("the splitter is usable again afterwards, not wedged", () => {
+    const s = new LineSplitter();
+    const enc = new TextEncoder();
+    expect(() => s.push(enc.encode("y".repeat(MAX_LINE_UNITS + 5)))).toThrow(LineTooLongError);
+    s.push(enc.encode("\n")); // close the rejected record
+    expect(s.push(enc.encode('{"a":1}\n{"b":2}\n'))).toEqual(['{"a":1}', '{"b":2}']);
   });
 });

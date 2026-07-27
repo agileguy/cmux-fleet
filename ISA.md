@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 63/219
+progress: 71/229
 mode: build
 started: 2026-07-27
 updated: 2026-07-27
@@ -381,6 +381,23 @@ retires the criterion.
 - [ ] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
 - [ ] ISC-218: `writeJsonAtomic`'s directory-fsync failure cannot report a durable write as failed after the rename succeeded.
 - [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses.
+
+### Group R — Round-3 mutation review (added 2026-07-27)
+
+Round 3 mutation-tested the round-2 *fixes*. Three of six were genuinely covered
+(dispatch, jsonl, verbgate); three were not, and one fix introduced a new defect
+of the same class it repaired.
+
+- [x] ISC-220: The `@`-guard sits in the data path and returns its argv, so a disabled call site fails to compile rather than passing a source-text grep.
+- [x] ISC-221: Anti: no test asserts a production invariant by grepping the source text of the file that implements it.
+- [x] ISC-222: A `settle()` rejection is observably survivable — the supervisor is still alive and answering after every durable write in the settle path fails.
+- [x] ISC-223: The oversized-line drop resyncs to the next newline, so the continuation of the rejected record is never emitted as a complete line.
+- [x] ISC-224: A resync spanning several pushes still emits no fragment.
+- [x] ISC-225: An unreadable head fingerprint is treated as unknown, not as changed, so a transient read error cannot replay the whole file as new records.
+- [x] ISC-226: A failed head anchor is retried on later polls rather than silently disabling rewrite detection for the reader's lifetime.
+- [x] ISC-227: The `willRetry` e2e states plainly that its discrimination comes from `completion.test.ts`, not from itself — the double reports `isStreaming: true` for a retrying `agent_end`.
+- [ ] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
+- [ ] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
 
 ## Test Strategy
 

@@ -1,0 +1,20 @@
+{
+  "scenario": "deaf-abort",
+  "_why": "The agent starts work and then ignores abort entirely — no agent_end, no queue_update, nothing. This is the case the deadline kill ladder exists for: without escalation the epoch stays live forever, and because allocate refuses while an epoch is live, that strands the whole worker rather than just the task.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "delay_ms": 120000 },
+        { "type": "agent_end", "messages": [], "willRetry": false }
+      ]
+    },
+    {
+      "on": "abort",
+      "cancel_active": false,
+      "emit": []
+    }
+  ]
+}

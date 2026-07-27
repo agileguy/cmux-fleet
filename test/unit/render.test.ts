@@ -172,19 +172,25 @@ describe("no @-prefixed argv (ISC-66)", () => {
   });
 
   /**
-   * And the call sites themselves: a guard that is never invoked is the same as
-   * no guard. `renderWorker` must run both checks, so removing either one is
-   * observable here even though no config can trip them.
+   * The guard returns its argv, so `renderWorker` cannot produce `pi` or
+   * `docker` without passing through it.
+   *
+   * This replaced a source-text grep for the call sites, which survived every
+   * way of disabling the calls except literal deletion — commenting them out
+   * and wrapping them in `if (false)` both left the suite green. A dead call
+   * site is the same as no call site, and a test that reads the file's text is
+   * asserting about characters rather than behaviour.
    */
-  test("renderWorker invokes the guard on both argvs", async () => {
+  test("the guard is in the data path, not beside it", () => {
+    const argv = ["--model", "m"];
+    expect(assertNoAtPaths(argv, "x")).toBe(argv); // identity: it IS the value
+  });
+
+  test("renderWorker still produces both argvs through the guard", async () => {
     const { loaded } = await fixture();
-    const src = await Bun.file("src/config/render.ts").text();
-    const body = src.slice(src.indexOf("export async function renderWorker"));
-    expect(body).toContain("assertNoAtPaths(pi,");
-    expect(body).toContain("assertNoAtPaths(docker,");
-    // And the render still succeeds, so the assertion above is about a live
-    // path rather than dead code.
-    await expect(renderWorker(loaded, "eng-1")).resolves.toBeDefined();
+    const r = await renderWorker(loaded, "eng-1");
+    expect(r.pi.length).toBeGreaterThan(0);
+    expect(r.docker.length).toBeGreaterThan(0);
   });
 });
 

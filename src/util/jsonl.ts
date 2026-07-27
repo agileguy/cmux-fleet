@@ -54,10 +54,32 @@ export class LineTooLongError extends Error {
 export class LineSplitter {
   #decoder = new TextDecoder("utf-8");
   #buffer = "";
+  /**
+   * Set after an oversized line is dropped: the bytes that follow are the
+   * CONTINUATION of that record, not a new one, so everything up to the next
+   * newline must be discarded too.
+   *
+   * Without this, dropping the residue and returning made the next "complete
+   * line" a tail fragment of the record just rejected — handed to the caller as
+   * if it were valid. That is the same corruption the TailReader identity fix
+   * exists to prevent, reintroduced one layer down.
+   */
+  #resyncing = false;
 
   /** Feed a chunk; returns every line completed by it. */
   push(chunk: Uint8Array): string[] {
     this.#buffer += this.#decoder.decode(chunk, { stream: true });
+    if (this.#resyncing) {
+      const nl = this.#buffer.indexOf("\n");
+      if (nl === -1) {
+        // Still inside the rejected record. Keep nothing; a resync must not
+        // accumulate the very bytes it is discarding.
+        this.#buffer = "";
+        return [];
+      }
+      this.#buffer = this.#buffer.slice(nl + 1);
+      this.#resyncing = false;
+    }
     return this.#drain();
   }
 
@@ -95,8 +117,13 @@ export class LineSplitter {
       // Drop the offending residue as well. Leaving it made every subsequent
       // push re-throw on a line the caller had already been told about, so one
       // oversized tail wedged the splitter permanently.
+      //
+      // The residue is UNTERMINATED, so the next bytes continue it. Enter
+      // resync and discard through the next newline; simply clearing the
+      // buffer would emit that continuation as if it were a whole record.
       const n = this.#buffer.length;
       this.#buffer = "";
+      this.#resyncing = true;
       throw new LineTooLongError(n, out);
     }
     return out;
@@ -233,12 +260,15 @@ export class TailReader {
     // The head is re-hashed over the SAME byte count that was hashed last
     // time — a prefix this reader has already consumed, which an append can
     // never alter and a rewrite almost always does.
-    const head = this.#headLen > 0 ? await headHash(this.path, this.#headLen) : null;
+    // `null` means "could not read the head", which is NOT the same as "the
+    // head changed". Treating them alike made a transient EINTR/ENOENT during
+    // rotation reset the offset and re-emit the entire file as new records —
+    // duplicates, silently, with no error anywhere.
+    const anchored = this.#headLen > 0 && this.#headHash !== null;
+    const head = anchored ? await headHash(this.path, this.#headLen) : null;
+    const headChanged = anchored && head !== null && head !== this.#headHash;
     const replaced =
-      this.#identity !== null &&
-      (identity !== this.#identity ||
-        size < this.#offset ||
-        (this.#headLen > 0 && head !== this.#headHash));
+      this.#identity !== null && (identity !== this.#identity || size < this.#offset || headChanged);
     if (replaced) {
       this.#offset = 0;
       this.#headLen = 0;
@@ -256,9 +286,18 @@ export class TailReader {
 
     // Re-anchor the head fingerprint on bytes now known to be consumed. Fixing
     // the length here is what keeps the next poll's comparison apples-to-apples.
-    if (this.#headLen === 0 && this.#offset > 0) {
-      this.#headLen = Math.min(this.#offset, HEAD_FINGERPRINT_BYTES);
-      this.#headHash = await headHash(this.path, this.#headLen);
+    //
+    // Retry on every poll until it succeeds: a single failed anchor used to
+    // leave `#headLen > 0` with a null hash, which compares equal forever and
+    // silently disabled rewrite detection for the life of the reader, with no
+    // signal that the guarantee had been withdrawn.
+    if (this.#headHash === null && this.#offset > 0) {
+      const len = Math.min(this.#offset, HEAD_FINGERPRINT_BYTES);
+      const h = await headHash(this.path, len);
+      if (h !== null) {
+        this.#headLen = len;
+        this.#headHash = h;
+      }
     }
     return this.#splitter.push(bytes);
   }
