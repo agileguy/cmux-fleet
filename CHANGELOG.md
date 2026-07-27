@@ -67,6 +67,66 @@ run can be stopped before it spends everything.
   installed session format spells the same concept as `summary` plus
   `firstKeptEntryId`. Implemented against the binary. Erratum in `ISA.md`.
 
+### Security — found by adversarial review of this phase
+- **`git diff` no longer executes what the graded repository tells it to.** A
+  `.gitattributes` in the tree assigns a diff driver per path and
+  `[diff "name"] command` in the repository's own config names a program git
+  runs — on the host, as the harvester, outside the container the worker is
+  confined to. Neutralized on the command line, because `GIT_CONFIG_GLOBAL`
+  and `GIT_CONFIG_SYSTEM` do not suppress `.git/config` and nothing in the
+  environment can. `runGit` also no longer spreads `process.env`, which had
+  been handing that subprocess the harvester's cloud credentials.
+- **Outbox containment is checked at the roots.** `files/` was walked directly
+  and so never met the per-entry symlink branch: a worker that replaced it
+  with a link to `~/.ssh` had every key returned as a safe artifact with
+  nothing refused. A symlinked task directory separately re-rooted containment
+  onto the attacker's own directory, after which escaping links were approved.
+  Accepted files are canonicalized and refused when their link count shows a
+  second name elsewhere.
+- **Envelope paths carrying control characters are refused.** A NUL is a single
+  contained path as a JavaScript string and truncates to a different file at
+  the C boundary; the same characters let a worker rewrite the harvest report
+  that is judging it, since these paths reach an operator's terminal.
+- **The harness surface covers what the test command resolves *through*.** The
+  pattern list omitted `bunfig.toml` — the config for the runner this
+  repository itself uses, whose `[test] preload` executes before any test — so
+  a worker could turn a red suite green with the implementation still wrong and
+  have nothing classified as harness. Runner config, inherited config
+  (`tsconfig` `extends`, Makefile `include`) and toolchain selection are now
+  included. A denylist cannot express this completely; the allowlist redesign
+  is tracked as ISC-243.
+
+### Fixed — found by mutation and adversarial review
+- **One unharvestable task no longer destroys the run's harvest.**
+  `readResultEnvelope` opened the file outside its own guard, so an envelope
+  that `lstat`'d cleanly but could not be opened threw out of a function whose
+  contract promises it never throws, propagated through an unguarded loop, and
+  exited `artifacts` with code 2 and no JSON at all — losing every healthy
+  task's harvest with the poisoned one.
+- **The adjudicator is on the live path.** `artifacts` reached the two-argument
+  lattice combinator, so the module implementing the evidence rules — the
+  harness cap, the replay hash, the moved-tree void, the inconclusive-exam cap
+  — had a full passing test suite and no production caller. This also settles a
+  contradiction between two implementations of F5: SRD §880 makes
+  *disagreement* between the envelope and the diff a hard failure class,
+  unqualified, so concealment now fails as fabrication already did.
+- **`facts_hash` is recorded, not just computed** — ISC-153 asks for hashed
+  *and* recorded, and the hash was being dropped.
+- **Flaky supervisor tests fixed at the root.** `socketPath` hashes
+  `(run_id, worker_id)` into the shared `os.tmpdir()`, so tests using hardcoded
+  run ids made concurrent test processes share a control socket and answer each
+  other's RPCs. Six parallel lanes went from 5/6 failing to 6/6 green.
+
+### Added — wiring completed after review
+- The daemon runs the reaper on an interval and deregisters what it reaps
+  (ISC-236); the staleness threshold travels with the run in `run.json`, so the
+  detached daemon judges by the interval the fleet was started under. This also
+  makes `up --config` do something, which it previously accepted and ignored.
+- `workerOutboxDir` has one definition (ISC-231). It was computed
+  independently by the mount builder and the harvester, and a divergence there
+  does not throw — harvest would find an empty directory and report a task that
+  produced artifacts as having produced none.
+
 ## [0.2.0] — 2026-07-27 — Phase 1: container and headless core
 
 `up → dispatch → wait → down` runs end to end on the `headless` backend against
