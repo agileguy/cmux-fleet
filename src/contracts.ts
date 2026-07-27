@@ -579,3 +579,114 @@ export type ProcId = z.infer<typeof ProcIdSchema>;
 export function sameProc(a: ProcId | null, b: ProcId | null): boolean {
   return a !== null && b !== null && a.pid === b.pid && a.started === b.started;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 seam — security and cloud identity (SRD §5.8, §5.10, §12)
+//
+// Written before the phase's engineers are dispatched and READ-ONLY to them.
+// Four subsystems meet here — credential injection, egress policy, hostile-repo
+// neutralization and control-socket auth — and a type that two of them each
+// define locally is how a phase ends up with two incompatible halves that both
+// pass their own tests.
+// ---------------------------------------------------------------------------
+
+/**
+ * How a container is given Google identity (§5.8).
+ *
+ * `token` is the default and the safe one: a ~1h ACCESS token, which expires
+ * on its own. `file` writes credentials the container can read, and a
+ * credentials file that contains a `refresh_token` is a permanent grant — the
+ * container could mint new access tokens forever, long after the run ended,
+ * and the blast radius of one escaped worker stops being time-boxed.
+ *
+ * The mode therefore appears in the injected record, so a probe can assert
+ * which one was actually used rather than which one was configured.
+ */
+export const AdcModeSchema = z.enum(["token", "file"]);
+export type AdcMode = z.infer<typeof AdcModeSchema>;
+
+/**
+ * One credential injection into a running container.
+ *
+ * `expires_at` is a wall-clock LABEL from the issuer, not a timer: it is what
+ * Google said, and the refresh loop's own scheduling runs on the monotonic
+ * clock (ISC-155). Recording both lets a probe answer "was this refreshed
+ * before it expired" without either clock being asked to do the other's job.
+ *
+ * The token VALUE is deliberately absent. This record is written to the run
+ * directory and read by `status` and `report`, and a credential that lands in
+ * a durable artifact has escaped the container it was scoped to.
+ */
+export const CredentialInjectionSchema = z.object({
+  schema: z.literal("pifleet.credential/v1"),
+  worker: workerId,
+  mode: AdcModeSchema,
+  /** Identity the token actually carries — the SA when impersonating (§5.8). */
+  identity: shortStr,
+  /** Issuer's expiry label. Never subtracted from a local clock to decide. */
+  expires_at: z.string(),
+  injected_at: z.string(),
+  /** Monotonic ms at injection; the refresh loop schedules from this. */
+  injected_mono: z.number().nonnegative(),
+  /** Which refresh this was; 0 is the initial injection. */
+  generation: z.number().int().nonnegative().default(0),
+  /** True only when the injected material provably carries no refresh_token. */
+  refresh_token_absent: z.boolean(),
+});
+export type CredentialInjection = z.infer<typeof CredentialInjectionSchema>;
+
+/**
+ * Egress verdict for one destination (§12, deny-all default).
+ *
+ * `reason` carries the matched rule so a refusal is diagnosable — "denied" on
+ * its own sends an operator to read the policy source to learn what happened,
+ * which is the moment they start disabling the policy to make progress.
+ */
+export const EgressDecisionSchema = z.object({
+  allowed: z.boolean(),
+  host: shortStr,
+  port: z.number().int().positive(),
+  /** The rule that decided, or `default-deny` when nothing matched. */
+  rule: shortStr,
+});
+export type EgressDecision = z.infer<typeof EgressDecisionSchema>;
+
+/**
+ * A repository artifact that would change what the agent does, found and
+ * neutralized (§12.2).
+ *
+ * A hostile repo does not need an exploit: `.pi/extensions/` and `AGENTS.md`
+ * are read by the agent as INSTRUCTIONS, so a checkout can rewrite the
+ * behaviour of the thing grading it. `neutralized` and `detected` are separate
+ * booleans because "we saw it and left it" and "we saw it and defused it" are
+ * different security postures and must not both read as handled.
+ */
+export const RepoHazardSchema = z.object({
+  /** Repo-relative path of the hazard. */
+  path: shortStr,
+  kind: z.enum(["pi_extension", "agents_md", "hooks_path", "mcp_config", "other"]),
+  detected: z.boolean().default(true),
+  neutralized: z.boolean(),
+  detail: text.default(""),
+});
+export type RepoHazard = z.infer<typeof RepoHazardSchema>;
+
+/**
+ * Control-socket authentication (§12).
+ *
+ * The socket is filesystem-permission protected today, which is sufficient
+ * against another user and insufficient against another PROCESS of the same
+ * user — including a worker that escaped its container. A per-run secret makes
+ * the caller prove it was told, rather than prove it can reach.
+ *
+ * Compared with a timing-safe equality, and never logged: an auth token in the
+ * supervisor log is the same failure as the credential above.
+ */
+export const ControlAuthSchema = z.object({
+  schema: z.literal("pifleet.controlauth/v1"),
+  run_id: shortStr,
+  /** 256-bit, hex. Generated per run, never derived from the run id. */
+  secret: z.string().regex(/^[0-9a-f]{64}$/, "control secret must be 64 hex chars"),
+  created_at: z.string(),
+});
+export type ControlAuth = z.infer<typeof ControlAuthSchema>;
