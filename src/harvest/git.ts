@@ -112,7 +112,10 @@ export function parseNumstatZ(raw: string): Map<string, { added?: number; remove
     const rec = fields[i];
     if (rec === undefined || rec === "") break;
     const parts = rec.split("\t");
-    const [a, r, inlinePath] = [parts[0], parts[1], parts[2]];
+    const [a, r] = [parts[0], parts[1]];
+    // Paths are unquoted under -z, so a filename containing a literal tab
+    // splits further — rejoin everything after the two counts.
+    const inlinePath = parts.length > 2 ? parts.slice(2).join("\t") : undefined;
     if (a === undefined || r === undefined) break;
     const counts = {
       ...(a === "-" ? {} : { added: Number(a) }),
