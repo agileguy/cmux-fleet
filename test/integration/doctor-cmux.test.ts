@@ -97,6 +97,23 @@ async function doctor(binDir: string): Promise<{ code: number; stdout: string; s
   return { code, stdout, stderr };
 }
 
+/**
+ * Parse `doctor --json`, surfacing stderr when it is not JSON.
+ *
+ * `JSON.parse` on empty stdout throws "Unexpected EOF", which says nothing
+ * about WHY doctor produced nothing — that failure cost a CI round-trip
+ * already. The diagnostic belongs in the assertion, not in a follow-up run.
+ */
+function parseDoctor(r: { code: number; stdout: string; stderr: string }): Record<string, unknown> {
+  try {
+    return JSON.parse(r.stdout) as Record<string, unknown>;
+  } catch {
+    throw new Error(
+      `doctor --json produced no parseable stdout (exit ${r.code}). stderr: ${r.stderr.slice(0, 800)}`,
+    );
+  }
+}
+
 describe("doctor reports what cmux can and cannot do", () => {
   /**
    * ISC-133. `respawn-pane` specifically, because that is the command the
@@ -107,7 +124,7 @@ describe("doctor reports what cmux can and cannot do", () => {
     const missing = "respawn-pane";
     const bin = await shimCmux(REQUIRED_COMMANDS.filter((c) => c !== missing));
     const r = await doctor(bin);
-    expect(r.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+    expect(r.code, `doctor stderr: ${r.stderr.slice(0, 800)}`).toBe(EXIT.BACKEND_UNAVAILABLE);
     const out = `${r.stdout}${r.stderr}`;
     expect(out).toContain("cmux-required-command-missing");
     expect(out).toContain(missing);
@@ -116,7 +133,7 @@ describe("doctor reports what cmux can and cannot do", () => {
   test("a cmux with every required command does not fail on that account", async () => {
     const bin = await shimCmux([...REQUIRED_COMMANDS, "read-screen"]);
     const r = await doctor(bin);
-    const parsed = JSON.parse(r.stdout) as Record<string, unknown>;
+    const parsed = parseDoctor(r);
     const cmux = parsed["cmux"] as Record<string, unknown>;
     // Every CLI command is present; whatever else a shim cannot satisfy (a
     // real socket, say) is a different diagnosis and not this test's subject.
@@ -132,8 +149,8 @@ describe("doctor reports what cmux can and cannot do", () => {
     const withRs = await doctor(await shimCmux([...REQUIRED_COMMANDS, "read-screen"]));
     const withoutRs = await doctor(await shimCmux([...REQUIRED_COMMANDS]));
 
-    const a = JSON.parse(withRs.stdout) as Record<string, unknown>;
-    const b = JSON.parse(withoutRs.stdout) as Record<string, unknown>;
+    const a = parseDoctor(withRs);
+    const b = parseDoctor(withoutRs);
     const caps = (x: Record<string, unknown>): Array<{ name: string; ok: boolean }> => {
       // Top-level `cmux`; `backends` is a kind -> boolean map, not this report.
       const cmux = x["cmux"] as Record<string, unknown> | undefined;
