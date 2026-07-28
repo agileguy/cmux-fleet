@@ -328,6 +328,15 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
   "late-response.json": [], // nothing is ever dispatched or emitted
   "truncated.json": [], // the stream dies mid-record; no settle is fabricated
   "queue-race.json": [], // quiet gauges lose to the queued steer, every probe
+  /**
+   * Settles exactly once, like `happy.json`. The 5s delay sits INSIDE the
+   * turn — long enough for a CLI-spawned steer to land mid-turn, which is
+   * what ISC-80 needs — and the turn then ends naturally with
+   * `agent_end{willRetry:false}`. A delay is not a reason to expect a
+   * different settle count; had it ended by abort, this would be `[]` and
+   * would prove abort ordering rather than steer ordering.
+   */
+  "slow-turn.json": [1],
 };
 
 function simulate(scenario: ScenarioFile): { settles: number[] } {
