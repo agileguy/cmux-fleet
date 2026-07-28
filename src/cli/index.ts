@@ -77,6 +77,7 @@ async function main(argv: string[]): Promise<number> {
     import("./commands/harvest.ts"),
     import("./commands/report.ts"),
     import("./commands/attach.ts"),
+    import("./commands/tui.ts"),
     import("./commands/logs.ts"),
     import("./commands/exec.ts"),
     import("./commands/down.ts"),
