@@ -44,7 +44,7 @@ function runCli(
   root: string,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn(["bun", "run", CLI, "logs", ...args], {
+  const p = Bun.spawn([process.execPath, CLI, "logs", ...args], {
     stdout: "pipe",
     stderr: "pipe",
     env: { ...process.env, PIFLEET_RUNS_DIR: root },
@@ -56,7 +56,13 @@ function runCli(
 
 /** Spawn a follower and capture its stdout incrementally. */
 function spawnFollow(root: string, args: string[]) {
-  const p = Bun.spawn(["bun", "run", CLI, "logs", "--worker", WORKER, "--follow", ...args], {
+  // The CLI DIRECTLY, not `bun run <cli>`. `bun run` is a wrapper process,
+  // so `proc.kill("SIGINT")` hit the wrapper rather than the command and the
+  // test measured `bun run`'s signal semantics: it reported 130 on Linux
+  // while macOS gave 0, so the suite passed locally and failed in CI on a
+  // difference that had nothing to do with the code under test. Every other
+  // suite in this repo spawns `[process.execPath, CLI, ...]`.
+  const p = Bun.spawn([process.execPath, CLI, "logs", "--worker", WORKER, "--follow", ...args], {
     stdout: "pipe",
     stderr: "pipe",
     env: { ...process.env, PIFLEET_RUNS_DIR: root },
