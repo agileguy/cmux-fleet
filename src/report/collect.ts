@@ -28,9 +28,11 @@ import {
   type TaskEnvelope,
   type Verdict,
 } from "../contracts.ts";
+import type { AttendedRecord } from "../contracts.ts";
 import { mergeLedger } from "../run/ledger.ts";
 import { taskRecordPath, workerPaths, type RunPaths } from "../run/paths.ts";
 import { readTaskRecord, readWorkerState } from "../run/state.ts";
+import { readAttended } from "../attended/mode.ts";
 import { harvestTask } from "../harvest/index.ts";
 import { precheckMerges, type MergeCheckInput } from "./merge.ts";
 import type { MergePrecheck } from "../contracts.ts";
@@ -52,6 +54,16 @@ export interface CollectedReport {
    * validating against it must not need to know our failure vocabulary.
    */
   notes: string[];
+  /**
+   * Every worker a person drove by hand (SRD §3.5 `tui` mode), with the
+   * guarantees their keystrokes voided. Beside the report for the same reason
+   * `notes` is — the wire schema is frozen — but this one is not a
+   * degradation of collection, it is a fact about the run that changes what
+   * every verdict above means. An attended run that presents as unattended is
+   * the failure the attended subsystem exists to prevent, so an unreadable
+   * record is a NOTE, never a silent skip.
+   */
+  attended: AttendedRecord[];
 }
 
 /** One dispatched task's durable facts, as far as they could be recovered. */
@@ -91,6 +103,7 @@ export async function collectRunReport(
 
   const schedule = await buildSchedule(run, dispatched, notes);
   await noteLiveWorkers(run, notes);
+  const attended = await collectAttended(run, notes);
 
   // Merge pre-check: one entry per (worker, branch), because several tasks on
   // one worker share its branch and checking it N times reports N times.
@@ -141,7 +154,40 @@ export async function collectRunReport(
       failed: schedule.filter((s) => s.verdict === "failed").length,
     },
   });
-  return { report, notes };
+  return { report, notes, attended };
+}
+
+/**
+ * Attended records for every worker that has one (SRD §3.5, Phase 6).
+ *
+ * The record is written once at `tui` entry and never removed, so its mere
+ * presence means a person was in this worker's container at some point — even
+ * if `--leave` has long since returned the pane to the viewer. A record that
+ * cannot be read is reported as a note AND as a degraded row here: dropping
+ * it silently would let an attended run present as unattended, which is
+ * precisely what the record exists to make impossible.
+ */
+async function collectAttended(run: RunPaths, notes: string[]): Promise<AttendedRecord[]> {
+  let workers: string[];
+  try {
+    workers = await readdir(run.workersDir);
+  } catch {
+    return []; // no workers ever started; nothing could have been attended
+  }
+  const out: AttendedRecord[] = [];
+  for (const id of workers.sort()) {
+    if (id.startsWith(".")) continue;
+    try {
+      const record = await readAttended(run, id);
+      if (record !== null) out.push(record);
+    } catch (err) {
+      notes.push(
+        `worker ${id} has an attended record that cannot be read (${firstLine(err)}); ` +
+          `treat this run as attended`,
+      );
+    }
+  }
+  return out;
 }
 
 /** Every task the inbox has a durable dispatch envelope for, harvested. */

@@ -14,14 +14,28 @@
  *   footnote the operator has scrolled past by the time they matter.
  */
 
-import type { MergePrecheck, RunReport, ScheduledTask } from "../contracts.ts";
+import type { AttendedRecord, MergePrecheck, RunReport, ScheduledTask } from "../contracts.ts";
 
 /** Render the whole report as markdown-flavoured text. */
-export function renderRunReport(report: RunReport, notes: readonly string[] = []): string {
+export function renderRunReport(
+  report: RunReport,
+  notes: readonly string[] = [],
+  attended: readonly AttendedRecord[] = [],
+): string {
   const lines: string[] = [];
   lines.push(`# pifleet run ${report.run_id}`);
   lines.push(`generated ${report.generated_at}`);
   lines.push("");
+
+  /**
+   * Attended workers come FIRST — before the totals, before any verdict.
+   * Every number below this line means something weaker once a person typed
+   * into a pane, so the reader must meet this section before they meet a
+   * verdict they might believe. A footnote here would be the exact
+   * scrolled-past shape this module's header forbids.
+   */
+  for (const a of attended) lines.push(...renderAttended(a));
+  if (attended.length > 0) lines.push("");
 
   const t = report.totals;
   lines.push(
@@ -48,6 +62,27 @@ export function renderRunReport(report: RunReport, notes: readonly string[] = []
     for (const n of notes) lines.push(`- ${n}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * One attended worker. "ATTENDED" is capitalized for the same reason the
+ * pre-check says "NOT merged": a skimming reader must not be able to miss it.
+ * A still-open session ("not handed back") is stated outright — a verdict
+ * over a pane a person still owns is a diff still in motion.
+ */
+function renderAttended(a: AttendedRecord): string[] {
+  const out: string[] = [];
+  const span =
+    a.left_at !== null
+      ? `from ${a.entered_at} until ${a.left_at}`
+      : `since ${a.entered_at} — not handed back; a person may still be driving`;
+  out.push(`## ATTENDED — a person drove worker ${a.worker}`);
+  out.push(`- ${a.worker}: ${a.mode === "tui" ? "pane is attended" : "pane returned to viewer"}, ${span}`);
+  if (a.voided.length > 0) {
+    out.push(`- ${a.voided.length} guarantee(s) do not hold for this run:`);
+    for (const v of a.voided) out.push(`    ${v.isc}: ${v.because}`);
+  }
+  return out;
 }
 
 function renderScheduleRow(row: ScheduledTask): string {
