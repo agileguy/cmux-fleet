@@ -23,6 +23,7 @@ import {
 } from "../../run/paths.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
+import { composeBrief } from "../../roles/index.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import { readTaskRecord, readWorkerState } from "../../run/state.ts";
 import { processStartTime } from "../../run/registry.ts";
@@ -410,11 +411,20 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
  * Only authorable fields cross here — the whole point of the spec/envelope
  * split (contracts.ts): everything else is filled by `sendTaskEnvelope` and
  * the supervisor at dispatch time.
+ *
+ * `role` is APPLIED here rather than carried. There is no envelope field for
+ * it and there should not be: a role is a standing frame the task is read
+ * inside, so it composes into the brief the worker actually receives. Left
+ * merely carried, `TaskSpec.role` type-checked, round-tripped through the
+ * schedule snapshot and reached no worker at all — `report` would show a task
+ * running as `verifier` while the container ran a generic one, which is the
+ * failure §14.2 exists to prevent: an independent verifier that is only
+ * nominally independent.
  */
 function specToPartial(spec: TaskSpec): Record<string, unknown> {
   return {
     title: spec.title,
-    brief: spec.brief,
+    brief: composeBrief(spec.role, spec.brief),
     inputs: spec.inputs,
     acceptance: spec.acceptance,
     constraints: spec.constraints,

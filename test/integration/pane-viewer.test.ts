@@ -142,8 +142,15 @@ describe("every worker gets a pane that shows what it is doing", () => {
    * The viewer must not be able to steer the worker. A pane is a view, never
    * a channel (SRD §3.3) — if the pane's process could write to the control
    * socket, a rendered surface would become correctness-bearing.
+   *
+   * `logs --follow --render` replaced a raw `tail -F` once that command
+   * existed. Its read-only property is enforced separately and far more
+   * strictly, by a scan over the command's own source and every module it
+   * imports (`test/integration/logs.test.ts`); what this asserts is the part
+   * only a live pane can show — that `up` launched THAT viewer and no verb
+   * capable of writing.
    */
-  test("the viewer is read-only: it follows files and holds no control socket", async () => {
+  test("the viewer is read-only: it renders logs and holds no control socket", async () => {
     const r = await tmux([
       "list-panes",
       "-t",
@@ -151,11 +158,30 @@ describe("every worker gets a pane that shows what it is doing", () => {
       "-F",
       "#{pane_start_command}",
     ]);
+    const WRITING_VERBS = ["dispatch", "steer", "abort", "down", "exec", "up "];
     for (const cmd of r.out.split("\n")) {
-      expect(cmd).toContain("tail");
+      expect(cmd).toContain("logs");
+      expect(cmd).toContain("--render");
       // A viewer that took the control socket, or any pifleet subcommand that
       // could write, would make the pane a channel.
       expect(cmd).not.toContain(".sock");
+      for (const verb of WRITING_VERBS) {
+        expect(cmd, `pane viewer runs a writing verb: ${verb}`).not.toContain(verb);
+      }
+    }
+  });
+
+  /**
+   * The pane must resolve the run without inheriting this process's
+   * environment. Panes are children of a server started before the run
+   * existed, so a viewer trusting the ambient `PIFLEET_RUNS_DIR` would tail
+   * the default location — a different fleet, or nothing.
+   */
+  test("the viewer is given the runs dir and run id explicitly", async () => {
+    const r = await tmux(["list-panes", "-t", `=pifleet-${runId}`, "-F", "#{pane_start_command}"]);
+    for (const cmd of r.out.split("\n")) {
+      expect(cmd).toContain(`PIFLEET_RUNS_DIR=${rig.root}`);
+      expect(cmd).toContain(runId);
     }
   });
 });
