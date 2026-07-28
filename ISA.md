@@ -625,3 +625,18 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 - ISC-194..198: `PIFLEET_DOCKER=1 bun test test/integration/{image,verbgate}.test.ts`
   → `38 pass, 0 fail` on macOS; the Linux CI `container` job is the probe that
   matters, and it executed its assertions for the first time this session.
+- ISC-251: pinned by `test/integration/up-wiring.test.ts` ("the grant line names the
+  real ADC identity"): a `gcloud` PATH shim answers `config get-value account` with a
+  known account, and the ledger's `credential_plan` line must carry it verbatim and
+  must not carry the `(adc user)` placeholder. Mutation-verified: with `up.ts`'s
+  `resolveIdentity` wiring replaced by `undefined`, the file runs `5 pass, 1 fail`
+  (only the new test fails, on the reverted placeholder line); restored →
+  `6 pass, 0 fail`.
+- Group C/J CI coverage: `test/integration/egress.test.ts` (5 probes) and
+  `test/integration/adc.test.ts` (5 probes) previously executed in NO job — the fast
+  `test` job never sets `PIFLEET_DOCKER`, so both self-skip there, and the `container`
+  job invoked only image + verbgate. Both files are now in the container job's probe
+  step and inside its anti-skip guard; `EXPECTED` raised 42 → 52, measured by running
+  the four files together: `PIFLEET_DOCKER=1 bun test …` → `52 pass, 0 fail, 0 skip`.
+  The guard script was executed verbatim in both directions: `EXPECTED=52` → exit 0,
+  stale `EXPECTED=42` → exit 1 with the count mismatch named.

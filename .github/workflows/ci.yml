@@ -41,7 +41,7 @@ jobs:
         run: docker info
       - name: Build the worker image
         run: bun run src/cli/index.ts image build -c fleet.example.yaml --toolchain node
-      - name: Tag it for the verbgate suite
+      - name: Tag it for the container suites
         run: |
           set -eux
           # `image list --json` emits a bare array, not {images: [...]}. Reading
@@ -54,16 +54,29 @@ jobs:
                            if (!t) { console.error("image list returned no images"); process.exit(1); }
                            console.log(t);')"
           docker tag "$tag" pifleet/pi-worker:verify
-      - name: Container and verbgate probes
+      - name: Container, verbgate, egress, and ADC probes
         env:
           PIFLEET_DOCKER: "1"
-        run: bun test test/integration/image.test.ts test/integration/verbgate.test.ts
+        # All four PIFLEET_DOCKER-gated files. egress.test.ts and adc.test.ts
+        # were absent from this list from the day they were added, so the live
+        # egress-containment and refresh-token-absence probes executed in no
+        # job at all — the fast `test` job never sets PIFLEET_DOCKER, so there
+        # they self-skip. Same silent-green failure the guard below exists to
+        # catch; it was simply never pointed at these two files.
+        run: >-
+          bun test
+          test/integration/image.test.ts
+          test/integration/verbgate.test.ts
+          test/integration/egress.test.ts
+          test/integration/adc.test.ts
       - name: Fail if the container probes silently skipped
         env:
           PIFLEET_DOCKER: "1"
-          # Every test in both files must run. Raise this when probes are added;
-          # a mismatch is the point, not an inconvenience.
-          EXPECTED: "42"
+          # Every test in all four files must run. Raise this when probes are
+          # added; a mismatch is the point, not an inconvenience.
+          # 52 = 42 (image + verbgate) + 5 (egress) + 5 (adc), measured by
+          # running the four files together with PIFLEET_DOCKER=1.
+          EXPECTED: "52"
         run: |
           set -eu
           # A skip prints an announcement and still exits 0, so a green job is
@@ -77,7 +90,8 @@ jobs:
           # passed this check, which is exactly what it claims to prevent.
           #
           # So: assert the exact number that ran, and that none skipped.
-          out="$(bun test test/integration/image.test.ts test/integration/verbgate.test.ts 2>&1)"
+          out="$(bun test test/integration/image.test.ts test/integration/verbgate.test.ts \
+                          test/integration/egress.test.ts test/integration/adc.test.ts 2>&1)"
           echo "$out"
           pass="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) pass$/\1/p' | tail -1)"
           skip="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) skip$/\1/p' | tail -1)"
