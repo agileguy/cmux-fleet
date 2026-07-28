@@ -2,7 +2,7 @@
  * `up`'s security wiring, pinned (review findings 1 and 2).
  *
  * Mutation testing found that deleting the `ensureEgressNetwork` call or the
- * `neutralizeRepoHazards` call from `up.ts` left the entire suite green: both
+ * `detectRepoHazards` call from `up.ts` left the entire suite green: both
  * controls were tested exhaustively as modules and held in place by nothing.
  * A control nothing pins is one refactor away from shipping absent, and its
  * unit tests would go on certifying it the whole way down.
@@ -99,8 +99,43 @@ async function writeDockerShim(binDir: string): Promise<void> {
   await chmod(shim, 0o755);
 }
 
+/**
+ * The account the `gcloud` shim reports. Distinctive on purpose: the ISC-251
+ * assertion greps the grant line for this exact string, so any drift between
+ * "what gcloud said" and "what `up` printed" is a mismatch, not a maybe.
+ */
+const SHIM_ACCOUNT = "wiring-shim-operator@example.test";
+
+/**
+ * A `gcloud` that answers `config get-value account` with a fixed account.
+ * `resolveIdentity` runs exactly that argv — a local config read, no token
+ * minting — so this is the whole surface the shim has to cover. Same loud
+ * failure on anything else as the docker shim, for the same reason: a silent
+ * stand-in would absorb a changed gcloud invocation instead of surfacing it.
+ */
+async function writeGcloudShim(binDir: string): Promise<void> {
+  const shim = join(binDir, "gcloud");
+  await writeFile(
+    shim,
+    [
+      "#!/bin/sh",
+      'case "$1 $2 $3" in',
+      '  "config get-value account")',
+      `    echo "${SHIM_ACCOUNT}"`,
+      "    ;;",
+      "  *)",
+      '    echo "gcloud shim: unexpected argv: $*" >&2',
+      "    exit 1",
+      "    ;;",
+      "esac",
+      "",
+    ].join("\n"),
+  );
+  await chmod(shim, 0o755);
+}
+
 /** Minimal valid fleet.yaml naming the shimmed network and the seeded repo. */
-function fleetYaml(repo: string): string {
+function fleetYaml(repo: string, opts: { cloudAccess?: boolean } = {}): string {
   return [
     "version: 2",
     "name: up-wiring",
@@ -114,14 +149,14 @@ function fleetYaml(repo: string): string {
     "llm:",
     "  model: wiring-test-model",
     "roles:",
-    "  engineer: {}",
+    opts.cloudAccess === true ? "  engineer: {cloud_access: true}" : "  engineer: {}",
     "workers:",
     "  - {id: eng-1, role: engineer}",
     "",
   ].join("\n");
 }
 
-async function makeRig(): Promise<Rig> {
+async function makeRig(opts: { cloudAccess?: boolean } = {}): Promise<Rig> {
   const base = await mkdtemp(join(tmpdir(), "pifleet-wiring-"));
   const root = join(base, "runs");
   const repo = join(base, "repo");
@@ -130,11 +165,15 @@ async function makeRig(): Promise<Rig> {
   await mkdir(repo, { recursive: true });
   await mkdir(bin, { recursive: true });
   await writeDockerShim(bin);
+  // Both shims always: only a cloud_access run invokes gcloud, but a shim
+  // that is present regardless means any UNEXPECTED gcloud call from another
+  // path fails loudly instead of reaching the developer's real gcloud.
+  await writeGcloudShim(bin);
   // The seeded hazard. Root-level AGENTS.md is the instruction-file class the
   // scanner quarantines by rename; one is enough to make the wiring visible.
   await writeFile(join(repo, "AGENTS.md"), "# MANDATORY fixture instructions\n");
   const configPath = join(base, "fleet.yaml");
-  await writeFile(configPath, fleetYaml(repo));
+  await writeFile(configPath, fleetYaml(repo, opts));
   const rig: Rig = {
     base,
     root,
@@ -337,4 +376,52 @@ describe("a config that exists but cannot be loaded refuses to start (review fin
     // The fallthrough would have started a fleet and printed a run id.
     expect(up.stdout).not.toContain("run ");
   });
+});
+
+describe("the grant line names the real ADC identity (ISC-251)", () => {
+  /**
+   * Same disease as the header describes, third strain. `up` wires
+   * `resolveIdentity` into `describeCredentialPlan` so the grant line names
+   * the account a worker was actually given — and mutation testing showed
+   * that replacing that wiring with `undefined` left the whole suite green.
+   * Nothing pinned it, and the failure mode is not even a crash: the line
+   * quietly reverts to the `"(adc user)"` placeholder, which is exactly the
+   * overclaim the wiring was added to fix. A regression here re-ships a
+   * defect while every module test keeps certifying the fix.
+   *
+   * So: a real `up` run, a `cloud_access: true` worker with no impersonation
+   * (the one shape that forces identity resolution), and a `gcloud` PATH shim
+   * answering with a known account. The ledger's `credential_plan` line must
+   * carry that account verbatim — and must NOT carry the placeholder, because
+   * "placeholder absent" is the assertion the mutation actually flips.
+   */
+  test(
+    "a cloud_access worker's credential plan carries the resolved account, never the placeholder",
+    async () => {
+      const rig = await makeRig({ cloudAccess: true });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      const { records, errors } = await mergeLedger(runPaths(rig.runId, rig.root));
+      expect(errors).toEqual([]);
+      const plan = records.find(
+        (r) => r.actor === "cli-up" && r.event === "credential_plan" && r.worker === "eng-1",
+      );
+      expect(plan).toBeDefined();
+      const line = String(plan!.detail?.["plan"]);
+      expect(line).toContain(SHIM_ACCOUNT);
+      expect(line).not.toContain("(adc user)");
+    },
+    90_000,
+  );
 });

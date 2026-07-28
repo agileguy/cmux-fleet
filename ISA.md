@@ -625,3 +625,10 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 - ISC-194..198: `PIFLEET_DOCKER=1 bun test test/integration/{image,verbgate}.test.ts`
   → `38 pass, 0 fail` on macOS; the Linux CI `container` job is the probe that
   matters, and it executed its assertions for the first time this session.
+- ISC-251: pinned by `test/integration/up-wiring.test.ts` ("the grant line names the
+  real ADC identity"): a `gcloud` PATH shim answers `config get-value account` with a
+  known account, and the ledger's `credential_plan` line must carry it verbatim and
+  must not carry the `(adc user)` placeholder. Mutation-verified: with `up.ts`'s
+  `resolveIdentity` wiring replaced by `undefined`, the file runs `5 pass, 1 fail`
+  (only the new test fails, on the reverted placeholder line); restored →
+  `6 pass, 0 fail`.
