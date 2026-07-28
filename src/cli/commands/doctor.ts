@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
+import { loadBackend } from "../../backends/registry.ts";
 import { ConfigError, loadConfig, type LoadedConfig } from "../../config/load.ts";
 import { resolveAllWorkers } from "../../config/load.ts";
 import { imageTag } from "../../container/image.ts";
@@ -37,16 +38,22 @@ interface Diagnosis {
   message: string;
 }
 
-/** SRD §4.1's `required` CLI rows — bind to the CLI, never to socket method names. */
-const CMUX_REQUIRED_COMMANDS = [
-  "ping",
-  "capabilities",
-  "identify",
-  "workspace",
-  "new-split",
-  "list-panes",
-  "focus-pane",
-] as const;
+/**
+ * The required-command list lives in `src/backends/cmux/capabilities.ts` and
+ * is reached through the backend's own `probe()`, NOT copied here.
+ *
+ * It was copied here, and the two copies had already diverged: the backend's
+ * list carries `respawn-pane` — how a viewer starts in a split pane, without
+ * which panes are empty shells and ISC-129 is unmeetable — and this file's did
+ * not. So `doctor` would report a clean cmux that `up` then failed on, which
+ * is the exact failure `doctor` exists to prevent. Two lists that must agree,
+ * in two files, with nothing comparing them, agree only until someone edits
+ * one.
+ *
+ * `doctor` cannot import the cmux module directly (ISC-137), which is what
+ * made copying tempting. It goes through the registry instead — the same
+ * kind-keyed load `up` uses — so there is one list and one prober.
+ */
 
 async function versionProbe(
   exec: Exec,
@@ -70,21 +77,62 @@ interface CmuxReport {
   probe: Probe;
   socketMode: string | null;
   missingCommands: string[];
+  /**
+   * Optional capabilities, REPORTED and never required (ISC-132).
+   * `read-screen` is the one that matters: it is diagnostics-only, so the run
+   * must succeed identically whether or not it exists — and the operator still
+   * has to be told which they have, or they cannot tell a missing diagnostic
+   * from a broken one.
+   */
+  optional: Array<{ name: string; ok: boolean; detail: string }>;
+  /**
+   * True when the capability probe THREW rather than reporting.
+   *
+   * Distinct from `missingCommands.length > 0`: a probe that failed to run
+   * tells us nothing about which commands exist, and the empty list must not
+   * be read as "none missing". Without this the report could say
+   * `backends.cmux: true` beside a `cmux-probe-failed` diagnosis.
+   */
+  probeFailed: boolean;
   diagnoses: Diagnosis[];
 }
 
 async function probeCmux(exec: Exec, env: Record<string, string | undefined>): Promise<CmuxReport> {
   const probe = await versionProbe(exec, "cmux", ["cmux", "--version"], false);
-  const report: CmuxReport = { probe, socketMode: null, missingCommands: [], diagnoses: [] };
+  const report: CmuxReport = {
+    probe,
+    socketMode: null,
+    missingCommands: [],
+    optional: [],
+    probeFailed: false,
+    diagnoses: [],
+  };
   if (!probe.ok) return report;
 
-  // Required-command presence from `--help` text: cmux commits to CLI
-  // stability, not to socket method names (SRD §4.1), so the CLI listing is
-  // the honest surface to bind to.
-  const help = await exec(["cmux", "--help"], { timeoutMs: 15_000 });
-  const helpText = `${help.stdout}\n${help.stderr}`;
-  for (const cmd of CMUX_REQUIRED_COMMANDS) {
-    if (!helpText.includes(cmd)) report.missingCommands.push(cmd);
+  // Ask the BACKEND what it requires, rather than restating it. `probe()`
+  // returns one `Capability` per required command (checked against `--help`
+  // text, because cmux commits to CLI stability and not to socket method
+  // names — SRD §4.1). A backend that cannot even run its probe counts as
+  // missing everything, which is the honest reading: we cannot say it is
+  // healthy.
+  try {
+    const caps = await (await loadBackend("cmux")).probe();
+    for (const c of caps) {
+      if (c.required && !c.ok) {
+        // `detail` carries WHICH commands are absent — the capability itself
+        // is an aggregate (`cmux-cli-commands`). Reporting the name alone
+        // tells an operator a category failed and not what to install, which
+        // is a worse message than the per-command loop this replaced.
+        report.missingCommands.push(c.detail !== undefined && c.detail !== "" ? `${c.name} (${c.detail})` : c.name);
+      }
+      if (!c.required) report.optional.push({ name: c.name, ok: c.ok, detail: c.detail ?? "" });
+    }
+  } catch (err) {
+    report.probeFailed = true;
+    report.diagnoses.push({
+      name: "cmux-probe-failed",
+      message: `cmux capability probe failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
   }
   if (report.missingCommands.length > 0) {
     report.diagnoses.push({
@@ -265,8 +313,17 @@ export function register(program: Command): void {
         }
       }
 
+      /**
+       * `cmux: true` must not survive a probe that threw.
+       *
+       * The flag was `probe.ok && missingCommands.length === 0`, and the
+       * catch around the capability probe pushes a `cmux-probe-failed`
+       * diagnosis while leaving `missingCommands` empty — so `--json` could
+       * report `backends.cmux: true` directly beside a diagnosis saying the
+       * probe failed. Whichever a reader believed, one of them was lying.
+       */
       const backends = {
-        cmux: cmux.probe.ok && cmux.missingCommands.length === 0,
+        cmux: cmux.probe.ok && !cmux.probeFailed && cmux.missingCommands.length === 0,
         tmux: probes.find((p) => p.name === "tmux")?.ok ?? false,
         headless: true, // always available — the acceptance suite runs on it
       };
@@ -280,7 +337,14 @@ export function register(program: Command): void {
               config: configDetail,
               probes,
               backends,
-              cmux: { socket_mode: cmux.socketMode, missing_commands: cmux.missingCommands },
+              cmux: {
+                socket_mode: cmux.socketMode,
+                missing_commands: cmux.missingCommands,
+                // Reported, never required (ISC-132): the run succeeds
+                // identically either way, but the operator must be able to
+                // tell a missing diagnostic from a broken one.
+                optional_capabilities: cmux.optional,
+              },
               images,
               mounts: { runs_dir: mount.dir, visible: mount.visible, detail: mount.detail },
               omlx: {
@@ -305,6 +369,9 @@ export function register(program: Command): void {
         }
         console.log(`backends: ${Object.entries(backends).map(([k, v]) => `${k}=${v ? "yes" : "no"}`).join(" ")}`);
         if (cmux.probe.ok) console.log(`cmux socket mode: ${cmux.socketMode}`);
+        for (const c of cmux.optional) {
+          console.log(`cmux ${c.name}: ${c.ok ? "available" : "unavailable"}${c.detail ? ` — ${c.detail}` : ""}`);
+        }
         for (const i of images) console.log(`image ${i.present ? "present" : "ABSENT "}: ${i.tag}`);
         console.log(`mounts: runs dir ${mount.visible ? "visible" : "NOT VISIBLE"} — ${mount.detail}`);
         console.log(

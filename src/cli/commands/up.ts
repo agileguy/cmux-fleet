@@ -9,7 +9,9 @@ import { LedgerWriter } from "../../run/ledger.ts";
 import { registryCall } from "../../run/registry.ts";
 import { ensureControlAuth } from "../../security/control-auth.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
-import { createHeadlessBackend } from "../../backends/headless/index.ts";
+import { resolveBackendWithFallback } from "../../backends/tmux/fallback.ts";
+import { isBackendKind, loadBackend } from "../../backends/registry.ts";
+import type { PaneRef } from "../../backends/types.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
 import {
@@ -48,12 +50,17 @@ export function register(program: Command): void {
     .option("--backend-fallback <kind>", "backend to use if the primary is unavailable")
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers: string; backend: string; config?: string; json?: boolean }) => {
-      if (opts.backend !== "headless") {
-        // Panes are Phase 4. Refusing beats pretending (exit 3, SRD §11).
+    .action(async (opts: { workers: string; backend: string; backendFallback?: string; config?: string; json?: boolean }) => {
+      if (!isBackendKind(opts.backend)) {
         throw new CliError(
-          `backend '${opts.backend}' is not available in this phase; use --backend headless`,
-          EXIT.BACKEND_UNAVAILABLE,
+          `unknown backend '${opts.backend}'; expected cmux, tmux or headless`,
+          EXIT.USAGE,
+        );
+      }
+      if (opts.backendFallback !== undefined && !isBackendKind(opts.backendFallback)) {
+        throw new CliError(
+          `unknown fallback backend '${opts.backendFallback}'; expected cmux, tmux or headless`,
+          EXIT.USAGE,
         );
       }
       const piCommand = process.env["PIFLEET_PI_COMMAND"];
@@ -261,21 +268,77 @@ export function register(program: Command): void {
         logPath: run.daemonLog,
       });
 
-      const backend = createHeadlessBackend();
-      await backend.probe();
+      /**
+       * Presentation, resolved and recorded — never assumed.
+       *
+       * `--backend` selects what the operator wants to WATCH; it decides
+       * nothing about the run. Supervisors are launched detached by
+       * `SupervisorLauncher` either way (SRD §3.3), so a backend that cannot
+       * start is a cosmetic loss, not a failed fleet — but it must not be a
+       * SILENT one. A fallback that quietly swaps cmux for tmux leaves the
+       * operator watching panes they believe are cmux, and `resolveBackendWithFallback`
+       * therefore writes the switch to stderr AND the ledger before returning.
+       *
+       * With no `--backend-fallback`, an unavailable primary is exit 3 with a
+       * named diagnosis (ISC-131) rather than a silent downgrade to headless:
+       * "I asked for six panes and got none, and nothing said so" is the
+       * failure this ordering exists to prevent.
+       */
+      const resolution = await resolveBackendWithFallback({
+        primary: await loadBackend(opts.backend),
+        ledger,
+        ...(opts.backendFallback === undefined
+          ? {}
+          : { fallback: await loadBackend(opts.backendFallback) }),
+      });
+      const backend = resolution.backend;
+      await ledger.append("backend_ready", {
+        detail: {
+          requested: opts.backend,
+          active: backend.kind,
+          fell_back: resolution.fellBack,
+          primary_failures: resolution.primaryFailures.map((c) => `${c.name}: ${c.detail ?? ""}`),
+        },
+      });
       const workspace = await backend.ensureWorkspace(`pifleet-${runId}`);
 
       const launched: Array<{ id: string; pid: number; pgid: number }> = [];
       for (const workerId of workers) {
         const wp = workerPaths(run, workerId);
         await mkdir(wp.dir, { recursive: true });
+        /**
+         * One pane per worker, created BEFORE its supervisor launches so the
+         * operator sees the pane fill rather than appear late (ISC-129).
+         *
+         * Failure here is deliberately not fatal. A pane is presentation, and
+         * the supervisor is already detached and backend-independent by
+         * design (SRD §3.3) — killing a run because a split failed would make
+         * a cosmetic subsystem load-bearing, which is the coupling the two
+         * separate interfaces exist to prevent. It is recorded, not swallowed.
+         */
+        let pane: PaneRef = { backend: backend.kind, id: null };
+        try {
+          pane = await backend.createPane(workspace, { workerId, cwd: run.root, title: workerId });
+        } catch (err) {
+          await ledger.append("pane_failed", {
+            worker: workerId,
+            detail: { backend: backend.kind, error: err instanceof Error ? err.message : String(err) },
+          });
+          if (opts.json !== true) {
+            process.stderr.write(`  no pane for ${workerId}: ${String(err)}\n`);
+          }
+        }
+
         // Presentation refs live beside state, never inside it (SRD §7.6).
+        // `backend` is the ACTIVE backend, not the requested one: it was
+        // hardcoded to "headless" here, so a cmux run recorded itself as
+        // headless and `attach` would have had nothing to focus.
         await writePresentation(wp, {
           schema: "pifleet.presentation/v1",
           worker: workerId,
-          backend: "headless",
+          backend: backend.kind,
           workspace_ref: workspace.id,
-          surface_ref: null,
+          surface_ref: pane.id,
           window_ref: null,
         });
         const { pid, pgid } = await processLauncher.launchDetached({
@@ -291,6 +354,55 @@ export function register(program: Command): void {
           worker: workerId,
           detail: { pid, pgid },
         });
+
+        /**
+         * Give the pane something to show (ISC-129).
+         *
+         * The criterion asks for a pane "showing its worker id and live
+         * activity", and only the first half was true: the title carried the
+         * id while the pane itself ran an idle login shell in the run
+         * directory. `attachViewer` — the method `respawn-pane` exists in the
+         * required-command list to serve, as `doctor` says in as many words —
+         * had no production caller at all, which is the same dead-subsystem
+         * shape as `destroy`. A reviewer running a live `up` is what surfaced
+         * it; `pane_current_command` was `bash`.
+         *
+         * `tail -F` and nothing else, deliberately. A pane is a view, never a
+         * channel (SRD §3.3): a follower cannot send anything back to the
+         * worker, so the operator can watch a run without being able to
+         * perturb it from the one surface that is not the control plane.
+         * Capital -F rather than -f because neither file need exist yet — it
+         * retries instead of dying on the race.
+         *
+         * Both files, and the order is the useful one. `events.jsonl` is
+         * where activity actually appears; `supervisor.log` was the obvious
+         * first choice and measuring it showed 0 bytes through a whole run,
+         * which would have made a technically-live pane that is empty in
+         * practice. The supervisor log stays in the list because it is where
+         * a crash lands, and a pane that goes quiet should show why.
+         *
+         * `pifleet logs --follow --render` is the eventual viewer — the flag
+         * is already declared and documented as "render the pane viewer
+         * view" — but that command is still a stub that throws, so this uses
+         * the files directly rather than shipping a pane that reports "logs
+         * is not implemented yet" forever.
+         *
+         * Failure stays non-fatal for the same reason pane creation is: a
+         * missing view must never take down a working run.
+         */
+        if (pane.id !== null) {
+          try {
+            await backend.attachViewer(pane, ["tail", "-F", wp.eventsJsonl, wp.supervisorLog]);
+          } catch (err) {
+            await ledger.append("viewer_failed", {
+              worker: workerId,
+              detail: {
+                backend: backend.kind,
+                error: err instanceof Error ? err.message : String(err),
+              },
+            });
+          }
+        }
       }
 
       /**

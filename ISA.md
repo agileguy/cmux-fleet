@@ -252,19 +252,19 @@ suite green on `headless` against a test double.
 
 ### Group K — Backends
 
-- [ ] ISC-128: The full acceptance suite passes on `headless` with cmux not running.
+- [x] ISC-128: The full acceptance suite passes on `headless` with cmux not running.
 - [ ] ISC-129: `up` on the cmux backend creates one workspace and N panes, each showing its worker id and live activity.
-- [ ] ISC-130: `attach --worker eng-2` focuses that pane.
-- [ ] ISC-131: With the cmux socket unreachable, `up` exits 3 with a named diagnosis or falls back to `tmux`.
-- [ ] ISC-132: `doctor` reports `read-screen` availability, and the run succeeds identically either way.
-- [ ] ISC-133: `doctor` exits 3 when a `required` cmux CLI command is missing.
-- [ ] ISC-134: The `tmux` backend brings up N panes and the same acceptance results as `headless`.
+- [x] ISC-130: `attach --worker eng-2` focuses that pane.
+- [x] ISC-131: With the cmux socket unreachable, `up` exits 3 with a named diagnosis or falls back to `tmux`.
+- [x] ISC-132: `doctor` reports `read-screen` availability, and the run succeeds identically either way.
+- [x] ISC-133: `doctor` exits 3 when a `required` cmux CLI command is missing.
+- [x] ISC-134: The `tmux` backend brings up N panes and the same acceptance results as `headless`.
 
 ### Group L — Anti-criteria
 
-- [ ] ISC-135: Anti: disabling `read-screen` entirely changes no acceptance result.
-- [ ] ISC-136: Anti: no code path outside diagnostics calls `readScreen()`.
-- [ ] ISC-137: Anti: no file under `src/` imports a cmux symbol outside `src/backends/cmux/`.
+- [x] ISC-135: Anti: disabling `read-screen` entirely changes no acceptance result.
+- [x] ISC-136: Anti: no code path outside diagnostics calls `readScreen()`.
+- [x] ISC-137: Anti: no file under `src/` imports a cmux symbol outside `src/backends/cmux/`.
 - [ ] ISC-138: Anti: no code path uses `readline` or `split(/\r?\n/)` on an RPC or session stream.
 - [ ] ISC-139: Anti: no generated commit, branch, or PR body contains AI attribution.
 - [ ] ISC-140: Anti: no acceptance test in the `headless` suite requires provider spend or a cloud endpoint.
@@ -640,3 +640,57 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   the four files together: `PIFLEET_DOCKER=1 bun test …` → `52 pass, 0 fail, 0 skip`.
   The guard script was executed verbatim in both directions: `EXPECTED=52` → exit 0,
   stale `EXPECTED=42` → exit 1 with the count mismatch named.
+
+### Phase 4 close-out — 2026-07-28
+
+Nine of Group K/L claimed. **ISC-129 stays open deliberately** — see below.
+
+- ISC-128: `bun test` → `874 pass, 52 skip, 0 fail` across 56 files with cmux's
+  socket unreachable (`doctor` reports `cmux-socket-unreachable`; this shell is
+  outside a cmux pane). The structural guarantee is the keyed lazy `import()` in
+  `src/backends/registry.ts`, pinned by `backend-registry.test.ts`: loading
+  `headless` never drags the cmux module in.
+- ISC-130: `attach.test.ts` drives the real CLI against a real two-pane tmux
+  server, with the OTHER pane made active first and asserted so, so a no-op
+  cannot pass; the focus is confirmed through `display-message`.
+- ISC-131: `backend-selection.test.ts` asserts the failure path by absence as
+  well as presence — exit 3, empty `workersDir`, no `backend_ready`, no
+  `backend_fallback`, no `supervisor_launched`, no tmux server. The success case
+  asserts exit 0, so neither code can be environment-supplied.
+- ISC-132: `doctor-cmux.test.ts` compares a cmux with and without `read-screen`:
+  reported in `optional_capabilities` both ways, verdict unchanged.
+- ISC-133: verified in BOTH directions against the real CLI — a complete cmux
+  exits 0, a cmux missing `respawn-pane` exits 3. It previously passed for the
+  wrong reason: this machine has no Docker daemon, so `doctor` exited 3 on that
+  account whether or not a command was missing, and CI (where docker works)
+  returned 2. Every required probe is now shimmed, and deleting the
+  `cmux-required-command-missing` diagnosis makes `doctor` exit 0 and the test
+  fail on the exit code itself.
+- ISC-134: `tmux-headless-equivalence.test.ts` runs one driver sequence against
+  both backends and requires every backend-independent outcome to match, with
+  backend-native ids the only permitted difference. The pane-count half now
+  builds its own session — it used to read the one the previous test left
+  behind, so it failed when run alone.
+- ISC-135: the `read-screen`-disabled shim runs through the production seam
+  while load-bearing verbs still work — a positive control, not just an absence.
+- ISC-136: `doctor-cmux.test.ts` walks every tracked `src/**.ts` and requires no
+  `readScreen(` call outside `src/backends/`. Injecting one turns it red.
+- ISC-137: `rpc-client.test.ts` scans every `src/` file for a cmux specifier.
+  The pattern now covers backticks — a template-literal `import()` used to walk
+  straight through, which is the likeliest regression shape because
+  `registry.ts` establishes exactly that idiom — and the pattern has its own
+  test for both matches and non-matches.
+
+**ISC-129 — open.** Both halves are now implemented and verified on `tmux`:
+panes are titled with the worker id, run `tail -F` over `events.jsonl` rather
+than an idle `bash`, and a line appended to the event stream appears on screen
+(`pane-viewer.test.ts`, four tests; reverting the `attachViewer` call fails
+three). `events.jsonl` was chosen by measurement — `supervisor.log` was 0 bytes
+across a whole run, which would have produced a technically-live, permanently
+empty pane. The criterion names the **cmux** backend specifically, and cmux's
+`socketControlMode` is `cmuxOnly`, so its socket refuses every call from
+outside a pane and no live cmux run is possible from a normal shell. Claiming
+it needs a run from inside a cmux pane. It stays unchecked until then.
+
+Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
+ISC-254.
