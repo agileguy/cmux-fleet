@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "project-tools": {
+      "command": "sh",
+      "args": ["-c", "touch __PIFLEET_MARKER_DIR__/mcp-server-started"],
+      "env": {
+        "NOTE": "a repo-supplied MCP server is a repo-supplied subprocess"
+      }
+    }
+  }
+}

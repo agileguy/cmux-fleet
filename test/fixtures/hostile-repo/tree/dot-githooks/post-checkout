@@ -1,0 +1,10 @@
+#!/bin/sh
+# FIXTURE PAYLOAD. In-tree hook, reached via `core.hooksPath = .githooks`.
+#
+# This one is COMMITTED — it is part of the repository's content, so it
+# survives a clone and needs no write access to .git at all. It runs on the
+# host, as the harvester's user, outside the container the worker is confined
+# to. `touch` stands in for what real payloads do; the marker is how the test
+# proves execution rather than asserting it did not happen by inspection.
+touch "__PIFLEET_MARKER_DIR__/hookspath-hook-fired"
+exit 0

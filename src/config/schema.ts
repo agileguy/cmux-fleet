@@ -17,6 +17,7 @@
 
 import { z } from "zod";
 import { workerId } from "../contracts.ts";
+import { ruleHostError } from "../security/egress.ts";
 
 // ---------------------------------------------------------------------------
 // Durations
@@ -228,6 +229,49 @@ export const SecretsSchema = z
   .prefault({});
 
 // ---------------------------------------------------------------------------
+// Egress (SRD §5.9, §12.4; ISC-57) — additive block owned by the Phase 3
+// egress subsystem; the matcher lives in src/security/egress.ts.
+// ---------------------------------------------------------------------------
+
+/**
+ * Rule hosts are validated HERE, at `config validate` time, with the same
+ * predicate the matcher uses. A pattern the matcher can never match (interior
+ * wildcard, bare `*`, TLD-wide suffix) must be a loud field-level error — a
+ * dead allow rule silently denies the destination it was written for, and the
+ * operator's next move is widening the policy until it means nothing.
+ */
+const egressRuleHost = shortStr.superRefine((host, ctx) => {
+  const err = ruleHostError(host);
+  if (err !== null) ctx.addIssue({ code: "custom", message: err });
+});
+
+export const EgressRuleSchema = z
+  .object({
+    /** Exact host, IP literal, or a single leading `*.` wildcard. */
+    host: egressRuleHost,
+    /** Part of the rule, never an afterthought: allowed-host-any-port is a tunnel. */
+    port: z.number().int().min(1).max(65535),
+  })
+  .strict();
+
+export const EgressSchema = z
+  .object({
+    /**
+     * Google endpoints ADC + GKE auth need, always on 443 (§12.4). The oMLX
+     * rule is NOT listed here — it is derived from `llm.base_url` so a
+     * reconfigured fleet is never silently denied its own model server.
+     */
+    google_hosts: z
+      .array(egressRuleHost)
+      .max(64)
+      .default(["oauth2.googleapis.com", "*.googleapis.com", "accounts.google.com"]),
+    /** Extra explicit rules. Empty by default — deny-all does the rest. */
+    allow: z.array(EgressRuleSchema).max(64).default([]),
+  })
+  .strict()
+  .prefault({});
+
+// ---------------------------------------------------------------------------
 // The whole document
 // ---------------------------------------------------------------------------
 
@@ -241,6 +285,7 @@ export const FleetConfigSchema = z
     llm: LlmSchema,
     cloud: CloudSchema,
     secrets: SecretsSchema,
+    egress: EgressSchema,
     defaults: RoleFieldsSchema.prefault({}),
     roles: z.record(shortStr, RoleFieldsSchema),
     workers: z.array(WorkerEntrySchema).min(1).max(64),

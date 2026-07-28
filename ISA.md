@@ -420,6 +420,17 @@ of the same class it repaired.
 - [ ] ISC-246: `scanOutboxFiles` returns file DESCRIPTORS, not path strings — a validated path re-opened later is a TOCTOU window, and `nlink` can be raised after the scan. Latent while `safe` has no consumers; arms the moment E3 attaches artifacts.
 - [ ] ISC-247: A backslash in an envelope path is refused. Harmless on POSIX, a separator anywhere else; not a control character, so the ISC-240 filter does not catch it.
 
+### Phase 3 — security and cloud identity
+
+- [x] ISC-248a: `up` refuses to start when the configured egress network exists but is NOT internal, rather than adopting it and reporting deny-all it does not enforce.
+- [ ] ISC-249: A checked-out repository is neutralized BEFORE any worker reads it; each hazard records `detected` and `neutralized` independently. **[OPEN — was marked met in error]** The scanner and the neutralizer both work and are pinned; they were aimed at the wrong tree. `up` scanned `config.run.repo`, the OPERATOR'S working repository, while `render.ts` mounts `<repo>/.worktrees/<worker>` as `/workspace` — and nothing in this phase creates those worktrees. So the call defended nothing and damaged the operator: it renamed their real `AGENTS.md` aside and commented out `filter.lfs.*` while leaving `filter.lfs.required = true`, which hard-fails every later `git add` on an LFS-tracked path, against SRD §12.8's requirement that this checkout be left unchanged. A linked worktree materializes committed files from git objects at checkout time regardless, so renaming in the parent could not have suppressed them anyway. `up` now DETECTS and reports only; neutralization belongs on the per-worker worktree at the moment it is created. The `detected`/`neutralized` half of this criterion IS met and pinned. **Blocked on ISC-27/ISC-28** (worktree creation and bind-mount round-tripping), which are the criteria that make a per-worker tree exist to neutralize; whoever closes those closes this at the same site, and SRD §9.2 already requires that path to fail fast on LFS — the same hazard this defect hit from the other direction.
+- [x] ISC-250: Every control-socket verb requires the per-run secret, `ping` included; a wrong or missing token is a clean refusal and the server stays up.
+- [x] ISC-251: The Google grant is never silent — `up` states per worker which identity it got, or that it got none.
+- [x] ISC-252: Egress host matching requires a label boundary; `evil-googleapis.com` and an empty leftmost label cannot ride a `*.googleapis.com` rule.
+- [ ] ISC-248: `TokenRefresher` runs on the supervisor's lifecycle and re-injects before expiry. [IMPLEMENTED + UNIT AND DOCKER-VERIFIED, NOT WIRED — it attaches to a running container and the headless path starts none; wiring it now would attach it to nothing]
+- [ ] ISC-253: A relay consults `decide()` for live traffic. [The internal network denies everything, which is the enforcement; `decide` is the policy a relay must consult and no relay exists yet, so the pure core is unit-verified but not on a live traffic path]
+- [ ] ISC-254: The timing-safe comparator is pinned by a test. [Replacing `timingSafeEqual` with `===` leaves the suite green: the two are behaviourally identical by construction, so only a timing measurement distinguishes them and that is too flaky to gate CI. Documented in place; NOT covered]
+
 ## Test Strategy
 
 | isc | type | check | threshold | tool |
@@ -614,3 +625,18 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 - ISC-194..198: `PIFLEET_DOCKER=1 bun test test/integration/{image,verbgate}.test.ts`
   → `38 pass, 0 fail` on macOS; the Linux CI `container` job is the probe that
   matters, and it executed its assertions for the first time this session.
+- ISC-251: pinned by `test/integration/up-wiring.test.ts` ("the grant line names the
+  real ADC identity"): a `gcloud` PATH shim answers `config get-value account` with a
+  known account, and the ledger's `credential_plan` line must carry it verbatim and
+  must not carry the `(adc user)` placeholder. Mutation-verified: with `up.ts`'s
+  `resolveIdentity` wiring replaced by `undefined`, the file runs `5 pass, 1 fail`
+  (only the new test fails, on the reverted placeholder line); restored →
+  `6 pass, 0 fail`.
+- Group C/J CI coverage: `test/integration/egress.test.ts` (5 probes) and
+  `test/integration/adc.test.ts` (5 probes) previously executed in NO job — the fast
+  `test` job never sets `PIFLEET_DOCKER`, so both self-skip there, and the `container`
+  job invoked only image + verbgate. Both files are now in the container job's probe
+  step and inside its anti-skip guard; `EXPECTED` raised 42 → 52, measured by running
+  the four files together: `PIFLEET_DOCKER=1 bun test …` → `52 pass, 0 fail, 0 skip`.
+  The guard script was executed verbatim in both directions: `EXPECTED=52` → exit 0,
+  stale `EXPECTED=42` → exit 1 with the count mismatch named.

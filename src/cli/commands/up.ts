@@ -7,11 +7,23 @@ import { newRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
 import { readWorkerState, writePresentation } from "../../run/state.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { registryCall } from "../../run/registry.ts";
+import { ensureControlAuth } from "../../security/control-auth.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { createHeadlessBackend } from "../../backends/headless/index.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
-import { loadConfig } from "../../config/load.ts";
+import {
+  ConfigError,
+  expandPath,
+  parseConfig,
+  resolveConfigPath,
+  resolveWorker,
+  type LoadedConfig,
+} from "../../config/load.ts";
+import { describeCredentialPlan, planCredential, resolveIdentity } from "../../security/adc.ts";
+import { realExec } from "../../container/run.ts";
+import { ensureEgressNetwork } from "../../security/network.ts";
+import { detectRepoHazards } from "../../security/repo-hazards.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
 
 /** ISC-70: every worker reaches `idle` within this budget. */
@@ -72,6 +84,12 @@ export function register(program: Command): void {
       // squashes ownership and hides this entirely.
       await makeWorkerAccessible(run.sessionsDir, true);
 
+      // Mint the run's control-socket secret (SRD §12.7) before launching
+      // anything that listens or calls: the daemon and every supervisor read
+      // this file, and every control-plane request must carry its value. It
+      // is 0600, never mounted into a container, and never logged.
+      await ensureControlAuth(run);
+
       /**
        * The reaper's staleness threshold has to travel WITH the run.
        *
@@ -87,11 +105,72 @@ export function register(program: Command): void {
        * that omitted the key would have produced anyway.
        */
       let heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
+      let egressNetwork: string | null = null;
+      let repoRoot: string | null = null;
+      let loadedConfig: LoadedConfig | null = null;
+
+      /**
+       * Resolution and loading are two DISTINCT steps here because their
+       * failures mean opposite things, and only resolution can tell them
+       * apart.
+       *
+       * "No config anywhere" is the legitimate Phase 1 shape above — the
+       * schema defaults stand. But a config that RESOLVED and then failed to
+       * load (unreadable, malformed YAML, schema violation) must refuse to
+       * start: `docker.network` and `run.repo` come from that file, so
+       * "could not load it, carried on" IS "no egress network verified, no
+       * repository hazard scan", silently — a one-character typo in
+       * fleet.yaml produced an unhardened run indistinguishable from a
+       * hardened one (review finding 1; a bare catch conflated all three
+       * failure classes). An explicit `--config` that does not resolve
+       * refuses for the same reason: the operator named a file and did not
+       * get it, and defaults would wear the shape of the config they asked
+       * for.
+       */
+      let configPath: string | null = null;
       try {
-        const loaded = await loadConfig(opts.config);
-        heartbeatIntervalMs = loaded.config.run.timers.heartbeat_interval * 1000;
-      } catch {
-        // No reachable config; the schema default stands.
+        configPath = await resolveConfigPath(opts.config);
+      } catch (err) {
+        if (opts.config !== undefined || !(err instanceof ConfigError)) {
+          throw new CliError(err instanceof Error ? err.message : String(err), EXIT.USAGE);
+        }
+        // Implicit resolution found nothing; the schema defaults stand.
+      }
+      if (configPath !== null) {
+        try {
+          loadedConfig = await parseConfig(await Bun.file(configPath).text(), configPath);
+        } catch (err) {
+          throw new CliError(
+            `refusing to start: config ${configPath} exists but could not be loaded — ` +
+              `the egress network and repository hazard scan are configured there, so ` +
+              `proceeding would run unhardened. ${err instanceof Error ? err.message : String(err)}`,
+            EXIT.USAGE,
+          );
+        }
+        heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
+        egressNetwork = loadedConfig.config.docker.network;
+        repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
+      }
+
+      /**
+       * The egress network must exist, and must be INTERNAL, before any
+       * container is attached to it.
+       *
+       * `render.ts` already puts every worker on `docker.network`, so the
+       * attachment was never the gap — creation was. An absent network makes
+       * `docker run` fail, which is loud and fine. A network of that name that
+       * someone created WITHOUT `--internal` is the dangerous case: every
+       * worker gets unrestricted egress while the fleet reports deny-all, and
+       * nothing anywhere would say so. `ensureEgressNetwork` refuses to adopt
+       * one rather than quietly using it (SRD §5.6, §12).
+       */
+      let egressInternal: boolean | null = null;
+      if (egressNetwork !== null) {
+        try {
+          egressInternal = (await ensureEgressNetwork(egressNetwork)).internal;
+        } catch (err) {
+          throw new CliError(String(err), EXIT.BACKEND_UNAVAILABLE);
+        }
       }
 
       await writeJsonAtomic(run.runJson, {
@@ -104,6 +183,72 @@ export function register(program: Command): void {
       });
       const ledger = new LedgerWriter(run, "cli-up");
       await ledger.append("run_created", { detail: { workers, backend: opts.backend } });
+      if (egressNetwork !== null) {
+        await ledger.append("egress_network_ready", {
+          detail: { network: egressNetwork, internal: egressInternal },
+        });
+      }
+
+      /**
+       * REPORT on the checked-out repository before any worker can read it.
+       *
+       * A repository is input, and several files in it are read by the agent
+       * as INSTRUCTIONS — `AGENTS.md`, `.pi/extensions/`, `core.hooksPath`,
+       * MCP configs. A checkout can therefore rewrite the behaviour of the
+       * thing grading it with no exploit at all, just a committed file, which
+       * is why this runs before the supervisors rather than as part of
+       * harvest (SRD §12.2).
+       *
+       * DETECT, never neutralize, and the distinction is the whole point:
+       * `config.run.repo` is the OPERATOR'S working repository, not a
+       * disposable per-worker tree. `render.ts` mounts
+       * `<repo>/.worktrees/<worker>` as `/workspace`, so the tree a worker
+       * actually reads is not this one — and nothing in this phase creates
+       * those worktrees yet. Quarantining here therefore defended nothing and
+       * damaged the operator: it renamed their real `AGENTS.md` aside and
+       * commented out their `filter.lfs.*` definitions while leaving
+       * `filter.lfs.required = true` intact, which hard-fails every subsequent
+       * `git add` and `checkout` on an LFS-tracked path. SRD §12.8 requires
+       * this checkout be left unchanged, and a linked worktree materializes
+       * committed files from git objects at checkout time anyway, so renaming
+       * in the parent could not have suppressed them.
+       *
+       * The load-bearing controls are elsewhere and are unaffected: the Pi
+       * argv flags (`--no-extensions --no-skills --no-context-files`) and the
+       * per-spawn `-c` hardening in `harvest/git.ts`. `repo-hazards.ts` says
+       * so itself. Neutralization belongs on the per-worker worktree at the
+       * moment it is created — ISC-249 is OPEN until that exists, rather than
+       * met by a call aimed at the wrong tree.
+       *
+       * Every hazard is still recorded, with `detected` and `neutralized` as
+       * separate fields precisely so "we saw it and left it" cannot read as
+       * "we defused it".
+       */
+      if (repoRoot !== null) {
+        try {
+          const hazards = await detectRepoHazards(repoRoot);
+          for (const h of hazards) {
+            await ledger.append("repo_hazard", {
+              detail: { path: h.path, kind: h.kind, neutralized: h.neutralized, detail: h.detail },
+            });
+          }
+          if (hazards.length > 0 && opts.json !== true) {
+            process.stdout.write(
+              `detected ${hazards.length} repository hazard(s) in ${repoRoot} (reported, NOT modified)\n`,
+            );
+            for (const h of hazards) {
+              process.stderr.write(`  hazard: ${h.kind} at ${h.path}\n`);
+            }
+          }
+        } catch (err) {
+          // The scan failing is an environment problem (unreadable repo,
+          // permissions), not an operator mistake — `2` misfiled it as usage
+          // (review finding 4). `3` matches the egress guard above, which is
+          // the same failure class: a configured control that could not be
+          // established, refusing rather than proceeding without it.
+          throw new CliError(`repository hazard scan failed: ${String(err)}`, EXIT.BACKEND_UNAVAILABLE);
+        }
+      }
 
       // The daemon: detached like the supervisors, single writer of registry.json.
       const cliEntry = new URL("../index.ts", import.meta.url).pathname;
@@ -146,6 +291,75 @@ export function register(program: Command): void {
           worker: workerId,
           detail: { pid, pgid },
         });
+      }
+
+      /**
+       * The Google grant is never silent (SRD §5.8).
+       *
+       * Per worker, one line saying what identity it got or that it got none.
+       * `cloud_access: false` produces a `none` PLAN rather than an early
+       * return, so "this worker has no credential" is a statement the run
+       * makes rather than something an operator has to infer from the absence
+       * of any mention.
+       *
+       * Planning only. Minting and the refresh loop attach to a running
+       * container, and the headless path does not start one — wiring them to
+       * a container that does not exist would be wiring to nothing. Tracked as
+       * ISC-248 rather than faked.
+       */
+      if (loadedConfig !== null) {
+        const cfg = loadedConfig;
+        const cloud = cfg.config.cloud;
+        const plans = workers.map((workerId) => {
+          let cloudAccess = false;
+          try {
+            cloudAccess = resolveWorker(cfg, workerId).cloudAccess;
+          } catch {
+            // Worker not in config (Phase 1 --workers can name any id).
+          }
+          return {
+            workerId,
+            plan: planCredential({
+              cloudAccess,
+              adcMode: cloud.adc_mode,
+              impersonateServiceAccount: cloud.impersonate_service_account,
+              quotaProject: cloud.quota_project,
+            }),
+          };
+        });
+
+        /**
+         * ISC-251 says the grant line names the identity each worker was
+         * GIVEN — and without impersonation that identity is the host's
+         * gcloud account, which `describeCredentialPlan` cannot know on its
+         * own. Its "(adc user)" fallback is a placeholder wearing the shape
+         * of an answer, and printing it unconditionally overclaimed the ISC
+         * (review finding 3). `resolveIdentity` reads local gcloud config —
+         * no network round-trip, no token minting — so being truthful costs
+         * one subprocess, paid only when some worker's plan actually injects
+         * as the ADC user. Resolution failing (no gcloud on the host, no
+         * account configured) degrades to the placeholder with a note on
+         * stderr rather than failing `up`: in Phase 1 the plan is a
+         * statement, not a mint, and a missing gcloud is loud enough at the
+         * first real mint.
+         */
+        let adcIdentity: string | undefined;
+        if (plans.some((p) => p.plan.kind === "inject" && p.plan.impersonateServiceAccount === null)) {
+          try {
+            adcIdentity = await resolveIdentity(realExec, null);
+          } catch (err) {
+            process.stderr.write(
+              `note: could not resolve the host gcloud account for the credential plan: ` +
+                `${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+        }
+
+        for (const { workerId, plan } of plans) {
+          const line = describeCredentialPlan(plan, adcIdentity);
+          await ledger.append("credential_plan", { worker: workerId, detail: { plan: line } });
+          if (opts.json !== true) process.stdout.write(`  ${workerId}: ${line}\n`);
+        }
       }
 
       // ISC-70: block until every worker is idle, fail loudly otherwise.

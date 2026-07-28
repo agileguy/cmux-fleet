@@ -23,6 +23,7 @@ import {
   startRegistryDaemon,
 } from "../../src/run/registry.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
+import { loadControlSecret } from "../../src/security/control-auth.ts";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -343,10 +344,13 @@ describe("the daemon reaps and deregisters", () => {
     });
 
     try {
+      // The daemon minted the run's control secret at startup; every socket
+      // verb — this one included — must present it (SRD §12.7).
+      const secret = await loadControlSecret(run);
       await socketRequest(run.daemonSock, {
         cmd: "register_worker",
         entry: entry("w-1", victim),
-      });
+      }, { secret });
       expect((await readRegistry(run))?.workers["w-1"]).toBeDefined();
 
       // First cycle only observes: a worker seen once is not yet stale.
@@ -397,10 +401,11 @@ describe("the daemon reaps and deregisters", () => {
     });
 
     try {
+      const secret = await loadControlSecret(run);
       await socketRequest(run.daemonSock, {
         cmd: "register_worker",
         entry: entry("w-1", victim),
-      });
+      }, { secret });
       for (let i = 0; i < 4; i++) {
         clock += 60_000;
         expect(await daemon.reapOnce()).toEqual([]);
@@ -455,10 +460,11 @@ describe("the daemon reaps and deregisters", () => {
     });
 
     try {
+      const secret = await loadControlSecret(run);
       await socketRequest(run.daemonSock, {
         cmd: "register_worker",
         entry: entry("w-1", victim),
-      });
+      }, { secret });
       // Observe once so w-1 has a frozen label to go stale against.
       held = true; // the gate is for the SECOND scan, not this one
       expect(await daemon.reapOnce()).toEqual([]);
@@ -472,7 +478,7 @@ describe("the daemon reaps and deregisters", () => {
       await socketRequest(run.daemonSock, {
         cmd: "register_worker",
         entry: entry("w-2", bystander),
-      });
+      }, { secret });
       releaseScan();
 
       const reports = await scan;

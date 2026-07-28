@@ -19,6 +19,12 @@
 import { z } from "zod";
 import type { WorkerState } from "../contracts.ts";
 import {
+  AUTH_FIELD,
+  checkAuth,
+  ensureControlAuth,
+  loadControlSecret,
+} from "../security/control-auth.ts";
+import {
   HeartbeatMonitor,
   reapStale,
   type ReaperOps,
@@ -95,8 +101,20 @@ export interface SocketServer {
  * Serve a one-request-one-response JSONL protocol on a unix socket. A stale
  * socket file from a crashed predecessor is unlinked first: `bind` would
  * otherwise fail EADDRINUSE forever, since nothing cleans up after SIGKILL.
+ *
+ * The per-run secret is REQUIRED and enforced here, in the framing layer,
+ * before any handler sees the request (SRD §12.7). Enforcing per verb inside
+ * each handler is how `ping` — the verb everyone forgets — becomes an
+ * unauthenticated oracle for whether a run exists; a gate at the framing
+ * layer covers every verb any handler will ever add. A refusal is a normal
+ * response, not a crash and not a hang: the caller gets a structured error
+ * and the server keeps serving.
  */
-export async function serveJsonlSocket(path: string, handler: SocketHandler): Promise<SocketServer> {
+export async function serveJsonlSocket(
+  path: string,
+  handler: SocketHandler,
+  auth: { secret: string },
+): Promise<SocketServer> {
   const { mkdir, unlink } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
   await mkdir(dirname(path), { recursive: true });
@@ -122,7 +140,16 @@ export async function serveJsonlSocket(path: string, handler: SocketHandler): Pr
             try {
               const msg = parseLine<Record<string, unknown>>(line);
               if (msg === undefined) return;
-              response = await handler(msg);
+              const refusal = checkAuth(msg, auth.secret);
+              if (refusal !== null) {
+                response = refusal;
+              } else {
+                // The token is stripped before the handler runs: no handler
+                // can echo it into a response, a ledger record or a log line,
+                // which is rule 3 of security/control-auth.ts made structural.
+                const { [AUTH_FIELD]: _token, ...verb } = msg;
+                response = await handler(verb);
+              }
             } catch (err) {
               response = { ok: false, error: String(err) };
             }
@@ -160,13 +187,22 @@ export class SocketRequestError extends Error {
   }
 }
 
-/** Send one request, await one response line, close. */
+/**
+ * Send one request, await one response line, close.
+ *
+ * When `secret` is given it is stamped onto the outgoing message as the
+ * `auth` field. Stamping at the transport keeps the token out of every
+ * caller-built message — and therefore out of everything callers persist:
+ * `dispatch` records its envelope verbatim in the inbox, and a token inside
+ * it would be a secret in a ledger-adjacent file.
+ */
 export async function socketRequest(
   path: string,
   msg: Record<string, unknown>,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; secret?: string } = {},
 ): Promise<Record<string, unknown>> {
   const timeoutMs = opts.timeoutMs ?? 5_000;
+  if (opts.secret !== undefined) msg = { ...msg, [AUTH_FIELD]: opts.secret };
   const splitter = new LineSplitter();
 
   return await new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -297,6 +333,12 @@ export async function startRegistryDaemon(
   let server: SocketServer | null = null;
   let onShutdown: (() => void) | null = null;
 
+  // The run's control secret (SRD §12.7). `up` mints it before launching
+  // anything, so this normally reads; the mint path exists for a daemon
+  // started directly against a bare run directory (tests, debugging) and is
+  // exclusive-create, so racing components converge on one value.
+  const controlAuth = await ensureControlAuth(run);
+
   server = await serveJsonlSocket(run.daemonSock, async (msg) => {
     switch (msg["cmd"]) {
       case "ping":
@@ -326,7 +368,7 @@ export async function startRegistryDaemon(
       default:
         return { ok: false, error: `unknown cmd: ${String(msg["cmd"])}` };
     }
-  });
+  }, { secret: controlAuth.secret });
 
   // -------------------------------------------------------------------------
   // Reaper loop (ISC-236)
@@ -409,14 +451,22 @@ export async function startRegistryDaemon(
   return daemon;
 }
 
-/** Client-side call to the daemon; tolerant of an absent daemon when asked. */
+/**
+ * Client-side call to the daemon; tolerant of an absent daemon when asked.
+ *
+ * The run's secret is loaded from the run directory on every call and stamped
+ * by the transport. A run with no auth record is as unreachable as one with
+ * no daemon — under `optional` both degrade to null, because a best-effort
+ * caller (supervisor registration) must not crash over either.
+ */
 export async function registryCall(
   run: RunPaths,
   msg: Record<string, unknown>,
   opts: { optional?: boolean } = {},
 ): Promise<Record<string, unknown> | null> {
   try {
-    return await socketRequest(run.daemonSock, msg);
+    const secret = await loadControlSecret(run);
+    return await socketRequest(run.daemonSock, msg, { secret });
   } catch (err) {
     if (opts.optional) return null;
     throw err;

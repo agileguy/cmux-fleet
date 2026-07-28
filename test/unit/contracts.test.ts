@@ -8,6 +8,10 @@ import {
   TaskEnvelopeSchema,
   WorkerStateSchema,
   worstExit,
+  ControlAuthSchema,
+  CredentialInjectionSchema,
+  EgressDecisionSchema,
+  RepoHazardSchema,
 } from "../../src/contracts.ts";
 
 const validTask = {
@@ -160,5 +164,120 @@ describe("WorkerStateSchema", () => {
     expect(s.session_path).toBeNull();
     expect(s.session_present).toBe(false);
     expect(s.exit).toEqual({ code: null, signal: null });
+  });
+});
+
+/**
+ * Phase 3 seam (SRD §5.8, §5.10, §12).
+ *
+ * Written before the phase's engineers are dispatched and read-only to them.
+ * These tests exist so the seam's INVARIANTS are pinned before four
+ * subsystems start depending on it — a shared type whose constraints are
+ * discovered by the first engineer to violate them is not a seam.
+ */
+describe("Phase 3 seam — credentials, egress, hazards, control auth", () => {
+  test("a control secret must be 256 bits of hex, not a shorter convenience", () => {
+    const base = {
+      schema: "pifleet.controlauth/v1" as const,
+      run_id: "r-1",
+      created_at: "2026-07-27T00:00:00Z",
+    };
+    expect(ControlAuthSchema.safeParse({ ...base, secret: "a".repeat(64) }).success).toBe(true);
+    // Too short, wrong alphabet, and uppercase are all rejected: a socket
+    // secret a caller can guess is a socket with no auth and a false sense of it.
+    expect(ControlAuthSchema.safeParse({ ...base, secret: "a".repeat(32) }).success).toBe(false);
+    expect(ControlAuthSchema.safeParse({ ...base, secret: "z".repeat(64) }).success).toBe(false);
+    expect(ControlAuthSchema.safeParse({ ...base, secret: "A".repeat(64) }).success).toBe(false);
+  });
+
+  /**
+   * `refresh_token_absent` is required with no default. A default of `true`
+   * would let a subsystem that never checked report the safe answer, and the
+   * whole point of §5.8's token mode is that the absence is VERIFIED.
+   */
+  test("refresh_token_absent has no default — it must be answered", () => {
+    const injection = {
+      schema: "pifleet.credential/v1" as const,
+      worker: "eng-1",
+      mode: "token" as const,
+      identity: "dan@example.com",
+      expires_at: "2026-07-27T01:00:00Z",
+      injected_at: "2026-07-27T00:00:00Z",
+      injected_mono: 1234,
+    };
+    expect(CredentialInjectionSchema.safeParse(injection).success).toBe(false);
+    expect(
+      CredentialInjectionSchema.safeParse({ ...injection, refresh_token_absent: true }).success,
+    ).toBe(true);
+  });
+
+  test("generation defaults to 0 so the initial injection needs no ceremony", () => {
+    const parsed = CredentialInjectionSchema.parse({
+      schema: "pifleet.credential/v1",
+      worker: "eng-1",
+      mode: "token",
+      identity: "sa@project.iam.gserviceaccount.com",
+      expires_at: "2026-07-27T01:00:00Z",
+      injected_at: "2026-07-27T00:00:00Z",
+      injected_mono: 0,
+      refresh_token_absent: true,
+    });
+    expect(parsed.generation).toBe(0);
+  });
+
+  /**
+   * `detected` and `neutralized` are separate because "we saw it and left it"
+   * and "we saw it and defused it" are different security postures. A single
+   * `handled` boolean would let the first masquerade as the second.
+   */
+  test("a repo hazard records detection and neutralization independently", () => {
+    const seen = RepoHazardSchema.parse({ path: "AGENTS.md", kind: "agents_md", neutralized: false });
+    expect(seen.detected).toBe(true);
+    expect(seen.neutralized).toBe(false);
+    expect(RepoHazardSchema.safeParse({ path: ".pi/extensions/x", kind: "pi_extension" }).success).toBe(
+      false,
+    );
+  });
+
+  /**
+   * `detected` is an invariant, not a default. The docstring read as one while
+   * `z.boolean().default(true)` behaved as the other: a default only supplies
+   * a value when the key is ABSENT, so `{detected: false}` parsed happily and
+   * produced a hazard record claiming nothing was found — a shape that should
+   * not exist, since a record is created BECAUSE something was found.
+   *
+   * Fails if the field goes back to a plain boolean. Without this the change
+   * to `z.literal(true)` reverts with the suite green, which is how the
+   * original weakening survived.
+   */
+  test("a hazard cannot claim it was never detected", () => {
+    expect(
+      RepoHazardSchema.safeParse({
+        path: "AGENTS.md",
+        kind: "agents_md",
+        detected: false,
+        neutralized: false,
+      }).success,
+    ).toBe(false);
+    // Omitted is still fine — the default is what fills it in.
+    expect(
+      RepoHazardSchema.parse({ path: "AGENTS.md", kind: "agents_md", neutralized: true }).detected,
+    ).toBe(true);
+  });
+
+  test("an egress decision names the rule that decided, including default-deny", () => {
+    const denied = EgressDecisionSchema.parse({
+      allowed: false,
+      host: "evil.example",
+      port: 443,
+      rule: "default-deny",
+    });
+    expect(denied.allowed).toBe(false);
+    expect(denied.rule).toBe("default-deny");
+    // Port is required and positive: "allowed to host X" without a port is a
+    // rule that cannot be checked against what actually happened.
+    expect(
+      EgressDecisionSchema.safeParse({ allowed: true, host: "oauth2.googleapis.com", port: 0 }).success,
+    ).toBe(false);
   });
 });

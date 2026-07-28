@@ -20,6 +20,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { SupervisorLauncher, WorkerSpec } from "../backends/types.ts";
 import { socketRequest } from "../run/registry.ts";
+import { loadControlSecret } from "../security/control-auth.ts";
 import { workerPaths, type RunPaths } from "../run/paths.ts";
 
 /** Absolute path to the supervisor entrypoint, wherever this checkout lives. */
@@ -84,7 +85,14 @@ export const processLauncher: SupervisorLauncher = {
 // Control-socket client — how the CLI talks to a live supervisor.
 // ---------------------------------------------------------------------------
 
-/** One request/response against a worker's control socket. */
+/**
+ * One request/response against a worker's control socket.
+ *
+ * Loads the run's control secret (SRD §12.7) and lets the transport stamp it;
+ * a run with no auth record fails here with a `ControlAuthError` that names
+ * the missing file, which beats a refusal from the far end that cannot say
+ * WHY the caller has no token.
+ */
 export async function controlCall(
   run: RunPaths,
   workerId: string,
@@ -92,5 +100,6 @@ export async function controlCall(
   opts: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
   const wp = workerPaths(run, workerId);
-  return socketRequest(wp.controlSock, msg, opts);
+  const secret = await loadControlSecret(run);
+  return socketRequest(wp.controlSock, msg, { ...opts, secret });
 }
