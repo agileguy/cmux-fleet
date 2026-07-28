@@ -195,8 +195,8 @@ suite green on `headless` against a test double.
 ### Group H — Dispatch and completion
 
 - [ ] ISC-79: A dispatched task appears in the transcript as a `UserMessage`.
-- [ ] ISC-80: `steer` injects a message that appears before the next assistant turn.
-- [ ] ISC-81: `abort` returns the worker to `idle` within 10s.
+- [x] ISC-80: `steer` injects a message that appears before the next assistant turn.
+- [x] ISC-81: `abort` returns the worker to `idle` within 10s.
 - [ ] ISC-82: A scenario emitting `agent_end{willRetry:true}` then continuing is not reported complete.
 - [ ] ISC-83: A scenario settling on an aborted turn is reported `aborted`, not `success`.
 - [ ] ISC-84: The SRD §7.5 interleaving scenario does not attribute epoch N's diff to epoch N+1.
@@ -691,6 +691,23 @@ empty pane. The criterion names the **cmux** backend specifically, and cmux's
 `socketControlMode` is `cmuxOnly`, so its socket refuses every call from
 outside a pane and no live cmux run is possible from a normal shell. Claiming
 it needs a run from inside a cmux pane. It stays unchecked until then.
+
+Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
+ISC-254.
+
+### Phase 6 close-out — 2026-07-28
+
+- ISC-80: `steer.test.ts` asserts the injected message's POSITION in the
+  worker's event stream — after the prompt, before the assistant entry — not
+  that the call returned ok. Sending `ping` instead of `steer` turns it red.
+- ISC-81: `abort.test.ts` aborts a 30s turn and asserts the observed phase
+  transition back to `idle` inside 10s on a real clock, with verdict
+  `aborted`. Sending `ping` instead of `abort` turns it red.
+
+**ISC-129 remains open**, carried from Phase 4 for the same reason: both
+halves are verified on `tmux`, but the criterion names the **cmux** backend,
+whose `socketControlMode` is `cmuxOnly` and therefore refuses every call from
+outside a pane. Claiming it needs a run from inside one.
 
 Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
 ISC-254.
