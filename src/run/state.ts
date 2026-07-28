@@ -213,12 +213,46 @@ export class StateReadError extends Error {
 async function readValidated<T>(path: string, parse: (v: unknown) => T): Promise<T | null> {
   const file = Bun.file(path);
   if (!(await file.exists())) return null;
-  const text = await file.text();
+  let text = await file.text();
   let doc: unknown;
   try {
     doc = JSON.parse(text);
-  } catch (err) {
-    throw new StateReadError(path, err);
+  } catch (firstErr) {
+    /**
+     * One retry, because the file on disk is whole and the READ was not.
+     *
+     * These files are written by `writeJsonAtomic` — tmp, fsync, rename — so
+     * a reader must see either the entire previous file or the entire next
+     * one. A truncated read of an untruncated file is what happens when the
+     * size is taken from one inode and the bytes from its replacement: the
+     * rename lands between the stat and the read, and the result is a short
+     * buffer that ends mid-token. It appeared only under CI's timing, never
+     * in eight local runs of the same test.
+     *
+     * Re-reading resolves that, and cannot hide a genuinely corrupt file:
+     * a real truncation on disk fails the retry too, and the error below
+     * carries the bytes either way.
+     */
+    text = await Bun.file(path).text();
+    try {
+      return parse(JSON.parse(text));
+    } catch {
+      // Fall through to the diagnostic, which reports the FIRST failure.
+    }
+    const err = firstErr;
+    /**
+     * Carry the bytes, because "Unterminated string" alone says nothing
+     * about how a file written by `writeJsonAtomic` came to be truncated.
+     * That writer is tmp + fsync + rename, so a reader should see either the
+     * whole previous file or the whole next one — a torn read means the
+     * premise is wrong somewhere, and CI is the only place it has appeared.
+     * Guessing across CI round-trips is expensive; a failure that describes
+     * itself is not.
+     */
+    throw new StateReadError(
+      path,
+      `${String(err)} — ${text.length} bytes on disk, starting ${JSON.stringify(text.slice(0, 120))}`,
+    );
   }
   try {
     return parse(doc);
