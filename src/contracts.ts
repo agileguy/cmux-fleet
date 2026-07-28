@@ -830,3 +830,64 @@ export const RunReportSchema = z.object({
     .default({ tasks: 0, done: 0, blocked: 0, failed: 0 }),
 });
 export type RunReport = z.infer<typeof RunReportSchema>;
+
+// ---------------------------------------------------------------------------
+// Attended mode (SRD §13, §16 Phase 6) — the Phase 6 seam.
+//
+// One table, written before any Phase 6 work is dispatched, because the two
+// halves of attended mode disagree about it otherwise: the pane that puts a
+// human in the loop and the report that has to describe what a run means
+// afterwards must name the SAME set of voided guarantees.
+// ---------------------------------------------------------------------------
+
+/**
+ * How a worker's pane is being driven.
+ *
+ * `viewer` is the default and the only mode the rest of this system reasons
+ * about: the pane is a read-only follower and every control-plane guarantee
+ * holds. `tui` hands the pane to a person, which is useful and which quietly
+ * invalidates several of those guarantees — so the mode is recorded rather
+ * than inferred, and `report` says which one a run was in.
+ */
+export const PaneModeSchema = z.enum(["viewer", "tui"]);
+export type PaneMode = z.infer<typeof PaneModeSchema>;
+
+/**
+ * A guarantee that does NOT hold once a human is typing into the pane.
+ *
+ * This exists because the honest failure of an attended mode is silent: the
+ * run still produces a result envelope, a verdict and a diff, and none of
+ * them mean quite what they mean unattended. Enumerating the voided
+ * requirements makes that difference readable instead of folklore — the
+ * operator gets told, in the report, which claims to stop trusting.
+ *
+ * `voided` is deliberately a criterion ID plus prose. An ID alone would rot
+ * silently when a criterion is renumbered; prose alone could not be checked
+ * against the ISA.
+ */
+export const VoidedRequirementSchema = z.object({
+  /** The ISC this attended session stops guaranteeing, e.g. "ISC-87". */
+  isc: z.string().regex(/^ISC-\d+(\.\d+)?$/, "voided requirement must name an ISC"),
+  /** What no longer holds, in one sentence an operator can act on. */
+  because: text,
+});
+export type VoidedRequirement = z.infer<typeof VoidedRequirementSchema>;
+
+/**
+ * The record that a worker was, at some point, driven by hand.
+ *
+ * Written once when a pane enters `tui` and never removed, because the point
+ * is that the RUN is affected, not the current state: a worker returned to
+ * `viewer` mode after a human intervened still produced work a human touched.
+ * A flag that cleared itself would let an attended run present as unattended.
+ */
+export const AttendedRecordSchema = z.object({
+  schema: z.literal("pifleet.attended/v1"),
+  worker: workerId,
+  mode: PaneModeSchema,
+  entered_at: z.string(),
+  /** Null until the operator hands the pane back. */
+  left_at: z.string().nullable().default(null),
+  voided: z.array(VoidedRequirementSchema).max(MAX_ITEMS).default([]),
+});
+export type AttendedRecord = z.infer<typeof AttendedRecordSchema>;
