@@ -28,9 +28,11 @@ import {
   type TaskEnvelope,
   type Verdict,
 } from "../contracts.ts";
+import type { AttendedRecord } from "../contracts.ts";
 import { mergeLedger } from "../run/ledger.ts";
 import { taskRecordPath, workerPaths, type RunPaths } from "../run/paths.ts";
 import { readTaskRecord, readWorkerState } from "../run/state.ts";
+import { readAttended } from "../attended/mode.ts";
 import { harvestTask } from "../harvest/index.ts";
 import { precheckMerges, type MergeCheckInput } from "./merge.ts";
 import type { MergePrecheck } from "../contracts.ts";
@@ -52,6 +54,28 @@ export interface CollectedReport {
    * validating against it must not need to know our failure vocabulary.
    */
   notes: string[];
+  /**
+   * Every worker a person drove by hand (SRD §3.5 `tui` mode), with the
+   * guarantees their keystrokes voided. Beside the report for the same reason
+   * `notes` is — the wire schema is frozen — but this one is not a
+   * degradation of collection, it is a fact about the run that changes what
+   * every verdict above means. An attended run that presents as unattended is
+   * the failure the attended subsystem exists to prevent, so an unreadable
+   * record is a NOTE, never a silent skip.
+   */
+  attended: AttendedRecord[];
+  /**
+   * Workers the ledger says a person touched whose record cannot be produced
+   * — missing, unreadable, or schema-invalid.
+   *
+   * A separate array rather than a note, because `attended: []` is an
+   * AFFIRMATIVE claim that nobody drove this run, and a consumer keying on
+   * that field read a tampered or crash-truncated run as autonomous while
+   * the warning sat in `collection_notes`. That array's own contract is
+   * "findings about the COLLECTION", and whether a human edited the branch
+   * is not a fact about collection. This is the non-empty signal.
+   */
+  attendedUnverified: Array<{ worker: string; reason: string }>;
 }
 
 /** One dispatched task's durable facts, as far as they could be recovered. */
@@ -91,6 +115,25 @@ export async function collectRunReport(
 
   const schedule = await buildSchedule(run, dispatched, notes);
   await noteLiveWorkers(run, notes);
+  /**
+   * Which workers the LEDGER says were handed to a person. Read here rather
+   * than inside `collectAttended` because the merged ledger is already in
+   * hand and re-reading it would be a second source of truth for the same
+   * fact.
+   */
+  const attendedInLedger = new Set<string>(
+    ledger.records
+      .filter(
+        (r) =>
+          // `steer` writes a record too, and a steer is equally a human
+          // reaching into a run — cross-checking only `tui_entered` would
+          // leave the steer record deletable without trace.
+          (r.event === "tui_entered" || r.event === "steer_sent") &&
+          typeof r.worker === "string",
+      )
+      .map((r) => r.worker as string),
+  );
+  const { attended, unverified: attendedUnverified } = await collectAttended(run, notes, attendedInLedger);
 
   // Merge pre-check: one entry per (worker, branch), because several tasks on
   // one worker share its branch and checking it N times reports N times.
@@ -141,7 +184,70 @@ export async function collectRunReport(
       failed: schedule.filter((s) => s.verdict === "failed").length,
     },
   });
-  return { report, notes };
+  return { report, notes, attended, attendedUnverified };
+}
+
+/**
+ * Attended records for every worker that has one (SRD §3.5, Phase 6).
+ *
+ * The record is written once at `tui` entry and never removed, so its mere
+ * presence means a person was in this worker's container at some point — even
+ * if `--leave` has long since returned the pane to the viewer. A record that
+ * cannot be read is reported as a note AND as a degraded row here: dropping
+ * it silently would let an attended run present as unattended, which is
+ * precisely what the record exists to make impossible.
+ */
+/**
+ * Attended records, corroborated against the ledger.
+ *
+ * `attended.json` was the only evidence, which made "was this run driven by a
+ * person" a question one `rm` could change the answer to: deleting the file
+ * made the run present as fully autonomous, and every verdict in the report
+ * regained a meaning it had not earned. An unreadable record already failed
+ * safe; an ABSENT one failed open.
+ *
+ * `tui` also appends `tui_entered` to the ledger, which is append-only and
+ * sharded per writer, so the two would have to be tampered with together.
+ * When the ledger says a worker was attended and no record survives, the
+ * report says so rather than staying quiet — a missing record is itself the
+ * finding, and the operator needs to know the run was touched even though
+ * the detail of how is gone.
+ */
+async function collectAttended(
+  run: RunPaths,
+  notes: string[],
+  attendedInLedger: ReadonlySet<string>,
+): Promise<{ attended: AttendedRecord[]; unverified: Array<{ worker: string; reason: string }> }> {
+  let workers: string[];
+  try {
+    workers = await readdir(run.workersDir);
+  } catch {
+    return { attended: [], unverified: [] }; // no workers; nothing could have been attended
+  }
+  const out: AttendedRecord[] = [];
+  const unverified: Array<{ worker: string; reason: string }> = [];
+  for (const id of workers.sort()) {
+    if (id.startsWith(".")) continue;
+    try {
+      const record = await readAttended(run, id);
+      if (record !== null) {
+        out.push(record);
+      } else if (attendedInLedger.has(id)) {
+        unverified.push({
+          worker: id,
+          reason: "the ledger records a human session but the attended record is missing",
+        });
+      }
+    } catch (err) {
+      // The case where the run is MOST certainly attended, so it must not be
+      // the one demoted to a footnote.
+      unverified.push({
+        worker: id,
+        reason: `the attended record cannot be read (${firstLine(err)})`,
+      });
+    }
+  }
+  return { attended: out, unverified };
 }
 
 /** Every task the inbox has a durable dispatch envelope for, harvested. */

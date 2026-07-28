@@ -104,6 +104,17 @@ export interface WorkerPaths {
   supervisorLog: string;
   controlSock: string;
   tasksDir: string;
+  /**
+   * The attended record (`AttendedRecord`), written when a pane is handed to
+   * a person and never removed afterwards.
+   *
+   * Beside state rather than inside it, like presentation: whether a human
+   * typed into a pane is a fact ABOUT the run, and losing the pane must not
+   * lose it. Named here because `steer`/`tui` write it and `report` reads it
+   * — the last phase put a path in two places and the halves diverged
+   * within a single dispatch.
+   */
+  attendedJson: string;
 }
 
 export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
@@ -118,6 +129,7 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     supervisorLog: join(dir, "supervisor.log"),
     controlSock: socketPath(run.runId, workerId),
     tasksDir: join(dir, "tasks"),
+    attendedJson: join(dir, "attended.json"),
   };
 }
 
