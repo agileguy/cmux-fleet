@@ -4,6 +4,58 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-28 — Phase 5: orchestration
+
+A fleet you hand a task list to, and a report you can read afterwards.
+
+### Added
+- **`dispatch --auto`** — a dependency DAG over a task list, assigned to idle
+  workers. A cycle or an unknown dependency is refused **before anything is
+  dispatched**, and a failed dependency names the task that actually failed:
+  two hops away, C is `blocked_by: A`, not by its blocked neighbour B.
+- **`pifleet report`** — derived facts only. Verdicts enter solely through
+  harvest adjudication; neither a worker's self-report nor the scheduler's own
+  snapshot can donate one. The merge pre-check runs in the object database via
+  `merge-tree` — never `merge`, `stash` or `checkout` — so it can be run
+  against dirty worker trees, which is the state they are in when a run has
+  gone wrong.
+- **`pifleet logs`** — the pane viewer, read-only by construction. `up`'s panes
+  now run `logs --follow --render` instead of a raw `tail -F`.
+- **Role briefings** — `sre`, `investigator`, `verifier`. Resolution takes no
+  envelope, config or worker identity, so it structurally cannot make a
+  capability decision; the verb allowlist stays on the envelope.
+
+### Fixed
+- **A dispatch whose outcome was unknown could run twice.** A control-socket
+  timeout was reported as "unreachable", which the scheduler read as "the task
+  is untouched" and re-offered to another worker — but the supervisor may have
+  accepted the envelope and replied late. The fence that would catch the second
+  run is per-worker, so the second worker accepts it, and two agents run the
+  same brief against the same branch. Only a provable connect failure is now
+  retried; anything else settles `unknown`.
+- **`dispatch --auto` could spin forever.** The deadlock guard fired only when
+  every worker was dead, so a supervisor that was alive but wedged polled
+  indefinitely with no budget and no output.
+- **`report` crashed on a fleet of more than a thousand tasks** — the schema
+  cap was treated as an assertion about reality. Rows are capped to fit, the
+  note says what was cut, and totals count everything.
+- **`TaskSpec.role` reached no worker.** It validated, travelled through the
+  DAG and reached the snapshot without ever composing into a brief — so a task
+  could report as `verifier` while the container ran a generic one.
+
+### Testing
+- 1009 pass, 52 skip, 0 fail across 68 files.
+- The `logs` read-only guarantee is now **behavioural**: the real command runs
+  over a real run directory in every mode and the directory must be
+  byte-identical afterwards. The previous source-text denylist was evaded three
+  ways — `fs.open` plus a FileHandle `write`, a backtick dynamic import, and
+  `Bun.spawn` with a shell redirect — each with the whole suite green.
+- The merge pre-check's "leaves every tree untouched" test was vacuous: a
+  literal `git stash` passed all eleven, because `stash` on a clean tree is a
+  no-op and the fixture was always clean. It is deliberately dirty now.
+- A SIGINT test signalled a `bun run` wrapper rather than the CLI, so it
+  measured the wrapper's exit semantics and failed only on Linux.
+
 ## [0.5.0] — 2026-07-28 — Phase 4: panes
 
 Two real backends behind one seam, and panes that show what a worker is doing.
