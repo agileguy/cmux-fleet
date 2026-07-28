@@ -700,3 +700,133 @@ export const ControlAuthSchema = z.object({
   created_at: z.string(),
 });
 export type ControlAuth = z.infer<typeof ControlAuthSchema>;
+
+// ---------------------------------------------------------------------------
+// Orchestration (SRD §14) — the Phase 5 seam.
+//
+// Three schemas, written before any Phase 5 work is dispatched, because the
+// scheduler and the reporter are built against each other: the scheduler
+// decides what ran and in what order, and the reporter has to describe that
+// decision to an operator who was not watching. An interface neither owns is
+// how a phase produces two halves that do not meet.
+// ---------------------------------------------------------------------------
+
+/**
+ * A task as an operator AUTHORS it, before the run exists.
+ *
+ * Deliberately not a `TaskEnvelope`: an envelope carries `run_id`, `epoch`,
+ * `attempt`, `worker`, `dispatched_at` and a resolved `base_ref`, none of
+ * which an author can know — they are facts the scheduler produces at
+ * dispatch time. Conflating the two would force whoever writes a task list to
+ * invent an epoch, which is exactly the kind of field that then goes stale
+ * and fences a live worker out of its own run.
+ *
+ * `id` is task-list-local. It is what `depends_on` names, and the scheduler
+ * maps it to a `task_id` when it builds the envelope.
+ */
+export const TaskSpecSchema = z.object({
+  id: shortStr,
+  title: text,
+  brief: text,
+  /** Task-list-local ids, NOT `task_id`s: nothing has been dispatched yet. */
+  depends_on: z.array(shortStr).max(MAX_ITEMS).default([]),
+  /** Which briefing the worker runs under; `null` means the fleet default. */
+  role: z.enum(["sre", "investigator", "verifier"]).nullable().default(null),
+  /** Pin to one worker. Null lets the scheduler choose any idle worker. */
+  worker: workerId.nullable().default(null),
+  acceptance: z.array(text).max(MAX_ITEMS).default([]),
+  constraints: z.array(text).max(MAX_ITEMS).default([]),
+  inputs: z.array(TaskInputSchema).max(MAX_ITEMS).default([]),
+  cloud_allow: z.array(shortStr).max(MAX_ITEMS).default([]),
+  deadline_s: z.number().int().positive().default(1800),
+});
+export type TaskSpec = z.infer<typeof TaskSpecSchema>;
+
+export const TaskListSchema = z.object({
+  schema: z.literal("pifleet.tasklist/v1"),
+  tasks: z.array(TaskSpecSchema).max(MAX_ITEMS),
+});
+export type TaskList = z.infer<typeof TaskListSchema>;
+
+/**
+ * Why a task is not running yet.
+ *
+ * A scheduler that only reports "pending" makes a stalled fleet unreadable:
+ * an operator cannot tell a task waiting on a dependency from one waiting on
+ * a free worker from one that will never run because a dependency failed.
+ * `blocked` is terminal, `waiting` and `ready` are not.
+ */
+export const TaskSchedStateSchema = z.enum([
+  "waiting", // a dependency has not finished
+  "ready", // dependencies met, no idle worker yet
+  "dispatched",
+  "done",
+  "blocked", // a dependency failed; this task will never be dispatched
+]);
+export type TaskSchedState = z.infer<typeof TaskSchedStateSchema>;
+
+/**
+ * One task's place in the schedule, as `dispatch --auto` and `report` both
+ * see it. `blocked_by` names the dependency that failed, so the operator gets
+ * the cause rather than a cascade of identical "blocked" lines.
+ */
+export const ScheduledTaskSchema = z.object({
+  id: shortStr,
+  state: TaskSchedStateSchema,
+  worker: workerId.nullable().default(null),
+  task_id: shortStr.nullable().default(null),
+  depends_on: z.array(shortStr).max(MAX_ITEMS).default([]),
+  blocked_by: shortStr.nullable().default(null),
+  verdict: VerdictSchema.nullable().default(null),
+});
+export type ScheduledTask = z.infer<typeof ScheduledTaskSchema>;
+
+/**
+ * Whether one worker's branch can be merged, checked WITHOUT merging.
+ *
+ * `conflicts_with` carries sibling worker ids rather than file names alone,
+ * because the operator's next action is a conversation with whoever owns the
+ * other branch — or a decision about which to land first. A pre-check that
+ * says only "conflict" sends them to re-derive that by hand.
+ *
+ * `clean: true` is a statement about the merge-base at the time of the check
+ * and nothing more. It must never be read as "merged" — the same distinction
+ * `down` got wrong when it printed `clean: true` over a leaked session.
+ */
+export const MergePrecheckSchema = z.object({
+  worker: workerId,
+  branch: shortStr,
+  base_ref: sha40,
+  clean: z.boolean(),
+  conflicts_with: z.array(workerId).max(MAX_ITEMS).default([]),
+  conflicting_paths: z.array(shortStr).max(MAX_ITEMS).default([]),
+  detail: text.default(""),
+});
+export type MergePrecheck = z.infer<typeof MergePrecheckSchema>;
+
+/**
+ * `pifleet report` (SRD §10, §14.2): the whole run, for someone who was not
+ * watching it.
+ *
+ * Derived facts only. Every field here is computed from the ledger, the
+ * harvest records and git — never from a worker's self-report, which §8.2
+ * treats as untrusted input that may downgrade a verdict but never upgrade
+ * one.
+ */
+export const RunReportSchema = z.object({
+  schema: z.literal("pifleet.report/v1"),
+  run_id: shortStr,
+  generated_at: z.string(),
+  schedule: z.array(ScheduledTaskSchema).max(MAX_ITEMS).default([]),
+  merge: z.array(MergePrecheckSchema).max(MAX_ITEMS).default([]),
+  /** Counts by verdict, so a caller need not re-derive them from `schedule`. */
+  totals: z
+    .object({
+      tasks: z.number().int().nonnegative().default(0),
+      done: z.number().int().nonnegative().default(0),
+      blocked: z.number().int().nonnegative().default(0),
+      failed: z.number().int().nonnegative().default(0),
+    })
+    .default({ tasks: 0, done: 0, blocked: 0, failed: 0 }),
+});
+export type RunReport = z.infer<typeof RunReportSchema>;

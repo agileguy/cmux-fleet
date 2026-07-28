@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import { Stopwatch } from "../../rpc/client.ts";
@@ -27,6 +28,15 @@ import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
 import { detectRepoHazards } from "../../security/repo-hazards.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
+
+/**
+ * This CLI's entrypoint, resolved from this module rather than from `cwd`.
+ *
+ * The pane viewer is spawned as a fresh `pifleet` process, and a pane starts
+ * in the worker's directory — a relative path would resolve against that and
+ * fail.
+ */
+const CLI_ENTRY = join(import.meta.dir, "..", "index.ts");
 
 /** ISC-70: every worker reaches `idle` within this budget. */
 const IDLE_TIMEOUT_MS = 60_000;
@@ -374,25 +384,47 @@ export function register(program: Command): void {
          * Capital -F rather than -f because neither file need exist yet — it
          * retries instead of dying on the race.
          *
-         * Both files, and the order is the useful one. `events.jsonl` is
-         * where activity actually appears; `supervisor.log` was the obvious
-         * first choice and measuring it showed 0 bytes through a whole run,
-         * which would have made a technically-live pane that is empty in
-         * practice. The supervisor log stays in the list because it is where
-         * a crash lands, and a pane that goes quiet should show why.
+         * `pifleet logs --follow --render` is the viewer, now that the
+         * command exists. It replaces a raw `tail -F` over `events.jsonl`
+         * and `supervisor.log`, which stood in while `logs` was a stub that
+         * threw — a pane is worth more showing legible lines than raw JSONL.
          *
-         * `pifleet logs --follow --render` is the eventual viewer — the flag
-         * is already declared and documented as "render the pane viewer
-         * view" — but that command is still a stub that throws, so this uses
-         * the files directly rather than shipping a pane that reports "logs
-         * is not implemented yet" forever.
+         * The read-only property is what makes this safe to run in a pane,
+         * and it is enforced rather than assumed: a test walks the `logs`
+         * source and every module it imports and fails if any write API or
+         * control-socket path appears. The pane stays a view (SRD §3.3).
+         *
+         * `--follow` waits for an events file that does not exist yet rather
+         * than dying, which matters because the supervisor may not have
+         * created it when the pane starts.
          *
          * Failure stays non-fatal for the same reason pane creation is: a
          * missing view must never take down a working run.
          */
         if (pane.id !== null) {
           try {
-            await backend.attachViewer(pane, ["tail", "-F", wp.eventsJsonl, wp.supervisorLog]);
+            /**
+             * `env PIFLEET_RUNS_DIR=…` because the pane does NOT inherit this
+             * process's environment. Panes are children of a long-lived
+             * cmux/tmux server that was started before this run existed, so a
+             * viewer relying on the ambient variable would resolve the
+             * default `~/.pifleet/runs` and quietly tail the wrong fleet —
+             * or nothing at all. `--run` is passed for the same reason:
+             * "the most recent run" is a different answer in a stale server.
+             */
+            await backend.attachViewer(pane, [
+              "env",
+              `PIFLEET_RUNS_DIR=${root}`,
+              process.execPath,
+              CLI_ENTRY,
+              "logs",
+              "--worker",
+              workerId,
+              "--run",
+              runId,
+              "--follow",
+              "--render",
+            ]);
           } catch (err) {
             await ledger.append("viewer_failed", {
               worker: workerId,

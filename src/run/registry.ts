@@ -177,13 +177,34 @@ export async function serveJsonlSocket(
   };
 }
 
+/**
+ * Whether the request provably never reached the listener.
+ *
+ * `connect_failed` is the only value that lets a caller retry elsewhere: the
+ * socket was never opened, so nothing on the other side saw the message. A
+ * timeout or a mid-request close says nothing of the sort — the supervisor
+ * may have accepted the dispatch, persisted its fence and started the agent,
+ * and merely answered late. Callers that treat those as "never happened" run
+ * the same task twice.
+ */
+export type SocketFailure = "connect_failed" | "timeout" | "closed" | "error";
+
 export class SocketRequestError extends Error {
   constructor(
     readonly path: string,
     message: string,
+    readonly failure: SocketFailure = "error",
   ) {
     super(`${message} (${path})`);
     this.name = "SocketRequestError";
+  }
+
+  /**
+   * True only when the request cannot have been acted on. Everything else is
+   * in doubt, and in doubt must never be retried on another worker.
+   */
+  get neverDelivered(): boolean {
+    return this.failure === "connect_failed";
   }
 }
 
@@ -214,7 +235,7 @@ export async function socketRequest(
       fn();
     };
     const timer = setTimeout(() => {
-      finish(() => reject(new SocketRequestError(path, `no response in ${timeoutMs}ms`)));
+      finish(() => reject(new SocketRequestError(path, `no response in ${timeoutMs}ms`, "timeout")));
     }, timeoutMs);
 
     Bun.connect({
@@ -233,17 +254,17 @@ export async function socketRequest(
           }
         },
         close() {
-          finish(() => reject(new SocketRequestError(path, "closed before responding")));
+          finish(() => reject(new SocketRequestError(path, "closed before responding", "closed")));
         },
         error(_socket, err) {
-          finish(() => reject(new SocketRequestError(path, String(err))));
+          finish(() => reject(new SocketRequestError(path, String(err), "error")));
         },
         connectError(_socket, err) {
-          finish(() => reject(new SocketRequestError(path, `connect failed: ${String(err)}`)));
+          finish(() => reject(new SocketRequestError(path, `connect failed: ${String(err)}`, "connect_failed")));
         },
       },
     }).catch((err) => {
-      finish(() => reject(new SocketRequestError(path, `connect failed: ${String(err)}`)));
+      finish(() => reject(new SocketRequestError(path, `connect failed: ${String(err)}`, "connect_failed")));
     });
   });
 }
