@@ -1,0 +1,17 @@
+{
+  "scenario": "slow-turn",
+  "_why": "A turn long enough for a CLI-spawned steer to land mid-turn, that then completes NATURALLY. The ISC-80 ordering assertion needs the next assistant turn to arrive on its own — an aborted turn would prove abort ordering, not steer ordering.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "delay_ms": 5000 },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}
