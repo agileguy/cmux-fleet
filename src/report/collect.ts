@@ -239,7 +239,13 @@ async function buildSchedule(
 }
 
 /**
- * The scheduler's snapshot at `<run-dir>/schedule.json`, read tolerantly.
+ * The scheduler's snapshot, read tolerantly from `run.scheduleJson`.
+ *
+ * The path comes from `runPaths()` rather than being rebuilt here. It was
+ * rebuilt here, against a filename this module invented, while the scheduler
+ * wrote no snapshot at all -- two halves of one phase that did not meet. The
+ * path is now part of the seam, and `run/paths.ts` is the single source for
+ * every run-dir path.
  *
  * This is a seam with `dispatch --auto`, which is owned elsewhere and may not
  * have run at all (manual dispatch). Absence is normal; a malformed file is a
@@ -247,7 +253,7 @@ async function buildSchedule(
  * envelope shape is not something two modules must agree on to interoperate.
  */
 async function readScheduleSnapshot(run: RunPaths, notes: string[]): Promise<ScheduledTask[]> {
-  const path = join(run.root, "schedule.json");
+  const path = run.scheduleJson;
   const file = Bun.file(path);
   if (!(await file.exists())) return [];
   let doc: unknown;
