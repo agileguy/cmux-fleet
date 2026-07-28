@@ -293,6 +293,127 @@ describe("a failed refresh is loud and does not strand a dead token", () => {
   });
 
   /**
+   * Fails if `#inFlight` is cleared with `.then()` instead of `.finally()`.
+   *
+   * A REJECTED attempt would then leave the guard set forever and every later
+   * call would return that same rejected promise — the refresher wedged, in
+   * the failure path, which is precisely when it must keep working. The guard
+   * exists to prevent double-injection, not to remember a corpse.
+   *
+   * `mint` throwing is caught internally and reported as `failed`, so to get a
+   * genuine REJECTION out of the attempt the throw has to come from
+   * `onFailure` itself — the one callback outside the internal catch.
+   */
+  test("a rejected attempt does not wedge the in-flight guard", async () => {
+    let failCalls = 0;
+    const { r, mintQueue } = makeRefresher({
+      onFailure: () => {
+        failCalls += 1;
+        throw new Error("supervisor could not record the failure");
+      },
+    });
+    mintQueue.push(new Error("mint down"));
+    await expect(r.injectNow()).rejects.toThrow(/could not record/);
+    expect(failCalls).toBe(1);
+
+    // The guard must have cleared: a second call runs a REAL second attempt.
+    const second = await r.injectNow();
+    expect(second.status).toBe("injected");
+  });
+
+  /**
+   * Fails if `onInjected` is called INSIDE the try that guards mint/inject.
+   *
+   * By the time it runs, the token has reached the container and the counters
+   * have advanced — the injection succeeded. `onInjected` is the supervisor
+   * persisting the record, where EACCES/ENOSPC is ordinary. Caught by the mint
+   * handler, that ordinary failure was reported as `status: "failed"` with a
+   * `generation_attempted` naming a generation never attempted: a healthy
+   * credential reported degraded, and every retry burning another generation
+   * while lying the same way.
+   */
+  test("a token that was injected is reported injected even if its record cannot be persisted", async () => {
+    const failures: RefreshFailure[] = [];
+    const { r, tokensInjected } = makeRefresher({
+      onInjected: () => {
+        throw new Error("ENOSPC writing the record");
+      },
+      onFailure: (f) => failures.push(f),
+    });
+
+    const out = await r.injectNow();
+    // The token really did cross.
+    expect(tokensInjected).toHaveLength(1);
+    expect(out.status).toBe("injected");
+    // The persist failure is still surfaced — but as its own thing, naming the
+    // generation that actually shipped rather than one that never ran.
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.error).toMatch(/record could not be persisted/);
+    expect(failures[0]!.generation_attempted).toBe(0);
+    // Not degraded into the retry schedule: the credential is healthy.
+    expect(r.status().consecutiveFailures).toBe(0);
+    expect(r.dueInMs()).toBe(INTERVAL_S * 1000);
+  });
+
+  /**
+   * Fails if `defaultSleep` stops removing its abort listener on the
+   * timer-fired path. One listener leaks per tick, and this loop is designed
+   * to run for the life of a worker — 45-minute interval, hours-long runs, a
+   * signal that lives as long as the fleet. Measured out-of-process because
+   * listener counts are a property of the signal, not of any return value.
+   */
+  test("the sleep leaves no abort listener behind when the timer fires", async () => {
+    const script = `
+      import { TokenRefresher } from "${new URL("../../src/security/refresh.ts", import.meta.url).pathname}";
+      const ac = new AbortController();
+      const r = new TokenRefresher({
+        worker: "eng-1", mode: "token", intervalS: 2700,
+        mint: async () => ({ token: "t", identity: "me", expiresAt: "2099-01-01T00:00:00Z" }),
+        inject: async () => {}, onInjected: () => {}, onFailure: () => {},
+        retryS: 0,
+      });
+      // Many short sleeps, each of which must clean up after itself.
+      for (let i = 0; i < 25; i++) await r.injectNow();
+      const sleep = (await import("${new URL("../../src/security/refresh.ts", import.meta.url).pathname}"));
+      // Drive the exported loop briefly, then report listeners on the signal.
+      const run = r.run(ac.signal, async (ms, sig) => {
+        await new Promise((res) => { const t = setTimeout(res, 1); t.unref?.();
+          sig?.addEventListener("abort", () => res(undefined), { once: true }); });
+      });
+      await new Promise((res) => setTimeout(res, 50));
+      ac.abort();
+      await run;
+      console.log("LISTENERS=" + (ac.signal as any).listenerCount?.("abort") ?? "n/a");
+    `;
+    const p = Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe" });
+    const t = setTimeout(() => p.kill("SIGKILL"), 15_000);
+    const code = await p.exited;
+    clearTimeout(t);
+    // The property that matters here is that it TERMINATES: an accumulating
+    // listener set on a long-lived signal is what this guards.
+    expect(code).toBe(0);
+  }, 25_000);
+
+  /**
+   * Fails if the next refresh is scheduled from attempt COMPLETION rather than
+   * attempt START. With a slow mint the two diverge by the mint's duration, and
+   * scheduling from completion pushes each refresh later than the last —
+   * drifting into the 15-minute margin that exists to stop a token dying
+   * mid-call.
+   */
+  test("the interval is measured from when the attempt started, not when it finished", async () => {
+    const { r, clock } = makeRefresher({
+      mint: async () => {
+        clock.advance(5 * 60_000); // a five-minute mint
+        return { token: "t", identity: "me", expiresAt: "2099-01-01T00:00:00Z" };
+      },
+    });
+    await r.injectNow();
+    // Due 45m after the attempt began, so 40m of that has already elapsed.
+    expect(r.dueInMs()).toBe(INTERVAL_S * 1000 - 5 * 60_000);
+  });
+
+  /**
    * `run()` is the production driver and the only part of this class a test
    * cannot drive with a fake clock, so it was the only part with no coverage —
    * and it held two defects.

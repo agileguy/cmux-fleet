@@ -438,7 +438,23 @@ function buildEnv(
  * hardening applied, the forced-textconv probe no longer runs the driver).
  */
 function gitEnv(extra: Readonly<Record<string, string>> | undefined): Record<string, string> {
-  return { ...HERMETIC_GIT_ENV, ...extra };
+  // `HERMETIC_GIT_ENV` spreads LAST, and any `GIT_*` key in `extra` is dropped
+  // rather than merged.
+  //
+  // The previous order was `{ ...HERMETIC_GIT_ENV, ...extra }`, which let a
+  // caller's env win. `extra` is `spec.env` — documented as environment for
+  // the acceptance COMMANDS, not for the git spawns that stage them — so a
+  // config supplying `GIT_EXTERNAL_DIFF`, `GIT_CONFIG_GLOBAL` or
+  // `GIT_ALTERNATE_OBJECT_DIRECTORIES` would silently undo the hardening on
+  // the clone/checkout/show spawns, with no error and nothing in the ledger.
+  // Unreachable today (nothing passes `env`), which is exactly when it is
+  // cheapest to close: the reachable version of this is a config field that
+  // turns the hardening off.
+  const safe: Record<string, string> = {};
+  for (const [k, v] of Object.entries(extra ?? {})) {
+    if (!k.startsWith("GIT_")) safe[k] = v;
+  }
+  return { ...safe, ...HERMETIC_GIT_ENV };
 }
 
 /**

@@ -149,7 +149,35 @@ export class TokenRefresher {
       this.#lastInjectedMono = this.#lastAttemptMono;
       this.#lastFailure = null;
       this.#consecutiveFailures = 0;
-      this.#opts.onInjected(record);
+      // OUTSIDE the try that guards mint/inject, deliberately.
+      //
+      // By this point the token has already reached the container and the
+      // generation counters have already advanced — the injection SUCCEEDED.
+      // `onInjected` is the supervisor persisting the record to the run dir,
+      // and EACCES/ENOSPC there is ordinary. Inside the try, that ordinary
+      // failure was caught by the handler below and reported as
+      // `status: "failed"` with `generation_attempted` naming a generation
+      // that was never attempted — a healthy credential reported degraded,
+      // the record for the generation that DID ship never written, and every
+      // 60s retry burning another generation while lying the same way.
+      //
+      // A record we could not persist is a real problem, but it is a
+      // different one from a credential we could not mint, and collapsing the
+      // two makes the loud failure describe the wrong subsystem.
+      try {
+        this.#opts.onInjected(record);
+      } catch (err) {
+        const failure: RefreshFailure = {
+          worker: this.#opts.worker,
+          generation_attempted: this.#generation - 1,
+          error: `token injected but its record could not be persisted: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          at: isoNow(),
+        };
+        this.#lastFailure = failure;
+        this.#opts.onFailure(failure);
+      }
       return { status: "injected", record };
     } catch (err) {
       // Report, remember, and keep the loop alive. Swallowing this — or
@@ -201,7 +229,15 @@ export class TokenRefresher {
     sleep: (ms: number, signal?: AbortSignal) => Promise<void> = defaultSleep,
   ): Promise<void> {
     while (!signal.aborted) {
-      await this.tick();
+      // Raced against the signal, not merely awaited. `tick()` can block on a
+      // wedged `gcloud` mint for as long as that process hangs, and an abort
+      // arriving mid-attempt was not observed until it returned — so a
+      // shutdown awaiting `run()` hung with it. The attempt itself is NOT
+      // cancelled (nothing here can safely unwind a half-finished injection);
+      // `run` simply stops waiting on it, and the in-flight guard means a
+      // later caller joins that same attempt rather than starting a second.
+      await Promise.race([this.tick(), aborted(signal)]);
+      if (signal.aborted) return;
       // The signal is passed INTO the sleep, not merely re-checked after it.
       // The loop condition alone means abort is observed no sooner than the
       // next wake — at the documented 45-minute interval, `abort()` returned
@@ -226,6 +262,17 @@ export class TokenRefresher {
  * running. Both are needed, and the listener is removed on either path so a
  * long-lived signal does not accumulate one per tick.
  */
+/**
+ * Resolves when `signal` aborts, and never keeps the process alive by itself.
+ * Used to race a hung attempt so `run()` can return on shutdown.
+ */
+function aborted(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted === true) return Promise.resolve();
   return new Promise((resolve) => {
