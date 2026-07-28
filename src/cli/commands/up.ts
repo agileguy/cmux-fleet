@@ -354,6 +354,55 @@ export function register(program: Command): void {
           worker: workerId,
           detail: { pid, pgid },
         });
+
+        /**
+         * Give the pane something to show (ISC-129).
+         *
+         * The criterion asks for a pane "showing its worker id and live
+         * activity", and only the first half was true: the title carried the
+         * id while the pane itself ran an idle login shell in the run
+         * directory. `attachViewer` — the method `respawn-pane` exists in the
+         * required-command list to serve, as `doctor` says in as many words —
+         * had no production caller at all, which is the same dead-subsystem
+         * shape as `destroy`. A reviewer running a live `up` is what surfaced
+         * it; `pane_current_command` was `bash`.
+         *
+         * `tail -F` and nothing else, deliberately. A pane is a view, never a
+         * channel (SRD §3.3): a follower cannot send anything back to the
+         * worker, so the operator can watch a run without being able to
+         * perturb it from the one surface that is not the control plane.
+         * Capital -F rather than -f because neither file need exist yet — it
+         * retries instead of dying on the race.
+         *
+         * Both files, and the order is the useful one. `events.jsonl` is
+         * where activity actually appears; `supervisor.log` was the obvious
+         * first choice and measuring it showed 0 bytes through a whole run,
+         * which would have made a technically-live pane that is empty in
+         * practice. The supervisor log stays in the list because it is where
+         * a crash lands, and a pane that goes quiet should show why.
+         *
+         * `pifleet logs --follow --render` is the eventual viewer — the flag
+         * is already declared and documented as "render the pane viewer
+         * view" — but that command is still a stub that throws, so this uses
+         * the files directly rather than shipping a pane that reports "logs
+         * is not implemented yet" forever.
+         *
+         * Failure stays non-fatal for the same reason pane creation is: a
+         * missing view must never take down a working run.
+         */
+        if (pane.id !== null) {
+          try {
+            await backend.attachViewer(pane, ["tail", "-F", wp.eventsJsonl, wp.supervisorLog]);
+          } catch (err) {
+            await ledger.append("viewer_failed", {
+              worker: workerId,
+              detail: {
+                backend: backend.kind,
+                error: err instanceof Error ? err.message : String(err),
+              },
+            });
+          }
+        }
       }
 
       /**
