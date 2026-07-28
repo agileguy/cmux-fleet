@@ -9,7 +9,8 @@ import { LedgerWriter } from "../../run/ledger.ts";
 import { registryCall } from "../../run/registry.ts";
 import { ensureControlAuth } from "../../security/control-auth.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
-import { createHeadlessBackend } from "../../backends/headless/index.ts";
+import { resolveBackendWithFallback } from "../../backends/tmux/fallback.ts";
+import { isBackendKind, loadBackend } from "../../backends/registry.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
 import {
@@ -48,12 +49,17 @@ export function register(program: Command): void {
     .option("--backend-fallback <kind>", "backend to use if the primary is unavailable")
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers: string; backend: string; config?: string; json?: boolean }) => {
-      if (opts.backend !== "headless") {
-        // Panes are Phase 4. Refusing beats pretending (exit 3, SRD §11).
+    .action(async (opts: { workers: string; backend: string; backendFallback?: string; config?: string; json?: boolean }) => {
+      if (!isBackendKind(opts.backend)) {
         throw new CliError(
-          `backend '${opts.backend}' is not available in this phase; use --backend headless`,
-          EXIT.BACKEND_UNAVAILABLE,
+          `unknown backend '${opts.backend}'; expected cmux, tmux or headless`,
+          EXIT.USAGE,
+        );
+      }
+      if (opts.backendFallback !== undefined && !isBackendKind(opts.backendFallback)) {
+        throw new CliError(
+          `unknown fallback backend '${opts.backendFallback}'; expected cmux, tmux or headless`,
+          EXIT.USAGE,
         );
       }
       const piCommand = process.env["PIFLEET_PI_COMMAND"];
@@ -261,8 +267,38 @@ export function register(program: Command): void {
         logPath: run.daemonLog,
       });
 
-      const backend = createHeadlessBackend();
-      await backend.probe();
+      /**
+       * Presentation, resolved and recorded — never assumed.
+       *
+       * `--backend` selects what the operator wants to WATCH; it decides
+       * nothing about the run. Supervisors are launched detached by
+       * `SupervisorLauncher` either way (SRD §3.3), so a backend that cannot
+       * start is a cosmetic loss, not a failed fleet — but it must not be a
+       * SILENT one. A fallback that quietly swaps cmux for tmux leaves the
+       * operator watching panes they believe are cmux, and `resolveBackendWithFallback`
+       * therefore writes the switch to stderr AND the ledger before returning.
+       *
+       * With no `--backend-fallback`, an unavailable primary is exit 3 with a
+       * named diagnosis (ISC-131) rather than a silent downgrade to headless:
+       * "I asked for six panes and got none, and nothing said so" is the
+       * failure this ordering exists to prevent.
+       */
+      const resolution = await resolveBackendWithFallback({
+        primary: await loadBackend(opts.backend),
+        ledger,
+        ...(opts.backendFallback === undefined
+          ? {}
+          : { fallback: await loadBackend(opts.backendFallback) }),
+      });
+      const backend = resolution.backend;
+      await ledger.append("backend_ready", {
+        detail: {
+          requested: opts.backend,
+          active: backend.kind,
+          fell_back: resolution.fellBack,
+          primary_failures: resolution.primaryFailures.map((c) => `${c.name}: ${c.detail ?? ""}`),
+        },
+      });
       const workspace = await backend.ensureWorkspace(`pifleet-${runId}`);
 
       const launched: Array<{ id: string; pid: number; pgid: number }> = [];
