@@ -344,6 +344,175 @@ describe("logs is read-only (SRD §3.3)", () => {
     }
   });
 
+  /**
+   * The denylist above is necessary and not sufficient, and it leaked.
+   *
+   * `node:fs/promises` has to be importable — `stat` is how the viewer waits
+   * for an events file that does not exist yet — and the denylist named the
+   * obvious write verbs while `open` was in neither list. So this passed the
+   * whole 17-test suite:
+   *
+   *   import { open } from "node:fs/promises";
+   *   const fh = await open(path, "a");
+   *   await fh.write("a viewer wrote this\n");
+   *
+   * A file handle's `write` is a method, not an imported name, so no
+   * name-based ban can see it. That is the same shape as the ISC-137 seam
+   * test missing backtick imports: a denylist enumerates the ways you
+   * thought of.
+   *
+   * So the fs surface is an ALLOWLIST of read-only functions. `open` is
+   * excluded even though it can be opened read-only, because the mode is an
+   * argument and this test reads names — a check that has to interpret
+   * arguments to stay correct is one that will eventually be wrong.
+   */
+  test("only read-only fs functions are imported, by allowlist", async () => {
+    const src = await Bun.file(LOGS_SRC).text();
+    const READ_ONLY_FS = new Set([
+      "stat",
+      "lstat",
+      "access",
+      "readFile",
+      "readdir",
+      "opendir",
+      "realpath",
+      "readlink",
+    ]);
+
+    // Both forms: the static header and the deferred `await import(...)`
+    // destructure the viewer actually uses.
+    const bindings: string[] = [];
+    const patterns = [
+      /import\s*\{([^{}]*)\}\s*from\s*"node:fs(?:\/promises)?"/g,
+      /\{([^{}]*)\}\s*=\s*await\s+import\("node:fs(?:\/promises)?"\)/g,
+    ];
+    for (const re of patterns) {
+      for (const m of src.matchAll(re)) {
+        for (const raw of m[1]!.split(",")) {
+          const name = raw.trim().split(/\s+as\s+/)[0]!.trim();
+          if (name !== "") bindings.push(name);
+        }
+      }
+    }
+
+    // Positive control: the viewer really does reach for fs, so an empty
+    // match set means this test stopped looking rather than found nothing.
+    expect(bindings.length).toBeGreaterThan(0);
+    for (const name of bindings) {
+      expect(READ_ONLY_FS.has(name), `logs.ts imports non-read-only fs function: ${name}`).toBe(
+        true,
+      );
+    }
+
+    // A namespace import would put every fs function one property access
+    // away and defeat the allowlist entirely. Both forms are bound to an
+    // IDENTIFIER — the destructuring form above is the legitimate one, and a
+    // first draft of this check matched it too and failed on clean source.
+    expect(/import\s+\*\s+as\s+\w+\s+from\s*["'`]node:fs/.test(src)).toBe(false);
+    expect(
+      /(?:const|let|var)\s+\w+\s*=\s*await\s+import\(["'`]node:fs(?:\/promises)?["'`]\)/.test(src),
+    ).toBe(false);
+
+    /**
+     * A viewer that can start a process can do anything a process can — write
+     * files, reach the control socket, run git. `Bun.spawn` needs no import
+     * at all, so neither the banned-token list nor the module allowlist can
+     * see it; it was demonstrated writing into the run directory with the
+     * whole suite green.
+     */
+    for (const spawner of ["Bun.spawn", "Bun.$", "child_process", "execSync", "spawnSync"]) {
+      expect(src.includes(spawner), `logs.ts can start a process via ${spawner}`).toBe(false);
+    }
+  });
+
+  /**
+   * The behavioural backstop, and the only check here that is not structurally
+   * defeatable.
+   *
+   * Every source scan enumerates the mechanisms someone thought of. Three
+   * separate evasions of the scans above were demonstrated — `fs.open` plus a
+   * FileHandle `.write()` (a handle's method is not an imported name, and
+   * bare `write` can never be banned because `process.stdout.write` is this
+   * command's entire job), a backtick dynamic import, and `Bun.spawn` with a
+   * shell redirect — each of which left the suite fully green while `logs`
+   * wrote bytes into the run directory.
+   *
+   * So this asserts the PROPERTY rather than its spelling: run the real
+   * command over a real run directory, in every mode, and require the
+   * directory to be byte-identical afterwards. It cannot be evaded by
+   * choosing a different API, because it never looks at the API.
+   */
+  test("running logs leaves the run directory byte-identical, in every mode", async () => {
+    const lines = [
+      evt({ type: "event", seq: 1, event: { type: "agent_start" } }),
+      evt({ type: "settled", task_id: "T-1", epoch: 0, verdict: "success" }),
+    ];
+    const f = await makeRun(lines);
+    try {
+      await writeFile(f.supervisorLog, "supervisor said something\n");
+
+      /** Every file under the run root, with its exact bytes. */
+      const fingerprint = async (): Promise<string> => {
+        const { readdir, readFile, stat } = await import("node:fs/promises");
+        const out: string[] = [];
+        const walk = async (dir: string, prefix: string): Promise<void> => {
+          for (const e of (await readdir(dir, { withFileTypes: true })).sort((a, b) =>
+            a.name < b.name ? -1 : 1,
+          )) {
+            const abs = join(dir, e.name);
+            const rel = prefix === "" ? e.name : `${prefix}/${e.name}`;
+            if (e.isDirectory()) {
+              out.push(`D ${rel}`);
+              await walk(abs, rel);
+            } else {
+              const [body, st] = await Promise.all([readFile(abs), stat(abs)]);
+              out.push(`F ${rel} ${st.size} ${Bun.hash(body).toString(16)}`);
+            }
+          }
+        };
+        await walk(f.root, "");
+        return out.join("\n");
+      };
+
+      const before = await fingerprint();
+      // Positive control: the fixture is real, so "identical" is not the
+      // trivial equality of two empty listings.
+      expect(before).toContain("events.jsonl");
+
+      for (const args of [
+        ["--worker", WORKER],
+        ["--worker", WORKER, "--json"],
+        ["--worker", WORKER, "--render"],
+      ]) {
+        const r = await runCli(f.root, args);
+        expect(r.code).toBe(EXIT.SUCCESS);
+      }
+
+      expect(await fingerprint()).toBe(before);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test("a follower leaves the run directory byte-identical too", async () => {
+    const f = await makeRun([evt({ type: "event", seq: 1, event: { type: "agent_start" } })]);
+    try {
+      const { readdir } = await import("node:fs/promises");
+      const namesBefore = (await readdir(join(f.root, RUN_ID, "workers", WORKER))).sort();
+      const follower = spawnFollow(f.root, []);
+      await until(() => follower.stdout().includes("agent_start"), "the first line");
+      await appendFile(f.eventsPath, `${evt({ type: "event", seq: 2, event: { type: "b" } })}\n`);
+      await until(() => follower.stdout().includes('"seq":2'), "the appended line");
+      follower.proc.kill("SIGTERM");
+      await follower.proc.exited;
+      // The follow path holds the file open for the whole run — the mode
+      // most likely to acquire a "just a small cache file" write later.
+      expect((await readdir(join(f.root, RUN_ID, "workers", WORKER))).sort()).toEqual(namesBefore);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+
   test("every import resolves to a known read-only module", async () => {
     const src = await Bun.file(LOGS_SRC).text();
     const specifiers = [
