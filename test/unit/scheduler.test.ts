@@ -1,0 +1,334 @@
+/**
+ * The scheduler loop (SRD §9.3, §14), against a scripted fake fleet.
+ *
+ * Every test records the ORDER of dispatches, because ordering is the
+ * requirement under test: same list + same workers must produce the same
+ * dispatch sequence, with ties broken by task-list position and worker
+ * assignment by sorted worker id. The propagation tests assert the negative
+ * — that a blocked task's dispatch NEVER appears in the log — since a
+ * scheduler that dispatches everything and lets the verdicts sort it out
+ * would pass any state-only assertion.
+ */
+
+import { describe, expect, test } from "bun:test";
+import { EXIT, TaskSpecSchema, type TaskSpec, type Verdict } from "../../src/contracts.ts";
+import {
+  SchedulerError,
+  runSchedule,
+  type DispatchAnswer,
+  type SchedulerIO,
+  type WorkerHealth,
+} from "../../src/orchestrate/scheduler.ts";
+
+function spec(id: string, deps: string[] = [], extra: Record<string, unknown> = {}): TaskSpec {
+  return TaskSpecSchema.parse({ id, title: id, brief: `do ${id}`, depends_on: deps, ...extra });
+}
+
+interface TaskScript {
+  /** Verdict the task record reports once it settles. */
+  verdict?: Verdict;
+  reason?: string;
+  /** readSettled calls that return null before the record appears. */
+  settleDelayPolls?: number;
+  /**
+   * Scripted dispatch answers, consumed per attempt; once exhausted the
+   * default accept-then-settle behaviour applies — so a retry after an
+   * `unreachable` can proceed normally.
+   */
+  answers?: DispatchAnswer[];
+  /** The worker dies mid-task: no record ever appears, health goes dead. */
+  killsWorker?: boolean;
+}
+
+interface FleetOpts {
+  /** Per-worker health sequences; consumed per probe, last value repeats. */
+  health?: Record<string, WorkerHealth[]>;
+  tasks?: Record<string, TaskScript>;
+}
+
+/**
+ * A fleet that exists only as bookkeeping. Deliberately synchronous inside:
+ * the determinism under test must come from the scheduler's own ordering,
+ * not from a fake that serialises for it.
+ */
+class FakeFleet implements SchedulerIO {
+  readonly log: string[] = [];
+  readonly #health = new Map<string, WorkerHealth[]>();
+  readonly #healthCursor = new Map<string, number>();
+  readonly #tasks: Record<string, TaskScript>;
+  /** taskId -> polls remaining until the record appears (null = never). */
+  readonly #settling = new Map<string, number | null>();
+  readonly #dead = new Set<string>();
+
+  constructor(workers: string[], opts: FleetOpts = {}) {
+    for (const w of workers) this.#health.set(w, opts.health?.[w] ?? ["idle"]);
+    this.#tasks = opts.tasks ?? {};
+  }
+
+  listWorkers(): Promise<string[]> {
+    return Promise.resolve([...this.#health.keys()]);
+  }
+
+  workerHealth(worker: string): Promise<WorkerHealth> {
+    if (this.#dead.has(worker)) return Promise.resolve("dead");
+    const seq = this.#health.get(worker) ?? ["dead"];
+    const i = this.#healthCursor.get(worker) ?? 0;
+    this.#healthCursor.set(worker, i + 1);
+    return Promise.resolve(seq[Math.min(i, seq.length - 1)]!);
+  }
+
+  dispatch(specArg: TaskSpec, worker: string, taskId: string): Promise<DispatchAnswer> {
+    this.log.push(`dispatch:${specArg.id}->${worker}`);
+    const script = this.#tasks[specArg.id] ?? {};
+    const scripted = script.answers?.shift();
+    if (scripted !== undefined) return Promise.resolve(scripted);
+    if (script.killsWorker === true) {
+      this.#dead.add(worker);
+      this.#settling.set(taskId, null);
+    } else {
+      this.#settling.set(taskId, script.settleDelayPolls ?? 0);
+    }
+    return Promise.resolve({ kind: "accepted", epoch: 1 });
+  }
+
+  readSettled(
+    _worker: string,
+    taskId: string,
+  ): Promise<{ verdict: Verdict; reason: string } | null> {
+    const left = this.#settling.get(taskId);
+    if (left === undefined || left === null) return Promise.resolve(null);
+    if (left > 0) {
+      this.#settling.set(taskId, left - 1);
+      return Promise.resolve(null);
+    }
+    this.#settling.delete(taskId);
+    const script = this.#tasks[taskId] ?? {};
+    this.log.push(`settled:${taskId}`);
+    return Promise.resolve({ verdict: script.verdict ?? "success", reason: script.reason ?? "" });
+  }
+
+  sleep(): Promise<void> {
+    // Resolve immediately: these tests exercise ordering, not wall clocks.
+    return Promise.resolve();
+  }
+}
+
+describe("assignment order is deterministic (requirement 6)", () => {
+  test("ties break on task-list order onto sorted workers, repeatably", async () => {
+    const run = async () => {
+      // Workers listed UNSORTED: if the scheduler trusted enumeration order,
+      // t1 would land on w2 and this test is what catches it.
+      const fleet = new FakeFleet(["w2", "w1"]);
+      const out = await runSchedule([spec("t1"), spec("t2"), spec("t3")], fleet);
+      return { fleet, out };
+    };
+    const a = await run();
+    const b = await run();
+
+    // First pass: t1 -> w1, t2 -> w2 (list order onto sorted idle workers);
+    // t3 waits for a free worker, then takes the first idle one.
+    expect(a.fleet.log.filter((l) => l.startsWith("dispatch:")).slice(0, 2)).toEqual([
+      "dispatch:t1->w1",
+      "dispatch:t2->w2",
+    ]);
+    expect(a.fleet.log).toEqual(b.fleet.log);
+    expect(a.out.schedule).toEqual(b.out.schedule);
+    expect(a.out.exit).toBe(EXIT.SUCCESS);
+    for (const t of a.out.schedule) {
+      expect(t.state).toBe("done");
+      expect(t.verdict).toBe("success");
+    }
+  });
+});
+
+describe("dependencies gate dispatch (requirement 1)", () => {
+  test("a dependent is not dispatched until its dependency settles", async () => {
+    const fleet = new FakeFleet(["w1", "w2"], {
+      tasks: { a: { settleDelayPolls: 2 } },
+    });
+    await runSchedule([spec("a"), spec("b", ["a"])], fleet);
+    const aSettled = fleet.log.indexOf("settled:a");
+    const bDispatched = fleet.log.indexOf("dispatch:b->w1");
+    expect(aSettled).toBeGreaterThanOrEqual(0);
+    expect(bDispatched).toBeGreaterThan(aSettled);
+    // And never early: w2 was idle the whole time, so only readiness — not
+    // worker scarcity — can explain the wait.
+    expect(fleet.log.filter((l) => l.startsWith("dispatch:b"))).toHaveLength(1);
+  });
+});
+
+describe("failure propagation (requirement 2)", () => {
+  test("A fails -> B and C are never dispatched, each blocked by A", async () => {
+    const fleet = new FakeFleet(["w1"], { tasks: { a: { verdict: "failed" } } });
+    const { schedule, exit } = await runSchedule(
+      [spec("a"), spec("b", ["a"]), spec("c", ["b"])],
+      fleet,
+    );
+    // The negative is the test: a scheduler that dispatches blocked tasks
+    // and lets their verdicts clean up would satisfy every state assertion.
+    expect(fleet.log.filter((l) => l.startsWith("dispatch:"))).toEqual(["dispatch:a->w1"]);
+    const byId = Object.fromEntries(schedule.map((t) => [t.id, t]));
+    expect(byId["b"]).toMatchObject({ state: "blocked", blocked_by: "a" });
+    expect(byId["c"]).toMatchObject({ state: "blocked", blocked_by: "a" });
+    expect(exit).toBe(EXIT.PARTIAL);
+  });
+
+  test("an independent sibling still runs to completion after a failure", async () => {
+    const fleet = new FakeFleet(["w1"], { tasks: { a: { verdict: "failed" } } });
+    const { schedule } = await runSchedule([spec("a"), spec("b", ["a"]), spec("d")], fleet);
+    const d = schedule.find((t) => t.id === "d")!;
+    expect(d.state).toBe("done");
+    expect(d.verdict).toBe("success");
+  });
+});
+
+describe("pinned workers (requirement 5)", () => {
+  test("a pin waits for ITS worker even while another sits idle", async () => {
+    const fleet = new FakeFleet(["w1", "w2"], {
+      health: { w2: ["busy", "busy", "idle"] },
+    });
+    const { schedule } = await runSchedule(
+      [spec("p", [], { worker: "w2" }), spec("free")],
+      fleet,
+    );
+    const dispatches = fleet.log.filter((l) => l.startsWith("dispatch:"));
+    // 'free' overtakes 'p' on w1; 'p' lands on w2 and nowhere else, ever.
+    expect(dispatches).toContain("dispatch:free->w1");
+    expect(dispatches).toContain("dispatch:p->w2");
+    expect(dispatches).not.toContain("dispatch:p->w1");
+    expect(schedule.find((t) => t.id === "p")!.worker).toBe("w2");
+  });
+
+  test("a pin to a worker outside the fleet refuses before ANY dispatch", async () => {
+    const fleet = new FakeFleet(["w1"]);
+    const err = await runSchedule([spec("ok"), spec("p", [], { worker: "ghost" })], fleet).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SchedulerError);
+    expect((err as SchedulerError).exitCode).toBe(EXIT.USAGE);
+    expect((err as SchedulerError).message).toContain("'p'");
+    expect((err as SchedulerError).message).toContain("'ghost'");
+    // Refused up front: 'ok' was ready and runnable, and running it before
+    // noticing the bad pin is the half-dispatched-list failure mode.
+    expect(fleet.log).toEqual([]);
+  });
+
+  test("a pin to a worker that died is a named WORKER_DIED refusal, not a hang", async () => {
+    // 'a' kills w2; 'p' is independent and pinned to the corpse. Without the
+    // refusal the scheduler would poll for w2 to come back forever — the
+    // §9.3 hold-forever this diagnosis exists to prevent.
+    const fleet = new FakeFleet(["w1", "w2"], {
+      tasks: { a: { killsWorker: true } },
+    });
+    const err = await runSchedule(
+      [spec("a", [], { worker: "w2" }), spec("p", [], { worker: "w2" })],
+      fleet,
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SchedulerError);
+    expect((err as SchedulerError).exitCode).toBe(EXIT.WORKER_DIED);
+    expect((err as SchedulerError).message).toContain("'p'");
+    expect((err as SchedulerError).message).toContain("'w2'");
+  });
+});
+
+describe("worker death mid-task", () => {
+  test("no record + dead supervisor -> unknown/worker_died; the fleet shrinks and finishes", async () => {
+    const fleet = new FakeFleet(["w1", "w2"], { tasks: { a: { killsWorker: true } } });
+    const { schedule, exit } = await runSchedule(
+      // 'a' takes w1 (first idle, list order); 'b' and 'c' outlive it on w2.
+      [spec("a"), spec("b"), spec("c", ["b"]), spec("d", ["a"])],
+      fleet,
+    );
+    const byId = Object.fromEntries(schedule.map((t) => [t.id, t]));
+    // `unknown`, never an invented failure: absence of the supervisor is the
+    // only evidence there is (same rule as `wait`).
+    expect(byId["a"]).toMatchObject({ state: "done", verdict: "unknown", worker: "w1" });
+    // Dependents of the dead task block on it, naming it.
+    expect(byId["d"]).toMatchObject({ state: "blocked", blocked_by: "a" });
+    // Unrelated work re-routes to the survivor and completes.
+    expect(byId["b"]).toMatchObject({ state: "done", verdict: "success", worker: "w2" });
+    expect(byId["c"]).toMatchObject({ state: "done", verdict: "success", worker: "w2" });
+    expect(fleet.log).not.toContain("dispatch:b->w1");
+    // WORKER_DIED outranks PARTIAL on the §10 ladder.
+    expect(exit).toBe(EXIT.WORKER_DIED);
+  });
+
+  test("every worker dead with tasks pending is a WORKER_DIED refusal, not a hang", async () => {
+    const fleet = new FakeFleet(["w1"], { tasks: { a: { killsWorker: true } } });
+    const err = await runSchedule([spec("a"), spec("b")], fleet).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SchedulerError);
+    expect((err as SchedulerError).exitCode).toBe(EXIT.WORKER_DIED);
+    expect((err as SchedulerError).message).toContain("b");
+  });
+});
+
+describe("dispatch-time answers", () => {
+  test("already_completed settles with the recorded verdict and unblocks dependents", async () => {
+    const fleet = new FakeFleet(["w1"], {
+      tasks: { a: { answers: [{ kind: "already_completed", verdict: "success" }] } },
+    });
+    const { schedule, exit } = await runSchedule([spec("a"), spec("b", ["a"])], fleet);
+    const byId = Object.fromEntries(schedule.map((t) => [t.id, t]));
+    // The replay IS the settle: no task record is ever polled for 'a'.
+    expect(fleet.log).not.toContain("settled:a");
+    expect(byId["a"]).toMatchObject({ state: "done", verdict: "success", worker: "w1" });
+    expect(byId["b"]).toMatchObject({ state: "done", verdict: "success" });
+    expect(exit).toBe(EXIT.SUCCESS);
+  });
+
+  test("a rejected prompt fails the task at the door; dependents block on it", async () => {
+    const fleet = new FakeFleet(["w1"], {
+      tasks: { a: { answers: [{ kind: "rejected", reason: "prompt_rejected" }] } },
+    });
+    const { schedule, exit } = await runSchedule([spec("a"), spec("b", ["a"]), spec("c")], fleet);
+    const byId = Object.fromEntries(schedule.map((t) => [t.id, t]));
+    expect(byId["a"]).toMatchObject({ state: "done", verdict: "failed" });
+    expect(byId["b"]).toMatchObject({ state: "blocked", blocked_by: "a" });
+    // The WORKER survived a rejection — 'c' still runs on it.
+    expect(byId["c"]).toMatchObject({ state: "done", verdict: "success", worker: "w1" });
+    expect(exit).toBe(EXIT.PARTIAL);
+  });
+
+  test("an unreachable worker loses the task to a survivor, not to oblivion", async () => {
+    // One scripted refusal, then the default accept: the first dispatch (to
+    // w1, the first sorted idle worker) hits the dead socket; the retry must
+    // land on w2, and w1 must never be offered work again.
+    const fleet = new FakeFleet(["w1", "w2"], {
+      tasks: { a: { answers: [{ kind: "unreachable", detail: "socket gone" }] } },
+    });
+    const { schedule, exit } = await runSchedule([spec("a")], fleet);
+    expect(fleet.log.filter((l) => l.startsWith("dispatch:a"))).toEqual([
+      "dispatch:a->w1",
+      "dispatch:a->w2",
+    ]);
+    expect(schedule[0]).toMatchObject({ state: "done", worker: "w2" });
+    // No task was lost, so no task-level failure reaches the ladder.
+    expect(exit).toBe(EXIT.SUCCESS);
+  });
+});
+
+describe("exit ladder over terminal states (SRD §10)", () => {
+  test("timed_out maps to TIMEOUT and outranks the blocked dependents' PARTIAL", async () => {
+    const fleet = new FakeFleet(["w1"], { tasks: { a: { verdict: "timed_out" } } });
+    const { exit } = await runSchedule([spec("a"), spec("b", ["a"])], fleet);
+    // Ladder order: 4 (timeout) outranks 7 (partial), per worstExit.
+    expect(exit).toBe(EXIT.TIMEOUT);
+  });
+
+  test("an empty fleet is a usage refusal", async () => {
+    const fleet = new FakeFleet([]);
+    const err = await runSchedule([spec("a")], fleet).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SchedulerError);
+    expect((err as SchedulerError).exitCode).toBe(EXIT.USAGE);
+  });
+});
