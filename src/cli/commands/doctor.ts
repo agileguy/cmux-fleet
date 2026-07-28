@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
+import { loadBackend } from "../../backends/registry.ts";
 import { ConfigError, loadConfig, type LoadedConfig } from "../../config/load.ts";
 import { resolveAllWorkers } from "../../config/load.ts";
 import { imageTag } from "../../container/image.ts";
@@ -37,16 +38,22 @@ interface Diagnosis {
   message: string;
 }
 
-/** SRD §4.1's `required` CLI rows — bind to the CLI, never to socket method names. */
-const CMUX_REQUIRED_COMMANDS = [
-  "ping",
-  "capabilities",
-  "identify",
-  "workspace",
-  "new-split",
-  "list-panes",
-  "focus-pane",
-] as const;
+/**
+ * The required-command list lives in `src/backends/cmux/capabilities.ts` and
+ * is reached through the backend's own `probe()`, NOT copied here.
+ *
+ * It was copied here, and the two copies had already diverged: the backend's
+ * list carries `respawn-pane` — how a viewer starts in a split pane, without
+ * which panes are empty shells and ISC-129 is unmeetable — and this file's did
+ * not. So `doctor` would report a clean cmux that `up` then failed on, which
+ * is the exact failure `doctor` exists to prevent. Two lists that must agree,
+ * in two files, with nothing comparing them, agree only until someone edits
+ * one.
+ *
+ * `doctor` cannot import the cmux module directly (ISC-137), which is what
+ * made copying tempting. It goes through the registry instead — the same
+ * kind-keyed load `up` uses — so there is one list and one prober.
+ */
 
 async function versionProbe(
   exec: Exec,
@@ -78,13 +85,22 @@ async function probeCmux(exec: Exec, env: Record<string, string | undefined>): P
   const report: CmuxReport = { probe, socketMode: null, missingCommands: [], diagnoses: [] };
   if (!probe.ok) return report;
 
-  // Required-command presence from `--help` text: cmux commits to CLI
-  // stability, not to socket method names (SRD §4.1), so the CLI listing is
-  // the honest surface to bind to.
-  const help = await exec(["cmux", "--help"], { timeoutMs: 15_000 });
-  const helpText = `${help.stdout}\n${help.stderr}`;
-  for (const cmd of CMUX_REQUIRED_COMMANDS) {
-    if (!helpText.includes(cmd)) report.missingCommands.push(cmd);
+  // Ask the BACKEND what it requires, rather than restating it. `probe()`
+  // returns one `Capability` per required command (checked against `--help`
+  // text, because cmux commits to CLI stability and not to socket method
+  // names — SRD §4.1). A backend that cannot even run its probe counts as
+  // missing everything, which is the honest reading: we cannot say it is
+  // healthy.
+  try {
+    const caps = await (await loadBackend("cmux")).probe();
+    for (const c of caps) {
+      if (c.required && !c.ok) report.missingCommands.push(c.name);
+    }
+  } catch (err) {
+    report.diagnoses.push({
+      name: "cmux-probe-failed",
+      message: `cmux capability probe failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
   }
   if (report.missingCommands.length > 0) {
     report.diagnoses.push({

@@ -11,6 +11,7 @@ import { ensureControlAuth } from "../../security/control-auth.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { resolveBackendWithFallback } from "../../backends/tmux/fallback.ts";
 import { isBackendKind, loadBackend } from "../../backends/registry.ts";
+import type { PaneRef } from "../../backends/types.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
 import {
@@ -305,13 +306,39 @@ export function register(program: Command): void {
       for (const workerId of workers) {
         const wp = workerPaths(run, workerId);
         await mkdir(wp.dir, { recursive: true });
+        /**
+         * One pane per worker, created BEFORE its supervisor launches so the
+         * operator sees the pane fill rather than appear late (ISC-129).
+         *
+         * Failure here is deliberately not fatal. A pane is presentation, and
+         * the supervisor is already detached and backend-independent by
+         * design (SRD §3.3) — killing a run because a split failed would make
+         * a cosmetic subsystem load-bearing, which is the coupling the two
+         * separate interfaces exist to prevent. It is recorded, not swallowed.
+         */
+        let pane: PaneRef = { backend: backend.kind, id: null };
+        try {
+          pane = await backend.createPane(workspace, { workerId, cwd: run.root, title: workerId });
+        } catch (err) {
+          await ledger.append("pane_failed", {
+            worker: workerId,
+            detail: { backend: backend.kind, error: err instanceof Error ? err.message : String(err) },
+          });
+          if (opts.json !== true) {
+            process.stderr.write(`  no pane for ${workerId}: ${String(err)}\n`);
+          }
+        }
+
         // Presentation refs live beside state, never inside it (SRD §7.6).
+        // `backend` is the ACTIVE backend, not the requested one: it was
+        // hardcoded to "headless" here, so a cmux run recorded itself as
+        // headless and `attach` would have had nothing to focus.
         await writePresentation(wp, {
           schema: "pifleet.presentation/v1",
           worker: workerId,
-          backend: "headless",
+          backend: backend.kind,
           workspace_ref: workspace.id,
-          surface_ref: null,
+          surface_ref: pane.id,
           window_ref: null,
         });
         const { pid, pgid } = await processLauncher.launchDetached({

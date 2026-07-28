@@ -30,10 +30,22 @@ export function isBackendKind(v: string): v is BackendKind {
   return (KINDS as readonly string[]).includes(v);
 }
 
-/** Every backend module exposes exactly this, so the registry stays uniform. */
-type BackendFactory = () => FleetBackend;
+/**
+ * Every backend module exposes exactly this, so the registry stays uniform.
+ *
+ * The options object is passed THROUGH, not interpreted. The first version of
+ * this took no arguments, which quietly made every backend unconfigurable: the
+ * tmux backend supports a `-L` private socket — the thing that keeps
+ * concurrent fleets off each other's server — and there was no way to reach
+ * it. A uniform signature is worth having; a uniform signature that drops
+ * every option is just a narrower one.
+ */
+type BackendFactory = (opts?: Record<string, unknown>) => FleetBackend;
 
-export async function loadBackend(kind: BackendKind): Promise<FleetBackend> {
+export async function loadBackend(
+  kind: BackendKind,
+  opts?: Record<string, unknown>,
+): Promise<FleetBackend> {
   if (!isBackendKind(kind)) {
     // Unreachable through the CLI, which validates first — but this function
     // is the one that builds a module path, so it re-checks rather than
@@ -49,5 +61,5 @@ export async function loadBackend(kind: BackendKind): Promise<FleetBackend> {
     // later as "the fleet started with no panes".
     throw new Error(`backend ${kind} does not export ${factoryName}`);
   }
-  return (factory as BackendFactory)();
+  return (factory as BackendFactory)(opts);
 }

@@ -260,6 +260,20 @@ export class TmuxBackend implements FleetBackend {
   }
 }
 
+/**
+ * `PIFLEET_TMUX_SOCKET` supplies the `-L` name when the caller passes none.
+ *
+ * The socket has to be reachable from a SEPARATE process — `attach` runs long
+ * after `up` exited — and the registry hands every backend the same opaque
+ * options bag, so an env default is the one channel that survives a process
+ * boundary without teaching the registry about tmux. Explicit options still
+ * win; this only fills the gap.
+ */
 export function createTmuxBackend(opts: TmuxBackendOptions = {}): FleetBackend {
-  return new TmuxBackend(opts);
+  const fromEnv = process.env["PIFLEET_TMUX_SOCKET"];
+  const resolved: TmuxBackendOptions =
+    opts.socketName === undefined && fromEnv !== undefined && fromEnv !== ""
+      ? { ...opts, socketName: fromEnv }
+      : opts;
+  return new TmuxBackend(resolved);
 }
