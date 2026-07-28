@@ -103,7 +103,18 @@ export async function collectRunReport(
 
   const schedule = await buildSchedule(run, dispatched, notes);
   await noteLiveWorkers(run, notes);
-  const attended = await collectAttended(run, notes);
+  /**
+   * Which workers the LEDGER says were handed to a person. Read here rather
+   * than inside `collectAttended` because the merged ledger is already in
+   * hand and re-reading it would be a second source of truth for the same
+   * fact.
+   */
+  const attendedInLedger = new Set<string>(
+    ledger.records
+      .filter((r) => r.event === "tui_entered" && typeof r.worker === "string")
+      .map((r) => r.worker as string),
+  );
+  const attended = await collectAttended(run, notes, attendedInLedger);
 
   // Merge pre-check: one entry per (worker, branch), because several tasks on
   // one worker share its branch and checking it N times reports N times.
@@ -167,7 +178,27 @@ export async function collectRunReport(
  * it silently would let an attended run present as unattended, which is
  * precisely what the record exists to make impossible.
  */
-async function collectAttended(run: RunPaths, notes: string[]): Promise<AttendedRecord[]> {
+/**
+ * Attended records, corroborated against the ledger.
+ *
+ * `attended.json` was the only evidence, which made "was this run driven by a
+ * person" a question one `rm` could change the answer to: deleting the file
+ * made the run present as fully autonomous, and every verdict in the report
+ * regained a meaning it had not earned. An unreadable record already failed
+ * safe; an ABSENT one failed open.
+ *
+ * `tui` also appends `tui_entered` to the ledger, which is append-only and
+ * sharded per writer, so the two would have to be tampered with together.
+ * When the ledger says a worker was attended and no record survives, the
+ * report says so rather than staying quiet — a missing record is itself the
+ * finding, and the operator needs to know the run was touched even though
+ * the detail of how is gone.
+ */
+async function collectAttended(
+  run: RunPaths,
+  notes: string[],
+  attendedInLedger: ReadonlySet<string>,
+): Promise<AttendedRecord[]> {
   let workers: string[];
   try {
     workers = await readdir(run.workersDir);
@@ -179,7 +210,14 @@ async function collectAttended(run: RunPaths, notes: string[]): Promise<Attended
     if (id.startsWith(".")) continue;
     try {
       const record = await readAttended(run, id);
-      if (record !== null) out.push(record);
+      if (record !== null) {
+        out.push(record);
+      } else if (attendedInLedger.has(id)) {
+        notes.push(
+          `worker ${id} has a tui_entered ledger entry but no attended record; ` +
+            `the record is missing or was removed — treat this run as attended`,
+        );
+      }
     } catch (err) {
       notes.push(
         `worker ${id} has an attended record that cannot be read (${firstLine(err)}); ` +

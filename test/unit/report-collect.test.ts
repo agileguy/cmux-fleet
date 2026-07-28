@@ -423,3 +423,60 @@ describe("the report degrades rather than crashing or over-claiming", () => {
     expect(byId.get("t-b")).toBe("blocked");
   });
 });
+
+/**
+ * The attended record is corroborated, not merely read.
+ *
+ * `attended.json` was the only evidence that a person had driven a worker,
+ * which made "was this run autonomous" a question one `rm` could change the
+ * answer to. An unreadable record already failed safe; an ABSENT one failed
+ * open, and every verdict in the report silently regained a meaning it had
+ * not earned. `tui` also appends `tui_entered` to the append-only ledger, so
+ * the two would have to be tampered with together.
+ */
+describe("a deleted attended record cannot make a run look autonomous", () => {
+  async function runWithLedger(tag: string, ledgerLine: string | null): Promise<string> {
+    const id = `2026-07-27T00-00-00Z-${tag}`;
+    const rp = runPaths(id, runsDir);
+    await mkdir(join(rp.workersDir, "eng-1"), { recursive: true });
+    await mkdir(rp.ledgerDir, { recursive: true });
+    await writeFile(rp.runJson, JSON.stringify({ run_id: id }), "utf8");
+    if (ledgerLine !== null) {
+      await writeFile(join(rp.ledgerDir, "cli-tui-1.jsonl"), `${ledgerLine}\n`, "utf8");
+    }
+    return id;
+  }
+
+  const enteredLine = (runId: string): string =>
+    JSON.stringify({
+      seq: 1,
+      ts: "2026-07-27T00:00:00.000Z",
+      actor: "cli-tui-1",
+      run_id: runId,
+      event: "tui_entered",
+      worker: "eng-1",
+    });
+
+  test("a tui_entered ledger entry with no record still reports the run as attended", async () => {
+    const id = `2026-07-27T00-00-00Z-att9`;
+    await runWithLedger("att9", enteredLine(id));
+    const { notes } = await collectRunReport(runPaths(id, runsDir), { precheck: async () => [] });
+    expect(notes.join(" ")).toMatch(/tui_entered.*no attended record/);
+    expect(notes.join(" ")).toContain("treat this run as attended");
+  });
+
+  /**
+   * The positive control, and it is load-bearing: a fix that simply declared
+   * every run attended would pass the test above and make the whole signal
+   * meaningless.
+   */
+  test("a run nothing ever attended reports no attendance at all", async () => {
+    const id = `2026-07-27T00-00-00Z-att8`;
+    await runWithLedger("att8", null);
+    const { attended, notes } = await collectRunReport(runPaths(id, runsDir), {
+      precheck: async () => [],
+    });
+    expect(attended).toEqual([]);
+    expect(notes.join(" ")).not.toContain("attended");
+  });
+});
