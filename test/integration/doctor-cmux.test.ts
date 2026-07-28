@@ -30,8 +30,16 @@ afterAll(async () => {
 
 /**
  * A `cmux` whose `--help` lists exactly `commands`, so a command can be made
- * to go missing. Anything not `--version`/`--help` exits non-zero loudly — a
- * silent stand-in would absorb a changed invocation instead of surfacing it.
+ * to go missing — plus healthy `docker` and `git`, which is the part that
+ * makes the exit code MEAN something.
+ *
+ * The first version shimmed only cmux and asserted exit 3. It passed locally
+ * for the wrong reason: this machine has no running Docker daemon, so the
+ * docker probe failed, `doctor` exited 3 on that account, and the assertion
+ * held whether or not a cmux command was missing. CI — where docker works —
+ * returned a different code and exposed it. Shimming every required probe
+ * makes cmux the only thing that can produce a diagnosis, so exit 3 is
+ * attributable to the thing under test rather than to the machine.
  */
 async function shimCmux(commands: readonly string[]): Promise<string> {
   const base = await mkdtemp(join(tmpdir(), "pifleet-doctor-"));
@@ -45,7 +53,7 @@ async function shimCmux(commands: readonly string[]): Promise<string> {
       '  --version) echo "cmux 0.64.20 (100) [test-shim]" ;;',
       `  --help) printf '%s\\n' ${commands.map((c) => `'  ${c}'`).join(" ")} ;;`,
       '  capabilities) echo "{\\"access_mode\\":\\"full\\",\\"methods\\":[]}" ;;',
-      '  ping) echo pong ;;',
+      '  ping) echo PONG ;;',
       '  identify) echo "{}" ;;',
       '  *) echo "cmux shim: unexpected argv: $*" >&2; exit 1 ;;',
       "esac",
@@ -53,6 +61,18 @@ async function shimCmux(commands: readonly string[]): Promise<string> {
     ].join("\n"),
   );
   await chmod(shim, 0o755);
+
+  // Healthy stand-ins for the other REQUIRED probes. Without these the
+  // machine decides the exit code: no Docker daemon here means `doctor`
+  // exits 3 on that account alone, which is how the first version of this
+  // test passed while proving nothing.
+  await writeFile(
+    join(base, "docker"),
+    ['#!/bin/sh', 'case "$1" in', '  --version) echo "Docker version 28.0.0" ;;', '  *) echo "{}" ;;', "esac", ""].join("\n"),
+  );
+  await chmod(join(base, "docker"), 0o755);
+  await writeFile(join(base, "git"), ["#!/bin/sh", 'echo "git version 2.50.1"', ""].join("\n"));
+  await chmod(join(base, "git"), 0o755);
   return base;
 }
 
