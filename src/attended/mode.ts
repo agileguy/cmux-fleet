@@ -189,9 +189,20 @@ export async function leaveTui(
   args: ModeSwitchArgs & { runsRoot: string },
 ): Promise<AttendedRecord> {
   const existing = await readAttended(args.run, args.workerId);
-  if (existing === null) {
+  /**
+   * `mode === "tui"`, not merely "a record exists".
+   *
+   * `steer` writes an attended record too — a steer IS a human reaching into
+   * a run — with `mode: "viewer"`, because no pane was ever handed over. The
+   * guard tested only for null, so after any steer, `tui --leave` on a worker
+   * whose pane was never taken succeeded: it respawned the viewer and stamped
+   * a fresh `left_at`, manufacturing a hand-back for a session that never
+   * happened. The record is meant to describe what occurred, so it must not
+   * be possible to write an ending to something that had no beginning.
+   */
+  if (existing === null || existing.mode !== "tui") {
     throw new AttendedModeError(
-      `worker ${args.workerId} was never handed to a person in this run; nothing to leave`,
+      `worker ${args.workerId} does not have a pane handed to a person in this run; nothing to leave`,
     );
   }
 

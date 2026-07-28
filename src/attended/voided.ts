@@ -37,11 +37,6 @@ import { VoidedRequirementSchema, type VoidedRequirement } from "../contracts.ts
  */
 export const TUI_VOIDED: readonly VoidedRequirement[] = [
   {
-    isc: "ISC-74",
-    because:
-      "Closing this worker's pane now severs a live human session instead of being cosmetic; treat pane closure as an interrupt, not housekeeping.",
-  },
-  {
     isc: "ISC-84",
     because:
       "Human edits carry no epoch marker, so changes made during epoch N surface in whichever diff is cut next; per-epoch attribution is unreliable for the rest of the run.",
@@ -50,11 +45,6 @@ export const TUI_VOIDED: readonly VoidedRequirement[] = [
     isc: "ISC-87",
     because:
       "Settle now proves only that the agent went quiet; a person can keep changing the worktree after the task reports complete, so treat the verdict as a snapshot, not a close.",
-  },
-  {
-    isc: "ISC-90",
-    because:
-      "The reported diff still equals git diff, but it is no longer the agent's work alone; read it as the branch's delta, not as what the worker did.",
   },
   {
     isc: "ISC-92",
@@ -72,19 +62,19 @@ export const TUI_VOIDED: readonly VoidedRequirement[] = [
       "Verdict reconstruction adopts whatever evidence the tree shows, so a clean diff and green acceptance may certify work the person did, not the worker.",
   },
   {
-    isc: "ISC-136",
+    isc: "ISC-106",
     because:
-      "The pane has become an input channel: keystrokes now flow through the presentation plane into the container, so the pane can no longer be deleted without loss.",
+      "The pane's shell inherits the image PATH, so a person's gcloud/kubectl/helm/gsutil/bq calls pass through the same verbgate and land in the ledger in the agent's row shape with no author and no task id; the mutating-verb audit trail no longer distinguishes who acted.",
+  },
+  {
+    isc: "ISC-107",
+    because:
+      "Every cloud invocation is still recorded, but the ledger stops being a record of what the AGENT did — read it as what someone did from this worker.",
   },
   {
     isc: "ISC-141",
     because:
       "Stream-offset fencing orders RPC records only; a person's writes have no stream position at all, so the fence cannot place their work before or after any epoch.",
-  },
-  {
-    isc: "ISC-154",
-    because:
-      "The quiesce-to-harvest tree-hash check that would catch edits made after settle is inert, so nothing detects work added between the verdict and the harvest.",
   },
 ].map((v) => VoidedRequirementSchema.parse(v));
 

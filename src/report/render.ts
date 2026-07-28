@@ -21,6 +21,7 @@ export function renderRunReport(
   report: RunReport,
   notes: readonly string[] = [],
   attended: readonly AttendedRecord[] = [],
+  attendedUnverified: readonly { worker: string; reason: string }[] = [],
 ): string {
   const lines: string[] = [];
   lines.push(`# pifleet run ${report.run_id}`);
@@ -35,7 +36,19 @@ export function renderRunReport(
    * scrolled-past shape this module's header forbids.
    */
   for (const a of attended) lines.push(...renderAttended(a));
-  if (attended.length > 0) lines.push("");
+  /**
+   * An unverifiable record gets the SAME prominence as a verified one, and
+   * for a stronger reason: a record that is missing or unreadable is the
+   * case where the run is most certainly attended and the detail of how is
+   * gone. This was a bottom-of-report note, which is the scrolled-past shape
+   * this module's header forbids.
+   */
+  for (const u of attendedUnverified) {
+    lines.push(`## ATTENDED (UNVERIFIED) — worker ${u.worker}`);
+    lines.push(`    ${u.reason}`);
+    lines.push("    Treat this run as attended: the voided guarantees are unknown.");
+  }
+  if (attended.length > 0 || attendedUnverified.length > 0) lines.push("");
 
   const t = report.totals;
   lines.push(

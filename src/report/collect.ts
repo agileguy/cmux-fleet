@@ -64,6 +64,18 @@ export interface CollectedReport {
    * record is a NOTE, never a silent skip.
    */
   attended: AttendedRecord[];
+  /**
+   * Workers the ledger says a person touched whose record cannot be produced
+   * — missing, unreadable, or schema-invalid.
+   *
+   * A separate array rather than a note, because `attended: []` is an
+   * AFFIRMATIVE claim that nobody drove this run, and a consumer keying on
+   * that field read a tampered or crash-truncated run as autonomous while
+   * the warning sat in `collection_notes`. That array's own contract is
+   * "findings about the COLLECTION", and whether a human edited the branch
+   * is not a fact about collection. This is the non-empty signal.
+   */
+  attendedUnverified: Array<{ worker: string; reason: string }>;
 }
 
 /** One dispatched task's durable facts, as far as they could be recovered. */
@@ -111,10 +123,17 @@ export async function collectRunReport(
    */
   const attendedInLedger = new Set<string>(
     ledger.records
-      .filter((r) => r.event === "tui_entered" && typeof r.worker === "string")
+      .filter(
+        (r) =>
+          // `steer` writes a record too, and a steer is equally a human
+          // reaching into a run — cross-checking only `tui_entered` would
+          // leave the steer record deletable without trace.
+          (r.event === "tui_entered" || r.event === "steer_sent") &&
+          typeof r.worker === "string",
+      )
       .map((r) => r.worker as string),
   );
-  const attended = await collectAttended(run, notes, attendedInLedger);
+  const { attended, unverified: attendedUnverified } = await collectAttended(run, notes, attendedInLedger);
 
   // Merge pre-check: one entry per (worker, branch), because several tasks on
   // one worker share its branch and checking it N times reports N times.
@@ -165,7 +184,7 @@ export async function collectRunReport(
       failed: schedule.filter((s) => s.verdict === "failed").length,
     },
   });
-  return { report, notes, attended };
+  return { report, notes, attended, attendedUnverified };
 }
 
 /**
@@ -198,14 +217,15 @@ async function collectAttended(
   run: RunPaths,
   notes: string[],
   attendedInLedger: ReadonlySet<string>,
-): Promise<AttendedRecord[]> {
+): Promise<{ attended: AttendedRecord[]; unverified: Array<{ worker: string; reason: string }> }> {
   let workers: string[];
   try {
     workers = await readdir(run.workersDir);
   } catch {
-    return []; // no workers ever started; nothing could have been attended
+    return { attended: [], unverified: [] }; // no workers; nothing could have been attended
   }
   const out: AttendedRecord[] = [];
+  const unverified: Array<{ worker: string; reason: string }> = [];
   for (const id of workers.sort()) {
     if (id.startsWith(".")) continue;
     try {
@@ -213,19 +233,21 @@ async function collectAttended(
       if (record !== null) {
         out.push(record);
       } else if (attendedInLedger.has(id)) {
-        notes.push(
-          `worker ${id} has a tui_entered ledger entry but no attended record; ` +
-            `the record is missing or was removed — treat this run as attended`,
-        );
+        unverified.push({
+          worker: id,
+          reason: "the ledger records a human session but the attended record is missing",
+        });
       }
     } catch (err) {
-      notes.push(
-        `worker ${id} has an attended record that cannot be read (${firstLine(err)}); ` +
-          `treat this run as attended`,
-      );
+      // The case where the run is MOST certainly attended, so it must not be
+      // the one demoted to a footnote.
+      unverified.push({
+        worker: id,
+        reason: `the attended record cannot be read (${firstLine(err)})`,
+      });
     }
   }
-  return out;
+  return { attended: out, unverified };
 }
 
 /** Every task the inbox has a durable dispatch envelope for, harvested. */

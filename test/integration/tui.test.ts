@@ -106,7 +106,7 @@ describe("one attended session, end to end", () => {
   test("--leave before any enter refuses and fabricates nothing", async () => {
     const r = await cli(["tui", "--worker", "eng-1", "--run", runId, "--leave"]);
     expect(r.code).toBe(EXIT.USAGE);
-    expect(r.stderr).toMatch(/never handed to a person/);
+    expect(r.stderr).toMatch(/does not have a pane handed to a person/);
     const file = workerPaths(runPaths(runId, rig.root), "eng-1").attendedJson;
     expect(await Bun.file(file).exists()).toBe(false);
   });
@@ -148,7 +148,9 @@ describe("one attended session, end to end", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toMatch(/guarantee\(s\) are void/);
     expect(r.stdout).toContain("ISC-87");
-    expect(r.stdout).toContain("ISC-136");
+    // ISC-106, not ISC-136: entering tui adds no readScreen call, but it does
+    // put a human's cloud verbs through the verbgate wearing the agent's row.
+    expect(r.stdout).toContain("ISC-106");
   });
 
   test("report names the attended worker while a person is driving", async () => {

@@ -460,9 +460,14 @@ describe("a deleted attended record cannot make a run look autonomous", () => {
   test("a tui_entered ledger entry with no record still reports the run as attended", async () => {
     const id = `2026-07-27T00-00-00Z-att9`;
     await runWithLedger("att9", enteredLine(id));
-    const { notes } = await collectRunReport(runPaths(id, runsDir), { precheck: async () => [] });
-    expect(notes.join(" ")).toMatch(/tui_entered.*no attended record/);
-    expect(notes.join(" ")).toContain("treat this run as attended");
+    const { attended, attendedUnverified } = await collectRunReport(runPaths(id, runsDir), {
+      precheck: async () => [],
+    });
+    // Not a note: `attended: []` beside a note in `collection_notes` is what
+    // let a tampered run read as autonomous to anything consuming the JSON.
+    expect(attended).toEqual([]);
+    expect(attendedUnverified.map((u) => u.worker)).toEqual(["eng-1"]);
+    expect(attendedUnverified[0]?.reason).toMatch(/ledger records a human session/);
   });
 
   /**
@@ -473,10 +478,82 @@ describe("a deleted attended record cannot make a run look autonomous", () => {
   test("a run nothing ever attended reports no attendance at all", async () => {
     const id = `2026-07-27T00-00-00Z-att8`;
     await runWithLedger("att8", null);
-    const { attended, notes } = await collectRunReport(runPaths(id, runsDir), {
+    const { attended, attendedUnverified } = await collectRunReport(runPaths(id, runsDir), {
       precheck: async () => [],
     });
     expect(attended).toEqual([]);
-    expect(notes.join(" ")).not.toContain("attended");
+    expect(attendedUnverified).toEqual([]);
+  });
+});
+
+/**
+ * The durability half, which the suite proved it was blind to.
+ *
+ * Review mutation-tested this area and found the pattern exactly: every
+ * ORDERING and lifecycle hazard was pinned, and every DURABILITY and tamper
+ * hazard was invisible. Three mutations passed untouched — dropping the note
+ * for an unreadable record, deleting most of the voided table, and making
+ * `readAttended` return null instead of throwing on corrupt JSON. The last
+ * is the dangerous one: it is a plausible "consistency" refactor that turns
+ * a corrupt record into "never attended" with no signal at all.
+ */
+describe("an unreadable attended record is never silently dropped", () => {
+  async function runWithBadRecord(tag: string, body: string): Promise<string> {
+    const id = `2026-07-27T00-00-00Z-${tag}`;
+    const rp = runPaths(id, runsDir);
+    const wp = join(rp.workersDir, "eng-1");
+    await mkdir(wp, { recursive: true });
+    await writeFile(rp.runJson, JSON.stringify({ run_id: id }), "utf8");
+    await writeFile(join(wp, "attended.json"), body, "utf8");
+    return id;
+  }
+
+  test("a truncated record surfaces as unverified, not as an empty attended list", async () => {
+    const id = await runWithBadRecord("trunc", '{"schema":"pifleet.attended/v1","worker":');
+    const { attended, attendedUnverified } = await collectRunReport(runPaths(id, runsDir), {
+      precheck: async () => [],
+    });
+    // `attended: []` is an AFFIRMATIVE claim that nobody drove this run, so
+    // the signal cannot live only in its absence.
+    expect(attended).toEqual([]);
+    expect(attendedUnverified.map((u) => u.worker)).toEqual(["eng-1"]);
+    expect(attendedUnverified[0]?.reason).toMatch(/cannot be read/);
+  });
+
+  /**
+   * Schema-invalid rather than syntactically broken: the shape a partial
+   * write or an older writer produces. It must not be read as "no record".
+   */
+  test("a schema-invalid record surfaces as unverified too", async () => {
+    const id = await runWithBadRecord("badsc", JSON.stringify({ schema: "wrong/v1", worker: 3 }));
+    const { attended, attendedUnverified } = await collectRunReport(runPaths(id, runsDir), {
+      precheck: async () => [],
+    });
+    expect(attended).toEqual([]);
+    expect(attendedUnverified.map((u) => u.worker)).toEqual(["eng-1"]);
+  });
+
+  /**
+   * The positive control for both: a VALID record must still be reported as
+   * attended and must NOT appear as unverified, or a fix that flagged every
+   * record as suspect would pass the two tests above.
+   */
+  test("a valid record is reported attended and is not flagged unverified", async () => {
+    const id = await runWithBadRecord(
+      "good",
+      JSON.stringify({
+        schema: "pifleet.attended/v1",
+        worker: "eng-1",
+        mode: "viewer",
+        entered_at: "2026-07-27T00:00:00.000Z",
+        left_at: "2026-07-27T00:05:00.000Z",
+        voided: [{ isc: "ISC-93", because: "a person's edits can supply the diff" }],
+      }),
+    );
+    const { attended, attendedUnverified } = await collectRunReport(runPaths(id, runsDir), {
+      precheck: async () => [],
+    });
+    expect(attended.map((a) => a.worker)).toEqual(["eng-1"]);
+    expect(attendedUnverified).toEqual([]);
   });
 });

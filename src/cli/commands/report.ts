@@ -29,7 +29,7 @@ export function register(program: Command): void {
       if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
       const run = runPaths(runId, root);
 
-      const { report, notes, attended } = await collectRunReport(run);
+      const { report, notes, attended, attendedUnverified } = await collectRunReport(run);
       if (opts.json === true) {
         // Collection notes ride ALONGSIDE the RunReportSchema fields, the
         // same convention `artifacts` uses for `harvest_status`: zod strips
@@ -38,10 +38,10 @@ export function register(program: Command): void {
         // rides the same way: a run a person drove must say so in every
         // output format, not only the human one (SRD §3.5, Phase 6).
         process.stdout.write(
-          `${JSON.stringify({ ...report, attended, collection_notes: notes })}\n`,
+          `${JSON.stringify({ ...report, attended, attended_unverified: attendedUnverified, collection_notes: notes })}\n`,
         );
         return;
       }
-      process.stdout.write(renderRunReport(report, notes, attended));
+      process.stdout.write(renderRunReport(report, notes, attended, attendedUnverified));
     });
 }
