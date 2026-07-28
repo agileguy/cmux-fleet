@@ -121,15 +121,34 @@ export async function resolveBackendWithFallback(
     );
   }
 
-  // Ledger first: if the process dies between these two writes, the durable
-  // record is the one that must exist.
-  await opts.ledger.append("backend_fallback", {
-    detail: {
-      from: opts.primary.kind,
-      to: opts.fallback.kind,
-      reasons: primaryFailures.map((c) => ({ name: c.name, detail: c.detail ?? "" })),
-    },
-  });
+  /**
+   * Ledger first: if the process dies between these two writes, the durable
+   * record is the one that must exist.
+   *
+   * But a ledger failure must not discard a fallback that WORKS. The append
+   * used to be unguarded, so a full disk threw a raw error carrying no
+   * `exitCode` — the CLI exited 1 generic, the operator got no diagnosis, and
+   * the stderr warning below never ran either, even though tmux had probed
+   * healthy and was ready to use. A cosmetic degradation became a failed `up`
+   * with an unnamed exit code, which is the opposite of what this whole
+   * function exists to do.
+   *
+   * The record still matters, so losing it is itself announced on stderr.
+   */
+  try {
+    await opts.ledger.append("backend_fallback", {
+      detail: {
+        from: opts.primary.kind,
+        to: opts.fallback.kind,
+        reasons: primaryFailures.map((c) => ({ name: c.name, detail: c.detail ?? "" })),
+      },
+    });
+  } catch (err) {
+    writeStderr(
+      `WARNING: could not record the backend fallback in the ledger: ` +
+        `${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
   writeStderr(
     `WARNING: backend '${opts.primary.kind}' unavailable (${describe(primaryFailures)}); ` +
       `falling back to '${opts.fallback.kind}'\n`,

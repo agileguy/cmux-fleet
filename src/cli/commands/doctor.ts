@@ -85,6 +85,15 @@ interface CmuxReport {
    * from a broken one.
    */
   optional: Array<{ name: string; ok: boolean; detail: string }>;
+  /**
+   * True when the capability probe THREW rather than reporting.
+   *
+   * Distinct from `missingCommands.length > 0`: a probe that failed to run
+   * tells us nothing about which commands exist, and the empty list must not
+   * be read as "none missing". Without this the report could say
+   * `backends.cmux: true` beside a `cmux-probe-failed` diagnosis.
+   */
+  probeFailed: boolean;
   diagnoses: Diagnosis[];
 }
 
@@ -95,6 +104,7 @@ async function probeCmux(exec: Exec, env: Record<string, string | undefined>): P
     socketMode: null,
     missingCommands: [],
     optional: [],
+    probeFailed: false,
     diagnoses: [],
   };
   if (!probe.ok) return report;
@@ -118,6 +128,7 @@ async function probeCmux(exec: Exec, env: Record<string, string | undefined>): P
       if (!c.required) report.optional.push({ name: c.name, ok: c.ok, detail: c.detail ?? "" });
     }
   } catch (err) {
+    report.probeFailed = true;
     report.diagnoses.push({
       name: "cmux-probe-failed",
       message: `cmux capability probe failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -302,8 +313,17 @@ export function register(program: Command): void {
         }
       }
 
+      /**
+       * `cmux: true` must not survive a probe that threw.
+       *
+       * The flag was `probe.ok && missingCommands.length === 0`, and the
+       * catch around the capability probe pushes a `cmux-probe-failed`
+       * diagnosis while leaving `missingCommands` empty — so `--json` could
+       * report `backends.cmux: true` directly beside a diagnosis saying the
+       * probe failed. Whichever a reader believed, one of them was lying.
+       */
       const backends = {
-        cmux: cmux.probe.ok && cmux.missingCommands.length === 0,
+        cmux: cmux.probe.ok && !cmux.probeFailed && cmux.missingCommands.length === 0,
         tmux: probes.find((p) => p.name === "tmux")?.ok ?? false,
         headless: true, // always available — the acceptance suite runs on it
       };

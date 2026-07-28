@@ -33,7 +33,21 @@ const WORKERS = ["eng-1", "eng-2", "eng-3", "eng-4", "eng-5", "eng-6"];
  * in a way that CHANGES OUTCOMES would surface as a divergence in this
  * record; everything else it does is pixels.
  */
-async function driveFleet(backend: FleetBackend, keepForInspection: boolean) {
+/**
+ * `session` is a parameter so each test can own its fleet.
+ *
+ * It used to be hardcoded, which made the pane-count test below depend on
+ * the equivalence test above having run first and left its session up: run
+ * under a name filter, a shard, or `--rerun-each`, it failed with "expected 0
+ * received 1". A test that only passes in file order is not a test of the
+ * thing it names — and this one is the ONLY proof that tmux brings up N panes
+ * titled per worker.
+ */
+async function driveFleet(
+  backend: FleetBackend,
+  keepForInspection: boolean,
+  session = "eq-fleet",
+) {
   const outcome = {
     kind: backend.kind,
     probedRequiredOk: false,
@@ -43,7 +57,7 @@ async function driveFleet(backend: FleetBackend, keepForInspection: boolean) {
   };
   const caps = await backend.probe();
   outcome.probedRequiredOk = caps.filter((c) => c.required).every((c) => c.ok);
-  const w = await backend.ensureWorkspace("eq-fleet");
+  const w = await backend.ensureWorkspace(session);
   for (const workerId of WORKERS) {
     const p = await backend.createPane(w, { workerId, cwd: "/tmp" });
     // The viewer stays alive (fast-exit output is lost on real tmux, probed).
@@ -76,7 +90,11 @@ describe("ISC-134: tmux and headless are interchangeable to the control plane", 
   });
 
   test("tmux really did bring up N panes for the N workers (not a vacuous pass)", async () => {
-    const r = await realExec(listPanesArgv(CTX, "eq-fleet"));
+    // Its own session: this test used to read the one the test above left
+    // behind, so running it alone failed and running it in isolation proved
+    // nothing about tmux.
+    await driveFleet(new TmuxBackend({ exec: realExec, ...CTX }), true, "eq-inspect");
+    const r = await realExec(listPanesArgv(CTX, "eq-inspect"));
     expect(r.code).toBe(0);
     const panes = parsePaneList(r.stdout);
     expect(panes).toHaveLength(WORKERS.length);
