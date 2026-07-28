@@ -77,12 +77,26 @@ interface CmuxReport {
   probe: Probe;
   socketMode: string | null;
   missingCommands: string[];
+  /**
+   * Optional capabilities, REPORTED and never required (ISC-132).
+   * `read-screen` is the one that matters: it is diagnostics-only, so the run
+   * must succeed identically whether or not it exists — and the operator still
+   * has to be told which they have, or they cannot tell a missing diagnostic
+   * from a broken one.
+   */
+  optional: Array<{ name: string; ok: boolean; detail: string }>;
   diagnoses: Diagnosis[];
 }
 
 async function probeCmux(exec: Exec, env: Record<string, string | undefined>): Promise<CmuxReport> {
   const probe = await versionProbe(exec, "cmux", ["cmux", "--version"], false);
-  const report: CmuxReport = { probe, socketMode: null, missingCommands: [], diagnoses: [] };
+  const report: CmuxReport = {
+    probe,
+    socketMode: null,
+    missingCommands: [],
+    optional: [],
+    diagnoses: [],
+  };
   if (!probe.ok) return report;
 
   // Ask the BACKEND what it requires, rather than restating it. `probe()`
@@ -94,7 +108,14 @@ async function probeCmux(exec: Exec, env: Record<string, string | undefined>): P
   try {
     const caps = await (await loadBackend("cmux")).probe();
     for (const c of caps) {
-      if (c.required && !c.ok) report.missingCommands.push(c.name);
+      if (c.required && !c.ok) {
+        // `detail` carries WHICH commands are absent — the capability itself
+        // is an aggregate (`cmux-cli-commands`). Reporting the name alone
+        // tells an operator a category failed and not what to install, which
+        // is a worse message than the per-command loop this replaced.
+        report.missingCommands.push(c.detail !== undefined && c.detail !== "" ? `${c.name} (${c.detail})` : c.name);
+      }
+      if (!c.required) report.optional.push({ name: c.name, ok: c.ok, detail: c.detail ?? "" });
     }
   } catch (err) {
     report.diagnoses.push({
@@ -296,7 +317,14 @@ export function register(program: Command): void {
               config: configDetail,
               probes,
               backends,
-              cmux: { socket_mode: cmux.socketMode, missing_commands: cmux.missingCommands },
+              cmux: {
+                socket_mode: cmux.socketMode,
+                missing_commands: cmux.missingCommands,
+                // Reported, never required (ISC-132): the run succeeds
+                // identically either way, but the operator must be able to
+                // tell a missing diagnostic from a broken one.
+                optional_capabilities: cmux.optional,
+              },
               images,
               mounts: { runs_dir: mount.dir, visible: mount.visible, detail: mount.detail },
               omlx: {
@@ -321,6 +349,9 @@ export function register(program: Command): void {
         }
         console.log(`backends: ${Object.entries(backends).map(([k, v]) => `${k}=${v ? "yes" : "no"}`).join(" ")}`);
         if (cmux.probe.ok) console.log(`cmux socket mode: ${cmux.socketMode}`);
+        for (const c of cmux.optional) {
+          console.log(`cmux ${c.name}: ${c.ok ? "available" : "unavailable"}${c.detail ? ` — ${c.detail}` : ""}`);
+        }
         for (const i of images) console.log(`image ${i.present ? "present" : "ABSENT "}: ${i.tag}`);
         console.log(`mounts: runs dir ${mount.visible ? "visible" : "NOT VISIBLE"} — ${mount.detail}`);
         console.log(
