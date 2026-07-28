@@ -3,7 +3,9 @@ import { readdir, unlink } from "node:fs/promises";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
-import { readWorkerState } from "../../run/state.ts";
+import { readPresentation, readWorkerState } from "../../run/state.ts";
+import { loadBackend } from "../../backends/registry.ts";
+import type { BackendKind } from "../../backends/types.ts";
 import { processStartTime, registryCall } from "../../run/registry.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
@@ -29,7 +31,7 @@ export function register(program: Command): void {
     .option("--keep-panes", "leave panes open")
     .option("--prune", "remove worktrees and branches")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { run?: string; json?: boolean }) => {
+    .action(async (opts: { run?: string; json?: boolean; keepPanes?: boolean }) => {
       const root = runsRoot();
       const runId = opts.run ?? (await latestRunId(root));
       if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
@@ -96,6 +98,65 @@ export function register(program: Command): void {
       } catch {
         // Already gone.
       }
+
+      /**
+       * The view, last of all (ISC-129).
+       *
+       * `down` tore down every process and left the workspace standing: a
+       * real `up --backend tmux` followed by `down` reported `clean: true`
+       * while its tmux session and both panes were still alive, so every run
+       * leaked a session that only `tmux kill-server` would ever reclaim.
+       * `FleetBackend.destroy` existed and was tested the whole time and had
+       * no production caller — the same dead-subsystem shape found twice
+       * before in this project, and a green suite is exactly what makes it
+       * look finished. `--keep-panes` was the tell: a documented flag that
+       * nothing read, because the teardown it modifies was never wired.
+       *
+       * Panes are destroyed AFTER the processes are gone. A pane whose
+       * process is still running would be killed out from under it, and the
+       * SRD's ordering is quiesce, then stop, then verify — the view is the
+       * last thing to go, so a failure anywhere above it is still readable
+       * on screen.
+       */
+      const keepPanes = opts.keepPanes === true;
+      const workspaces = new Map<string, { backend: BackendKind; id: string }>();
+      for (const id of workerIds) {
+        const p = await readPresentation(workerPaths(run, id));
+        // headless has no view to destroy, and a null ref means the pane
+        // never got created — `up` records the failure rather than aborting.
+        if (p === null || p.backend === "headless" || p.workspace_ref === null) continue;
+        workspaces.set(`${p.backend}:${p.workspace_ref}`, {
+          backend: p.backend,
+          id: p.workspace_ref,
+        });
+      }
+      for (const w of workspaces.values()) {
+        try {
+          const backend = await loadBackend(w.backend);
+          await backend.destroy({ backend: w.backend, id: w.id }, { keepPanes });
+          await ledger.append("workspace_down", {
+            detail: { backend: w.backend, workspace: w.id, kept: keepPanes },
+          });
+        } catch (err) {
+          /**
+           * Not fatal, and deliberately so: presentation is not the control
+           * plane. A backend that has already died cannot make `down` report
+           * that the workers it really did stop are still running. Recorded,
+           * never swallowed.
+           */
+          await ledger.append("workspace_down_failed", {
+            detail: {
+              backend: w.backend,
+              workspace: w.id,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          });
+          if (opts.json !== true) {
+            process.stderr.write(`  could not destroy ${w.backend} workspace ${w.id}: ${String(err)}\n`);
+          }
+        }
+      }
+
       await ledger.append("run_down", {});
 
       const allStopped = report.every((r) => r.stopped);
