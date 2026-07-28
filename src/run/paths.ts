@@ -53,6 +53,20 @@ export interface RunPaths {
   inboxDir: string;
   sessionsDir: string;
   workersDir: string;
+  /**
+   * The scheduler's snapshot of the task graph (`ScheduledTask[]`).
+   *
+   * Named here rather than in either subsystem because two of them meet on
+   * it: `dispatch --auto` writes it and `report` reads it. It was NOT in the
+   * seam originally, and within one dispatch the two halves had diverged --
+   * the reporter had invented a path and a tolerant parser for a file the
+   * scheduler never wrote. That is the exact failure a shared seam exists to
+   * prevent, and a path is as much a contract as a schema.
+   *
+   * Absence is normal: a run driven by manual `dispatch` calls has no
+   * schedule, and `report` must still describe it.
+   */
+  scheduleJson: string;
 }
 
 export function runPaths(runId: string, root: string = runsRoot()): RunPaths {
@@ -70,6 +84,7 @@ export function runPaths(runId: string, root: string = runsRoot()): RunPaths {
     inboxDir: join(base, "inbox"),
     sessionsDir: join(base, "sessions"),
     workersDir: join(base, "workers"),
+    scheduleJson: join(base, "schedule.json"),
   };
 }
 
