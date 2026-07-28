@@ -314,6 +314,42 @@ describe("dispatch-time answers", () => {
   });
 });
 
+describe("onChange keeps a durable record current while the run is live", () => {
+  test("fires before the first dispatch, after every transition batch, ending terminal", async () => {
+    const fleet = new FakeFleet(["w1"], { tasks: { a: { verdict: "failed" } } });
+    const snapshots: string[][] = [];
+    await runSchedule([spec("a"), spec("b", ["a"])], fleet, {
+      onChange: (s) => {
+        snapshots.push(s.map((t) => `${t.id}:${t.state}`));
+        return Promise.resolve();
+      },
+    });
+    // The INITIAL states are on the record before anything runs: a reporter
+    // reading mid-run must be able to tell "waiting on a dependency" from
+    // "the scheduler never saw this task".
+    expect(snapshots[0]).toEqual(["a:ready", "b:waiting"]);
+    // A dispatch is a transition; so is a settle and the blocked propagation
+    // it triggers. Both appear, in order.
+    expect(snapshots).toContainEqual(["a:dispatched", "b:waiting"]);
+    expect(snapshots.at(-1)).toEqual(["a:done", "b:blocked"]);
+  });
+
+  test("a no-op poll iteration writes nothing — the record changes only when state does", async () => {
+    const fleet = new FakeFleet(["w1"], { tasks: { a: { settleDelayPolls: 5 } } });
+    let calls = 0;
+    await runSchedule([spec("a")], fleet, {
+      onChange: () => {
+        calls++;
+        return Promise.resolve();
+      },
+    });
+    // initial + dispatch + settle. Five empty polls happened in between; a
+    // scheduler that rewrites the file every poll turns the durable record
+    // into disk churn scaled by poll rate.
+    expect(calls).toBe(3);
+  });
+});
+
 describe("exit ladder over terminal states (SRD §10)", () => {
   test("timed_out maps to TIMEOUT and outranks the blocked dependents' PARTIAL", async () => {
     const fleet = new FakeFleet(["w1"], { tasks: { a: { verdict: "timed_out" } } });

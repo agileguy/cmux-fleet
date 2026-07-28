@@ -382,7 +382,15 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
     },
   };
 
-  const { schedule, exit } = await runSchedule(list.tasks, io);
+  const { schedule, exit } = await runSchedule(list.tasks, io, {
+    // The durable schedule record (run/paths.ts): `report` reads this file
+    // to describe what the scheduler decided, and it is updated on every
+    // state transition — atomically, because the reporter can run WHILE the
+    // schedule does, and a torn read must yield the previous snapshot, not
+    // half of this one. Verdicts in it are the scheduler's bookkeeping;
+    // authoritative verdicts stay with harvest (SRD §7.2).
+    onChange: (snapshot) => writeJsonAtomic(run.scheduleJson, snapshot),
+  });
 
   if (opts.json === true) {
     // The shared seam, verbatim: `ScheduledTask[]` (contracts.ts), the same

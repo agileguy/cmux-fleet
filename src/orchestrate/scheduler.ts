@@ -81,13 +81,21 @@ const DEFAULT_POLL_MS = 100;
 /**
  * Run the list to completion. `tasks` must already be validated
  * (tasklist.ts): unique ids, known dependencies, no cycles.
+ *
+ * `onChange` fires with a fresh snapshot after every batch of state
+ * transitions — initial states included — so a caller can keep a durable
+ * schedule record current while the run is LIVE. `report` reads that record
+ * (run.scheduleJson); a snapshot written only at exit would describe every
+ * crashed or interrupted run as empty, which is precisely the run someone
+ * asks `report` about.
  */
 export async function runSchedule(
   tasks: readonly TaskSpec[],
   io: SchedulerIO,
-  opts: { pollMs?: number } = {},
+  opts: { pollMs?: number; onChange?: (schedule: ScheduledTask[]) => Promise<void> } = {},
 ): Promise<ScheduleOutcome> {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
+  const onChange = opts.onChange ?? (() => Promise.resolve());
   const workers = [...(await io.listWorkers())].sort();
 
   // Refusals precede any dispatch, like tasklist validation does: a pin that
@@ -114,6 +122,11 @@ export async function runSchedule(
   /** Task id -> settle reason, for the exit ladder (worker_died vs verdict). */
   const reasons = new Map<string, string>();
 
+  // The initial snapshot goes out before the first dispatch: a schedule
+  // record that appears only once something ran cannot distinguish "waiting
+  // on a dependency" from "the scheduler never saw this task".
+  await onChange(graph.snapshot());
+
   while (!graph.allTerminal()) {
     let progressed = false;
 
@@ -139,6 +152,10 @@ export async function runSchedule(
         progressed = true;
       }
     }
+    // Settle facts (and the blocked propagation they trigger) reach the
+    // durable record BEFORE the terminal-exit break and BEFORE any refusal
+    // below can throw — the last written state is always the true one.
+    if (progressed) await onChange(graph.snapshot());
     if (graph.allTerminal()) break;
 
     // -- Dispatch pass: ready tasks onto free idle workers. -----------------
@@ -156,6 +173,7 @@ export async function runSchedule(
       if (health === "idle") available.push(w);
     }
 
+    let dispatchedAny = false;
     for (const spec of graph.ready()) {
       // A pin names one worker or nothing runs; null takes the first free
       // idle worker in sorted order. Ties break on task-list position
@@ -163,6 +181,10 @@ export async function runSchedule(
       let target: string | null;
       if (spec.worker !== null) {
         if (dead.has(spec.worker)) {
+          // Dispatches already made this pass reach the record before the
+          // refusal aborts the loop — they are running whether or not this
+          // error is ever read.
+          if (dispatchedAny) await onChange(graph.snapshot());
           throw new SchedulerError(
             `task '${spec.id}' is pinned to worker '${spec.worker}', which died; ` +
               `the schedule cannot complete (in-flight tasks keep running on their workers)`,
@@ -181,6 +203,7 @@ export async function runSchedule(
       // completed tasks instead of re-executing them (ISC-85).
       const answer = await io.dispatch(spec, target, spec.id);
       progressed = true;
+      dispatchedAny = true;
       switch (answer.kind) {
         case "accepted":
           graph.markDispatched(spec.id, target, spec.id);
@@ -208,6 +231,7 @@ export async function runSchedule(
           break;
       }
     }
+    if (dispatchedAny) await onChange(graph.snapshot());
 
     if (!graph.allTerminal() && inflight.size === 0 && !progressed) {
       // Nothing running, nothing dispatched, tasks remain. With a validated

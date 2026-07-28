@@ -1,0 +1,8 @@
+{
+  "schema": "pifleet.tasklist/v1",
+  "tasks": [
+    { "id": "r1", "title": "R1", "brief": "x", "depends_on": ["r3"] },
+    { "id": "r2", "title": "R2", "brief": "x", "depends_on": ["r1"] },
+    { "id": "r3", "title": "R3", "brief": "x", "depends_on": ["r2"] }
+  ]
+}
