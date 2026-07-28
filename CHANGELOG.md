@@ -4,6 +4,55 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-07-28 — Phase 6: attended
+
+The last phase. Every command in SRD §10 is implemented.
+
+### Added
+- **`steer` / `abort` / `exec`** — the supervisor already spoke `steer` and
+  `abort`; these are the CLI layer and the proof. ISC-80 asserts the message's
+  *position* in the event stream, not that a call returned ok; ISC-81 asserts
+  the phase transition on a real clock.
+- **`tui` pane mode** — hands a worker's pane to a person and records it. The
+  record is written once and never removed: `--leave` sets `left_at`, because
+  the point is that the run *was* touched, not what the pane is doing now.
+- **The voided-requirements table** — attended mode's honest failure is silent.
+  The run still produces a result envelope, a verdict and a diff, and none of
+  them mean what they mean unattended. Eight criteria, each with a consequence
+  an operator can act on.
+
+### Fixed
+- **A tampered or crash-truncated attended record read as autonomous.**
+  `attended: []` is an affirmative claim that nobody drove the run, and the
+  warning sat in `collection_notes` — an array whose own contract is findings
+  about *collection*. There is now an `attended_unverified` signal with a
+  top-of-report banner, cross-checked against `tui_entered` and `steer_sent` in
+  the append-only ledger, so the record and the ledger must be tampered with
+  together.
+- **`tui --leave` fabricated a hand-back.** It guarded on "a record exists"
+  rather than "the pane was handed over", and `steer` writes a record too — so
+  `--leave` on a merely-steered worker stamped an ending for a session that had
+  no beginning.
+- **Four voided rows named criteria that still hold**, and the two a container
+  shell genuinely breaks were missing. The pane's shell inherits the image
+  PATH, where the verbgate sits over `gcloud`/`kubectl`/`helm`/`gsutil`/`bq`,
+  so a person's mutating cloud verbs land in the ledger in the agent's row
+  shape with no author (ISC-106) and the ledger stops being a record of what
+  the *agent* did (ISC-107).
+- **A torn read of an atomically-written state file.** `writeJsonAtomic` is
+  tmp + fsync + rename, so a reader must see one whole file or the other; the
+  size can still come from one inode and the bytes from its replacement. Read
+  once more, and carry the bytes into the error either way.
+
+### Testing
+- 1069 pass, 52 skip, 0 fail across 75 files.
+- The voided set is asserted exactly in both directions, and every consequence
+  must be distinct prose — review had gutted the table to three rows and
+  replaced every sentence with one placeholder without turning anything red.
+- `readAttended` returning null instead of throwing on corrupt JSON — a
+  plausible "consistency" refactor that would turn a tampered record into
+  "never attended" — now fails two tests.
+
 ## [0.6.0] — 2026-07-28 — Phase 5: orchestration
 
 A fleet you hand a task list to, and a report you can read afterwards.
