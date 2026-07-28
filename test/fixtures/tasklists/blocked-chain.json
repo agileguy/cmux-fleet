@@ -1,0 +1,15 @@
+{
+  "schema": "pifleet.tasklist/v1",
+  "tasks": [
+    {
+      "id": "A",
+      "title": "doomed",
+      "brief": "runs on the worker whose agent ignores abort; deadline 1s times it out",
+      "worker": "w-bad",
+      "deadline_s": 1
+    },
+    { "id": "B", "title": "needs A", "brief": "never runs", "depends_on": ["A"] },
+    { "id": "C", "title": "needs B", "brief": "never runs either", "depends_on": ["B"] },
+    { "id": "D", "title": "independent", "brief": "succeeds on the healthy worker", "worker": "w-ok" }
+  ]
+}
