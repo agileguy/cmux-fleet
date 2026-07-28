@@ -107,11 +107,24 @@ const PI_DIRS: ReadonlyArray<{ rel: string; kind: RepoHazard["kind"]; why: strin
 
 /**
  * `.git/config` keys that name a program git will execute, or pull further
- * config from a path the repo controls. Mirrors the `-c` list in
- * `harvest/git.ts` — the host harvester already suppresses these per-spawn;
- * this scan makes the committed state itself inert and visible.
+ * config from a path the repo controls.
+ *
+ * This list is a SUPERSET of the `-c` suppression list in `harvest/git.ts`,
+ * and the two serve different purposes: suppression stops the harvester's own
+ * spawns from honouring a key, detection makes the committed state visible to
+ * the operator. A key can need the second without the first, and every key
+ * here needs the second.
+ *
+ * The docstring used to claim it "mirrors the `-c` list". It did not — three
+ * of the five suppressed keys (`core.attributesFile`, `diff.external`,
+ * `protocol.ext.allow`) matched nothing here, and `diff.external` could never
+ * match, because `/^diff\./` demands a subsection while `[diff] external` has
+ * none. A docstring asserting a coverage relationship that does not hold is
+ * the same defect this module was patched for twice already, so the claim is
+ * now a checked one: `test/integration/git-config-forms.test.ts` asserts the
+ * superset property against `GIT_HARDENING` directly.
  */
-const CONFIG_HAZARDS: ReadonlyArray<{
+export const CONFIG_HAZARDS: ReadonlyArray<{
   section: RegExp;
   key: RegExp;
   kind: RepoHazard["kind"];
@@ -122,6 +135,15 @@ const CONFIG_HAZARDS: ReadonlyArray<{
   { section: /^include(if)?(\.|$)/, key: /^path$/, kind: "other", why: "pulls additional config from a repo-controlled path" },
   { section: /^diff\./, key: /^(command|textconv)$/, kind: "other", why: "names a program git runs to produce diffs" },
   { section: /^filter\./, key: /^(clean|smudge|process)$/, kind: "other", why: "names a program git runs on checkout/add" },
+  // Top-level `[diff]`, no subsection — `/^diff\./` above cannot match it, so
+  // the key `harvest/git.ts` bothers to suppress with `-c diff.external=` was
+  // undetectable here. Same shape as the `pager` row below.
+  { section: /^diff$/, key: /^external$/, kind: "other", why: "names a program git runs for every diff" },
+  { section: /^core$/, key: /^attributesfile$/, kind: "other", why: "points attribute lookup at a repo-controlled file" },
+  { section: /^protocol(\.|$)/, key: /^allow$/, kind: "other", why: "enables transport helpers git executes" },
+  { section: /^merge\./, key: /^driver$/, kind: "other", why: "names a program git runs to merge" },
+  { section: /^init$/, key: /^templatedir$/, kind: "other", why: "seeds new repos from a repo-controlled template, hooks included" },
+  { section: /^remote\./, key: /^(uploadpack|receivepack)$/, kind: "other", why: "names a program git runs for transfers" },
   // The set below all name a program too, and were absent while the five above
   // were present. `runGit` suppresses only what it lists in `-c`, and the three
   // git spawns in `harvest/acceptance.ts` historically carried no `-c` at all,
@@ -129,7 +151,12 @@ const CONFIG_HAZARDS: ReadonlyArray<{
   // undetected. Detection is also what makes a hazard VISIBLE to the operator,
   // which suppression alone never does.
   { section: /^core$/, key: /^(pager|sshcommand|editor)$/, kind: "other", why: "names a program git runs" },
-  { section: /^pager\./, key: /^.+$/, kind: "other", why: "names a per-command pager program git runs" },
+  // `^pager$`, NOT `^pager\.`: `[pager]` + `log = …` yields the section
+  // `pager` with no trailing dot, so the dotted form matched nothing and the
+  // key this row exists for went undetected. Caught by the table test, which
+  // asks git for the effective value first — the pattern had been written to
+  // mirror `diff.`/`filter.`, whose subsections genuinely do carry a dot.
+  { section: /^pager$/, key: /^.+$/, kind: "other", why: "names a per-command pager program git runs" },
   { section: /^sequence$/, key: /^editor$/, kind: "other", why: "names a program git runs during interactive rebase" },
   { section: /^credential(\.|$)/, key: /^helper$/, kind: "other", why: "names a program git runs to supply credentials" },
   { section: /^gpg(\.|$)/, key: /^program$/, kind: "other", why: "names a program git runs to verify or make signatures" },
@@ -151,7 +178,25 @@ const CONFIG_HAZARDS: ReadonlyArray<{
  * halves are recorded, because a scanner that reports only the config half
  * describes a loaded gun and omits that it is pointed somewhere.
  */
-const ATTRIBUTE_FILES = [join(".git", "info", "attributes")] as const;
+const ATTRIBUTE_FILES = [join(".git", "info", "attributes"), ".gitattributes"] as const;
+
+/**
+ * How deep to look for nested `.gitattributes`.
+ *
+ * Git honours one in EVERY directory, applying to that subtree. The first
+ * version of this scan covered only `.git/info/attributes` — the untracked,
+ * rarest source — and missed both the root and nested tracked files, which are
+ * the ones a hostile repo actually commits. Covering the exotic case and
+ * missing the ordinary one is worse than not scanning at all, because the
+ * report reads as complete.
+ *
+ * Bounded rather than exhaustive: a repository is worker-controlled input and
+ * an unbounded walk is a denial-of-service surface. Depth 4 with the existing
+ * per-directory entry cap covers realistic layouts; anything deeper is
+ * reported as unscanned rather than silently skipped, so the limit cannot
+ * masquerade as a clean result.
+ */
+const ATTRIBUTE_SCAN_DEPTH = 4;
 
 /** `path pattern` lines assigning a diff/filter driver, e.g. `*.bin filter=pwn`. */
 const ATTRIBUTE_DRIVER = /(^|\s)(diff|filter)=(\S+)/;
@@ -392,12 +437,69 @@ export async function scanRepoHazards(
  * `;`. Using the wrong one would leave the line live while reporting it
  * neutralized, so the marker matches this file's own syntax.
  */
+/**
+ * Every `.gitattributes` below the root, to `ATTRIBUTE_SCAN_DEPTH`.
+ *
+ * Never descends through a symlink — the same discipline as the rest of this
+ * module and `harvest/outbox.ts`: following a link walks wherever the repo
+ * points, which is outside the tree this scan is scoped to. `.git` is skipped
+ * because its own attributes file is already covered by name.
+ *
+ * A directory that is too deep, unreadable, or over the entry cap is RECORDED
+ * as unscanned rather than dropped, so a bounded scan cannot be mistaken for
+ * an exhaustive one.
+ */
+async function nestedAttributeFiles(root: string, record: Record_): Promise<string[]> {
+  const found: string[] = [];
+  const walk = async (relDir: string, depth: number): Promise<void> => {
+    let entries: string[];
+    try {
+      entries = (await readdir(relDir === "" ? root : join(root, relDir))) as unknown as string[];
+    } catch {
+      return;
+    }
+    if (entries.length > MAX_DIR_ENTRIES) {
+      record("other", relDir || ".", false, `directory has ${entries.length} entries (cap ${MAX_DIR_ENTRIES}); not scanned for .gitattributes`);
+      return;
+    }
+    for (const name of entries) {
+      if (name === ".git") continue;
+      const rel = relDir === "" ? name : join(relDir, name);
+      let st: Awaited<ReturnType<typeof lstat>>;
+      try {
+        st = await lstat(join(root, rel));
+      } catch {
+        continue;
+      }
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) {
+        if (depth >= ATTRIBUTE_SCAN_DEPTH) {
+          record("other", rel, false, `below the .gitattributes scan depth of ${ATTRIBUTE_SCAN_DEPTH}; not scanned`);
+          continue;
+        }
+        await walk(rel, depth + 1);
+      }
+    }
+    // Root `.gitattributes` is in ATTRIBUTE_FILES already; only nested ones here.
+    if (relDir !== "") {
+      const cand = join(relDir, ".gitattributes");
+      try {
+        if ((await lstat(join(root, cand))).isFile()) found.push(cand);
+      } catch {
+        // absent
+      }
+    }
+  };
+  await walk("", 0);
+  return found;
+}
+
 async function scanGitAttributes(
   worktreeRoot: string,
   opts: RepoHazardScanOptions,
   record: Record_,
 ): Promise<void> {
-  for (const rel of ATTRIBUTE_FILES) {
+  for (const rel of [...ATTRIBUTE_FILES, ...(await nestedAttributeFiles(worktreeRoot, record))]) {
     const abs = join(worktreeRoot, rel);
     let st: Awaited<ReturnType<typeof lstat>>;
     try {
@@ -483,8 +585,30 @@ type Defuse = (abs: string) => Promise<{ neutralized: boolean; note: string }>;
  * meaning removed, and the marker keeps a re-scan from flagging the same line
  * twice (a commented line no longer matches a key assignment).
  */
+/**
+ * Config files git honours inside `.git/`.
+ *
+ * `config.worktree` is a SECOND honoured config, activated by
+ * `extensions.worktreeConfig = true`, and scanning only `.git/config` left it
+ * entirely invisible: a `core.hooksPath` there was returned by `git config
+ * --get` while this scanner reported nothing at all. An unscanned config file
+ * is strictly worse than an unparsed form, because no amount of parser
+ * correctness reaches it.
+ */
+const GIT_CONFIG_FILES = [join(".git", "config"), join(".git", "config.worktree")] as const;
+
 async function scanGitConfig(worktreeRoot: string, opts: RepoHazardScanOptions, record: Record_): Promise<void> {
-  const rel = join(".git", "config");
+  for (const rel of GIT_CONFIG_FILES) {
+    await scanOneGitConfig(worktreeRoot, rel, opts, record);
+  }
+}
+
+async function scanOneGitConfig(
+  worktreeRoot: string,
+  rel: string,
+  opts: RepoHazardScanOptions,
+  record: Record_,
+): Promise<void> {
   const abs = join(worktreeRoot, rel);
   let st: Awaited<ReturnType<typeof lstat>>;
   try {
@@ -551,16 +675,22 @@ async function scanGitConfig(worktreeRoot: string, opts: RepoHazardScanOptions, 
     /** The line with `\r` stripped and any leading header removed. */
     tail: string;
   }> = [];
+  const HEADER = /^(\s*\[([^\]\s"]+)(?:\s+"((?:[^"\\]|\\.)*)")?\])/;
   for (let i = 0; i < rawLines.length; i++) {
     const line = rawLines[i]!.replace(/\r$/, "");
-    // Not anchored at end: a header may be followed by a key on the same line.
-    const sec = /^(\s*\[([^\]\s"]+)(?:\s+"((?:[^"\\]|\\.)*)")?\])/.exec(line);
     let header = "";
     let tail = line;
-    if (sec !== null) {
+    // LOOP, not a single match: git accepts `[foo] [core] hooksPath = x`, and
+    // consuming only the first header left `tail` still starting with `[`, so
+    // the key regex below never matched and the line vanished — the very bug
+    // the non-anchored header was introduced to fix, one header along. The
+    // LAST header on the line is the one the key belongs to.
+    for (;;) {
+      const sec = HEADER.exec(tail);
+      if (sec === null) break;
       section = sec[3] !== undefined ? `${sec[2]!.toLowerCase()}.${sec[3]}` : sec[2]!.toLowerCase();
-      header = sec[1]!;
-      tail = line.slice(header.length);
+      header += sec[1]!;
+      tail = tail.slice(sec[1]!.length);
     }
     const kv = /^\s*([A-Za-z][A-Za-z0-9-]*)\s*=\s*(.*)$/.exec(tail);
     if (kv === null) continue;
