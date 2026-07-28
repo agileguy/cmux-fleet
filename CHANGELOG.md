@@ -4,6 +4,67 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-28 — Phase 4: panes
+
+Two real backends behind one seam, and panes that show what a worker is doing.
+
+### Added
+- **`FleetBackend` registry** — `src/backends/registry.ts` turns a
+  `BackendKind` into a backend by keyed lazy `import()`. Lazy is a requirement,
+  not a style choice: a static import would drag the cmux module into every
+  `headless` run, and the kind is validated against a literal allowlist before
+  it reaches an import specifier, since `--backend` is operator input and an
+  unchecked value interpolated into a module path is a load-anything primitive.
+- **cmux and tmux backends** — presentation only, by contract. Neither can name
+  the run directory, and nothing outside a backend may interpret a backend-native
+  id.
+- **`pifleet attach --worker <id>`** — was a stub that threw for three phases.
+  Reads the backend from the worker's `presentation.json` rather than a flag,
+  because the run already decided it; refuses a headless worker by name instead
+  of silently succeeding.
+- **Panes show live activity (ISC-129, partial)** — each pane runs `tail -F`
+  over its worker's `events.jsonl`, titled with the worker id. `tail` and
+  nothing else: a follower cannot send anything back, so the pane stays a view
+  and never becomes a channel.
+- **`down` destroys the workspace it opened**, honouring `--keep-panes`.
+
+### Fixed
+- **`realExec` threw on a missing executable.** `Bun.spawn` raises rather than
+  returning 127, so `doctor` — whose job is reporting which tools are missing —
+  died with exit 2 and no JSON on a machine missing one. Every spawn failure is
+  now a datum; the errno cannot separate "not installed" from "installed and
+  unusable" anyway, and `stderr` carries the distinction.
+- **The subprocess timeout never fired.** SIGTERM with no escalation, and the
+  pipe reads awaited alongside `proc.exited`, so a process that traps SIGTERM
+  and one whose grandchild holds the stdout pipe both hung `realExec` forever.
+  Every backend call passes `timeoutMs: 15_000`, so `up` hung rather than
+  losing a pane.
+- **`attachViewer` wrote its 0700 launch script before validating the surface
+  id**, so an id like `x/../../victim/target` escaped the viewer directory —
+  an arbitrary-file overwrite with `#!/bin/sh` content. The guard existed; it
+  ran on the last line of the method.
+- **`setProgressArgv` emitted the literal string `"NaN"`** through the clamp
+  written to contain out-of-domain values.
+- **A ledger append failure discarded a working fallback**, exiting 1 with no
+  diagnosis while tmux sat there healthy.
+- **`doctor` reported `backends.cmux: true` beside a `cmux-probe-failed`
+  diagnosis** — an empty missing-commands list read as "nothing missing".
+- **`up` recorded every run's backend as `headless`**, so `attach` had nothing
+  to focus.
+
+### Testing
+- 874 pass, 52 skip, 0 fail across 56 files.
+- The `doctor` exit-code test previously passed for the wrong reason: this
+  machine has no Docker daemon, so the 3 came from docker regardless of cmux.
+  Now attributable in both directions.
+- The ISC-137 seam test missed backtick imports — the idiom `registry.ts`
+  itself teaches.
+- A raw NUL byte made `cmux-client.test.ts` binary to git; `grep` and `diff`
+  refused it, and two reviewers independently concluded `shellQuote` was
+  untested when it has 56 tests.
+- Two invariants had no test at all, both found by mutation: the tmux empty-id
+  guard, and the cmux socket password staying out of argv.
+
 ## [0.4.0] — 2026-07-28 — Phase 3: security and cloud identity
 
 The posture a graded worker runs under, and the identity it is given. Six
