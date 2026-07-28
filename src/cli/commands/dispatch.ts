@@ -26,7 +26,7 @@ import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { composeBrief } from "../../roles/index.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import { readTaskRecord, readWorkerState } from "../../run/state.ts";
-import { processStartTime } from "../../run/registry.ts";
+import { processStartTime, SocketRequestError } from "../../run/registry.ts";
 import { loadTaskList } from "../../orchestrate/tasklist.ts";
 import { runSchedule, type DispatchAnswer, type SchedulerIO } from "../../orchestrate/scheduler.ts";
 
@@ -64,9 +64,21 @@ export interface SendOutcome {
 /** The control socket did not answer — a fact about the worker, not the task. */
 export class WorkerUnreachableError extends Error {
   readonly exitCode = EXIT.WORKER_DIED;
+  /**
+   * True only when the dispatch provably never reached the supervisor.
+   *
+   * A connect failure means the socket was never opened and nothing saw the
+   * envelope, so the task is untouched and another worker may take it. A
+   * TIMEOUT means no such thing: the supervisor may have accepted the
+   * dispatch, persisted its fence and started the agent, and merely replied
+   * late — a GC pause, a slow container start, a loaded host. Retrying that
+   * elsewhere runs two agents on the same brief and the same branch.
+   */
+  readonly neverDelivered: boolean;
   constructor(worker: string, cause: unknown) {
     super(`worker ${worker} is unreachable: ${String(cause)}`);
     this.name = "WorkerUnreachableError";
+    this.neverDelivered = cause instanceof SocketRequestError && cause.neverDelivered;
   }
 }
 
@@ -358,7 +370,13 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
         });
       } catch (err) {
         if (err instanceof WorkerUnreachableError) {
-          return { kind: "unreachable", detail: err.message };
+          // Only a provable non-delivery may be retried on another worker.
+          // Anything else is in doubt, and the fence that would stop a double
+          // run lives in the SUPERVISOR — it is per-worker, so a second
+          // worker has never heard of this attempt and would accept it.
+          return err.neverDelivered
+            ? { kind: "unreachable", detail: err.message }
+            : { kind: "in_doubt", detail: err.message };
         }
         throw err;
       }
@@ -380,6 +398,10 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
 
     sleep(ms: number): Promise<void> {
       return new Promise((r) => setTimeout(r, ms));
+    },
+
+    now(): number {
+      return performance.now();
     },
   };
 

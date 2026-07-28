@@ -335,3 +335,91 @@ describe("collectRunReport — merge pre-check wiring", () => {
     expect(notes.some((n) => n.includes("merge pre-check failed"))).toBe(true);
   });
 });
+
+/**
+ * Two ways the report stopped being a report.
+ *
+ * Both were found by constructing the input rather than by reading, and both
+ * hit `report` at exactly the moment an operator reaches for it: a large fleet,
+ * and a run that went wrong.
+ */
+describe("the report degrades rather than crashing or over-claiming", () => {
+  /** A run dir whose only content is a schedule snapshot of `n` valid rows. */
+  async function runWithSchedule(rows: unknown[], tag: string): Promise<string> {
+    const id = `2026-07-27T00-00-00Z-${tag}`;
+    const rp = runPaths(id, runsDir);
+    await mkdir(rp.workersDir, { recursive: true });
+    await writeFile(rp.runJson, JSON.stringify({ run_id: id }), "utf8");
+    await writeFile(rp.scheduleJson, JSON.stringify({ tasks: rows }), "utf8");
+    return id;
+  }
+
+  /**
+   * `RunReportSchema` caps its arrays at MAX_ITEMS and `parse` THROWS rather
+   * than truncating, so a fleet of more than a thousand tasks produced no
+   * report at all — on the run that needs one most.
+   */
+  test("a schedule larger than the schema cap still produces a report", async () => {
+    const rows = Array.from({ length: 1200 }, (_, i) => ({
+      id: `t-${i}`,
+      state: "waiting",
+      depends_on: [],
+    }));
+    const id = await runWithSchedule(rows, "big1");
+    const { report, notes } = await collectRunReport(runPaths(id, runsDir), {
+      precheck: async () => [],
+    });
+    // Rows are capped to fit the wire schema...
+    expect(report.schedule.length).toBe(1000);
+    // ...but the counts tell the truth about the run, not about the array.
+    expect(report.totals.tasks).toBe(1200);
+    // And the truncation is SAID. A silent cap reads as "covered everything".
+    expect(notes.join(" ")).toMatch(/1200 tasks.*first 1000/);
+  });
+
+  /**
+   * `done` is the one state the snapshot must not be able to assert. The
+   * verdict was already refused for an undispatched row; the state was not,
+   * so a snapshot could donate a completed task the inbox cannot show was
+   * ever dispatched — and `totals.done` counted it.
+   */
+  test("the snapshot cannot report a task done that was never dispatched", async () => {
+    const id = await runWithSchedule(
+      [
+        { id: "t-never-ran", state: "done", task_id: null, verdict: "success" },
+        { id: "t-honest", state: "waiting", depends_on: [] },
+      ],
+      "lie1",
+    );
+    const { report, notes } = await collectRunReport(runPaths(id, runsDir), {
+      precheck: async () => [],
+    });
+    const row = report.schedule.find((r) => r.id === "t-never-ran");
+    expect(row?.state).not.toBe("done");
+    expect(row?.verdict).toBeNull();
+    expect(report.totals.done).toBe(0);
+    // Refusing quietly would leave the operator wondering where the task went.
+    expect(notes.join(" ")).toContain("t-never-ran");
+  });
+
+  /**
+   * The positive control. Scheduling states ARE the snapshot's to assert —
+   * nothing else in the run records them — so a fix that distrusted the whole
+   * file would erase the graph and pass the two tests above.
+   */
+  test("waiting, ready and blocked are still taken from the snapshot", async () => {
+    const id = await runWithSchedule(
+      [
+        { id: "t-w", state: "waiting", depends_on: ["t-b"] },
+        { id: "t-r", state: "ready", depends_on: [] },
+        { id: "t-b", state: "blocked", blocked_by: "t-x" },
+      ],
+      "ctrl1",
+    );
+    const { report } = await collectRunReport(runPaths(id, runsDir), { precheck: async () => [] });
+    const byId = new Map(report.schedule.map((r) => [r.id, r.state]));
+    expect(byId.get("t-w")).toBe("waiting");
+    expect(byId.get("t-r")).toBe("ready");
+    expect(byId.get("t-b")).toBe("blocked");
+  });
+});

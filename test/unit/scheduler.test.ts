@@ -109,7 +109,16 @@ class FakeFleet implements SchedulerIO {
 
   sleep(): Promise<void> {
     // Resolve immediately: these tests exercise ordering, not wall clocks.
+    // Every sleep advances the fake clock instead, so the stall timeout is
+    // reachable in a test without waiting ten real minutes for it.
+    this.clockMs += 1_000;
     return Promise.resolve();
+  }
+
+  /** Injected clock: no test may depend on how fast the machine ran it. */
+  clockMs = 0;
+  now(): number {
+    return this.clockMs;
   }
 }
 
@@ -366,5 +375,97 @@ describe("exit ladder over terminal states (SRD §10)", () => {
     );
     expect(err).toBeInstanceOf(SchedulerError);
     expect((err as SchedulerError).exitCode).toBe(EXIT.USAGE);
+  });
+});
+
+/**
+ * Two ways `dispatch --auto` failed to hold the line, both found by review
+ * rather than by the suite, and both about doubt rather than about failure.
+ */
+describe("a dispatch whose outcome is unknown is never retried elsewhere", () => {
+  /**
+   * The control socket's default timeout is 5s and `sendTaskEnvelope` wrapped
+   * every rejection — including a timeout — as "unreachable". The scheduler
+   * read that as "the task is untouched" and offered it to the next idle
+   * worker. But a timeout is not evidence of non-delivery: the supervisor may
+   * have accepted the envelope, persisted its fence and started the agent,
+   * and merely replied late. The dedup that should stop the second run is
+   * per-supervisor, so a second worker has never seen the attempt and accepts
+   * it — two agents on one brief and one branch.
+   */
+  test("an in-doubt dispatch settles unknown instead of moving to another worker", async () => {
+    const fleet = new FakeFleet(["w1", "w2"], {
+      tasks: { t1: { answers: [{ kind: "in_doubt", detail: "no response in 5000ms" }] } },
+    });
+    const out = await runSchedule([spec("t1")], fleet);
+    const t1 = out.schedule.find((t) => t.id === "t1");
+    expect(t1?.state).toBe("done");
+    // `unknown`, never an invented failure and never a silent success.
+    expect(t1?.verdict).toBe("unknown");
+    // The assertion that matters: exactly ONE dispatch happened.
+    expect(fleet.log.filter((l) => l.startsWith("dispatch:t1"))).toHaveLength(1);
+  });
+
+  /**
+   * The positive control. A PROVABLE non-delivery — the socket never opened,
+   * so nothing saw the envelope — must still be retried, or a single dead
+   * worker would strand every task the fleet had left.
+   */
+  test("a provable non-delivery is still retried on a surviving worker", async () => {
+    const fleet = new FakeFleet(["w1", "w2"], {
+      tasks: { t1: { answers: [{ kind: "unreachable", detail: "connect failed: ENOENT" }] } },
+    });
+    const out = await runSchedule([spec("t1")], fleet);
+    const t1 = out.schedule.find((t) => t.id === "t1");
+    expect(t1?.state).toBe("done");
+    expect(t1?.verdict).toBe("success");
+    expect(fleet.log.filter((l) => l.startsWith("dispatch:t1")).length).toBeGreaterThan(1);
+  });
+});
+
+describe("a stalled fleet is refused rather than polled forever", () => {
+  /**
+   * The deadlock guard only fired when EVERY worker was dead. A supervisor
+   * whose process is alive but wedged reports `busy` for ever, nothing
+   * settles, and there was no budget, no iteration cap and no output — the
+   * §9.3 deadlock surviving in the one branch the guard did not cover.
+   */
+  test("no progress for the stall budget throws, naming what is stuck", async () => {
+    // Settles never: the record never appears and the worker stays alive.
+    const fleet = new FakeFleet(["w1"], { tasks: { t1: { settleDelayPolls: 1_000_000 } } });
+    await expect(
+      runSchedule([spec("t1")], fleet, { stallTimeoutMs: 5_000 }),
+    ).rejects.toThrow(/no progress/);
+  });
+
+  test("the refusal names the in-flight task and its worker", async () => {
+    const fleet = new FakeFleet(["w1"], { tasks: { t1: { settleDelayPolls: 1_000_000 } } });
+    // A bare "timed out" would send the operator looking through every
+    // worker; the point of the diagnosis is to say which one to look at.
+    await expect(
+      runSchedule([spec("t1")], fleet, { stallTimeoutMs: 5_000 }),
+    ).rejects.toThrow(/t1 on w1/);
+  });
+
+  /**
+   * The positive control: a run that is slow but progressing must not be cut
+   * off. Without this, a stall timeout that fired on elapsed time rather than
+   * on time-since-progress would pass both tests above and break every long
+   * fleet.
+   */
+  test("a slow but progressing schedule is not cut off by the stall budget", async () => {
+    const fleet = new FakeFleet(["w1"], {
+      tasks: {
+        t1: { settleDelayPolls: 4 },
+        t2: { settleDelayPolls: 4 },
+        t3: { settleDelayPolls: 4 },
+      },
+    });
+    // Each task takes 4 polls (4s on the fake clock) — comfortably more than
+    // the budget in TOTAL, but never that long without something changing.
+    const out = await runSchedule([spec("t1"), spec("t2"), spec("t3")], fleet, {
+      stallTimeoutMs: 5_000,
+    });
+    expect(out.schedule.every((t) => t.state === "done")).toBe(true);
   });
 });

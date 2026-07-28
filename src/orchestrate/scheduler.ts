@@ -41,7 +41,14 @@ export type DispatchAnswer =
   /** The worker refused the prompt. The task failed at the door; the worker lives. */
   | { kind: "rejected"; reason: string }
   /** The control socket is gone. A fact about the WORKER, not the task. */
-  | { kind: "unreachable"; detail: string };
+  | { kind: "unreachable"; detail: string }
+  /**
+   * The dispatch may or may not have been acted on — a timeout, or a socket
+   * closed mid-request. Distinct from `unreachable`, which is a PROVABLE
+   * non-delivery, because the two demand opposite responses: one is safe to
+   * retry elsewhere and the other must never be.
+   */
+  | { kind: "in_doubt"; detail: string };
 
 /** Everything the loop touches outside its own memory. */
 export interface SchedulerIO {
@@ -53,6 +60,11 @@ export interface SchedulerIO {
   /** The terminal task record, or null while the task is still running. */
   readSettled(worker: string, taskId: string): Promise<{ verdict: Verdict; reason: string } | null>;
   sleep(ms: number): Promise<void>;
+  /**
+   * Monotonic-ish milliseconds, injected rather than read from the clock so
+   * the stall timeout is testable without waiting for it in real time.
+   */
+  now(): number;
 }
 
 /**
@@ -79,6 +91,16 @@ export interface ScheduleOutcome {
 const DEFAULT_POLL_MS = 100;
 
 /**
+ * How long the schedule may sit with nothing changing before it is refused.
+ *
+ * Generous, because a legitimately slow task settles on its own `deadline_s`
+ * and this is the backstop for a supervisor that has stopped honouring it —
+ * not a second task deadline. Ten minutes of a fleet where nothing at all
+ * moves is a wedge, not a long task.
+ */
+const DEFAULT_STALL_TIMEOUT_MS = 600_000;
+
+/**
  * Run the list to completion. `tasks` must already be validated
  * (tasklist.ts): unique ids, known dependencies, no cycles.
  *
@@ -92,10 +114,29 @@ const DEFAULT_POLL_MS = 100;
 export async function runSchedule(
   tasks: readonly TaskSpec[],
   io: SchedulerIO,
-  opts: { pollMs?: number; onChange?: (schedule: ScheduledTask[]) => Promise<void> } = {},
+  opts: {
+    pollMs?: number;
+    onChange?: (schedule: ScheduledTask[]) => Promise<void>;
+    /**
+     * How long the schedule may make NO progress before the run is refused.
+     *
+     * The deadlock guard below only fires when every worker is dead. A
+     * supervisor whose process is alive but wedged mid-task reports `busy`
+     * forever, `workerHealth` never says `dead`, nothing ever settles, and
+     * `dispatch --auto` polls until someone notices — no budget, no
+     * iteration cap, no output. That is the §9.3 deadlock the module claims
+     * to prevent, surviving in the one branch the guard does not cover.
+     *
+     * Measured from the last time anything changed, not from the start, so a
+     * long but healthy run is never cut off — only a stalled one.
+     */
+    stallTimeoutMs?: number;
+  } = {},
 ): Promise<ScheduleOutcome> {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
+  const stallTimeoutMs = opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
   const onChange = opts.onChange ?? (() => Promise.resolve());
+  let lastProgressMs = io.now();
   const workers = [...(await io.listWorkers())].sort();
 
   // Refusals precede any dispatch, like tasklist validation does: a pin that
@@ -221,6 +262,30 @@ export async function runSchedule(
           graph.markSettled(spec.id, "failed", { worker: target, taskId: spec.id });
           reasons.set(spec.id, answer.reason);
           break;
+        case "in_doubt":
+          /**
+           * Settle it `unknown` and never re-offer it.
+           *
+           * A timeout on the control socket used to be reported as
+           * `unreachable`, which the scheduler read as "the task is
+           * untouched" and handed to the next idle worker. That premise does
+           * not hold: the supervisor may have accepted the envelope,
+           * persisted its fence and started the agent before replying late.
+           * The dedup that should have caught the second dispatch is
+           * per-supervisor — `FenceSnapshot.attempts` lives in each worker's
+           * own fence — so a second worker has never seen this attempt id and
+           * accepts it. Two agents then run the same brief against the same
+           * branch, and both writes to the inbox record land on one path
+           * keyed by run and task, not by worker, so the second silently
+           * overwrites the first's durable record.
+           *
+           * `unknown` is the honest verdict: we do not know whether it ran.
+           * Dependents block rather than proceeding on an unverified result.
+           */
+          graph.markSettled(spec.id, "unknown", { worker: target, taskId: spec.id });
+          reasons.set(spec.id, `dispatch outcome unknown: ${answer.detail}`);
+          available.splice(available.indexOf(target), 1);
+          break;
         case "unreachable":
           // The worker is gone, the task is untouched: it stays `ready` and
           // the next iteration offers it to a surviving worker. Only a PIN
@@ -252,6 +317,23 @@ export async function runSchedule(
       // (or still settling) — that resolves on its own; keep polling.
     }
 
+    if (progressed) {
+      lastProgressMs = io.now();
+    } else if (io.now() - lastProgressMs > stallTimeoutMs) {
+      /**
+       * Alive, busy, and going nowhere. Refusing beats polling forever: the
+       * in-flight tasks keep running on their workers either way, and the
+       * operator gets a named diagnosis instead of a CLI that never returns.
+       */
+      const stuck = [...inflight.entries()].map(([t, w]) => `${t} on ${w}`);
+      if (dispatchedAny) await onChange(graph.snapshot());
+      throw new SchedulerError(
+        `no progress for ${Math.round(stallTimeoutMs / 1000)}s with ` +
+          `${inflight.size} task(s) still in flight (${stuck.join(", ") || "none"}); ` +
+          `workers are alive but not settling — the tasks keep running on their workers`,
+        EXIT.TIMEOUT,
+      );
+    }
     if (!progressed) await io.sleep(pollMs);
   }
 

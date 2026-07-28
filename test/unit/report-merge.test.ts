@@ -79,10 +79,36 @@ afterAll(async () => {
 });
 
 /** The tree-and-HEAD fingerprint the pre-check must never change. */
-async function fingerprint(dir: string): Promise<{ status: string; head: string }> {
+/**
+ * Everything a probe could disturb, not just the two obvious things.
+ *
+ * `status` + `HEAD` alone was not enough: a literal `git stash` inserted into
+ * `merge.ts` left all eleven tests green, because on a CLEAN tree `stash` is
+ * a no-op that creates no entry, moves no HEAD and leaves porcelain empty.
+ * The damage it does is to UNCOMMITTED work and to git's control state, and
+ * the fixture had neither dirty trees nor a stash to lose. So the fingerprint
+ * now covers the index, the stash, the reflog and the merge-in-progress
+ * files — and the fixture below is deliberately dirty.
+ */
+async function fingerprint(dir: string): Promise<Record<string, string>> {
+  const opt = async (...args: string[]): Promise<string> => {
+    try {
+      return (await git(dir, ...args)).trim();
+    } catch {
+      return "<absent>";
+    }
+  };
   return {
     status: await git(dir, "status", "--porcelain"),
     head: (await git(dir, "rev-parse", "HEAD")).trim(),
+    // The index: a probe that stages and resets leaves status clean.
+    index: await opt("ls-files", "-s"),
+    // Uncommitted content itself — the thing a stash actually takes away.
+    worktreeDiff: await opt("diff"),
+    stash: await opt("stash", "list"),
+    reflog: await opt("reflog", "--all"),
+    origHead: await opt("rev-parse", "ORIG_HEAD"),
+    mergeHead: await opt("rev-parse", "MERGE_HEAD"),
   };
 }
 
@@ -190,9 +216,44 @@ describe("precheckMerges — leaves every tree untouched", () => {
    * across the repo AND both sibling worktrees, covering the conflicting
    * path — the case where a working-tree merge would definitely write.
    */
-  test("status is empty and HEAD identical everywhere after clean, conflicting and pairwise checks", async () => {
+  /**
+   * The trees are DIRTY on purpose, and that is the whole point.
+   *
+   * With clean trees this test was vacuous against the most likely regression:
+   * a literal `git stash` inserted into `merge.ts` passed all eleven tests,
+   * because `stash` on a clean tree creates no entry and changes nothing. The
+   * same mutation against dirty trees destroys the operator's uncommitted work
+   * — the file reverts, `stash@{0}` appears, `ORIG_HEAD` is written.
+   *
+   * Dirty is also the realistic state. `report` is what an operator runs when
+   * a run went wrong, which is precisely when worker trees have uncommitted
+   * output in them. A pre-check that is only safe on tidy repositories is not
+   * safe.
+   */
+  test("nothing is disturbed, even with uncommitted work and a stash present", async () => {
     const dirs = [repo, join(tmp, "wt-w1"), join(tmp, "wt-w2")];
+
+    // The stash entry FIRST: `stash push` sweeps up the working tree, so
+    // dirtying before stashing leaves a clean repo and the positive control
+    // below fails — which is exactly how this fixture was caught.
+    await writeFile(join(repo, "to-stash.txt"), "stashed content\n");
+    await git(repo, "add", "to-stash.txt");
+    await git(repo, "stash", "push", "-m", "pifleet-precheck-fixture");
+
+    // Then uncommitted work in every tree — staged and unstaged, both of
+    // which a stash-based probe would silently consume.
+    for (const d of dirs) {
+      await writeFile(join(d, "uncommitted.txt"), `work in progress in ${d}\n`);
+      await git(d, "add", "uncommitted.txt");
+      await writeFile(join(d, "uncommitted.txt"), `work in progress in ${d}\nplus unstaged\n`);
+    }
+
     const before = await Promise.all(dirs.map(fingerprint));
+    // Positive control: the fixture really is dirty and really has a stash,
+    // so "unchanged" is not the trivial equality of two pristine repos.
+    expect(before[0]!.status).not.toBe("");
+    expect(before[0]!.stash).toContain("pifleet-precheck-fixture");
+    expect(before[0]!.worktreeDiff).not.toBe("");
 
     await precheckMerges([
       { worker: "w1", branch: "fleet/r/w1", base_ref: advancedSha, repo },
@@ -202,10 +263,6 @@ describe("precheckMerges — leaves every tree untouched", () => {
 
     const after = await Promise.all(dirs.map(fingerprint));
     expect(after).toEqual(before);
-    for (const f of after) expect(f.status).toBe("");
-    // And no stash entries were created and popped either — a probe that
-    // stashes leaves no status but does leave reflog damage on a dirty tree.
-    expect(await git(repo, "stash", "list")).toBe("");
   });
 });
 

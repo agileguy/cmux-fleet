@@ -19,6 +19,7 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  MAX_ITEMS,
   RunReportSchema,
   TaskEnvelopeSchema,
   ScheduledTaskSchema,
@@ -116,12 +117,23 @@ export async function collectRunReport(
     notes.push(`merge pre-check failed: ${String(err)}`);
   }
 
+  /**
+   * Parsing must not be able to fail the whole report.
+   *
+   * `RunReportSchema` caps its arrays at MAX_ITEMS (1000), so a fleet with
+   * more than a thousand tasks made `collectRunReport` THROW — no report at
+   * all, on precisely the run where an operator most needs one, and in
+   * direct contradiction of this module's stated contract that a degraded
+   * report is always produced. The cap is a sane wire limit; treating it as
+   * an assertion about reality was the mistake.
+   */
+  const capped = capForSchema(schedule, merge, notes);
   const report = RunReportSchema.parse({
     schema: "pifleet.report/v1",
     run_id: run.runId,
     generated_at: new Date().toISOString(),
-    schedule,
-    merge,
+    schedule: capped.schedule,
+    merge: capped.merge,
     totals: {
       tasks: schedule.length,
       done: schedule.filter((s) => s.state === "done").length,
@@ -214,8 +226,29 @@ async function buildSchedule(
         verdict: d.verdict,
       });
     } else {
-      // Undispatched: keep the scheduler's state, refuse its verdict.
-      rows.push({ ...entry, verdict: null });
+      /**
+       * Undispatched: refuse the verdict AND `done`.
+       *
+       * Refusing only the verdict left the one state the snapshot must not
+       * be able to assert. A `schedule.json` row of
+       * `{state:"done", task_id:null}` produced "1 done" in `totals` and a
+       * `done` line in the rendering, with no collection note, for a task the
+       * inbox cannot show was ever dispatched — the file donating a fact
+       * about work rather than about scheduling. Same laundering shape §8.2
+       * closes for self-reports, one file over.
+       *
+       * Every other state is genuinely the scheduler's to know: `waiting`,
+       * `ready` and `blocked` are statements about the graph, and nothing
+       * else in the run records them.
+       */
+      const donated = entry.state === "done" || entry.state === "dispatched";
+      if (donated) {
+        notes.push(
+          `schedule.json claims task '${entry.id}' is ${entry.state}, but no dispatch record ` +
+            `exists for it; reported as ready`,
+        );
+      }
+      rows.push({ ...entry, state: donated ? "ready" : entry.state, verdict: null });
     }
   }
 
@@ -309,4 +342,37 @@ async function noteLiveWorkers(run: RunPaths, notes: string[]): Promise<void> {
 function firstLine(err: unknown): string {
   const s = err instanceof Error ? err.message : String(err);
   return s.split("\n")[0] ?? s;
+}
+
+/**
+ * Fit the report to the wire schema, saying so when anything is dropped.
+ *
+ * `RunReportSchema` caps its arrays at `MAX_ITEMS`, and `parse` throws rather
+ * than truncating — so a run with more than a thousand tasks produced no
+ * report at all. Truncating silently would be no better: a report that says
+ * "1000 tasks" when there were 1200 is worse than one that crashes, because
+ * it is believed. `totals` is computed from the FULL arrays and the note
+ * names exactly what was cut, so the counts stay true even when the rows do
+ * not fit.
+ *
+ * Rows are kept from the front: `schedule` is in task-list order, so the
+ * retained ones are the ones an operator reads first.
+ */
+function capForSchema(
+  schedule: ScheduledTask[],
+  merge: MergePrecheck[],
+  notes: string[],
+): { schedule: ScheduledTask[]; merge: MergePrecheck[] } {
+  if (schedule.length > MAX_ITEMS) {
+    notes.push(
+      `schedule has ${schedule.length} tasks; only the first ${MAX_ITEMS} are listed ` +
+        `(totals count all ${schedule.length})`,
+    );
+  }
+  if (merge.length > MAX_ITEMS) {
+    notes.push(
+      `merge pre-check has ${merge.length} rows; only the first ${MAX_ITEMS} are listed`,
+    );
+  }
+  return { schedule: schedule.slice(0, MAX_ITEMS), merge: merge.slice(0, MAX_ITEMS) };
 }
