@@ -4,6 +4,77 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-28 — Phase 3: security and cloud identity
+
+The posture a graded worker runs under, and the identity it is given. Six
+subsystems under `src/security/`, all wired into `up`.
+
+### Added
+- **Egress (§5.9, §12.4)** — a deny-by-default allowlist whose matching is
+  label-boundary correct: `*.googleapis.com` matches `storage.googleapis.com`
+  and refuses both `evil-googleapis.com` and `googleapis.com.evil.test`. Hosts
+  are normalized (case, trailing root dot, IDN → punycode, empty labels
+  rejected) before comparison, because normalizing one side only is how a
+  homoglyph of an allowed apex gets through.
+- **Network lifecycle** — the worker network is created `--internal`, and `up`
+  REFUSES to adopt a pre-existing network of that name that is not. A network
+  wearing the configured name without `--internal` gives every worker
+  unrestricted egress while the fleet reports deny-all, and nothing would say
+  so.
+- **Repository hazard scan (§12.2)** — a checked-out repo is INPUT, and several
+  files in it are read by the agent as INSTRUCTIONS. The scan parses
+  `.git/config` and `.git/config.worktree` as text (never `git config`, which
+  would execute whatever `core.fsmonitor` names), covers every attributes
+  source git honours, and records `detected` and `neutralized` as separate
+  fields so "we saw it and left it" cannot read as "we defused it".
+- **Cloud identity (§5.8, §12.4)** — per-worker credential planning, stated
+  explicitly including when the grant is nothing. A refresh loop that schedules
+  on the MONOTONIC clock, never from the issuer's `expires_at` label: this
+  fleet runs on a laptop that sleeps, and a wall-clock comparison wakes to find
+  every token simultaneously fresh or dead.
+- **Control-socket auth (§12.7)** — a per-run 256-bit secret minted with
+  `link(2)` so two racing minters cannot each serve their own, mode 0600, never
+  mounted into a container. Every verb requires it, `ping` included.
+
+### Fixed
+- **`--no-ext-diff` alone did not close the diff-driver escape — it relocated
+  it.** `.gitattributes` assigns `diff=name`; `[diff "name"]` may define
+  `command` OR `textconv`, and `command` wins when both are present. So
+  suppressing `command` made git fall back to *executing* `textconv`, on the
+  host, outside the container. The middle state was strictly worse than no
+  hardening, because a dormant driver became the live one.
+- **The hazard scanner missed five `.git/config` forms git honours** —
+  `[section] key = value` on one line (the header pattern was anchored and the
+  key pattern demanded a line-initial key, so a line carrying both matched
+  neither), CRLF endings (`.` excludes `\r`, so the value capture could not
+  reach `$`), and a second `[header]` on the same line.
+- **`up` quarantined the operator's own repository.** It scanned
+  `config.run.repo` with the mutating entry point, renaming their real
+  `AGENTS.md` aside and commenting out `filter.lfs.*` while leaving
+  `filter.lfs.required = true` — which hard-fails every later `git add` on an
+  LFS-tracked path. It also defended nothing, since workers read
+  `<repo>/.worktrees/<id>`. Now detect-and-report only.
+- **The harvester's environment crossed into git.** `runGit` spread
+  `process.env` into a subprocess operating on a tree the graded worker
+  controls, handing it cloud credentials and tokens; the sibling module built
+  its env from a literal and the asymmetry was the bug.
+- **A credential that shipped could be reported dead.** `onInjected` — the
+  supervisor persisting a record — ran inside the try guarding mint/inject, so
+  an ordinary `ENOSPC` there was reported as a failed refresh naming a
+  generation never attempted.
+- **The refresh loop ignored abort and pinned the process.** The signal was
+  re-checked only after the sleep resolved (45 minutes at the default), and the
+  timer was never `unref`'d, so the process outlived all of its work.
+
+### Notes
+- ISC-249 is OPEN, not met: neutralization belongs on the per-worker worktree
+  at the moment it is created, and nothing creates one yet (ISC-27/28).
+- ISC-248 and ISC-253 are OPEN: the refresher attaches to a running container
+  and the headless path starts none; the egress relay does not exist, so
+  containment is enforced by network isolation alone.
+- ISC-254 is OPEN and unpinnable as written — `timingSafeEqual` and `===` are
+  behaviourally identical, so only a timing measurement separates them.
+
 ## [0.3.0] — 2026-07-27 — Phase 2: artifacts and safety
 
 A worker's self-report is now adjudicated against independent evidence, and a
