@@ -239,6 +239,32 @@ describe("Phase 3 seam — credentials, egress, hazards, control auth", () => {
     );
   });
 
+  /**
+   * `detected` is an invariant, not a default. The docstring read as one while
+   * `z.boolean().default(true)` behaved as the other: a default only supplies
+   * a value when the key is ABSENT, so `{detected: false}` parsed happily and
+   * produced a hazard record claiming nothing was found — a shape that should
+   * not exist, since a record is created BECAUSE something was found.
+   *
+   * Fails if the field goes back to a plain boolean. Without this the change
+   * to `z.literal(true)` reverts with the suite green, which is how the
+   * original weakening survived.
+   */
+  test("a hazard cannot claim it was never detected", () => {
+    expect(
+      RepoHazardSchema.safeParse({
+        path: "AGENTS.md",
+        kind: "agents_md",
+        detected: false,
+        neutralized: false,
+      }).success,
+    ).toBe(false);
+    // Omitted is still fine — the default is what fills it in.
+    expect(
+      RepoHazardSchema.parse({ path: "AGENTS.md", kind: "agents_md", neutralized: true }).detected,
+    ).toBe(true);
+  });
+
   test("an egress decision names the rule that decided, including default-deny", () => {
     const denied = EgressDecisionSchema.parse({
       allowed: false,

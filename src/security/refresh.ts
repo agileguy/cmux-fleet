@@ -77,6 +77,8 @@ export class TokenRefresher {
 
   /** Which injection is next; 0 is the initial one (schema: generation 0). */
   #generation = 0;
+  /** The single in-flight attempt, so concurrent callers share it. */
+  #inFlight: Promise<RefreshOutcome> | null = null;
   /** Monotonic ms of the last SUCCESSFUL injection; null before the first. */
   #lastInjectedMono: number | null = null;
   /** Monotonic ms of the last attempt, success or not — retry schedules here. */
@@ -107,8 +109,27 @@ export class TokenRefresher {
     return Math.max(0, this.#intervalMs - sinceInject);
   }
 
-  /** Mint and inject now, unconditionally. The initial injection calls this. */
+  /**
+   * Mint and inject now, unconditionally. The initial injection calls this.
+   *
+   * Concurrent callers share ONE attempt rather than racing. `#generation` is
+   * read at the top, survives two `await`s, and is incremented at the bottom,
+   * so two overlapping calls both record the same generation and both inject —
+   * the same shape as the overlapping-scan defect that aimed two kill ladders
+   * at one pid. Only `run()` calls this today, sequentially, so it is not
+   * reachable yet; a guard added before the second caller exists costs
+   * nothing, and after it exists costs a debugging session.
+   */
   async injectNow(): Promise<RefreshOutcome> {
+    if (this.#inFlight !== null) return this.#inFlight;
+    const attempt = this.#injectNowUnguarded().finally(() => {
+      this.#inFlight = null;
+    });
+    this.#inFlight = attempt;
+    return attempt;
+  }
+
+  async #injectNowUnguarded(): Promise<RefreshOutcome> {
     this.#lastAttemptMono = this.#now();
     try {
       const minted = await this.#opts.mint();

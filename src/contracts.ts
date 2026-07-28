@@ -665,7 +665,17 @@ export const RepoHazardSchema = z.object({
   /** Repo-relative path of the hazard. */
   path: shortStr,
   kind: z.enum(["pi_extension", "agents_md", "hooks_path", "mcp_config", "other"]),
-  detected: z.boolean().default(true),
+  /**
+   * Always `true`, and a literal rather than a defaulted boolean so the type
+   * says so. A `RepoHazard` exists BECAUSE something was found; `detected:
+   * false` describes a record that should not have been created, and
+   * `z.boolean().default(true)` accepted exactly that — `parse({detected:
+   * false, …})` returned `false` and the field read as an invariant while
+   * behaving as a suggestion. The pairing that carries meaning is
+   * detected-and-not-neutralized ("we saw it and left it live"), which
+   * `neutralized` alone expresses.
+   */
+  detected: z.literal(true).default(true),
   neutralized: z.boolean(),
   detail: text.default(""),
 });

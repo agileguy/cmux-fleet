@@ -251,6 +251,48 @@ describe("a failed refresh is loud and does not strand a dead token", () => {
   });
 
   /**
+   * Fails if: two overlapping `injectNow()` calls each run a full attempt.
+   * `#generation` is read at the top, survives two awaits, and is incremented
+   * at the bottom, so unguarded racers both record generation 0 and both
+   * inject — the same shape as the overlapping-scan bug that aimed two kill
+   * ladders at one pid.
+   *
+   * The mint is held open deliberately: without a real overlap the guard is
+   * unobservable, and a test that cannot observe it would pass either way.
+   */
+  test("concurrent injectNow calls share one attempt", async () => {
+    let mintCalls = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const { r } = makeRefresher({
+      mint: async () => {
+        mintCalls += 1;
+        await gate;
+        return { token: "t", identity: "me", expiresAt: "2099-01-01T00:00:00Z" };
+      },
+    });
+
+    const a = r.injectNow();
+    const b = r.injectNow();
+    release!();
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(mintCalls).toBe(1);
+    expect(ra).toBe(rb); // the same attempt, not two equal ones
+    expect(r.status().generation).toBe(1);
+  });
+
+  /** A settled attempt must not be cached — the next call has to mint afresh. */
+  test("the in-flight guard clears once the attempt settles", async () => {
+    const { r } = makeRefresher();
+    await r.injectNow();
+    await r.injectNow();
+    expect(r.status().generation).toBe(2);
+  });
+
+  /**
    * `run()` is the production driver and the only part of this class a test
    * cannot drive with a fake clock, so it was the only part with no coverage —
    * and it held two defects.
