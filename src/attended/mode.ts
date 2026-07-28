@@ -205,6 +205,14 @@ export async function leaveTui(
     mode: "viewer" satisfies PaneMode,
     left_at: new Date().toISOString(),
   });
+  /**
+   * Updated in place, never removed. `left_at` is the whole difference
+   * between "a person is typing here now" and "a person typed here", and
+   * only the second one is a fact about the RUN. Deleting the record on
+   * leave would let an attended run present as unattended the moment the
+   * operator handed the pane back — which is the one outcome this subsystem
+   * exists to prevent.
+   */
   await writeAttended(args.run, args.workerId, record);
   return record;
 }
