@@ -7,10 +7,11 @@
  * and are never pane children, so killing a pane — or the whole server —
  * cannot orphan a container. Nothing correctness-bearing may come from here,
  * and `readScreen` (capture-pane) exists for a human diagnosing a stuck pane,
- * not for code.
+ * never for code.
  *
- * Every tmux invocation goes through argv.ts builders that were probed against
- * the installed 3.6a binary; see the notes there for what the probe showed.
+ * Every tmux invocation goes through argv.ts builders that were probed
+ * against the installed 3.6a binary; the probe record lives at the top of
+ * that file and each deviation from documentation is noted where it bit.
  */
 
 import type {
@@ -24,7 +25,6 @@ import type {
 import type { Exec } from "../../container/run.ts";
 import { realExec } from "../../container/run.ts";
 import {
-  borderStatusArgv,
   capturePaneArgv,
   hasSessionArgv,
   killSessionArgv,
@@ -41,6 +41,7 @@ import {
   sendKeyArgv,
   sendKeysLiteralArgv,
   setPaneTitleArgv,
+  setWindowOptionArgv,
   splitWindowArgv,
   versionArgv,
   type TmuxContext,
@@ -49,9 +50,9 @@ import {
 export interface TmuxBackendOptions extends TmuxContext {
   exec?: Exec;
   /**
-   * Detached sessions default to 80x24, which runs out of splittable space
-   * after a handful of panes ("no space for new pane"). A generous virtual
-   * size plus a tiled relayout after every split keeps N-worker fleets viable.
+   * Virtual size of the detached session. The default 80x24 refuses the 5th
+   * split ("no space for new pane", probed); 220x50 with tiled relayout holds
+   * an 8-worker fleet.
    */
   width?: number;
   height?: number;
@@ -68,12 +69,22 @@ export class TmuxBackend implements FleetBackend {
   readonly #size: { width: number; height: number };
 
   /**
-   * `new-session` necessarily creates pane 0; the first `createPane` claims it
-   * instead of splitting, so N workers get exactly N panes rather than N plus
-   * a stray shell nobody asked for. Keyed by session name because one backend
-   * instance can serve several workspaces.
+   * `new-session` necessarily creates pane 0; the first `createPane` claims
+   * it instead of splitting, so N workers get exactly N panes rather than N
+   * plus a stray shell nobody asked for. Keyed by session name because one
+   * backend instance can serve several workspaces.
    */
   #unclaimed = new Map<string, string>();
+
+  /**
+   * The `@N` id of the window all panes live in, pinned at creation. Splits
+   * and window options target this id rather than `=session:` because the
+   * latter means "the session's CURRENT window" — one operator keystroke
+   * (new-window, select-window) away from splitting the wrong window — and
+   * because window options set with `-w` do not propagate to other windows
+   * (probed), so they must land on this exact one.
+   */
+  #window = new Map<string, string>();
 
   /**
    * `respawn-pane` is the only way to change a pane's command, and it takes
@@ -120,34 +131,76 @@ export class TmuxBackend implements FleetBackend {
   async ensureWorkspace(name: string): Promise<WorkspaceRef> {
     const session = sanitizeSessionName(name);
     const exists = await this.#exec(hasSessionArgv(this.#ctx, session), { timeoutMs: 15_000 });
-    if (exists.code !== 0) {
-      await this.#tmux(newSessionArgv(this.#ctx, session, this.#size));
-      // Worker ids on the borders: without this every pane is an anonymous
-      // rectangle and the operator is left matching panes to workers by eye.
-      await this.#tmux(borderStatusArgv(this.#ctx, session));
-      const panes = parsePaneList(await this.#tmux(listPanesArgv(this.#ctx, session)));
-      const first = panes[0];
-      if (first !== undefined) this.#unclaimed.set(session, first.paneId);
+    if (exists.code === 0) {
+      // Idempotent path: adopt the existing session's window, claim nothing —
+      // its panes belong to whoever created them.
+      if (!this.#window.has(session)) {
+        const panes = parsePaneList(await this.#tmux(listPanesArgv(this.#ctx, session)));
+        const first = panes[0];
+        if (first !== undefined) this.#window.set(session, first.windowId);
+      }
+      return { backend: this.kind, id: session };
     }
+
+    await this.#tmux(newSessionArgv(this.#ctx, session, this.#size));
+    const panes = parsePaneList(await this.#tmux(listPanesArgv(this.#ctx, session)));
+    const first = panes[0];
+    if (first === undefined) {
+      // A session with no panes does not exist in tmux's model; seeing one
+      // means our view of the server is wrong, which is not recoverable here.
+      throw new Error(`tmux session ${session} created but reports no panes`);
+    }
+    this.#window.set(session, first.windowId);
+    this.#unclaimed.set(session, first.paneId);
+
+    // Worker ids on the borders: without this every pane is an anonymous
+    // rectangle and the operator matches panes to workers by eye.
+    await this.#tmux(setWindowOptionArgv(this.#ctx, first.windowId, "pane-border-status", "top"));
+    // A crashed viewer keeps its last screen and a "Pane is dead" banner for
+    // diagnosis instead of silently vanishing from the layout. The pane is a
+    // view; a view disappearing is information destroyed.
+    await this.#tmux(setWindowOptionArgv(this.#ctx, first.windowId, "remain-on-exit", "on"));
     return { backend: this.kind, id: session };
   }
 
   async createPane(w: WorkspaceRef, spec: PaneSpec): Promise<PaneRef> {
     const session = this.#requireId(w.id, "workspace");
+    const windowId = this.#window.get(session);
+    if (windowId === undefined) {
+      throw new Error(`createPane before ensureWorkspace for session ${session}`);
+    }
     let paneId: string;
     const initial = this.#unclaimed.get(session);
     if (initial !== undefined) {
       this.#unclaimed.delete(session);
       paneId = initial;
     } else {
-      paneId = parsePaneId(await this.#tmux(splitWindowArgv(this.#ctx, session, spec.cwd)));
+      paneId = await this.#split(windowId, spec.cwd);
       // Re-tile after every split: sequential splits halve the smallest pane
-      // until tmux refuses, so an untiled layout caps the fleet size at ~4.
-      await this.#tmux(selectLayoutTiledArgv(this.#ctx, session));
+      // until tmux refuses, so an untiled layout caps the fleet at ~4 panes.
+      await this.#tmux(selectLayoutTiledArgv(this.#ctx, windowId));
     }
     this.#paneCwd.set(paneId, spec.cwd);
     await this.#tmux(setPaneTitleArgv(this.#ctx, paneId, spec.title ?? spec.workerId));
     return { backend: this.kind, id: paneId };
+  }
+
+  /**
+   * One split, with one retry behind a relayout. "no space for new pane" is
+   * tmux refusing to halve an already-minimal pane (probed at 80x24 after 4
+   * splits); tiling first redistributes the space, after which the same split
+   * usually fits. One retry, not a loop: if a tiled window still has no room,
+   * the fleet genuinely does not fit and the error should surface.
+   */
+  async #split(windowId: string, cwd: string): Promise<string> {
+    const argv = splitWindowArgv(this.#ctx, windowId, cwd);
+    const first = await this.#exec(argv, { timeoutMs: 15_000 });
+    if (first.code === 0) return parsePaneId(first.stdout);
+    if (!/no space for new pane/i.test(first.stderr)) {
+      throw new Error(`${argv.join(" ")}: ${first.stderr.trim() || `exit ${first.code ?? "timeout"}`}`);
+    }
+    await this.#tmux(selectLayoutTiledArgv(this.#ctx, windowId));
+    return parsePaneId(await this.#tmux(argv));
   }
 
   async attachViewer(p: PaneRef, argv: string[]): Promise<void> {
@@ -185,10 +238,12 @@ export class TmuxBackend implements FleetBackend {
   async destroy(w: WorkspaceRef, opts: { keepPanes: boolean }): Promise<void> {
     const session = this.#requireId(w.id, "workspace");
     this.#unclaimed.delete(session);
+    this.#window.delete(session);
     if (opts.keepPanes) return; // leave the view up for post-mortem reading
     const r = await this.#exec(killSessionArgv(this.#ctx, session), { timeoutMs: 15_000 });
-    // "can't find session" after a run is success — someone or something
-    // already tore the view down, and the view is all we own here.
+    // "can't find session" / "no server running" after a run is success —
+    // the view is already gone, and the view is all we own here. (Both
+    // messages probed verbatim from 3.6a.)
     if (r.code !== 0 && !/can't find session|no server running/i.test(r.stderr)) {
       throw new Error(`kill-session ${session}: ${r.stderr.trim() || `exit ${r.code}`}`);
     }
@@ -196,8 +251,9 @@ export class TmuxBackend implements FleetBackend {
 
   #requireId(id: string | null, what: string): string {
     if (id === null || id === "") {
-      // A null id is the headless shape leaking in; addressing tmux with it
-      // would target "the current pane" — some pane, never the right one.
+      // A null id is the headless shape leaking in; an empty `-t` would make
+      // tmux target "the active pane" — some pane, never reliably the right
+      // one — so refuse before tmux gets the chance to guess.
       throw new Error(`tmux backend given a ${what} ref with no id`);
     }
     return id;
