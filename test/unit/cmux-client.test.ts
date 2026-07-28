@@ -157,6 +157,25 @@ describe("argv builders produce exactly the documented command line", () => {
     expect(setProgressArgv("ws", 0.5)).toContain("0.5000");
   });
 
+  /**
+   * The one value the clamp did not contain. `Math.min(1, Math.max(0, NaN))`
+   * is `NaN` and `NaN.toFixed(4)` is the string `"NaN"`, so a non-number
+   * reached cmux's argv as a progress value — through the very expression
+   * written to prevent out-of-domain input.
+   *
+   * Split out from the test above deliberately: that one pins 2, -1 and 0.5,
+   * all finite, so it reads as covering this and does not. Both infinities
+   * clamp correctly, which is what makes the gap easy to miss. A division by
+   * zero upstream is the whole exploit.
+   */
+  test("set-progress refuses to emit a non-numeric value", () => {
+    expect(setProgressArgv("ws", Number.NaN)).toContain("0.0000");
+    expect(setProgressArgv("ws", Number.NaN).join(" ")).not.toContain("NaN");
+    // The infinities were already right; pinned so a rewrite keeps them.
+    expect(setProgressArgv("ws", Number.POSITIVE_INFINITY)).toContain("1.0000");
+    expect(setProgressArgv("ws", Number.NEGATIVE_INFINITY)).toContain("0.0000");
+  });
+
   test("every builder refuses an injected identifier rather than emitting it", () => {
     expect(() => listPanesArgv("--rm")).toThrow(/refusing/);
     expect(() => focusPaneArgv("a b")).toThrow(/refusing/);

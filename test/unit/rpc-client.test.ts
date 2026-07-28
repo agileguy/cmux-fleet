@@ -320,13 +320,57 @@ describe("static anti-criteria over src/", () => {
     }
   });
 
+  /**
+   * The delimiter set includes backticks, and that is the whole point.
+   *
+   * The original pattern required a quote after `import(`, so a
+   * template-literal specifier walked straight through: adding
+   * ``await import(`../../backends/cmux/index.ts`)`` to `up.ts` left this
+   * suite green at 18/18, while the same import in quotes turned it red.
+   * That is the highest-probability regression form precisely because
+   * `src/backends/registry.ts` establishes the backtick template import as
+   * THE sanctioned way to reach cmux — a developer copying the sanctioned
+   * idiom one file over gets a green suite and a broken seam.
+   */
   test("no file outside src/backends/cmux/ imports a cmux symbol (ISC-137)", async () => {
     const root = new URL("../../", import.meta.url).pathname;
+    const CMUX_IMPORT = /from\s+["'`][^"'`]*cmux[^"'`]*["'`]|import\s*\(\s*["'`][^"'`]*cmux/;
     for (const rel of await srcFiles()) {
       if (rel.startsWith("src/backends/cmux/")) continue;
       const text = await Bun.file(join(root, rel)).text();
-      const importsCmux = /from\s+["'][^"']*cmux[^"']*["']|import\s*\(\s*["'][^"']*cmux/.test(text);
-      expect(importsCmux, `${rel} imports a cmux module`).toBe(false);
+      expect(CMUX_IMPORT.test(text), `${rel} imports a cmux module`).toBe(false);
+    }
+  });
+
+  /**
+   * The guard above is a regex over source text, so it needs its own proof
+   * that it still matches what it claims to. Three shapes, each of which has
+   * either shipped or nearly shipped: a quoted static import, a backtick
+   * dynamic import, and the registry's own interpolated specifier.
+   */
+  test("the ISC-137 pattern catches every import shape, including backticks", () => {
+    const CMUX_IMPORT = /from\s+["'`][^"'`]*cmux[^"'`]*["'`]|import\s*\(\s*["'`][^"'`]*cmux/;
+    const violations = [
+      'import { assertCmuxValue } from "../../backends/cmux/client.ts";',
+      "import { assertCmuxValue } from '../../backends/cmux/client.ts';",
+      "import { assertCmuxValue } from `../../backends/cmux/client.ts`;",
+      'const m = await import("./cmux/index.ts");',
+      "const m = await import(`../../backends/cmux/index.ts`);",
+    ];
+    for (const v of violations) {
+      expect(CMUX_IMPORT.test(v), `missed: ${v}`).toBe(true);
+    }
+
+    const allowed = [
+      // The registry's keyed load: the kind is a variable, so no literal
+      // "cmux" appears in the specifier and the seam stays intact.
+      "const mod = await import(`./${kind}/index.ts`);",
+      'import type { BackendKind } from "./types.ts";',
+      // Prose mentioning cmux must not trip a source-text guard.
+      "// cmux is reached through the registry, never imported directly.",
+    ];
+    for (const a of allowed) {
+      expect(CMUX_IMPORT.test(a), `false positive: ${a}`).toBe(false);
     }
   });
 });

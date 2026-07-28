@@ -35,6 +35,7 @@ import type {
 } from "../types.ts";
 import {
   CmuxClient,
+  assertCmuxValue,
   focusPaneArgv,
   listPanesArgv,
   newSplitArgv,
@@ -237,9 +238,31 @@ export class CmuxBackend implements FleetBackend {
     const { surfaceId } = splitPaneId(this.requirePaneId(p));
     if (argv.length === 0) throw new Error("cmux: attachViewer requires a non-empty argv");
 
+    /**
+     * Validate BEFORE the id becomes a path, not after.
+     *
+     * The guard existed but ran too late: its only caller was
+     * `respawnPaneArgv`, on the last line of this method, while `surfaceId`
+     * was interpolated into a filename and written with mode 0700 several
+     * lines earlier. `splitPaneId` requires only two non-empty
+     * space-separated parts, so `/` and `.` both survive it, and a surfaceId
+     * like `x/../../victim/target` escapes `viewerScriptDir` into a sibling
+     * directory — an arbitrary-file overwrite with attacker-influenced
+     * `#!/bin/sh` content. The `viewer-` prefix absorbs a plain leading
+     * `../`, which is what makes the naive attempt fail and the real one easy
+     * to miss.
+     *
+     * The comment that used to sit here claimed the id was "already validated
+     * to be path-safe by the identifier grammar". It was not, at this point
+     * in the method. The value arrives from cmux's own JSON, so exploiting it
+     * needs a hostile or broken cmux — but this is now reachable from every
+     * `up` on the cmux backend, which is exactly the kind of ordering bug
+     * that stays latent until something wires the caller in.
+     */
+    assertCmuxValue("surface id", surfaceId);
+
     await mkdir(this.viewerScriptDir, { recursive: true, mode: 0o700 });
-    // Keyed by surface UUID: unique per pane, stable across re-attach, and
-    // already validated to be path-safe by the identifier grammar.
+    // Keyed by surface UUID: unique per pane and stable across re-attach.
     const script = join(this.viewerScriptDir, `viewer-${surfaceId}.sh`);
     const body =
       "#!/bin/sh\n" +

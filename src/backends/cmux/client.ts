@@ -155,9 +155,24 @@ export function setStatusArgv(
 
 export function setProgressArgv(workspaceId: string, value: number, label?: string): string[] {
   assertCmuxValue("workspace id", workspaceId);
-  // Clamp rather than throw: progress is cosmetic, and a 1.0000001 from
-  // accumulated float error must not fail a run the control plane finished.
-  const clamped = Math.min(1, Math.max(0, value));
+  /**
+   * Clamp rather than throw: progress is cosmetic, and a 1.0000001 from
+   * accumulated float error must not fail a run the control plane finished.
+   *
+   * NaN is special-cased because it is the one value that went straight
+   * through the clamp written to contain it: `Math.min(1, Math.max(0, NaN))`
+   * is `NaN`, and `NaN.toFixed(4)` is the string `"NaN"`, which then reached
+   * cmux's argv as a progress value. The test covering this pinned 2, -1 and
+   * 0.5 — all finite — so it read as covering the case and did not. A
+   * division by zero upstream is all it takes.
+   *
+   * NaN only, NOT `!Number.isFinite`. The first version of this fix used the
+   * broader test and regressed the infinities, which the clamp already
+   * handled correctly: `Infinity` must land on 1, not 0, because an overshoot
+   * means finished rather than not-started. Its own positive control caught
+   * that within a minute.
+   */
+  const clamped = Number.isNaN(value) ? 0 : Math.min(1, Math.max(0, value));
   const argv = ["set-progress", clamped.toFixed(4), "--workspace", workspaceId];
   if (label !== undefined) {
     assertCmuxText("progress label", label);
