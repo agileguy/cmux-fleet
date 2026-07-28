@@ -22,6 +22,7 @@ import {
   RULE_INVALID_HOST,
   RULE_INVALID_PORT,
   type EgressPolicy,
+  decisionForRecord,
 } from "../../src/security/egress.ts";
 import {
   assertNetworkName,
@@ -427,5 +428,56 @@ describe("parseNetworkInspect", () => {
   test("malformed output throws — it must not read as 'missing' and trigger a create", () => {
     expect(() => parseNetworkInspect("pifleet-egress", "not json")).toThrow(/unparseable/);
     expect(() => parseNetworkInspect("pifleet-egress", '{"Name":"x"}')).toThrow(/array/);
+  });
+});
+
+/**
+ * `decide` refuses invalid ports, and a refusal must be able to REPORT the
+ * port it refused. That put its return value in conflict with its declared
+ * type: `EgressDecision` is inferred from a schema requiring
+ * `int().positive()`, so the refusal branch returned something the type said
+ * was impossible and any caller parsing the result threw on precisely the
+ * inputs the branch exists for.
+ *
+ * The types now say where each is legal. These tests pin both directions:
+ * the refusal is representable, and the seam still rejects it.
+ */
+describe("a refusal reports the port as asked, and does not pass as a record", () => {
+  const policy = defaultPolicy();
+
+  test.each([0, -1, 1.5, NaN, 70000])("port %p is refused and reported verbatim", (port) => {
+    const v = decide("storage.googleapis.com", port, policy);
+    expect(v.allowed).toBe(false);
+    expect(v.rule).toBe(RULE_INVALID_PORT);
+    // Verbatim: substituting a placeholder would hide what was actually asked.
+    expect(Object.is(v.port, port)).toBe(true);
+  });
+
+  test.each([0, -1, 1.5, NaN])("an invalid-port refusal cannot become a record", (port) => {
+    const v = decide("storage.googleapis.com", port, policy);
+    expect(EgressDecisionSchema.safeParse(v).success).toBe(false);
+    // null rather than a thrown error or an invented port: there is nothing
+    // schema-valid for this verdict to become.
+    expect(decisionForRecord(v)).toBeNull();
+  });
+
+  test("an allowed verdict does round-trip through the schema", () => {
+    const v = decide("storage.googleapis.com", 443, policy);
+    expect(v.allowed).toBe(true);
+    const rec: EgressDecision | null = decisionForRecord(v);
+    expect(rec).not.toBeNull();
+    expect(rec!.port).toBe(443);
+  });
+
+  /**
+   * 70000 is in range for the schema (a positive int) but not a TCP port, so
+   * it is the one refusal that CAN round-trip — worth pinning, because it is
+   * the case that makes "refused" and "unrecordable" visibly different
+   * properties rather than synonyms.
+   */
+  test("an out-of-range but positive-int port is refused yet still recordable", () => {
+    const v = decide("storage.googleapis.com", 70000, policy);
+    expect(v.allowed).toBe(false);
+    expect(decisionForRecord(v)).not.toBeNull();
   });
 });

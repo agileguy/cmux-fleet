@@ -21,7 +21,42 @@
 
 import { isIP } from "node:net";
 import { domainToASCII } from "node:url";
-import { MAX_SHORT, type EgressDecision } from "../contracts.ts";
+import { EgressDecisionSchema, MAX_SHORT, type EgressDecision } from "../contracts.ts";
+
+/**
+ * What `decide` returns: an `EgressDecision` widened at `port`.
+ *
+ * `EgressDecision` is inferred from `EgressDecisionSchema`, whose `port` is
+ * `int().positive()` — correct for anything crossing the contracts seam, and
+ * wrong as a return type for the function whose job includes REFUSING ports
+ * that are none of those things. A refusal must be able to report the port as
+ * asked, including `0`, `-1`, `1.5` and `NaN`.
+ *
+ * Kept as a distinct type rather than loosening the schema: a verdict that
+ * reaches an envelope or a ledger still has to satisfy the positive-int bound,
+ * and `EgressDecisionSchema.parse` is what enforces it at that boundary. The
+ * two types encode where each is legal, so the compiler carries the rule
+ * instead of a comment asking callers to remember it.
+ */
+export interface EgressVerdict {
+  readonly allowed: boolean;
+  readonly host: string;
+  /** As asked. May violate `EgressDecisionSchema` — that IS the refusal case. */
+  readonly port: number;
+  readonly rule: string;
+}
+
+/**
+ * Narrow a verdict to a schema-valid decision, or `null` when it cannot be.
+ *
+ * The `null` is deliberate and is not an error path: a verdict refused for an
+ * invalid port has nothing schema-valid to become, and forcing one would mean
+ * inventing a port the caller never asked for.
+ */
+export function decisionForRecord(v: EgressVerdict): EgressDecision | null {
+  const parsed = EgressDecisionSchema.safeParse(v);
+  return parsed.success ? parsed.data : null;
+}
 
 /** Rule names reserved for refusals; no allow rule may ever carry them. */
 export const RULE_DEFAULT_DENY = "default-deny";
@@ -173,14 +208,20 @@ function hostMatches(host: string, ruleHost: string): boolean {
  * Port is part of every rule, not an afterthought: an allowed host on an
  * unexpected port is exactly how a permitted name becomes a tunnel.
  */
-export function decide(host: string, port: number, policy: EgressPolicy): EgressDecision {
+export function decide(host: string, port: number, policy: EgressPolicy): EgressVerdict {
   // Recorded host is always bounded so the decision can cross the contracts.ts
   // seam; the RAW prefix is kept for refusals so the log shows what was asked.
   const asAsked = host.slice(0, MAX_SHORT);
   if (!validPort(port)) {
-    // NOTE: the record carries the port as asked. A nonsense port (0, -1, 1.5)
-    // is refused here but cannot round-trip through EgressDecisionSchema's
-    // positive-int bound — such a record is for logging, never for envelopes.
+    // The record carries the port AS ASKED — 0, -1, 1.5 and NaN all reach here
+    // — which is why the return type is `EgressVerdict` and not
+    // `EgressDecision`. `EgressDecision` is inferred from a schema requiring a
+    // positive int, so declaring this function as returning one was a claim the
+    // compiler could not check and this branch broke: any caller round-tripping
+    // the result through `EgressDecisionSchema.parse` threw on exactly the
+    // inputs the refusal exists to handle. Naming the wider type is the fix;
+    // the previous version documented the unsoundness in a comment instead,
+    // which left every caller to remember it.
     return { allowed: false, host: asAsked, port, rule: RULE_INVALID_PORT };
   }
   const norm = normalizeHost(host);
