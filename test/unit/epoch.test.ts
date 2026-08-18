@@ -9,7 +9,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { EpochManager, emptyFence } from "../../src/rpc/epoch.ts";
+import { EpochManager, MalformedEpochError, emptyFence } from "../../src/rpc/epoch.ts";
+import { EXIT, isExitCoded } from "../../src/contracts.ts";
 
 const now = "2026-07-26T14:00:00.000Z";
 
@@ -57,6 +58,66 @@ describe("EpochManager — allocation", () => {
     const em = new EpochManager();
     const d = em.allocate("T-001", "a1", 7);
     expect(d).toEqual({ ok: false, reason: "stale_epoch", requested: 7, next: 1 });
+  });
+});
+
+/**
+ * ISC-217. An epoch is a whole non-negative counter. A negative or fractional
+ * one is not a re-dispatch request that happens to be wrong — it is a value
+ * that can never have named an epoch, so answering it with a normal decision
+ * hides the author's mistake behind ordinary-looking behaviour: `-1` was
+ * silently normalized to "allocate a fresh epoch" (so a re-dispatch meant to
+ * replay ran the task AGAIN), and `1.5` came back `stale_epoch`, which reads as
+ * "someone else advanced the fence" and sends the reader after the wrong bug.
+ */
+describe("EpochManager — a malformed epoch is named, not normalized (ISC-217)", () => {
+  test("a negative requested epoch throws MalformedEpochError", () => {
+    const em = new EpochManager();
+    expect(() => em.allocate("T-001", "a1", -1)).toThrow(MalformedEpochError);
+  });
+
+  test("a fractional requested epoch throws MalformedEpochError", () => {
+    const em = new EpochManager();
+    expect(() => em.allocate("T-001", "a1", 1.5)).toThrow(MalformedEpochError);
+  });
+
+  test("the error names the offending value and is a diagnosed usage failure", () => {
+    let caught: unknown;
+    try {
+      new EpochManager().allocate("T-001", "a1", -3);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(MalformedEpochError);
+    expect((caught as MalformedEpochError).name).toBe("MalformedEpochError");
+    expect((caught as MalformedEpochError).value).toBe(-3);
+    expect((caught as Error).message).toContain("-3");
+    // Diagnosed, so the CLI prints one line and exits 2 rather than reporting
+    // an internal error (ISC-216) for a value the operator supplied.
+    expect(isExitCoded(caught)).toBe(true);
+    expect((caught as MalformedEpochError).exitCode).toBe(EXIT.USAGE);
+  });
+
+  test("a malformed epoch is refused even for an attempt that would replay", () => {
+    // The replay lookup must not launder it: the request is unreadable before
+    // it is anything else.
+    const em = new EpochManager();
+    em.allocate("T-001", "a1", null);
+    expect(() => em.allocate("T-001", "a1", -1)).toThrow(MalformedEpochError);
+  });
+
+  test("well-formed epochs are untouched: 0 allocates, whole positives request", () => {
+    expect(new EpochManager().allocate("T-001", "a1", 0)).toEqual({
+      ok: false,
+      reason: "stale_epoch",
+      requested: 0,
+      next: 1,
+    });
+    expect(new EpochManager().allocate("T-001", "a1", 1)).toEqual({
+      ok: true,
+      epoch: 1,
+      replayed: false,
+    });
   });
 });
 
