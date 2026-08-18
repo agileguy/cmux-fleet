@@ -89,4 +89,21 @@ describe("a hostile surface id never reaches the filesystem", () => {
     expect(st.mode & 0o777).toBe(0o700);
     expect(await tree(dir)).toContain("nested/viewers/viewer-surface-abc123.sh");
   });
+
+  /**
+   * A pane id recorded by a pifleet build predating the `--workspace` fix
+   * (`presentation.json` written by `up`, read back by a later `attach`/`tui`
+   * invocation) has only two fields. `attachViewer` must name that condition
+   * and refuse before writing anything, not throw the generic
+   * `CmuxParseError` a stray 2-part string would otherwise produce two layers
+   * down inside `respawnPaneArgv`.
+   */
+  test("a legacy 2-part id (no workspace) is refused by name and writes nothing", async () => {
+    const { dir, backend } = await rig();
+    const before = await tree(dir);
+    await expect(
+      backend.attachViewer({ backend: "cmux", id: "pane-1 surface-abc123" }, ["tail", "-F", "/tmp/x"]),
+    ).rejects.toThrow(/predates the respawn-pane --workspace fix/);
+    expect(await tree(dir)).toEqual(before);
+  });
 });

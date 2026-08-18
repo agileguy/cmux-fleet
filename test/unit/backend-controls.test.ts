@@ -8,7 +8,11 @@
  * of a decision rather than a load-bearing invariant.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CmuxBackend } from "../../src/backends/cmux/index.ts";
 import { CmuxClient, listPanesArgv } from "../../src/backends/cmux/client.ts";
 import { TmuxBackend } from "../../src/backends/tmux/index.ts";
 import type { ExecResult } from "../../src/container/run.ts";
@@ -98,5 +102,80 @@ describe("the cmux socket password stays out of argv", () => {
     // Positive control: without this, a client that silently dropped the
     // password entirely would pass the test above.
     expect(JSON.stringify(env ?? {})).toContain(SECRET);
+  });
+});
+
+/**
+ * `respawn-pane`/`rename-tab` must carry the pane's WORKSPACE id in
+ * `--workspace`, not its surface id transposed into that slot.
+ *
+ * Mutation-found during PR #8's review (ISC-129): swapping the two
+ * same-typed string arguments at both call sites in
+ * `src/backends/cmux/index.ts` — passing `surfaceId` for `workspaceId` —
+ * typechecks, and the whole suite stayed green, because
+ * `test/unit/cmux-client.test.ts` only pins the pure argv builders in
+ * isolation and `test/unit/cmux-viewer-path.test.ts` only asserts filesystem
+ * effects while letting the live cmux call fail. Neither test proved
+ * `CmuxBackend` itself sends the right id in the right slot. This is the
+ * exact "swap two ids and everything is still green" shape the WORKSPACE
+ * field was added to fix in the first place.
+ */
+describe("cmux respawn-pane and rename-tab carry the pane's workspace id, not its surface id", () => {
+  const scriptDirs: string[] = [];
+  afterAll(async () => {
+    for (const d of scriptDirs) await rm(d, { recursive: true, force: true }).catch(() => {});
+  });
+
+  test("attachViewer sends --workspace <workspaceId> --surface <surfaceId>, unswapped", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-backend-controls-"));
+    scriptDirs.push(dir);
+    const seen: string[][] = [];
+    const backend = new CmuxBackend({
+      viewerScriptDir: dir,
+      exec: async (argv): Promise<ExecResult> => {
+        seen.push(argv);
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      },
+    });
+
+    await backend.attachViewer({ backend: "cmux", id: "pane-1 surface-2 workspace-3" }, ["tail", "-F", "/tmp/x"]);
+
+    const respawn = seen.find((argv) => argv.includes("respawn-pane"));
+    expect(respawn).toBeDefined();
+    expect(respawn![respawn!.indexOf("--workspace") + 1]).toBe("workspace-3");
+    expect(respawn![respawn!.indexOf("--surface") + 1]).toBe("surface-2");
+  });
+
+  test("createPane's rename-tab sends --workspace <workspaceId> --surface <surfaceId>, unswapped", async () => {
+    const seen: string[][] = [];
+    const backend = new CmuxBackend({
+      exec: async (argv): Promise<ExecResult> => {
+        seen.push(argv);
+        if (argv.includes("list-panes")) {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ panes: [{ id: "existing-pane", selected_surface_id: "existing-surface", index: 0 }] }),
+            stderr: "",
+            timedOut: false,
+          };
+        }
+        if (argv.includes("new-split")) {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ pane_id: "pane-9", surface_id: "surface-9" }),
+            stderr: "",
+            timedOut: false,
+          };
+        }
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      },
+    });
+
+    await backend.createPane({ backend: "cmux", id: "workspace-7" }, { workerId: "eng-1", cwd: "/tmp" });
+
+    const rename = seen.find((argv) => argv.includes("rename-tab"));
+    expect(rename).toBeDefined();
+    expect(rename![rename!.indexOf("--workspace") + 1]).toBe("workspace-7");
+    expect(rename![rename!.indexOf("--surface") + 1]).toBe("surface-9");
   });
 });

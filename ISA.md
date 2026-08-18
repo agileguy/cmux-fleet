@@ -6,7 +6,7 @@ phase: build
 progress: 194/255
 mode: build
 started: 2026-07-27
-updated: 2026-08-17
+updated: 2026-08-18
 ---
 
 # cmux-fleet — Ideal State Artifact
@@ -628,14 +628,29 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   rework. Asked to actually implement that rework, a fresh controlled A/B test (not a repeat of the
   same steps) showed every `--workspace`+`--surface` combination succeeds regardless of UUID-vs-ref
   spelling on either flag; the only failing case is `--workspace` omitted entirely, which is what
-  `respawnPaneArgv`/`renameTabArgv` had always sent. The actual fix was two functions gaining a
-  `--workspace` parameter, not a backend-wide addressing rewrite. **Learned: a root-cause writeup
+  `respawnPaneArgv`/`renameTabArgv` had always sent. The actual fix was two argv builders gaining a
+  `--workspace` parameter and two id-codec functions gaining a third field to carry it, not a
+  backend-wide addressing rewrite. **Learned: a root-cause writeup
   with a reproduction table still needs re-verification before code is built on top of it,
   especially one written under the same "prior diagnosis turned out wrong" pressure that produced
   this exact lesson three phases running now** — the corrected mechanism only surfaced by re-running
   the experiment with tighter controls (one variable changed at a time, immediately re-confirmed
   with a live shell + `send`/`read-screen`) instead of extending the earlier table's conclusion.
   Full corrected reproduction is in `## Verification`, "Phase 4 close-out," 2026-08-18 correction.
+- **2026-08-18 — PR #8's review round (Claude/Gemini/Codex, same pattern as PR #7) caught a real
+  test-coverage gap and a real backward-compatibility break the live verification above didn't
+  surface, because live verification only exercises a fresh run end-to-end and never a stale
+  `presentation.json` from an older build.** All three reviewers independently re-ran the live
+  cmux A/B test themselves rather than accepting the PR's table at face value — by this point a
+  deliberate habit, not an accident, per the two entries directly above. Two reviewers then
+  mutation-tested the fix and proved the `--workspace`/`--surface` wiring in `index.ts` had zero
+  test coverage (swap the two arguments, whole suite stays green); all three independently found
+  that the composed pane id is persisted to `presentation.json` and read back by a later `attach`/
+  `tui` process, so widening it from 2 to 3 fields breaks any run recorded by the pre-fix binary.
+  **Learned: a live end-to-end verification proves the happy path for a run created and consumed by
+  the same build — it says nothing about a run that started under an older build**, which is
+  exactly the gap a cross-process persisted format opens and an in-process test cannot see. Full
+  findings and fixes are in `## Verification`, "PR #8 review round."
 
 ## Changelog
 
@@ -867,8 +882,10 @@ the caller already holds (UUID — no resolution step needed). `composePaneId`/
 `splitPaneId` (`src/backends/cmux/parse.ts`) carry a third field so
 `attachViewer` has the workspace id available; `createPane`'s own rename-tab
 call already had it in scope. `readScreenArgv`, `sendArgv`, `sendKeyArgv`,
-`focusPaneArgv`, `newSplitArgv` are untouched — all confirmed still correct
-without a workspace flag.
+`focusPaneArgv` are untouched — all confirmed still correct without a
+workspace flag. `newSplitArgv` was **already** correct — it already sent
+`--workspace` before this PR — which is itself corroborating evidence for the
+corrected mechanism, not an example of a builder needing no fix.
 
 **Verified live** (cmux 0.64.22, real `pifleet up --backend cmux` with
 `PIFLEET_PI_COMMAND` pointed at `fake-pi.ts`, two workers): `backend_ready`
@@ -877,10 +894,68 @@ worker's live `logs --follow --render` output (`fake-pi: scenario 'happy'
 loaded...`), not an idle shell and not `Surface not found`; `pifleet down`
 tore the run and the cmux workspace down cleanly. Unit coverage:
 `test/unit/cmux-client.test.ts` pins the new `--workspace ws-uuid --surface
-surf-uuid` argv shape and its injection-refusal cases; `test/unit/cmux-client.test.ts`
-and `test/unit/cmux-viewer-path.test.ts` updated for the 3-part composed id.
-Full suite: `bun test test/unit test/integration` → 1105 pass, 53 skip
-(Docker-gated), 0 fail. `bun run typecheck` clean.
+surf-uuid` argv shape and its injection-refusal cases; that file and
+`test/unit/cmux-viewer-path.test.ts` were also updated for the 3-part
+composed id. Full suite: `bun test test/unit test/integration` → 1105 pass,
+53 skip (Docker-gated), 0 fail. `bun run typecheck` clean.
+
+**PR #8 review round — 2026-08-18.** Same ProjectManager/CodeReviewer pattern as
+PR #7: three independent local reviewers (Claude, Gemini, Codex) against the
+diff above. All three independently confirmed the diagnosis by re-testing
+live cmux themselves rather than trusting the write-up — Codex's own words:
+"this project has now recorded the wrong mechanism for ISC-129 twice, so I
+re-ran the experiment myself... the third time is the charm." Two real defects
+survived to CONFIRMED, both fixed and re-verified before merge:
+
+1. **The `--workspace`/`--surface` wiring itself was completely untested — a
+   consensus finding across all three reviewers, mutation-proven by two of
+   them.** Swapping the two arguments at both `index.ts` call sites (passing
+   `surfaceId` where `workspaceId` belongs) typechecked and left the entire
+   suite green, because the argv-builder tests only pin the pure functions in
+   isolation and the viewer-path tests only assert filesystem effects. Fixed
+   by adding two argv-capturing wiring tests to `test/unit/backend-controls.test.ts`
+   (this repo's existing home for "found by mutation" cross-backend regressions)
+   using the already-injectable `exec`; confirmed both tests fail when the
+   swap is reintroduced (mutation-killed), pass with the real code.
+2. **`workspaceId` was validated only inside `respawnPaneArgv`, after
+   `attachViewer` had already written the 0700 viewer script to disk** — 3/3
+   reviewers independently found this, reproducing the exact "validate BEFORE
+   the id becomes a path, not after" bug this same method's own 20-line
+   comment exists to prevent, for the field this PR added. Not currently
+   exploitable (`workspaceId` never reaches a filesystem path), but it
+   reintroduces the ordering invariant the comment and `cmux-viewer-path.test.ts`'s
+   header both exist to hold. Fixed: `assertCmuxValue("workspace id", ...)`
+   now runs immediately after the existing surface-id guard, before `mkdir`.
+3. **A real backward-compatibility break, found independently by all three
+   reviewers and empirically reproduced by two of them**: the composed pane id
+   is not just in-memory — `up` persists it to `presentation.json` as
+   `surface_ref` (`pifleet.presentation/v1`), and a *later, separate* `attach`/
+   `tui` invocation reads it back and calls `splitPaneId`. A 2-field id written
+   by the pre-fix binary now throws `CmuxParseError` instead of resolving,
+   turning a nameable version-skew condition into an opaque parse failure.
+   Fixed: `splitPaneId` now accepts both 2-part (legacy, `workspaceId: null`)
+   and 3-part composed ids; `attachViewer` — the one caller that actually needs
+   the workspace id — throws a named, actionable error ("this pane was
+   recorded by a pifleet build that predates the respawn-pane --workspace fix;
+   run `pifleet down` and `pifleet up` again") instead of a generic parse
+   error. `focus`/`sendText`/`sendKey`/`readScreen` are unaffected either way —
+   none of them ever needed the workspace id.
+
+Also fixed from the review: `composePaneId` now rejects empty fields (it only
+checked for embedded spaces, so it could mint a string `splitPaneId` then
+rejected downstream — after that string might already be on disk); the
+`--workspace` comments in `client.ts` were reworded from "required" to what
+cmux's own `--help` actually calls it ("workspace context ... default:
+`$CMUX_WORKSPACE_ID`") — 0.64.22 scoped surface resolution to a workspace, it
+did not make the flag itself mandatory, and this project has twice mis-stated
+the mechanism from imprecise language already. Two accuracy fixes to this very
+write-up, both caught by Gemini's cross-file pass: the `newSplitArgv` claim
+above (now corrected — it needed no fix because it was already right, not
+because 0.64.22 left it alone), and this paragraph previously undercounted the
+fix as "two functions" when it touched four signatures across three files.
+
+Full suite after the review-round fixes: `bun test test/unit test/integration`
+→ 1111 pass, 53 skip (Docker-gated), 0 fail. `bun run typecheck` clean.
 
 Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
 ISC-254.
@@ -1096,6 +1171,11 @@ Progress: 191/255 → 192/255.
 halves are verified on `tmux`, but the criterion names the **cmux** backend,
 whose `socketControlMode` is `cmuxOnly` and therefore refuses every call from
 outside a pane. Claiming it needs a run from inside one.
+
+*(2026-08-18 — both this diagnosis and the one before it were wrong; ISC-129
+is now `[x]`, fixed, and live-verified. See the criterion line at the top of
+`## Criteria` and `## Verification`, "Phase 4 close-out," for the real
+mechanism and the fix.)*
 
 Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
 ISC-254.

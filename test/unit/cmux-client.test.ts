@@ -319,12 +319,36 @@ describe("the composed pane id round-trips and rejects what would corrupt it", (
     });
   });
 
+  /**
+   * A 2-part id is the pre-`--workspace`-fix encoding, still on disk in any
+   * `presentation.json` written by an earlier pifleet build. `splitPaneId`
+   * must keep accepting it — `paneId`/`surfaceId` alone are all `focus`,
+   * `sendText`, `sendKey` and `readScreen` ever needed — with `workspaceId`
+   * reported as `null` rather than a fabricated value, so `attachViewer` can
+   * name the real condition instead of throwing an opaque parse error two
+   * layers down.
+   */
+  test("a legacy 2-part id (pre-workspace-fix) still splits, with a null workspaceId", () => {
+    expect(splitPaneId("pane-uuid surface-uuid")).toEqual({
+      paneId: "pane-uuid",
+      surfaceId: "surface-uuid",
+      workspaceId: null,
+    });
+  });
+
   test("an embedded space is refused rather than silently truncating a pane id", () => {
     expect(() => composePaneId("pane uuid", "surface", "ws")).toThrow(CmuxParseError);
+    expect(() => composePaneId("pane", "surface uuid", "ws")).toThrow(CmuxParseError);
     expect(() => composePaneId("pane", "surface", "ws id")).toThrow(CmuxParseError);
   });
 
-  test.each(["", "only-one", "a b", "a b c d", " b c", "a  c", "a b "])(
+  test("an empty field is refused, not silently composed into an id splitPaneId then rejects", () => {
+    expect(() => composePaneId("", "surface", "ws")).toThrow(CmuxParseError);
+    expect(() => composePaneId("pane", "", "ws")).toThrow(CmuxParseError);
+    expect(() => composePaneId("pane", "surface", "")).toThrow(CmuxParseError);
+  });
+
+  test.each(["", "only-one", "a b c d", " b c", "a  c", "a b ", " b", "a "])(
     "splitPaneId refuses %j",
     (bad) => {
       expect(() => splitPaneId(bad)).toThrow(CmuxParseError);

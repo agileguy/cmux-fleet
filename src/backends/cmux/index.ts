@@ -244,8 +244,8 @@ export class CmuxBackend implements FleetBackend {
      * The guard existed but ran too late: its only caller was
      * `respawnPaneArgv`, on the last line of this method, while `surfaceId`
      * was interpolated into a filename and written with mode 0700 several
-     * lines earlier. `splitPaneId` requires only three non-empty
-     * space-separated parts, so `/` and `.` both survive it, and a surfaceId
+     * lines earlier. `splitPaneId` requires only non-empty space-separated
+     * parts, so `/` and `.` both survive it, and a surfaceId
      * like `x/../../victim/target` escapes `viewerScriptDir` into a sibling
      * directory — an arbitrary-file overwrite with attacker-influenced
      * `#!/bin/sh` content. The `viewer-` prefix absorbs a plain leading
@@ -258,8 +258,24 @@ export class CmuxBackend implements FleetBackend {
      * needs a hostile or broken cmux — but this is now reachable from every
      * `up` on the cmux backend, which is exactly the kind of ordering bug
      * that stays latent until something wires the caller in.
+     *
+     * `workspaceId` gets the same treatment for the same reason, even though
+     * it never reaches a path itself: `respawnPaneArgv` validated it, but one
+     * line after the write below — a code review on this exact PR caught the
+     * same ordering bug recurring for the field this PR just added.
      */
     assertCmuxValue("surface id", surfaceId);
+    if (workspaceId === null) {
+      // A pane id composed by a pifleet build that predates the --workspace
+      // fix (persisted in presentation.json across a binary upgrade,
+      // ISC-129). Named and actionable, not a generic parse failure two
+      // layers down.
+      throw new Error(
+        "cmux: this pane was recorded by a pifleet build that predates the " +
+          "respawn-pane --workspace fix; run `pifleet down` and `pifleet up` again",
+      );
+    }
+    assertCmuxValue("workspace id", workspaceId);
 
     await mkdir(this.viewerScriptDir, { recursive: true, mode: 0o700 });
     // Keyed by surface UUID: unique per pane and stable across re-attach.
