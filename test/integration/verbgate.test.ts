@@ -384,7 +384,8 @@ describe.skipIf(!DOCKER)("verbgate", () => {
          printf '*\\n' > /outbox/cloud-allow 2>/dev/null;        echo "flat=$?"
          printf '*\\n' > /outbox/policy/cloud-allow 2>/dev/null; echo "nested=$?"
          kubectl delete deployment web >/dev/null 2>&1;          echo "after=$?"
-         kubectl rollout restart deployment/web >/dev/null 2>&1; echo "allowed=$?"`,
+         kubectl rollout restart deployment/web >/dev/null 2>&1; echo "allowed=$?"
+         rm -rf /outbox/policy /outbox/cloud-allow`,
         sb.mounts,
       );
       // The forgery was really written — /outbox is the worker's own mount.

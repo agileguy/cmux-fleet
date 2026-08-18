@@ -380,7 +380,7 @@ retires the criterion.
 - [x] ISC-216: An undiagnosed internal error is distinguishable by exit code from a usage error.
 - [x] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
 - [ ] ISC-218: `writeJsonAtomic`'s directory-fsync failure cannot report a durable write as failed after the rename succeeded.
-- [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses. Test written (`test/integration/verbgate.test.ts`, "a policy planted at the pre-fix /outbox path grants nothing"); cannot be live-verified on this machine until `pifleet/pi-worker:verify` is rebuilt (see Decisions, 2026-08-17).
+- [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses. `test/integration/verbgate.test.ts`, "a policy planted at the pre-fix /outbox path grants nothing" — its own assertions passed on CI's first run (real Docker, fresh image build), but a cleanup-only `EACCES` failed the job; fix pushed, awaiting a green CI run before checking this box (see `## Verification`, "ISC-219, resolved by CI").
 
 ### Group R — Round-3 mutation review (added 2026-07-27)
 
@@ -936,6 +936,23 @@ test. See the commit immediately above this section for the exact ISA diff.
 **Verification, review round:** `bun test test/unit` — 856 pass, 0 fail (43 files); `bun test
 test/integration/up-wiring.test.ts` — 10 pass, 0 fail; `bun run typecheck` clean. No new ISC
 numbers closed by this round — it hardens ISC-160/190/216/217, already counted above.
+
+**ISC-219, resolved by CI (not local Docker).** GitHub Actions' `container` job builds its own
+worker image from scratch every run — it does not depend on this machine's deleted
+`pifleet/pi-worker:verify` — so pushing this branch gave the ISC-219 test its first real
+execution anywhere. Result: 52 of 53 tests in `verbgate.test.ts` passed, including the new one's
+actual assertions; the job still went red because its `afterEach` scratch cleanup hit `EACCES`
+removing `/outbox/policy` and `/outbox/cloud-allow` — files the test has the container itself
+`mkdir`/`printf` into the bind-mounted outbox. On Linux a bind mount passes the container's uid
+10001 straight through to the host, so the CI runner's own user cannot remove what uid 10001
+created; macOS Docker Desktop's VM masks exactly this class of ownership mismatch, which is why
+it looked fine when written and reviewed locally on this machine — the same asymmetry Group N's
+mount-visibility notes already describe, on the write side instead of the read side. Fixed by
+having the same container `rm -rf` the two paths it created before the script exits, so nothing
+uid-10001-owned is left for the host-level cleanup to trip on. Pushed; **ISC-219 stays open
+until CI confirms green on this exact fix** — the test's own assertions already passing once is
+good evidence the logic is right, but checking the box on a run that hasn't gone green yet is
+exactly the overclaiming this same round of review just caught twice already.
 
 ### Phase 6 close-out — 2026-07-28
 
