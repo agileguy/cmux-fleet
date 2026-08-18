@@ -74,9 +74,10 @@ jobs:
           PIFLEET_DOCKER: "1"
           # Every test in all four files must run. Raise this when probes are
           # added; a mismatch is the point, not an inconvenience.
-          # 52 = 42 (image + verbgate) + 5 (egress) + 5 (adc), measured by
-          # running the four files together with PIFLEET_DOCKER=1.
-          EXPECTED: "52"
+          # 53 = 43 (image + verbgate, +1 for ISC-219's pre-fix-path case) + 5
+          # (egress) + 5 (adc), measured by running the four files together
+          # with PIFLEET_DOCKER=1.
+          EXPECTED: "53"
         run: |
           set -eu
           # A skip prints an announcement and still exits 0, so a green job is

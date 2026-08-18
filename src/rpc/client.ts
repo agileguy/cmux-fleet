@@ -149,13 +149,13 @@ export class RpcClient {
       this.#fatal(new RpcProtocolError("<line too long>", err));
       return;
     }
-    for (const line of lines) this.#handleLine(line);
+    this.#handleLines(lines);
   }
 
   /** Test convenience: feed already-decoded text. */
   feedText(text: string): void {
     if (this.#closed) return;
-    for (const line of this.#splitter.pushText(text)) this.#handleLine(line);
+    this.#handleLines(this.#splitter.pushText(text));
   }
 
   /**
@@ -228,11 +228,34 @@ export class RpcClient {
       }
       // Swallow the original rejection path; the caller gets this one instead.
       promise.catch(() => {});
-      return Promise.reject(
-        new RpcClosedError(`write failed: ${err instanceof Error ? err.message : String(err)}`),
-      );
+      // And the client is CLOSED, not merely one request short. The write end
+      // is gone, so no response to anything still pending can arrive and no
+      // later write can succeed — yet `#closed` stayed null, so the
+      // RpcClosedError below asserted a state the object was not in: feeds were
+      // still accepted, and every later send() paid another EPIPE to learn a
+      // fact already established. Reason and error carry the same text.
+      const reason = `write failed: ${err instanceof Error ? err.message : String(err)}`;
+      this.close(reason);
+      return Promise.reject(new RpcClosedError(reason));
     }
     return promise;
+  }
+
+  /**
+   * Dispatch one chunk's lines, re-checking closure between them.
+   *
+   * `#fatal()` can fire on any line, and the entry-point guard is one chunk too
+   * coarse to see it: the lines were already taken off the splitter, so the
+   * loop kept dispatching records from a stream this client had just declared
+   * dead — advancing the stream seq the epoch fence is measured against, and
+   * making "one malformed record kills the stream" true only until the next
+   * newline in the same write.
+   */
+  #handleLines(lines: readonly string[]): void {
+    for (const line of lines) {
+      if (this.#closed) return;
+      this.#handleLine(line);
+    }
   }
 
   #handleLine(line: string): void {

@@ -13,7 +13,7 @@ import { EXIT, isExitCoded } from "../../src/contracts.ts";
 import { CliError } from "../../src/cli/index.ts";
 import { requestedEpochFrom } from "../../src/cli/commands/dispatch.ts";
 import { parseConfig } from "../../src/config/load.ts";
-import { EpochManager } from "../../src/rpc/epoch.ts";
+import { EpochManager, MalformedEpochError } from "../../src/rpc/epoch.ts";
 import { RpcClient } from "../../src/rpc/client.ts";
 
 /**
@@ -214,11 +214,25 @@ describe("dispatch — the mandatory epoch placeholder", () => {
    */
   test("only a positive number is a request — everything else allocates", () => {
     expect(requestedEpochFrom(0)).toBeNull();
-    expect(requestedEpochFrom(-1)).toBeNull();
     expect(requestedEpochFrom(undefined)).toBeNull();
     expect(requestedEpochFrom("1")).toBeNull();
     expect(requestedEpochFrom(null)).toBeNull();
     expect(requestedEpochFrom(1)).toBe(1);
     expect(requestedEpochFrom(7)).toBe(7);
+  });
+
+  /**
+   * ISC-217. `-1` used to fall through the `raw > 0` predicate to `null`, which
+   * means "allocate" — so a task file with a mistyped `epoch` was not refused,
+   * it was RUN, and a re-dispatch meant to replay executed the task a second
+   * time. `1.5` passed the predicate instead and came back `stale_epoch`, which
+   * reads as a fence that moved on rather than as an unreadable request. Both
+   * are named at the boundary now; only the TYPE check still falls through to
+   * "allocate", because a missing `epoch` is not a malformed one.
+   */
+  test("a negative or fractional epoch is a named error, not an allocation", () => {
+    expect(() => requestedEpochFrom(-1)).toThrow(MalformedEpochError);
+    expect(() => requestedEpochFrom(1.5)).toThrow(MalformedEpochError);
+    expect(() => requestedEpochFrom(Number.NaN)).toThrow(MalformedEpochError);
   });
 });

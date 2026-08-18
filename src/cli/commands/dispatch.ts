@@ -21,6 +21,7 @@ import {
   workerPaths,
   type RunPaths,
 } from "../../run/paths.ts";
+import { assertEpochWellFormed } from "../../rpc/epoch.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { composeBrief } from "../../roles/index.ts";
@@ -39,14 +40,24 @@ import { runSchedule, type DispatchAnswer, type SchedulerIO } from "../../orches
  * hand-written envelope with `stale_epoch`, for supplying the one value the
  * schema forces its author to supply.
  *
+ * A negative or fractional `epoch` is neither a request nor the placeholder: it
+ * is malformed. `raw > 0` used to normalize `-1` into `null` — "allocate a fresh
+ * epoch" — so a mistyped re-dispatch RAN the task rather than being refused. It
+ * is a named error now (ISC-217). The TYPE check still falls through to
+ * "allocate", because an absent `epoch` is not a malformed one.
+ *
  * Exported solely so the regression test can exercise THIS expression. It was
  * previously inline, and the test that guards it re-declared an identical
  * predicate of its own — so reverting the fix in this file left the suite green.
  * A test that copies the code under test asserts only that the copy is
  * self-consistent.
+ *
+ * @throws {MalformedEpochError} on a negative or fractional `epoch`.
  */
 export function requestedEpochFrom(raw: unknown): number | null {
-  return typeof raw === "number" && raw > 0 ? raw : null;
+  if (typeof raw !== "number") return null;
+  assertEpochWellFormed(raw);
+  return raw > 0 ? raw : null;
 }
 
 /** The supervisor's answer to one dispatch, before any exit-code policy. */

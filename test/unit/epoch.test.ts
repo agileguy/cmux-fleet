@@ -9,7 +9,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { EpochManager, emptyFence } from "../../src/rpc/epoch.ts";
+import { EpochManager, MalformedEpochError, emptyFence } from "../../src/rpc/epoch.ts";
+import { EXIT, isExitCoded } from "../../src/contracts.ts";
 
 const now = "2026-07-26T14:00:00.000Z";
 
@@ -57,6 +58,100 @@ describe("EpochManager — allocation", () => {
     const em = new EpochManager();
     const d = em.allocate("T-001", "a1", 7);
     expect(d).toEqual({ ok: false, reason: "stale_epoch", requested: 7, next: 1 });
+  });
+});
+
+/**
+ * ISC-217. An epoch is a whole non-negative counter. A negative or fractional
+ * one is not a re-dispatch request that happens to be wrong — it is a value
+ * that can never have named an epoch, so answering it with a normal decision
+ * hides the author's mistake behind ordinary-looking behaviour: `-1` was
+ * silently normalized to "allocate a fresh epoch" (so a re-dispatch meant to
+ * replay ran the task AGAIN), and `1.5` came back `stale_epoch`, which reads as
+ * "someone else advanced the fence" and sends the reader after the wrong bug.
+ */
+describe("EpochManager — a malformed epoch is named, not normalized (ISC-217)", () => {
+  test("a negative requested epoch throws MalformedEpochError", () => {
+    const em = new EpochManager();
+    expect(() => em.allocate("T-001", "a1", -1)).toThrow(MalformedEpochError);
+  });
+
+  test("a fractional requested epoch throws MalformedEpochError", () => {
+    const em = new EpochManager();
+    expect(() => em.allocate("T-001", "a1", 1.5)).toThrow(MalformedEpochError);
+  });
+
+  test("the error names the offending value and is a diagnosed usage failure", () => {
+    let caught: unknown;
+    try {
+      new EpochManager().allocate("T-001", "a1", -3);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(MalformedEpochError);
+    expect((caught as MalformedEpochError).name).toBe("MalformedEpochError");
+    expect((caught as MalformedEpochError).value).toBe(-3);
+    expect((caught as Error).message).toContain("-3");
+    // Diagnosed, so the CLI prints one line and exits 2 rather than reporting
+    // an internal error (ISC-216) for a value the operator supplied.
+    expect(isExitCoded(caught)).toBe(true);
+    expect((caught as MalformedEpochError).exitCode).toBe(EXIT.USAGE);
+  });
+
+  test("a malformed epoch is refused even for an attempt that would replay", () => {
+    // The replay lookup must not launder it: the request is unreadable before
+    // it is anything else.
+    const em = new EpochManager();
+    em.allocate("T-001", "a1", null);
+    expect(() => em.allocate("T-001", "a1", -1)).toThrow(MalformedEpochError);
+  });
+
+  /**
+   * The same defect at the other end of the number line.
+   *
+   * `Number.isInteger(2 ** 53)` is TRUE, so the guard accepted values that can
+   * never function as an epoch counter: past `Number.MAX_SAFE_INTEGER`,
+   * `epoch + 1 === epoch` in IEEE-754, so `allocate`'s `last_accepted_epoch +
+   * 1` returns the number it started from and the fence can never advance
+   * again — every later dispatch answered as though it were the live epoch.
+   *
+   * `MAX_SAFE_INTEGER` itself is the last value that still works and must
+   * remain accepted, or the guard has just moved the off-by-one somewhere else.
+   */
+  test.each([
+    ["MAX_SAFE_INTEGER + 1", Number.MAX_SAFE_INTEGER + 1],
+    ["2 ** 53", 2 ** 53],
+    ["2 ** 60", 2 ** 60],
+    ["Infinity", Number.POSITIVE_INFINITY],
+  ])("an epoch at or above the safe-integer boundary is malformed: %s", (_label, value) => {
+    // The premise: these are exactly the values `Number.isInteger` waved
+    // through, so the case is about safe-ness and not about integer-ness.
+    expect(Number.isInteger(value)).toBe(value !== Number.POSITIVE_INFINITY);
+    expect(() => new EpochManager().allocate("T-001", "a1", value)).toThrow(MalformedEpochError);
+  });
+
+  test("MAX_SAFE_INTEGER is still a well-formed request — the fence can reach it", () => {
+    const d = new EpochManager().allocate("T-001", "a1", Number.MAX_SAFE_INTEGER);
+    expect(d).toEqual({
+      ok: false,
+      reason: "stale_epoch",
+      requested: Number.MAX_SAFE_INTEGER,
+      next: 1,
+    });
+  });
+
+  test("well-formed epochs are untouched: 0 allocates, whole positives request", () => {
+    expect(new EpochManager().allocate("T-001", "a1", 0)).toEqual({
+      ok: false,
+      reason: "stale_epoch",
+      requested: 0,
+      next: 1,
+    });
+    expect(new EpochManager().allocate("T-001", "a1", 1)).toEqual({
+      ok: true,
+      epoch: 1,
+      replayed: false,
+    });
   });
 });
 

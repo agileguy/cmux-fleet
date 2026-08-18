@@ -9,10 +9,14 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
+import { exitCodeForError } from "../../src/cli/index.ts";
+import { imageStatus } from "../../src/cli/commands/doctor.ts";
+import { EXIT, isExitCoded } from "../../src/contracts.ts";
 import { ConfigError, loadConfig, type LoadedConfig } from "../../src/config/load.ts";
 import {
   assertNoAtPaths,
@@ -20,10 +24,29 @@ import {
   renderWorker,
   BRIEFING_MOUNT,
 } from "../../src/config/render.ts";
-import { configHash, imageInputs } from "../../src/container/image.ts";
+import {
+  assetDigestAt,
+  BUILD_CONTEXT_ASSETS,
+  BuildContextError,
+  configHash,
+  imageInputs,
+  type BuildContextAsset,
+  type ImageInputs,
+} from "../../src/container/image.ts";
+import type { Exec } from "../../src/container/run.ts";
 import { runPaths, workerOutboxDir } from "../../src/run/paths.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
+
+/**
+ * The digest of a build-context file as computed from the bytes on disk,
+ * derived independently of `image.ts` so the ISC-160 assertions compare two
+ * separately-arrived-at values rather than a function against itself.
+ */
+async function digestOnDisk(asset: BuildContextAsset): Promise<string> {
+  const text = await readFile(join(REPO_ROOT, "docker", asset), "utf8");
+  return createHash("sha256").update(text.replace(/\r\n/g, "\n")).digest("hex");
+}
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -361,6 +384,160 @@ describe("image tag", () => {
     });
     expect(configHash(imageInputs(a.config, "base"))).toBe(configHash(imageInputs(b.config, "base")));
     expect(configHash(imageInputs(a.config, "base"))).not.toBe(configHash(imageInputs(c.config, "base")));
+  });
+
+  /**
+   * ISC-160 — a stale image must not be silently reused after the build
+   * context changed.
+   *
+   * The hash used to cover pi_version, toolchain and apt_packages and nothing
+   * else. Those are the BUILD ARGS, not the recipe: every other line of the
+   * Dockerfile — the base image, the tini and gcloud installs, the uid 10001
+   * user, the entrypoint, the verbgate COPYs — could be rewritten wholesale
+   * and the tag would not move. `up` refuses an image that is ABSENT (§5.7),
+   * so it would find the old one present and run the fleet on it, and nothing
+   * anywhere reports a tag that merely matched. Silent by construction.
+   *
+   * The digests below are asserted against the files on disk first, so the
+   * inequalities that follow are statements about the build context and not
+   * about arithmetic on invented strings.
+   */
+  test("editing the Dockerfile busts the tag even when nothing else changed (ISC-160)", async () => {
+    const { loaded } = await fixture();
+    const base = imageInputs(loaded.config, "base");
+
+    // Real content, not a stub: an `assets` record wired to "" would satisfy
+    // the inequality below while hashing nothing the image is built from.
+    expect(base.assets.Dockerfile).toBe(await digestOnDisk("Dockerfile"));
+
+    const edited: ImageInputs = {
+      ...base,
+      assets: { ...base.assets, Dockerfile: `${base.assets.Dockerfile}-edited` },
+    };
+    expect(edited.piVersion).toBe(base.piVersion);
+    expect(edited.toolchain).toBe(base.toolchain);
+    expect(edited.aptPackages).toEqual(base.aptPackages);
+
+    expect(configHash(edited)).not.toBe(configHash(base));
+    // …and the hash stays a pure function of its inputs: an UNCHANGED
+    // Dockerfile must keep sharing a tag, or every build is a cache miss.
+    expect(configHash({ ...base })).toBe(configHash(base));
+  });
+
+  /**
+   * ISC-160, the other half — the Dockerfile is not the whole recipe.
+   *
+   * The Dockerfile `COPY`s two files it does not contain, and hashing only its
+   * own text left both outside the tag:
+   *
+   *  - `docker/verbgate` IS the cloud-mutation gate (ISC-104/105/106/107). An
+   *    image built before a gate fix carries the OLD gate, and reusing it
+   *    silently is the single highest-consequence staleness this system has.
+   *  - `docker/entrypoint.sh` renders `models.json`, so a stale one points the
+   *    worker at the wrong model set.
+   *
+   * Each assertion pins the recorded digest to the bytes on disk first, so
+   * "the tag moves" cannot be satisfied by a field nobody reads.
+   */
+  test.each(["verbgate", "entrypoint.sh"] as const)(
+    "editing docker/%s busts the tag even though the Dockerfile is untouched (ISC-160)",
+    async (asset) => {
+      const { loaded } = await fixture();
+      const base = imageInputs(loaded.config, "base");
+
+      expect(base.assets[asset]).toBe(await digestOnDisk(asset));
+      // The Dockerfile itself is held fixed across the comparison, so a pass
+      // cannot come from the half of the hash that already worked.
+      const edited: ImageInputs = {
+        ...base,
+        assets: { ...base.assets, [asset]: `${base.assets[asset]}-edited` },
+      };
+      expect(edited.assets.Dockerfile).toBe(base.assets.Dockerfile);
+      expect(configHash(edited)).not.toBe(configHash(base));
+    },
+  );
+
+  /**
+   * The enumeration cannot silently fall behind the Dockerfile.
+   *
+   * `BUILD_CONTEXT_ASSETS` is only as good as its completeness: a new
+   * `COPY docker/<x>` added without a matching entry reintroduces exactly the
+   * gap above, and nothing else in the build would complain. Reading the
+   * COPY sources out of the real Dockerfile makes the enumeration answerable
+   * to it rather than to whoever last remembered.
+   */
+  test("every file the Dockerfile COPYs out of docker/ is in BUILD_CONTEXT_ASSETS", async () => {
+    const text = await readFile(join(REPO_ROOT, "docker", "Dockerfile"), "utf8");
+    const copied = new Set(
+      [...text.matchAll(/^\s*COPY\s+.*?\bdocker\/(\S+)/gm)].map((m) => m[1] as string),
+    );
+    // The regex must actually be finding things, or this test passes vacuously.
+    expect(copied.size).toBeGreaterThan(0);
+    for (const src of copied) {
+      expect(BUILD_CONTEXT_ASSETS as readonly string[]).toContain(src);
+    }
+  });
+
+  /**
+   * ISC-216 applied to the build context: an unreadable `docker/Dockerfile` is
+   * an operator-fixable broken checkout, NOT a pifleet bug.
+   *
+   * It threw a bare `Error`, which `exitCodeForError` classifies as
+   * `EXIT.INTERNAL` — "internal error, file it, do not retry". That is the
+   * misclassification `EXIT.INTERNAL` was introduced to prevent, aimed the
+   * wrong way: it sends an operator whose checkout is missing a file off to
+   * open a bug report instead of restoring the file.
+   */
+  test("an unreadable build-context file throws a DIAGNOSED usage error, not an internal one", () => {
+    let caught: unknown;
+    try {
+      assetDigestAt(join(REPO_ROOT, "docker", "no-such-build-context-file"));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(BuildContextError);
+    expect((caught as Error).message).toContain("so no image tag can be computed");
+    // Diagnosed under the structural protocol…
+    expect(isExitCoded(caught)).toBe(true);
+    expect((caught as BuildContextError).exitCode).toBe(EXIT.USAGE);
+    // …and the entry point agrees, which is the half that actually reaches a
+    // caller. Asserting only the field would pass with the CLI still exiting 8.
+    expect(exitCodeForError(caught)).toBe(EXIT.USAGE);
+    expect(exitCodeForError(caught)).not.toBe(EXIT.INTERNAL);
+  });
+
+  /**
+   * …and `doctor` survives it. §11's whole premise is that a broken machine is
+   * still diagnosable, so the unreadable checkout has to arrive as a ROW in the
+   * report. Called bare, `imageTag`'s throw escaped the action and destroyed
+   * every probe already collected — the report was suppressed by the very
+   * condition it existed to describe.
+   */
+  test("doctor reports an unreadable build context as a diagnosis instead of aborting", async () => {
+    const { loaded } = await fixture();
+    const execNever: Exec = async () => {
+      throw new Error("docker must not be consulted for a tag that cannot be computed");
+    };
+    const status = await imageStatus(loaded.config, "base", execNever, () => {
+      throw new BuildContextError("cannot read /gone/Dockerfile, so no image tag can be computed");
+    });
+    expect(status.image).toBeNull();
+    expect(status.diagnosis).not.toBeNull();
+    expect(status.diagnosis?.name).toBe("image-tag-uncomputable");
+    // Actionable: which toolchain, and the unreadable path.
+    expect(status.diagnosis?.message).toContain("base");
+    expect(status.diagnosis?.message).toContain("/gone/Dockerfile");
+
+    // The happy path still reports presence, or "never aborts" would be
+    // satisfiable by a helper that never reports an image at all.
+    const ok = await imageStatus(loaded.config, "base", async () => ({
+      code: 0,
+      stdout: "sha256:abc",
+      stderr: "",
+      timedOut: false,
+    }));
+    expect(ok.diagnosis).toBeNull();
+    expect(ok.image?.present).toBe(true);
   });
 });
 

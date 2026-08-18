@@ -1,0 +1,21 @@
+# Bun configuration (ISC-22).
+#
+# `coverage` is deliberately NOT set here. Enabling it globally would attach
+# the profiler to every `bun test` invocation in the repo — including the
+# narrow, fast runs (`bun test test/unit/harvest-outbox.test.ts`) that are the
+# inner loop of working on this codebase — and would bury a one-line failure
+# under a seventy-row table. Coverage is a report you ask for, so it lives
+# behind `bun run test:coverage`; the keys below configure it for when you do.
+
+[test]
+# The report answers "how much of src/ is exercised", and a test file's own
+# 100% is not evidence of anything.
+coverageSkipTestFiles = true
+
+# `text` for a human reading the terminal, `lcov` for anything that ingests it
+# (CI annotations, an editor gutter). `coverage/` is already gitignored.
+coverageReporter = ["text", "lcov"]
+
+# No `coverageThreshold`. A threshold turns the report into a build gate, and
+# ISC-22 asks for a report that can be PRODUCED — a gate here would fail the
+# build on day one and be raised to a number nobody believes by day two.

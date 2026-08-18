@@ -14,12 +14,17 @@ import { stringify } from "yaml";
 import {
   ConfigError,
   ConfigValidationError,
+  ModelNotAllowedError,
+  assertModelAllowed,
   decomposeModel,
   loadConfig,
   resolveAllWorkers,
   resolveWorker,
+  type LoadedConfig,
 } from "../../src/config/load.ts";
+import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
 import { parseDuration } from "../../src/config/schema.ts";
+import { EXIT } from "../../src/contracts.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -247,6 +252,139 @@ describe("merge: model decomposition (§6.1 exception 2)", () => {
     const typo = decomposeModel("SomeModel:hot", "omlx", "low");
     expect(typo.model).toBe("SomeModel:hot");
     expect(typo.thinking).toBe("low");
+  });
+});
+
+/**
+ * ISC-190 / ISC-52 — `models_allowlist` is ENFORCED, not merely accepted.
+ *
+ * The field has been in the schema since v2 and nothing read it, so a typo'd
+ * or deliberately-swapped model started a worker exactly as if the operator
+ * had listed it. The list is the fleet's statement about which models it has
+ * probed for native tool calls (SRD §5.9); an unlisted one is a model nobody
+ * checked, and finding out costs an hour of a run rather than a second of
+ * `up`.
+ */
+describe("models_allowlist is enforced (ISC-190)", () => {
+  /** Resolve `w1` under an allowlist, returning the assertion's outcome. */
+  async function check(allowlist: string[], model: string): Promise<Error | null> {
+    const doc = baseDoc();
+    doc["llm"] = { model: "DefaultModel", models_allowlist: allowlist };
+    doc["roles"] = { eng: { model } };
+    const loaded = await writeAndLoad(doc);
+    try {
+      assertModelAllowed(loaded, resolveWorker(loaded, "w1"));
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  }
+
+  test("a model absent from a non-empty allowlist is refused", async () => {
+    const err = await check(["Allowed-A", "Allowed-B"], "Sneaky-C");
+    expect(err).toBeInstanceOf(ModelNotAllowedError);
+    // Actionable: which worker, which model, and what it could have been.
+    expect(err!.message).toContain("w1");
+    expect(err!.message).toContain("Sneaky-C");
+    expect(err!.message).toContain("Allowed-A");
+  });
+
+  // ISC-52 names the code, so it is asserted rather than assumed.
+  test("the refusal carries exit 2, the usage code", async () => {
+    const err = await check(["Allowed-A"], "Sneaky-C");
+    expect((err as ModelNotAllowedError).exitCode).toBe(EXIT.USAGE);
+  });
+
+  // The other half: a gate that refuses everything is not a gate.
+  test("a model ON the allowlist is permitted", async () => {
+    expect(await check(["Allowed-A", "Allowed-B"], "Allowed-B")).toBeNull();
+  });
+
+  /**
+   * The schema default. Every existing config omits the key, and turning that
+   * into "no model may run" would be a refusal nobody asked for.
+   */
+  test("an empty allowlist constrains nothing", async () => {
+    expect(await check([], "Anything-At-All")).toBeNull();
+  });
+
+  /**
+   * Both sides are compared AFTER §6.1 decomposition, because `provider/` and
+   * `:thinking` are flags rather than part of the model's identity. Comparing
+   * raw strings would break in both directions: a worker written
+   * `omlx/Allowed-A:high` would be refused by an allowlist that names it, and
+   * an entry written `omlx/Allowed-A` would be a rule that can never match —
+   * the dead-rule shape `EgressRuleSchema` already refuses to ship.
+   */
+  test("a decorated worker model matches a bare allowlist entry", async () => {
+    expect(await check(["Allowed-A"], "omlx/Allowed-A:high")).toBeNull();
+  });
+
+  test("a decorated allowlist entry is not a dead rule", async () => {
+    expect(await check(["omlx/Allowed-A:high"], "Allowed-A")).toBeNull();
+  });
+
+  /**
+   * The gate's own error handling, which is where ISC-190 was escapable.
+   *
+   * `up` skips a `--workers` id the config does not define — a legitimate
+   * Phase 1 shape, since a `PIFLEET_PI_COMMAND` double has no configured model
+   * to check. That skip was a `catch { continue }` around `resolveWorker`, and
+   * `resolveWorker` throws `ConfigError` for two unrelated conditions: an id
+   * absent from `workers:`, and a worker that IS defined but names a role
+   * `roles:` does not. A bare catch cannot tell them apart, so the second —
+   * a real config defect — was silently treated as "nothing to check here".
+   *
+   * `FleetConfigSchema.superRefine` rejects that config at parse time
+   * (ISC-68), so the hole was not reachable through a config `up` could load.
+   * That is exactly why it needs pinning HERE, on a hand-built `LoadedConfig`
+   * that bypasses the schema: the value of a second line of defence is what it
+   * does when the first one is absent, and a second line that discards its own
+   * errors is not one. The construction is deliberate, not a shortcut.
+   */
+  describe("the gate does not swallow a resolution failure", () => {
+    /** A LoadedConfig assembled past the schema, so `w1` names a missing role. */
+    async function unresolvable(): Promise<LoadedConfig> {
+      const doc = baseDoc();
+      doc["llm"] = { model: "DefaultModel", models_allowlist: ["Allowed-A"] };
+      const loaded = await writeAndLoad(doc);
+      const workers = loaded.config.workers.map((w) => ({ ...w, role: "no-such-role" }));
+      return { ...loaded, config: { ...loaded.config, workers } };
+    }
+
+    test("a DEFINED worker naming an unknown role propagates, it is not skipped", async () => {
+      const loaded = await unresolvable();
+      // Sanity: `w1` really is in `workers:`, so this is the defect case and
+      // not the absent-id case the skip legitimately covers.
+      expect(loaded.config.workers.map((w) => w.id)).toContain("w1");
+
+      let caught: unknown;
+      try {
+        assertModelsAllowed(loaded, ["w1"]);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(ConfigError);
+      expect((caught as Error).message).toContain("unknown role");
+      expect((caught as Error).message).toContain("no-such-role");
+      // Loud the same way it would be without the allowlist feature at all.
+      expect((caught as ConfigError).exitCode).toBe(EXIT.USAGE);
+    });
+
+    test("an id absent from workers: is still skipped, not refused", async () => {
+      const loaded = await unresolvable();
+      expect(loaded.config.workers.map((w) => w.id)).not.toContain("ghost-1");
+      expect(() => assertModelsAllowed(loaded, ["ghost-1"])).not.toThrow();
+    });
+
+    test("a defined, resolvable worker is still checked against the list", async () => {
+      const doc = baseDoc();
+      doc["llm"] = { model: "DefaultModel", models_allowlist: ["Allowed-A"] };
+      doc["roles"] = { eng: { model: "Sneaky-C" } };
+      const loaded = await writeAndLoad(doc);
+      // The skip must not have widened into "check nothing".
+      expect(() => assertModelsAllowed(loaded, ["w1"])).toThrow(ModelNotAllowedError);
+    });
   });
 });
 

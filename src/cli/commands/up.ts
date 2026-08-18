@@ -17,6 +17,7 @@ import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
 import {
   ConfigError,
+  assertModelAllowed,
   expandPath,
   parseConfig,
   resolveConfigPath,
@@ -37,6 +38,48 @@ import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
  * fail.
  */
 const CLI_ENTRY = join(import.meta.dir, "..", "index.ts");
+
+/**
+ * Enforce `models_allowlist` across every named worker (ISC-190, ISC-52),
+ * before the daemon, before any pane, before any supervisor.
+ *
+ * The field had been in the schema since v2 with no reader, so the list was
+ * documentation: a worker pointed at an unlisted model started exactly as if
+ * the operator had listed it. §5.9 makes the allowlist the fleet's statement
+ * about which models it has probed for native tool calls, and the whole value
+ * of that statement is that it costs a second at `up` rather than an hour of a
+ * run that answers in prose.
+ *
+ * EVERY named worker is checked before ANY is launched. Refusing inside the
+ * launch loop would leave a half-started fleet behind the refusal, which is
+ * the state the check exists to avoid.
+ *
+ * A `--workers` id the config does not define is skipped rather than refused:
+ * Phase 1 `up` legitimately names ids that exist only as a
+ * `PIFLEET_PI_COMMAND` double, and those have no configured model to check.
+ * `ModelNotAllowedError` is a `ConfigError`, so it already carries exit 2 and
+ * needs no wrapping.
+ *
+ * That skip is an explicit MEMBERSHIP test, and was a `catch { continue }`
+ * around `resolveWorker`. The two are not equivalent. `resolveWorker` raises
+ * `ConfigError` for two unrelated conditions — an id absent from `workers:`,
+ * and a worker that IS defined but names a role `roles:` does not — and a bare
+ * catch cannot tell them apart, so the second was treated as "nothing to check
+ * here" and walked straight past the gate. `FleetConfigSchema.superRefine`
+ * rejects that config at parse time (ISC-68), which is why the hole was not
+ * reachable through `up` in practice; but a guard whose second line of defence
+ * silently discards its own errors is not a second line of defence, and the
+ * catch would have swallowed any FUTURE resolution failure just as quietly.
+ * Anything in `workers:` must resolve, and a failure to resolve propagates
+ * exactly as it would without this feature.
+ */
+export function assertModelsAllowed(loaded: LoadedConfig, workerIds: readonly string[]): void {
+  const defined = new Set(loaded.config.workers.map((w) => w.id));
+  for (const workerId of workerIds) {
+    if (!defined.has(workerId)) continue;
+    assertModelAllowed(loaded, resolveWorker(loaded, workerId));
+  }
+}
 
 /** ISC-70: every worker reaches `idle` within this budget. */
 const IDLE_TIMEOUT_MS = 60_000;
@@ -167,6 +210,8 @@ export function register(program: Command): void {
         heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
         egressNetwork = loadedConfig.config.docker.network;
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
+
+        assertModelsAllowed(loadedConfig, workers);
       }
 
       /**

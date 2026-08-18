@@ -4,6 +4,41 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **A chunk containing a fatal error kept dispatching the lines after it.** `RpcClient.feed()`
+  and `feedText()` now share one line loop that re-checks `#closed` between lines, so nothing
+  past the fatal line in the same chunk reaches a handler.
+- **An EPIPE write left the client silently open.** The `send()` EPIPE catch now calls
+  `close()`, so a dead pipe is reported as closed instead of one request failing while the
+  object still accepts feeds and further sends.
+- **An undiagnosed internal error and a usage error shared an exit code.** New `EXIT.INTERNAL`,
+  ranked first in the severity ladder.
+- **A negative, fractional, or unsafely-large `epoch` silently allocated a fresh one instead of
+  failing.** New `MalformedEpochError`; the bound is `Number.isSafeInteger`, not
+  `Number.isInteger` — a value at or past `2**53` could never advance the fence.
+- **A stale worker image could be silently reused after the Dockerfile — or the files it
+  `COPY`s — changed.** The image tag's config hash now covers `docker/Dockerfile`,
+  `docker/verbgate`, and `docker/entrypoint.sh`, not only `pi_version` / `toolchain` /
+  `apt_packages`. A structural test asserts every `COPY` source in the real Dockerfile is
+  accounted for.
+- **A backslash in an envelope path passed the control-character filter.** Harmless on POSIX,
+  a path separator elsewhere; now refused independently of the control-character check.
+- **An unreadable `docker/Dockerfile` was reported as an internal pifleet bug (exit 8) instead
+  of a fixable environment problem (exit 2).** `doctor` also no longer aborts its entire probe
+  when one toolchain's image tag can't be computed — it reports a diagnosis row instead.
+- **The `models_allowlist` gate could be silently bypassed by an unrelated config error.** A
+  worker resolution failure now propagates instead of being treated as "nothing to check."
+
+### Added
+- **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
+  allowlist refuses to start, checked for every worker before any of them launch.
+- **Exit code `8` (internal error) documented in the README's exit ladder.**
+- **A test-coverage report.** `bun run test:coverage` (Bun's built-in coverage,
+  text + lcov, no threshold gate).
+- **The `late_prompt_failure` settle guard has its own regression test**, alongside the
+  existing deadline-escalation one — the two are different call sites reached by different
+  events.
+
 ## [1.0.0] — 2026-07-28 — Phase 6: attended
 
 The last phase. Every command in SRD §10 is implemented.

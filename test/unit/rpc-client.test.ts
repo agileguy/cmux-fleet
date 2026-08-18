@@ -189,6 +189,91 @@ describe("RpcClient — stream death", () => {
     await expect(h.client.send("abort")).rejects.toBeInstanceOf(RpcClosedError);
     expect(h.written).toHaveLength(0);
   });
+
+  /**
+   * ISC-214. "One malformed record kills the stream" held only until the next
+   * newline in the SAME write. `#fatal()` closes the client, but the chunk's
+   * lines had already been taken off the splitter, and the loop kept handing
+   * them to `#handleLine` — so a stream this client had declared dead went on
+   * dispatching events, advancing the stream seq the epoch fence is built on.
+   *
+   * Both entry points are driven: `feed()` is the production path and
+   * `feedText()` is the one every test uses, and the guard has to sit on the
+   * loop they share or one of them regresses alone.
+   */
+  test("a fatal error stops the rest of the SAME chunk (ISC-214)", () => {
+    const chunk = '{"type":"a"}\n{this is not json}\n{"type":"c"}\n{"type":"d"}\n';
+    for (const entry of ["feed", "feedText"] as const) {
+      const h = harness();
+      if (entry === "feed") h.client.feed(enc.encode(chunk));
+      else h.client.feedText(chunk);
+
+      expect(h.protocolErrors, entry).toHaveLength(1);
+      // Line 1 was dispatched before the fatal; lines 3 and 4 never are.
+      expect(h.events.map((e) => (e.event as { type: string }).type), entry).toEqual(["a"]);
+      // And they consume no seq either: a record dispatched after the close
+      // would move the fence post every epoch attribution is measured against.
+      expect(h.client.lastSeq, entry).toBe(1);
+    }
+  });
+});
+
+/**
+ * ISC-215. The EPIPE path emptied the pending map and returned an
+ * `RpcClosedError` while leaving `#closed` null — an error asserting a state
+ * the object was not in. The client went on accepting feeds and went on
+ * writing to a pipe that had already thrown, so every later `send()` paid
+ * another EPIPE instead of failing fast on a fact already established.
+ */
+describe("RpcClient — a failed write closes the client (ISC-215)", () => {
+  function brokenPipe(afterWrites: number): {
+    sink: { write(data: string): void };
+    attempts: () => number;
+  } {
+    let attempts = 0;
+    return {
+      sink: {
+        write(): void {
+          attempts++;
+          if (attempts > afterWrites) {
+            throw Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+          }
+        },
+      },
+      attempts: () => attempts,
+    };
+  }
+
+  test("the client reports itself closed after an EPIPE", async () => {
+    const events: Array<{ event: RpcEvent; seq: number }> = [];
+    const pipe = brokenPipe(0);
+    const client = new RpcClient(pipe.sink, { onEvent: (event, seq) => events.push({ event, seq }) });
+
+    await expect(client.send("prompt", { message: "go" })).rejects.toBeInstanceOf(RpcClosedError);
+    expect(pipe.attempts()).toBe(1);
+
+    // Closed: the next send fails fast rather than re-throwing off the dead pipe.
+    await expect(client.send("abort")).rejects.toBeInstanceOf(RpcClosedError);
+    expect(pipe.attempts()).toBe(1);
+
+    // Closed on the read side too — the same fact governs both directions.
+    client.feedText('{"type":"agent_start"}\n');
+    expect(events).toHaveLength(0);
+    expect(client.lastSeq).toBe(0);
+  });
+
+  test("requests already in flight reject; none are left pending", async () => {
+    // The pipe breaks between two sends. The first one's response can never
+    // arrive, so leaving it pending would hold a timer — and a rejection
+    // nobody is waiting on yet — against a stream that is gone.
+    const pipe = brokenPipe(1);
+    const client = new RpcClient(pipe.sink, { onEvent: () => {} });
+
+    const inFlight = client.send("get_state");
+    await expect(client.send("prompt", { message: "go" })).rejects.toBeInstanceOf(RpcClosedError);
+    await expect(inFlight).rejects.toBeInstanceOf(RpcClosedError);
+    expect(client.pendingCount).toBe(0);
+  });
 });
 
 describe("Stopwatch — monotonic time only", () => {

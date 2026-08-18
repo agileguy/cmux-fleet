@@ -135,7 +135,15 @@ async function writeGcloudShim(binDir: string): Promise<void> {
 }
 
 /** Minimal valid fleet.yaml naming the shimmed network and the seeded repo. */
-function fleetYaml(repo: string, opts: { cloudAccess?: boolean } = {}): string {
+function fleetYaml(
+  repo: string,
+  opts: {
+    cloudAccess?: boolean;
+    modelsAllowlist?: string[];
+    /** Role named by `eng-1`. A name absent from `roles:` is a config defect. */
+    workerRole?: string;
+  } = {},
+): string {
   return [
     "version: 2",
     "name: up-wiring",
@@ -148,10 +156,16 @@ function fleetYaml(repo: string, opts: { cloudAccess?: boolean } = {}): string {
     "    tokens_ceiling: 1000000",
     "llm:",
     "  model: wiring-test-model",
+    // Omitted by default, which is the shape of every other test in this file:
+    // an empty allowlist constrains nothing, so the ISC-190 gate stays
+    // invisible until a test asks for it.
+    ...(opts.modelsAllowlist === undefined
+      ? []
+      : [`  models_allowlist: [${opts.modelsAllowlist.join(", ")}]`]),
     "roles:",
     opts.cloudAccess === true ? "  engineer: {cloud_access: true}" : "  engineer: {}",
     "workers:",
-    "  - {id: eng-1, role: engineer}",
+    `  - {id: eng-1, role: ${opts.workerRole ?? "engineer"}}`,
     "",
   ].join("\n");
 }
@@ -375,6 +389,170 @@ describe("a config that exists but cannot be loaded refuses to start (review fin
     expect(up.stderr).toContain("config not found");
     // The fallthrough would have started a fleet and printed a run id.
     expect(up.stdout).not.toContain("run ");
+  });
+});
+
+/**
+ * ISC-190 / ISC-52 — `models_allowlist` is enforced on the LAUNCH path.
+ *
+ * `assertModelAllowed` is unit-tested against the resolver, but the criterion
+ * is "a worker whose model is not on the list DOES NOT START", and that is a
+ * statement about `up`, not about a pure function. This is the same
+ * dead-wiring disease the header of this file describes: the check could be
+ * deleted from `up.ts` and every unit test would go on certifying it.
+ *
+ * So both halves run the real CLI: the refusal must launch nothing, and the
+ * permitted model must still bring a fleet up. Asserting only the refusal
+ * would be satisfied by a gate that refuses every model there is.
+ */
+describe("models_allowlist is enforced before any worker starts (ISC-190)", () => {
+  test("a model outside the allowlist exits 2 and launches nothing", async () => {
+    const rig = await makeRig();
+    const gated = join(rig.base, "gated.yaml");
+    // `wiring-test-model` is what the worker resolves to; the list names two
+    // other models, so the fleet's own default is the thing refused.
+    await writeFile(
+      gated,
+      fleetYaml(rig.repo, { modelsAllowlist: ["probed-model-a", "probed-model-b"] }),
+    );
+    const up = await runCli(rig, [
+      "up",
+      "--config",
+      gated,
+      "--workers",
+      "eng-1",
+      "--backend",
+      "headless",
+    ]);
+    expect(up.code).toBe(EXIT.USAGE);
+    // Actionable: the worker, the model it resolved to, and the list it missed.
+    expect(up.stderr).toContain("eng-1");
+    expect(up.stderr).toContain("wiring-test-model");
+    expect(up.stderr).toContain("models_allowlist");
+    expect(up.stderr).toContain("probed-model-a");
+    // A diagnosis, not a crash.
+    expect(up.stderr).not.toContain("at async");
+    expect(up.stdout).not.toContain("run ");
+
+    // Nothing started. The run dir is created before the config is read, so it
+    // may exist — but no supervisor was launched and no ledger written, which
+    // is what "does not start" means.
+    for (const runId of await readdir(rig.root)) {
+      const run = runPaths(runId, rig.root);
+      expect(await readdir(run.workersDir)).toEqual([]);
+      expect((await mergeLedger(run)).records).toEqual([]);
+    }
+  });
+
+  test(
+    "a model ON the allowlist still starts normally — the gate is a filter, not a wall",
+    async () => {
+      const rig = await makeRig();
+      const allowed = join(rig.base, "allowed.yaml");
+      await writeFile(
+        allowed,
+        fleetYaml(rig.repo, { modelsAllowlist: ["wiring-test-model", "probed-model-b"] }),
+      );
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        allowed,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      // …and the fleet genuinely came up, rather than merely exiting 0.
+      const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+      expect(records.map((r) => r.event)).toContain("supervisor_launched");
+    },
+    90_000,
+  );
+
+  /**
+   * A worker naming an unknown role is refused BEFORE the run touches
+   * anything, allowlist present or not.
+   *
+   * Two independent guards have to hold for this, and this test pins the
+   * outcome they jointly produce rather than either one's internals:
+   * `FleetConfigSchema.superRefine` rejects the role at parse time (ISC-68),
+   * and the `models_allowlist` loop in `up.ts` no longer swallows a
+   * `resolveWorker` failure if it ever gets one. Whichever fires, the operator
+   * must get exit 2 naming the role.
+   *
+   * The last assertion is the load-bearing one. Everything downstream of the
+   * pre-flight checks mutates something the operator owns — `detectRepoHazards`
+   * QUARANTINES `AGENTS.md` by renaming it in their repository. A config defect
+   * must not buy a half-applied run, so the seeded hazard being untouched is
+   * how "refused before anything happened" is verified rather than assumed.
+   */
+  test("a worker naming an unknown role is refused before the repo is touched", async () => {
+    const rig = await makeRig();
+    const badRole = join(rig.base, "bad-role.yaml");
+    await writeFile(
+      badRole,
+      fleetYaml(rig.repo, {
+        workerRole: "no-such-role",
+        modelsAllowlist: ["probed-model-a"],
+      }),
+    );
+    const up = await runCli(rig, [
+      "up",
+      "--config",
+      badRole,
+      "--workers",
+      "eng-1",
+      "--backend",
+      "headless",
+    ]);
+    expect(up.code).toBe(EXIT.USAGE);
+    // Named and pathed at the key the operator has to edit — and NOT misfiled
+    // as an allowlist miss, which would send them to the wrong key entirely.
+    expect(up.stderr).toContain("unknown role");
+    expect(up.stderr).toContain("no-such-role");
+    expect(up.stderr).not.toContain("models_allowlist");
+    // A diagnosis, not a crash.
+    expect(up.stderr).not.toContain("at async");
+    expect(up.stdout).not.toContain("run ");
+
+    for (const runId of await readdir(rig.root)) {
+      const run = runPaths(runId, rig.root);
+      expect(await readdir(run.workersDir)).toEqual([]);
+      expect((await mergeLedger(run)).records).toEqual([]);
+    }
+    // The seeded hazard is still where the operator left it, under its own name.
+    expect(await readdir(rig.repo)).toEqual(["AGENTS.md"]);
+  });
+
+  /**
+   * …and the skip the bare catch existed to provide is still there. Narrowing
+   * it to a membership test must not start refusing a `--workers` id that
+   * exists only as a `PIFLEET_PI_COMMAND` double, or this fix trades one
+   * wrongly-refused fleet for another.
+   */
+  test("an id absent from workers: is still skipped, not refused", async () => {
+    const rig = await makeRig();
+    const gated = join(rig.base, "undefined-id.yaml");
+    await writeFile(gated, fleetYaml(rig.repo, { modelsAllowlist: ["probed-model-a"] }));
+    const up = await runCli(rig, [
+      "up",
+      "--config",
+      gated,
+      "--workers",
+      "ghost-1",
+      "--backend",
+      "headless",
+      "--json",
+    ]);
+    // `eng-1`'s model is NOT on this list, so a loop that checked configured
+    // workers rather than the named ones would refuse here. `ghost-1` is not in
+    // `workers:` at all, so the allowlist has nothing to say about it.
+    expect(up.stderr).not.toContain("models_allowlist");
+    expect(up.stderr).not.toContain("unknown role");
   });
 });
 

@@ -39,7 +39,49 @@
  *   else did it" from "I did it and lost the ack".
  */
 
-import type { Verdict } from "../contracts.ts";
+import { EXIT, type Verdict } from "../contracts.ts";
+
+/**
+ * A requested `epoch` that could never have named an epoch.
+ *
+ * Epochs are a whole counter starting at 1, with 0 the documented "allocate one
+ * for me" placeholder. A negative or fractional value is not a request that
+ * happens to be wrong — it is unreadable, and answering it with an ordinary
+ * decision hid the author's mistake behind ordinary behaviour: `-1` was
+ * normalized to a FRESH ALLOCATION, so a re-dispatch meant to replay ran the
+ * task a second time; `1.5` came back `stale_epoch`, which reads as a fence
+ * someone else advanced and sends the reader after the wrong bug (ISC-217).
+ *
+ * It carries `exitCode` so the structural `ExitCoded` protocol (contracts.ts)
+ * reports it as the usage error it is — one line and exit 2, rather than the
+ * undiagnosed-internal code.
+ */
+export class MalformedEpochError extends Error {
+  readonly exitCode = EXIT.USAGE;
+  constructor(readonly value: number) {
+    super(
+      `malformed epoch ${String(value)}: expected a whole number in [0, ${Number.MAX_SAFE_INTEGER}]`,
+    );
+    this.name = "MalformedEpochError";
+  }
+}
+
+/**
+ * Throw `MalformedEpochError` unless `value` is a whole number in
+ * `[0, Number.MAX_SAFE_INTEGER]`.
+ *
+ * SAFE integer, not merely integer. `Number.isInteger(2 ** 53)` is true, and
+ * a value at or above that boundary can never function as an epoch counter:
+ * `epoch + 1 === epoch` in IEEE-754 doubles from there on, so `allocate`'s
+ * `last_accepted_epoch + 1` returns the SAME number it started from and the
+ * fence can never advance again. Every subsequent dispatch would be answered
+ * as though it were the live epoch. That is the same class of defect ISC-217
+ * is about — a value that cannot name an epoch being processed as one — and
+ * `Number.isInteger` waves it straight through.
+ */
+export function assertEpochWellFormed(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) throw new MalformedEpochError(value);
+}
 
 export interface CompletedTask {
   task_id: string;
@@ -123,6 +165,9 @@ export class EpochManager {
    * snapshot durably and only then send the prompt.
    */
   allocate(taskId: string, attemptId: string, requestedEpoch: number | null): DispatchDecision {
+    // Before anything else, including the replay lookup: an unreadable request
+    // must not be laundered into a decision by a path that never examines it.
+    if (requestedEpoch !== null) assertEpochWellFormed(requestedEpoch);
     const key = attemptKey(taskId, attemptId);
 
     // Same attempt seen before: replay the original answer verbatim, whether

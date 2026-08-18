@@ -349,6 +349,17 @@ export const EXIT = {
   BUDGET: 5,
   WORKER_DIED: 6,
   PARTIAL: 7,
+  /**
+   * A failure pifleet could not diagnose — a bug in pifleet itself.
+   *
+   * Not in the SRD §10 ladder, and deliberately outside it: every code above
+   * describes something that happened to the RUN, and this one describes the
+   * tool breaking. The entry point used to report it as `USAGE`, which made a
+   * crash indistinguishable from a typo'd flag over the only channel a machine
+   * caller has — so an orchestrator would answer it by rewriting its arguments
+   * and trying again, forever (ISC-216).
+   */
+  INTERNAL: 8,
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
@@ -380,6 +391,9 @@ export function isExitCoded(e: unknown): e is ExitCoded {
 
 /** Severity order for `wait --all`, which can legitimately trip several at once. */
 const EXIT_SEVERITY: readonly ExitCode[] = [
+  // Above the §10 ladder: if pifleet itself broke, nothing it reports about
+  // the run is trustworthy enough to outrank that.
+  EXIT.INTERNAL,
   EXIT.USAGE,
   EXIT.BACKEND_UNAVAILABLE,
   EXIT.BUDGET,

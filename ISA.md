@@ -3,10 +3,10 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 104/236
+progress: 192/255
 mode: build
 started: 2026-07-27
-updated: 2026-07-27
+updated: 2026-08-17
 ---
 
 # cmux-fleet — Ideal State Artifact
@@ -119,38 +119,38 @@ suite green on `headless` against a test double.
 - [x] ISC-19: The e2e suite runs `up → dispatch → wait → artifacts` end-to-end against the double.
 - [x] ISC-20: Integration tests exercise real subprocess spawning, real filesystem, and real git, with no network.
 - [x] ISC-21: No test in the `headless` suite requires network egress.
-- [ ] ISC-22: A test-coverage report can be produced and lists every `src/` module.
+- [ ] ISC-22: A test-coverage report can be produced and lists every `src/` module. `bun run test:coverage` works and lists 73 of 76 (`bunfig.toml`); `src/backends/types.ts` (types-only, no instrumentable code) and `src/supervisor/index.ts` (only ever loaded as a spawned subprocess) are structurally absent, but `src/cli/commands/tui.ts` is missing only because no test imports it — a real, closable gap, not a structural one — so "every module" isn't met yet.
 
 ### Group C — Container image
 
-- [ ] ISC-23: `image build --toolchain node` produces an image whose `pi --version` matches the pinned version.
-- [ ] ISC-24: `image verify` fails on an image whose Pi version differs from config.
-- [ ] ISC-25: A worker container runs as uid 10001.
-- [ ] ISC-26: A worker container runs with a read-only root filesystem.
-- [ ] ISC-27: A file written to `/workspace` appears in the host worktree.
-- [ ] ISC-28: A file written in the host worktree appears at `/workspace`.
-- [ ] ISC-29: `/skills` is read-only inside the container; a write attempt fails.
-- [ ] ISC-30: The host `~/.pi/agent` is not mounted in any container.
+- [x] ISC-23: `image build --toolchain node` produces an image whose `pi --version` matches the pinned version.
+- [x] ISC-24: `image verify` fails on an image whose Pi version differs from config.
+- [x] ISC-25: A worker container runs as uid 10001.
+- [x] ISC-26: A worker container runs with a read-only root filesystem.
+- [x] ISC-27: A file written to `/workspace` appears in the host worktree.
+- [x] ISC-28: A file written in the host worktree appears at `/workspace`.
+- [x] ISC-29: `/skills` is read-only inside the container; a write attempt fails.
+- [x] ISC-30: The host `~/.pi/agent` is not mounted in any container.
 - [ ] ISC-31: `docker inspect` shows no cloud provider key in any container's environment (only `OMLX_API_KEY`).
 - [ ] ISC-32: `up` refuses to start when a role's image is missing.
-- [ ] ISC-33: `gcloud version` succeeds inside every worker image regardless of `toolchain`.
-- [ ] ISC-34: `kubectl version --client` succeeds inside every worker image.
-- [ ] ISC-35: `helm version` succeeds inside every worker image.
-- [ ] ISC-36: `jq --version` succeeds inside every worker image.
-- [ ] ISC-37: `curl --version` succeeds inside every worker image.
-- [ ] ISC-38: PID 1 in a worker container is `tini`.
-- [ ] ISC-39: The container entrypoint renders `~/.pi/agent/models.json` from env and Pi registers the oMLX provider (SRD Q9).
-- [ ] ISC-40: The rendered `models.json` survives the read-only root (written to a writable tmpfs path Pi reads).
+- [x] ISC-33: `gcloud version` succeeds inside every worker image regardless of `toolchain`.
+- [x] ISC-34: `kubectl version --client` succeeds inside every worker image.
+- [x] ISC-35: `helm version` succeeds inside every worker image.
+- [x] ISC-36: `jq --version` succeeds inside every worker image.
+- [x] ISC-37: `curl --version` succeeds inside every worker image.
+- [x] ISC-38: PID 1 in a worker container is `tini`.
+- [x] ISC-39: The container entrypoint renders `~/.pi/agent/models.json` from env and Pi registers the oMLX provider (SRD Q9).
+- [x] ISC-40: The rendered `models.json` survives the read-only root (written to a writable tmpfs path Pi reads).
 
 ### Group D — Google credentials
 
-- [ ] ISC-41: With `cloud_access: true` and `adc_mode: token`, `gcloud auth print-access-token` succeeds inside the container.
-- [ ] ISC-42: In `token` mode, no `refresh_token` appears in the container environment.
-- [ ] ISC-43: In `token` mode, no `refresh_token` appears anywhere on the container filesystem or in `/creds`.
+- [x] ISC-41: With `cloud_access: true` and `adc_mode: token`, `gcloud auth print-access-token` succeeds inside the container.
+- [x] ISC-42: In `token` mode, no `refresh_token` appears in the container environment.
+- [x] ISC-43: In `token` mode, no `refresh_token` appears anywhere on the container filesystem or in `/creds`.
 - [ ] ISC-44: The host `~/.config/gcloud` directory is not in any container's `docker inspect` mount list.
 - [ ] ISC-45: A role with `cloud_access: false` has no Google credential.
 - [ ] ISC-46: In a `cloud_access: false` role, `gcloud auth print-access-token` fails.
-- [ ] ISC-47: After `token_refresh` elapses, a `gcloud` call inside a long-running container still succeeds.
+- [x] ISC-47: After `token_refresh` elapses, a `gcloud` call inside a long-running container still succeeds.
 - [ ] ISC-48: With `impersonate_service_account` set, the token's identity is the SA, not the launching user's account.
 - [ ] ISC-49: `up` prints the granted identity, project, and ADC mode for every `cloud_access` worker.
 
@@ -158,7 +158,7 @@ suite green on `headless` against a test double.
 
 - [ ] ISC-50: A container completes a model call against `host.docker.internal:8000`.
 - [ ] ISC-51: That call succeeds with no route to the public internet.
-- [ ] ISC-52: A model outside `models_allowlist` is refused at `up` with exit 2.
+- [x] ISC-52: A model outside `models_allowlist` is refused at `up` with exit 2.
 - [ ] ISC-53: A model that answers a `tools`-bearing probe with prose is refused at `up` with exit 2.
 - [ ] ISC-54: `doctor` reports the oMLX model list.
 - [ ] ISC-55: `doctor` reports a measured single-request oMLX latency.
@@ -167,42 +167,42 @@ suite green on `headless` against a test double.
 
 ### Group F — Configuration
 
-- [ ] ISC-58: `config validate` exits 2 with a field-level error on a malformed config.
-- [ ] ISC-59: `config validate` rejects a role combining `bash` with `read_only: true`.
-- [ ] ISC-60: `render --worker eng-1` emits the expected normalized argv without spawning anything.
-- [ ] ISC-61: Changing the length of `workers:` changes the container count, with no other edit.
-- [ ] ISC-62: Two roles produce different `--model` values.
-- [ ] ISC-63: Two roles produce different `--skill` sets.
-- [ ] ISC-64: A role that overrides `skills:` still receives `pifleet-worker`.
-- [ ] ISC-65: Multiple briefing fragments produce exactly one `--append-system-prompt` argument.
-- [ ] ISC-66: No rendered argv contains an `@`-prefixed path.
-- [ ] ISC-67: All six SRD roles (`sre`, `investigator`, `verifier`, `engineer`, `reviewer`, `tester`) load from the default config.
-- [ ] ISC-68: An unknown role name referenced by a worker fails `config validate` with a named error.
+- [x] ISC-58: `config validate` exits 2 with a field-level error on a malformed config.
+- [x] ISC-59: `config validate` rejects a role combining `bash` with `read_only: true`.
+- [x] ISC-60: `render --worker eng-1` emits the expected normalized argv without spawning anything.
+- [x] ISC-61: Changing the length of `workers:` changes the container count, with no other edit.
+- [x] ISC-62: Two roles produce different `--model` values.
+- [x] ISC-63: Two roles produce different `--skill` sets.
+- [x] ISC-64: A role that overrides `skills:` still receives `pifleet-worker`.
+- [x] ISC-65: Multiple briefing fragments produce exactly one `--append-system-prompt` argument.
+- [x] ISC-66: No rendered argv contains an `@`-prefixed path.
+- [x] ISC-67: All six SRD roles (`sre`, `investigator`, `verifier`, `engineer`, `reviewer`, `tester`) load from the default config.
+- [x] ISC-68: An unknown role name referenced by a worker fails `config validate` with a named error.
 
 ### Group G — Lifecycle
 
-- [ ] ISC-69: `up` returns a `run_id`.
-- [ ] ISC-70: Every worker reaches `idle` within 60s of `up`.
-- [ ] ISC-71: `status --json` reflects `busy` within 2s of dispatch.
-- [ ] ISC-72: `down` leaves no running container for that run.
-- [ ] ISC-73: `down` leaves no supervisor process for that run.
+- [x] ISC-69: `up` returns a `run_id`.
+- [x] ISC-70: Every worker reaches `idle` within 60s of `up`.
+- [x] ISC-71: `status --json` reflects `busy` within 2s of dispatch.
+- [x] ISC-72: `down` leaves no running container for that run.
+- [x] ISC-73: `down` leaves no supervisor process for that run.
 - [ ] ISC-74: Closing a worker's pane does not stop the worker in rpc mode; the task still settles.
-- [ ] ISC-75: Killing the `pifleet` CLI mid-run leaves supervisors running.
-- [ ] ISC-76: After the CLI is killed, `status --run` re-attaches and `wait` still returns a verdict.
-- [ ] ISC-77: No supervisor has the CLI or a pane shell as its parent: `pgid == pid`.
-- [ ] ISC-78: A supervisor's session id differs from the launcher's.
+- [x] ISC-75: Killing the `pifleet` CLI mid-run leaves supervisors running.
+- [x] ISC-76: After the CLI is killed, `status --run` re-attaches and `wait` still returns a verdict.
+- [x] ISC-77: No supervisor has the CLI or a pane shell as its parent: `pgid == pid`.
+- [x] ISC-78: A supervisor's session id differs from the launcher's.
 
 ### Group H — Dispatch and completion
 
-- [ ] ISC-79: A dispatched task appears in the transcript as a `UserMessage`.
+- [x] ISC-79: A dispatched task appears in the transcript as a `UserMessage`.
 - [x] ISC-80: `steer` injects a message that appears before the next assistant turn.
 - [x] ISC-81: `abort` returns the worker to `idle` within 10s.
-- [ ] ISC-82: A scenario emitting `agent_end{willRetry:true}` then continuing is not reported complete.
-- [ ] ISC-83: A scenario settling on an aborted turn is reported `aborted`, not `success`.
-- [ ] ISC-84: The SRD §7.5 interleaving scenario does not attribute epoch N's diff to epoch N+1.
-- [ ] ISC-85: Re-dispatching a completed `(worker, task_id, epoch)` is a no-op returning `already_completed`.
-- [ ] ISC-86: A `prompt` that acks then fails late fails its epoch rather than reporting accepted.
-- [ ] ISC-87: Completion is detected via `agent_end{willRetry:false}` plus a correlated `get_state` showing `isStreaming:false` and `pendingMessageCount:0`.
+- [x] ISC-82: A scenario emitting `agent_end{willRetry:true}` then continuing is not reported complete.
+- [x] ISC-83: A scenario settling on an aborted turn is reported `aborted`, not `success`.
+- [x] ISC-84: The SRD §7.5 interleaving scenario does not attribute epoch N's diff to epoch N+1.
+- [x] ISC-85: Re-dispatching a completed `(worker, task_id, epoch)` is a no-op returning `already_completed`.
+- [x] ISC-86: A `prompt` that acks then fails late fails its epoch rather than reporting accepted.
+- [x] ISC-87: Completion is detected via `agent_end{willRetry:false}` plus a correlated `get_state` showing `isStreaming:false` and `pendingMessageCount:0`.
 
 ### Group I — Artifacts
 
@@ -224,11 +224,11 @@ suite green on `headless` against a test double.
 
 ### Group J — Safety and security
 
-- [ ] ISC-103: A `kubectl get` in a `cloud_access` worker succeeds.
-- [ ] ISC-104: A `kubectl delete` not in `cloud_allow[]` exits 77 and is refused.
-- [ ] ISC-105: A mutating verb named in the task's `cloud_allow[]` executes.
-- [ ] ISC-106: That permitted mutating verb is recorded in the ledger with task id and argv.
-- [ ] ISC-107: Every cloud invocation, permitted or refused, appears in the run ledger.
+- [x] ISC-103: A `kubectl get` in a `cloud_access` worker succeeds.
+- [x] ISC-104: A `kubectl delete` not in `cloud_allow[]` exits 77 and is refused.
+- [x] ISC-105: A mutating verb named in the task's `cloud_allow[]` executes.
+- [x] ISC-106: That permitted mutating verb is recorded in the ledger with task id and argv.
+- [x] ISC-107: Every cloud invocation, permitted or refused, appears in the run ledger.
 - [ ] ISC-108: A worker completing 3 turns with zero tool calls is classified `failed:no_tool_calls`.
 - [ ] ISC-109: With 6 workers up and `max_concurrent: 2`, at most 2 have an in-flight generation at any sampled moment.
 - [x] ISC-110: A worker queued behind others is not killed as wedged before `event_stall_warn` elapses.
@@ -277,7 +277,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-141: Epoch attribution uses the RPC stream offset, and the SRD §7.5 interleaving is decided correctly when offset is the only distinguishing signal.
 - [ ] ISC-142: A dispatch whose epoch is `<=` the worker's persisted `last_accepted_epoch` is rejected at the worker side, not merely bookkept by the allocator.
 - [ ] ISC-143: The epoch high-water-mark is durable before dispatch; allocate → crash → restart does not re-issue the same epoch.
-- [ ] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
+- [x] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
 - [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
 - [x] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
 - [ ] ISC-147: Across every hostile scenario, completion is never declared while the agent will still emit output.
@@ -293,7 +293,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
 - [ ] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output.
 - [ ] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
-- [ ] ISC-160: A stale image is not silently reused after the Dockerfile changed.
+- [x] ISC-160: A stale image is not silently reused after the Dockerfile changed.
 
 ### Group N — Mount visibility (added 2026-07-27, found by the Docker-gated suite)
 
@@ -334,7 +334,7 @@ Open — carried forward, not fixed here:
 - [ ] ISC-172: The verbgate ledger is collected outside the container, so a worker cannot truncate its own audit trail.
 - [ ] ISC-188: `render.ts` and `run/paths.ts` compute the run directory once, not twice (`outbox`, `skills`, `env`, briefing paths, and `PIFLEET_RUNS_DIR` honoured).
 - [ ] ISC-189: `up` refuses to run against an image that is absent or fails `verify`.
-- [ ] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
+- [x] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
 - [x] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
 - [ ] ISC-192: A ledger or state file written under an older schema version is read under a pinned policy rather than failing.
 - [x] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
@@ -375,12 +375,12 @@ retires the criterion.
 - [x] ISC-211: Genuine gcloud reads (`list`, `describe`) still reach the real binary and record `allow_read`.
 - [x] ISC-212: No `void settle(...)` can turn a durable-write failure into an unhandled rejection that exits the supervisor.
 - [x] ISC-213: The CI anti-skip guard asserts an exact probe count and zero skips, instead of a case pattern that cannot match bun's output.
-- [ ] ISC-214: `RpcClient` stops dispatching the remainder of a chunk once `#fatal` has closed it.
-- [ ] ISC-215: The EPIPE write path sets `#closed`, so the error does not assert a state the object is not in.
-- [ ] ISC-216: An undiagnosed internal error is distinguishable by exit code from a usage error.
-- [ ] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
+- [x] ISC-214: `RpcClient` stops dispatching the remainder of a chunk once `#fatal` has closed it.
+- [x] ISC-215: The EPIPE write path sets `#closed`, so the error does not assert a state the object is not in.
+- [x] ISC-216: An undiagnosed internal error is distinguishable by exit code from a usage error.
+- [x] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
 - [ ] ISC-218: `writeJsonAtomic`'s directory-fsync failure cannot report a durable write as failed after the rename succeeded.
-- [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses.
+- [x] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses. `test/integration/verbgate.test.ts`, "a policy planted at the pre-fix /outbox path grants nothing" — green on CI's `container` job (real Docker, fresh image build): 53/53 probes passed, anti-skip guard updated to match (see `## Verification`, "ISC-219, resolved by CI").
 
 ### Group R — Round-3 mutation review (added 2026-07-27)
 
@@ -396,8 +396,8 @@ of the same class it repaired.
 - [x] ISC-225: An unreadable head fingerprint is treated as unknown, not as changed, so a transient read error cannot replay the whole file as new records.
 - [x] ISC-226: A failed head anchor is retried on later polls rather than silently disabling rewrite detection for the reader's lifetime.
 - [x] ISC-227: The `willRetry` e2e states plainly that its discrimination comes from `completion.test.ts`, not from itself — the double reports `isStreaming: true` for a retrying `agent_end`.
-- [ ] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
-- [ ] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
+- [x] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
+- [x] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
 
 ### Group S — Phase 2 findings (added 2026-07-27)
 
@@ -418,7 +418,7 @@ of the same class it repaired.
 - [x] ISC-244: Validation COST is bounded, not just envelope bytes — array lengths are checked before the schema, so an element-packed envelope cannot allocate an issue object per element.
 - [x] ISC-245: A worker-controlled filename cannot forge lines in the harvest report; every refusal is escaped and truncated at one choke point.
 - [ ] ISC-246: `scanOutboxFiles` returns file DESCRIPTORS, not path strings — a validated path re-opened later is a TOCTOU window, and `nlink` can be raised after the scan. Latent while `safe` has no consumers; arms the moment E3 attaches artifacts.
-- [ ] ISC-247: A backslash in an envelope path is refused. Harmless on POSIX, a separator anywhere else; not a control character, so the ISC-240 filter does not catch it.
+- [x] ISC-247: A backslash in an envelope path is refused. Harmless on POSIX, a separator anywhere else; not a control character, so the ISC-240 filter does not catch it.
 
 ### Phase 3 — security and cloud identity
 
@@ -532,6 +532,72 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   files across seven subsystems. Remaining phases dispatch ~10-14 files per engineer, keep image
   builds in the parent so build logs do not consume an engineer's budget, and treat integration and
   e2e suites as their own dispatch unit because that is reliably what gets cut.
+- **2026-08-17 — the "phases done" claim in README/CHANGELOG and the ISA's own done-condition
+  had drifted apart.** All six SRD phases shipping every command in §10 did not mean every ISC
+  was verified — most of Groups C/D/E/F/G (container image, Google credentials, oMLX, config,
+  lifecycle) were unchecked not because the code was wrong, but because no prior session on
+  this machine had a running Docker daemon to live-probe against. Fixed by running the full
+  `PIFLEET_DOCKER=1` integration + e2e suite once Docker (Colima), vanilla pi.dev 0.79.6, and
+  the oMLX key were all available — 54 criteria closed with no source changes beyond one bug
+  (below). Deliberately did NOT check off Group E (ISC-50..57, oMLX in-container model calls):
+  no dedicated test file exercises them, and "the e2e suite passed" doesn't independently prove
+  allowlist refusal or the MLX-training-run guard fire correctly — that's real follow-up work,
+  not a documentation gap. Same restraint applied to ISC-44..46, 48, 49, 61(kept — see below),
+  74, 32: no test file names them, so they stay open rather than being swept in on file-level
+  correlation.
+- **2026-08-17 — found and fixed a real bug while unblocking the environment, not part of any
+  planned workstream.** `src/harvest/outbox.ts`'s `CONTROL_CHARS` regex and `safeForReport`'s
+  replace() were built from literal raw NUL/US/DEL bytes in the source instead of `\x` escape
+  sequences. Bun 1.3.11 parses that as "range out of order in character class" and refuses to
+  load the file — which took down every test touching outbox.ts, plus `doctor` itself, since
+  commands are registered eagerly at CLI startup. Same character class, rewritten with escape
+  sequences; full unit suite went from a hard crash to 818/818 green. This suggests the ISA's
+  frontmatter `progress: 104/236` (dated 2026-07-27) predates whichever change introduced the
+  raw bytes, or predates a Bun upgrade on this machine that started rejecting them — either way,
+  nobody had run the full suite on this exact machine+Bun version since.
+- **2026-08-17 — vanilla pi.dev installed alongside, not over, an existing fork.** This machine's
+  `$PATH` resolved `pi` to `~/bin/pi` → `@oh-my-pi/pi-coding-agent`, a different npm-scoped fork,
+  not the pinned `@earendil-works/pi-coding-agent@0.79.6` this project is built against. Per
+  explicit instruction, installed the real package via `bun install -g`, which lands in
+  `~/.bun/bin/pi` — earlier in `$PATH` than `~/bin/pi` — so `pi` now resolves to vanilla 0.79.6
+  without touching the existing oh-my-pi setup at all.
+- **2026-08-17 — Workstream 2 (small independent fixes) run as two parallel engineers in git
+  worktrees, per the existing manual-worktree precedent above.** Engineer A took the RPC/CLI/
+  epoch/supervisor cluster (ISC-214, 215, 216, 217, 228); Engineer B took harvest/container/
+  config (ISC-247, 160, 190, 219, 22) — a clean file-disjoint split, so the merge back into
+  `workstream-2-small-fixes` was conflict-free. ISC-219's live probe could not run: the worker
+  image (`pifleet/pi-worker:verify`) needed by the Docker-gated verbgate suite is the one an
+  earlier agent deleted without authorization (see the same-day incident already on record);
+  the user's explicit call was "leave it for now," so the image was not rebuilt and ISC-219
+  stays open with its test written but unverified, rather than being checked off on the
+  strength of the code alone.
+- **2026-08-17 — a pre-existing test-isolation flake, not a regression.** After merging both
+  engineers' branches, `bun test test/unit` showed one failure in
+  `harvest-outbox.test.ts` ("a hard link to a file outside the outbox is refused" — wrong
+  refusal reason, consistent with a leftover temp path from a neighboring test rather than a
+  logic error). The same file run in isolation, and the full suite re-run immediately after,
+  were both 100% green. Recorded rather than chased: neither engineer's diff touched the
+  hard-link check or its test, so this reads as ordering/temp-path contention between test
+  files rather than something this workstream introduced.
+- **2026-08-17 — an independent review pass on the same-day PR found real defects a passing
+  test suite had missed, plus two ISA bookkeeping mistakes.** Three reviewers (Claude, Gemini,
+  Codex) ran against the diff before merge and converged 3/3 on two issues neither engineer nor
+  the orchestrator had caught: `readDockerfile()` threw an undiagnosed error that `doctor`
+  reported as `EXIT.INTERNAL`, exactly the "pifleet bug" misclassification ISC-216 exists to
+  prevent, aimed at a broken checkout instead; and the `models_allowlist` gate's bare `catch`
+  discarded a real config error alongside the one case it was meant to skip. Claude alone (high
+  confidence) found that ISC-160's hash covered the Dockerfile's text but not the two files it
+  `COPY`s — including `docker/verbgate`, the enforcement point behind the cloud-mutation gate —
+  leaving the highest-consequence staleness case still open under a criterion just marked
+  closed. **Learned: every fix in this workstream had its own red-then-green regression test,
+  and none of those tests were wrong — they each proved the fix did what it claimed. What they
+  didn't do was ask what ELSE could go wrong at the same site**, which is exactly the blind
+  spot an independent adversarial pass exists to cover, and the same reasoning this ISA already
+  applies to worker self-report (`## Anti-criteria`) applies one level up to the engineer
+  writing the test. Separately, Gemini's cross-file pass caught that ISC-247 had been fixed and
+  tested but its checkbox never flipped, and that ISC-22 had been checked despite not meeting
+  its own "every module" wording — both are on the orchestrator, not either engineer, and both
+  are now fixed. All fixes and citations are in `## Verification`, "PR #7 review round."
 - **2026-07-27 — scratch directories that get bind-mounted live under `$HOME`, never `os.tmpdir()`.**
   Measured on this machine: Colima shares `$HOME` and shares neither `/tmp` nor
   `/var/folders/...`. An unshared `-v` source does not error — the daemon mounts an empty
@@ -694,6 +760,204 @@ it needs a run from inside a cmux pane. It stays unchecked until then.
 
 Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
 ISC-254.
+
+### Environment unblock + Docker/e2e sweep — 2026-08-17
+
+**Environment.** `bun install` was failing outright (`ConnectionClosed` on every tarball) —
+a corporate transparent-proxy issue, resolved once disabled. Vanilla pi.dev installed
+(`bun install -g @earendil-works/pi-coding-agent@0.79.6`); `pi --version` → `0.79.6`,
+resolving ahead of an unrelated `@oh-my-pi` fork already on `$PATH`. `OMLX_API_KEY` sourced
+from `~/.env`. Docker (Colima) and cmux (0.64.22) were already present. `doctor --json`
+afterward: `docker` 28.4.0 ok, `git` 2.50.1 ok, `pi` 0.79.6 ok, `tmux` 3.6a ok, `cmux` 0.64.22
+ok (socket unreachable outside a live pane — expected, see ISC-129), `omlx.ok: true`.
+
+**Bug found and fixed en route:** `src/harvest/outbox.ts`'s two control-character regexes
+were built from literal raw bytes, which Bun 1.3.11 refuses to parse (see `## Decisions`).
+Fixed; `bun test test/unit` went from a hard crash to `818 pass, 0 fail` across 43 files.
+
+**Docker + e2e sweep**, `PIFLEET_DOCKER=1`, against real Docker and real pi 0.79.6 (no
+test-double fallback in the e2e suite):
+
+- Built the missing `pifleet/pi-worker:verify` image (`docker build --build-arg
+  TOOLCHAIN=base --build-arg PI_VERSION=0.79.6 -f docker/Dockerfile .`) — no worker image had
+  ever been built on this machine, which was the sole cause of 26 initial integration
+  failures (exit 125, image not found), not a code defect.
+- `bun test test/integration` (29 files) → **293 pass, 0 fail**, 1571 `expect()` calls, 97.4s.
+- `bun test test/e2e` (2 files) → **10 pass, 0 fail**, 131 `expect()` calls, 43.6s.
+- Combined with the unit suite: **1121/1121 passing, 0 failures, 0 parse/load blockers.**
+
+**54 criteria closed**, each backed by an explicit `ISC-N` citation found in the test file
+itself (not inferred from file-level correlation): ISC-23..30, 33..40 (`test/integration/
+image.test.ts`, `cli-exit-codes.test.ts`); ISC-41..43, 47 (`adc.test.ts`); ISC-58..68
+(`test/unit/config.test.ts`, `render.test.ts`, `cli-exit-codes.test.ts`); ISC-69..73, 75..79,
+82..87 (`test/e2e/lifecycle.test.ts`); ISC-103..107 (`verbgate.test.ts`); ISC-144
+(`supervisor.test.ts`); ISC-229 (`test/unit/completion.test.ts`'s bidirectional
+`EXPECTED_SETTLES` ↔ scenario-file parity check, lines 439-452).
+
+**Deliberately left open** despite the green run, for lack of a named test citing them:
+ISC-31, 32, 44..46, 48, 49, 74 (Groups C/D/G — file-level correlation isn't the same as
+per-criterion evidence); all of ISC-50..57 (Group E, oMLX — no dedicated in-container model
+call / allowlist-refusal test file exists yet, a real gap, not a bookkeeping one). ISC-129
+stays open per Phase 4/6 notes (needs a run from inside a live cmux pane). ISC-249 was
+expected to close as a side effect of ISC-27/28 landing — re-check: its text also requires
+the neutralization site itself (per-worker worktree, not the operator's checkout) to exist,
+which is a separate, still-open question from whether ISC-27/28's write-through behavior
+works.
+
+### Workstream 2 — small independent fixes — 2026-08-17
+
+Eight of ten planned criteria closed on the first pass, each with its own regression test
+written against a confirmed-red baseline before the fix; ISC-247 was fixed and tested but
+missed the checkbox flip in the same pass (caught by an independent PR review, see below);
+ISC-219 has its test written but is blocked on a missing image (see `## Decisions`). A tenth,
+unplanned criterion (ISC-52) turned out to already be satisfied by ISC-190's own launch-path
+test and is closed alongside it. Two engineers ran in parallel worktrees
+(`ws2-engineer-a`, `ws2-engineer-b`), merged conflict-free into `workstream-2-small-fixes`
+since their file sets never overlapped.
+
+- **ISC-214** — `test/unit/rpc-client.test.ts`, "a fatal error stops the rest of the SAME
+  chunk (ISC-214)". `feed()`/`feedText()` now share `#handleLines()`, which re-checks
+  `#closed` between lines of the same chunk.
+- **ISC-215** — `test/unit/rpc-client.test.ts`, describe "a failed write closes the client
+  (ISC-215)" (2 tests: closed state observable after EPIPE; in-flight requests reject with
+  none left pending). The EPIPE catch in `send()` now calls `this.close(reason)`.
+- **ISC-216** — `test/unit/cli.test.ts`, describe "undiagnosed errors are their own exit code
+  (ISC-216)" (5 tests). New `EXIT.INTERNAL` (ranked first in the severity ladder) and an
+  exported `exitCodeForError()`; no existing exit code renumbered.
+- **ISC-217** — `test/unit/epoch.test.ts` (5 tests) + `test/unit/review-regressions.test.ts`,
+  "a negative or fractional epoch is a named error, not an allocation". New
+  `MalformedEpochError`, thrown from `assertEpochWellFormed()` ahead of the replay lookup;
+  the pre-existing test that had codified silent normalization of `-1` was replaced.
+- **ISC-228** — `test/integration/supervisor.test.ts`, "a late prompt failure whose durable
+  writes fail leaves the supervisor alive", alongside (not replacing) the deadline-escalation
+  test. Uses `scenarios/late-failure.json`; asserts the trigger event is
+  `stray_response{kind:"late", success:false}`, not `deadline_exceeded`, and that the
+  supervisor answers `ping` afterward.
+- **ISC-247** — `test/unit/harvest-outbox.test.ts`, describe "ISC-247 backslash is a separator
+  elsewhere" (3 tests). New `backslashProblem` check in `outbox.ts`, independent of the
+  control-character filter.
+- **ISC-160** — `test/unit/render.test.ts`, "editing the Dockerfile busts the tag even when
+  nothing else changed (ISC-160)". `ImageInputs.dockerfile` now holds the Dockerfile's actual
+  content, folded into `configHash`; `dockerfilePath()` is the single source both the hash and
+  `docker build -f` read, so they cannot drift apart.
+- **ISC-190** — `test/unit/config.test.ts`, describe "models_allowlist is enforced (ISC-190)"
+  (6 tests) + `test/integration/up-wiring.test.ts`, describe "models_allowlist is enforced
+  before any worker starts (ISC-190)" (2 tests, mutation-checked: removing the enforcement
+  call from `up.ts` fails only the launch-path test, which is the criterion's actual claim).
+  New `ModelNotAllowedError extends ConfigError` (exit 2). The same launch-path test also
+  verbatim satisfies **ISC-52** ("a model outside `models_allowlist` is refused at `up` with
+  exit 2") — not part of the original ten, closed as a side effect.
+- **ISC-22 — not closed.** `bunfig.toml` (new) configures `coverageSkipTestFiles` and
+  `coverageReporter = ["text", "lcov"]`, deliberately with no `coverage = true` default (would
+  slow every narrow `bun test` invocation) and no `coverageThreshold` (would gate the build on
+  a number chosen on day one); `package.json` gained a `test:coverage` script; the report does
+  run. But the criterion says "lists every `src/` module" and it lists 73 of 76:
+  `src/backends/types.ts` (types-only, no instrumentable code) and `src/supervisor/index.ts`
+  (only ever loaded as a spawned subprocess) are structurally absent, which is fine — but
+  `src/cli/commands/tui.ts` is absent only because no test imports it, same as its 19 sibling
+  command files that DO appear (each covered incidentally by an unrelated unit test importing
+  a named export). That's a real, closable gap, so the box stays open rather than checked with
+  a caveat 40 lines away from the criterion itself — the mistake ISC-219 avoided and this entry
+  originally repeated (an independent PR review caught it; see below).
+- **ISC-219 — not closed.** Test written (`test/integration/verbgate.test.ts`, "a policy
+  planted at the pre-fix /outbox path grants nothing"), plants a wildcard policy at both
+  plausible pre-fix path candidates since the exact historical path is not recoverable from
+  git history. Cannot run live: `PIFLEET_DOCKER=1 bun test test/integration/verbgate.test.ts`
+  needs `pifleet/pi-worker:verify`, which does not exist on this machine (deleted earlier,
+  left alone per explicit instruction — see `## Decisions`). 20 of 23 tests in that file fail
+  on empty container output with the image absent, identical failure shape for the new test
+  and the 19 pre-existing ones — not a sign of a bad test, just no image to run against.
+
+**Verification:** `bun test test/unit` — 842 pass, 0 fail (one flaky failure on first run,
+see `## Decisions`, gone on re-run) — across 43 files; `bun run typecheck` clean.
+
+Progress: 182/255 → 191/255 (ISC-214, 215, 216, 217, 228, 247, 160, 190, 52).
+
+### PR #7 review round — 2026-08-17
+
+Three independent reviewers (Claude, Gemini, Codex — see the `CodeReviewer` skill) ran against
+the Workstream 2 diff before merge. Genuine value: they caught two bookkeeping mistakes above
+(ISC-247 fixed but not checked; ISC-22 checked despite not meeting "every module") and two
+real code defects that had passed all of this workstream's own tests because nothing tested
+the failure path itself:
+
+- `readDockerfile()` threw a bare `Error` on a missing/unreadable Dockerfile, which
+  `exitCodeForError` classifies as `EXIT.INTERNAL` (ISC-216's "undiagnosed bug in pifleet") —
+  exactly backwards for a broken checkout, and `doctor`'s own image-presence check sat outside
+  any try, so the one command whose job is diagnosing a broken machine crashed on one. 3/3
+  reviewers flagged this independently — highest-confidence finding of the round.
+- `up.ts`'s `models_allowlist` enforcement loop used a bare `catch { continue }` around
+  `resolveWorker()`, which swallows "worker names an unknown role" (a real config defect)
+  identically to "worker id not in `--workers`" (the one case meant to be skipped) — silently
+  bypassing the allowlist gate for a misconfigured worker. Also 3/3.
+- (Claude, high confidence) `configHash` hashed the Dockerfile's text but not the two files it
+  `COPY`s into the image — `docker/verbgate` (the cloud-mutation gate) and `docker/entrypoint.sh`
+  — so editing either left the image tag, and therefore `up`'s staleness check, unchanged.
+- (Codex) `assertEpochWellFormed` used `Number.isInteger`, which admits `2**53` and other values
+  past which `epoch + 1 === epoch` — the fence could never advance.
+- Both Gemini and Codex separately flagged the exit-code ladder docs (README, `contracts.test.ts`)
+  never picked up the new `EXIT.INTERNAL = 8`.
+
+**Fix pass, same day:**
+
+- `src/container/image.ts`: `readDockerfile()` now throws `BuildContextError` (`exitCode:
+  EXIT.USAGE`), modelled on `ConfigError`. `doctor` gained `imageStatus()`, which turns an
+  unreadable Dockerfile into a `Diagnosis` row instead of aborting the whole probe.
+  `test/unit/render.test.ts`, "an unreadable Dockerfile throws a DIAGNOSED usage error, not an
+  internal one" + "doctor reports an unreadable Dockerfile as a diagnosis instead of aborting."
+- `src/container/image.ts`: new `BUILD_CONTEXT_ASSETS` enumeration (`Dockerfile`, `verbgate`,
+  `entrypoint.sh`) feeds `configHash` via a sha256 digest per file (CRLF folded to LF first);
+  `dockerfilePath()` generalizes to `buildContextPath()`. `test/unit/render.test.ts`, "editing
+  docker/verbgate busts the tag even though the Dockerfile is untouched (ISC-160)" + same for
+  `entrypoint.sh` + a structural test asserting every `COPY` source parsed out of the real
+  Dockerfile appears in `BUILD_CONTEXT_ASSETS`, so the enumeration cannot silently fall behind
+  a new `COPY` line.
+- `src/cli/commands/up.ts`: the allowlist loop is now `assertModelsAllowed()`, an explicit
+  membership test against `workers:` rather than a bare `catch`. The unknown-role bypass this
+  was meant to close turned out to be unreachable through a real `up` — `FleetConfigSchema`'s
+  `superRefine` already rejects an unknown role at parse time (ISC-68) — so the regression test
+  builds a `LoadedConfig` past the schema to prove the second line of defence doesn't discard
+  its own errors, rather than shipping a test that would have passed against the original bug
+  too. `test/unit/config.test.ts` (3 cases) + `test/integration/up-wiring.test.ts`, "a worker
+  naming an unknown role is refused before the repo is touched."
+- `src/rpc/epoch.ts`: `assertEpochWellFormed` uses `Number.isSafeInteger`, not
+  `Number.isInteger` — a value at/past `2**53` could never advance the fence (`epoch + 1 ===
+  epoch`). `test/unit/epoch.test.ts`, boundary cases at `MAX_SAFE_INTEGER + 1`, `2**53`,
+  `2**60`, `Infinity` refused; `MAX_SAFE_INTEGER` itself still accepted.
+- `README.md`: exit code `8` (`EXIT.INTERNAL`) added to the ladder line.
+- `test/unit/contracts.test.ts`: `worstExit` suite covers `EXIT.INTERNAL` outranking every
+  other code, including usage.
+
+Also fixed as part of the same round (bookkeeping, not code): ISC-247's checkbox (fixed and
+tested in the first pass, but the checkbox flip was missed), ISC-22 reverted to open (checked
+prematurely — see its criterion line for why), ISC-52 closed as a side effect of ISC-190's own
+test. See the commit immediately above this section for the exact ISA diff.
+
+**Verification, review round:** `bun test test/unit` — 856 pass, 0 fail (43 files); `bun test
+test/integration/up-wiring.test.ts` — 10 pass, 0 fail; `bun run typecheck` clean. No new ISC
+numbers closed by this round — it hardens ISC-160/190/216/217, already counted above.
+
+**ISC-219, resolved by CI (not local Docker).** GitHub Actions' `container` job builds its own
+worker image from scratch every run — it does not depend on this machine's deleted
+`pifleet/pi-worker:verify` — so pushing this branch gave the ISC-219 test its first real
+execution anywhere. Result: 52 of 53 tests in `verbgate.test.ts` passed, including the new one's
+actual assertions; the job still went red because its `afterEach` scratch cleanup hit `EACCES`
+removing `/outbox/policy` and `/outbox/cloud-allow` — files the test has the container itself
+`mkdir`/`printf` into the bind-mounted outbox. On Linux a bind mount passes the container's uid
+10001 straight through to the host, so the CI runner's own user cannot remove what uid 10001
+created; macOS Docker Desktop's VM masks exactly this class of ownership mismatch, which is why
+it looked fine when written and reviewed locally on this machine — the same asymmetry Group N's
+mount-visibility notes already describe, on the write side instead of the read side. Fixed by
+having the same container `rm -rf` the two paths it created before the script exits, so nothing
+uid-10001-owned is left for the host-level cleanup to trip on. That push also exposed a second,
+unrelated issue: the `container` job's own anti-skip guard (`EXPECTED: "52"`) was never updated
+when the ISC-219 test was added, so a fully green 53/0/0 run still failed the guard on a count
+mismatch — fixed by bumping `EXPECTED` to 53 (`.github/workflows/ci.yml`; needed the `workflow`
+OAuth scope added to this machine's `gh` token, since the default scope set can't push changes
+to workflow files). Re-run: **both CI jobs green** — `test` and `container`, 53/53 probes, no
+skips. **ISC-219 closed.**
+
+Progress: 191/255 → 192/255.
 
 ### Phase 6 close-out — 2026-07-28
 
