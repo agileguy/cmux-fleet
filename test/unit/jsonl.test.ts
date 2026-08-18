@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  appendJsonl,
   LineSplitter,
   LineTooLongError,
   MAX_LINE_UNITS,
@@ -8,7 +9,7 @@ import {
   writeJsonAtomic,
   TailReader,
 } from "../../src/util/jsonl.ts";
-import { mkdtemp, readFile, writeFile, appendFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -86,12 +87,216 @@ describe("writeJsonAtomic", () => {
       const p = join(dir, "nested", "state.json");
       await writeJsonAtomic(p, { schema: "pifleet.state/v1", worker: "eng-1" });
       expect(JSON.parse(await readFile(p, "utf8")).worker).toBe("eng-1");
-      const { readdir } = await import("node:fs/promises");
       expect((await readdir(join(dir, "nested"))).filter((f) => f.includes(".tmp-"))).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+/**
+ * ISC-156, one case per syscall boundary of the atomic-write path.
+ *
+ * `writeJsonAtomic` is five ordered steps — open, write, fsync, rename,
+ * directory fsync — and the claim it makes is per-step: everything up to the
+ * rename must leave the PREVIOUS value whole, everything from the rename on
+ * must leave the NEW one whole, and no kill anywhere may leave a half of
+ * either. One kill at an unnamed instant tests one of those five and cannot
+ * say which; `test/fixtures/kill-at-boundary.ts` makes the process kill
+ * ITSELF the moment a named step returns, and the trace it leaves proves
+ * which step that was.
+ *
+ * The two values are deliberately different lengths, with the new one SHORTER.
+ * An implementation that wrote in place — the failure this protocol exists to
+ * prevent — would leave the previous value's tail behind the new one, and the
+ * survivor would not be parseable JSON at all. Equal-length payloads would let
+ * that pass.
+ */
+describe("writeJsonAtomic survives a SIGKILL at every syscall boundary (ISC-156)", () => {
+  const FIXTURE = new URL("../fixtures/kill-at-boundary.ts", import.meta.url).pathname;
+  const JSONL = new URL("../../src/util/jsonl.ts", import.meta.url).pathname;
+
+  const PREVIOUS = {
+    schema: "pifleet.state/v1",
+    worker: "eng-1",
+    generation: 1,
+    // Padding so the previous value is much longer than the next one.
+    note: "the version already on disk when the writer was killed".repeat(8),
+  };
+  const NEXT = { schema: "pifleet.state/v1", worker: "eng-1", generation: 2 };
+  const THIRD = { schema: "pifleet.state/v1", worker: "eng-1", generation: 3 };
+
+  /**
+   * Every boundary, the trace it must produce, and which value must survive.
+   *
+   * The trace is exact, not a prefix match: a kill at `write` that actually
+   * landed at `fsync` leaves an identical filesystem — previous value intact,
+   * full temp file beside it — so only the step list distinguishes them.
+   */
+  interface BoundaryCase {
+    boundary: string;
+    survivor: object;
+    steps: string[];
+  }
+  const CASES: BoundaryCase[] = [
+    { boundary: "open", survivor: PREVIOUS, steps: ["open"] },
+    { boundary: "write", survivor: PREVIOUS, steps: ["open", "write"] },
+    { boundary: "fsync", survivor: PREVIOUS, steps: ["open", "write", "fsync"] },
+    { boundary: "rename", survivor: NEXT, steps: ["open", "write", "fsync", "rename"] },
+    {
+      boundary: "dirfsync",
+      survivor: NEXT,
+      steps: ["open", "write", "fsync", "rename", "diropen", "dirfsync"],
+    },
+  ];
+
+  for (const { boundary, survivor, steps } of CASES) {
+    test(
+      `killed at ${boundary}: the surviving state.json is whole and a later write still lands`,
+      async () => {
+        const dir = await mkdtemp(join(tmpdir(), "pifleet-kill-"));
+        try {
+          const target = join(dir, "state.json");
+          const trace = join(dir, "trace.tsv");
+          await writeJsonAtomic(target, PREVIOUS);
+
+          const writerCode = [
+            `const { writeJsonAtomic } = await import(${JSON.stringify(JSONL)});`,
+            `await writeJsonAtomic(${JSON.stringify(target)}, ${JSON.stringify(NEXT)});`,
+            `console.log("SURVIVED");`,
+          ].join("\n");
+          const writer = Bun.spawn([process.execPath, "--preload", FIXTURE, "-e", writerCode], {
+            env: {
+              ...process.env,
+              PIFLEET_TEST_KILL_AT: boundary,
+              PIFLEET_TEST_KILL_PATH: target,
+              PIFLEET_TEST_KILL_TRACE: trace,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const stdout = await new Response(writer.stdout).text();
+          // 128 + SIGKILL. A writer that reached the end of `writeJsonAtomic`
+          // exits 0 and prints SURVIVED — which would mean the boundary was
+          // never reached and every assertion below is about nothing.
+          expect(await writer.exited).toBe(137);
+          expect(stdout).not.toContain("SURVIVED");
+
+          // The kill landed exactly here, and nowhere later.
+          const traced = (await readFile(trace, "utf8"))
+            .split("\n")
+            .filter((l) => l !== "")
+            .map((l) => l.split("\t"));
+          expect(traced.map((r) => r[0])).toEqual(steps);
+          for (const row of traced) expect(row[1]).toBe(target);
+
+          // THE claim: a complete version, never a mixture of the two.
+          expect(JSON.parse(await readFile(target, "utf8"))).toEqual(survivor);
+
+          // Before the rename the temp file is orphaned — SIGKILL runs no
+          // cleanup, by construction — and after it there is nothing to orphan.
+          const orphans = (await readdir(dir)).filter((f) => f.includes(".tmp-"));
+          expect(orphans).toHaveLength(survivor === PREVIOUS ? 1 : 0);
+
+          // And the orphan is inert. The temp name carries a per-call UUID, so
+          // the next writer cannot collide with a dead one's leftovers — the
+          // property that keeps a crash-loop from wedging the run directory.
+          await writeJsonAtomic(target, THIRD);
+          expect(JSON.parse(await readFile(target, "utf8"))).toEqual(THIRD);
+          expect((await readdir(dir)).filter((f) => f.includes(".tmp-"))).toEqual(orphans);
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      },
+      20_000,
+    );
+  }
+});
+
+/**
+ * ISC-156's other half: "…and the ledger readable".
+ *
+ * The ledger does not go through `writeJsonAtomic` at all — `appendJsonl` opens
+ * the file O_APPEND and writes one line — so none of the five boundaries above
+ * touch it, and the criterion's second clause had no test behind it once the
+ * old stochastic one was deleted. That test at least killed a process that was
+ * appending; these kill AT an append, which is the same proof without the
+ * coin flip.
+ *
+ * The claim is per-record, not per-file: a killed writer may lose the record it
+ * was about to write, but must never leave a partial one, because half a JSONL
+ * line is not a smaller ledger — it is an unreadable one, and `mergeLedger`
+ * reports it as a corrupt shard for the whole run.
+ */
+describe("appendJsonl leaves the ledger readable across a SIGKILL (ISC-156)", () => {
+  const FIXTURE = new URL("../fixtures/kill-at-boundary.ts", import.meta.url).pathname;
+  const JSONL = new URL("../../src/util/jsonl.ts", import.meta.url).pathname;
+
+  test(
+    "a kill at an append boundary truncates at a record edge, never inside one",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "pifleet-kill-"));
+      try {
+        const ledger = join(dir, "ledger", "eng-1.jsonl");
+        const trace = join(dir, "trace.tsv");
+
+        // Records of deliberately DIFFERENT lengths. Equal-length records would
+        // let a writer that tore a line mid-record still produce a file that
+        // happened to split cleanly on the newline it did write.
+        const writerCode = [
+          `const { appendJsonl } = await import(${JSON.stringify(JSONL)});`,
+          `for (let i = 1; i <= 6; i++) {`,
+          `  await appendJsonl(${JSON.stringify(ledger)}, { seq: i, pad: "x".repeat(i * 40) });`,
+          `}`,
+          `console.log("SURVIVED");`,
+        ].join("\n");
+        const writer = Bun.spawn([process.execPath, "--preload", FIXTURE, "-e", writerCode], {
+          env: {
+            ...process.env,
+            PIFLEET_TEST_KILL_AT: "append",
+            PIFLEET_TEST_KILL_PATH: ledger,
+            PIFLEET_TEST_KILL_TRACE: trace,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const stdout = await new Response(writer.stdout).text();
+        expect(await writer.exited).toBe(137);
+        expect(stdout).not.toContain("SURVIVED");
+
+        // The fixture arms on the FIRST append to this path, so exactly one
+        // record was written and the kill fired the instant it landed.
+        const traced = (await readFile(trace, "utf8"))
+          .split("\n")
+          .filter((l) => l !== "")
+          .map((l) => l.split("\t"));
+        expect(traced.map((r) => r[0])).toEqual(["append"]);
+        expect(traced[0]?.[1]).toBe(ledger);
+
+        // THE claim: every line the crash left behind parses. A torn record
+        // would throw here — which is precisely how `mergeLedger` would report
+        // it, one layer up.
+        const text = await readFile(ledger, "utf8");
+        const lines = text.split("\n").filter((l) => l !== "");
+        const records = lines.map((l) => parseLine<{ seq: number; pad: string }>(l)!);
+        expect(records.map((r) => r.seq)).toEqual([1]);
+        // Whole, not merely parseable: a short write would still be valid JSON
+        // if it cut inside `pad`'s quotes only by luck.
+        expect(records[0]!.pad).toBe("x".repeat(40));
+        // And the file ends ON the record boundary — no partial tail.
+        expect(text.endsWith("\n")).toBe(true);
+
+        // The ledger is still APPENDABLE, not merely readable. A crash must
+        // not leave a shard that the next writer extends into garbage.
+        await appendJsonl(ledger, { seq: 99, pad: "after-the-crash" });
+        const after = (await readFile(ledger, "utf8")).split("\n").filter((l) => l !== "");
+        expect(after.map((l) => parseLine<{ seq: number }>(l)!.seq)).toEqual([1, 99]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
 });
 
 describe("TailReader", () => {
