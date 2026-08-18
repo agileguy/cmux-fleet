@@ -276,7 +276,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 
 - [ ] ISC-141: Epoch attribution uses the RPC stream offset, and the SRD §7.5 interleaving is decided correctly when offset is the only distinguishing signal.
 - [ ] ISC-142: A dispatch whose epoch is `<=` the worker's persisted `last_accepted_epoch` is rejected at the worker side, not merely bookkept by the allocator.
-- [ ] ISC-143: The epoch high-water-mark is durable before dispatch; allocate → crash → restart does not re-issue the same epoch.
+- [x] ISC-143: The epoch high-water-mark is durable before dispatch; allocate → crash → restart does not re-issue the same epoch.
 - [x] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
 - [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
 - [x] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
@@ -289,7 +289,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [x] ISC-153: The derived-fact bundle is hashed and recorded, so an adjudication can be replayed.
 - [ ] ISC-154: A worktree content hash differing between quiesce and harvest end forces `unknown` (backgrounded work kept writing). [LIVE but INERT — nothing populates `tree_hash_quiesce`/`tree_hash_harvest`, so the check cannot fire; needs supervisor cooperation]
 - [x] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
-- [ ] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
+- [x] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
 - [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
 - [x] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output. [no per-worker port surface EXISTS — see close-out]
 - [x] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
@@ -1242,6 +1242,54 @@ Test count after the fix commit (`bdd43b8`): `bun test test/unit` → **876 pass
 across 43 files (was 869 before this round's fixes). Mutation re-verified: restoring the old
 `config.run.root` derivation → 31 pass / 9 fail on `render.test.ts` (not 26 — the fix commit
 added tests of its own beyond the round-1 ISC-188 block).
+
+### ISC-143/156 close-out — 2026-08-18
+
+Both criteria name a SIGKILL at a *specific* point, and the only test that existed for either
+slept 150ms and then killed a writer — a kill that lands wherever the scheduler puts it, proves
+one of the five steps of `writeJsonAtomic`, and cannot say which. It was deleted and replaced
+with ten deterministic cases, five per call site, driven by a new test-only preload
+(`test/fixtures/kill-at-boundary.ts`) that wraps `node:fs/promises`'s `open` and `rename` and
+makes the process kill ITSELF the instant a named step returns. Each case also asserts the trace
+the fixture writes, so a case that killed at the wrong step fails rather than passing quietly.
+
+Ran: `bun test test/unit/jsonl.test.ts test/integration/supervisor.test.ts` → **35 pass, 0 fail,
+196 expect() calls** (was 26 pass). Full suite `bun test` → **1130 pass, 53 skip, 0 fail** across
+75 files. `bun run typecheck` clean.
+
+- ISC-156 — `test/unit/jsonl.test.ts`, describe "writeJsonAtomic survives a SIGKILL at every
+  syscall boundary (ISC-156)", 5 cases against `writeJsonAtomic` directly. `open`: the temp file
+  exists and is empty, the target is still the whole previous value. `write`: the whole body is
+  in the temp, the target is still the previous value. `fsync`: body durable in the temp, the
+  directory entry still names the old inode. `rename`: the commit point has passed, the target is
+  the whole new value, no temp left. `dirfsync`: same, with the directory entry itself durable.
+  Every case then writes a third value through the same path and asserts it lands — the orphaned
+  temp a SIGKILL necessarily leaves behind (nothing runs the `unlink`) never blocks a later write,
+  because the temp name carries a per-call UUID. The two payloads are deliberately different
+  lengths, new one shorter, so an in-place write would leave the old tail behind and fail to
+  parse at all.
+- ISC-143 — `test/integration/supervisor.test.ts`, describe "epoch fence durability across a
+  SIGKILL (ISC-143)", the same 5 boundaries against a REAL supervisor process killed inside the
+  `await persistFence()` that precedes the prompt. Each run seeds `fence.json` as a previous
+  incarnation left it (epoch 1 allocated, dispatched, settled), then dispatches a task that never
+  gets an answer. Before the rename the surviving fence is byte-identical to the seed and the
+  restart issues epoch 2 — correct, because that allocation's prompt was never sent; from the
+  rename on the fence is durable with epoch 2 live, the restart burns it as
+  `supervisor_restarted`, and the next epoch is 3. Epoch 1 — the one that *was* dispatched — is
+  never re-issued at any boundary, which is the criterion. The ledger the crash cut across merges
+  with zero unparseable lines, tightening the old test's "at most one".
+
+Mutation-checked, per the discipline in `test/unit/backend-controls.test.ts`'s header. Moving
+`await rename(tmp, path)` ahead of `await fh.sync()` in `writeJsonAtomic` — a real durability bug,
+committing the directory entry before the data — left **29 pass / 6 fail**: the `fsync`, `rename`
+and `dirfsync` cases of BOTH new blocks went red on the trace order, and nothing else in the repo
+noticed, including the pre-existing "writes valid JSON and leaves no tmp file behind" round-trip
+test. A second mutation truncating the body by five bytes (a classic short write) failed all five
+ISC-156 cases with `Unterminated string` / `Unexpected EOF`. Both reverted; `src/util/jsonl.ts`
+and `src/run/state.ts` are unchanged by this work — the kill mechanism lives entirely in the test
+fixture and cannot fire without `PIFLEET_TEST_KILL_AT`, which no production call site passes.
+
+Progress: 197/255 → 199/255.
 
 ### Phase 6 close-out — 2026-07-28
 

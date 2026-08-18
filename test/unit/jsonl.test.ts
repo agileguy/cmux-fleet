@@ -8,7 +8,7 @@ import {
   writeJsonAtomic,
   TailReader,
 } from "../../src/util/jsonl.ts";
-import { mkdtemp, readFile, writeFile, appendFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -86,12 +86,130 @@ describe("writeJsonAtomic", () => {
       const p = join(dir, "nested", "state.json");
       await writeJsonAtomic(p, { schema: "pifleet.state/v1", worker: "eng-1" });
       expect(JSON.parse(await readFile(p, "utf8")).worker).toBe("eng-1");
-      const { readdir } = await import("node:fs/promises");
       expect((await readdir(join(dir, "nested"))).filter((f) => f.includes(".tmp-"))).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+/**
+ * ISC-156, one case per syscall boundary of the atomic-write path.
+ *
+ * `writeJsonAtomic` is five ordered steps — open, write, fsync, rename,
+ * directory fsync — and the claim it makes is per-step: everything up to the
+ * rename must leave the PREVIOUS value whole, everything from the rename on
+ * must leave the NEW one whole, and no kill anywhere may leave a half of
+ * either. One kill at an unnamed instant tests one of those five and cannot
+ * say which; `test/fixtures/kill-at-boundary.ts` makes the process kill
+ * ITSELF the moment a named step returns, and the trace it leaves proves
+ * which step that was.
+ *
+ * The two values are deliberately different lengths, with the new one SHORTER.
+ * An implementation that wrote in place — the failure this protocol exists to
+ * prevent — would leave the previous value's tail behind the new one, and the
+ * survivor would not be parseable JSON at all. Equal-length payloads would let
+ * that pass.
+ */
+describe("writeJsonAtomic survives a SIGKILL at every syscall boundary (ISC-156)", () => {
+  const FIXTURE = new URL("../fixtures/kill-at-boundary.ts", import.meta.url).pathname;
+  const JSONL = new URL("../../src/util/jsonl.ts", import.meta.url).pathname;
+
+  const PREVIOUS = {
+    schema: "pifleet.state/v1",
+    worker: "eng-1",
+    generation: 1,
+    // Padding so the previous value is much longer than the next one.
+    note: "the version already on disk when the writer was killed".repeat(8),
+  };
+  const NEXT = { schema: "pifleet.state/v1", worker: "eng-1", generation: 2 };
+  const THIRD = { schema: "pifleet.state/v1", worker: "eng-1", generation: 3 };
+
+  /**
+   * Every boundary, the trace it must produce, and which value must survive.
+   *
+   * The trace is exact, not a prefix match: a kill at `write` that actually
+   * landed at `fsync` leaves an identical filesystem — previous value intact,
+   * full temp file beside it — so only the step list distinguishes them.
+   */
+  interface BoundaryCase {
+    boundary: string;
+    survivor: object;
+    steps: string[];
+  }
+  const CASES: BoundaryCase[] = [
+    { boundary: "open", survivor: PREVIOUS, steps: ["open"] },
+    { boundary: "write", survivor: PREVIOUS, steps: ["open", "write"] },
+    { boundary: "fsync", survivor: PREVIOUS, steps: ["open", "write", "fsync"] },
+    { boundary: "rename", survivor: NEXT, steps: ["open", "write", "fsync", "rename"] },
+    {
+      boundary: "dirfsync",
+      survivor: NEXT,
+      steps: ["open", "write", "fsync", "rename", "diropen", "dirfsync"],
+    },
+  ];
+
+  for (const { boundary, survivor, steps } of CASES) {
+    test(
+      `killed at ${boundary}: the surviving state.json is whole and a later write still lands`,
+      async () => {
+        const dir = await mkdtemp(join(tmpdir(), "pifleet-kill-"));
+        try {
+          const target = join(dir, "state.json");
+          const trace = join(dir, "trace.tsv");
+          await writeJsonAtomic(target, PREVIOUS);
+
+          const writerCode = [
+            `const { writeJsonAtomic } = await import(${JSON.stringify(JSONL)});`,
+            `await writeJsonAtomic(${JSON.stringify(target)}, ${JSON.stringify(NEXT)});`,
+            `console.log("SURVIVED");`,
+          ].join("\n");
+          const writer = Bun.spawn([process.execPath, "--preload", FIXTURE, "-e", writerCode], {
+            env: {
+              ...process.env,
+              PIFLEET_TEST_KILL_AT: boundary,
+              PIFLEET_TEST_KILL_PATH: target,
+              PIFLEET_TEST_KILL_TRACE: trace,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const stdout = await new Response(writer.stdout).text();
+          // 128 + SIGKILL. A writer that reached the end of `writeJsonAtomic`
+          // exits 0 and prints SURVIVED — which would mean the boundary was
+          // never reached and every assertion below is about nothing.
+          expect(await writer.exited).toBe(137);
+          expect(stdout).not.toContain("SURVIVED");
+
+          // The kill landed exactly here, and nowhere later.
+          const traced = (await readFile(trace, "utf8"))
+            .split("\n")
+            .filter((l) => l !== "")
+            .map((l) => l.split("\t"));
+          expect(traced.map((r) => r[0])).toEqual(steps);
+          for (const row of traced) expect(row[1]).toBe(target);
+
+          // THE claim: a complete version, never a mixture of the two.
+          expect(JSON.parse(await readFile(target, "utf8"))).toEqual(survivor);
+
+          // Before the rename the temp file is orphaned — SIGKILL runs no
+          // cleanup, by construction — and after it there is nothing to orphan.
+          const orphans = (await readdir(dir)).filter((f) => f.includes(".tmp-"));
+          expect(orphans).toHaveLength(survivor === PREVIOUS ? 1 : 0);
+
+          // And the orphan is inert. The temp name carries a per-call UUID, so
+          // the next writer cannot collide with a dead one's leftovers — the
+          // property that keeps a crash-loop from wedging the run directory.
+          await writeJsonAtomic(target, THIRD);
+          expect(JSON.parse(await readFile(target, "utf8"))).toEqual(THIRD);
+          expect((await readdir(dir)).filter((f) => f.includes(".tmp-"))).toEqual(orphans);
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      },
+      20_000,
+    );
+  }
 });
 
 describe("TailReader", () => {

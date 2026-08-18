@@ -2,9 +2,14 @@
  * Supervisor integration: real subprocesses, real filesystem, no network.
  *
  * What lives here and not in e2e: the process-tree facts (ISC-75..78), the
- * crash-consistency facts (ISC-156), the (pid, start-time) lease identity
- * (ISC-144), and the double's worker-side epoch fence — things provable
- * without driving the whole CLI lifecycle.
+ * epoch high-water-mark's durability across a crash (ISC-143), the
+ * (pid, start-time) lease identity (ISC-144), and the double's worker-side
+ * epoch fence — things provable without driving the whole CLI lifecycle.
+ *
+ * ISC-156 — the atomic-write protocol itself under a SIGKILL at each syscall
+ * boundary — is pinned one layer down, in `test/unit/jsonl.test.ts`, against
+ * `writeJsonAtomic` directly. What the ISC-143 block below adds is the
+ * supervisor's USE of it: that the fence reaches disk before a prompt does.
  *
  * macOS note: `ps -o sess=` prints 0 for every process, so a session id
  * cannot be compared directly. A new session is instead evidenced by the
@@ -22,10 +27,13 @@ import { RpcClient } from "../../src/rpc/client.ts";
 import { runPaths, taskRecordPath, workerPaths } from "../../src/run/paths.ts";
 import {
   initialWorkerState,
+  readFence,
   readTaskRecord,
   readWorkerState,
+  writeFence,
   writeWorkerState,
 } from "../../src/run/state.ts";
+import type { FenceSnapshot } from "../../src/rpc/epoch.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { identityAlive, processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
@@ -296,70 +304,275 @@ describe("state.json durability", () => {
     const leftovers = (await readdir(wp.dir)).filter((f) => f.includes(".tmp-"));
     expect(leftovers).toEqual([]);
   });
+});
 
-  test(
-    "SIGKILL mid-write: the previous state stays readable and the ledger still parses (ISC-156)",
-    async () => {
-      const root = await freshRoot();
-      const runId = testRunId("d");
-      const run = runPaths(runId, root);
-      const wp = workerPaths(run, "eng-1");
-      await mkdir(wp.dir, { recursive: true });
-      await mkdir(run.ledgerDir, { recursive: true });
+/**
+ * ISC-143, one case per syscall boundary of the fence write.
+ *
+ * This replaces a test that spawned a writer, slept 150ms, sent SIGKILL, and
+ * asserted the state file still parsed. That kill landed wherever the
+ * scheduler put it — it proved ONE of the five steps of `writeJsonAtomic` and
+ * could not say which, and reported the same PASS for a kill before the first
+ * byte as for one after the directory fsync. `test/fixtures/kill-at-boundary.ts`
+ * replaces the sleep: the supervisor kills ITSELF the instant a named step of
+ * the fence write returns, and the trace it leaves names the step.
+ *
+ * What is under test here is not `writeJsonAtomic` — `test/unit/jsonl.test.ts`
+ * pins that directly — but the supervisor's use of it. The high-water-mark is
+ * durable BEFORE the prompt goes out (SRD §7.5), so the invariant a restart
+ * must honour is:
+ *
+ *     the next epoch issued is strictly greater than the highest epoch in
+ *     whatever COMPLETE version of fence.json survived the crash
+ *
+ * with "complete version" doing real work: a torn fence.json is not a smaller
+ * high-water-mark, it is an unreadable one, and a supervisor that cannot read
+ * its fence cannot safely allocate at all.
+ *
+ * Each run starts from a seeded fence in which epoch 1 was allocated,
+ * dispatched and settled. That epoch is the one that must never come back —
+ * a re-issue of 1 would hand a second worker the epoch the first one already
+ * ran under, which is precisely the interleaving §7.5 exists to make
+ * impossible. Epoch 2, the one being written when the kill lands, may be
+ * re-used at the boundaries where the write never committed: its prompt was
+ * never sent, because `persistFence()` is awaited first, so no worker has
+ * ever seen it.
+ */
+describe("epoch fence durability across a SIGKILL (ISC-143)", () => {
+  const FIXTURE = join(ROOT_URL, "test/fixtures/kill-at-boundary.ts");
+  const SUPERVISOR_TS = join(ROOT_URL, "src/supervisor/index.ts");
 
-      // A writer child hammering both files through the shared primitives.
-      // Killed with SIGKILL — no cleanup handler gets to run, which is the
-      // point: the atomic-write protocol itself must leave a readable file.
-      const jsonlTs = join(ROOT_URL, "src/util/jsonl.ts");
-      const writerCode = [
-        `const { writeJsonAtomic, appendJsonl } = await import(${JSON.stringify(jsonlTs)});`,
-        `const statePath = ${JSON.stringify(wp.stateJson)};`,
-        `const ledgerPath = ${JSON.stringify(join(run.ledgerDir, "eng-1.jsonl"))};`,
-        `let i = 0;`,
-        `for (;;) {`,
-        `  await writeJsonAtomic(statePath, {`,
-        `    schema: "pifleet.state/v1", worker: "eng-1", run_id: ${JSON.stringify(runId)},`,
-        `    pid: process.pid, pgid: process.pid, started_at: new Date().toISOString(),`,
-        `    phase: "busy", epoch: 1, turns: i,`,
-        `  });`,
-        `  await appendJsonl(ledgerPath, {`,
-        `    seq: i, ts: new Date().toISOString(), actor: "eng-1",`,
-        `    run_id: ${JSON.stringify(runId)}, event: "tick",`,
-        `  });`,
-        `  i++;`,
-        `}`,
-      ].join("\n");
-      const writer = Bun.spawn([process.execPath, "-e", writerCode], {
-        stdout: "ignore",
-        stderr: "pipe",
-      });
+  /**
+   * `attemptKey` from rpc/epoch.ts, which is private to that module.
+   *
+   * Spelled with `String.fromCharCode` rather than an escape so this file
+   * carries no literal NUL byte — one embedded in the source makes `grep`
+   * treat the whole test suite as binary.
+   */
+  const attemptKey = (taskId: string, attemptId: string): string =>
+    `${taskId}${String.fromCharCode(0)}${attemptId}`;
 
-      // Let it complete at least one full cycle, then kill it mid-flight.
-      const wrote = await waitFor(
-        async () => (await readWorkerState(wp).catch(() => null)) !== null,
-        5_000,
-      );
-      expect(wrote).toBe(true);
-      await new Promise((r) => setTimeout(r, 150));
-      writer.kill("SIGKILL");
-      await writer.exited;
+  /** The fence as a previous incarnation left it: epoch 1 allocated and settled. */
+  const seededFence = (): FenceSnapshot => ({
+    last_accepted_epoch: 1,
+    ack_seq: null,
+    last_seq: 9,
+    live: null,
+    completed: [
+      {
+        task_id: "T-FENCE-DONE",
+        attempt_id: "a-done",
+        epoch: 1,
+        verdict: "success",
+        settled_at: "2026-08-18T00:00:00.000Z",
+      },
+    ],
+    attempts: { [attemptKey("T-FENCE-DONE", "a-done")]: 1 },
+  });
 
-      // The state file is a COMPLETE previous version — rename is the commit
-      // point, so a torn write is impossible by construction.
-      const state = await readWorkerState(wp);
-      expect(state).not.toBeNull();
-      expect(state?.schema).toBe("pifleet.state/v1");
-      expect(state?.worker).toBe("eng-1");
+  /**
+   * The trace rows for one target, in order.
+   *
+   * Filtered by target because the fixture traces every rename it sees, and
+   * the supervisor is flushing `state.json` on a 250ms heartbeat throughout.
+   */
+  async function traceFor(path: string, target: string): Promise<string[]> {
+    const text = await Bun.file(path)
+      .text()
+      .catch(() => "");
+    return text
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => l.split("\t"))
+      .filter((row) => row[1] === target)
+      .map((row) => row[0]!);
+  }
 
-      // Every complete ledger line parses; at most the final line may be a
-      // partial append cut by the kill — one error, never silent corruption.
-      const { records, errors } = await mergeLedger(run);
-      expect(records.length).toBeGreaterThan(0);
-      expect(errors.length).toBeLessThanOrEqual(1);
-      for (const r of records) expect(r.event).toBe("tick");
+  /**
+   * Per boundary: the steps the fence write must have completed, whether the
+   * write committed, and the epoch the restarted supervisor must then issue.
+   *
+   * `committed` is the whole story in one flag. Before the rename the fence on
+   * disk is still the seeded one, so the next epoch is 2 — the interrupted
+   * allocation is reclaimed, correctly, because it was never dispatched. From
+   * the rename on, epoch 2 is durable and live, so the restart burns it as
+   * `supervisor_restarted` and the next epoch is 3.
+   */
+  interface FenceCase {
+    boundary: string;
+    committed: boolean;
+    nextEpoch: number;
+    steps: string[];
+  }
+  const CASES: FenceCase[] = [
+    { boundary: "open", committed: false, nextEpoch: 2, steps: ["open"] },
+    { boundary: "write", committed: false, nextEpoch: 2, steps: ["open", "write"] },
+    { boundary: "fsync", committed: false, nextEpoch: 2, steps: ["open", "write", "fsync"] },
+    {
+      boundary: "rename",
+      committed: true,
+      nextEpoch: 3,
+      steps: ["open", "write", "fsync", "rename"],
     },
-    15_000,
-  );
+    {
+      boundary: "dirfsync",
+      committed: true,
+      nextEpoch: 3,
+      steps: ["open", "write", "fsync", "rename", "diropen", "dirfsync"],
+    },
+  ];
+
+  for (const { boundary, committed, nextEpoch, steps } of CASES) {
+    test(
+      `killed at ${boundary} while persisting the fence: the restart never re-issues a durable epoch`,
+      async () => {
+        const root = await freshRoot();
+        const runId = testRunId(`fence-${boundary}`);
+        const run = runPaths(runId, root);
+        const wp = workerPaths(run, "eng-1");
+        await mkdir(wp.tasksDir, { recursive: true });
+        await mkdir(run.sessionsDir, { recursive: true });
+
+        const seeded = seededFence();
+        await writeFence(wp, "eng-1", seeded);
+
+        // A real supervisor, launched with the boundary fixture preloaded so it
+        // will kill itself inside `persistFence`. Not `launchDetached`: this one
+        // has to be awaited, and it is going to die on purpose.
+        const trace = join(root, "fence-trace.tsv");
+        const doomed = Bun.spawn(
+          [
+            process.execPath,
+            "--preload",
+            FIXTURE,
+            SUPERVISOR_TS,
+            "--runs-root",
+            root,
+            "--run",
+            runId,
+            "--worker",
+            "eng-1",
+          ],
+          {
+            env: {
+              ...process.env,
+              PIFLEET_PI_COMMAND: piCommand("happy.json"),
+              PIFLEET_TEST_KILL_AT: boundary,
+              PIFLEET_TEST_KILL_PATH: wp.fenceJson,
+              PIFLEET_TEST_KILL_TRACE: trace,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        cleanups.push(async () => {
+          doomed.kill("SIGKILL");
+        });
+        // Drain stderr from the start: an unread pipe that fills would block
+        // the very process this test is waiting to observe.
+        const doomedErr = new Response(doomed.stderr).text();
+
+        // Gate on the PID as well as the phase, here and at the restart below.
+        // `state.json` outlives the process that wrote it, so a bare
+        // `phase === "idle"` is satisfied by a DEAD supervisor's last words —
+        // which is how the restart half of this test first "passed" in 120ms
+        // and then failed connecting to a socket nobody was listening on.
+        const idle = async (expected: number): Promise<boolean> =>
+          waitFor(async () => {
+            const s = await readWorkerState(wp);
+            return s !== null && s.pid === expected && s.phase === "idle";
+          }, 20_000);
+
+        expect(await idle(doomed.pid)).toBe(true);
+
+        // This dispatch never gets an answer: the supervisor dies inside the
+        // `await persistFence()` that precedes the prompt.
+        void controlCall(run, "eng-1", {
+          cmd: "dispatch",
+          envelope: makeEnvelope(runId, "eng-1", "T-FENCE-KILLED"),
+          attempt_id: "a-killed",
+          requested_epoch: null,
+        }).catch(() => {});
+
+        // 128 + SIGKILL. Any other code means the fence write ran to completion
+        // and the boundary was never reached.
+        expect(await doomed.exited).toBe(137);
+        expect(await doomedErr).not.toContain("error:");
+
+        // The kill landed exactly here, and nowhere later.
+        expect(await traceFor(trace, wp.fenceJson)).toEqual(steps);
+
+        // The surviving fence is a COMPLETE version — `readFence` validates the
+        // whole schema, so a torn or half-updated file throws rather than
+        // quietly reading as a lower high-water-mark.
+        const survivor = await readFence(wp);
+        if (committed) {
+          expect(survivor.last_accepted_epoch).toBe(2);
+          expect(survivor.live).toEqual({
+            task_id: "T-FENCE-KILLED",
+            attempt_id: "a-killed",
+            epoch: 2,
+            started: false,
+            abort_requested: false,
+            timed_out: false,
+          });
+          // The settled history is carried forward, not replaced.
+          expect(survivor.completed).toEqual(seeded.completed);
+        } else {
+          expect(survivor).toEqual(seeded);
+        }
+
+        // A fresh supervisor over the same run directory — the restart.
+        const { pid, pgid } = await processLauncher.launchDetached({
+          runId,
+          runDir: join(root, runId),
+          workerId: "eng-1",
+          argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+          env: { PIFLEET_PI_COMMAND: piCommand("happy.json") },
+          logPath: wp.supervisorLog,
+        });
+        cleanups.push(() => killSupervisor(pid, pgid));
+        expect(await idle(pid)).toBe(true);
+
+        // An epoch that was durable when the crash happened is burned, never
+        // resumed: it MAY have partially run, and "maybe ran" must not look like
+        // "never dispatched".
+        const burned = await readTaskRecord(taskRecordPath(wp, "T-FENCE-KILLED"));
+        if (committed) {
+          expect(burned?.epoch).toBe(2);
+          expect(burned?.verdict).toBe("failed");
+          expect(burned?.reason).toBe("supervisor_restarted");
+        } else {
+          expect(burned).toBeNull();
+        }
+
+        const reply = await controlCall(run, "eng-1", {
+          cmd: "dispatch",
+          envelope: makeEnvelope(runId, "eng-1", "T-FENCE-NEXT"),
+          attempt_id: "a-next",
+          requested_epoch: null,
+        });
+        expect(reply["accepted"]).toBe(true);
+        // THE assertion: strictly above everything the surviving fence recorded,
+        // and never epoch 1 — the one that was dispatched and settled before the
+        // crash, and the only epoch a re-issue could actually corrupt.
+        expect(reply["epoch"]).toBe(nextEpoch);
+        expect(reply["epoch"] as number).toBeGreaterThan(survivor.last_accepted_epoch);
+        expect(reply["epoch"]).not.toBe(1);
+
+        // And the ledger the crash cut across still reads end to end. The kill
+        // is inside a fence write, not an append, so this is exact: zero
+        // unparseable lines, not "at most the last one".
+        const { records, errors } = await mergeLedger(run);
+        expect(errors).toEqual([]);
+        expect(records.length).toBeGreaterThan(0);
+
+        await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+        await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+      },
+      60_000,
+    );
+  }
 });
 
 describe("lease identity (ISC-144)", () => {
