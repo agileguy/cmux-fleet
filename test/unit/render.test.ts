@@ -13,6 +13,9 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
+import { exitCodeForError } from "../../src/cli/index.ts";
+import { imageStatus } from "../../src/cli/commands/doctor.ts";
+import { EXIT, isExitCoded } from "../../src/contracts.ts";
 import { ConfigError, loadConfig, type LoadedConfig } from "../../src/config/load.ts";
 import {
   assertNoAtPaths,
@@ -20,7 +23,14 @@ import {
   renderWorker,
   BRIEFING_MOUNT,
 } from "../../src/config/render.ts";
-import { configHash, imageInputs, type ImageInputs } from "../../src/container/image.ts";
+import {
+  BuildContextError,
+  configHash,
+  imageInputs,
+  readDockerfileAt,
+  type ImageInputs,
+} from "../../src/container/image.ts";
+import type { Exec } from "../../src/container/run.ts";
 import { runPaths, workerOutboxDir } from "../../src/run/paths.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -398,6 +408,68 @@ describe("image tag", () => {
     // …and the hash stays a pure function of its inputs: an UNCHANGED
     // Dockerfile must keep sharing a tag, or every build is a cache miss.
     expect(configHash({ ...base })).toBe(configHash(base));
+  });
+
+  /**
+   * ISC-216 applied to the build context: an unreadable `docker/Dockerfile` is
+   * an operator-fixable broken checkout, NOT a pifleet bug.
+   *
+   * It threw a bare `Error`, which `exitCodeForError` classifies as
+   * `EXIT.INTERNAL` — "internal error, file it, do not retry". That is the
+   * misclassification `EXIT.INTERNAL` was introduced to prevent, aimed the
+   * wrong way: it sends an operator whose checkout is missing a file off to
+   * open a bug report instead of restoring the file.
+   */
+  test("an unreadable Dockerfile throws a DIAGNOSED usage error, not an internal one", () => {
+    let caught: unknown;
+    try {
+      readDockerfileAt(join(REPO_ROOT, "docker", "no-such-dockerfile"));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(BuildContextError);
+    expect((caught as Error).message).toContain("so no image tag can be computed");
+    // Diagnosed under the structural protocol…
+    expect(isExitCoded(caught)).toBe(true);
+    expect((caught as BuildContextError).exitCode).toBe(EXIT.USAGE);
+    // …and the entry point agrees, which is the half that actually reaches a
+    // caller. Asserting only the field would pass with the CLI still exiting 8.
+    expect(exitCodeForError(caught)).toBe(EXIT.USAGE);
+    expect(exitCodeForError(caught)).not.toBe(EXIT.INTERNAL);
+  });
+
+  /**
+   * …and `doctor` survives it. §11's whole premise is that a broken machine is
+   * still diagnosable, so an unreadable checkout has to arrive as a ROW in the
+   * report. Called bare, `imageTag`'s throw escaped the action and destroyed
+   * every probe already collected — the report was suppressed by the very
+   * condition it existed to describe.
+   */
+  test("doctor reports an unreadable Dockerfile as a diagnosis instead of aborting", async () => {
+    const { loaded } = await fixture();
+    const execNever: Exec = async () => {
+      throw new Error("docker must not be consulted for a tag that cannot be computed");
+    };
+    const status = await imageStatus(loaded.config, "base", execNever, () => {
+      throw new BuildContextError("cannot read /gone/Dockerfile, so no image tag can be computed");
+    });
+    expect(status.image).toBeNull();
+    expect(status.diagnosis).not.toBeNull();
+    expect(status.diagnosis?.name).toBe("image-tag-uncomputable");
+    // Actionable: which toolchain, and the unreadable path.
+    expect(status.diagnosis?.message).toContain("base");
+    expect(status.diagnosis?.message).toContain("/gone/Dockerfile");
+
+    // The happy path still reports presence, or "never aborts" would be
+    // satisfiable by a helper that never reports an image at all.
+    const ok = await imageStatus(loaded.config, "base", async () => ({
+      code: 0,
+      stdout: "sha256:abc",
+      stderr: "",
+      timedOut: false,
+    }));
+    expect(ok.diagnosis).toBeNull();
+    expect(ok.image?.present).toBe(true);
   });
 });
 

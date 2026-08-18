@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { EXIT } from "../contracts.ts";
 import type { FleetConfig, Toolchain } from "../config/schema.ts";
 import { probeWriteThrough } from "./mounts.ts";
 import { realExec, repoRoot, type Exec } from "./run.ts";
@@ -19,6 +20,29 @@ import { realExec, repoRoot, type Exec } from "./run.ts";
 // ---------------------------------------------------------------------------
 // Tagging
 // ---------------------------------------------------------------------------
+
+/**
+ * A build-context file that cannot be read.
+ *
+ * DIAGNOSED, and deliberately so. This used to throw a bare `Error`, which
+ * `exitCodeForError` classifies as `EXIT.INTERNAL` — "a bug in pifleet, file
+ * it, do not retry" (ISC-216). A missing or unreadable `docker/Dockerfile` is
+ * the opposite of that: it is a broken checkout, the operator's to fix, and
+ * pointing them at a pifleet bug report is the exact misclassification
+ * `EXIT.INTERNAL` was added to prevent — aimed backwards.
+ *
+ * Modelled on `ConfigError` (config/load.ts): a `readonly exitCode` field is
+ * all the structural `ExitCoded` protocol asks for, so no CLI import is needed.
+ */
+export class BuildContextError extends Error {
+  /** A broken checkout is a usage failure, not a crash (SRD §10). */
+  readonly exitCode = EXIT.USAGE;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "BuildContextError";
+  }
+}
 
 /**
  * The one Dockerfile every worker image is built from.
@@ -32,18 +56,26 @@ export function dockerfilePath(): string {
 }
 
 /**
- * Read the recipe. An unreadable Dockerfile is a broken checkout, and it
- * THROWS rather than degrading to a placeholder: a constant stand-in would
+ * Read the recipe at `path`. An unreadable Dockerfile is a broken checkout, and
+ * it THROWS rather than degrading to a placeholder: a constant stand-in would
  * make every broken checkout hash alike, which is the silent tag collision
  * ISC-160 exists to prevent. `docker build` could not have succeeded anyway.
+ *
+ * Takes the path so the unreadable case is testable without deleting a file out
+ * of the developer's own checkout.
  */
-function readDockerfile(): string {
-  const p = dockerfilePath();
+export function readDockerfileAt(path: string): string {
   try {
-    return readFileSync(p, "utf8");
+    return readFileSync(path, "utf8");
   } catch (err) {
-    throw new Error(`cannot read ${p}, so no image tag can be computed: ${String(err)}`);
+    throw new BuildContextError(
+      `cannot read ${path}, so no image tag can be computed: ${String(err)}`,
+    );
   }
+}
+
+function readDockerfile(): string {
+  return readDockerfileAt(dockerfilePath());
 }
 
 /** The image-shaping subset of config. Anything else changing must NOT retag. */

@@ -7,6 +7,7 @@ import { EXIT } from "../../contracts.ts";
 import { loadBackend } from "../../backends/registry.ts";
 import { ConfigError, loadConfig, type LoadedConfig } from "../../config/load.ts";
 import { resolveAllWorkers } from "../../config/load.ts";
+import type { FleetConfig, Toolchain } from "../../config/schema.ts";
 import { imageTag } from "../../container/image.ts";
 import { probeMountVisibility, type MountVisibility } from "../../container/mounts.ts";
 import { realExec, type Exec } from "../../container/run.ts";
@@ -33,7 +34,7 @@ interface Probe {
   detail: string;
 }
 
-interface Diagnosis {
+export interface Diagnosis {
   name: string;
   message: string;
 }
@@ -71,6 +72,42 @@ async function versionProbe(
     ...(version !== undefined ? { version } : {}),
     detail: ok ? (version ?? "") : `not available (${argv[0]} exited ${r.code ?? "on timeout"})`,
   };
+}
+
+/**
+ * Image presence for one toolchain — or a diagnosis of why it is unknowable.
+ *
+ * `imageTag` reads the build context off disk to hash it, so an unreadable
+ * `docker/Dockerfile` makes it THROW. Called bare, that throw escaped the whole
+ * `doctor` action and took every probe already collected with it: the operator
+ * asking "what is wrong with my machine" got a one-line failure instead of the
+ * report, and the answer to their question was the very thing that suppressed
+ * it. `doctor` exists so a broken machine is still diagnosable, so a broken
+ * checkout has to be a ROW, not an abort.
+ *
+ * `tagFor` is injected only so the unreadable-context path can be exercised
+ * without deleting a file out of the developer's own checkout.
+ */
+export async function imageStatus(
+  config: FleetConfig,
+  toolchain: Toolchain,
+  exec: Exec,
+  tagFor: (c: FleetConfig, t: Toolchain) => string = imageTag,
+): Promise<{ image: { tag: string; present: boolean } | null; diagnosis: Diagnosis | null }> {
+  let tag: string;
+  try {
+    tag = tagFor(config, toolchain);
+  } catch (err) {
+    return {
+      image: null,
+      diagnosis: {
+        name: "image-tag-uncomputable",
+        message: `toolchain "${toolchain}": ${err instanceof Error ? err.message : String(err)}`,
+      },
+    };
+  }
+  const r = await exec(["docker", "image", "inspect", tag, "--format", "{{.Id}}"]);
+  return { image: { tag, present: r.code === 0 }, diagnosis: null };
 }
 
 interface CmuxReport {
@@ -278,9 +315,9 @@ export function register(program: Command): void {
       if (loaded !== null && dockerOk) {
         const toolchains = [...new Set(resolveAllWorkers(loaded).map((w) => w.toolchain))];
         for (const tc of toolchains) {
-          const tag = imageTag(loaded.config, tc);
-          const r = await exec(["docker", "image", "inspect", tag, "--format", "{{.Id}}"]);
-          images.push({ tag, present: r.code === 0 });
+          const status = await imageStatus(loaded.config, tc, exec);
+          if (status.diagnosis !== null) diagnoses.push(status.diagnosis);
+          if (status.image !== null) images.push(status.image);
         }
       }
 
