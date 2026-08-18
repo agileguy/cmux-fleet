@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 190/255
+progress: 191/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-17
@@ -119,7 +119,7 @@ suite green on `headless` against a test double.
 - [x] ISC-19: The e2e suite runs `up → dispatch → wait → artifacts` end-to-end against the double.
 - [x] ISC-20: Integration tests exercise real subprocess spawning, real filesystem, and real git, with no network.
 - [x] ISC-21: No test in the `headless` suite requires network egress.
-- [x] ISC-22: A test-coverage report can be produced and lists every `src/` module.
+- [ ] ISC-22: A test-coverage report can be produced and lists every `src/` module. `bun run test:coverage` works and lists 73 of 76 (`bunfig.toml`); `src/backends/types.ts` (types-only, no instrumentable code) and `src/supervisor/index.ts` (only ever loaded as a spawned subprocess) are structurally absent, but `src/cli/commands/tui.ts` is missing only because no test imports it — a real, closable gap, not a structural one — so "every module" isn't met yet.
 
 ### Group C — Container image
 
@@ -158,7 +158,7 @@ suite green on `headless` against a test double.
 
 - [ ] ISC-50: A container completes a model call against `host.docker.internal:8000`.
 - [ ] ISC-51: That call succeeds with no route to the public internet.
-- [ ] ISC-52: A model outside `models_allowlist` is refused at `up` with exit 2.
+- [x] ISC-52: A model outside `models_allowlist` is refused at `up` with exit 2.
 - [ ] ISC-53: A model that answers a `tools`-bearing probe with prose is refused at `up` with exit 2.
 - [ ] ISC-54: `doctor` reports the oMLX model list.
 - [ ] ISC-55: `doctor` reports a measured single-request oMLX latency.
@@ -418,7 +418,7 @@ of the same class it repaired.
 - [x] ISC-244: Validation COST is bounded, not just envelope bytes — array lengths are checked before the schema, so an element-packed envelope cannot allocate an issue object per element.
 - [x] ISC-245: A worker-controlled filename cannot forge lines in the harvest report; every refusal is escaped and truncated at one choke point.
 - [ ] ISC-246: `scanOutboxFiles` returns file DESCRIPTORS, not path strings — a validated path re-opened later is a TOCTOU window, and `nlink` can be raised after the scan. Latent while `safe` has no consumers; arms the moment E3 attaches artifacts.
-- [ ] ISC-247: A backslash in an envelope path is refused. Harmless on POSIX, a separator anywhere else; not a control character, so the ISC-240 filter does not catch it.
+- [x] ISC-247: A backslash in an envelope path is refused. Harmless on POSIX, a separator anywhere else; not a control character, so the ISC-240 filter does not catch it.
 
 ### Phase 3 — security and cloud identity
 
@@ -787,9 +787,12 @@ works.
 
 ### Workstream 2 — small independent fixes — 2026-08-17
 
-Nine of ten planned criteria closed, each with its own regression test written against a
-confirmed-red baseline before the fix; the tenth (ISC-219) has its test written but is
-blocked on a missing image (see `## Decisions`). Two engineers ran in parallel worktrees
+Eight of ten planned criteria closed on the first pass, each with its own regression test
+written against a confirmed-red baseline before the fix; ISC-247 was fixed and tested but
+missed the checkbox flip in the same pass (caught by an independent PR review, see below);
+ISC-219 has its test written but is blocked on a missing image (see `## Decisions`). A tenth,
+unplanned criterion (ISC-52) turned out to already be satisfied by ISC-190's own launch-path
+test and is closed alongside it. Two engineers ran in parallel worktrees
 (`ws2-engineer-a`, `ws2-engineer-b`), merged conflict-free into `workstream-2-small-fixes`
 since their file sets never overlapped.
 
@@ -822,15 +825,21 @@ since their file sets never overlapped.
   (6 tests) + `test/integration/up-wiring.test.ts`, describe "models_allowlist is enforced
   before any worker starts (ISC-190)" (2 tests, mutation-checked: removing the enforcement
   call from `up.ts` fails only the launch-path test, which is the criterion's actual claim).
-  New `ModelNotAllowedError extends ConfigError` (exit 2).
-- **ISC-22** — `bunfig.toml` (new) configures `coverageSkipTestFiles` and
+  New `ModelNotAllowedError extends ConfigError` (exit 2). The same launch-path test also
+  verbatim satisfies **ISC-52** ("a model outside `models_allowlist` is refused at `up` with
+  exit 2") — not part of the original ten, closed as a side effect.
+- **ISC-22 — not closed.** `bunfig.toml` (new) configures `coverageSkipTestFiles` and
   `coverageReporter = ["text", "lcov"]`, deliberately with no `coverage = true` default (would
   slow every narrow `bun test` invocation) and no `coverageThreshold` (would gate the build on
-  a number chosen on day one). `package.json` gained a `test:coverage` script. Confirmed by
-  running it: 73 modules reported across all 16 top-level `src/` areas; the 3 `src/*.ts` files
-  absent from the report are structural (a types-only file with no instrumentable code, and
-  two files only ever loaded inside spawned subprocesses, which Bun's profiler does not span)
-  rather than a config gap.
+  a number chosen on day one); `package.json` gained a `test:coverage` script; the report does
+  run. But the criterion says "lists every `src/` module" and it lists 73 of 76:
+  `src/backends/types.ts` (types-only, no instrumentable code) and `src/supervisor/index.ts`
+  (only ever loaded as a spawned subprocess) are structurally absent, which is fine — but
+  `src/cli/commands/tui.ts` is absent only because no test imports it, same as its 19 sibling
+  command files that DO appear (each covered incidentally by an unrelated unit test importing
+  a named export). That's a real, closable gap, so the box stays open rather than checked with
+  a caveat 40 lines away from the criterion itself — the mistake ISC-219 avoided and this entry
+  originally repeated (an independent PR review caught it; see below).
 - **ISC-219 — not closed.** Test written (`test/integration/verbgate.test.ts`, "a policy
   planted at the pre-fix /outbox path grants nothing"), plants a wildcard policy at both
   plausible pre-fix path candidates since the exact historical path is not recoverable from
@@ -843,7 +852,34 @@ since their file sets never overlapped.
 **Verification:** `bun test test/unit` — 842 pass, 0 fail (one flaky failure on first run,
 see `## Decisions`, gone on re-run) — across 43 files; `bun run typecheck` clean.
 
-Progress: 182/255 → 190/255.
+Progress: 182/255 → 191/255 (ISC-214, 215, 216, 217, 228, 247, 160, 190, 52).
+
+### PR #7 review round — 2026-08-17
+
+Three independent reviewers (Claude, Gemini, Codex — see the `CodeReviewer` skill) ran against
+the Workstream 2 diff before merge. Genuine value: they caught two bookkeeping mistakes above
+(ISC-247 fixed but not checked; ISC-22 checked despite not meeting "every module") and two
+real code defects that had passed all of this workstream's own tests because nothing tested
+the failure path itself:
+
+- `readDockerfile()` threw a bare `Error` on a missing/unreadable Dockerfile, which
+  `exitCodeForError` classifies as `EXIT.INTERNAL` (ISC-216's "undiagnosed bug in pifleet") —
+  exactly backwards for a broken checkout, and `doctor`'s own image-presence check sat outside
+  any try, so the one command whose job is diagnosing a broken machine crashed on one. 3/3
+  reviewers flagged this independently — highest-confidence finding of the round.
+- `up.ts`'s `models_allowlist` enforcement loop used a bare `catch { continue }` around
+  `resolveWorker()`, which swallows "worker names an unknown role" (a real config defect)
+  identically to "worker id not in `--workers`" (the one case meant to be skipped) — silently
+  bypassing the allowlist gate for a misconfigured worker. Also 3/3.
+- (Claude, high confidence) `configHash` hashed the Dockerfile's text but not the two files it
+  `COPY`s into the image — `docker/verbgate` (the cloud-mutation gate) and `docker/entrypoint.sh`
+  — so editing either left the image tag, and therefore `up`'s staleness check, unchanged.
+- (Codex) `assertEpochWellFormed` used `Number.isInteger`, which admits `2**53` and other values
+  past which `epoch + 1 === epoch` — the fence could never advance.
+- Both Gemini and Codex separately flagged the exit-code ladder docs (README, `contracts.test.ts`)
+  never picked up the new `EXIT.INTERNAL = 8`.
+
+Fix pass and final citations recorded once complete; see immediately below.
 
 ### Phase 6 close-out — 2026-07-28
 
