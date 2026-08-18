@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 194/255
+progress: 195/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-18
@@ -292,7 +292,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
 - [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
 - [ ] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output.
-- [ ] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
+- [x] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
 - [x] ISC-160: A stale image is not silently reused after the Dockerfile changed.
 
 ### Group N — Mount visibility (added 2026-07-27, found by the Docker-gated suite)
@@ -1179,3 +1179,126 @@ mechanism and the fix.)*
 
 Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
 ISC-254.
+
+### ISC-159 close-out — 2026-08-18
+
+`doctor` could not meet this criterion for two independent reasons, and both are fixed
+in `src/cli/commands/doctor.ts`. `versionProbe` captured a version string and compared it
+to nothing, so "a wrong version" was undetectable by construction; and every finding —
+whatever its cause — landed in one untyped `diagnoses` array that produced a single
+`EXIT.BACKEND_UNAVAILABLE` throw, so "a missing binary" and "an absent daemon" were the
+same row. `docker version --format {{.Server.Version}}` failing printed
+`not available (docker exited 1)` whether Docker was uninstalled or merely stopped.
+
+**Exit code: still 3 for every class, deliberately.** The ladder was NOT widened and
+`src/contracts.ts` is untouched. An exit code is one number and `doctor` routinely trips
+several classes in a single run, so encoding the class in the code forces a
+`worstExit`-style collapse that destroys the very distinction this criterion asks for.
+`EXIT.INTERNAL` is the one precedent for extending the ladder, and it was split from
+`EXIT.USAGE` because a machine caller must take a categorically *different action*
+(rewrite your arguments vs. stop, pifleet is broken); these three do not diverge that
+way — all of them say "the host is not ready, fix it and re-run" and differ only in what
+a human then types, which is what the criterion puts in the message. SRD §11 already
+fixes the number ("Any missing `required` capability → exit 3 with a named diagnosis").
+The distinction now travels as a `class` tag on `Diagnosis` — `missing-binary` /
+`wrong-version` / `absent-daemon` / `misconfigured` — named for what the operator must
+DO, surfaced per-diagnosis and as a top-level `diagnosis_classes` array in `--json`, and
+led with in the human report (`DIAGNOSIS [absent-daemon] …`). The decision has one
+documented home, the exported `exitForDiagnoses`.
+
+**Version floors, and why these numbers.** No floor for docker, git or tmux is stated in
+`Docs/SRD.md` or `fleet.example.yaml`, so each was derived from a feature this repo
+already calls rather than picked:
+
+- **docker >= 23.0.0** — `docker/Dockerfile` uses `COPY --chmod=` (a BuildKit frontend
+  feature) six times and `container/image.ts` shells out to plain `docker build` without
+  ever setting `DOCKER_BUILDKIT=1`. BuildKit became the default builder in Engine 23.0;
+  on 22.x the classic builder runs and rejects `--chmod`, so no worker image builds.
+- **git >= 2.32.0** — `harvest/git.ts`'s `HERMETIC_GIT_ENV` neutralises the developer's
+  config against an untrusted repo via `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, both
+  introduced in 2.32. Older git *ignores* them, so the hardening fails **open**, silently
+  and unobservably — the strongest case here for enforcing rather than reporting.
+- **tmux >= 2.4.0** — `backends/tmux/argv.ts` sets `pane-border-status` and
+  `select-pane -T` (2.3) and calls `respawn-pane -c` (2.4). Applied as a *report*, not a
+  gate: tmux is probed `required: false`, an absent tmux has never been a diagnosis, and
+  "absent is fine but stale is fatal" would be incoherent — a below-floor tmux withdraws
+  `backends.tmux` instead, the reported-never-required shape `read-screen` already has.
+
+Ordering is part of the fix: a missing binary and a dead daemon both make the version
+unknowable, so neither is ever followed by a floor verdict. An *unparseable* banner is a
+third status (`unreadable`), reported as "could not verify the minimum" rather than as a
+pass or as a violation, since only one of those is known.
+
+`unreadable` only pays for itself if every consumer honours all three states, and two
+places initially did not — both caught in review and fixed:
+
+- **`backends.tmux` gated on `floor?.status === "ok"`**, folding `unreadable` in with
+  `below` and withdrawing the backend. Because `floorDiagnosis` returns null for an
+  optional tool, nothing was pushed to explain it: a working tmux vanished from
+  `backends` with no finding anywhere in the report and an exit of 0. `tmux master` —
+  what a git-built tmux prints, and *newer* than every numbered release — landed there,
+  while `TmuxBackend.probe()` reported the same binary `ok: true`, so `doctor` called a
+  tmux dead that `up --backend tmux` drove without complaint. The gate now tests
+  `!== "below"`: only a version that actually parsed and actually lost the comparison is
+  evidence enough to withdraw a backend.
+- **The `unreadable` diagnosis was tagged `wrong-version`**, contradicting the
+  remediation it shipped with. It is `misconfigured`: nothing parsed, so nothing lost a
+  comparison and the tool may be current — what is known is that the name does not
+  resolve to something answering with a recognisable banner, which is a property of the
+  environment. Wrapper scripts, shims and version managers land here.
+
+`doctor`'s banner parser is renamed `parseVersionTriple`, because
+`backends/tmux/argv.ts` exports its own `parseVersion` over the same tmux banner
+answering a different question (raw token for display and a present/absent test, versus
+numbers for a comparison). They legitimately disagree on `tmux master` — `"master"` there,
+`null` here — and two same-named exports that disagree on one input is how a later
+"de-duplicate these" pass deletes the wrong one. Unifying them is a larger change and is
+deliberately not attempted here.
+
+Observed, per class, driven through PATH shims with `PATH` set to the shim dir **alone**
+so the developer's own binaries cannot answer a probe
+(`test/integration/doctor-diagnoses.test.ts`):
+
+- *missing-binary*: no `git` on PATH → exit 3, `git-not-installed`, "install git and
+  re-run". Absent `docker` → `docker-not-installed`, and `absent-daemon` is **not** in
+  `diagnosis_classes` — the discrimination the criterion turns on.
+- *absent-daemon*: a docker shim whose `--version` succeeds (client-only, never opens the
+  socket) while `version` exits 1 → exit 3, `docker-daemon-unreachable`, message names the
+  client version found and says to start Docker; `missing-binary` absent from the classes.
+- *wrong-version*: `git version 2.20.1` → exit 3, `git-version-below-minimum`, message
+  carries both 2.20.1 and 2.32.0. Docker `20.10.24` → `docker-version-below-minimum`.
+- *misconfigured*: `git version unknown` → exit 3, `git-version-unreadable`, with
+  `misconfigured` in `diagnosis_classes` and `wrong-version` asserted **absent** — the
+  fix the message names ("check what `git` resolves to on PATH") is a PATH change, not
+  an upgrade, and an operator filtering on `wrong-version` must not be sent here.
+- *control*: docker 23.0.0 + git 2.32.0 exactly at the floors → exit 0, zero diagnoses.
+- *optional floor*: `tmux 1.8` → exit 0, zero diagnoses, `backends.tmux: false`, probe
+  detail naming 2.4.0; `tmux 3.6a` → `backends.tmux: true`. `tmux master` — unparseable,
+  and newer than every numbered release — → exit 0, zero diagnoses, floor status
+  `unreadable`, and `backends.tmux: **true**`: a backend is withdrawn only on confirmed
+  evidence of staleness, never on the absence of evidence. The two non-`ok` statuses are
+  additionally asserted side by side reaching opposite verdicts, since the bug was
+  precisely that they converged.
+- *multi-class*: a single run tripping a dead daemon beside a below-floor git yields
+  `["absent-daemon", "wrong-version"]`, and beside an unparseable git
+  `["absent-daemon", "misconfigured"]` — the array shape `diagnosis_classes` exists for,
+  and which every single-fault case above leaves unexercised.
+- All three classes asserted to share exit 3 while yielding three distinct messages and
+  three distinct `diagnosis_classes` — the decision above pinned as a test, not left
+  incidental. The human-readable branch is asserted separately from `--json`, since it is
+  a different code path.
+
+`test/unit/version-floor.test.ts` pins the parser against the three banner formats that
+disagree (`git version 2.43.0`, `tmux 3.6a`, docker's bare `28.0.1`) and against the two
+implementations that pass a casual read and are wrong: string comparison ranks `2.9`
+above `2.10` (asserted directly), and `split(".")` turns `3.6a` into `NaN`.
+
+The sibling suite's "healthy" docker shim was fixed in the same commit: it answered only
+`--version` and let its catch-all return `{}` to the `docker version --format` call
+`doctor` actually makes, so the stand-in was healthy by accident and reported a server
+version of `{}`.
+
+`bun run typecheck` → clean, zero diagnostics. `bun test` → **1142 pass, 53 skip, 0 fail**
+across 77 files. `src/contracts.ts` unmodified; `EXIT_SEVERITY` unchanged.
+
+Progress: 194/255 → 195/255.
