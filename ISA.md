@@ -3,10 +3,10 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 104/236
+progress: 182/255
 mode: build
 started: 2026-07-27
-updated: 2026-07-27
+updated: 2026-08-17
 ---
 
 # cmux-fleet — Ideal State Artifact
@@ -123,34 +123,34 @@ suite green on `headless` against a test double.
 
 ### Group C — Container image
 
-- [ ] ISC-23: `image build --toolchain node` produces an image whose `pi --version` matches the pinned version.
-- [ ] ISC-24: `image verify` fails on an image whose Pi version differs from config.
-- [ ] ISC-25: A worker container runs as uid 10001.
-- [ ] ISC-26: A worker container runs with a read-only root filesystem.
-- [ ] ISC-27: A file written to `/workspace` appears in the host worktree.
-- [ ] ISC-28: A file written in the host worktree appears at `/workspace`.
-- [ ] ISC-29: `/skills` is read-only inside the container; a write attempt fails.
-- [ ] ISC-30: The host `~/.pi/agent` is not mounted in any container.
+- [x] ISC-23: `image build --toolchain node` produces an image whose `pi --version` matches the pinned version.
+- [x] ISC-24: `image verify` fails on an image whose Pi version differs from config.
+- [x] ISC-25: A worker container runs as uid 10001.
+- [x] ISC-26: A worker container runs with a read-only root filesystem.
+- [x] ISC-27: A file written to `/workspace` appears in the host worktree.
+- [x] ISC-28: A file written in the host worktree appears at `/workspace`.
+- [x] ISC-29: `/skills` is read-only inside the container; a write attempt fails.
+- [x] ISC-30: The host `~/.pi/agent` is not mounted in any container.
 - [ ] ISC-31: `docker inspect` shows no cloud provider key in any container's environment (only `OMLX_API_KEY`).
 - [ ] ISC-32: `up` refuses to start when a role's image is missing.
-- [ ] ISC-33: `gcloud version` succeeds inside every worker image regardless of `toolchain`.
-- [ ] ISC-34: `kubectl version --client` succeeds inside every worker image.
-- [ ] ISC-35: `helm version` succeeds inside every worker image.
-- [ ] ISC-36: `jq --version` succeeds inside every worker image.
-- [ ] ISC-37: `curl --version` succeeds inside every worker image.
-- [ ] ISC-38: PID 1 in a worker container is `tini`.
-- [ ] ISC-39: The container entrypoint renders `~/.pi/agent/models.json` from env and Pi registers the oMLX provider (SRD Q9).
-- [ ] ISC-40: The rendered `models.json` survives the read-only root (written to a writable tmpfs path Pi reads).
+- [x] ISC-33: `gcloud version` succeeds inside every worker image regardless of `toolchain`.
+- [x] ISC-34: `kubectl version --client` succeeds inside every worker image.
+- [x] ISC-35: `helm version` succeeds inside every worker image.
+- [x] ISC-36: `jq --version` succeeds inside every worker image.
+- [x] ISC-37: `curl --version` succeeds inside every worker image.
+- [x] ISC-38: PID 1 in a worker container is `tini`.
+- [x] ISC-39: The container entrypoint renders `~/.pi/agent/models.json` from env and Pi registers the oMLX provider (SRD Q9).
+- [x] ISC-40: The rendered `models.json` survives the read-only root (written to a writable tmpfs path Pi reads).
 
 ### Group D — Google credentials
 
-- [ ] ISC-41: With `cloud_access: true` and `adc_mode: token`, `gcloud auth print-access-token` succeeds inside the container.
-- [ ] ISC-42: In `token` mode, no `refresh_token` appears in the container environment.
-- [ ] ISC-43: In `token` mode, no `refresh_token` appears anywhere on the container filesystem or in `/creds`.
+- [x] ISC-41: With `cloud_access: true` and `adc_mode: token`, `gcloud auth print-access-token` succeeds inside the container.
+- [x] ISC-42: In `token` mode, no `refresh_token` appears in the container environment.
+- [x] ISC-43: In `token` mode, no `refresh_token` appears anywhere on the container filesystem or in `/creds`.
 - [ ] ISC-44: The host `~/.config/gcloud` directory is not in any container's `docker inspect` mount list.
 - [ ] ISC-45: A role with `cloud_access: false` has no Google credential.
 - [ ] ISC-46: In a `cloud_access: false` role, `gcloud auth print-access-token` fails.
-- [ ] ISC-47: After `token_refresh` elapses, a `gcloud` call inside a long-running container still succeeds.
+- [x] ISC-47: After `token_refresh` elapses, a `gcloud` call inside a long-running container still succeeds.
 - [ ] ISC-48: With `impersonate_service_account` set, the token's identity is the SA, not the launching user's account.
 - [ ] ISC-49: `up` prints the granted identity, project, and ADC mode for every `cloud_access` worker.
 
@@ -167,42 +167,42 @@ suite green on `headless` against a test double.
 
 ### Group F — Configuration
 
-- [ ] ISC-58: `config validate` exits 2 with a field-level error on a malformed config.
-- [ ] ISC-59: `config validate` rejects a role combining `bash` with `read_only: true`.
-- [ ] ISC-60: `render --worker eng-1` emits the expected normalized argv without spawning anything.
-- [ ] ISC-61: Changing the length of `workers:` changes the container count, with no other edit.
-- [ ] ISC-62: Two roles produce different `--model` values.
-- [ ] ISC-63: Two roles produce different `--skill` sets.
-- [ ] ISC-64: A role that overrides `skills:` still receives `pifleet-worker`.
-- [ ] ISC-65: Multiple briefing fragments produce exactly one `--append-system-prompt` argument.
-- [ ] ISC-66: No rendered argv contains an `@`-prefixed path.
-- [ ] ISC-67: All six SRD roles (`sre`, `investigator`, `verifier`, `engineer`, `reviewer`, `tester`) load from the default config.
-- [ ] ISC-68: An unknown role name referenced by a worker fails `config validate` with a named error.
+- [x] ISC-58: `config validate` exits 2 with a field-level error on a malformed config.
+- [x] ISC-59: `config validate` rejects a role combining `bash` with `read_only: true`.
+- [x] ISC-60: `render --worker eng-1` emits the expected normalized argv without spawning anything.
+- [x] ISC-61: Changing the length of `workers:` changes the container count, with no other edit.
+- [x] ISC-62: Two roles produce different `--model` values.
+- [x] ISC-63: Two roles produce different `--skill` sets.
+- [x] ISC-64: A role that overrides `skills:` still receives `pifleet-worker`.
+- [x] ISC-65: Multiple briefing fragments produce exactly one `--append-system-prompt` argument.
+- [x] ISC-66: No rendered argv contains an `@`-prefixed path.
+- [x] ISC-67: All six SRD roles (`sre`, `investigator`, `verifier`, `engineer`, `reviewer`, `tester`) load from the default config.
+- [x] ISC-68: An unknown role name referenced by a worker fails `config validate` with a named error.
 
 ### Group G — Lifecycle
 
-- [ ] ISC-69: `up` returns a `run_id`.
-- [ ] ISC-70: Every worker reaches `idle` within 60s of `up`.
-- [ ] ISC-71: `status --json` reflects `busy` within 2s of dispatch.
-- [ ] ISC-72: `down` leaves no running container for that run.
-- [ ] ISC-73: `down` leaves no supervisor process for that run.
+- [x] ISC-69: `up` returns a `run_id`.
+- [x] ISC-70: Every worker reaches `idle` within 60s of `up`.
+- [x] ISC-71: `status --json` reflects `busy` within 2s of dispatch.
+- [x] ISC-72: `down` leaves no running container for that run.
+- [x] ISC-73: `down` leaves no supervisor process for that run.
 - [ ] ISC-74: Closing a worker's pane does not stop the worker in rpc mode; the task still settles.
-- [ ] ISC-75: Killing the `pifleet` CLI mid-run leaves supervisors running.
-- [ ] ISC-76: After the CLI is killed, `status --run` re-attaches and `wait` still returns a verdict.
-- [ ] ISC-77: No supervisor has the CLI or a pane shell as its parent: `pgid == pid`.
-- [ ] ISC-78: A supervisor's session id differs from the launcher's.
+- [x] ISC-75: Killing the `pifleet` CLI mid-run leaves supervisors running.
+- [x] ISC-76: After the CLI is killed, `status --run` re-attaches and `wait` still returns a verdict.
+- [x] ISC-77: No supervisor has the CLI or a pane shell as its parent: `pgid == pid`.
+- [x] ISC-78: A supervisor's session id differs from the launcher's.
 
 ### Group H — Dispatch and completion
 
-- [ ] ISC-79: A dispatched task appears in the transcript as a `UserMessage`.
+- [x] ISC-79: A dispatched task appears in the transcript as a `UserMessage`.
 - [x] ISC-80: `steer` injects a message that appears before the next assistant turn.
 - [x] ISC-81: `abort` returns the worker to `idle` within 10s.
-- [ ] ISC-82: A scenario emitting `agent_end{willRetry:true}` then continuing is not reported complete.
-- [ ] ISC-83: A scenario settling on an aborted turn is reported `aborted`, not `success`.
-- [ ] ISC-84: The SRD §7.5 interleaving scenario does not attribute epoch N's diff to epoch N+1.
-- [ ] ISC-85: Re-dispatching a completed `(worker, task_id, epoch)` is a no-op returning `already_completed`.
-- [ ] ISC-86: A `prompt` that acks then fails late fails its epoch rather than reporting accepted.
-- [ ] ISC-87: Completion is detected via `agent_end{willRetry:false}` plus a correlated `get_state` showing `isStreaming:false` and `pendingMessageCount:0`.
+- [x] ISC-82: A scenario emitting `agent_end{willRetry:true}` then continuing is not reported complete.
+- [x] ISC-83: A scenario settling on an aborted turn is reported `aborted`, not `success`.
+- [x] ISC-84: The SRD §7.5 interleaving scenario does not attribute epoch N's diff to epoch N+1.
+- [x] ISC-85: Re-dispatching a completed `(worker, task_id, epoch)` is a no-op returning `already_completed`.
+- [x] ISC-86: A `prompt` that acks then fails late fails its epoch rather than reporting accepted.
+- [x] ISC-87: Completion is detected via `agent_end{willRetry:false}` plus a correlated `get_state` showing `isStreaming:false` and `pendingMessageCount:0`.
 
 ### Group I — Artifacts
 
@@ -224,11 +224,11 @@ suite green on `headless` against a test double.
 
 ### Group J — Safety and security
 
-- [ ] ISC-103: A `kubectl get` in a `cloud_access` worker succeeds.
-- [ ] ISC-104: A `kubectl delete` not in `cloud_allow[]` exits 77 and is refused.
-- [ ] ISC-105: A mutating verb named in the task's `cloud_allow[]` executes.
-- [ ] ISC-106: That permitted mutating verb is recorded in the ledger with task id and argv.
-- [ ] ISC-107: Every cloud invocation, permitted or refused, appears in the run ledger.
+- [x] ISC-103: A `kubectl get` in a `cloud_access` worker succeeds.
+- [x] ISC-104: A `kubectl delete` not in `cloud_allow[]` exits 77 and is refused.
+- [x] ISC-105: A mutating verb named in the task's `cloud_allow[]` executes.
+- [x] ISC-106: That permitted mutating verb is recorded in the ledger with task id and argv.
+- [x] ISC-107: Every cloud invocation, permitted or refused, appears in the run ledger.
 - [ ] ISC-108: A worker completing 3 turns with zero tool calls is classified `failed:no_tool_calls`.
 - [ ] ISC-109: With 6 workers up and `max_concurrent: 2`, at most 2 have an in-flight generation at any sampled moment.
 - [x] ISC-110: A worker queued behind others is not killed as wedged before `event_stall_warn` elapses.
@@ -277,7 +277,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-141: Epoch attribution uses the RPC stream offset, and the SRD §7.5 interleaving is decided correctly when offset is the only distinguishing signal.
 - [ ] ISC-142: A dispatch whose epoch is `<=` the worker's persisted `last_accepted_epoch` is rejected at the worker side, not merely bookkept by the allocator.
 - [ ] ISC-143: The epoch high-water-mark is durable before dispatch; allocate → crash → restart does not re-issue the same epoch.
-- [ ] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
+- [x] ISC-144: The run-dir lease keys on pid plus process start-time, so a recycled pid is not mistaken for a live supervisor.
 - [ ] ISC-145: A retried dispatch carrying the same `(task_id, attempt_uuid)` replays the stored response rather than returning a bare `already_completed`.
 - [x] ISC-146: Every deadline and stall timer uses a monotonic clock; a wall-clock jump fires none of them early.
 - [ ] ISC-147: Across every hostile scenario, completion is never declared while the agent will still emit output.
@@ -397,7 +397,7 @@ of the same class it repaired.
 - [x] ISC-226: A failed head anchor is retried on later polls rather than silently disabling rewrite detection for the reader's lifetime.
 - [x] ISC-227: The `willRetry` e2e states plainly that its discrimination comes from `completion.test.ts`, not from itself — the double reports `isStreaming: true` for a retrying `agent_end`.
 - [ ] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
-- [ ] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
+- [x] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
 
 ### Group S — Phase 2 findings (added 2026-07-27)
 
@@ -532,6 +532,35 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   files across seven subsystems. Remaining phases dispatch ~10-14 files per engineer, keep image
   builds in the parent so build logs do not consume an engineer's budget, and treat integration and
   e2e suites as their own dispatch unit because that is reliably what gets cut.
+- **2026-08-17 — the "phases done" claim in README/CHANGELOG and the ISA's own done-condition
+  had drifted apart.** All six SRD phases shipping every command in §10 did not mean every ISC
+  was verified — most of Groups C/D/E/F/G (container image, Google credentials, oMLX, config,
+  lifecycle) were unchecked not because the code was wrong, but because no prior session on
+  this machine had a running Docker daemon to live-probe against. Fixed by running the full
+  `PIFLEET_DOCKER=1` integration + e2e suite once Docker (Colima), vanilla pi.dev 0.79.6, and
+  the oMLX key were all available — 54 criteria closed with no source changes beyond one bug
+  (below). Deliberately did NOT check off Group E (ISC-50..57, oMLX in-container model calls):
+  no dedicated test file exercises them, and "the e2e suite passed" doesn't independently prove
+  allowlist refusal or the MLX-training-run guard fire correctly — that's real follow-up work,
+  not a documentation gap. Same restraint applied to ISC-44..46, 48, 49, 61(kept — see below),
+  74, 32: no test file names them, so they stay open rather than being swept in on file-level
+  correlation.
+- **2026-08-17 — found and fixed a real bug while unblocking the environment, not part of any
+  planned workstream.** `src/harvest/outbox.ts`'s `CONTROL_CHARS` regex and `safeForReport`'s
+  replace() were built from literal raw NUL/US/DEL bytes in the source instead of `\x` escape
+  sequences. Bun 1.3.11 parses that as "range out of order in character class" and refuses to
+  load the file — which took down every test touching outbox.ts, plus `doctor` itself, since
+  commands are registered eagerly at CLI startup. Same character class, rewritten with escape
+  sequences; full unit suite went from a hard crash to 818/818 green. This suggests the ISA's
+  frontmatter `progress: 104/236` (dated 2026-07-27) predates whichever change introduced the
+  raw bytes, or predates a Bun upgrade on this machine that started rejecting them — either way,
+  nobody had run the full suite on this exact machine+Bun version since.
+- **2026-08-17 — vanilla pi.dev installed alongside, not over, an existing fork.** This machine's
+  `$PATH` resolved `pi` to `~/bin/pi` → `@oh-my-pi/pi-coding-agent`, a different npm-scoped fork,
+  not the pinned `@earendil-works/pi-coding-agent@0.79.6` this project is built against. Per
+  explicit instruction, installed the real package via `bun install -g`, which lands in
+  `~/.bun/bin/pi` — earlier in `$PATH` than `~/bin/pi` — so `pi` now resolves to vanilla 0.79.6
+  without touching the existing oh-my-pi setup at all.
 - **2026-07-27 — scratch directories that get bind-mounted live under `$HOME`, never `os.tmpdir()`.**
   Measured on this machine: Colima shares `$HOME` and shares neither `/tmp` nor
   `/var/folders/...`. An unshared `-v` source does not error — the daemon mounts an empty
@@ -694,6 +723,49 @@ it needs a run from inside a cmux pane. It stays unchecked until then.
 
 Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
 ISC-254.
+
+### Environment unblock + Docker/e2e sweep — 2026-08-17
+
+**Environment.** `bun install` was failing outright (`ConnectionClosed` on every tarball) —
+a corporate transparent-proxy issue, resolved once disabled. Vanilla pi.dev installed
+(`bun install -g @earendil-works/pi-coding-agent@0.79.6`); `pi --version` → `0.79.6`,
+resolving ahead of an unrelated `@oh-my-pi` fork already on `$PATH`. `OMLX_API_KEY` sourced
+from `~/.env`. Docker (Colima) and cmux (0.64.22) were already present. `doctor --json`
+afterward: `docker` 28.4.0 ok, `git` 2.50.1 ok, `pi` 0.79.6 ok, `tmux` 3.6a ok, `cmux` 0.64.22
+ok (socket unreachable outside a live pane — expected, see ISC-129), `omlx.ok: true`.
+
+**Bug found and fixed en route:** `src/harvest/outbox.ts`'s two control-character regexes
+were built from literal raw bytes, which Bun 1.3.11 refuses to parse (see `## Decisions`).
+Fixed; `bun test test/unit` went from a hard crash to `818 pass, 0 fail` across 43 files.
+
+**Docker + e2e sweep**, `PIFLEET_DOCKER=1`, against real Docker and real pi 0.79.6 (no
+test-double fallback in the e2e suite):
+
+- Built the missing `pifleet/pi-worker:verify` image (`docker build --build-arg
+  TOOLCHAIN=base --build-arg PI_VERSION=0.79.6 -f docker/Dockerfile .`) — no worker image had
+  ever been built on this machine, which was the sole cause of 26 initial integration
+  failures (exit 125, image not found), not a code defect.
+- `bun test test/integration` (29 files) → **293 pass, 0 fail**, 1571 `expect()` calls, 97.4s.
+- `bun test test/e2e` (2 files) → **10 pass, 0 fail**, 131 `expect()` calls, 43.6s.
+- Combined with the unit suite: **1121/1121 passing, 0 failures, 0 parse/load blockers.**
+
+**54 criteria closed**, each backed by an explicit `ISC-N` citation found in the test file
+itself (not inferred from file-level correlation): ISC-23..30, 33..40 (`test/integration/
+image.test.ts`, `cli-exit-codes.test.ts`); ISC-41..43, 47 (`adc.test.ts`); ISC-58..68
+(`test/unit/config.test.ts`, `render.test.ts`, `cli-exit-codes.test.ts`); ISC-69..73, 75..79,
+82..87 (`test/e2e/lifecycle.test.ts`); ISC-103..107 (`verbgate.test.ts`); ISC-144
+(`supervisor.test.ts`); ISC-229 (`test/unit/completion.test.ts`'s bidirectional
+`EXPECTED_SETTLES` ↔ scenario-file parity check, lines 439-452).
+
+**Deliberately left open** despite the green run, for lack of a named test citing them:
+ISC-31, 32, 44..46, 48, 49, 74 (Groups C/D/G — file-level correlation isn't the same as
+per-criterion evidence); all of ISC-50..57 (Group E, oMLX — no dedicated in-container model
+call / allowlist-refusal test file exists yet, a real gap, not a bookkeeping one). ISC-129
+stays open per Phase 4/6 notes (needs a run from inside a live cmux pane). ISC-249 was
+expected to close as a side effect of ISC-27/28 landing — re-check: its text also requires
+the neutralization site itself (per-worker worktree, not the operator's checkout) to exist,
+which is a separate, still-open question from whether ISC-27/28's write-through behavior
+works.
 
 ### Phase 6 close-out — 2026-07-28
 
