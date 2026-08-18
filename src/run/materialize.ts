@@ -234,6 +234,51 @@ function assertContained(root: string, name: string, what: string): string {
 }
 
 /**
+ * Refuse a DISCOVERED filename that is not a single, safe path segment.
+ *
+ * Deliberately NOT `assertContained`, and the difference is a regression that
+ * one fixed. `assertContained` applies `SESSION_ID_RE` — the grammar for an
+ * identifier an operator TYPES into config, where "a name that cannot be
+ * spelled cannot escape" is the whole control. A file inside a skill bundle is
+ * not that. Nobody named it in a config; it is whatever the bundle's author (or
+ * the operating system) put on disk, and the copy has no say in it. Holding
+ * those to the config grammar made `copySkillTree` refuse `.DS_Store` — which
+ * macOS, this project's own development platform, writes into any directory
+ * Finder opens — and with it `.gitignore` and every name containing a space,
+ * parens, `@`, `~` or a non-ASCII character. None of those is dangerous to
+ * copy, and each arrived as `ConfigError: skill bundle entry "…" is not a path
+ * segment`: a config diagnosis, pointing at a file the operator never wrote
+ * anywhere, for a bundle that is perfectly fine.
+ *
+ * What actually matters at that call site is narrower and purely structural —
+ * that the name cannot make `join` mean anything other than "one entry inside
+ * this directory". So: no empty string, no `.` or `..`, no separator, no NUL.
+ * `readdir` yields none of those, but that is an assumption about another API
+ * rather than a property of the loop, which is why the loop checked at all.
+ * `resolvedWithin` then confirms the same conclusion by a second, independent
+ * route, exactly as `assertContained` does.
+ *
+ * Exported for direct test: no real `readdir` can produce a name that reaches
+ * any of these branches.
+ */
+export function assertEntryContained(root: string, name: string): string {
+  if (name === "" || name === "." || name === ".." || /[/\\\0]/.test(name)) {
+    throw new ConfigError(
+      `skill bundle entry ${JSON.stringify(name)} is not a single path segment — ` +
+        `a bundle entry must be one ordinary directory entry, not "", ".", ".." or a path`,
+    );
+  }
+  const path = join(root, name);
+  if (!resolvedWithin(root, path) || path === root) {
+    throw new ConfigError(
+      `skill bundle entry ${JSON.stringify(name)} escapes ${root} — a bundle is copied ` +
+        `entry by entry into its own directory, never through one`,
+    );
+  }
+  return path;
+}
+
+/**
  * Recursive, symlink-refusing, bounded, mode-setting copy of one skill bundle.
  *
  * Symlinks are REFUSED, never dereferenced. A skill tree is copied into a mount
@@ -279,9 +324,11 @@ export async function copySkillTree(src: string, dst: string, depth = 0): Promis
   for (const name of names) {
     // `readdir` yields basenames, so neither join can traverse; checked anyway
     // because "it cannot contain a separator" is an assumption about another
-    // API rather than a property of this loop.
-    const from = assertContained(src, name, "skill bundle entry");
-    const to = assertContained(dst, name, "skill bundle entry");
+    // API rather than a property of this loop. Checked for the TRAVERSAL
+    // properties only — a bundle author's filename is not a config identifier,
+    // and holding it to `assertContained`'s grammar refused `.DS_Store`.
+    const from = assertEntryContained(src, name);
+    const to = assertEntryContained(dst, name);
     const entry = await lstat(from);
     if (entry.isSymbolicLink()) {
       throw new ConfigError(
@@ -343,6 +390,27 @@ export async function materializeRoleSkills(
   skillNames: readonly string[],
   sourceRoot: string,
 ): Promise<string> {
+  /**
+   * The ROLE is checked here too, not only the skill names below.
+   *
+   * DEFENCE IN DEPTH for this exported function's DIRECT-CALL surface — not a
+   * live hole in `pifleet up`, and it should not be read as one.
+   * `FleetConfigSchema` already applies this same grammar to every key of
+   * `roles:`, and `resolveWorker` refuses a worker whose `role` is not one of
+   * those keys, so no config that loads can reach here with a traversing role.
+   * But `assertContained`'s docstring promises that "a future caller reaching
+   * it without schema validation must still be safe", and every skill NAME in
+   * this function was held to that while the role — joined into the same host
+   * path, then mkdir'd and chmod'd through — was trusted outright. Closing that
+   * asymmetry is all this line does.
+   *
+   * The containment root is computed here rather than as
+   * `dirname(roleSkillsDir(runRoot, role))`: `roleSkillsDir` joins the
+   * untrusted role in FIRST and `path.join` normalizes `..` away, so a root
+   * derived from the already-joined path would be a root that had itself
+   * followed the traversal — and the check would then pass anything.
+   */
+  assertContained(join(runRoot, "skills"), role, "role name");
   const dst = roleSkillsDir(runRoot, role);
   const targets = skillNames.map((name) => ({
     name,

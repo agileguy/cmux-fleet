@@ -42,6 +42,7 @@ import {
   MAX_SKILL_DIR_ENTRIES,
   MAX_SKILL_FILE_BYTES,
   MaterializeError,
+  assertEntryContained,
   copySkillTree,
   materializeRoleSkills,
   materializeWorkerInputs,
@@ -432,6 +433,58 @@ describe("a skill name cannot escape the directories it is joined into", () => {
   });
 });
 
+/**
+ * The ROLE is joined into a host path here exactly as a skill name is.
+ *
+ * This is DEFENCE IN DEPTH, not a live hole in `up`, and the distinction is
+ * worth stating so nobody reads the test as evidence of one: `FleetConfigSchema`
+ * already applies this grammar to every key of `roles:`, and `resolveWorker`
+ * refuses a worker whose `role` is not one of those keys — so no config that
+ * loads can carry a traversing role this far. `materializeRoleSkills` is
+ * exported, though, and on THAT surface the role was the one name in the
+ * function that nothing checked while every skill name beside it was.
+ */
+describe("a role name cannot escape the directories it is joined into either", () => {
+  test("materializeRoleSkills refuses a hostile ROLE directly, and mutates nothing", async () => {
+    const f = await fixture();
+    const src = await skillSourceRoot();
+    const victim = join(f.dir, "role-victim");
+    await mkdir(victim, { recursive: true });
+    await writeFile(join(victim, "key"), "private\n");
+    await chmod(join(victim, "key"), 0o600);
+    await chmod(victim, 0o700);
+
+    // Enough `..` to reach the filesystem root from `<run>/skills` whatever the
+    // temp root's depth; the surplus is discarded, since `..` above `/` is a
+    // no-op on an absolute path.
+    const climb = Array.from({ length: 16 }, () => "..").join("/");
+    const err = await materializeRoleSkills(
+      f.run.root,
+      `${climb}${victim}`,
+      ["pifleet-worker"],
+      src,
+    ).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).exitCode).toBe(EXIT.USAGE);
+    expect((err as Error).message).toContain("role name");
+    expect((err as Error).message).toContain("is not a path segment");
+    /**
+     * The two things that actually happened without the check, both asserted:
+     * `mkdir -p` + `makeWorkerAccessible` reopened the directory the role
+     * resolved to (0700 → 0755), and the bundle was then copied straight into
+     * it. Modes and contents are exactly as they were.
+     */
+    expect(await readdir(victim)).toEqual(["key"]);
+    expect(await mode(victim)).toBe(0o700);
+    expect(await mode(join(victim, "key"))).toBe(0o600);
+    // …and nothing half-built was left inside the run root either. `readdir`
+    // rather than `Bun.file().exists()`, which reports every DIRECTORY as
+    // absent and would pass here no matter what had been created.
+    expect(await readdir(f.run.root)).toEqual([]);
+  });
+});
+
 describe("the verbgate policy file", () => {
   test("is a zero-byte REGULAR FILE, which is the whole point", async () => {
     const f = await fixture();
@@ -721,6 +774,87 @@ describe("the skill-tree walk is bounded", () => {
     expect((err as Error).message).toContain("over the");
     // Refused from the lstat, so the oversized bytes were never copied.
     expect(await Bun.file(join(dst, "b", "huge.md")).exists()).toBe(false);
+  });
+});
+
+/**
+ * A bundle ENTRY is a filename, and a filename is not a config identifier.
+ *
+ * `copySkillTree` ran every name `readdir` handed it through `assertContained`,
+ * which applies `SESSION_ID_RE` — the grammar for a name an operator TYPES into
+ * `roles:` or `skills:`. Nobody types the names below; they are whatever the
+ * bundle author or the OS left on disk. So a skill bundle that had ever been
+ * opened in Finder carried a `.DS_Store`, and `pifleet up` refused the whole
+ * launch with `skill bundle entry ".DS_Store" is not a path segment` — a config
+ * diagnosis naming a file the operator never wrote, for a bundle that is fine.
+ *
+ * The traversal properties are what that call site actually needs, and they are
+ * pinned directly below, since `readdir` cannot produce one to test through.
+ */
+describe("a skill bundle entry is a filename, not a config identifier", () => {
+  /** Each of these is refused by `SESSION_ID_RE` and harmless to copy. */
+  const AWKWARD = [
+    ".DS_Store", // macOS writes it into any directory Finder opens
+    ".gitignore", // every dotfile, in fact
+    "notes and thoughts.md", // spaces
+    "diagram (v2).md", // parens
+    "read@me.md", // @
+    "draft~", // editor backup suffix
+    "notes-café-日本語.md", // non-ASCII
+  ] as const;
+
+  test("macOS junk, dotfiles, and spaced or non-ASCII names all copy through", async () => {
+    const src = await skillSourceRoot();
+    for (const name of AWKWARD) {
+      await writeFile(join(src, "pifleet-worker", name), `${name} content\n`);
+      // Nested too: the check runs at every level of the recursion.
+      await writeFile(join(src, "pifleet-worker", "nested", name), `nested ${name}\n`);
+    }
+    const f = await fixture({ skillsRoot: src });
+
+    const [m] = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
+    const bundle = join(m!.skillsDir, "pifleet-worker");
+    for (const name of AWKWARD) {
+      // Copied, with the right bytes — not skipped, and not refused.
+      expect(await Bun.file(join(bundle, name)).text()).toBe(`${name} content\n`);
+      expect(await Bun.file(join(bundle, "nested", name)).text()).toBe(`nested ${name}\n`);
+    }
+    // Nothing was quietly dropped on the way, either.
+    expect((await readdir(bundle)).sort()).toEqual([...AWKWARD, "SKILL.md", "nested"].sort());
+  });
+
+  /**
+   * The rejection branches, pinned directly.
+   *
+   * `readdir` never yields any of these, which is precisely why they need a
+   * direct call: through `copySkillTree` the branches are dead code that
+   * mutation testing would delete without turning a single test red.
+   */
+  /** The synchronous twin of the `.catch((e: unknown) => e)` idiom used above. */
+  const refusal = (name: string): unknown => {
+    try {
+      assertEntryContained("/tmp/bundle", name);
+      return null;
+    } catch (e) {
+      return e;
+    }
+  };
+
+  test.each([
+    ["an empty name", ""],
+    ["a bare dot", "."],
+    ["a parent reference", ".."],
+    ["a POSIX separator", "a/b"],
+    ["a Windows separator", "a\\b"],
+    ["an embedded NUL", "a\0b"],
+  ])("%s is refused", (_what, name) => {
+    const err = refusal(name);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).exitCode).toBe(EXIT.USAGE);
+  });
+
+  test("an ordinary name is joined into the root and returned", () => {
+    expect(assertEntryContained("/tmp/bundle", ".DS_Store")).toBe("/tmp/bundle/.DS_Store");
   });
 });
 
