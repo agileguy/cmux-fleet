@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskEnvelopeSchema, type TaskEnvelope } from "../../src/contracts.ts";
 import { RpcClient } from "../../src/rpc/client.ts";
-import { runPaths, taskRecordPath, workerPaths } from "../../src/run/paths.ts";
+import { runPaths, taskRecordPath, workerPaths, type WorkerPaths } from "../../src/run/paths.ts";
 import {
   initialWorkerState,
   readFence,
@@ -110,6 +110,29 @@ async function waitFor(cond: () => Promise<boolean>, budgetMs: number): Promise<
   }
 }
 
+/**
+ * Wait for a supervisor that is idle AND still running.
+ *
+ * `state.json` outlives the process that wrote it, so a bare
+ * `phase === "idle"` is satisfied by a DEAD supervisor's last words — which is
+ * how the restart half of the ISC-143 block first "passed" in 120ms and then
+ * failed connecting to a socket nobody was listening on. Every gate in this
+ * file goes through here so the next one added inherits the fix; the same gate
+ * in production is `up`'s ISC-70 readiness loop.
+ *
+ * Liveness is the (pid, start-time) identity, not the pid alone: the number is
+ * reused, and a bare pid check is exactly the hazard ISC-144 closes.
+ */
+async function waitForIdle(wp: WorkerPaths, pid: number, budgetMs = 20_000): Promise<boolean> {
+  const started = await processStartTime(pid);
+  if (started === null) return false; // never came up, or already gone
+  return waitFor(async () => {
+    const s = await readWorkerState(wp);
+    if (s === null || s.phase !== "idle" || s.pid !== pid) return false;
+    return identityAlive({ pid, started });
+  }, budgetMs);
+}
+
 function makeEnvelope(runId: string, worker: string, taskId: string): TaskEnvelope {
   return TaskEnvelopeSchema.parse({
     schema: "pifleet.task/v1",
@@ -176,11 +199,7 @@ describe("detached supervisor — process tree (ISC-77/78)", () => {
       // And it must have come up for real: state.json reaches idle.
       const run = runPaths(runId, root);
       const wp = workerPaths(run, "eng-1");
-      const idle = await waitFor(
-        async () => (await readWorkerState(wp))?.phase === "idle",
-        20_000,
-      );
-      expect(idle).toBe(true);
+      expect(await waitForIdle(wp, pid)).toBe(true);
 
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
       await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
@@ -228,11 +247,7 @@ describe("detached supervisor — process tree (ISC-77/78)", () => {
       expect(orphaned).toBe(true);
       expect((await psField(pid, "pgid")).trim()).toBe(String(pid));
 
-      const idle = await waitFor(
-        async () => (await readWorkerState(wp))?.phase === "idle",
-        20_000,
-      );
-      expect(idle).toBe(true);
+      expect(await waitForIdle(wp, pid)).toBe(true);
 
       // ISC-76: a brand-new client re-attaches through the durable files and
       // the control socket — no state from the dead launcher required.
@@ -461,7 +476,11 @@ describe("epoch fence durability across a SIGKILL (ISC-143)", () => {
               PIFLEET_TEST_KILL_PATH: wp.fenceJson,
               PIFLEET_TEST_KILL_TRACE: trace,
             },
-            stdout: "pipe",
+            // The supervisor's own stdout goes to its log; leaving it piped
+            // and undrained is the very thing the stderr note below warns
+            // about — a full pipe blocking the process this test is waiting
+            // to observe.
+            stdout: "ignore",
             stderr: "pipe",
           },
         );
@@ -472,18 +491,7 @@ describe("epoch fence durability across a SIGKILL (ISC-143)", () => {
         // the very process this test is waiting to observe.
         const doomedErr = new Response(doomed.stderr).text();
 
-        // Gate on the PID as well as the phase, here and at the restart below.
-        // `state.json` outlives the process that wrote it, so a bare
-        // `phase === "idle"` is satisfied by a DEAD supervisor's last words —
-        // which is how the restart half of this test first "passed" in 120ms
-        // and then failed connecting to a socket nobody was listening on.
-        const idle = async (expected: number): Promise<boolean> =>
-          waitFor(async () => {
-            const s = await readWorkerState(wp);
-            return s !== null && s.pid === expected && s.phase === "idle";
-          }, 20_000);
-
-        expect(await idle(doomed.pid)).toBe(true);
+        expect(await waitForIdle(wp, doomed.pid)).toBe(true);
 
         // This dispatch never gets an answer: the supervisor dies inside the
         // `await persistFence()` that precedes the prompt.
@@ -501,6 +509,43 @@ describe("epoch fence durability across a SIGKILL (ISC-143)", () => {
 
         // The kill landed exactly here, and nowhere later.
         expect(await traceFor(trace, wp.fenceJson)).toEqual(steps);
+
+        /**
+         * And it landed in the fence write that PRECEDES the prompt, not one of
+         * the other four `persistFence()` call sites.
+         *
+         * Without this the block asserts only "a fence write happened at some
+         * point during the run". Delete the `await persistFence()` at the
+         * dispatch site — the one whose comment reads "Durable fence BEFORE the
+         * prompt … Crash between here and the send burns the epoch — safe" —
+         * and the kill simply relocates to the fence write that follows the
+         * ack. Every assertion below still passes, while the supervisor has
+         * handed a worker an epoch it never made durable: the exact §7.5
+         * violation this criterion exists to forbid.
+         *
+         * `state.json` is what separates them, because the dispatch handler
+         * writes it BETWEEN the two fence writes and awaits it:
+         *
+         *     await persistFence();      <- the kill lands here
+         *     state.phase = "busy"; state.epoch = decision.epoch;
+         *     await flushState();        <- so this can never have run
+         *     await client.send("prompt", ...)
+         *     await persistFence();      <- and the kill never reaches here
+         *
+         * So a surviving state.json that still reads `idle`, epoch 0, no task
+         * is proof the process died before the epoch was even recorded locally
+         * — which is upstream of the send, whatever the boundary. If the kill
+         * had landed in the post-ack fence write, this file would name epoch 2.
+         *
+         * Deterministic, not lucky: those three fields are assigned after the
+         * awaited fence write returns, and the flush that follows is awaited
+         * too, so no heartbeat can smear the two cases together.
+         */
+        const stateAtCrash = await readWorkerState(wp);
+        expect(stateAtCrash).not.toBeNull();
+        expect(stateAtCrash?.phase).toBe("idle");
+        expect(stateAtCrash?.epoch).toBe(0);
+        expect(stateAtCrash?.task_id).toBeNull();
 
         // The surviving fence is a COMPLETE version — `readFence` validates the
         // whole schema, so a torn or half-updated file throws rather than
@@ -532,7 +577,7 @@ describe("epoch fence durability across a SIGKILL (ISC-143)", () => {
           logPath: wp.supervisorLog,
         });
         cleanups.push(() => killSupervisor(pid, pgid));
-        expect(await idle(pid)).toBe(true);
+        expect(await waitForIdle(wp, pid)).toBe(true);
 
         // An epoch that was durable when the crash happened is burned, never
         // resumed: it MAY have partially run, and "maybe ran" must not look like
@@ -560,9 +605,22 @@ describe("epoch fence durability across a SIGKILL (ISC-143)", () => {
         expect(reply["epoch"] as number).toBeGreaterThan(survivor.last_accepted_epoch);
         expect(reply["epoch"]).not.toBe(1);
 
-        // And the ledger the crash cut across still reads end to end. The kill
-        // is inside a fence write, not an append, so this is exact: zero
-        // unparseable lines, not "at most the last one".
+        /**
+         * And the ledger the crash cut across still reads end to end.
+         *
+         * Exact — zero unparseable lines, not "at most the last one" — but not
+         * because appends are out of reach of the kill. `ledger.append` is a
+         * real fire-and-forget call and one can well be in flight here. It is
+         * exact because a signal cannot tear the write: `appendJsonl` issues
+         * ONE `write(2)` on an O_APPEND fd for a line far below the size at
+         * which the kernel returns a short write, and a process dying of
+         * SIGKILL dies at a signal-delivery point, never part-way through the
+         * kernel's copy. So each record is entirely present or entirely
+         * absent.
+         *
+         * That reasoning is what `test/unit/jsonl.test.ts` pins directly, by
+         * killing AT an append boundary rather than hoping to hit one.
+         */
         const { records, errors } = await mergeLedger(run);
         expect(errors).toEqual([]);
         expect(records.length).toBeGreaterThan(0);
@@ -681,9 +739,7 @@ describe("settle() failure does not kill the supervisor (ISC-212)", () => {
 
       const run = runPaths(runId, root);
       const wp = workerPaths(run, "eng-1");
-      expect(await waitFor(async () => (await readWorkerState(wp))?.phase === "idle", 20_000)).toBe(
-        true,
-      );
+      expect(await waitForIdle(wp, pid)).toBe(true);
 
       // A deadline short enough to fire during the test, against an agent that
       // will not answer `abort` — so the 5s escalation ladder is reached.
@@ -776,9 +832,7 @@ describe("settle() failure does not kill the supervisor (ISC-212)", () => {
 
       const run = runPaths(runId, root);
       const wp = workerPaths(run, "eng-1");
-      expect(await waitFor(async () => (await readWorkerState(wp))?.phase === "idle", 20_000)).toBe(
-        true,
-      );
+      expect(await waitForIdle(wp, pid)).toBe(true);
 
       // Same probe as the deadline test: 0555 on `tasks/` refuses the temp file
       // writeTaskRecord creates, while fence.json and state.json — whose

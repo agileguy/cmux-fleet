@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  appendJsonl,
   LineSplitter,
   LineTooLongError,
   MAX_LINE_UNITS,
@@ -210,6 +211,92 @@ describe("writeJsonAtomic survives a SIGKILL at every syscall boundary (ISC-156)
       20_000,
     );
   }
+});
+
+/**
+ * ISC-156's other half: "…and the ledger readable".
+ *
+ * The ledger does not go through `writeJsonAtomic` at all — `appendJsonl` opens
+ * the file O_APPEND and writes one line — so none of the five boundaries above
+ * touch it, and the criterion's second clause had no test behind it once the
+ * old stochastic one was deleted. That test at least killed a process that was
+ * appending; these kill AT an append, which is the same proof without the
+ * coin flip.
+ *
+ * The claim is per-record, not per-file: a killed writer may lose the record it
+ * was about to write, but must never leave a partial one, because half a JSONL
+ * line is not a smaller ledger — it is an unreadable one, and `mergeLedger`
+ * reports it as a corrupt shard for the whole run.
+ */
+describe("appendJsonl leaves the ledger readable across a SIGKILL (ISC-156)", () => {
+  const FIXTURE = new URL("../fixtures/kill-at-boundary.ts", import.meta.url).pathname;
+  const JSONL = new URL("../../src/util/jsonl.ts", import.meta.url).pathname;
+
+  test(
+    "a kill at an append boundary truncates at a record edge, never inside one",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "pifleet-kill-"));
+      try {
+        const ledger = join(dir, "ledger", "eng-1.jsonl");
+        const trace = join(dir, "trace.tsv");
+
+        // Records of deliberately DIFFERENT lengths. Equal-length records would
+        // let a writer that tore a line mid-record still produce a file that
+        // happened to split cleanly on the newline it did write.
+        const writerCode = [
+          `const { appendJsonl } = await import(${JSON.stringify(JSONL)});`,
+          `for (let i = 1; i <= 6; i++) {`,
+          `  await appendJsonl(${JSON.stringify(ledger)}, { seq: i, pad: "x".repeat(i * 40) });`,
+          `}`,
+          `console.log("SURVIVED");`,
+        ].join("\n");
+        const writer = Bun.spawn([process.execPath, "--preload", FIXTURE, "-e", writerCode], {
+          env: {
+            ...process.env,
+            PIFLEET_TEST_KILL_AT: "append",
+            PIFLEET_TEST_KILL_PATH: ledger,
+            PIFLEET_TEST_KILL_TRACE: trace,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const stdout = await new Response(writer.stdout).text();
+        expect(await writer.exited).toBe(137);
+        expect(stdout).not.toContain("SURVIVED");
+
+        // The fixture arms on the FIRST append to this path, so exactly one
+        // record was written and the kill fired the instant it landed.
+        const traced = (await readFile(trace, "utf8"))
+          .split("\n")
+          .filter((l) => l !== "")
+          .map((l) => l.split("\t"));
+        expect(traced.map((r) => r[0])).toEqual(["append"]);
+        expect(traced[0]?.[1]).toBe(ledger);
+
+        // THE claim: every line the crash left behind parses. A torn record
+        // would throw here — which is precisely how `mergeLedger` would report
+        // it, one layer up.
+        const text = await readFile(ledger, "utf8");
+        const lines = text.split("\n").filter((l) => l !== "");
+        const records = lines.map((l) => parseLine<{ seq: number; pad: string }>(l)!);
+        expect(records.map((r) => r.seq)).toEqual([1]);
+        // Whole, not merely parseable: a short write would still be valid JSON
+        // if it cut inside `pad`'s quotes only by luck.
+        expect(records[0]!.pad).toBe("x".repeat(40));
+        // And the file ends ON the record boundary — no partial tail.
+        expect(text.endsWith("\n")).toBe(true);
+
+        // The ledger is still APPENDABLE, not merely readable. A crash must
+        // not leave a shard that the next writer extends into garbage.
+        await appendJsonl(ledger, { seq: 99, pad: "after-the-crash" });
+        const after = (await readFile(ledger, "utf8")).split("\n").filter((l) => l !== "");
+        expect(after.map((l) => parseLine<{ seq: number }>(l)!.seq)).toEqual([1, 99]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
 });
 
 describe("TailReader", () => {

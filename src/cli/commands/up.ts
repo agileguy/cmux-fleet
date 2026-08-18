@@ -7,7 +7,12 @@ import { Stopwatch } from "../../rpc/client.ts";
 import { newRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
 import { readWorkerState, writePresentation } from "../../run/state.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
-import { registryCall } from "../../run/registry.ts";
+import {
+  identityAlive,
+  processStartTime,
+  registryCall,
+  type ProcessIdentity,
+} from "../../run/registry.ts";
 import { ensureControlAuth } from "../../security/control-auth.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { resolveBackendWithFallback } from "../../backends/tmux/fallback.ts";
@@ -376,6 +381,15 @@ export function register(program: Command): void {
       const workspace = await backend.ensureWorkspace(`pifleet-${runId}`);
 
       const launched: Array<{ id: string; pid: number; pgid: number }> = [];
+      /**
+       * (pid, start-time) per worker, captured at launch.
+       *
+       * The readiness gate below needs to tell "this supervisor is idle" from
+       * "this supervisor is dead and `state.json` still holds its last words",
+       * and a bare pid cannot: the number outlives the process and the kernel
+       * hands it out again. Same identity the lease uses (ISC-144).
+       */
+      const identities = new Map<string, ProcessIdentity>();
       for (const workerId of workers) {
         const wp = workerPaths(run, workerId);
         await mkdir(wp.dir, { recursive: true });
@@ -423,6 +437,7 @@ export function register(program: Command): void {
           logPath: wp.supervisorLog,
         });
         launched.push({ id: workerId, pid, pgid });
+        identities.set(workerId, { pid, started: (await processStartTime(pid)) ?? "" });
         await ledger.append("supervisor_launched", {
           worker: workerId,
           detail: { pid, pgid },
@@ -569,12 +584,31 @@ export function register(program: Command): void {
         }
       }
 
-      // ISC-70: block until every worker is idle, fail loudly otherwise.
+      /**
+       * ISC-70: block until every worker is idle, fail loudly otherwise.
+       *
+       * "Idle" is a claim about a LIVE supervisor, and `phase` alone cannot
+       * carry it. `state.json` outlives the process that wrote it, so a
+       * supervisor that reached idle and then died — SIGKILL, OOM, a crash on
+       * the next tick — leaves a file that reads `idle` forever. This loop
+       * would then break, `up` would print the run as ready, and the first
+       * command to reach for that worker would fail connecting to a socket
+       * nobody is listening on.
+       *
+       * The liveness test is the (pid, start-time) identity, not `pid` alone:
+       * a bare pid check passes the moment the kernel reuses the number, which
+       * is the reuse hazard ISC-144 exists to close.
+       */
       const clock = new Stopwatch();
       const phases = new Map<string, string>();
       for (;;) {
         let allIdle = true;
         for (const workerId of workers) {
+          const identity = identities.get(workerId);
+          if (identity !== undefined && !(await identityAlive(identity))) {
+            phases.set(workerId, "dead");
+            throw new CliError(`worker ${workerId} died during startup`, EXIT.WORKER_DIED);
+          }
           const state = await readWorkerState(workerPaths(run, workerId));
           const phase = state?.phase ?? "starting";
           phases.set(workerId, phase);
