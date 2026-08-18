@@ -4,7 +4,7 @@
  * The guard existed and ran too late. Its only caller was `respawnPaneArgv`,
  * on the last line of `attachViewer`, while the surface id was interpolated
  * into a filename and written with mode 0700 several lines earlier.
- * `splitPaneId` requires only two non-empty space-separated parts, so `/` and
+ * `splitPaneId` requires only three non-empty space-separated parts, so `/` and
  * `.` both survive it, and an id like `x/../../victim/target` escapes
  * `viewerScriptDir` into a sibling directory — an arbitrary-file overwrite
  * whose content is a `#!/bin/sh` script. The `viewer-` prefix absorbs a plain
@@ -54,11 +54,11 @@ async function tree(dir: string): Promise<string[]> {
 
 describe("a hostile surface id never reaches the filesystem", () => {
   test.each([
-    ["p1 x/../../victim/target", "escapes past the viewer- prefix"],
-    ["p1 ../../etc/pwn", "plain traversal"],
-    ["p1 a/b", "a separator at all"],
-    ["p1 .", "current directory"],
-    ["p1 ..", "parent directory"],
+    ["p1 x/../../victim/target ws1", "escapes past the viewer- prefix"],
+    ["p1 ../../etc/pwn ws1", "plain traversal"],
+    ["p1 a/b ws1", "a separator at all"],
+    ["p1 . ws1", "current directory"],
+    ["p1 .. ws1", "parent directory"],
   ])("refuses %j (%s) and writes nothing", async (paneId) => {
     const { dir, backend } = await rig();
     const before = await tree(dir);
@@ -80,7 +80,7 @@ describe("a hostile surface id never reaches the filesystem", () => {
     // The cmux call afterwards fails here (no reachable socket); the write
     // happens first, which is the step under test.
     await backend
-      .attachViewer({ backend: "cmux", id: "pane-1 surface-abc123" }, ["tail", "-F", "/tmp/x"])
+      .attachViewer({ backend: "cmux", id: "pane-1 surface-abc123 ws-1" }, ["tail", "-F", "/tmp/x"])
       .catch(() => {});
     const entries = await readdir(viewers);
     expect(entries).toEqual(["viewer-surface-abc123.sh"]);
@@ -88,5 +88,22 @@ describe("a hostile surface id never reaches the filesystem", () => {
     const st = await stat(join(viewers, entries[0]!));
     expect(st.mode & 0o777).toBe(0o700);
     expect(await tree(dir)).toContain("nested/viewers/viewer-surface-abc123.sh");
+  });
+
+  /**
+   * A pane id recorded by a pifleet build predating the `--workspace` fix
+   * (`presentation.json` written by `up`, read back by a later `attach`/`tui`
+   * invocation) has only two fields. `attachViewer` must name that condition
+   * and refuse before writing anything, not throw the generic
+   * `CmuxParseError` a stray 2-part string would otherwise produce two layers
+   * down inside `respawnPaneArgv`.
+   */
+  test("a legacy 2-part id (no workspace) is refused by name and writes nothing", async () => {
+    const { dir, backend } = await rig();
+    const before = await tree(dir);
+    await expect(
+      backend.attachViewer({ backend: "cmux", id: "pane-1 surface-abc123" }, ["tail", "-F", "/tmp/x"]),
+    ).rejects.toThrow(/predates the respawn-pane --workspace fix/);
+    expect(await tree(dir)).toEqual(before);
   });
 });

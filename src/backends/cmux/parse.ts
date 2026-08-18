@@ -27,26 +27,45 @@ export class CmuxParseError extends Error {
 }
 
 /**
- * A pane in this backend is addressed by BOTH its pane id and the id of the
- * terminal surface inside it, because cmux splits the verbs across the two:
- * `focus-pane` wants a pane, while `respawn-pane`, `read-screen`, `send`,
- * `send-key` and `rename-tab` all want a surface. The seam's `PaneRef` carries
- * one opaque string, so the two UUIDs travel composed in it. A space is a safe
- * separator: UUIDs never contain one.
+ * A pane in this backend is addressed by its pane id, the id of the terminal
+ * surface inside it, AND the id of the workspace that owns it, because cmux
+ * splits the verbs three ways: `focus-pane` wants a pane; `read-screen`,
+ * `send` and `send-key` want a surface alone; `respawn-pane` and `rename-tab`
+ * want a surface scoped to a workspace context — with neither `--workspace`
+ * nor `$CMUX_WORKSPACE_ID` set, surface resolution for those two verbs fails
+ * even on a surface id `new-split` just returned, probed live against 0.64.22
+ * on 2026-08-18 (see `respawnPaneArgv`). The seam's `PaneRef` carries one
+ * opaque string, so all three ids travel composed in it. A space is a safe
+ * separator: no id cmux emits (UUID or `kind:N` ref) contains one.
  */
-export function composePaneId(paneId: string, surfaceId: string): string {
-  if (paneId.includes(" ") || surfaceId.includes(" ")) {
-    throw new CmuxParseError("pane/surface id (embedded space)", `${paneId} ${surfaceId}`);
+export function composePaneId(paneId: string, surfaceId: string, workspaceId: string): string {
+  for (const [what, v] of [
+    ["pane id", paneId],
+    ["surface id", surfaceId],
+    ["workspace id", workspaceId],
+  ] as const) {
+    if (v === "" || v.includes(" ")) {
+      throw new CmuxParseError(`${what} (empty or embedded space)`, `${paneId} ${surfaceId} ${workspaceId}`);
+    }
   }
-  return `${paneId} ${surfaceId}`;
+  return `${paneId} ${surfaceId} ${workspaceId}`;
 }
 
-export function splitPaneId(composed: string): { paneId: string; surfaceId: string } {
+/**
+ * `workspaceId` is `null` for a pane id composed by a pifleet build that
+ * predates the `--workspace` fix (a 2-field `"<pane> <surface>"` string) —
+ * such an id can persist across process boundaries in `presentation.json`
+ * (`pifleet.presentation/v1`, written by `up`, read back later by `attach`/
+ * `tui`), so a binary upgrade mid-run must not turn a stale-but-nameable
+ * condition into an opaque parse failure. `paneId`/`surfaceId` alone are
+ * still enough for every verb except `respawn-pane`/`rename-tab`.
+ */
+export function splitPaneId(composed: string): { paneId: string; surfaceId: string; workspaceId: string | null } {
   const parts = composed.split(" ");
-  if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
+  if ((parts.length !== 2 && parts.length !== 3) || parts.some((p) => p === "")) {
     throw new CmuxParseError("composed pane id", composed);
   }
-  return { paneId: parts[0]!, surfaceId: parts[1]! };
+  return { paneId: parts[0]!, surfaceId: parts[1]!, workspaceId: parts[2] ?? null };
 }
 
 function asObject(what: string, raw: string): Record<string, unknown> {

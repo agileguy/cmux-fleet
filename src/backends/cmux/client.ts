@@ -110,16 +110,40 @@ export function focusPaneArgv(paneId: string): string[] {
   return ["focus-pane", "--pane", paneId];
 }
 
-export function renameTabArgv(surfaceId: string, title: string): string[] {
+export function renameTabArgv(workspaceId: string, surfaceId: string, title: string): string[] {
+  assertCmuxValue("workspace id", workspaceId);
   assertCmuxValue("surface id", surfaceId);
   assertCmuxText("tab title", title);
   // `--title` keeps the text out of positional position (probed form).
-  return ["rename-tab", "--surface", surfaceId, "--title", title];
+  // `--workspace` supplies the workspace CONTEXT this verb resolves `--surface`
+  // against — cmux's own `--help` calls it exactly that, defaulting to
+  // `$CMUX_WORKSPACE_ID` when omitted. Neither is set by this client, so on
+  // 0.64.22 a surface id that demonstrably exists reports `not_found: Tab not
+  // found` (probed live 2026-08-18), even though the identical id resolves
+  // fine for `send`/`send-key`/`read-screen`/`focus-pane`, none of which are
+  // workspace-scoped. Either UUID or ref form works once the context is
+  // supplied — the regression was the missing context, not the id spelling
+  // (see `respawnPaneArgv`).
+  return ["rename-tab", "--workspace", workspaceId, "--surface", surfaceId, "--title", title];
 }
 
-export function respawnPaneArgv(surfaceId: string, command: string): string[] {
+export function respawnPaneArgv(workspaceId: string, surfaceId: string, command: string): string[] {
+  assertCmuxValue("workspace id", workspaceId);
   assertCmuxValue("surface id", surfaceId);
-  return ["respawn-pane", "--surface", surfaceId, "--command", command];
+  // `--workspace` supplies workspace CONTEXT, per cmux's own `--help`
+  // ("Workspace context ... default: $CMUX_WORKSPACE_ID") — 0.64.22 scoped
+  // `respawn-pane`'s surface resolution to a workspace, and neither the flag
+  // nor the env var is set by this client. Probed live 2026-08-18: a bare
+  // `--surface <uuid>` — the shape this backend shipped, matching the SRD's
+  // 0.64.20 baseline — fails with `Surface not found: <uuid>` on a surface
+  // `new-split` had just returned moments earlier. Adding `--workspace` (any
+  // id form, UUID included) alongside the identical `--surface <uuid>` fixes
+  // it outright; ref-vs-UUID spelling was never the actual variable, and
+  // `read-screen`/`send`/`send-key`/`focus-pane` need no context at all
+  // because they aren't workspace-scoped. A prior write-up in this project
+  // mis-attributed the failure to a UUID/ref addressing regression —
+  // corrected after this direct A/B test (see ISA.md).
+  return ["respawn-pane", "--workspace", workspaceId, "--surface", surfaceId, "--command", command];
 }
 
 export function setStatusArgv(
