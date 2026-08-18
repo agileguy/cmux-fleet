@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **A harvest re-run months later could grade a task against whatever `fleet.yaml`
+  happened to be sitting in the current directory that day.** `artifacts`/`report`
+  auto-discovered config from cwd when no `--config` was given, so the harness-pattern
+  surface a run was graded against was a function of when and where you happened to run
+  the harvest command, not of the run itself. `up` now persists the resolved harness
+  patterns into the run directory at launch time (the same pattern already used for the
+  heartbeat interval); harvesting reads that persisted value, and cwd/global config
+  auto-discovery is no longer consulted on the harvest path at all.
 - **`render`'s preview could name a different run directory than `up`'s real launch.**
   `render` computed the run root from the config file's `run.root` field; `up` always used
   `runsRoot()` (which honors `PIFLEET_RUNS_DIR`). Whenever that variable was set — every test
@@ -66,6 +74,14 @@ All notable changes to this project are documented here.
   project already relies on (BuildKit's `COPY --chmod=`, hermetic git's
   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, tmux's `respawn-pane -c`) rather than picked
   arbitrarily.
+- **`harness.patterns` is now a `fleet.yaml` key.** A config that supplies patterns
+  replaces `DEFAULT_HARNESS_PATTERNS` entirely for the ISC-150 anti-gaming cap; an empty
+  list is a validation error rather than "match nothing" (silently disabling the cap
+  through a key that reads as harmless). Because an honest, non-malicious pattern list
+  that simply doesn't match a worker's diff has the same silencing effect as an empty
+  one, the harvester now also compares the configured surface against the built-in
+  defaults and records a discrepancy — visible in both the human report and `--json` —
+  whenever narrowing the surface would have changed the verdict.
 
 ## [1.0.0] — 2026-07-28 — Phase 6: attended
 
