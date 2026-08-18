@@ -40,6 +40,37 @@ function isCommanderError(e: unknown): e is { code: string; exitCode: number } {
   );
 }
 
+/**
+ * Classify a thrown value into a ladder code.
+ *
+ * Exported because this expression IS the entry point's policy, and a test
+ * that re-declared it would prove only that its own copy is self-consistent
+ * (the same reason `requestedEpochFrom` is exported from `commands/dispatch.ts`).
+ *
+ * Order matters: a `CommanderError` carries `exitCode: 1`, which satisfies the
+ * structural `ExitCoded` protocol and is not a ladder code at all, so commander
+ * is classified first.
+ */
+export function exitCodeForError(err: unknown): ExitCode {
+  // `--help` and `--version` arrive here as CommanderErrors after commander has
+  // already printed; they are successes, not failures. Everything else
+  // commander diagnoses is a usage error. Detected structurally so the
+  // commander import stays an implementation detail of this file.
+  if (isCommanderError(err)) {
+    return err.code === "commander.helpDisplayed" ||
+      err.code === "commander.help" ||
+      err.code === "commander.version"
+      ? EXIT.SUCCESS
+      : EXIT.USAGE;
+  }
+  // One branch: CliError satisfies ExitCoded structurally, so the protocol is
+  // the only path and is therefore actually exercised.
+  if (isExitCoded(err)) return err.exitCode;
+  // Undiagnosed: a bug in pifleet, not a mistake by its caller. Reporting it as
+  // EXIT.USAGE collapsed the two into one integer (ISC-216).
+  return EXIT.INTERNAL;
+}
+
 export function buildProgram(): Command {
   const program = new Command();
   program
@@ -96,28 +127,17 @@ async function main(argv: string[]): Promise<number> {
     await program.parseAsync(argv);
     return EXIT.SUCCESS;
   } catch (err) {
-    // `--help` and `--version` reach here as CommanderErrors after commander
-    // has already printed; they are successes, not failures. Everything else
-    // commander diagnoses is a usage error. Detected structurally so the
-    // commander import stays an implementation detail of this file.
-    if (isCommanderError(err)) {
-      return err.code === "commander.helpDisplayed" ||
-        err.code === "commander.help" ||
-        err.code === "commander.version"
-        ? EXIT.SUCCESS
-        : EXIT.USAGE;
+    const code = exitCodeForError(err);
+    // Commander already printed its own diagnosis; anything else gets one line
+    // and never a stack trace. An undiagnosed failure says so, because the
+    // reader's next move differs: file a bug, do not fix the command line.
+    if (!isCommanderError(err)) {
+      const what = code === EXIT.INTERNAL ? "internal error: " : "";
+      process.stderr.write(
+        `pifleet: ${what}${err instanceof Error ? err.message : String(err)}\n`,
+      );
     }
-    // One branch: CliError satisfies ExitCoded structurally, so the protocol
-    // is the only path and is therefore actually exercised.
-    if (isExitCoded(err)) {
-      process.stderr.write(`pifleet: ${err.message}\n`);
-      return err.exitCode;
-    }
-    // Undiagnosed. Still no stack trace on stderr and still a ladder code:
-    // exit 1 is not in the SRD §10 ladder, so a caller switching on the
-    // integer would fall through every case it knows about.
-    process.stderr.write(`pifleet: ${err instanceof Error ? err.message : String(err)}\n`);
-    return EXIT.USAGE;
+    return code;
   }
 }
 
