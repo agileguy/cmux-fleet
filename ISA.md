@@ -1219,6 +1219,30 @@ reality by a human, and only if they look.
 
 Progress: 194/255 → 195/255.
 
+**PR #9 review round — 2026-08-18.** Same ProjectManager/CodeReviewer pattern as PR #7/#8:
+three independent local reviewers (Claude, Gemini, Codex) against the diff, then a fourth
+independent verification pass re-deriving each finding against the fix rather than trusting
+the fix's own claims. All three reviewers independently converged on the same shadowed-`run`
+hazard; Gemini and Codex additionally found the untested `kubeconfig` path and the
+non-canonicalizing `runsRoot()` respectively (the latter reproduced live against a real
+Docker daemon). Four fixes landed: the ambiguous `run` destructure in `buildDockerArgv` is
+now unbound entirely (confirmed by direct compiler test — reintroducing the hazard is now a
+`TS2304` compile error, not a runtime bug); the `kubeconfig` assertion now goes through
+`workerPaths()` instead of a hand-rebuilt string; `runsRoot()` resolves `~` and relative
+`PIFLEET_RUNS_DIR` values (verified absolute across 19 probed inputs); and role names are
+now validated against `SESSION_ID_RE` at config-load time, closing a real (if narrow)
+path-traversal gap a reviewer found in `roleSkillsDir()`. Verification re-ran every claim
+independently — the compile-error claim, the pre/post-fix mutation deltas, and the 19-input
+canonicalization sweep — rather than accepting the fix commit's word.
+Filed, not fixed here (out of this PR's scope, tracked as follow-ups): `--run-id`/`--run`
+accept unvalidated path segments on every command that takes them, the same traversal class
+as the role-name fix but reaching further — it lets `run.root` itself escape to an arbitrary
+host directory, taking the 0600 `control-auth.json` control-socket secret with it.
+Test count after the fix commit (`bdd43b8`): `bun test test/unit` → **876 pass, 0 fail**
+across 43 files (was 869 before this round's fixes). Mutation re-verified: restoring the old
+`config.run.root` derivation → 31 pass / 9 fail on `render.test.ts` (not 26 — the fix commit
+added tests of its own beyond the round-1 ISC-188 block).
+
 ### Phase 6 close-out — 2026-07-28
 
 - ISC-80: `steer.test.ts` asserts the injected message's POSITION in the
