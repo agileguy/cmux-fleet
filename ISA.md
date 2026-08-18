@@ -579,6 +579,25 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   were both 100% green. Recorded rather than chased: neither engineer's diff touched the
   hard-link check or its test, so this reads as ordering/temp-path contention between test
   files rather than something this workstream introduced.
+- **2026-08-17 — an independent review pass on the same-day PR found real defects a passing
+  test suite had missed, plus two ISA bookkeeping mistakes.** Three reviewers (Claude, Gemini,
+  Codex) ran against the diff before merge and converged 3/3 on two issues neither engineer nor
+  the orchestrator had caught: `readDockerfile()` threw an undiagnosed error that `doctor`
+  reported as `EXIT.INTERNAL`, exactly the "pifleet bug" misclassification ISC-216 exists to
+  prevent, aimed at a broken checkout instead; and the `models_allowlist` gate's bare `catch`
+  discarded a real config error alongside the one case it was meant to skip. Claude alone (high
+  confidence) found that ISC-160's hash covered the Dockerfile's text but not the two files it
+  `COPY`s — including `docker/verbgate`, the enforcement point behind the cloud-mutation gate —
+  leaving the highest-consequence staleness case still open under a criterion just marked
+  closed. **Learned: every fix in this workstream had its own red-then-green regression test,
+  and none of those tests were wrong — they each proved the fix did what it claimed. What they
+  didn't do was ask what ELSE could go wrong at the same site**, which is exactly the blind
+  spot an independent adversarial pass exists to cover, and the same reasoning this ISA already
+  applies to worker self-report (`## Anti-criteria`) applies one level up to the engineer
+  writing the test. Separately, Gemini's cross-file pass caught that ISC-247 had been fixed and
+  tested but its checkbox never flipped, and that ISC-22 had been checked despite not meeting
+  its own "every module" wording — both are on the orchestrator, not either engineer, and both
+  are now fixed. All fixes and citations are in `## Verification`, "PR #7 review round."
 - **2026-07-27 — scratch directories that get bind-mounted live under `$HOME`, never `os.tmpdir()`.**
   Measured on this machine: Colima shares `$HOME` and shares neither `/tmp` nor
   `/var/folders/...`. An unshared `-v` source does not error — the daemon mounts an empty
@@ -879,7 +898,44 @@ the failure path itself:
 - Both Gemini and Codex separately flagged the exit-code ladder docs (README, `contracts.test.ts`)
   never picked up the new `EXIT.INTERNAL = 8`.
 
-Fix pass and final citations recorded once complete; see immediately below.
+**Fix pass, same day:**
+
+- `src/container/image.ts`: `readDockerfile()` now throws `BuildContextError` (`exitCode:
+  EXIT.USAGE`), modelled on `ConfigError`. `doctor` gained `imageStatus()`, which turns an
+  unreadable Dockerfile into a `Diagnosis` row instead of aborting the whole probe.
+  `test/unit/render.test.ts`, "an unreadable Dockerfile throws a DIAGNOSED usage error, not an
+  internal one" + "doctor reports an unreadable Dockerfile as a diagnosis instead of aborting."
+- `src/container/image.ts`: new `BUILD_CONTEXT_ASSETS` enumeration (`Dockerfile`, `verbgate`,
+  `entrypoint.sh`) feeds `configHash` via a sha256 digest per file (CRLF folded to LF first);
+  `dockerfilePath()` generalizes to `buildContextPath()`. `test/unit/render.test.ts`, "editing
+  docker/verbgate busts the tag even though the Dockerfile is untouched (ISC-160)" + same for
+  `entrypoint.sh` + a structural test asserting every `COPY` source parsed out of the real
+  Dockerfile appears in `BUILD_CONTEXT_ASSETS`, so the enumeration cannot silently fall behind
+  a new `COPY` line.
+- `src/cli/commands/up.ts`: the allowlist loop is now `assertModelsAllowed()`, an explicit
+  membership test against `workers:` rather than a bare `catch`. The unknown-role bypass this
+  was meant to close turned out to be unreachable through a real `up` — `FleetConfigSchema`'s
+  `superRefine` already rejects an unknown role at parse time (ISC-68) — so the regression test
+  builds a `LoadedConfig` past the schema to prove the second line of defence doesn't discard
+  its own errors, rather than shipping a test that would have passed against the original bug
+  too. `test/unit/config.test.ts` (3 cases) + `test/integration/up-wiring.test.ts`, "a worker
+  naming an unknown role is refused before the repo is touched."
+- `src/rpc/epoch.ts`: `assertEpochWellFormed` uses `Number.isSafeInteger`, not
+  `Number.isInteger` — a value at/past `2**53` could never advance the fence (`epoch + 1 ===
+  epoch`). `test/unit/epoch.test.ts`, boundary cases at `MAX_SAFE_INTEGER + 1`, `2**53`,
+  `2**60`, `Infinity` refused; `MAX_SAFE_INTEGER` itself still accepted.
+- `README.md`: exit code `8` (`EXIT.INTERNAL`) added to the ladder line.
+- `test/unit/contracts.test.ts`: `worstExit` suite covers `EXIT.INTERNAL` outranking every
+  other code, including usage.
+
+Also fixed as part of the same round (bookkeeping, not code): ISC-247's checkbox (fixed and
+tested in the first pass, but the checkbox flip was missed), ISC-22 reverted to open (checked
+prematurely — see its criterion line for why), ISC-52 closed as a side effect of ISC-190's own
+test. See the commit immediately above this section for the exact ISA diff.
+
+**Verification, review round:** `bun test test/unit` — 856 pass, 0 fail (43 files); `bun test
+test/integration/up-wiring.test.ts` — 10 pass, 0 fail; `bun run typecheck` clean. No new ISC
+numbers closed by this round — it hardens ISC-160/190/216/217, already counted above.
 
 ### Phase 6 close-out — 2026-07-28
 
