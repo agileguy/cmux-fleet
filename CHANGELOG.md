@@ -101,6 +101,32 @@ All notable changes to this project are documented here.
   from the supervisor's own event log. Also fixed: a failed `up` no longer orphans all
   16 detached supervisors — cleanup now runs regardless of whether `up`'s own result
   could be parsed.
+- **`up` now creates the host side of every mount before the container starts (SRD §5.5).**
+  `render` decided what each worker would bind-mount and nothing made those host paths exist
+  — and on a bind mount that gap doesn't fail, it succeeds wrongly: Docker creates a missing
+  `-v` source, so a missing directory arrives empty and a missing *file* arrives as an empty
+  *directory*. A worker's `/skills` came up with no skills at all, and `/policy/cloud-allow`
+  came up as a directory that verbgate's `[ -r ]` accepts and reads no lines from, quietly
+  degrading the run to deny-all and leaving a stray `cloud-allow/` in the run dir. Every
+  symptom read as model behaviour. `up` now writes the outbox, the per-role skill bundle, a
+  zero-byte `cloud-allow` at 0444 (verbgate refuses *every* verb if its policy is writable by
+  the uid consulting it), the concatenated briefing, and a verbatim copy of the configured
+  kubeconfig — all through the same path helpers that emit the mounts — and refuses the whole
+  launch rather than starting a worker with an input missing. Skill bundles are copied from
+  `<repo>/skills/<name>/` (override with `PIFLEET_SKILLS_DIR`); a configured skill with no
+  source bundle is a refusal naming the worker, role, skill and resolved path instead of a
+  bundle that silently shrinks by one. Symlinks are refused rather than followed on both the
+  source and the destination side, and a `.git` directory inside a bundle is refused rather
+  than copied into the read-only directory the agent reads as instruction (its `config` can
+  carry a credential in a remote URL) — ordinary dotfiles like `.DS_Store` and `.gitignore`
+  copy normally. Found and fixed along the way: `skills: ["../../../../victim"]` walked out
+  of the run directory and reopened a 0600 key to 0644, so skill and role names are now
+  validated as single path segments where they enter the system; `--workers eng-1,eng-1`
+  aborted the entire fleet with an environment error, because the duplicate id reached the
+  policy write twice and the second attempt hit the 0444 the first had just set; an
+  unreadable skill source was diagnosed as "no bundle exists", sending the operator to edit a
+  config that was already correct; and `fleet.example.yaml` named three skill bundles that
+  have no source directory, which the new refusal would have made un-runnable as shipped.
 
 ## [1.0.0] — 2026-07-28 — Phase 6: attended
 

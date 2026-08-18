@@ -1630,3 +1630,157 @@ other e2e files).
   `1125 pass, 53 skip, 0 fail` across 76 files.
 
 Progress: 197/255 → 198/255.
+
+### PR #14 close-out — 2026-08-18
+
+`config/render.ts` decided WHAT every worker's `docker run` would bind-mount, and nothing
+created the host paths it named. On a bind mount that gap does not fail — it succeeds
+wrongly. Docker creates a missing `-v` source rather than refusing, so a missing directory
+arrives EMPTY and a missing FILE arrives as an empty DIRECTORY. An unmaterialized `/skills`
+is a worker briefed with no skills; an unmaterialized `/policy/cloud-allow` is
+`docker/verbgate` reading a directory, whose `[ -r ]` passes, whose `while read` loop yields
+nothing, and whose run therefore degrades to deny-all while leaving a spurious
+`cloud-allow/` behind in the run dir. Every symptom reads as model behaviour. It is the same
+silent-empty-mount failure class `container/mounts.ts` exists to describe, arriving one
+layer earlier.
+
+**Closes no ISC, and none was invented to fit it.** `## Criteria` states that the mount
+table's paths are computed once (ISC-188, ISC-231) and that `/skills` is read-only INSIDE
+the container (ISC-29), but nowhere states that the host sources exist before `docker run` —
+which is part of why the defect survived a phase that pinned everything around it. Progress
+stays 200/255.
+
+- **Mechanism.** New `src/run/materialize.ts` writes the five sources `buildDockerArgv`
+  names: the outbox (0777), the per-ROLE skill bundle (dirs 0755, files 0644), a zero-byte
+  `cloud-allow` (0444), the concatenated briefing (0644), and a verbatim copy of the
+  configured kubeconfig (0644). Briefing existence, content and host path all come from
+  `renderWorker` rather than being re-derived, so the writer and the mount cannot disagree —
+  ISC-188's doctrine applied to EXISTENCE rather than to spelling. The run dirs the two
+  resolve are compared as well; a disagreement would write files under one root and mount
+  from another, silently. Wired into `up` after the hazard report and the model allowlist and
+  before anything detached exists, so a refusal costs nothing to reap; a failure aborts the
+  whole launch, with no per-worker `continue`. `fleet.example.yaml` listed `sre`, `tdd` and
+  `diagnose`, none of which have a source directory, so the new refusal would have made the
+  shipped example un-runnable; the lists are trimmed to the one bundle that exists.
+
+- **Not materialized, deliberately:** `/workspace` (no per-worker worktree exists yet —
+  ISC-27/ISC-28), `/sessions` (`up` creates it), the `pifleet-piagent-<id>` named volume
+  (Docker owns it by construction), and the `--env-file`. The last is the asymmetry worth
+  recording: an EMPTY allow list is semantically correct (authorization is task-scoped, SRD
+  §5.10, so deny-all is the right run-time default and read verbs are unaffected), while an
+  empty env file is semantically WRONG. Leaving that path unwritten makes a premature
+  `docker run` fail loudly on a MISSING `--env-file` instead of quietly on a wrong one.
+
+- **Review round 1 — nine findings, three independent reviewers.** The per-role skill cache
+  dropped per-worker `skills:` overrides. The bundle is per-ROLE but the list is per-WORKER
+  overridable, and a cache keyed on the role alone and filled from whichever worker arrived
+  first gave a worker `--skill /skills/X` against a bundle with no X, made the on-disk bytes
+  a function of `--workers` ORDER, and let a nonexistent bundle named only by a LATER worker
+  of an already-cached role skip the missing-bundle refusal entirely — the headline control
+  of the original commit, silently not firing. Bundles are now planned as the UNION across
+  every named worker of a role, in a pre-pass, before anything is written. Skill names were
+  unvalidated path segments, so `skills: ["../../../../victim"]` walked out of the run root
+  and chmod'd a 0600 key to 0644; refused at load under the role-name grammar, checked at
+  all three merge levels. Also this round: `cloud-allow` moved to 0444, because verbgate
+  refuses EVERY verb (exit 78) when its policy is writable by the uid consulting it and the
+  macOS VM squashes ownership to the container user; `copySkillTree` gained the
+  entry/file-size/depth bounds its docstring already claimed; destination symlinks were
+  being dereferenced where source symlinks were refused; `shapeOf` reported EACCES as "no
+  bundle exists", a config diagnosis (exit 2) for an environment fault (exit 3); and the
+  ledger sink moved to per-worker, so a failure part-way still records what already exists
+  on disk.
+
+- **Review round 2 — the previous round's headline fix rested on a false premise, and was
+  removed rather than tightened.** Round 1 chmod'd `<run>/`, `<run>/workers/` and
+  `<run>/workers/<id>/` on the theory that a container walks the host's directory chain to
+  reach a mounted file, so a 0700 ancestor under `umask 077` would make a 0644 mount
+  unreadable. It does not. A bind mount is established by the privileged runtime, and the
+  containerized process reaches the path at its MOUNTPOINT inside its own mount namespace;
+  it never traverses the host chain and never sees the host path at all. Verified against a
+  real Linux container — direct host-path access as uid 10001 IS denied through a 0700
+  ancestor, while the same file through a `-v` reads back fine regardless. The chmods
+  therefore fixed nothing and cost something real, widening directories a hardened umask had
+  correctly closed, and were incomplete on their own terms anyway (`~/.pifleet/runs` and
+  `~/.pifleet` sit two levels further up, untouched). The regression test that pinned
+  ancestor traversal was pinning the wrong thing; it now asserts that every mounted inode
+  carries its explicit mode AND that every ancestor is left exactly as the umask made it —
+  absence pinned as firmly as presence. The symlink guards on those same parents stay,
+  because `mkdir -p` through a link is a different problem from a mode — and this round
+  found that guard applied to seven destinations and not to five, the worst miss being
+  `<run>/outbox/<id>`, the one path this module chmods to 0777. Round 1's 0444 `cloud-allow`
+  also broke re-materialization of the same worker: `--workers eng-1,eng-1` reached the
+  write twice and the second hit the 0444 the first had just set (on POSIX the OWNER of a
+  0444 file cannot open it for writing either — only `CAP_DAC_OVERRIDE` bypasses the mode),
+  so a typo aborted the whole fleet with an exit-3 environment diagnosis. Fixed at both ends:
+  `up` dedupes, and the write is chmod-write-chmod. Finally, `assertContained` was not the
+  safety net it claimed to be for `.` — `resolvedWithin` correctly reports no escape, because
+  the resolved path IS the root — so a direct call copied the ENTIRE skills source into the
+  bundle; it gained the grammar the schema applies. The three walk bounds, untested until now
+  (multiplying all three by 1000 left the suite green), each got a test.
+
+- **Review round 3 — that grammar fix broke a different call site sharing the same helper.**
+  `assertContained` served two unrelated purposes: names an operator TYPES into config, and
+  filenames `readdir` DISCOVERS inside a bundle. Applying `SESSION_ID_RE` fixed the first and
+  silently broke the second, since the grammar requires a name to begin and end alphanumeric.
+  A skill bundle containing a `.DS_Store` — which macOS, this project's own development
+  platform, writes into any directory Finder opens — failed the entire launch with
+  `skill bundle entry ".DS_Store" is not a path segment`, a config diagnosis naming a file
+  the operator never configured anywhere; `.gitignore` and any name carrying a space,
+  parens, `@`, `~` or a non-ASCII character were refused the same way. The per-entry check is
+  now a separate `assertEntryContained`, refusing only the traversal-relevant shapes (`""`,
+  `.`, `..`, a separator, a NUL) and confirming containment through `resolvedWithin`; no
+  filename is special-cased and there is no junk allowlist. This round also gave `role` its
+  own containment check inside `materializeRoleSkills` — defence in depth for the exported
+  function's direct-call surface, where the role was the one name nothing checked while every
+  skill name beside it was.
+
+- **Review round 4 — one new hole, and two justification comments that claimed more than was
+  true.** Admitting ordinary dotfiles necessarily admitted dotted DIRECTORIES with them, and
+  `.git` is one: a skill source root that is a real checkout copied its whole git database
+  into the directory mounted `:ro` at `/skills` and read as INSTRUCTION. Reproduced with a
+  token in `.git/config`'s remote URL, which landed inside the mount verbatim — the same
+  hazard `copySkillTree`'s docstring cites for refusing symlinks, reached by a different
+  route. `.git` is now refused by exact name, directory or file, at every recursion depth,
+  while `.gitignore` and `.gitattributes` still copy, pinned by a test so a later
+  `startsWith(".git")` cannot slip in. Separately, round 3's comment claimed the role was
+  already fully validated upstream; it is not, and the claim was corrected rather than left
+  standing (see the follow-up below). A second comment claimed that deriving the containment
+  root from the already-joined path "would pass anything" — it would not, because
+  `assertContained` runs its character-class check first and that check is root-independent.
+  The fixed root is still correct, on the structural ground that a trust boundary must never
+  be derived from the value it is validating.
+
+- **Filed, not fixed here (out of this PR's scope, tracked as follow-ups):**
+  - **Role membership is tested against the PROTOTYPE CHAIN.** `src/config/schema.ts:357`
+    uses `w.role in cfg.roles` and `src/config/load.ts:282` uses `config.roles[entry.role]`;
+    `cfg.roles` comes from `z.record` and therefore carries `Object.prototype`. All TWELVE of
+    that object's own property names consequently pass the ISC-68 "unknown role" refusal as
+    though they were declared roles — verified by running each through `parseConfig` and
+    `resolveWorker` — and such a worker silently resolves against `defaults:` instead of
+    being refused. Seven of them (`constructor`, `toString`, `toLocaleString`, `valueOf`,
+    `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`) also satisfy `SESSION_ID_RE`
+    and go on to materialize a bundle directory named after them; the five `__`-prefixed ones
+    are stopped later by the character check this PR added to `materializeRoleSkills`, which
+    is a misleading materialization-time error rather than the "unknown role" one the
+    operator should have seen. It is not a traversal in any case — no key of
+    `Object.prototype` contains `/` or `\`, and none spells `.` or `..` — which is why it is
+    a follow-up rather than a blocker. The fix is `Object.hasOwn(cfg.roles, w.role)` and
+    `Object.hasOwn(config.roles, entry.role)`.
+  - **The same per-entry relaxation admits other credential-bearing dotfiles.** `.git`
+    arrives without anyone authoring it into a bundle, which is why it is refused by name; a
+    bundle AUTHOR placing `.npmrc`, `.env` or `.netrc` beside their `SKILL.md` is a different
+    question, and those now copy into the instruction mount. Recorded because this codebase
+    already treats `.npmrc` as a hazard in the other direction —
+    `src/harvest/acceptance.ts:122` lists it on the harness surface for its `node-options`
+    primitive.
+  - **`buildDockerArgv` joins `w.role` into a `-v` with no check of its own**, so the
+    consistency this PR gave `materializeRoleSkills` does not yet extend to the renderer.
+
+- **Verification.** `bun run typecheck` clean. `bun test` → **1260 pass, 53 skip, 0 fail**
+  across 80 files; `test/unit/materialize.test.ts` carries 46 of them. Every fix in rounds 3
+  and 4 was mutation-proved by disabling it and recording the observed failure: without the
+  role check, `materializeRoleSkills` RETURNED a path outside the run root, having chmod'd it
+  0700 → 0755 and copied a bundle into it; with the per-entry check reverted to
+  `assertContained`, the `.DS_Store` case failed with the exact production error; without the
+  `.git` guard, materialization SUCCEEDED and `.git/config` — embedded credential and all —
+  was readable inside the run's `/skills` bundle.
