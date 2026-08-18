@@ -132,8 +132,29 @@ describe("worstExit", () => {
   });
 
   // One `wait --all` can legitimately trip several at once.
-  test("usage outranks every other code", () => {
+  test("usage outranks every other code describing the run", () => {
     expect(worstExit([EXIT.PARTIAL, EXIT.TIMEOUT, EXIT.USAGE])).toBe(EXIT.USAGE);
+  });
+
+  /**
+   * …but not `INTERNAL`, which sits ABOVE the §10 ladder rather than on it.
+   *
+   * Every other code describes something that happened to the RUN; this one
+   * says pifleet itself broke, so nothing it reports about the run is
+   * trustworthy enough to outrank it (ISC-216). The distinction is what a
+   * machine caller acts on: exit 2 means rewrite your arguments and retry,
+   * and answering a crash that way is an orchestrator retrying forever.
+   *
+   * Paired with EVERY other code, not just a sample, so a future entry added
+   * to EXIT_SEVERITY above INTERNAL cannot slip in unnoticed.
+   */
+  test("internal outranks every other code, including usage", () => {
+    expect(worstExit([EXIT.PARTIAL, EXIT.TIMEOUT, EXIT.USAGE, EXIT.INTERNAL])).toBe(EXIT.INTERNAL);
+    for (const other of Object.values(EXIT)) {
+      expect(worstExit([other, EXIT.INTERNAL])).toBe(EXIT.INTERNAL);
+      // Order of observation must not matter — it is a severity set, not a list.
+      expect(worstExit([EXIT.INTERNAL, other])).toBe(EXIT.INTERNAL);
+    }
   });
 
   test("budget outranks timeout and partial", () => {
