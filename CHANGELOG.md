@@ -35,6 +35,11 @@ All notable changes to this project are documented here.
   live worker activity in each pane as designed. A pane id recorded by a pifleet build
   predating this fix (persisted in `presentation.json`) is now refused with a named,
   actionable error on `attach`/`tui` instead of an opaque parse failure.
+- **`doctor` could report a healthy tmux as absent.** An unparseable version banner was
+  folded into "below the floor," silently flipping `backends.tmux` to `false` with no
+  diagnosis even when `up --backend tmux` would launch fine against the same binary.
+  Diagnoses now carry a `class` (`missing-binary` / `wrong-version` / `absent-daemon` /
+  `misconfigured`) so an unreadable banner can no longer masquerade as a real failure.
 
 ### Added
 - **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
@@ -45,6 +50,12 @@ All notable changes to this project are documented here.
 - **The `late_prompt_failure` settle guard has its own regression test**, alongside the
   existing deadline-escalation one — the two are different call sites reached by different
   events.
+- **Version-floor checks for docker (>= 23.0.0), git (>= 2.32.0), and tmux (>= 2.4.0,
+  reported only, not enforced).** `doctor` previously captured each tool's version but never
+  compared it to a minimum; each floor is derived from a concrete feature dependency this
+  project already relies on (BuildKit's `COPY --chmod=`, hermetic git's
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, tmux's `respawn-pane -c`) rather than picked
+  arbitrarily.
 
 ## [1.0.0] — 2026-07-28 — Phase 6: attended
 
