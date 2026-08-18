@@ -64,6 +64,7 @@
 import { join } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { LineSplitter, parseLine } from "../../src/util/jsonl.ts";
+import { stepsForSession } from "./scenario-steps.ts";
 
 // ---------------------------------------------------------------------------
 // Argument parsing — tolerant of real Pi flags it does not implement.
@@ -159,11 +160,15 @@ const cursors = new Map<string, number>();
  *
  * The partition is FIXED for the life of the process — `--session-id` never
  * changes — so the cursor can stay keyed on the command alone.
+ *
+ * The rule itself lives in `scenario-steps.ts` so it can be exercised without
+ * starting this executable, and so a scenario that leaves a session with no
+ * applicable step says so on stderr instead of hanging that worker silently.
  */
 function stepsFor(command: string): Step[] {
-  const forCommand = scenario.steps.filter((s) => s.on === command);
-  const specific = forCommand.filter((s) => s.sessions?.includes(args.sessionId) === true);
-  return specific.length > 0 ? specific : forCommand.filter((s) => s.sessions === undefined);
+  return stepsForSession(scenario.steps, command, args.sessionId, (message) =>
+    process.stderr.write(`fake-pi: ${message}\n`),
+  );
 }
 
 function stepFor(command: string): Step | undefined {
@@ -269,6 +274,39 @@ const NOISE_CHUNK_LINES = 50;
  * `completion.ts` counts it as an activity event, so the flood also exerts the
  * real backpressure on the completion detector instead of a decorative one.
  */
+/**
+ * A `noise` payload, validated rather than asserted.
+ *
+ * The cast this replaces was load-bearing in the worst way: a malformed spec
+ * (`lines` misspelled, `bytes` a string) produced `undefined` bounds, the
+ * emission loop ran zero times, and the flood silently did not happen. The
+ * suite would then be asserting an ordering between one worker that emitted
+ * nothing and fourteen others — green, and describing nothing. A scenario
+ * mistake has to be louder than the property it breaks.
+ */
+function parseNoiseSpec(raw: unknown): EmitNoise["noise"] | null {
+  const s = raw as Partial<EmitNoise["noise"]> | null;
+  if (s === null || typeof s !== "object") return null;
+  const problems: string[] = [];
+  if (s.stream !== "stdout" && s.stream !== "stderr") {
+    problems.push(`stream must be "stdout" or "stderr", got ${JSON.stringify(s.stream)}`);
+  }
+  if (typeof s.lines !== "number" || !Number.isFinite(s.lines) || s.lines <= 0) {
+    problems.push(`lines must be a positive number, got ${JSON.stringify(s.lines)}`);
+  }
+  if (typeof s.bytes !== "number" || !Number.isFinite(s.bytes) || s.bytes <= 0) {
+    problems.push(`bytes must be a positive number, got ${JSON.stringify(s.bytes)}`);
+  }
+  if (s.chunk_pause_ms !== undefined && typeof s.chunk_pause_ms !== "number") {
+    problems.push(`chunk_pause_ms must be a number when present`);
+  }
+  if (problems.length > 0) {
+    process.stderr.write(`fake-pi: ignoring malformed 'noise' entry — ${problems.join("; ")}\n`);
+    return null;
+  }
+  return s as EmitNoise["noise"];
+}
+
 async function emitNoise(spec: EmitNoise["noise"], cancel: { cancelled: boolean }): Promise<void> {
   const filler = "x".repeat(Math.max(1, spec.bytes));
   const pause = spec.chunk_pause_ms ?? 0;
@@ -295,8 +333,9 @@ async function runEmissions(entries: EmitEntry[], cancel: { cancelled: boolean }
       process.stdout.write(entry.partial);
       continue;
     }
-    if ("noise" in entry && typeof entry.noise === "object" && entry.noise !== null) {
-      await emitNoise(entry.noise as EmitNoise["noise"], cancel);
+    if ("noise" in entry) {
+      const spec = parseNoiseSpec(entry.noise);
+      if (spec !== null) await emitNoise(spec, cancel);
       continue;
     }
     if ("exit" in entry && typeof entry.exit === "number") {
