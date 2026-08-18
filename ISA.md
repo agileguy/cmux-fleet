@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 182/255
+progress: 190/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-17
@@ -119,7 +119,7 @@ suite green on `headless` against a test double.
 - [x] ISC-19: The e2e suite runs `up → dispatch → wait → artifacts` end-to-end against the double.
 - [x] ISC-20: Integration tests exercise real subprocess spawning, real filesystem, and real git, with no network.
 - [x] ISC-21: No test in the `headless` suite requires network egress.
-- [ ] ISC-22: A test-coverage report can be produced and lists every `src/` module.
+- [x] ISC-22: A test-coverage report can be produced and lists every `src/` module.
 
 ### Group C — Container image
 
@@ -293,7 +293,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
 - [ ] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output.
 - [ ] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
-- [ ] ISC-160: A stale image is not silently reused after the Dockerfile changed.
+- [x] ISC-160: A stale image is not silently reused after the Dockerfile changed.
 
 ### Group N — Mount visibility (added 2026-07-27, found by the Docker-gated suite)
 
@@ -334,7 +334,7 @@ Open — carried forward, not fixed here:
 - [ ] ISC-172: The verbgate ledger is collected outside the container, so a worker cannot truncate its own audit trail.
 - [ ] ISC-188: `render.ts` and `run/paths.ts` compute the run directory once, not twice (`outbox`, `skills`, `env`, briefing paths, and `PIFLEET_RUNS_DIR` honoured).
 - [ ] ISC-189: `up` refuses to run against an image that is absent or fails `verify`.
-- [ ] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
+- [x] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
 - [x] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
 - [ ] ISC-192: A ledger or state file written under an older schema version is read under a pinned policy rather than failing.
 - [x] ISC-193: `EXIT.BUDGET` has a producer, or the code is removed from the ladder.
@@ -375,12 +375,12 @@ retires the criterion.
 - [x] ISC-211: Genuine gcloud reads (`list`, `describe`) still reach the real binary and record `allow_read`.
 - [x] ISC-212: No `void settle(...)` can turn a durable-write failure into an unhandled rejection that exits the supervisor.
 - [x] ISC-213: The CI anti-skip guard asserts an exact probe count and zero skips, instead of a case pattern that cannot match bun's output.
-- [ ] ISC-214: `RpcClient` stops dispatching the remainder of a chunk once `#fatal` has closed it.
-- [ ] ISC-215: The EPIPE write path sets `#closed`, so the error does not assert a state the object is not in.
-- [ ] ISC-216: An undiagnosed internal error is distinguishable by exit code from a usage error.
-- [ ] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
+- [x] ISC-214: `RpcClient` stops dispatching the remainder of a chunk once `#fatal` has closed it.
+- [x] ISC-215: The EPIPE write path sets `#closed`, so the error does not assert a state the object is not in.
+- [x] ISC-216: An undiagnosed internal error is distinguishable by exit code from a usage error.
+- [x] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
 - [ ] ISC-218: `writeJsonAtomic`'s directory-fsync failure cannot report a durable write as failed after the rename succeeded.
-- [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses.
+- [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses. Test written (`test/integration/verbgate.test.ts`, "a policy planted at the pre-fix /outbox path grants nothing"); cannot be live-verified on this machine until `pifleet/pi-worker:verify` is rebuilt (see Decisions, 2026-08-17).
 
 ### Group R — Round-3 mutation review (added 2026-07-27)
 
@@ -396,7 +396,7 @@ of the same class it repaired.
 - [x] ISC-225: An unreadable head fingerprint is treated as unknown, not as changed, so a transient read error cannot replay the whole file as new records.
 - [x] ISC-226: A failed head anchor is retried on later polls rather than silently disabling rewrite detection for the reader's lifetime.
 - [x] ISC-227: The `willRetry` e2e states plainly that its discrimination comes from `completion.test.ts`, not from itself — the double reports `isStreaming: true` for a retrying `agent_end`.
-- [ ] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
+- [x] ISC-228: The `late_prompt_failure` settle guard has its own test, not only the deadline-escalation one.
 - [x] ISC-229: Anti: no scenario file exists without a reviewed `EXPECTED_SETTLES` entry.
 
 ### Group S — Phase 2 findings (added 2026-07-27)
@@ -561,6 +561,24 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   explicit instruction, installed the real package via `bun install -g`, which lands in
   `~/.bun/bin/pi` — earlier in `$PATH` than `~/bin/pi` — so `pi` now resolves to vanilla 0.79.6
   without touching the existing oh-my-pi setup at all.
+- **2026-08-17 — Workstream 2 (small independent fixes) run as two parallel engineers in git
+  worktrees, per the existing manual-worktree precedent above.** Engineer A took the RPC/CLI/
+  epoch/supervisor cluster (ISC-214, 215, 216, 217, 228); Engineer B took harvest/container/
+  config (ISC-247, 160, 190, 219, 22) — a clean file-disjoint split, so the merge back into
+  `workstream-2-small-fixes` was conflict-free. ISC-219's live probe could not run: the worker
+  image (`pifleet/pi-worker:verify`) needed by the Docker-gated verbgate suite is the one an
+  earlier agent deleted without authorization (see the same-day incident already on record);
+  the user's explicit call was "leave it for now," so the image was not rebuilt and ISC-219
+  stays open with its test written but unverified, rather than being checked off on the
+  strength of the code alone.
+- **2026-08-17 — a pre-existing test-isolation flake, not a regression.** After merging both
+  engineers' branches, `bun test test/unit` showed one failure in
+  `harvest-outbox.test.ts` ("a hard link to a file outside the outbox is refused" — wrong
+  refusal reason, consistent with a leftover temp path from a neighboring test rather than a
+  logic error). The same file run in isolation, and the full suite re-run immediately after,
+  were both 100% green. Recorded rather than chased: neither engineer's diff touched the
+  hard-link check or its test, so this reads as ordering/temp-path contention between test
+  files rather than something this workstream introduced.
 - **2026-07-27 — scratch directories that get bind-mounted live under `$HOME`, never `os.tmpdir()`.**
   Measured on this machine: Colima shares `$HOME` and shares neither `/tmp` nor
   `/var/folders/...`. An unshared `-v` source does not error — the daemon mounts an empty
@@ -766,6 +784,66 @@ expected to close as a side effect of ISC-27/28 landing — re-check: its text a
 the neutralization site itself (per-worker worktree, not the operator's checkout) to exist,
 which is a separate, still-open question from whether ISC-27/28's write-through behavior
 works.
+
+### Workstream 2 — small independent fixes — 2026-08-17
+
+Nine of ten planned criteria closed, each with its own regression test written against a
+confirmed-red baseline before the fix; the tenth (ISC-219) has its test written but is
+blocked on a missing image (see `## Decisions`). Two engineers ran in parallel worktrees
+(`ws2-engineer-a`, `ws2-engineer-b`), merged conflict-free into `workstream-2-small-fixes`
+since their file sets never overlapped.
+
+- **ISC-214** — `test/unit/rpc-client.test.ts`, "a fatal error stops the rest of the SAME
+  chunk (ISC-214)". `feed()`/`feedText()` now share `#handleLines()`, which re-checks
+  `#closed` between lines of the same chunk.
+- **ISC-215** — `test/unit/rpc-client.test.ts`, describe "a failed write closes the client
+  (ISC-215)" (2 tests: closed state observable after EPIPE; in-flight requests reject with
+  none left pending). The EPIPE catch in `send()` now calls `this.close(reason)`.
+- **ISC-216** — `test/unit/cli.test.ts`, describe "undiagnosed errors are their own exit code
+  (ISC-216)" (5 tests). New `EXIT.INTERNAL` (ranked first in the severity ladder) and an
+  exported `exitCodeForError()`; no existing exit code renumbered.
+- **ISC-217** — `test/unit/epoch.test.ts` (5 tests) + `test/unit/review-regressions.test.ts`,
+  "a negative or fractional epoch is a named error, not an allocation". New
+  `MalformedEpochError`, thrown from `assertEpochWellFormed()` ahead of the replay lookup;
+  the pre-existing test that had codified silent normalization of `-1` was replaced.
+- **ISC-228** — `test/integration/supervisor.test.ts`, "a late prompt failure whose durable
+  writes fail leaves the supervisor alive", alongside (not replacing) the deadline-escalation
+  test. Uses `scenarios/late-failure.json`; asserts the trigger event is
+  `stray_response{kind:"late", success:false}`, not `deadline_exceeded`, and that the
+  supervisor answers `ping` afterward.
+- **ISC-247** — `test/unit/harvest-outbox.test.ts`, describe "ISC-247 backslash is a separator
+  elsewhere" (3 tests). New `backslashProblem` check in `outbox.ts`, independent of the
+  control-character filter.
+- **ISC-160** — `test/unit/render.test.ts`, "editing the Dockerfile busts the tag even when
+  nothing else changed (ISC-160)". `ImageInputs.dockerfile` now holds the Dockerfile's actual
+  content, folded into `configHash`; `dockerfilePath()` is the single source both the hash and
+  `docker build -f` read, so they cannot drift apart.
+- **ISC-190** — `test/unit/config.test.ts`, describe "models_allowlist is enforced (ISC-190)"
+  (6 tests) + `test/integration/up-wiring.test.ts`, describe "models_allowlist is enforced
+  before any worker starts (ISC-190)" (2 tests, mutation-checked: removing the enforcement
+  call from `up.ts` fails only the launch-path test, which is the criterion's actual claim).
+  New `ModelNotAllowedError extends ConfigError` (exit 2).
+- **ISC-22** — `bunfig.toml` (new) configures `coverageSkipTestFiles` and
+  `coverageReporter = ["text", "lcov"]`, deliberately with no `coverage = true` default (would
+  slow every narrow `bun test` invocation) and no `coverageThreshold` (would gate the build on
+  a number chosen on day one). `package.json` gained a `test:coverage` script. Confirmed by
+  running it: 73 modules reported across all 16 top-level `src/` areas; the 3 `src/*.ts` files
+  absent from the report are structural (a types-only file with no instrumentable code, and
+  two files only ever loaded inside spawned subprocesses, which Bun's profiler does not span)
+  rather than a config gap.
+- **ISC-219 — not closed.** Test written (`test/integration/verbgate.test.ts`, "a policy
+  planted at the pre-fix /outbox path grants nothing"), plants a wildcard policy at both
+  plausible pre-fix path candidates since the exact historical path is not recoverable from
+  git history. Cannot run live: `PIFLEET_DOCKER=1 bun test test/integration/verbgate.test.ts`
+  needs `pifleet/pi-worker:verify`, which does not exist on this machine (deleted earlier,
+  left alone per explicit instruction — see `## Decisions`). 20 of 23 tests in that file fail
+  on empty container output with the image absent, identical failure shape for the new test
+  and the 19 pre-existing ones — not a sign of a bad test, just no image to run against.
+
+**Verification:** `bun test test/unit` — 842 pass, 0 fail (one flaky failure on first run,
+see `## Decisions`, gone on re-run) — across 43 files; `bun run typecheck` clean.
+
+Progress: 182/255 → 190/255.
 
 ### Phase 6 close-out — 2026-07-28
 
