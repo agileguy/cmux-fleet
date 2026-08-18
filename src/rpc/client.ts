@@ -149,13 +149,13 @@ export class RpcClient {
       this.#fatal(new RpcProtocolError("<line too long>", err));
       return;
     }
-    for (const line of lines) this.#handleLine(line);
+    this.#handleLines(lines);
   }
 
   /** Test convenience: feed already-decoded text. */
   feedText(text: string): void {
     if (this.#closed) return;
-    for (const line of this.#splitter.pushText(text)) this.#handleLine(line);
+    this.#handleLines(this.#splitter.pushText(text));
   }
 
   /**
@@ -233,6 +233,23 @@ export class RpcClient {
       );
     }
     return promise;
+  }
+
+  /**
+   * Dispatch one chunk's lines, re-checking closure between them.
+   *
+   * `#fatal()` can fire on any line, and the entry-point guard is one chunk too
+   * coarse to see it: the lines were already taken off the splitter, so the
+   * loop kept dispatching records from a stream this client had just declared
+   * dead — advancing the stream seq the epoch fence is measured against, and
+   * making "one malformed record kills the stream" true only until the next
+   * newline in the same write.
+   */
+  #handleLines(lines: readonly string[]): void {
+    for (const line of lines) {
+      if (this.#closed) return;
+      this.#handleLine(line);
+    }
   }
 
   #handleLine(line: string): void {

@@ -189,8 +189,34 @@ describe("RpcClient — stream death", () => {
     await expect(h.client.send("abort")).rejects.toBeInstanceOf(RpcClosedError);
     expect(h.written).toHaveLength(0);
   });
-});
 
+  /**
+   * ISC-214. "One malformed record kills the stream" held only until the next
+   * newline in the SAME write. `#fatal()` closes the client, but the chunk's
+   * lines had already been taken off the splitter, and the loop kept handing
+   * them to `#handleLine` — so a stream this client had declared dead went on
+   * dispatching events, advancing the stream seq the epoch fence is built on.
+   *
+   * Both entry points are driven: `feed()` is the production path and
+   * `feedText()` is the one every test uses, and the guard has to sit on the
+   * loop they share or one of them regresses alone.
+   */
+  test("a fatal error stops the rest of the SAME chunk (ISC-214)", () => {
+    const chunk = '{"type":"a"}\n{this is not json}\n{"type":"c"}\n{"type":"d"}\n';
+    for (const entry of ["feed", "feedText"] as const) {
+      const h = harness();
+      if (entry === "feed") h.client.feed(enc.encode(chunk));
+      else h.client.feedText(chunk);
+
+      expect(h.protocolErrors, entry).toHaveLength(1);
+      // Line 1 was dispatched before the fatal; lines 3 and 4 never are.
+      expect(h.events.map((e) => (e.event as { type: string }).type), entry).toEqual(["a"]);
+      // And they consume no seq either: a record dispatched after the close
+      // would move the fence post every epoch attribution is measured against.
+      expect(h.client.lastSeq, entry).toBe(1);
+    }
+  });
+});
 describe("Stopwatch — monotonic time only", () => {
   test("elapsed time follows the injected monotonic clock, never wall time", () => {
     // Deadlines must survive host sleep and NTP steps: Date.now() can jump
