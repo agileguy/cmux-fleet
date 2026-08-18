@@ -144,6 +144,62 @@ export async function loadConfig(
   return parseConfig(text, path);
 }
 
+/** `harness.patterns` if a config supplied them, plus anything worth saying aloud. */
+export interface HarnessPatternsLookup {
+  /** `undefined` = no opinion; the harvester's built-in defaults apply. */
+  patterns: readonly string[] | undefined;
+  /** A degradation the caller must surface, or `null` when there is nothing to say. */
+  note: string | null;
+}
+
+/**
+ * Resolve `harness.patterns` for commands that must work with or without a
+ * config (ISC-232).
+ *
+ * `artifacts` and `report` are pure reads over a RUN directory. Both are
+ * documented to work with no `fleet.yaml` anywhere, and a run outlives the
+ * config that produced it, so an absent config cannot be fatal here — it is
+ * the ordinary case, it returns `undefined`, and it says nothing.
+ *
+ * A config that EXISTS and does not validate is a different event and gets a
+ * note. The two are worth separating because the fallback is not neutral: if
+ * the unreadable config was the thing WIDENING the harness surface, falling
+ * back silently narrows it, and a security control that quietly reverts to
+ * its default while still reporting verdicts is precisely the failure this
+ * subsystem exists to name. The note never changes the exit code — the read
+ * did succeed — and `pifleet config validate` is where the full field-level
+ * errors live.
+ *
+ * An EXPLICIT `--config` is exempt from all of that leniency: an operator who
+ * named a file meant it, and answering a named-but-unusable config with the
+ * built-in defaults would take the one case where intent is unambiguous and
+ * silently ignore it. That throws `ConfigError`, whose exit code is already
+ * `USAGE` — which is what a bad flag is.
+ */
+export async function harnessPatternsFromConfig(
+  explicit?: string,
+  cwd: string = process.cwd(),
+): Promise<HarnessPatternsLookup> {
+  try {
+    const loaded = await loadConfig(explicit, cwd);
+    return { patterns: loaded.config.harness.patterns, note: null };
+  } catch (err) {
+    if (explicit !== undefined) throw err;
+    if (err instanceof ConfigValidationError) {
+      return {
+        patterns: undefined,
+        note:
+          `config ${err.file} did not validate; harness surface falls back to built-in ` +
+          `defaults (run 'pifleet config validate' for the field-level errors)`,
+      };
+    }
+    // No config on any of the §6.1 search paths — the documented, ordinary
+    // case for a pure read over a run directory. Silent by design.
+    if (err instanceof ConfigError) return { patterns: undefined, note: null };
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Model decomposition (§6.1 rule 2)
 // ---------------------------------------------------------------------------

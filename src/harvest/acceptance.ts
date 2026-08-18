@@ -61,10 +61,15 @@ import { HERMETIC_GIT_ENV, hardenedGitArgv } from "./git.ts";
  * The verdict is then capped (see `adjudicate.ts`); this list only decides
  * what counts as harness.
  *
- * These defaults belong in the config schema; that file is owned elsewhere,
- * so they live here as the exported fallback until the wiring lands. Both
- * bare and `**`-prefixed forms are listed so a root-level match does not
- * depend on any one glob engine's zero-segment `**` behavior.
+ * These are the FALLBACK, not the source of truth (ISC-232): `fleet.yaml`'s
+ * `harness.patterns` replaces this list outright when it is set, and the
+ * defaults are what a config that says nothing gets. The list stays here
+ * rather than in the config schema because it is the matcher's contract —
+ * `harnessSurface` must have a defined surface with no config in reach, as
+ * it does when `artifacts` reads a run whose config is long gone.
+ *
+ * Both bare and `**`-prefixed forms are listed so a root-level match does
+ * not depend on any one glob engine's zero-segment `**` behavior.
  */
 export const DEFAULT_HARNESS_PATTERNS: readonly string[] = [
   // Test trees and test files.

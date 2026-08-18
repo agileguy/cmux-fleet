@@ -64,6 +64,20 @@ cloud:
 secrets:
   env_allowlist: []          # NEVER provider keys — see §12.4
 
+# Which changed files count as the EXAM rather than the answer (§8.2). A diff
+# touching one caps the verdict: a worker that can rewrite the suite cannot be
+# certified by it. Omit the key — as this example does — to get the harvester's
+# built-in defaults (test trees, package.json, Makefile, bunfig.toml, CI
+# definitions, lockfiles, …); set it only for a repo those globs miss.
+#
+# `patterns` REPLACES the defaults, it does not extend them, so a list here is
+# the WHOLE surface. `patterns: []` is rejected rather than treated as "match
+# nothing" — an empty list would switch the cap off and look like it said
+# nothing.
+#
+# harness:
+#   patterns: [test/**, ci/**, package.json, Makefile, bunfig.toml]
+
 defaults:
   pane_mode: rpc
   toolchain: base

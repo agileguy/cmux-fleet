@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot } from "../../run/paths.ts";
+import { harnessPatternsFromConfig } from "../../config/load.ts";
 import { harvestAll, harvestTask, type TaskHarvest } from "../../harvest/index.ts";
 
 /**
@@ -43,6 +44,7 @@ export function register(program: Command): void {
     .option("--run <id>", "run id")
     .option("--task <id>", "single task id")
     .option("--all", "every task in the run")
+    .option("--config <path>", "fleet.yaml to read harness.patterns from")
     .option("--include <kinds>", "extra payloads to include, e.g. diff")
     .option("--run-acceptance", "re-run the task's acceptance commands and grade on the result")
     .option("--json", "emit machine-readable output")
@@ -51,6 +53,7 @@ export function register(program: Command): void {
         run?: string;
         task?: string;
         all?: boolean;
+        config?: string;
         include?: string;
         runAcceptance?: boolean;
         json?: boolean;
@@ -77,13 +80,30 @@ export function register(program: Command): void {
           else throw new CliError(`unknown --include kind: ${kind}`, EXIT.USAGE);
         }
 
+        /**
+         * ISC-232: which globs count as the test harness is the operator's
+         * call, and `fleet.yaml` is where they make it. Config wins; the
+         * harvester's `DEFAULT_HARNESS_PATTERNS` is what a config that says
+         * nothing falls back to.
+         *
+         * A missing config is not an error here — `artifacts` is a pure read
+         * over a run directory and must keep working for a run whose config
+         * has moved on. A config that was found and cannot be used degrades
+         * to the defaults with a note on STDERR, which keeps stdout's JSON
+         * contract intact while refusing to narrow the harness surface
+         * silently.
+         */
+        const harness = await harnessPatternsFromConfig(opts.config);
+        if (harness.note !== null) process.stderr.write(`warning: ${harness.note}\n`);
+        const harvestOpts = { includeDiff, runAcceptance, harnessPatterns: harness.patterns };
+
         const root = runsRoot();
         const runId = opts.run ?? (await latestRunId(root));
         if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
         const run = runPaths(runId, root);
 
         if (single) {
-          const t = await harvestTask(run, opts.task as string, { includeDiff, runAcceptance });
+          const t = await harvestTask(run, opts.task as string, harvestOpts);
           if (opts.json === true) process.stdout.write(`${JSON.stringify(serialize(t))}\n`);
           else printHuman(t);
           return;
@@ -91,7 +111,7 @@ export function register(program: Command): void {
 
         // --all: the single end-of-fanout call (§8.4). An empty run emits an
         // empty task list — still valid JSON, still exit 0.
-        const tasks = await harvestAll(run, { includeDiff, runAcceptance });
+        const tasks = await harvestAll(run, harvestOpts);
         if (opts.json === true) {
           process.stdout.write(`${JSON.stringify({ run_id: runId, tasks: tasks.map(serialize) })}\n`);
         } else {

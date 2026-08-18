@@ -17,11 +17,13 @@ import {
   ModelNotAllowedError,
   assertModelAllowed,
   decomposeModel,
+  harnessPatternsFromConfig,
   loadConfig,
   resolveAllWorkers,
   resolveWorker,
   type LoadedConfig,
 } from "../../src/config/load.ts";
+import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
 import { parseDuration } from "../../src/config/schema.ts";
 import { EXIT } from "../../src/contracts.ts";
@@ -507,6 +509,118 @@ describe("worker count follows config (ISC-61)", () => {
     four["workers"] = [...(three["workers"] as unknown[]), { id: "w4", role: "eng" }];
     expect(resolveAllWorkers(await writeAndLoad(three))).toHaveLength(3);
     expect(resolveAllWorkers(await writeAndLoad(four))).toHaveLength(4);
+  });
+});
+
+/**
+ * ISC-232: the harness surface is a CONFIG decision, and
+ * `DEFAULT_HARNESS_PATTERNS` is what a silent config falls back to.
+ *
+ * These pin the schema half — the shape, the fallback, and the two ways an
+ * operator can get the surface wrong. The wiring half (that a config actually
+ * changes what `pifleet artifacts` treats as harness) is pinned end-to-end in
+ * `test/integration/harvest.test.ts`, because a schema field nothing reads
+ * would satisfy every assertion here and still change nothing at runtime.
+ */
+describe("harness.patterns (ISC-232)", () => {
+  // The backward-compatibility guarantee: every fleet.yaml written before
+  // this key existed must keep loading, and must keep meaning what it meant.
+  // `undefined` — not `[]` — is what tells the harvester to use its defaults.
+  test("omitting harness leaves patterns undefined, not empty", async () => {
+    const loaded = await writeAndLoad(baseDoc());
+    expect(loaded.config.harness).toEqual({});
+    expect(loaded.config.harness.patterns).toBeUndefined();
+  });
+
+  test("the shipped example still omits the key", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    expect(loaded.config.harness.patterns).toBeUndefined();
+  });
+
+  test("a declared list is carried through verbatim", async () => {
+    const doc = baseDoc();
+    doc["harness"] = { patterns: ["ci/**", "grade/*.sh"] };
+    const loaded = await writeAndLoad(doc);
+    expect(loaded.config.harness.patterns).toEqual(["ci/**", "grade/*.sh"]);
+  });
+
+  /**
+   * The important rejection. `patterns: []` reads like "no opinion" and would
+   * mean the opposite: nothing could ever match, `touched` would be
+   * permanently empty, and the ISC-150 cap — the only thing standing between
+   * a rewritten exam and a certified success — would be switched off by a key
+   * that looks like it says nothing. Omitting the key is how you say nothing.
+   */
+  test("an empty list is refused rather than read as 'match nothing'", async () => {
+    const doc = baseDoc();
+    doc["harness"] = { patterns: [] };
+    await expectIssue(doc, "harness.patterns");
+  });
+
+  // Strictness matches the rest of the document: a typo'd key is a loud error,
+  // not a silently ignored intention to widen the surface.
+  test("an unknown key under harness is a field-level error", async () => {
+    const doc = baseDoc();
+    doc["harness"] = { pattern: ["ci/**"] };
+    await expectIssue(doc, "harness.pattern", "unrecognized key");
+  });
+
+  /**
+   * The cap must clear `DEFAULT_HARNESS_PATTERNS`' own length, or a config
+   * could not even restate the list it is overriding. Guards against someone
+   * "tidying" this to the `.max(64)` the neighbouring arrays use.
+   */
+  test("the list is long enough to restate the defaults", async () => {
+    const doc = baseDoc();
+    doc["harness"] = { patterns: [...DEFAULT_HARNESS_PATTERNS] };
+    const loaded = await writeAndLoad(doc);
+    expect(loaded.config.harness.patterns).toHaveLength(DEFAULT_HARNESS_PATTERNS.length);
+  });
+});
+
+describe("harnessPatternsFromConfig (ISC-232)", () => {
+  // `artifacts`/`report` read a RUN, and a run outlives its config. No config
+  // is the ordinary case for a pure read: defaults, and nothing said aloud.
+  test("no config anywhere is silent and yields no opinion", async () => {
+    const dir = await tempDir();
+    expect(await harnessPatternsFromConfig(undefined, dir)).toEqual({
+      patterns: undefined,
+      note: null,
+    });
+  });
+
+  test("a discovered config supplies its patterns", async () => {
+    const dir = await tempDir();
+    const doc = baseDoc();
+    doc["harness"] = { patterns: ["ci/**"] };
+    await writeFile(join(dir, "fleet.yaml"), stringify(doc));
+    expect(await harnessPatternsFromConfig(undefined, dir)).toEqual({
+      patterns: ["ci/**"],
+      note: null,
+    });
+  });
+
+  /**
+   * Falling back is not neutral: if the broken config was the thing WIDENING
+   * the surface, defaults narrow it. The read still succeeds — so this is a
+   * note, not an exit code — but it must not be silent.
+   */
+  test("a discovered config that does not validate degrades with a note", async () => {
+    const dir = await tempDir();
+    await writeFile(join(dir, "fleet.yaml"), stringify({ version: 2, name: "broken" }));
+    const got = await harnessPatternsFromConfig(undefined, dir);
+    expect(got.patterns).toBeUndefined();
+    expect(got.note).toContain("falls back to built-in defaults");
+  });
+
+  // An operator who NAMED a config meant it. Answering a bad --config with
+  // the defaults would silently ignore the one case where intent is explicit.
+  test("an explicit --config that is missing or invalid throws", async () => {
+    const dir = await tempDir();
+    await expect(harnessPatternsFromConfig(join(dir, "nope.yaml"), dir)).rejects.toThrow(ConfigError);
+    const bad = join(dir, "bad.yaml");
+    await writeFile(bad, stringify({ version: 2, name: "broken" }));
+    await expect(harnessPatternsFromConfig(bad, dir)).rejects.toThrow(ConfigValidationError);
   });
 });
 

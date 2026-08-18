@@ -15,6 +15,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarvestSchema, VerdictSchema } from "../../src/contracts.ts";
+import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { deriveGitFacts } from "../../src/harvest/git.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
@@ -27,6 +28,9 @@ let runsDir: string;
 let runDir: string;
 let baseSha: string;
 let mainAdvancedSha: string;
+/** Two fleet.yaml files differing ONLY in `harness.patterns` (ISC-232). */
+let cfgDefault: string;
+let cfgCustom: string;
 
 /** The nasty filename that proves argv-array spawning: a shell would run it. */
 const NASTY = "a b;$(touch pwned).txt";
@@ -56,6 +60,27 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
     new Response(p.stderr).text(),
   ]);
   return { code: await p.exited, stdout, stderr };
+}
+
+/**
+ * A minimal valid fleet.yaml, optionally declaring `harness.patterns`.
+ *
+ * The two configs these produce are byte-identical apart from that block, so
+ * a behaviour difference between them cannot be attributed to anything else.
+ */
+function fleetYaml(patterns: string[] | null): string {
+  const harness =
+    patterns === null ? "" : `harness:\n  patterns: [${patterns.join(", ")}]\n`;
+  return (
+    `version: 2\n` +
+    `name: harvest-fixture\n` +
+    `docker: {pi_version: "0.79.6"}\n` +
+    `run:\n  repo: ${repo}\n  budget: {tokens_ceiling: 1000000}\n` +
+    `llm: {model: FixtureModel}\n` +
+    harness +
+    `roles: {eng: {}}\n` +
+    `workers: [{id: w1, role: eng}]\n`
+  );
 }
 
 function taskEnvelope(
@@ -235,6 +260,45 @@ beforeAll(async () => {
       ],
     }),
   );
+
+  /**
+   * T-cfg: a worker whose whole diff sits in `ci/`, which NO default pattern
+   * matches. That is the point — the task is invisible to the built-in
+   * surface, so whether it is graded as harness depends entirely on whether
+   * config reached the harvester (ISC-232). Nothing else in this file can
+   * tell the two states apart.
+   */
+  const cw = join(repo, ".worktrees", "w-cfg");
+  await git(repo, "worktree", "add", "-q", "-b", `fleet/${RUN_ID}/w-cfg`, cw, baseSha);
+  await mkdir(join(cw, "ci"), { recursive: true });
+  await writeFile(join(cw, "ci", "grade.sh"), "#!/bin/sh\nexit 0\n");
+  await writeFile(join(cw, "src", "feature.ts"), "export const feature = 1;\n");
+  await git(cw, "add", ".");
+  await git(cw, "commit", "-q", "-m", "add ci/grade.sh and src/feature.ts");
+  await writeFile(join(runDir, "inbox", "T-cfg.json"), JSON.stringify(taskEnvelope("T-cfg", "w-cfg", cw)));
+  await mkdir(join(runDir, "outbox", "w-cfg", "T-cfg"), { recursive: true });
+  await writeFile(
+    join(runDir, "outbox", "w-cfg", "T-cfg", "result.json"),
+    JSON.stringify({
+      schema: "pifleet.result/v1",
+      task_id: "T-cfg",
+      epoch: 1,
+      worker: "w-cfg",
+      status: "success",
+      summary: "graded myself green",
+      files_changed: [
+        { path: "ci/grade.sh", change: "added" },
+        { path: "src/feature.ts", change: "added" },
+      ],
+    }),
+  );
+
+  // Two configs, differing only in `harness.patterns`, so any behaviour
+  // change between them is attributable to that key and nothing else.
+  cfgDefault = join(tmp, "fleet-default.yaml");
+  cfgCustom = join(tmp, "fleet-custom.yaml");
+  await writeFile(cfgDefault, fleetYaml(null));
+  await writeFile(cfgCustom, fleetYaml(["ci/**"]));
 
   // T-abort: real work and a claimed success, but the SUPERVISOR settled the
   // epoch as aborted. A fact about the run outranks any inference from the tree.
@@ -455,6 +519,115 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     // because the actor could have rewritten the exam.
     expect(h.verdict).not.toBe("success");
     expect(h.reasons.join(" ")).toContain("harness");
+  });
+
+  /**
+   * ISC-232 on the live CLI path.
+   *
+   * These run through the spawned binary rather than importing `harvestTask`,
+   * for the reason this file already exists: a `harnessPatterns` option with
+   * no caller is indistinguishable at runtime from one that was never
+   * written, and the module's own comment names that as the failure that let
+   * ISC-150 sit dead. Importing the seam would prove the seam and leave the
+   * wiring — the actual criterion — pinned by nothing.
+   *
+   * `T-cfg`'s diff is `ci/grade.sh` + `src/feature.ts`. No default pattern
+   * matches either, so every assertion below turns on config alone.
+   */
+  test("with no config the built-in defaults still decide the surface", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[]; touched: string[] } } };
+    // Backward compatibility: a run harvested without a config is graded
+    // exactly as it was before this key existed.
+    expect(payload.facts.harness.patterns).toEqual([...DEFAULT_HARNESS_PATTERNS]);
+    expect(payload.facts.harness.touched).toEqual([]);
+  });
+
+  test("a config with no harness key is identical to no config at all", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--config", cfgDefault, "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[]; touched: string[] } } };
+    expect(payload.facts.harness.patterns).toEqual([...DEFAULT_HARNESS_PATTERNS]);
+    expect(payload.facts.harness.touched).toEqual([]);
+  });
+
+  /**
+   * The criterion itself: config decides. `ci/**` is not a default, so a
+   * `touched` list containing `ci/grade.sh` is only reachable if the value
+   * travelled from `fleet.yaml` through the CLI into `harnessSurface`.
+   */
+  test("config patterns change what counts as harness, and cap the verdict", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--config", cfgCustom, "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as {
+      verdict: string;
+      reasons: string[];
+      facts: { harness: { patterns: string[]; touched: string[] } };
+    };
+    expect(payload.facts.harness.patterns).toEqual(["ci/**"]);
+    expect(payload.facts.harness.touched).toEqual(["ci/grade.sh"]);
+    // Not merely recorded — acted on. The worker claimed success over a diff
+    // that rewrote its own grader, and ISC-150's cap must refuse to certify it.
+    expect(payload.verdict).not.toBe("success");
+    expect(payload.reasons.join(" ")).toContain("harness");
+  });
+
+  /**
+   * REPLACE, not extend — the half of the semantics that a union
+   * implementation would pass every other assertion here and still get wrong.
+   *
+   * `T-harness`'s diff is `bunfig.toml` + `sneak.ts`, which the DEFAULTS
+   * match and `ci/**` does not. Under replacement the cap stops firing for
+   * it; under a union it would still fire. This test fails if someone
+   * "helpfully" merges the two lists.
+   */
+  test("config patterns replace the defaults rather than extending them", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-harness", "--config", cfgCustom, "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[]; touched: string[] } } };
+    expect(payload.facts.harness.patterns).toEqual(["ci/**"]);
+    expect(payload.facts.harness.touched).toEqual([]);
+  });
+
+  /**
+   * `report` and `artifacts` read the same run through the same adjudicator,
+   * so they must reach the same verdict for the same task. Wiring one to
+   * config and not the other would make the answer depend on which command
+   * the operator happened to type.
+   */
+  test("report honours the same config as artifacts", async () => {
+    const withCfg = await runCli(["report", "--run", RUN_ID, "--config", cfgCustom, "--json"]);
+    const without = await runCli(["report", "--run", RUN_ID, "--json"]);
+    expect(withCfg.code).toBe(0);
+    expect(without.code).toBe(0);
+    const verdictOf = (stdout: string): string => {
+      const parsed = JSON.parse(stdout) as {
+        schedule?: Array<{ task_id: string | null; verdict: string | null }>;
+      };
+      const row = parsed.schedule?.find((s) => s.task_id === "T-cfg");
+      expect(row, `no schedule row for T-cfg in ${stdout.slice(0, 400)}`).toBeDefined();
+      expect(row!.verdict).not.toBeNull();
+      return row!.verdict as string;
+    };
+    // The two configs must produce DIFFERENT verdicts for the same task, or
+    // this test would pass against a `report` that ignored config entirely.
+    expect(verdictOf(without.stdout)).toBe("success");
+    expect(verdictOf(withCfg.stdout)).not.toBe("success");
+    // And the artifacts command agrees, on the same config.
+    const art = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--config", cfgCustom, "--json"]);
+    expect((JSON.parse(art.stdout) as { verdict: string }).verdict).toBe(verdictOf(withCfg.stdout));
+    // Without it, both fall back to the defaults — still agreeing.
+    const artNo = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--json"]);
+    expect((JSON.parse(artNo.stdout) as { verdict: string }).verdict).toBe(verdictOf(without.stdout));
+  });
+
+  // An operator who NAMED a config meant it: silently harvesting with the
+  // defaults would ignore the one case where the intent is explicit.
+  test("an explicit --config that does not exist is a usage error", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--config", join(tmp, "absent.yaml"), "--json"]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("config not found");
   });
 
   /**

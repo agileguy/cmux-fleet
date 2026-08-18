@@ -43,6 +43,20 @@ export interface CollectOptions {
    * repository. Defaults to the real `git merge-tree` check.
    */
   precheck?: (inputs: readonly MergeCheckInput[]) => Promise<MergePrecheck[]>;
+  /**
+   * Harness globs from `fleet.yaml` (ISC-232), forwarded verbatim to every
+   * `harvestTask` below.
+   *
+   * The report and `artifacts` must reach the same verdict for the same task
+   * — they read the same run and both route through the same adjudicator, so
+   * a divergence here is not a difference of opinion, it is one of the two
+   * being wrong. Leaving `report` on the built-in defaults while `artifacts`
+   * honoured config would do exactly that: a task whose diff touches an
+   * operator-declared harness path would be capped by one command and
+   * certified by the other, and which answer an operator got would depend on
+   * which one they happened to run.
+   */
+  harnessPatterns?: readonly string[];
 }
 
 export interface CollectedReport {
@@ -99,7 +113,7 @@ export async function collectRunReport(
   const ledger = await mergeLedger(run);
   for (const e of ledger.errors) notes.push(`ledger: ${e}`);
 
-  const dispatched = await collectDispatched(run, notes);
+  const dispatched = await collectDispatched(run, notes, opts.harnessPatterns);
 
   // Cross-check the ledger against the inbox: a `dispatched` event whose
   // envelope is missing means the durable dispatch record was lost, and the
@@ -251,7 +265,11 @@ async function collectAttended(
 }
 
 /** Every task the inbox has a durable dispatch envelope for, harvested. */
-async function collectDispatched(run: RunPaths, notes: string[]): Promise<DispatchedTask[]> {
+async function collectDispatched(
+  run: RunPaths,
+  notes: string[],
+  harnessPatterns: readonly string[] | undefined,
+): Promise<DispatchedTask[]> {
   let entries: string[];
   try {
     entries = await readdir(run.inboxDir);
@@ -274,7 +292,7 @@ async function collectDispatched(run: RunPaths, notes: string[]): Promise<Dispat
     // may enter through, because adjudication there can never upgrade.
     let verdict: Verdict = "unknown";
     try {
-      const t = await harvestTask(run, taskId);
+      const t = await harvestTask(run, taskId, { harnessPatterns });
       verdict = t.harvest.verdict;
     } catch (err) {
       // One task that cannot be harvested is one degraded row, not the loss

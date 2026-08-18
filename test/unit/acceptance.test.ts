@@ -81,8 +81,9 @@ describe("harnessSurface (ISC-150)", () => {
     expect(s.patterns).toEqual(["ci/**"]);
   });
 
-  // Pins the exported defaults as the fallback contract until the config
-  // schema takes ownership. Fails if the export is emptied or renamed.
+  // Pins the exported defaults as the FALLBACK contract (ISC-232): config
+  // decides the surface, and this is what a config with no opinion gets.
+  // Fails if the export is emptied or renamed.
   test("defaults are exported and non-empty", () => {
     expect(DEFAULT_HARNESS_PATTERNS.length).toBeGreaterThan(0);
     expect(harnessSurface(["package.json"]).patterns).toEqual([...DEFAULT_HARNESS_PATTERNS]);

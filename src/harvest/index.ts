@@ -18,7 +18,12 @@ import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adjudicate as adjudicateFacts } from "./adjudicate.ts";
-import { harnessSurface, resolveFromEnvelope, runAcceptance } from "./acceptance.ts";
+import {
+  DEFAULT_HARNESS_PATTERNS,
+  harnessSurface,
+  resolveFromEnvelope,
+  runAcceptance,
+} from "./acceptance.ts";
 import { Deadline } from "../util/clock.ts";
 import {
   DerivedFactsSchema,
@@ -57,6 +62,19 @@ export interface HarvestOptions {
    * nothing was verified, not a bug.
    */
   runAcceptance?: boolean;
+  /**
+   * Repo-relative globs that count as the test harness (ISC-232), from
+   * `fleet.yaml`'s `harness.patterns`. Absent means the config had no opinion
+   * and `DEFAULT_HARNESS_PATTERNS` applies; a present list REPLACES them.
+   *
+   * Passed in rather than loaded here on purpose. Harvest is handed a RUN
+   * directory, not a workspace, and a run routinely outlives the config that
+   * produced it — a harvester that resolved `./fleet.yaml` itself would grade
+   * an old run against whatever config happens to sit in today's cwd, which
+   * is a worse failure than using the defaults. The CLI knows which config
+   * the operator meant; this module does not.
+   */
+  harnessPatterns?: readonly string[];
   /** Scratch root for the fresh clone. Defaults to the OS temp dir. */
   acceptanceScratch?: string;
   /** Whole-run budget for acceptance execution. */
@@ -251,10 +269,20 @@ export async function harvestTask(
    * The changed-file list comes from the DERIVED diff, never from the
    * envelope: the envelope is the actor being graded, and a worker asked to
    * self-declare whether it touched the tests has an obvious answer.
+   *
+   * WHICH globs count is the caller's to say (ISC-232): `harness.patterns`
+   * from `fleet.yaml` when the operator set it, and only otherwise the
+   * built-in defaults. The fallback is spelled out at the call site rather
+   * than left to the parameter default, because "the config decides, and
+   * these are what you get when it does not" is the whole content of the
+   * criterion and belongs where a reader is looking for it.
    */
   const factsWithHarness: DerivedFacts = {
     ...git.facts,
-    harness: harnessSurface(git.facts.files_changed.map((f) => f.path)),
+    harness: harnessSurface(
+      git.facts.files_changed.map((f) => f.path),
+      opts.harnessPatterns ?? DEFAULT_HARNESS_PATTERNS,
+    ),
   };
 
   /**
