@@ -20,7 +20,7 @@ import {
   renderWorker,
   BRIEFING_MOUNT,
 } from "../../src/config/render.ts";
-import { configHash, imageInputs } from "../../src/container/image.ts";
+import { configHash, imageInputs, type ImageInputs } from "../../src/container/image.ts";
 import { runPaths, workerOutboxDir } from "../../src/run/paths.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -361,6 +361,43 @@ describe("image tag", () => {
     });
     expect(configHash(imageInputs(a.config, "base"))).toBe(configHash(imageInputs(b.config, "base")));
     expect(configHash(imageInputs(a.config, "base"))).not.toBe(configHash(imageInputs(c.config, "base")));
+  });
+
+  /**
+   * ISC-160 — a stale image must not be silently reused after the Dockerfile
+   * changed.
+   *
+   * The hash used to cover pi_version, toolchain and apt_packages and nothing
+   * else. Those are the BUILD ARGS, not the recipe: every other line of the
+   * Dockerfile — the base image, the tini and gcloud installs, the uid 10001
+   * user, the entrypoint, the verbgate COPYs — could be rewritten wholesale
+   * and the tag would not move. `up` refuses an image that is ABSENT (§5.7),
+   * so it would find the old one present and run the fleet on it, and nothing
+   * anywhere reports a tag that merely matched. Silent by construction.
+   *
+   * The two inputs below differ in the Dockerfile alone, so this test fails
+   * the moment `dockerfile` stops reaching `configHash`.
+   */
+  test("editing the Dockerfile busts the tag even when nothing else changed (ISC-160)", async () => {
+    const { loaded } = await fixture();
+    const base = imageInputs(loaded.config, "base");
+
+    // Real content, not a stub: a `dockerfile` field wired to "" would satisfy
+    // the inequality below while hashing nothing the image is built from.
+    expect(base.dockerfile).toContain("FROM");
+
+    const edited: ImageInputs = {
+      ...base,
+      dockerfile: `${base.dockerfile}\nRUN echo "a line that changes the image"\n`,
+    };
+    expect(edited.piVersion).toBe(base.piVersion);
+    expect(edited.toolchain).toBe(base.toolchain);
+    expect(edited.aptPackages).toEqual(base.aptPackages);
+
+    expect(configHash(edited)).not.toBe(configHash(base));
+    // …and the hash stays a pure function of its inputs: an UNCHANGED
+    // Dockerfile must keep sharing a tag, or every build is a cache miss.
+    expect(configHash({ ...base })).toBe(configHash(base));
   });
 });
 

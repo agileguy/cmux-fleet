@@ -218,6 +218,59 @@ describe("readResultEnvelope — ISC-120 path containment", () => {
   });
 });
 
+/**
+ * ISC-247 — a backslash is nothing here and a separator everywhere else.
+ *
+ * Both paths below pass every containment check above. node:path's POSIX
+ * flavour treats `\` as an ordinary filename character, so
+ * `/outbox/T-1/files/a\..\..\..\etc\passwd` is a SINGLE segment inside the
+ * task outbox and `resolvedWithin` approves it — while any consumer that
+ * normalizes separators (a Windows path parser, Go's `filepath`, a zip
+ * extractor) reads the same bytes as traversal. That is the ISC-120 confusion
+ * in a character the ISC-240 filter cannot see: 0x5C is not in C0.
+ *
+ * Every test here returns `ok` with the backslash refusal deleted, which is
+ * the only thing that makes them mean anything.
+ */
+describe("readResultEnvelope — ISC-247 backslash is a separator elsewhere", () => {
+  test("an artifact path containing a backslash is refused", async () => {
+    await writeEnvelope(
+      envelopeJson({
+        artifacts: [{ kind: "file", path: "/outbox/T-1/files/a\\..\\..\\..\\etc\\passwd" }],
+      }),
+    );
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("refused");
+    if (r.kind === "refused") expect(r.reason).toContain("backslash");
+  });
+
+  test("a files_changed path containing a backslash is refused", async () => {
+    await writeEnvelope(
+      envelopeJson({ files_changed: [{ path: "src\\..\\..\\etc\\passwd", change: "modified" }] }),
+    );
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("refused");
+    if (r.kind === "refused") expect(r.reason).toContain("backslash");
+  });
+
+  /**
+   * The refusal is SEPARATE from the control-character one, not folded into
+   * it: `CONTROL_CHARS` never matches 0x5C, so widening that regex would be
+   * the wrong fix and a shared message would misname what was found.
+   */
+  test("the refusal names the backslash, not a control character", async () => {
+    await writeEnvelope(
+      envelopeJson({ artifacts: [{ kind: "file", path: "/outbox/T-1/files/a\\b" }] }),
+    );
+    const r = await readResultEnvelope(loc);
+    expect(r.kind).toBe("refused");
+    if (r.kind === "refused") {
+      expect(r.reason).toContain("0x5c");
+      expect(r.reason).not.toContain("control character");
+    }
+  });
+});
+
 describe("readResultEnvelope — ISC-122 size cap", () => {
   // Would fail if the lstat size gate were removed: the payload is NOT valid
   // JSON, so a cap-less implementation would read and parse it and return the

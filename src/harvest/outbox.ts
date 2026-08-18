@@ -169,6 +169,35 @@ function controlCharProblem(p: string, what: string): string | null {
 }
 
 /**
+ * A backslash means nothing here and a separator everywhere else (ISC-247).
+ *
+ * Every containment check in this module runs through node:path's POSIX
+ * flavour, where `\` is an ordinary filename character. So
+ * `/outbox/T-1/files/a\..\..\..\etc\passwd` is ONE segment, `resolvedWithin`
+ * places it squarely inside the task outbox, and the envelope is accepted —
+ * while any consumer that normalizes separators before opening reads the very
+ * same bytes as traversal: a Windows path parser, Go's `filepath` on Windows,
+ * a zip or tar extractor unpacking the artifact, an SMB share. The path this
+ * validator contained and the path something else opens are then different
+ * paths, which is exactly the ISC-120 confusion §12.5 exists to close.
+ *
+ * Refused SEPARATELY from `controlCharProblem` rather than by widening
+ * `CONTROL_CHARS`, because 0x5C is not a control character: it is not in C0,
+ * the ISC-240 filter cannot see it, and folding the two together would leave
+ * the refusal misnaming what it found. Nothing legitimate in a Linux
+ * container's outbox needs a backslash in a filename.
+ */
+const BACKSLASH = "\\";
+
+function backslashProblem(p: string, what: string): string | null {
+  const i = p.indexOf(BACKSLASH);
+  if (i === -1) return null;
+  // Index only, matching the refusal above: a path that is lying about its own
+  // shape is not something to reproduce into an operator's terminal.
+  return `${what} contains a backslash (0x5c) at index ${i}`;
+}
+
+/**
  * Validate one envelope-named artifact path. Purely lexical — nothing is
  * opened, nothing is stat'd, because refusal must happen BEFORE the path is
  * ever dereferenced (ISC-120). Physical symlink checks belong to
@@ -178,6 +207,8 @@ function controlCharProblem(p: string, what: string): string | null {
 function artifactPathProblem(p: string, loc: OutboxLocation): string | null {
   const control = controlCharProblem(p, "artifact path");
   if (control !== null) return control;
+  const separator = backslashProblem(p, "artifact path");
+  if (separator !== null) return separator;
   const host = containerPathToHost(p, loc);
   if (host === null) return `artifact path ${p} is outside the mount table`;
   const taskOutbox = join(loc.workerOutboxDir, loc.taskId);
@@ -199,6 +230,8 @@ function artifactPathProblem(p: string, loc: OutboxLocation): string | null {
 function changedPathProblem(p: string, loc: OutboxLocation): string | null {
   const control = controlCharProblem(p, "files_changed path");
   if (control !== null) return control;
+  const separator = backslashProblem(p, "files_changed path");
+  if (separator !== null) return separator;
   if (isAbsolute(p)) return `files_changed path ${p} is absolute; the contract is repo-relative`;
   if (loc.hostWorkdir === null) return null; // nothing to contain against; compared later
   if (!resolvedWithin(loc.hostWorkdir, join(loc.hostWorkdir, p))) {

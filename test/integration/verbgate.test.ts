@@ -350,6 +350,54 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     });
 
     /**
+     * ISC-219 — the test above attempts the path the FIX uses. It never
+     * attempted the one the DEFECT used.
+     *
+     * `/policy/cloud-allow` is read-only by construction, so "the worker
+     * cannot rewrite its own policy" passes against a shim reading somewhere
+     * else entirely — including one that regressed to reading the
+     * worker-owned `/outbox`, which is the bug that moved the policy in the
+     * first place (`render.ts`: "It used to be read out of /outbox, which the
+     * worker owns — so the subject of the policy could rewrite the policy").
+     * The mutation the old test cannot see is precisely the one that matters.
+     *
+     * Both `/outbox`-rooted candidates are attempted, because the exact
+     * pre-fix constant is not recoverable: the shim landed already-fixed in
+     * the Phase 1 squash, so no revision of `docker/verbgate` names it. The
+     * criterion is that the gate ignores a policy written anywhere the worker
+     * owns, and covering both roots states that more strongly than guessing
+     * one.
+     *
+     * Three assertions, and every one is load-bearing:
+     *   - the writes SUCCEED, so this is a genuine attempt rather than one
+     *     the filesystem happened to block;
+     *   - the injected `*` grants nothing;
+     *   - the REAL policy is still in force, which is what separates "the
+     *     gate ignored the forgery" from "the gate is broken and refuses
+     *     everything" — the refusal alone is satisfied by both.
+     */
+    test("a policy planted at the pre-fix /outbox path grants nothing", async () => {
+      const sb = await makeSandbox();
+      const out = await inImage(
+        `${PRELUDE}
+         mkdir -p /outbox/policy 2>/dev/null
+         printf '*\\n' > /outbox/cloud-allow 2>/dev/null;        echo "flat=$?"
+         printf '*\\n' > /outbox/policy/cloud-allow 2>/dev/null; echo "nested=$?"
+         kubectl delete deployment web >/dev/null 2>&1;          echo "after=$?"
+         kubectl rollout restart deployment/web >/dev/null 2>&1; echo "allowed=$?"`,
+        sb.mounts,
+      );
+      // The forgery was really written — /outbox is the worker's own mount.
+      expect(out).toContain("flat=0");
+      expect(out).toContain("nested=0");
+      // And it bought nothing: the verb it "allowed" is still refused…
+      expect(out).toContain("after=77");
+      // …while the read-only policy the gate actually reads still admits its
+      // own verb, so the refusal above is discrimination, not breakage.
+      expect(out).not.toContain("allowed=77");
+    });
+
+    /**
      * And if the policy IS writable — a misconfigured mount — the gate refuses
      * everything rather than consulting a policy its subject controls.
      */

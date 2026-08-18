@@ -135,7 +135,10 @@ async function writeGcloudShim(binDir: string): Promise<void> {
 }
 
 /** Minimal valid fleet.yaml naming the shimmed network and the seeded repo. */
-function fleetYaml(repo: string, opts: { cloudAccess?: boolean } = {}): string {
+function fleetYaml(
+  repo: string,
+  opts: { cloudAccess?: boolean; modelsAllowlist?: string[] } = {},
+): string {
   return [
     "version: 2",
     "name: up-wiring",
@@ -148,6 +151,12 @@ function fleetYaml(repo: string, opts: { cloudAccess?: boolean } = {}): string {
     "    tokens_ceiling: 1000000",
     "llm:",
     "  model: wiring-test-model",
+    // Omitted by default, which is the shape of every other test in this file:
+    // an empty allowlist constrains nothing, so the ISC-190 gate stays
+    // invisible until a test asks for it.
+    ...(opts.modelsAllowlist === undefined
+      ? []
+      : [`  models_allowlist: [${opts.modelsAllowlist.join(", ")}]`]),
     "roles:",
     opts.cloudAccess === true ? "  engineer: {cloud_access: true}" : "  engineer: {}",
     "workers:",
@@ -376,6 +385,88 @@ describe("a config that exists but cannot be loaded refuses to start (review fin
     // The fallthrough would have started a fleet and printed a run id.
     expect(up.stdout).not.toContain("run ");
   });
+});
+
+/**
+ * ISC-190 / ISC-52 — `models_allowlist` is enforced on the LAUNCH path.
+ *
+ * `assertModelAllowed` is unit-tested against the resolver, but the criterion
+ * is "a worker whose model is not on the list DOES NOT START", and that is a
+ * statement about `up`, not about a pure function. This is the same
+ * dead-wiring disease the header of this file describes: the check could be
+ * deleted from `up.ts` and every unit test would go on certifying it.
+ *
+ * So both halves run the real CLI: the refusal must launch nothing, and the
+ * permitted model must still bring a fleet up. Asserting only the refusal
+ * would be satisfied by a gate that refuses every model there is.
+ */
+describe("models_allowlist is enforced before any worker starts (ISC-190)", () => {
+  test("a model outside the allowlist exits 2 and launches nothing", async () => {
+    const rig = await makeRig();
+    const gated = join(rig.base, "gated.yaml");
+    // `wiring-test-model` is what the worker resolves to; the list names two
+    // other models, so the fleet's own default is the thing refused.
+    await writeFile(
+      gated,
+      fleetYaml(rig.repo, { modelsAllowlist: ["probed-model-a", "probed-model-b"] }),
+    );
+    const up = await runCli(rig, [
+      "up",
+      "--config",
+      gated,
+      "--workers",
+      "eng-1",
+      "--backend",
+      "headless",
+    ]);
+    expect(up.code).toBe(EXIT.USAGE);
+    // Actionable: the worker, the model it resolved to, and the list it missed.
+    expect(up.stderr).toContain("eng-1");
+    expect(up.stderr).toContain("wiring-test-model");
+    expect(up.stderr).toContain("models_allowlist");
+    expect(up.stderr).toContain("probed-model-a");
+    // A diagnosis, not a crash.
+    expect(up.stderr).not.toContain("at async");
+    expect(up.stdout).not.toContain("run ");
+
+    // Nothing started. The run dir is created before the config is read, so it
+    // may exist — but no supervisor was launched and no ledger written, which
+    // is what "does not start" means.
+    for (const runId of await readdir(rig.root)) {
+      const run = runPaths(runId, rig.root);
+      expect(await readdir(run.workersDir)).toEqual([]);
+      expect((await mergeLedger(run)).records).toEqual([]);
+    }
+  });
+
+  test(
+    "a model ON the allowlist still starts normally — the gate is a filter, not a wall",
+    async () => {
+      const rig = await makeRig();
+      const allowed = join(rig.base, "allowed.yaml");
+      await writeFile(
+        allowed,
+        fleetYaml(rig.repo, { modelsAllowlist: ["wiring-test-model", "probed-model-b"] }),
+      );
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        allowed,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      // …and the fleet genuinely came up, rather than merely exiting 0.
+      const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+      expect(records.map((r) => r.event)).toContain("supervisor_launched");
+    },
+    90_000,
+  );
 });
 
 describe("the grant line names the real ADC identity (ISC-251)", () => {

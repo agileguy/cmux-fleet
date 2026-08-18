@@ -2,14 +2,15 @@
  * Worker image lifecycle: `image build | list | verify | gc` (SRD §5.7).
  *
  * Tags are `<prefix>:<pi-version>-<toolchain>-<config-hash>`. The hash covers
- * exactly the inputs that change the image (pi_version, toolchain,
- * apt_packages), so two configs that build the same bytes share a tag and a
- * config edit that matters forces a new one. `up` refuses to run against an
- * image that is absent or fails `verify` — a run must never silently use a
- * stale image (SRD §5.7).
+ * exactly the inputs that change the image — pi_version, toolchain,
+ * apt_packages, and the Dockerfile's own content — so two configs that build
+ * the same bytes share a tag and any edit that matters forces a new one. `up`
+ * refuses to run against an image that is absent or fails `verify` — a run
+ * must never silently use a stale image (SRD §5.7).
  */
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FleetConfig, Toolchain } from "../config/schema.ts";
 import { probeWriteThrough } from "./mounts.ts";
@@ -19,11 +20,48 @@ import { realExec, repoRoot, type Exec } from "./run.ts";
 // Tagging
 // ---------------------------------------------------------------------------
 
+/**
+ * The one Dockerfile every worker image is built from.
+ *
+ * Named once so the file that is HASHED and the file that is passed to
+ * `docker build -f` cannot drift apart — a hash over a different Dockerfile
+ * than the build reads is worse than no hash at all.
+ */
+export function dockerfilePath(): string {
+  return join(repoRoot(), "docker", "Dockerfile");
+}
+
+/**
+ * Read the recipe. An unreadable Dockerfile is a broken checkout, and it
+ * THROWS rather than degrading to a placeholder: a constant stand-in would
+ * make every broken checkout hash alike, which is the silent tag collision
+ * ISC-160 exists to prevent. `docker build` could not have succeeded anyway.
+ */
+function readDockerfile(): string {
+  const p = dockerfilePath();
+  try {
+    return readFileSync(p, "utf8");
+  } catch (err) {
+    throw new Error(`cannot read ${p}, so no image tag can be computed: ${String(err)}`);
+  }
+}
+
 /** The image-shaping subset of config. Anything else changing must NOT retag. */
 export interface ImageInputs {
   piVersion: string;
   toolchain: Toolchain;
   aptPackages: string[];
+  /**
+   * The Dockerfile's CONTENT, not its path (ISC-160).
+   *
+   * The three fields above are the build ARGS; they are not the recipe. The
+   * base image, the tini and gcloud installs, the uid 10001 user, the
+   * entrypoint and the verbgate COPYs all live in the Dockerfile, and while
+   * they were outside the hash an edit to any of them left the tag unchanged —
+   * so `up`, which only refuses an image that is ABSENT, found the stale one
+   * present and ran the fleet on it with nothing reporting the reuse.
+   */
+  dockerfile: string;
 }
 
 export function imageInputs(config: FleetConfig, toolchain: Toolchain): ImageInputs {
@@ -31,12 +69,18 @@ export function imageInputs(config: FleetConfig, toolchain: Toolchain): ImageInp
     piVersion: config.docker.pi_version,
     toolchain,
     aptPackages: [...config.docker.apt_packages].sort(),
+    dockerfile: readDockerfile(),
   };
 }
 
 /** 12 hex chars of sha256 over the canonical inputs — stable across machines. */
 export function configHash(inputs: ImageInputs): string {
-  const canonical = JSON.stringify([inputs.piVersion, inputs.toolchain, inputs.aptPackages]);
+  const canonical = JSON.stringify([
+    inputs.piVersion,
+    inputs.toolchain,
+    inputs.aptPackages,
+    inputs.dockerfile,
+  ]);
   return createHash("sha256").update(canonical).digest("hex").slice(0, 12);
 }
 
@@ -68,16 +112,15 @@ export interface BuildResult {
 export async function buildImage(config: FleetConfig, opts: BuildOptions): Promise<BuildResult> {
   const exec = opts.exec ?? realExec;
   const piVersion = opts.piVersion ?? config.docker.pi_version;
-  const inputs: ImageInputs = {
-    piVersion,
-    toolchain: opts.toolchain,
-    aptPackages: [...config.docker.apt_packages].sort(),
-  };
+  // `--pi-version` overrides the pin (tests build a deliberate mismatch);
+  // everything else, the Dockerfile content included, comes from the one
+  // `imageInputs` reader, so the hash covers the same recipe `-f` passes below.
+  const inputs: ImageInputs = { ...imageInputs(config, opts.toolchain), piVersion };
   const tag = opts.tag ?? `${config.docker.image_prefix}:${piVersion}-${opts.toolchain}-${configHash(inputs)}`;
 
   const argv = [
     "docker", "build",
-    "-f", join(repoRoot(), "docker", "Dockerfile"),
+    "-f", dockerfilePath(),
     "--build-arg", `PI_VERSION=${piVersion}`,
     "--build-arg", `TOOLCHAIN=${opts.toolchain}`,
     "--build-arg", `EXTRA_APT_PACKAGES=${inputs.aptPackages.join(" ")}`,
