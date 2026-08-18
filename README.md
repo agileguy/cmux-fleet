@@ -35,8 +35,9 @@ bun run src/cli/index.ts doctor --json     # every command supports --json
 ```
 
 Exit codes are a strict severity ladder, highest wins, so one `wait --all` can report a
-timeout and a dead worker without ambiguity: `2` usage/config · `3` backend unavailable ·
-`5` budget ceiling · `6` worker died · `4` timeout · `7` partial · `0` success.
+timeout and a dead worker without ambiguity: `8` internal error, a pifleet bug — file it,
+don't retry · `2` usage/config · `3` backend unavailable · `5` budget ceiling · `6` worker
+died · `4` timeout · `7` partial · `0` success.
 
 ## A run, end to end
 
