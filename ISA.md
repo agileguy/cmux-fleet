@@ -291,7 +291,7 @@ rather than merely implementing it; SRD errata are recorded in `## Changelog`.
 - [x] ISC-155: Anti: no timeout, deadline, or stall computation reads `Date.now()`.
 - [ ] ISC-156: A SIGKILL at each syscall boundary of the atomic-write path leaves state recoverable and the ledger readable.
 - [ ] ISC-157: A ledger written under an older schema version is read under a pinned, tested policy rather than crashing.
-- [ ] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output.
+- [x] ISC-158: At 16 workers, no container-name or port collision occurs and no worker's event loop is starved by another's output. [no per-worker port surface EXISTS — see close-out]
 - [x] ISC-159: `doctor` exits nonzero with an actionable message on a missing binary, a wrong version, and an absent daemon.
 - [x] ISC-160: A stale image is not silently reused after the Dockerfile changed.
 
@@ -1484,4 +1484,101 @@ the full default list) plus `harnessPatternsFromConfig`'s four cases.
 Full suite: `bun test` → **1137 pass, 53 skip, 0 fail** across 75 files
 (1121 → 1137, +16). `bun run typecheck` → clean.
 
-Progress: 196/255 → 197/255.
+### ISC-158 close-out — 2026-08-18
+
+Sixteen workers, three properties, proved three different ways in
+`test/e2e/scale-16-workers.test.ts` (3 tests, 363 assertions, 3.9s wall — no
+Docker, no network, no GUI, so it runs in the fast `test` CI job alongside the
+other e2e files).
+
+- **Container names.** `renderAllWorkers` over a sixteen-worker config yields
+  sixteen distinct `--name` values, each equal to `pifleet-<run_id>-<worker_id>`
+  AND to `attended/mode.ts`'s `workerContainerName(run_id, worker_id)` — the
+  duplicate spelling that file declares as consolidation debt, now pinned
+  against the renderer for a whole fleet rather than one worker. Rendered
+  rather than run: `render` exists so argv can be inspected without a Docker
+  daemon (ISC-60), and the name is a pure function of `(run_id, worker_id)`.
+  Mutation-verified: `--name` templated to emit `eng-8` for `eng-9` →
+  `Expected: 16, Received: 15`. **No other test in the repo catches that
+  mutation** — `bun test test/unit test/integration` stayed green under it.
+
+- **Ports: there is no collision surface at all, and that is the finding.**
+  Nothing in pifleet allocates a TCP or UDP port per worker. `buildDockerArgv`
+  emits no `-p`/`--publish`/`-P`/`--publish-all`/`--expose` on any branch;
+  `DockerSchema` is `.strict()` with no port key and no raw-argv passthrough;
+  `docker/Dockerfile` has no `EXPOSE`; every worker attaches to one shared
+  `--internal` network. The per-worker addressable resource that a port would
+  have been is a UNIX domain socket — `serveJsonlSocket` calls
+  `Bun.listen({unix})`, never `{port}` — named by
+  `sha256(run_id, worker_id).slice(0,16)` in `run/paths.ts` rather than
+  allocated from a range, so uniqueness is a property of the hash and not of a
+  registry that could hand a value out twice. The test therefore asserts the
+  ABSENCE holds across all sixteen rendered argvs (including that `--network`
+  is never `host`, the one way "no publish flag" could still mean one shared
+  port space), each with a positive control so the absence cannot be satisfied
+  by an empty array. If a later phase publishes a port, that assertion fails
+  and the header comment says why it was there.
+
+- **Sockets, live.** All sixteen control sockets exist on disk and each answers
+  `ping` naming the worker whose path was dialled. This is the
+  `EADDRINUSE`-equivalent: `serveJsonlSocket` unlinks a stale path before
+  binding, so a collision would not fail loudly — it would silently redirect
+  one worker's control traffic onto another's socket, and only asking each
+  socket who it belongs to catches that. Sixteen distinct supervisor pids are
+  asserted too: one pid twice is the starvation hazard by construction.
+
+- **Starvation.** A live sixteen-worker `headless` fleet against
+  `pifleet-fake-pi`: `up` → sixteen concurrent dispatches → `wait --all` →
+  `status` → `artifacts --all` → `down`. `eng-1` floods stderr and `eng-2`
+  floods stdout with ~800KB each (twelve times the ~64KB at which an undrained
+  pipe blocks the child, SRD §3.4 rule 2), paced over ~1.6s; the other fourteen
+  run 50ms turns. All sixteen settle `success` at epoch 1, exit 0, all return
+  to `idle`. The assertion is an ORDERING, measured from each worker's own
+  dispatch ack so sixteen `bun` spawns on a loaded runner cannot masquerade as
+  starvation: every quiet worker settles before either flooder does. Measured
+  margin — quiet `[39,59,57,48,64,57,63,63,42,65,69,55,48,52]ms` against noisy
+  `[1636,1635]ms`, a 23x separation. A quiet worker finishing while ~1.6MB is
+  still moving through two other workers' pipes cannot be explained by an event
+  loop those pipes were blocking.
+
+  The structural reason it holds: one supervisor process per worker (SRD §3.3),
+  each owning its own child's pipes, and `launchDetached` sends supervisor
+  stdio to a FILE rather than a pipe the launcher would have to drain. Neither
+  `wait` nor `status` reads `events.jsonl`, so a flooder's 800KB never enters
+  the shared read path; and `settle()` awaits `writeTaskRecord` directly rather
+  than through the serialized `events.jsonl` append chain, so a settle is not
+  queued behind a flood of `stderr_line` writes.
+
+- **Anti-vacuity.** The floods are verified to have HAPPENED, counted out of
+  `events.jsonl` — i.e. bytes that made it through the supervisor's drain, not
+  bytes the double claims to have written: ≥2000 `stderr_line` records for
+  `eng-1`, ≥2000 `message_update` for `eng-2`, both files >400KB. The flooders
+  must also settle, so "the quiet ones were fine" cannot describe a fleet that
+  lost two workers; and `fastestNoisy > 1000ms` proves the flood was genuinely
+  still in flight while the quiet workers finished.
+
+- Mutation-verified in both remaining directions. Dropping the supervisor's
+  stderr drain for one worker → `Expected: >= 2000, Received: 0`. Worth
+  recording precisely: on Bun 1.3.11/macOS that mutation did **not** wedge the
+  worker — it still settled — so the drained-byte guard is what catches a lost
+  drain, not a hang. Making a nominally-quiet worker flood too (adding `eng-3`
+  to the noisy step's `sessions`) → `Expected: < 1631.6, Received: 1647.7`,
+  which is the ordering assertion failing on exactly the quantity it claims to
+  measure, so it is not inert. Both mutations reverted; `git diff` over `src/`
+  is empty.
+
+- Supporting change: `test/fixtures/fake-pi.ts` gains a `sessions` step filter
+  and a `noise` emit entry. Both were forced by the shape of the problem — one
+  `PIFLEET_PI_COMMAND` serves an entire fleet and only `--session-id`
+  distinguishes workers, so a heterogeneous fleet is not expressible from the
+  launch side. `noise` on stdout emits valid `message_update` records rather
+  than filler because `RpcClient` treats one unparseable line as fatal and
+  kills the child; raw filler there would have measured the protocol-kill path
+  instead of throughput. `test/unit/completion.test.ts`'s scenario table — which
+  fails the suite for any scenario lacking a reviewed expectation — declares
+  `noisy-fleet.json: [1,2,3]`, and that claim was checked, not assumed.
+
+- `bun run typecheck` → `rc=0`, zero diagnostics. `bun test` →
+  `1125 pass, 53 skip, 0 fail` across 76 files.
+
+Progress: 197/255 → 198/255.

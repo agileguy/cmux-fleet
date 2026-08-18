@@ -33,6 +33,8 @@
  *   { "scenario": "name", "steps": [ Step, ... ] }
  * Step:
  *   { "on": "<command>",
+ *     "sessions": ["eng-1", ...]                  — restrict this step to those
+ *                                                   `--session-id` values
  *     "ack": {"success": false, "error": "..."}   — override the immediate ack
  *     "respond": {...}                            — response `data` payload
  *     "respond_delay_ms": 300                     — delay before responding
@@ -44,9 +46,19 @@
  *     "cancel_active": true }                     — stop the active emission
  * EmitEntry:
  *   {"delay_ms": 200} | {"partial": "raw text, no newline"} | {"exit": 1}
+ *   | {"noise": {"stream": "stderr", "lines": 2000, "bytes": 400}}
  *   | any raw record (written verbatim as one JSONL line)
  *
  * Steps for one command are consumed in order; the last one repeats.
+ *
+ * `sessions` exists because one `PIFLEET_PI_COMMAND` serves an ENTIRE fleet —
+ * every worker's double is launched from the same string with the same
+ * `--scenario`, and only `--session-id` distinguishes them. Making a fleet
+ * heterogeneous (fifteen quiet workers and one that floods its pipes, ISC-158)
+ * is therefore impossible from the launch side and has to be expressible in the
+ * scenario itself. A session-specific step wins OUTRIGHT over the unrestricted
+ * fallback rather than merging with it, so a scenario reads as "these workers
+ * do this, everyone else does that" instead of an ordering puzzle.
  */
 
 import { join } from "node:path";
@@ -90,10 +102,28 @@ interface EmitPartial {
 interface EmitExit {
   exit: number;
 }
-type EmitEntry = EmitDelay | EmitPartial | EmitExit | Record<string, unknown>;
+/**
+ * A deliberate flood of one pipe (ISC-158).
+ *
+ * `bytes` is the filler width of each line, `lines` how many, and
+ * `chunk_pause_ms` how long to yield every `NOISE_CHUNK_LINES` lines — a real
+ * agent streams output while staying able to answer `get_state`, and a double
+ * that monopolised its own event loop would model a hang rather than a flood.
+ */
+interface EmitNoise {
+  noise: {
+    stream: "stdout" | "stderr";
+    lines: number;
+    bytes: number;
+    chunk_pause_ms?: number;
+  };
+}
+type EmitEntry = EmitDelay | EmitPartial | EmitExit | EmitNoise | Record<string, unknown>;
 
 interface Step {
   on: string;
+  /** `--session-id` values this step applies to; absent means "any". */
+  sessions?: string[];
   ack?: { success?: boolean; error?: string };
   respond?: Record<string, unknown>;
   respond_delay_ms?: number;
@@ -117,8 +147,27 @@ const scenario: Scenario = JSON.parse(await Bun.file(args.scenario).text()) as S
 
 /** Per-command step cursors; the last matching step repeats when exhausted. */
 const cursors = new Map<string, number>();
+
+/**
+ * The steps this process runs for `command`.
+ *
+ * A step naming this session in `sessions` wins OUTRIGHT: if any exist, the
+ * unrestricted steps are not considered at all. Merging the two lists instead
+ * would make a scenario's meaning depend on document order across two
+ * different intents, and the cursor below would then walk a noisy worker off
+ * its own script and onto the fallback on its second dispatch.
+ *
+ * The partition is FIXED for the life of the process — `--session-id` never
+ * changes — so the cursor can stay keyed on the command alone.
+ */
+function stepsFor(command: string): Step[] {
+  const forCommand = scenario.steps.filter((s) => s.on === command);
+  const specific = forCommand.filter((s) => s.sessions?.includes(args.sessionId) === true);
+  return specific.length > 0 ? specific : forCommand.filter((s) => s.sessions === undefined);
+}
+
 function stepFor(command: string): Step | undefined {
-  const matching = scenario.steps.filter((s) => s.on === command);
+  const matching = stepsFor(command);
   if (matching.length === 0) return undefined;
   const i = cursors.get(command) ?? 0;
   cursors.set(command, i + 1);
@@ -203,6 +252,36 @@ function respond(
 
 const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
 
+/** How many noise lines are written before the double yields its event loop. */
+const NOISE_CHUNK_LINES = 50;
+
+/**
+ * Flood one pipe (ISC-158).
+ *
+ * stderr takes raw filler, which is the point: an unread stderr pipe fills at
+ * ~64KB and the child blocks on `write(2)`, so a supervisor that stopped
+ * draining (SRD §3.4 rule 2) wedges a worker that looks alive.
+ *
+ * stdout takes VALID JSONL records, and must. `RpcClient` treats one
+ * unparseable line as fatal and kills the child, so raw filler there would
+ * measure the protocol kill path rather than throughput. `message_update` is
+ * the honest choice: it is what a streaming agent's output actually is, and
+ * `completion.ts` counts it as an activity event, so the flood also exerts the
+ * real backpressure on the completion detector instead of a decorative one.
+ */
+async function emitNoise(spec: EmitNoise["noise"], cancel: { cancelled: boolean }): Promise<void> {
+  const filler = "x".repeat(Math.max(1, spec.bytes));
+  const pause = spec.chunk_pause_ms ?? 0;
+  for (let i = 0; i < spec.lines; i++) {
+    if (cancel.cancelled) return;
+    if (spec.stream === "stderr") process.stderr.write(`noise ${i} ${filler}\n`);
+    else writeRecord({ type: "message_update", text: `${i} ${filler}` });
+    // `sleep(0)` still yields a macrotask, so stdin stays serviceable even
+    // with no configured pause.
+    if ((i + 1) % NOISE_CHUNK_LINES === 0) await sleep(pause);
+  }
+}
+
 /** Stream an emission sequence, honouring delays, partials, exits and cancel. */
 async function runEmissions(entries: EmitEntry[], cancel: { cancelled: boolean }): Promise<void> {
   for (const entry of entries) {
@@ -214,6 +293,10 @@ async function runEmissions(entries: EmitEntry[], cancel: { cancelled: boolean }
     if ("partial" in entry && typeof entry.partial === "string") {
       // Hostile: a record that never completes. No newline, by design.
       process.stdout.write(entry.partial);
+      continue;
+    }
+    if ("noise" in entry && typeof entry.noise === "object" && entry.noise !== null) {
+      await emitNoise(entry.noise as EmitNoise["noise"], cancel);
       continue;
     }
     if ("exit" in entry && typeof entry.exit === "number") {

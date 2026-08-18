@@ -1,0 +1,41 @@
+{
+  "scenario": "noisy-fleet",
+  "_why": "ISC-158's starvation half. One fleet, three scripts: eng-1 floods stderr, eng-2 floods stdout, and every other worker runs a 50ms turn. Both floods are ~800KB — more than twelve times the ~64KB at which an undrained pipe blocks the child — and each is paced over ~1.6s so the quiet workers must settle WHILE the noise is still being produced. That ordering is the assertion: a quiet worker finishing first cannot be explained by a shared event loop that the flood was blocking. The floods must also settle themselves, which is what proves the drain (SRD §3.4 rule 2) is doing its job rather than the flood being too small to matter.",
+  "steps": [
+    {
+      "on": "prompt",
+      "sessions": ["eng-1"],
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "noise": { "stream": "stderr", "lines": 2000, "bytes": 400, "chunk_pause_ms": 40 } },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    },
+    {
+      "on": "prompt",
+      "sessions": ["eng-2"],
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "noise": { "stream": "stdout", "lines": 2000, "bytes": 400, "chunk_pause_ms": 40 } },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    },
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "delay_ms": 50 },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}
