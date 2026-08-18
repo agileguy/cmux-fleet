@@ -332,7 +332,7 @@ Fixed in this phase:
 Open — carried forward, not fixed here:
 
 - [ ] ISC-172: The verbgate ledger is collected outside the container, so a worker cannot truncate its own audit trail.
-- [ ] ISC-188: `render.ts` and `run/paths.ts` compute the run directory once, not twice (`outbox`, `skills`, `env`, briefing paths, and `PIFLEET_RUNS_DIR` honoured).
+- [x] ISC-188: `render.ts` and `run/paths.ts` compute the run directory once, not twice (`outbox`, `skills`, `env`, briefing paths, and `PIFLEET_RUNS_DIR` honoured).
 - [ ] ISC-189: `up` refuses to run against an image that is absent or fails `verify`.
 - [x] ISC-190: `models_allowlist` is enforced — a worker whose model is not on the list does not start.
 - [x] ISC-191: The kill ladder uses `(pid, started)` identity, never pid alone.
@@ -480,6 +480,24 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 
 ## Decisions
 
+- **2026-08-18 — `config.run.root` left in the schema, and now read by nothing (ISC-188).**
+  Closing ISC-188 meant deciding which of two answers to the runs root is THE answer.
+  `run.root` is not a different concept from `runsRoot()` — its schema default is
+  `~/.pifleet/runs`, byte-for-byte what `runsRoot()` falls back to — so this was one
+  concept with two spellings, unlike its neighbour `run.repo`, which genuinely means
+  something else (the operator's working repository). `runsRoot()` won because `up` and
+  all nine other run-dir readers already use it and because it is the only one that can
+  honour `PIFLEET_RUNS_DIR`; `render` was the sole reader of `run.root`.
+  The field is deliberately NOT deleted. It is `.strict()`-validated, set in
+  `fleet.example.yaml:27` and documented at `Docs/SRD.md:593`, so removing it would hard-
+  fail every existing `fleet.yaml` that sets it — a breaking config change, and out of
+  scope for a criterion about computing a path once. That leaves it accepted, defaulted
+  and unread, which is honest about today (nothing has silently changed for anyone: `up`
+  never consulted it) but is not a resting state — a user who sets `run.root: /data/runs`
+  gets no runs in `/data/runs` and no diagnostic. The follow-up is a decision between
+  making `runsRoot()` fall back to it BELOW `PIFLEET_RUNS_DIR` (which requires `up` to
+  load config before computing the root — it currently does so after) and rejecting the
+  key with a named error. Filed rather than chosen unilaterally.
 - **2026-07-27 — Project ISA, not task ISA.** cmux-fleet is a thing with persistent identity, so
   the ISA lives at `~/repos/cmux-fleet/ISA.md` as system of record, per Algorithm v6.3.0 §ISA homes.
 - **2026-07-27 — 140 ISCs from 89 SRD acceptance criteria.** Compound SRD criteria were split per
@@ -1157,6 +1175,49 @@ to workflow files). Re-run: **both CI jobs green** — `test` and `container`, 5
 skips. **ISC-219 closed.**
 
 Progress: 191/255 → 192/255.
+
+### ISC-188 close-out — 2026-08-18
+
+`render` and `up` computed the run directory independently, and the two disagreed the
+moment `PIFLEET_RUNS_DIR` was set — which is how every test rig and the detached daemon
+are pointed at their runs root. `up` calls `runsRoot()` (`src/cli/commands/up.ts:133`);
+`render` derived its own from `expandPath(config.run.root, loaded.dir)`. So the command
+whose entire purpose is to say what `up` will run named an `--env-file`, an `/outbox`, a
+`/skills` mount, a `cloud-allow` policy, a kubeconfig and a briefing file under a
+directory no real run would ever contain. Nothing threw: a preview is only compared to
+reality by a human, and only if they look.
+
+- **Mechanism.** `renderWorker` now calls `runPaths(runId, runsRoot())` and
+  `workerPaths(run, id)`, and `buildDockerArgv` takes those two structs instead of a
+  run-dir string — so no mount CAN be joined at the mount site. `run/paths.ts` gained the
+  four per-worker container inputs (`envFile`, `systemAppendMd`, `cloudAllow`,
+  `kubeconfig`) and `roleSkillsDir()`, since those were the paths render was hand-rolling.
+  `config.run.root` is no longer read by anything; see `## Decisions`.
+- **The old test could not have caught this.** The fixture set `run.root: ./runs` AND left
+  `PIFLEET_RUNS_DIR` unset, so both sources named the same directory and all 31 tests
+  passed identically against either implementation — the coverage shape ISC-66's comment
+  in the same file already warns about. The fixture now sets `PIFLEET_RUNS_DIR` and points
+  `run.root` at a decoy `./config-runs`, which turns five pre-existing path assertions into
+  live ones.
+- **Tests** — `test/unit/render.test.ts`, describe "the run directory is computed once
+  (ISC-188)" (4 tests): every rendered path under `PIFLEET_RUNS_DIR` and none under the
+  decoy; the four paths the criterion names asserted against the helpers the *other* side
+  of each contract uses; `r.runDir` equal to `runPaths(runId, runsRoot()).root`; and a
+  re-render under a second root requiring all 7 run-state host paths to follow it.
+- **Mutation-verified in both directions.** Restoring the `config.run.root` derivation →
+  `26 pass, 9 fail` (the 4 new tests plus the 5 pre-existing ones the decoy made live).
+  Reverting the `--env-file` alone — one stray path out of eight — → `32 pass, 3 fail`.
+  That narrow mutation is also what caught a weak assertion in the new suite: the
+  "changing `PIFLEET_RUNS_DIR`" test was originally a prefix-swap comparison, which a
+  *stuck* path passes straight through because it never moves. It now extracts the host
+  paths and requires each to be under the run dir.
+- **Verification:** `bun run typecheck` clean; `bun test test/unit` → **869 pass, 0 fail**
+  across 43 files (three consecutive runs). One run showed the `harvest-outbox.test.ts`
+  hard-link flake already recorded under `## Decisions` (2026-08-17) — same test, same
+  wrong-refusal-reason symptom, green in isolation and on re-run, and this diff touches
+  nothing in that path.
+
+Progress: 194/255 → 195/255.
 
 ### Phase 6 close-out — 2026-07-28
 

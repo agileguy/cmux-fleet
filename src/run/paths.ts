@@ -115,6 +115,21 @@ export interface WorkerPaths {
    * within a single dispatch.
    */
   attendedJson: string;
+  /**
+   * The four per-worker container INPUTS (SRD §5.5): the `--env-file`, the
+   * concatenated briefing, the verbgate policy, and the filtered kubeconfig.
+   *
+   * Named here rather than joined at the mount site because `config/render.ts`
+   * built all four from its own separately-computed run-dir string, which was
+   * not the one `up` uses — so `render`, the command whose entire purpose is to
+   * say what `up` will do, described four mounts at paths no run would ever
+   * contain (ISC-188). Nothing writes these files yet; naming them now is what
+   * stops the eventual writer from inventing a fifth spelling.
+   */
+  envFile: string;
+  systemAppendMd: string;
+  cloudAllow: string;
+  kubeconfig: string;
 }
 
 export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
@@ -130,6 +145,10 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     controlSock: socketPath(run.runId, workerId),
     tasksDir: join(dir, "tasks"),
     attendedJson: join(dir, "attended.json"),
+    envFile: join(dir, "env"),
+    systemAppendMd: join(dir, "system-append.md"),
+    cloudAllow: join(dir, "cloud-allow"),
+    kubeconfig: join(dir, "kubeconfig"),
   };
 }
 
@@ -150,6 +169,18 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
  */
 export function workerOutboxDir(runRoot: string, workerId: string): string {
   return join(runRoot, "outbox", workerId);
+}
+
+/**
+ * Host directory mounted read-only at `/skills` (SRD §5.5).
+ *
+ * Keyed by ROLE, not worker: every worker in a role reads the same skill set,
+ * and a per-worker copy would let two workers of one role be briefed
+ * differently by whichever wrote last. Takes the run root as a string for the
+ * same reason `workerOutboxDir` does.
+ */
+export function roleSkillsDir(runRoot: string, role: string): string {
+  return join(runRoot, "skills", role);
 }
 
 /** Ledger shards are per writer (SRD §7.7); the shard name is the writer id. */
