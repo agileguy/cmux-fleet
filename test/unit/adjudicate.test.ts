@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 
 import {
   DerivedFactsSchema,
@@ -38,7 +39,10 @@ function run(outcome: AcceptanceRun["outcome"], over: Partial<AcceptanceRun> = {
 }
 
 /** A healthy baseline: clean one-file diff, one commit, green acceptance. */
-function facts(over: Partial<DerivedFacts> = {}): DerivedFacts {
+// Overrides are typed as the schema's INPUT, not its output, so a fixture may
+// name only the fields it cares about — `harness: {patterns, touched}` without
+// restating every defaulted key beside them.
+function facts(over: Partial<z.input<typeof DerivedFactsSchema>> = {}): DerivedFacts {
   return DerivedFactsSchema.parse({
     branch: "fleet/run-1/eng-1",
     base_ref: SHA_BASE,

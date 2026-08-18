@@ -310,7 +310,22 @@ export const EgressSchema = z
  */
 export const HarnessSchema = z
   .object({
-    patterns: z.array(shortStr).min(1).max(MAX_ITEMS).optional(),
+    // The message carries the reasoning because the stock one ("expected
+    // array to have >=1 items") reads as a formatting nit, and the obvious
+    // way to satisfy a formatting nit is to put SOMETHING in the list — which
+    // is the more dangerous move, not the safe one: any list that matches
+    // nothing narrows the surface just as an empty one does. Naming the
+    // consequence and the actual escape hatch is the point of the override.
+    patterns: z
+      .array(shortStr)
+      .min(
+        1,
+        "harness.patterns cannot be empty: it REPLACES the built-in defaults, " +
+          "so an empty list would disable the ISC-150 test-harness cap entirely " +
+          "rather than mean 'no opinion'. Omit the harness key to get the defaults.",
+      )
+      .max(MAX_ITEMS)
+      .optional(),
   })
   .strict()
   .prefault({});

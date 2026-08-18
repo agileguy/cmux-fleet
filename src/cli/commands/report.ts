@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot } from "../../run/paths.ts";
-import { harnessPatternsFromConfig } from "../../config/load.ts";
+import { resolveHarnessPatterns } from "../../harvest/patterns.ts";
 import { collectRunReport } from "../../report/collect.ts";
 import { renderRunReport } from "../../report/render.ts";
 
@@ -22,7 +22,7 @@ export function register(program: Command): void {
     .command("report")
     .description("Print a merged run report and merge conflict pre-check")
     .option("--run <id>", "run id")
-    .option("--config <path>", "fleet.yaml to read harness.patterns from")
+    .option("-c, --config <path>", "fleet.yaml to read harness.patterns from")
     .option("--md", "emit markdown (the default human format)")
     .option("--json", "emit machine-readable output")
     .action(async (opts: { run?: string; config?: string; md?: boolean; json?: boolean }) => {
@@ -35,12 +35,30 @@ export function register(program: Command): void {
       // `artifacts` uses, so it must read the harness surface from the same
       // place. A run graded one way by one command and another way by the
       // other is not two views of a run, it is a bug with two outputs.
-      const harness = await harnessPatternsFromConfig(opts.config);
-      if (harness.note !== null) process.stderr.write(`warning: ${harness.note}\n`);
+      const harness = await resolveHarnessPatterns(run, opts.config);
+      for (const w of harness.warnings) process.stderr.write(`warning: ${w}\n`);
 
-      const { report, notes, attended, attendedUnverified } = await collectRunReport(run, {
-        harnessPatterns: harness.patterns,
-      });
+      const collected = await collectRunReport(run, { harnessPatterns: harness.patterns });
+      const { report, attended, attendedUnverified } = collected;
+
+      /**
+       * The harness notes ride in `collection_notes` as well as on stderr.
+       *
+       * Stderr alone was invisible to the only consumer `--json` exists for.
+       * `pifleet report --run R --json > out.json` in a directory with a
+       * broken config regraded against the built-in defaults and wrote a file
+       * with no trace of it — a CI gate or dashboard reading the documented
+       * contract saw a clean report, and the one signal that a security
+       * control had silently reverted went to a stream nobody redirected.
+       * This file's own convention (below) is that degradations stay visible
+       * IN the payload; the harness note was the one that did not follow it.
+       *
+       * The surface line is unconditional, not just the failures. `artifacts`
+       * publishes what it graded against as `facts.harness.patterns`;
+       * `report` had no equivalent field anywhere, so "defaults" and "config"
+       * were indistinguishable in its output even when everything worked.
+       */
+      const notes = [...harness.warnings, harness.surface, ...collected.notes];
       if (opts.json === true) {
         // Collection notes ride ALONGSIDE the RunReportSchema fields, the
         // same convention `artifacts` uses for `harvest_status`: zod strips

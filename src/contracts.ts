@@ -470,6 +470,27 @@ export const HarnessSurfaceSchema = z.object({
   patterns: z.array(shortStr).max(MAX_ITEMS).default([]),
   /** Which of the worker's changed files matched. Empty means the cap did not fire. */
   touched: z.array(shortStr).max(MAX_ITEMS).default([]),
+  /**
+   * Files `DEFAULT_HARNESS_PATTERNS` would have caught that the CONFIGURED
+   * `patterns` did not — recorded only when that difference switched the
+   * ISC-150 cap off, i.e. when `touched` is empty and the defaults' surface
+   * was not (ISC-232).
+   *
+   * The narrow condition is the whole point. Config REPLACES the defaults, so
+   * any `patterns` list that happens to match nothing in a given diff disables
+   * the cap for that diff — and the dangerous shape is not a hostile
+   * `patterns: []` (the schema already refuses that) but an ordinary, honest
+   * `patterns: ["ci/**"]` written by an operator who only cared about CI
+   * files and did not realize it cost them all ~91 built-in globs. `Bun.Glob`
+   * accepts malformed patterns and simply matches nothing, so a typo is
+   * indistinguishable from a deliberate narrowing by any check on the list
+   * itself; only comparing the two SURFACES over a real diff tells them apart.
+   *
+   * Empty when config narrowed nothing away, when the cap fired anyway
+   * (`touched` non-empty — the verdict is capped either way, so the
+   * difference is not load-bearing), or when no config was in play at all.
+   */
+  defaults_missed: z.array(shortStr).max(MAX_ITEMS).default([]),
 });
 export type HarnessSurface = z.infer<typeof HarnessSurfaceSchema>;
 

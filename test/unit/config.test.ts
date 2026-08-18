@@ -7,7 +7,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stringify } from "yaml";
@@ -17,12 +17,13 @@ import {
   ModelNotAllowedError,
   assertModelAllowed,
   decomposeModel,
-  harnessPatternsFromConfig,
   loadConfig,
   resolveAllWorkers,
   resolveWorker,
   type LoadedConfig,
 } from "../../src/config/load.ts";
+import { resolveHarnessPatterns } from "../../src/harvest/patterns.ts";
+import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
 import { parseDuration } from "../../src/config/schema.ts";
@@ -578,49 +579,154 @@ describe("harness.patterns (ISC-232)", () => {
   });
 });
 
-describe("harnessPatternsFromConfig (ISC-232)", () => {
-  // `artifacts`/`report` read a RUN, and a run outlives its config. No config
-  // is the ordinary case for a pure read: defaults, and nothing said aloud.
-  test("no config anywhere is silent and yields no opinion", async () => {
-    const dir = await tempDir();
-    expect(await harnessPatternsFromConfig(undefined, dir)).toEqual({
-      patterns: undefined,
-      note: null,
-    });
+describe("resolveHarnessPatterns (ISC-232)", () => {
+  /**
+   * Build a run directory whose `run.json` holds `body`, and hand back the
+   * `RunPaths` a harvest would be given. `null` writes no `run.json` at all —
+   * the shape of a run assembled by hand or created before the field existed.
+   */
+  async function runWith(body: Record<string, unknown> | null): Promise<RunPaths> {
+    const root = await tempDir();
+    const run = runPaths("run-h", root);
+    await mkdir(run.root, { recursive: true });
+    if (body !== null) await writeFile(run.runJson, JSON.stringify(body));
+    return run;
+  }
+
+  // The ordinary case for a pure read over a run directory: defaults, no
+  // degradation, and a surface line that says so out loud.
+  test("a run recording no surface uses the defaults, silently", async () => {
+    const got = await resolveHarnessPatterns(await runWith(null));
+    expect(got.patterns).toBeUndefined();
+    expect(got.warnings).toEqual([]);
+    expect(got.surface).toContain("built-in defaults");
   });
 
-  test("a discovered config supplies its patterns", async () => {
-    const dir = await tempDir();
-    const doc = baseDoc();
-    doc["harness"] = { patterns: ["ci/**"] };
-    await writeFile(join(dir, "fleet.yaml"), stringify(doc));
-    expect(await harnessPatternsFromConfig(undefined, dir)).toEqual({
-      patterns: ["ci/**"],
-      note: null,
-    });
+  // An explicit null is `up` saying "config had no opinion" — a positive
+  // record, not an absence, and equally silent.
+  test("harness_patterns: null is the defaults, silently", async () => {
+    const got = await resolveHarnessPatterns(await runWith({ harness_patterns: null }));
+    expect(got.patterns).toBeUndefined();
+    expect(got.warnings).toEqual([]);
+  });
+
+  test("patterns recorded at run creation are what the harvest grades against", async () => {
+    const got = await resolveHarnessPatterns(await runWith({ harness_patterns: ["ci/**"] }));
+    expect(got.patterns).toEqual(["ci/**"]);
+    expect(got.warnings).toEqual([]);
+    expect(got.surface).toContain("run.json");
   });
 
   /**
-   * Falling back is not neutral: if the broken config was the thing WIDENING
-   * the surface, defaults narrow it. The read still succeeds — so this is a
-   * note, not an exit code — but it must not be silent.
+   * `[]` cannot come from a valid `fleet.yaml`, so reaching it here means a
+   * hand-edited or corrupt `run.json`. Falling back keeps the pure read
+   * working; the warning is because an empty list would have disabled the
+   * ISC-150 cap outright, and silently repairing that hides it.
    */
-  test("a discovered config that does not validate degrades with a note", async () => {
-    const dir = await tempDir();
-    await writeFile(join(dir, "fleet.yaml"), stringify({ version: 2, name: "broken" }));
-    const got = await harnessPatternsFromConfig(undefined, dir);
+  test("an empty recorded surface is refused, loudly", async () => {
+    const got = await resolveHarnessPatterns(await runWith({ harness_patterns: [] }));
     expect(got.patterns).toBeUndefined();
-    expect(got.note).toContain("falls back to built-in defaults");
+    expect(got.warnings.join(" ")).toContain("EMPTY");
+  });
+
+  test("an unreadable recorded surface degrades rather than crashing the read", async () => {
+    const got = await resolveHarnessPatterns(await runWith({ harness_patterns: 42 }));
+    expect(got.patterns).toBeUndefined();
+    expect(got.warnings.join(" ")).toContain("harness surface");
+  });
+
+  // The documented escape hatch: a run that predates persistence, or a
+  // dry-run preview of how a candidate config would grade.
+  test("an explicit --config overrides what the run recorded", async () => {
+    const run = await runWith({ harness_patterns: ["recorded/**"] });
+    const dir = await tempDir();
+    const doc = baseDoc();
+    doc["harness"] = { patterns: ["explicit/**"] };
+    const path = join(dir, "fleet.yaml");
+    await writeFile(path, stringify(doc));
+    const got = await resolveHarnessPatterns(run, path);
+    expect(got.patterns).toEqual(["explicit/**"]);
+    expect(got.surface).toContain("overriding");
   });
 
   // An operator who NAMED a config meant it. Answering a bad --config with
   // the defaults would silently ignore the one case where intent is explicit.
   test("an explicit --config that is missing or invalid throws", async () => {
+    const run = await runWith(null);
     const dir = await tempDir();
-    await expect(harnessPatternsFromConfig(join(dir, "nope.yaml"), dir)).rejects.toThrow(ConfigError);
+    await expect(resolveHarnessPatterns(run, join(dir, "nope.yaml"))).rejects.toThrow(ConfigError);
     const bad = join(dir, "bad.yaml");
     await writeFile(bad, stringify({ version: 2, name: "broken" }));
-    await expect(harnessPatternsFromConfig(bad, dir)).rejects.toThrow(ConfigValidationError);
+    await expect(resolveHarnessPatterns(run, bad)).rejects.toThrow(ConfigValidationError);
+  });
+
+  /**
+   * The reproducibility property itself (ISC-232), stated as a test rather
+   * than left to the absence of a cwd parameter.
+   *
+   * A `fleet.yaml` sitting in the process's own directory must not reach a
+   * harvest. Before this, `resolveConfigPath` fell through to `./fleet.yaml`
+   * and then to `~/.config/pifleet/fleet.yaml`, so the same run harvested on
+   * two days from two directories could be graded two ways — a task capped by
+   * the ISC-150 rule one day and certified `success` the next, with nothing
+   * about the run having changed.
+   */
+  test("a fleet.yaml in the cwd cannot change how a run is graded", async () => {
+    const run = await runWith({ harness_patterns: ["recorded/**"] });
+    const cwd = await tempDir();
+    const doc = baseDoc();
+    doc["harness"] = { patterns: ["ambient/**"] };
+    await writeFile(join(cwd, "fleet.yaml"), stringify(doc));
+    const original = process.cwd();
+    try {
+      process.chdir(cwd);
+      const got = await resolveHarnessPatterns(run);
+      expect(got.patterns).toEqual(["recorded/**"]);
+    } finally {
+      process.chdir(original);
+    }
+  });
+
+  // The same guarantee for a run that recorded nothing: the ambient config
+  // must not be able to invent a surface either.
+  test("a fleet.yaml in the cwd cannot supply a surface the run never had", async () => {
+    const run = await runWith(null);
+    const cwd = await tempDir();
+    const doc = baseDoc();
+    doc["harness"] = { patterns: ["ambient/**"] };
+    await writeFile(join(cwd, "fleet.yaml"), stringify(doc));
+    const original = process.cwd();
+    try {
+      process.chdir(cwd);
+      const got = await resolveHarnessPatterns(run);
+      expect(got.patterns).toBeUndefined();
+    } finally {
+      process.chdir(original);
+    }
+  });
+});
+
+describe("loadConfig on an unreadable file (ISC-232)", () => {
+  /**
+   * A config that EXISTS and cannot be read is a bad config, not a crash.
+   *
+   * As a raw `Error` it escaped every `instanceof ConfigError` handler and
+   * exited 8 ("internal error"), taking `artifacts` and `report` down with it
+   * — while malformed YAML, which is strictly less recoverable, degraded
+   * politely. Same class of operator mistake, so the same class of error.
+   */
+  test("a mode-000 config raises ConfigError, not a bare Error", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "fleet.yaml");
+    await writeFile(path, stringify(baseDoc()));
+    await chmod(path, 0o000);
+    try {
+      await expect(loadConfig(path)).rejects.toThrow(ConfigError);
+      const err = await loadConfig(path).catch((e: unknown) => e);
+      expect((err as ConfigError).exitCode).toBe(EXIT.USAGE);
+    } finally {
+      await chmod(path, 0o600);
+    }
   });
 });
 

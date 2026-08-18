@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot } from "../../run/paths.ts";
-import { harnessPatternsFromConfig } from "../../config/load.ts";
+import { resolveHarnessPatterns } from "../../harvest/patterns.ts";
 import { harvestAll, harvestTask, type TaskHarvest } from "../../harvest/index.ts";
 
 /**
@@ -44,7 +44,7 @@ export function register(program: Command): void {
     .option("--run <id>", "run id")
     .option("--task <id>", "single task id")
     .option("--all", "every task in the run")
-    .option("--config <path>", "fleet.yaml to read harness.patterns from")
+    .option("-c, --config <path>", "fleet.yaml to read harness.patterns from")
     .option("--include <kinds>", "extra payloads to include, e.g. diff")
     .option("--run-acceptance", "re-run the task's acceptance commands and grade on the result")
     .option("--json", "emit machine-readable output")
@@ -80,27 +80,27 @@ export function register(program: Command): void {
           else throw new CliError(`unknown --include kind: ${kind}`, EXIT.USAGE);
         }
 
-        /**
-         * ISC-232: which globs count as the test harness is the operator's
-         * call, and `fleet.yaml` is where they make it. Config wins; the
-         * harvester's `DEFAULT_HARNESS_PATTERNS` is what a config that says
-         * nothing falls back to.
-         *
-         * A missing config is not an error here — `artifacts` is a pure read
-         * over a run directory and must keep working for a run whose config
-         * has moved on. A config that was found and cannot be used degrades
-         * to the defaults with a note on STDERR, which keeps stdout's JSON
-         * contract intact while refusing to narrow the harness surface
-         * silently.
-         */
-        const harness = await harnessPatternsFromConfig(opts.config);
-        if (harness.note !== null) process.stderr.write(`warning: ${harness.note}\n`);
-        const harvestOpts = { includeDiff, runAcceptance, harnessPatterns: harness.patterns };
-
         const root = runsRoot();
         const runId = opts.run ?? (await latestRunId(root));
         if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
         const run = runPaths(runId, root);
+
+        /**
+         * ISC-232: which globs count as the test harness is the operator's
+         * call, and `fleet.yaml` is where they make it — but the file that
+         * decides is the one the RUN was created under, not the one in the
+         * cwd today. `resolveHarnessPatterns` reads the run directory (or an
+         * explicit `--config`) and never auto-discovers, so re-harvesting a
+         * run cannot change its verdict.
+         *
+         * Notes go to STDERR, which keeps stdout's JSON contract intact.
+         * `artifacts` already publishes the surface it graded against inside
+         * the payload as `facts.harness.patterns`, so the machine consumer is
+         * covered there rather than by a second copy here.
+         */
+        const harness = await resolveHarnessPatterns(run, opts.config);
+        for (const w of harness.warnings) process.stderr.write(`warning: ${w}\n`);
+        const harvestOpts = { includeDiff, runAcceptance, harnessPatterns: harness.patterns };
 
         if (single) {
           const t = await harvestTask(run, opts.task as string, harvestOpts);

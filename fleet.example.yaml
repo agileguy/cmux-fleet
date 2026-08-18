@@ -75,6 +75,19 @@ secrets:
 # nothing" — an empty list would switch the cap off and look like it said
 # nothing.
 #
+# Because it replaces, a narrow list can quietly stop the cap firing on files
+# the defaults would have caught: `patterns: [ci/**]` is the obvious thing to
+# write if CI is what you had in mind, and it drops `test/**` with it. That is
+# allowed — it may be exactly right for your repo — but the harvest records
+# what the narrowing cost in `harness.defaults_missed` and raises it as a
+# discrepancy, so it cannot happen without anyone noticing.
+#
+# This value is read when `pifleet up` CREATES a run and is stored in that
+# run's `run.json`. Editing it later does not change how an existing run is
+# graded, and `artifacts`/`report` never read this file from the current
+# directory — pass `--config` to grade against something other than what the
+# run recorded.
+#
 # harness:
 #   patterns: [test/**, ci/**, package.json, Makefile, bunfig.toml]
 

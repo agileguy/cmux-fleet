@@ -1404,22 +1404,49 @@ could compute from the document in front of them.
   caller. `harvestTask` called `harnessSurface(paths)` with no second
   argument, so no config could reach it.
 - Wired through `HarvestOptions.harnessPatterns` → `harvestTask` →
-  `harnessSurface`, with `?? DEFAULT_HARNESS_PATTERNS` spelled out at the call
-  site rather than left to the parameter default.
+  `harnessSurfaceFor`, which owns the fallback. Not a `??` at the call site:
+  `??` rescues `undefined` and `null` but not `[]`, so every caller building
+  `HarvestOptions` by hand could still have handed in an empty list and got
+  `touched: []` — the ISC-150 cap off, silently. Empty throws.
 - **Both** readers are wired, not just `artifacts`: `report/collect.ts` takes
   `CollectOptions.harnessPatterns` and forwards it to every `harvestTask`.
   They read the same run through the same adjudicator, so leaving `report` on
   the defaults would have meant one command capping a verdict and the other
   certifying it, with the answer depending on which one an operator typed —
   a smaller copy of the exact bug this criterion names.
-- `artifacts` and `report` both take `--config`. A missing config is silent
-  (both are pure reads over a run directory, and a run outlives its config); a
-  config that was FOUND and does not validate degrades to the defaults with a
-  stderr note, because falling back NARROWS the surface whenever the broken
-  config was the thing widening it, and a security control that quietly
-  reverts to its default is this subsystem's own failure mode. An explicit
-  `--config` is exempt from the leniency and throws — a named file is
-  unambiguous intent.
+- **The harvest path does not resolve config from the cwd.** `up` writes the
+  resolved surface into `run.json` as `harness_patterns` when the run is
+  created — the technique `heartbeat_interval_ms` already uses so a config
+  edited mid-run cannot retroactively change results — and
+  `harvest/patterns.ts` reads it back. `null` means "config had no opinion,
+  use the defaults" and is written explicitly, so a run states its surface
+  either way.
+
+  Auto-discovery was the bug, not a convenience: `resolveConfigPath` falls
+  through to `./fleet.yaml` and then a machine-global
+  `~/.config/pifleet/fleet.yaml`, so `artifacts`/`report` with no `--config`
+  graded an OLD run against whatever file was sitting in today's directory. A
+  task the ISC-150 cap had refused to certify came back `success` months
+  later with nothing about the run having changed — a verdict that is a
+  function of when and where the command was typed is not a verdict, and
+  `harvest/index.ts` had documented that exact prohibition while the CLI
+  violated it. `--config` remains as the explicit override, for a run that
+  predates persistence and for previewing a candidate config; it throws on
+  anything unusable, because a named file is unambiguous intent.
+- A configured surface that matches NOTHING in a diff the defaults would have
+  flagged is recorded as `harness.defaults_missed` and raised as a
+  discrepancy. Replacement means any narrow list disables the cap for some
+  diffs, and the realistic route there is not malice — `patterns: ["ci/**"]`
+  is the first thing an operator who cares about CI files writes, and it
+  costs them all ~91 defaults. `Bun.Glob` matches nothing for a malformed
+  pattern, so a typo is invisible to any check on the list itself; only
+  comparing the two surfaces over a real diff tells them apart. The verdict
+  still follows the config — narrowing is a legitimate decision — but it can
+  no longer happen silently.
+- `report --json` carries the harness surface and any degradation in
+  `collection_notes`, not only on stderr. A note that exists only on stderr is
+  invisible to `report --json > out.json`, which is the one consumer `--json`
+  exists for.
 - `patterns: []` is a validation error rather than "match nothing". An empty
   list reads like "no opinion" and would mean the opposite: `touched` could
   never be non-empty and the ISC-150 cap would be switched off by a key that
