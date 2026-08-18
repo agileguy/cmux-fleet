@@ -28,6 +28,13 @@ All notable changes to this project are documented here.
   when one toolchain's image tag can't be computed — it reports a diagnosis row instead.
 - **The `models_allowlist` gate could be silently bypassed by an unrelated config error.** A
   worker resolution failure now propagates instead of being treated as "nothing to check."
+- **On the cmux backend, every pane's viewer failed to attach and its tab never showed the
+  worker id.** `respawn-pane`/`rename-tab` need a `--workspace` argument on cmux 0.64.22 that
+  this client never sent, so both calls failed against a surface id `new-split` had just
+  returned (`Surface not found`/`Tab not found`). Fixed; `pifleet up --backend cmux` now shows
+  live worker activity in each pane as designed. A pane id recorded by a pifleet build
+  predating this fix (persisted in `presentation.json`) is now refused with a named,
+  actionable error on `attach`/`tui` instead of an opaque parse failure.
 
 ### Added
 - **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
