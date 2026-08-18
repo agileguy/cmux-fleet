@@ -337,6 +337,22 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
    * would prove abort ordering rather than steer ordering.
    */
   "slow-turn.json": [1],
+  /**
+   * Three prompt steps, so three settles — one per epoch the simulator walks.
+   *
+   * The scenario's three steps are alternative SCRIPTS, not a sequence: each
+   * is selected by `sessions`, so a real worker runs exactly one of them
+   * (ISC-158 needs one fleet where two workers flood a pipe and fourteen do
+   * not, and one `PIFLEET_PI_COMMAND` serves them all). This simulator has no
+   * session identity and replays every prompt step in order, which is the
+   * right thing for the property under test: each script must settle its own
+   * epoch cleanly on its own `agent_end`, whichever worker draws it.
+   *
+   * The `noise` volume does not enter the count, and cannot: every record it
+   * produces precedes the terminal event, so conditions 1-3 are still false
+   * while it streams and no probe is open for it to invalidate.
+   */
+  "noisy-fleet.json": [1, 2, 3],
 };
 
 function simulate(scenario: ScenarioFile): { settles: number[] } {
@@ -423,7 +439,12 @@ function simulate(scenario: ScenarioFile): { settles: number[] } {
     em.noteAck(seq);
     let dead = false;
     for (const entry of step.emit ?? []) {
-      if ("delay_ms" in entry || "partial" in entry) continue; // markers, not records
+      // Markers, not records. `noise` is a VOLUME directive — the double
+      // expands it into filler on one pipe — and expanding it here would feed
+      // the tracker thousands of `message_update`s to prove a property that
+      // the ordering already decides: every one of them lands before the
+      // terminal event.
+      if ("delay_ms" in entry || "partial" in entry || "noise" in entry) continue;
       if ("exit" in entry) {
         dead = true;
         break; // the process died; nothing further arrives, ever

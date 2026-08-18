@@ -63,13 +63,31 @@ interface Rig {
 
 const rigs: Rig[] = [];
 afterAll(async () => {
-  // Belt and braces, same shape as the e2e suite: a failing test must not
-  // leave a detached supervisor outliving the run.
+  /**
+   * Belt and braces, same shape as the e2e suite: a failing test must not
+   * leave a detached supervisor outliving the run.
+   *
+   * The run ids are read off DISK rather than out of `rig.runId`, because the
+   * cases that leak are exactly the cases that never set it. `up` launches
+   * every supervisor and only then waits for them to go idle, so a worker that
+   * dies during startup — or the 60s idle gate — fails after the processes
+   * exist and before any run id has been captured, and `if (r.runId !== "")`
+   * then skipped the teardown for the one shape that needed it. This suite was
+   * observed leaking one supervisor plus its fake-pi child per full run.
+   */
   for (const r of rigs) {
-    if (r.runId !== "") await runCli(r, ["down", "--run", r.runId, "--json"]).catch(() => {});
+    let runIds: string[] = [];
+    try {
+      runIds = (await readdir(r.root)).filter((e) => !e.startsWith("."));
+    } catch {
+      // The root never got created; there is nothing running to reap.
+    }
+    for (const runId of runIds) {
+      await runCli(r, ["down", "--run", runId, "--json"]).catch(() => {});
+    }
     await rm(r.base, { recursive: true, force: true }).catch(() => {});
   }
-});
+}, 120_000);
 
 /**
  * A `docker` that answers `network inspect` with an existing INTERNAL network.

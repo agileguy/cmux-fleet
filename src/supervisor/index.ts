@@ -116,8 +116,25 @@ async function main(): Promise<void> {
   // Serialize events.jsonl appends so two async writes cannot interleave.
   let eventsChain: Promise<unknown> = Promise.resolve();
   const logEvent = (record: Record<string, unknown>): void => {
+    /**
+     * Stamped HERE, not inside the `.then` below.
+     *
+     * `ts` used to be evaluated when the queued append finally ran, which made
+     * it the time the write was FLUSHED rather than the time the event
+     * happened — and the gap between those is exactly the interval this log is
+     * consulted about. A worker flooding a pipe queues thousands of
+     * `stderr_line` appends ahead of whatever comes next, so under the load
+     * that makes an event log worth reading, every timestamp in it drifted
+     * later by however backed up the chain was. `settled` would claim to have
+     * happened after a flood it actually preceded.
+     *
+     * Ordering is unaffected: the chain still serializes the writes, so the
+     * file stays in emission order. Only the recorded time changes, from "when
+     * the disk caught up" to "when this happened".
+     */
+    const ts = new Date().toISOString();
     eventsChain = eventsChain
-      .then(() => appendJsonl(wp.eventsJsonl, { ts: new Date().toISOString(), ...record }))
+      .then(() => appendJsonl(wp.eventsJsonl, { ts, ...record }))
       .catch(() => {});
   };
 
