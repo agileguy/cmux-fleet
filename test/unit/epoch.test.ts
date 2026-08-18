@@ -106,6 +106,40 @@ describe("EpochManager — a malformed epoch is named, not normalized (ISC-217)"
     expect(() => em.allocate("T-001", "a1", -1)).toThrow(MalformedEpochError);
   });
 
+  /**
+   * The same defect at the other end of the number line.
+   *
+   * `Number.isInteger(2 ** 53)` is TRUE, so the guard accepted values that can
+   * never function as an epoch counter: past `Number.MAX_SAFE_INTEGER`,
+   * `epoch + 1 === epoch` in IEEE-754, so `allocate`'s `last_accepted_epoch +
+   * 1` returns the number it started from and the fence can never advance
+   * again — every later dispatch answered as though it were the live epoch.
+   *
+   * `MAX_SAFE_INTEGER` itself is the last value that still works and must
+   * remain accepted, or the guard has just moved the off-by-one somewhere else.
+   */
+  test.each([
+    ["MAX_SAFE_INTEGER + 1", Number.MAX_SAFE_INTEGER + 1],
+    ["2 ** 53", 2 ** 53],
+    ["2 ** 60", 2 ** 60],
+    ["Infinity", Number.POSITIVE_INFINITY],
+  ])("an epoch at or above the safe-integer boundary is malformed: %s", (_label, value) => {
+    // The premise: these are exactly the values `Number.isInteger` waved
+    // through, so the case is about safe-ness and not about integer-ness.
+    expect(Number.isInteger(value)).toBe(value !== Number.POSITIVE_INFINITY);
+    expect(() => new EpochManager().allocate("T-001", "a1", value)).toThrow(MalformedEpochError);
+  });
+
+  test("MAX_SAFE_INTEGER is still a well-formed request — the fence can reach it", () => {
+    const d = new EpochManager().allocate("T-001", "a1", Number.MAX_SAFE_INTEGER);
+    expect(d).toEqual({
+      ok: false,
+      reason: "stale_epoch",
+      requested: Number.MAX_SAFE_INTEGER,
+      next: 1,
+    });
+  });
+
   test("well-formed epochs are untouched: 0 allocates, whole positives request", () => {
     expect(new EpochManager().allocate("T-001", "a1", 0)).toEqual({
       ok: false,

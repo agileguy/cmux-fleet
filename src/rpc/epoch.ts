@@ -59,14 +59,28 @@ import { EXIT, type Verdict } from "../contracts.ts";
 export class MalformedEpochError extends Error {
   readonly exitCode = EXIT.USAGE;
   constructor(readonly value: number) {
-    super(`malformed epoch ${String(value)}: expected a whole number >= 0`);
+    super(
+      `malformed epoch ${String(value)}: expected a whole number in [0, ${Number.MAX_SAFE_INTEGER}]`,
+    );
     this.name = "MalformedEpochError";
   }
 }
 
-/** Throw `MalformedEpochError` unless `value` is a whole number >= 0. */
+/**
+ * Throw `MalformedEpochError` unless `value` is a whole number in
+ * `[0, Number.MAX_SAFE_INTEGER]`.
+ *
+ * SAFE integer, not merely integer. `Number.isInteger(2 ** 53)` is true, and
+ * a value at or above that boundary can never function as an epoch counter:
+ * `epoch + 1 === epoch` in IEEE-754 doubles from there on, so `allocate`'s
+ * `last_accepted_epoch + 1` returns the SAME number it started from and the
+ * fence can never advance again. Every subsequent dispatch would be answered
+ * as though it were the live epoch. That is the same class of defect ISC-217
+ * is about — a value that cannot name an epoch being processed as one — and
+ * `Number.isInteger` waves it straight through.
+ */
 export function assertEpochWellFormed(value: number): void {
-  if (!Number.isInteger(value) || value < 0) throw new MalformedEpochError(value);
+  if (!Number.isSafeInteger(value) || value < 0) throw new MalformedEpochError(value);
 }
 
 export interface CompletedTask {
