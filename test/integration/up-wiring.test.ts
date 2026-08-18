@@ -32,11 +32,13 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadConfig } from "../../src/config/load.ts";
+import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { EXIT } from "../../src/contracts.ts";
-import { runPaths } from "../../src/run/paths.ts";
+import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
 
@@ -160,8 +162,16 @@ function fleetYaml(
     modelsAllowlist?: string[];
     /** Role named by `eng-1`. A name absent from `roles:` is a config defect. */
     workerRole?: string;
+    /** Extra `engineer:` role fields, written into its flow mapping. */
+    roleFields?: string[];
+    /** `cloud.kubeconfig`; omitted entirely when absent, as the schema default is null. */
+    kubeconfig?: string;
   } = {},
 ): string {
+  const roleFields = [
+    ...(opts.cloudAccess === true ? ["cloud_access: true"] : []),
+    ...(opts.roleFields ?? []),
+  ];
   return [
     "version: 2",
     "name: up-wiring",
@@ -172,6 +182,7 @@ function fleetYaml(
     `  repo: ${repo}`,
     "  budget:",
     "    tokens_ceiling: 1000000",
+    ...(opts.kubeconfig === undefined ? [] : ["cloud:", `  kubeconfig: ${opts.kubeconfig}`]),
     "llm:",
     "  model: wiring-test-model",
     // Omitted by default, which is the shape of every other test in this file:
@@ -181,7 +192,7 @@ function fleetYaml(
       ? []
       : [`  models_allowlist: [${opts.modelsAllowlist.join(", ")}]`]),
     "roles:",
-    opts.cloudAccess === true ? "  engineer: {cloud_access: true}" : "  engineer: {}",
+    `  engineer: {${roleFields.join(", ")}}`,
     "workers:",
     `  - {id: eng-1, role: ${opts.workerRole ?? "engineer"}}`,
     "",
@@ -617,6 +628,159 @@ describe("the grant line names the real ADC identity (ISC-251)", () => {
       const line = String(plan!.detail?.["plan"]);
       expect(line).toContain(SHIM_ACCOUNT);
       expect(line).not.toContain("(adc user)");
+    },
+    90_000,
+  );
+});
+
+/**
+ * Every `-v` source a worker's container would mount EXISTS after `up`, with
+ * the right shape (SRD §5.5).
+ *
+ * Same disease as this file's header describes, fourth strain — and the one
+ * where the symptom sits furthest from the cause. A `-v` whose host source is
+ * missing does not fail: Docker creates it. A missing directory arrives empty,
+ * and a missing FILE arrives as an empty DIRECTORY. So deleting the
+ * materialization call from `up.ts` leaves every unit test green and `up`
+ * exiting 0, while the damage surfaces an hour later as an agent that ignored
+ * its skills and a verbgate that refused everything — both of which read as
+ * model behaviour rather than as a mount fault.
+ *
+ * The assertion is therefore driven FROM render rather than from a hand-written
+ * list: `renderWorker` is asked for the argv `up` will run, and every `-v`
+ * source in it must be a real path of the right type and mode, or be on a
+ * two-entry exemption list. A mount added to `render.ts` later with no writer
+ * behind it fails here instead of passing unnoticed.
+ *
+ * `isolation: none` deliberately: nothing creates a per-worker worktree yet, so
+ * a `worktree` fixture would be asserting against unimplemented work.
+ */
+describe("up materializes every host path its containers would mount (SRD §5.5)", () => {
+  /** Container target → what its host source must be; keyed by target, because that is what render decides. */
+  const EXPECTED: Record<string, { directory: boolean; mode: number }> = {
+    "/outbox": { directory: true, mode: 0o777 },
+    "/sessions": { directory: true, mode: 0o777 },
+    "/skills": { directory: true, mode: 0o755 },
+    "/policy/cloud-allow": { directory: false, mode: 0o644 },
+    [BRIEFING_MOUNT]: { directory: false, mode: 0o644 },
+    "/home/pi/.kube/config": { directory: false, mode: 0o644 },
+  };
+  /** Not a host path at all — Docker owns this one by construction. */
+  const NAMED_VOLUME_TARGET = "/home/pi/.pi/agent";
+
+  test(
+    "every -v source exists with the right type and mode, and materialization precedes launch",
+    async () => {
+      const rig = await makeRig();
+      const kubeconfig = join(rig.base, "filtered-kubeconfig");
+      await writeFile(kubeconfig, "apiVersion: v1\nkind: Config\nclusters: []\n");
+      const configPath = join(rig.base, "mounts.yaml");
+      await writeFile(
+        configPath,
+        fleetYaml(rig.repo, {
+          kubeconfig,
+          roleFields: [
+            // No `/workspace` mount at all: the worktree that would back one is
+            // not this slice's to create.
+            "isolation: none",
+            // Forces the kubeconfig mount, the one gated on a compound predicate.
+            "cloud_access: true",
+            // Inline, so the briefing mount is exercised without a second file.
+            'append_system_prompt: "wiring briefing"',
+          ],
+        }),
+      );
+
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+      const run = runPaths(rig.runId, rig.root);
+
+      /**
+       * `renderWorker` resolves its own run dir from `runsRoot()`, the seam
+       * `up` was pointed at — so this process has to be pointed at the same one
+       * to be asking about the same run.
+       */
+      const before = process.env["PIFLEET_RUNS_DIR"];
+      process.env["PIFLEET_RUNS_DIR"] = rig.root;
+      try {
+        const loaded = await loadConfig(configPath);
+        for (const worker of loaded.config.workers) {
+          const r = await renderWorker(loaded, worker.id, { runId: rig.runId });
+
+          const unchecked: string[] = [];
+          const seen = new Set<string>();
+          for (let i = 0; i < r.docker.length; i++) {
+            if (r.docker[i] !== "-v") continue;
+            const [source, target] = (r.docker[i + 1] ?? "").split(":");
+            if (target === NAMED_VOLUME_TARGET) {
+              // A `-v` source with no leading `/` IS a named volume, which is
+              // precisely why this one needs no host path.
+              expect(source).toBe(`pifleet-piagent-${worker.id}`);
+              expect(source!.startsWith("/")).toBe(false);
+              continue;
+            }
+            const want = EXPECTED[target ?? ""];
+            if (want === undefined) {
+              unchecked.push(`${target} <- ${source}`);
+              continue;
+            }
+            const st = await stat(source!);
+            expect(st.isDirectory()).toBe(want.directory);
+            expect(st.isFile()).toBe(!want.directory);
+            expect(st.mode & 0o777).toBe(want.mode);
+            seen.add(target!);
+          }
+          // A mount this test does not know about is a FAILURE, not a skip: an
+          // unwritten source is silent, so "nobody added an assertion" must not
+          // be indistinguishable from "there was nothing to assert".
+          expect(unchecked).toEqual([]);
+          // …and every mount it does know about was actually emitted, so a
+          // render that stops emitting one cannot pass by producing less.
+          expect([...seen].sort()).toEqual(Object.keys(EXPECTED).sort());
+
+          /**
+           * The one deliberate exemption. `--env-file` is NOT materialized: an
+           * empty allow list is semantically correct (deny-all for mutating
+           * verbs), while an empty env file is semantically wrong — no
+           * `base_url`, no API key — and would fail obscurely inside the
+           * container instead of loudly at `docker run`.
+           */
+          const envFile = r.docker[r.docker.indexOf("--env-file") + 1];
+          expect(envFile).toBe(workerPaths(run, worker.id).envFile);
+          expect(await Bun.file(envFile!).exists()).toBe(false);
+        }
+      } finally {
+        if (before === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+        else process.env["PIFLEET_RUNS_DIR"] = before;
+      }
+
+      // ORDER, by the same integer-`seq` technique the rest of this file uses.
+      // A mount materialized after its container starts is not materialized.
+      const { records, errors } = await mergeLedger(run);
+      expect(errors).toEqual([]);
+      const cliUp = records.filter((r) => r.actor === "cli-up").sort((a, b) => a.seq - b.seq);
+      const materialized = cliUp.find(
+        (r) => r.event === "worker_inputs_materialized" && r.worker === "eng-1",
+      );
+      const supervisor = cliUp.find(
+        (r) => r.event === "supervisor_launched" && r.worker === "eng-1",
+      );
+      expect(materialized).toBeDefined();
+      expect(supervisor).toBeDefined();
+      expect(materialized!.seq).toBeLessThan(supervisor!.seq);
+      // The ledger names WHAT was written, not merely that something was.
+      expect(materialized!.detail?.["skills"]).toBe(join(run.root, "skills", "engineer"));
+      expect(materialized!.detail?.["kubeconfig_source"]).toBe(kubeconfig);
     },
     90_000,
   );

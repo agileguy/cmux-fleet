@@ -7,13 +7,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   daemonScratchRoot,
   makeDaemonScratch,
   makeWorkerAccessible,
+  makeWorkerReadable,
   probeMountVisibility,
   probeWriteThrough,
   WORKER_UID,
@@ -207,6 +208,24 @@ describe("worker-uid accessibility", () => {
       await makeWorkerAccessible(dir, false);
       expect(await mode(dir)).toBe(0o755);
       expect((await mode(dir)) & 0o002).toBe(0); // world-writable would be wrong here
+    });
+  });
+
+  /**
+   * The FILE half of the same rule. Three of the mount table's sources are
+   * single files — the briefing, the verbgate policy, the kubeconfig — and a
+   * host writing them under a tightened umask leaves 0600, which uid 10001
+   * cannot read at all. No execute bit: every one of them is content a worker
+   * reads, none is a program.
+   */
+  test("a read-only mounted FILE gets read but neither write nor execute", async () => {
+    await withRoot(async (root) => {
+      const file = join(root, "cloud-allow");
+      await writeFile(file, "");
+      await chmod(file, 0o600);
+      await makeWorkerReadable(file);
+      expect(await mode(file)).toBe(0o644);
+      expect((await mode(file)) & 0o111).toBe(0);
     });
   });
 

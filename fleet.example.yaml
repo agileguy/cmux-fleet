@@ -99,13 +99,20 @@ defaults:
   exclude_tools: []
   no_context_files: true     # repo AGENTS.md/CLAUDE.md is untrusted input
 
+# Every name in a `skills:` list is a BUNDLE NAME, copied at `up` from
+# <repo>/skills/<name>/ into the host directory mounted read-only at /skills.
+# A name with no directory there is a refusal, not a silently shorter bundle —
+# so this example lists only `pifleet-worker`, which is the one bundle that
+# exists. `sre`, `tdd` and `diagnose` were listed below before anything read
+# these lists; they are not authored yet, and inventing their content to make
+# the example parse would be worse than naming the gap.
 roles:
   # ---- SRE / cloud-ops: the primary role set ----
   sre:                                    # diagnoses AND remediates
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: base                       # gcloud/kubectl/helm are in every image
     tools: [read, write, edit, bash, grep, find, ls]
-    skills: [pifleet-worker, sre]
+    skills: [pifleet-worker]
     cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
     isolation: worktree                   # manifest/IaC edits land on a branch
     append_system_prompt_file: ./roles/sre.md
@@ -114,7 +121,7 @@ roles:
     thinking: high
     toolchain: base
     tools: [read, bash, grep, find, ls]   # bash for kubectl/gcloud READ verbs
-    skills: [pifleet-worker, sre]
+    skills: [pifleet-worker]
     cloud_access: true
     isolation: none
     append_system_prompt_file: ./roles/investigator.md
@@ -122,7 +129,7 @@ roles:
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: base
     tools: [read, bash, grep, find, ls]
-    skills: [pifleet-worker, sre]
+    skills: [pifleet-worker]
     cloud_access: true
     isolation: none
     append_system_prompt_file: ./roles/verifier.md
@@ -132,7 +139,7 @@ roles:
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: node
     tools: [read, write, edit, bash, grep, find, ls]
-    skills: [pifleet-worker, tdd, diagnose]
+    skills: [pifleet-worker]
     append_system_prompt_file: ./roles/engineer.md
   reviewer:
     model: Qwen3.5-35B-A3B-8bit

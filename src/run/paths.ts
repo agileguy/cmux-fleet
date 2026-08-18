@@ -49,11 +49,43 @@ import { join, resolve } from "node:path";
  * to the question this module exists to make singular.
  */
 export function runsRoot(env: Record<string, string | undefined> = process.env): string {
-  const configured = env["PIFLEET_RUNS_DIR"];
+  return rootFromEnv(env["PIFLEET_RUNS_DIR"], () => join(homedir(), ".pifleet", "runs"));
+}
+
+/**
+ * Where per-role skill bundles are COPIED FROM (SRD §5.4).
+ *
+ * There is no config field for this and there should not be: a skill name in
+ * `skills:` is a bundle NAME, and `--skill /skills/<name>` hard-codes the
+ * container half, so the host half must be equally fixed. Resolved from this
+ * module's own location so it survives being run from any cwd, exactly as
+ * `up.ts`'s `CLI_ENTRY` does with `import.meta.dir` — `src/run/` is two levels
+ * below the repo root, where `skills/` lives beside `src/`.
+ *
+ * `PIFLEET_SKILLS_DIR` overrides it — the packaging and test seam, the same
+ * shape as `PIFLEET_RUNS_DIR` and `PIFLEET_SCRATCH_DIR`, and the only way a
+ * test can plant a hostile bundle (a symlink, a missing name) without writing
+ * into the repository's real `skills/`.
+ */
+export function skillsSourceRoot(env: Record<string, string | undefined> = process.env): string {
+  return rootFromEnv(env["PIFLEET_SKILLS_DIR"], () =>
+    resolve(import.meta.dir, "..", "..", "skills"),
+  );
+}
+
+/**
+ * The expansion every root-valued environment variable in this module gets.
+ *
+ * Factored out rather than copied because a second spelling of these four
+ * lines is a second answer to what `~/x` and `./x` mean here, which is the
+ * divergence this module's first rule exists to prevent. `fallback` is lazy so
+ * each caller keeps its own default without computing it on the override path.
+ */
+function rootFromEnv(configured: string | undefined, fallback: () => string): string {
   // An exported-but-cleared variable arrives as "", which `??` passed
   // through; `join("", runId)` is then relative, i.e. the named-volume case
   // with nothing in the path to suggest a variable was ever set.
-  if (configured === undefined || configured === "") return join(homedir(), ".pifleet", "runs");
+  if (configured === undefined || configured === "") return fallback();
   if (configured === "~") return homedir();
   if (configured.startsWith("~/")) return resolve(homedir(), configured.slice(2));
   return resolve(configured);

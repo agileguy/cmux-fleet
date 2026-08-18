@@ -130,16 +130,29 @@ describe("render", () => {
     expect(mounts).not.toContain(`${process.env.HOME}/.pi/agent`);
   });
 
-  // ISC-62, ISC-63 — two roles differ in brain and in skills.
-  test("different roles render different models and skill sets", async () => {
+  /**
+   * ISC-62 — two roles differ in brain.
+   *
+   * This used to assert differing `--skill` SETS here too (ISC-63), against
+   * `fleet.example.yaml`. It cannot any more, and the reason is worth stating:
+   * `up` now COPIES each configured skill by name out of `<repo>/skills/<name>/`
+   * and refuses a name with no bundle there, so the example config may only
+   * list bundles that exist. Exactly one does — `pifleet-worker` — and it is
+   * re-injected post-merge and cannot be removed (ISC-64), so no two roles in a
+   * RUNNABLE example can differ in skills until a second bundle is authored.
+   *
+   * ISC-63 is unaffected and is pinned where it belongs: `test/unit/
+   * render.test.ts` asserts the exact sets against its own fixture, where a
+   * name nothing copies costs nothing. Shipping an example that `up` refuses,
+   * purely so an integration test could keep re-checking a criterion a unit
+   * test already checks harder, would be the wrong trade.
+   */
+  test("different roles render different models", async () => {
     const sre = JSON.parse((await render()).stdout);
     const rev = JSON.parse(
       (await runCli(["render", "-c", "fleet.example.yaml", "--worker", "rev-1", "--json"])).stdout,
     );
     const modelOf = (d: { docker: string[] }) => d.docker[d.docker.indexOf("--model") + 1];
-    const skillsOf = (d: { docker: string[] }) =>
-      d.docker.filter((a, i) => d.docker[i - 1] === "--skill").sort();
     expect(modelOf(sre)).not.toBe(modelOf(rev));
-    expect(skillsOf(sre)).not.toEqual(skillsOf(rev));
   });
 });

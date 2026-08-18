@@ -5,6 +5,7 @@ import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import { Stopwatch } from "../../rpc/client.ts";
 import { newRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
+import { materializeWorkerInputs } from "../../run/materialize.ts";
 import { readWorkerState, writePresentation } from "../../run/state.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import {
@@ -332,6 +333,48 @@ export function register(program: Command): void {
           // the same failure class: a configured control that could not be
           // established, refusing rather than proceeding without it.
           throw new CliError(`repository hazard scan failed: ${String(err)}`, EXIT.BACKEND_UNAVAILABLE);
+        }
+      }
+
+      /**
+       * Every host path a worker's container will bind-mount is created HERE,
+       * before anything detached exists (SRD §5.5).
+       *
+       * A `-v` whose source is missing does not fail. Docker creates it — a
+       * directory source comes up empty, and a FILE source comes up as an empty
+       * DIRECTORY — so an unmaterialized `/skills` is a worker with no skills
+       * and an unmaterialized `/policy/cloud-allow` is a verbgate reading a
+       * directory. Both read as agent behaviour, not as mount faults.
+       *
+       * The ordering is the same argument the allowlist gate above makes.
+       * After the ledger, so events land in the authoritative-`seq` `cli-up`
+       * shard. After config load and `assertModelsAllowed`, so a refusal there
+       * costs nothing on disk. Before the daemon and the launch loop, because
+       * everything from `launchDetached` onward survives a thrown `CliError`
+       * and has to be reaped, while this is pure filesystem work that can
+       * refuse with nothing running behind it.
+       *
+       * Config-gated like the two controls above: the no-config Phase 1 path
+       * (`up --workers eng-1` against a `PIFLEET_PI_COMMAND` double) has no
+       * mount table to materialize and must keep starting.
+       *
+       * A failure aborts the WHOLE launch rather than skipping one worker —
+       * see `materialize.ts`'s second rule.
+       */
+      if (loadedConfig !== null) {
+        for (const m of await materializeWorkerInputs(loadedConfig, run, workers)) {
+          await ledger.append("worker_inputs_materialized", {
+            worker: m.workerId,
+            detail: {
+              role: m.role,
+              outbox: m.outboxDir,
+              skills: m.skillsDir,
+              cloud_allow: m.cloudAllow,
+              system_append: m.systemAppendMd,
+              kubeconfig: m.kubeconfig,
+              kubeconfig_source: m.kubeconfigSource,
+            },
+          });
         }
       }
 
