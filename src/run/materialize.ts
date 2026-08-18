@@ -67,7 +67,7 @@ import {
 } from "../config/load.ts";
 import { renderWorker } from "../config/render.ts";
 import { makeWorkerAccessible, makeWorkerReadable } from "../container/mounts.ts";
-import { EXIT } from "../contracts.ts";
+import { EXIT, SESSION_ID_RE } from "../contracts.ts";
 import { resolvedWithin } from "../harvest/outbox.ts";
 import {
   roleSkillsDir,
@@ -207,7 +207,24 @@ async function refuseSymlinkDestination(path: string): Promise<void> {
  */
 function assertContained(root: string, name: string, what: string): string {
   const path = join(root, name);
-  if (!resolvedWithin(root, path)) {
+  /**
+   * The character-class check comes FIRST, and it is the one that matters.
+   *
+   * `resolvedWithin` answers "did this escape", and for `.` — or `""` — the
+   * honest answer is no: the resolved path IS the root, and the containment
+   * check returns true. So `materializeRoleSkills(root, role, ["."], src)`
+   * copied the entire skills source into the bundle while the safety net
+   * reported everything fine. Applying the grammar the schema applies makes
+   * the net catch what its docstring claims: a name that is not a single,
+   * ordinary path segment is refused before it is ever joined.
+   */
+  if (!SESSION_ID_RE.test(name) || name.length > 64) {
+    throw new ConfigError(
+      `${what} "${name}" is not a path segment — it must be 1-64 characters of ` +
+        `letters, digits, ".", "_" or "-", beginning and ending alphanumeric`,
+    );
+  }
+  if (!resolvedWithin(root, path) || path === root) {
     throw new ConfigError(
       `${what} "${name}" escapes ${root} — a skill name is a mount path segment, ` +
         `not a path`,
@@ -301,10 +318,17 @@ export async function copySkillTree(src: string, dst: string, depth = 0): Promis
  * Keyed by ROLE because the mount is: `render.ts` emits
  * `<run>/skills/<role>:/skills:ro` for every worker of that role. `skillNames`
  * must therefore be the UNION over every named worker of the role, not any one
- * worker's list — see this module's third rule. Workers of a role consequently
- * share a directory containing each other's bundles; only `--skill` decides
- * what each actually loads, and that is a property of `render.ts`'s per-role
- * mount rather than something this function may change.
+ * worker's list — see this module's third rule.
+ *
+ * KNOWN, DELIBERATE PROPERTY, stated so a later reader does not read it as an
+ * oversight: when two workers of one role override `skills:` differently, each
+ * one's `/skills:ro` mount CONTAINS the other's bundles. Nothing extra is
+ * loaded — `render.ts` still emits `--skill` from each worker's own resolved
+ * names — but the readable surface is a superset of what either asked for.
+ * That is inherent in "one mount per role" (`render.ts:183`), and narrowing it
+ * means either a per-worker mount or a schema rule forcing role-uniform
+ * skills. Both are design calls above this function; neither is something to
+ * decide by quietly changing what gets copied.
  *
  * Idempotent, but only when what is already on disk is COMPLETE for this call.
  * A destination that exists but is missing a requested bundle is re-copied,
@@ -338,14 +362,15 @@ export async function materializeRoleSkills(
     if (complete) return dst;
   }
 
+  // `<run>/skills` is guarded but NOT chmod'd: `mkdir -p` through a symlinked
+  // parent would build the bundle inside the link's target, while the parent's
+  // own MODE is irrelevant to the container — only `dst` is mounted, and a
+  // bind mount is reached at its mountpoint rather than by walking the host
+  // chain. See the outbox block in `materializeWorkerInputs` for the whole
+  // argument.
+  await refuseSymlinkDestination(dirname(dst));
   await refuseSymlinkDestination(dst);
   await mkdir(dst, { recursive: true });
-  // The `<run-dir>/skills` PARENT has to be traversable or the 0755 bundle
-  // beneath it is unreachable regardless of its own mode: permission is
-  // checked at every path component. `dirname` of the authoritative path
-  // rather than a second join, so this cannot name a different directory than
-  // the mount does.
-  await makeWorkerAccessible(dirname(dst), false);
   await makeWorkerAccessible(dst, false);
 
   for (const t of targets) {
@@ -494,25 +519,38 @@ export async function materializeWorkerInputs(
 
     const outboxDir = workerOutboxDir(run.root, workerId);
     await establishing(`the outbox for ${workerId}`, async () => {
+      /**
+       * ONLY the mounted inodes get their modes set — never the host
+       * directories above them.
+       *
+       * This module briefly chmod'd `<run>/`, `<run>/workers/` and
+       * `<run>/workers/<id>/` on the theory that a container traverses the
+       * host's directory chain to reach a mounted file, so a 0700 ancestor
+       * under `umask 077` would make a 0644 mount unreadable. It does not. A
+       * bind mount is established by the privileged runtime, and the
+       * containerized process then reaches the path at its MOUNTPOINT inside
+       * its own mount namespace — it never walks the host chain and never sees
+       * the host path at all. Only the mounted inode's own mode governs what it
+       * can do. Verified against a real Linux container: direct host-path
+       * access as uid 10001 is correctly denied through a 0700 ancestor, while
+       * the same file through a `-v` reads back fine regardless.
+       *
+       * So those chmods fixed nothing and cost something real — under a
+       * hardened umask they widened directories that were correctly 0700, for
+       * no container-side benefit. They were also incomplete on their own
+       * terms: `~/.pifleet/runs` and `~/.pifleet` sit two levels further up and
+       * were never touched. Removed rather than tightened.
+       *
+       * The symlink guards stay, and are not moot: `mkdir -p` through a
+       * symlinked `<run>/outbox` would create the worker's outbox inside the
+       * link's target and chmod THAT to 0777, and a symlinked
+       * `<run>/workers/<id>` would take every file written below with it.
+       */
       await refuseSymlinkDestination(paths.dir);
       await mkdir(paths.dir, { recursive: true });
+      await refuseSymlinkDestination(dirname(outboxDir));
+      await refuseSymlinkDestination(outboxDir);
       await mkdir(outboxDir, { recursive: true });
-      /**
-       * Every directory on the way to a mounted file, not just the leaf.
-       *
-       * `cloud-allow`, `system-append.md` and the kubeconfig all live under
-       * `<run>/workers/<id>/`, and traversal is checked at EVERY component —
-       * so under `umask 077` the run root, `workers/` and `workers/<id>/` all
-       * land at 0700 and three carefully-chmod'd 0644 files become
-       * unreachable to uid 10001. Nothing errors; the mounts just come up
-       * unreadable, which is the same silent failure this module exists to
-       * prevent, reintroduced by omission. Read-only is enough: nothing writes
-       * at these levels, they only have to be walkable.
-       */
-      await makeWorkerAccessible(run.root, false);
-      await makeWorkerAccessible(run.workersDir, false);
-      await makeWorkerAccessible(paths.dir, false);
-      await makeWorkerAccessible(dirname(outboxDir), false);
       await makeWorkerAccessible(outboxDir, true);
     });
 
@@ -567,6 +605,21 @@ export async function materializeWorkerInputs(
      */
     await establishing(`the cloud policy for ${workerId}`, async () => {
       await refuseSymlinkDestination(paths.cloudAllow);
+      /**
+       * chmod-write-chmod, exactly as the note above prescribes for the future
+       * rewriter — because "this runs at most once per worker per run" was an
+       * invariant nothing enforced. `up.ts` never deduped `--workers`, so
+       * `--workers eng-1,eng-1` reached here twice, and the second
+       * `writeFile` hit the 0444 the first pass had just set. On POSIX the
+       * OWNER of a 0444 file cannot open it for writing either — only
+       * CAP_DAC_OVERRIDE bypasses the mode — so a duplicate id aborted the
+       * whole launch with an exit-3 environment diagnosis for what is a typo.
+       * `up.ts` dedupes now as well; this end is fixed too because idempotence
+       * is a property this module already claims everywhere else.
+       */
+      if ((await shapeOf(paths.cloudAllow)) !== null) {
+        await makeWorkerReadable(paths.cloudAllow, true);
+      }
       await writeFile(paths.cloudAllow, "");
       await makeWorkerReadable(paths.cloudAllow, false);
     });
@@ -652,7 +705,13 @@ export async function materializeWorkerInputs(
       kubeconfigSource,
     };
     out.push(materialized);
-    await onWorker?.(materialized);
+    // Wrapped like every other fallible step here. The sink is a ledger
+    // append, so its failure mode is a full disk or an unwritable run dir —
+    // an environment fault, and it deserves the same exit-3 diagnosis rather
+    // than escaping raw as an undiagnosed internal error.
+    if (onWorker !== undefined) {
+      await establishing(`the record of ${workerId}'s inputs`, () => onWorker(materialized));
+    }
   }
   return out;
 }

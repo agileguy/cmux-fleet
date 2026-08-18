@@ -130,10 +130,20 @@ export function register(program: Command): void {
         );
       }
 
-      const workers = opts.workers
-        .split(",")
-        .map((w) => w.trim())
-        .filter((w) => w.length > 0);
+      // Deduped, and not merely as tidiness. A repeated id is a plain typo
+      // (`--workers eng-1,eng-1`), and every stage below treats the list as a
+      // set of distinct workers: it would launch two supervisors for one id
+      // against one control socket, materialize one worker's inputs twice, and
+      // wait on the same state file under two names. `[...new Set()]` keeps
+      // first-seen order, so nothing else about the list changes.
+      const workers = [
+        ...new Set(
+          opts.workers
+            .split(",")
+            .map((w) => w.trim())
+            .filter((w) => w.length > 0),
+        ),
+      ];
       if (workers.length === 0) throw new CliError("no workers named", EXIT.USAGE);
 
       const root = runsRoot();

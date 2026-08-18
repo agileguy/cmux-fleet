@@ -239,10 +239,13 @@ export function workerOutboxDir(runRoot: string, workerId: string): string {
 /**
  * Host directory mounted read-only at `/skills` (SRD §5.5).
  *
- * Keyed by ROLE, not worker: every worker in a role reads the same skill set,
- * and a per-worker copy would let two workers of one role be briefed
- * differently by whichever wrote last. Takes the run root as a string for the
- * same reason `workerOutboxDir` does.
+ * Keyed by ROLE, not worker: one host directory is shared by every worker of a
+ * role. `skills:` is per-worker overridable, so those workers do NOT
+ * necessarily load the same set — `run/materialize.ts` fills this directory
+ * with the UNION of their lists and each worker's own `--skill` flags select
+ * from it. The directory is therefore a superset of what any one worker asked
+ * for; see `materializeRoleSkills` for why that is deliberate. Takes the run
+ * root as a string for the same reason `workerOutboxDir` does.
  */
 export function roleSkillsDir(runRoot: string, role: string): string {
   return join(runRoot, "skills", role);

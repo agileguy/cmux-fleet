@@ -28,6 +28,7 @@ import {
   rm,
   stat,
   symlink,
+  truncate,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -37,6 +38,9 @@ import { ConfigError, parseConfig, type LoadedConfig } from "../../src/config/lo
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { EXIT } from "../../src/contracts.ts";
 import {
+  MAX_SKILL_DEPTH,
+  MAX_SKILL_DIR_ENTRIES,
+  MAX_SKILL_FILE_BYTES,
   MaterializeError,
   copySkillTree,
   materializeRoleSkills,
@@ -158,10 +162,10 @@ describe("the outbox", () => {
     const [m] = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
     expect(m!.outboxDir).toBe(workerOutboxDir(f.run.root, "eng-1"));
     expect((await stat(m!.outboxDir)).isDirectory()).toBe(true);
+    // The mounted inode's own mode is the whole contract — the container
+    // reaches it at its mountpoint and never walks the host chain above it, so
+    // nothing here asserts (or sets) an ancestor's mode.
     expect(await mode(m!.outboxDir)).toBe(0o777);
-    // Traversal is checked at every component, so a 0700 parent would make the
-    // 0777 leaf unreachable no matter what the leaf's own mode says.
-    expect((await mode(dirname(m!.outboxDir))) & 0o055).toBe(0o055);
   });
 });
 
@@ -374,6 +378,38 @@ describe("a skill name cannot escape the directories it is joined into", () => {
     expect((err as Error).message).toContain("path segment");
   });
 
+  test('a name of "." is refused, though it "escapes" nothing', async () => {
+    // `resolvedWithin` answers "did this leave the root", and for `.` the
+    // honest answer is no — the resolved path IS the root. So this copied the
+    // ENTIRE skills source into the bundle while the safety net reported all
+    // clear. The grammar check is what makes the net catch it.
+    const src = await skillSourceRoot();
+    const f = await fixture({ skillsRoot: src });
+    const err = await materializeRoleSkills(f.run.root, "eng", ["."], src).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toContain("path segment");
+    expect(await Bun.file(join(roleSkillsDir(f.run.root, "eng"), ".")).exists()).toBe(false);
+  });
+
+  test("a name with a separator is refused even though it stays inside the root", async () => {
+    /**
+     * The case containment alone cannot see. `join(root, "a/b")` resolves
+     * INSIDE the root, so `resolvedWithin` is satisfied and the name is not
+     * the root either — only the grammar check refuses it. Role names have a
+     * dedicated test for exactly this shape, for the same reason: a name is
+     * only safe to join if it cannot be more than one segment.
+     */
+    const src = await skillSourceRoot();
+    const f = await fixture({ skillsRoot: src });
+    const err = await materializeRoleSkills(f.run.root, "eng", ["nested/bundle"], src).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toContain("is not a path segment");
+  });
+
   test("materializeRoleSkills refuses one directly, and mutates nothing", async () => {
     // Belt to the schema's braces: this function is exported, and a caller that
     // reaches it without schema validation must still be safe.
@@ -494,41 +530,52 @@ describe("the kubeconfig", () => {
 });
 
 /**
- * Traversal is checked at EVERY path component, so the mode of a mounted file
- * is only half the answer.
+ * What a tightened umask may and may not change.
  *
- * `cloud-allow`, `system-append.md` and the kubeconfig all live under
- * `<run>/workers/<id>/`. Under `umask 077` — or Linux's common 027 — the run
- * root, `workers/` and `workers/<id>/` are all created 0700, and three
- * carefully-chmod'd 0644 files underneath become unreachable to uid 10001 with
- * nothing erroring anywhere. The rest of this suite cannot see it because it
- * inherits the ambient 022, so this test sets the umask itself.
+ * The MOUNTED inodes must carry their explicit modes no matter what umask the
+ * operator runs under — those modes are the entire interface to the container.
+ * Their host ANCESTORS must be left exactly as the umask made them.
+ *
+ * That second half is the correction to an earlier, wrong fix. This module
+ * briefly chmod'd `<run>/`, `<run>/workers/` and `<run>/workers/<id>/` on the
+ * theory that a container walks the host directory chain to reach a mounted
+ * file. It does not: a bind mount is established by the privileged runtime and
+ * the containerized process reaches the path at its mountpoint in its own
+ * mount namespace, never traversing the host chain. Verified on a real Linux
+ * container — direct host-path access as uid 10001 IS denied through a 0700
+ * ancestor, while the same file through a `-v` reads back fine anyway. So the
+ * chmods bought nothing and widened directories a hardened umask had correctly
+ * closed; this test now pins their ABSENCE as much as the modes' presence.
  */
 describe("under a tightened umask", () => {
-  test("every directory on the way to a mounted file is still traversable", async () => {
+  test("mounted inodes keep their explicit modes and ancestors keep the umask's", async () => {
     const previous = process.umask(0o077);
     try {
       const f = await fixture({ mutate: withKubeconfigFixture });
       await writeFile(join(f.dir, "filtered-kubeconfig"), "apiVersion: v1\n");
       const [m] = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
 
-      // Every component from the run root down to each mounted file. `0o055`
-      // is read+execute for group and other — what a traverse actually needs.
-      const chain = [
+      // The mounted inodes: explicit modes, umask irrelevant. `writeFile` and
+      // `mkdir` both apply the umask, so every one of these is a chmod this
+      // module made rather than a default it inherited.
+      expect(await mode(m!.outboxDir)).toBe(0o777);
+      expect(await mode(m!.skillsDir)).toBe(0o755);
+      expect(await mode(join(m!.skillsDir, "pifleet-worker", "SKILL.md"))).toBe(0o644);
+      expect(await mode(m!.cloudAllow)).toBe(0o444);
+      expect(await mode(m!.systemAppendMd!)).toBe(0o644);
+      expect(await mode(m!.kubeconfig!)).toBe(0o644);
+
+      // The ancestors: untouched, still exactly what `umask 077` produced. A
+      // chmod here would be a host-side regression bought for nothing, since
+      // the container never traverses them.
+      for (const dir of [
         f.run.root,
         f.run.workersDir,
         workerPaths(f.run, "eng-1").dir,
         dirname(m!.outboxDir),
         dirname(m!.skillsDir),
-        m!.skillsDir,
-      ];
-      for (const dir of chain) {
-        expect({ dir, bits: (await mode(dir)) & 0o055 }).toEqual({ dir, bits: 0o055 });
-      }
-      // …and the files themselves are world-readable, which is worth nothing
-      // without the chain above and is the half the old test checked alone.
-      for (const file of [m!.cloudAllow, m!.systemAppendMd!, m!.kubeconfig!]) {
-        expect({ file, bits: (await mode(file)) & 0o044 }).toEqual({ file, bits: 0o044 });
+      ]) {
+        expect({ dir, mode: await mode(dir) }).toEqual({ dir, mode: 0o700 });
       }
     } finally {
       process.umask(previous);
@@ -545,6 +592,56 @@ describe("under a tightened umask", () => {
  * aimed at directories pifleet created under the run root.
  */
 describe("a symlinked DESTINATION is refused, not written through", () => {
+  /**
+   * The outbox is the highest-consequence destination in the module — it is
+   * the one path that ends up 0777 — and it was the one with no guard in front
+   * of it. A link planted there had `mkdir` and `chmod` reach straight through
+   * to whatever it pointed at.
+   */
+  test("a linked OUTBOX is refused, and the directory it pointed at keeps its mode", async () => {
+    const f = await fixture();
+    const victim = join(f.dir, "outbox-victim");
+    await mkdir(victim, { recursive: true });
+    await chmod(victim, 0o700);
+
+    const outbox = workerOutboxDir(f.run.root, "eng-1");
+    await mkdir(dirname(outbox), { recursive: true });
+    await symlink(victim, outbox);
+
+    const err = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MaterializeError);
+    expect((err as MaterializeError).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+    // 0777 never reached through the link.
+    expect(await mode(victim)).toBe(0o700);
+  });
+
+  /**
+   * The PARENT is a separate guard from the leaf, and only a link planted one
+   * level up reaches it.
+   *
+   * `mkdir(outboxDir, {recursive:true})` walks through `<run>/outbox`, so a
+   * link there builds the worker's outbox inside the link's TARGET and chmods
+   * that to 0777. The leaf guard cannot see it: `lstat` of
+   * `<run>/outbox/<id>` resolves the linked component and reports "does not
+   * exist", which is exactly what a fresh run looks like.
+   */
+  test.each([
+    ["outbox", (run: RunPaths) => dirname(workerOutboxDir(run.root, "eng-1"))],
+    ["skills", (run: RunPaths) => dirname(roleSkillsDir(run.root, "eng"))],
+  ])("a symlinked %s PARENT is refused before mkdir -p walks through it", async (_name, at) => {
+    const f = await fixture();
+    const victim = join(f.dir, "parent-victim");
+    await mkdir(victim, { recursive: true });
+    await chmod(victim, 0o700);
+    await symlink(victim, at(f.run));
+
+    const err = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MaterializeError);
+    // Nothing was created inside the link's target, and its mode is unchanged.
+    expect(await readdir(victim)).toEqual([]);
+    expect(await mode(victim)).toBe(0o700);
+  });
+
   test("a linked bundle destination is refused and its target is untouched", async () => {
     const f = await fixture();
     const victim = join(f.dir, "victim");
@@ -564,7 +661,86 @@ describe("a symlinked DESTINATION is refused, not written through", () => {
   });
 });
 
+/**
+ * The three walk bounds, each actually exercised.
+ *
+ * Mutation found them untested: multiplying all three by 1000 left the entire
+ * suite green, which makes them documentation rather than controls — the exact
+ * shape this module's header criticises elsewhere.
+ */
+describe("the skill-tree walk is bounded", () => {
+  const bundleFixture = async (): Promise<{ src: string; dst: string }> => {
+    const src = await mkdtemp(join(tmpdir(), "pifleet-bound-src-"));
+    const dst = await mkdtemp(join(tmpdir(), "pifleet-bound-dst-"));
+    cleanups.push(src, dst);
+    return { src, dst };
+  };
+
+  test("a tree deeper than MAX_SKILL_DEPTH is refused", async () => {
+    const { src, dst } = await bundleFixture();
+    const deep = Array.from({ length: MAX_SKILL_DEPTH + 2 }, (_, i) => `d${i}`);
+    await mkdir(join(src, ...deep), { recursive: true });
+
+    const err = await copySkillTree(src, join(dst, "b")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toContain("nests deeper");
+  });
+
+  test("a directory holding more than MAX_SKILL_DIR_ENTRIES entries is refused", async () => {
+    const { src, dst } = await bundleFixture();
+    // One over the cap. Written in batches so the fixture is a second, not a
+    // minute — the cap is what is under test, not the filesystem.
+    const names = Array.from({ length: MAX_SKILL_DIR_ENTRIES + 1 }, (_, i) => `f${i}.md`);
+    for (let i = 0; i < names.length; i += 500) {
+      await Promise.all(names.slice(i, i + 500).map((n) => writeFile(join(src, n), "x")));
+    }
+
+    const err = await copySkillTree(src, join(dst, "b")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toContain("that is a payload, not a bundle");
+  }, 60_000);
+
+  test("a file larger than MAX_SKILL_FILE_BYTES is refused before it is read", async () => {
+    /**
+     * The cap's VALUE is asserted separately from the branch it guards, and
+     * the order matters. Sizing the fixture off the constant made the test
+     * immune to the constant changing — raise the cap and the fixture grows
+     * with it, so the refusal test goes on passing while the bound it exists
+     * to pin has moved. Mutation testing found exactly that.
+     */
+    expect(MAX_SKILL_FILE_BYTES).toBe(4 * 1024 * 1024);
+    const { src, dst } = await bundleFixture();
+    const huge = join(src, "huge.md");
+    // Sparse, via truncate: the fixture is about the SIZE the lstat reports,
+    // and writing four real megabytes to prove that would be waste.
+    await writeFile(huge, "");
+    await truncate(huge, 4 * 1024 * 1024 + 1);
+
+    const err = await copySkillTree(src, join(dst, "b")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toContain("over the");
+    // Refused from the lstat, so the oversized bytes were never copied.
+    expect(await Bun.file(join(dst, "b", "huge.md")).exists()).toBe(false);
+  });
+});
+
 describe("membership and failure class", () => {
+  /**
+   * A failing sink is an environment fault like any other here — a full disk
+   * or an unwritable ledger — and must be diagnosed, not escape raw as an
+   * undiagnosed internal error (exit 8).
+   */
+  test("a throwing sink is classified as exit 3, not left undiagnosed", async () => {
+    const f = await fixture();
+    const err = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"], async () => {
+      throw new Error("ENOSPC: no space left on device");
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(MaterializeError);
+    expect((err as MaterializeError).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+    expect((err as Error).message).toContain("ENOSPC");
+  });
+
   /**
    * The same skip `assertModelsAllowed` makes, for the same reason: Phase 1
    * `--workers` legitimately names ids that exist only as a
@@ -604,6 +780,26 @@ describe("membership and failure class", () => {
     expect(seen).toEqual(["eng-1"]);
     // …and its inputs really are on disk, which is why the record matters.
     expect(await Bun.file(workerPaths(f.run, "eng-1").cloudAllow).exists()).toBe(true);
+  });
+
+  /**
+   * A duplicate worker id must not abort the launch.
+   *
+   * `up`'s `--workers` never deduped, so `--workers eng-1,eng-1` reached
+   * materialization twice. The second `writeFile` hit the 0444 the first pass
+   * had set, and on POSIX the OWNER of a 0444 file cannot open it for writing
+   * either — so a typo aborted the whole fleet with an exit-3 environment
+   * diagnosis. `up` dedupes now, and this end is idempotent regardless,
+   * because "called at most once per worker" was an invariant nothing
+   * enforced.
+   */
+  test("materializing the same worker twice succeeds and leaves the policy at 0444", async () => {
+    const f = await fixture();
+    const out = await materializeWorkerInputs(f.loaded, f.run, ["eng-1", "eng-1"]);
+    expect(out).toHaveLength(2);
+    const policy = workerPaths(f.run, "eng-1").cloudAllow;
+    expect((await stat(policy)).size).toBe(0);
+    expect(await mode(policy)).toBe(0o444);
   });
 
   /**
