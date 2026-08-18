@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 196/255
+progress: 197/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-18
@@ -1484,4 +1484,4 @@ the full default list) plus `harnessPatternsFromConfig`'s four cases.
 Full suite: `bun test` → **1137 pass, 53 skip, 0 fail** across 75 files
 (1121 → 1137, +16). `bun run typecheck` → clean.
 
-Progress: 195/255 → 196/255.
+Progress: 196/255 → 197/255.
