@@ -77,6 +77,35 @@ export async function makeWorkerAccessible(dir: string, writable: boolean): Prom
 }
 
 /**
+ * Open a host FILE's permissions for a read-only mount.
+ *
+ * The directory analogue is `makeWorkerAccessible(dir, false)`; a file needs no
+ * execute bit to be read, so this is 0644 rather than 0755. Same Linux
+ * ownership reasoning as the header: the briefing, the verbgate policy and the
+ * kubeconfig are written by the operator's uid and read by uid 10001, so a file
+ * left at the 0600 an umask-tightened host produces is unreadable there while
+ * working perfectly under the macOS VM's ownership squash.
+ *
+ * The execute bit is withheld deliberately rather than incidentally. Every file
+ * this is pointed at is CONTENT a worker reads — policy lines, prompt text, a
+ * kubeconfig — and none of them is a program; a mode that would let the
+ * container execute one is a wider grant than the mount needs.
+ *
+ * `hostRewritable: false` drops the owner write bit as well, giving 0444, and
+ * the verbgate policy is why the distinction exists. `docker/verbgate` refuses
+ * EVERY verb (exit 78) when its allow file is writable by the uid consulting
+ * it — and the macOS VM squashes ownership to the container user, so a 0644
+ * policy reads as owner-writable INSIDE the container with only the `:ro`
+ * mount flag standing between that check and a fleet-wide refusal. Files a
+ * later phase must rewrite in place (the briefing, the kubeconfig) pass
+ * `true`; a policy file passes `false`, because nothing should hold write
+ * permission on it by any path.
+ */
+export async function makeWorkerReadable(file: string, hostRewritable: boolean): Promise<void> {
+  await chmod(file, hostRewritable ? 0o644 : 0o444);
+}
+
+/**
  * Create a fresh scratch directory under the daemon-visible root.
  *
  * `mkdtemp` deliberately creates 0700 — correct for a private temp directory,
