@@ -228,9 +228,15 @@ export class RpcClient {
       }
       // Swallow the original rejection path; the caller gets this one instead.
       promise.catch(() => {});
-      return Promise.reject(
-        new RpcClosedError(`write failed: ${err instanceof Error ? err.message : String(err)}`),
-      );
+      // And the client is CLOSED, not merely one request short. The write end
+      // is gone, so no response to anything still pending can arrive and no
+      // later write can succeed — yet `#closed` stayed null, so the
+      // RpcClosedError below asserted a state the object was not in: feeds were
+      // still accepted, and every later send() paid another EPIPE to learn a
+      // fact already established. Reason and error carry the same text.
+      const reason = `write failed: ${err instanceof Error ? err.message : String(err)}`;
+      this.close(reason);
+      return Promise.reject(new RpcClosedError(reason));
     }
     return promise;
   }
