@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 192/255
+progress: 193/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-17
@@ -101,7 +101,7 @@ suite green on `headless` against a test double.
 - [x] ISC-4: `Docs/SRD.md` exists in the repo and is byte-identical to the source SRD at the commit that imported it.
 - [x] ISC-5: `ISA.md` exists at the repo root and parses as valid YAML frontmatter plus twelve sections.
 - [x] ISC-6: A GitHub Actions workflow runs typecheck, unit, integration, and e2e as separate named steps.
-- [ ] ISC-7: CI passes on the default branch.
+- [x] ISC-7: CI passes on the default branch. `aad8042` (PR #7's squash merge) on `main` — GitHub Actions run 32132390040, both `test` and `container` jobs green, triggered directly by the push to `main`, not a stale PR-branch run.
 - [x] ISC-8: `README.md` documents install, `pifleet doctor`, and the six-phase status.
 - [x] ISC-9: `CHANGELOG.md` exists and has an entry for every merged phase.
 - [x] ISC-10: `git log --format=%B` over all commits contains no AI/LLM/Claude attribution string.
