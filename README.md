@@ -44,7 +44,7 @@ timeout and a dead worker without ambiguity: `2` usage/config · `3` backend una
 pifleet up --workers eng-1,rev-1 --backend headless   # build the run dir, start supervisors
 pifleet dispatch --worker eng-1 --task task.json      # send a typed envelope
 pifleet wait --all --timeout 20m --json               # block until every task settles
-pifleet artifacts --all --json                        # adjudicated results  (Phase 2)
+pifleet artifacts --all --json                        # adjudicated results
 pifleet down --run <id>                               # quiesce, then stop
 ```
 
@@ -54,18 +54,21 @@ started them. `up` is not "fire and forget": it returns only once every worker h
 
 ## Status
 
+All six phases are done. 1069 tests pass, 52 skip, 0 fail across 75 files.
+
 | Phase | Deliverable | State |
 |---|---|---|
 | 0 | Interface verification | done (see SRD §4) |
 | 1 | Container + headless core | done — `up → dispatch → wait → down` green on `headless` and against real Pi 0.79.6 |
-| 2 | Artifacts + safety | next — outbox contract, harvester, adjudicator, worktree isolation, budget ceilings, kill ladder |
-| 3 | Security + cloud identity | pending |
-| 4 | Panes | pending |
-| 5 | Orchestration | pending |
-| 6 | Attended mode | pending |
+| 2 | Artifacts + safety | done — outbox contract, harvester, adjudicator, worktree isolation, budget ceilings, kill ladder |
+| 3 | Security + cloud identity | done — egress allowlist, network lifecycle, repo hazard scan, cloud identity, control-socket auth |
+| 4 | Panes | done — cmux/tmux backends, `attach`, live pane viewer |
+| 5 | Orchestration | done — `dispatch --auto` DAG scheduling, `pifleet report`, `pifleet logs` |
+| 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 
-Commands belonging to a later phase exist and refuse rather than pretending: `artifacts`
-reports that it is a Phase 2 deliverable, `up --backend cmux` exits 3.
+A handful of ISA done-condition criteria remain open (see `ISA.md`): ISC-129 needs a run from
+inside a live cmux pane to verify (cmux's socket refuses calls from outside one), and a few
+carried from Phase 3 are blocked on other open criteria.
 
 ## Tests
 
