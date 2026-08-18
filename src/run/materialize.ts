@@ -279,7 +279,8 @@ export function assertEntryContained(root: string, name: string): string {
 }
 
 /**
- * Recursive, symlink-refusing, bounded, mode-setting copy of one skill bundle.
+ * Recursive, symlink-refusing, `.git`-refusing, bounded, mode-setting copy of
+ * one skill bundle.
  *
  * Symlinks are REFUSED, never dereferenced. A skill tree is copied into a mount
  * the worker reads as INSTRUCTION, and a symlink resolves wherever it points —
@@ -329,6 +330,32 @@ export async function copySkillTree(src: string, dst: string, depth = 0): Promis
     // and holding it to `assertContained`'s grammar refused `.DS_Store`.
     const from = assertEntryContained(src, name);
     const to = assertEntryContained(dst, name);
+    /**
+     * A `.git` is REFUSED, and this is the one name that is.
+     *
+     * Relaxing the per-entry check to admit ordinary dotfiles (`.DS_Store`,
+     * `.gitignore` — the whole point of that fix) also stopped refusing dotted
+     * DIRECTORIES, and `.git` is one. A skill source root that is a real
+     * checkout — plausible under a `PIFLEET_SKILLS_DIR` override with a
+     * skill-per-repo layout, though not the default `<repo>/skills/<name>/`
+     * one — would then copy its entire git database into the directory mounted
+     * `:ro` at `/skills` and read as INSTRUCTION, `.git/config` included, and
+     * a remote URL there routinely carries an embedded token.
+     *
+     * That is the hazard this function's own docstring cites for refusing
+     * symlinks, reached by a different route: content nobody reviewed as a
+     * skill, laundered into the agent's prompt (SRD §5.4). Refused by exact
+     * name, as a directory or a file — `.git` is legitimately either, per git's
+     * own worktree design. Deliberately NOT a broader junk list: `.gitignore`
+     * and `.gitattributes` are ordinary files and still copy.
+     */
+    if (name === ".git") {
+      throw new ConfigError(
+        `git checkout in skill bundle: ${from} — a bundle is mounted as instruction, and a ` +
+          `.git directory is content nobody reviewed as a skill (its config can carry a ` +
+          `credential in a remote URL), so it is refused rather than copied (SRD §5.4)`,
+      );
+    }
     const entry = await lstat(from);
     if (entry.isSymbolicLink()) {
       throw new ConfigError(
@@ -393,22 +420,46 @@ export async function materializeRoleSkills(
   /**
    * The ROLE is checked here too, not only the skill names below.
    *
-   * DEFENCE IN DEPTH for this exported function's DIRECT-CALL surface — not a
-   * live hole in `pifleet up`, and it should not be read as one.
-   * `FleetConfigSchema` already applies this same grammar to every key of
-   * `roles:`, and `resolveWorker` refuses a worker whose `role` is not one of
-   * those keys, so no config that loads can reach here with a traversing role.
-   * But `assertContained`'s docstring promises that "a future caller reaching
-   * it without schema validation must still be safe", and every skill NAME in
-   * this function was held to that while the role — joined into the same host
-   * path, then mkdir'd and chmod'd through — was trusted outright. Closing that
-   * asymmetry is all this line does.
+   * DEFENCE IN DEPTH for this exported function's DIRECT-CALL surface — not the
+   * thing standing between `pifleet up` and a traversal, and it should not be
+   * read as one. `FleetConfigSchema` applies `SESSION_ID_RE` to every KEY of
+   * `roles:`, so a role an operator can DECLARE cannot spell a separator, `.`
+   * or `..`.
    *
-   * The containment root is computed here rather than as
-   * `dirname(roleSkillsDir(runRoot, role))`: `roleSkillsDir` joins the
-   * untrusted role in FIRST and `path.join` normalizes `..` away, so a root
-   * derived from the already-joined path would be a root that had itself
-   * followed the traversal — and the check would then pass anything.
+   * That is the accurate mechanism, and it is narrower than "the role is fully
+   * validated before it reaches here" — which is false, so it is not claimed.
+   * A worker's `role` FIELD carries no grammar of its own
+   * (`WorkerEntrySchema.role` is a bare `shortStr`), and both membership tests
+   * it faces walk the PROTOTYPE CHAIN: `schema.ts`'s `w.role in cfg.roles` and
+   * `resolveWorker`'s `config.roles[entry.role]`. So the names on
+   * `Object.prototype` — `constructor`, `toString`, `valueOf`,
+   * `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`,
+   * `toLocaleString` — pass both as though they were declared roles and arrive
+   * here as `role`; confirmed by running all seven through `parseConfig` and
+   * `resolveWorker`. That is a real defect (the worker silently inherits
+   * `defaults` instead of being refused as unknown), but it belongs to
+   * `schema.ts`/`load.ts` and is left to a follow-up rather than patched from
+   * here.
+   *
+   * It is also not a traversal, which is why the conclusion above survives it:
+   * no key of `Object.prototype` contains `/` or `\`, and none spells `.` or
+   * `..`, so nothing reaching here through that gap can escape a join. The
+   * check below still earns its line for the reason `assertContained`'s own
+   * docstring gives — a future caller reaching this function without schema
+   * validation must still be safe — and because every skill NAME here was
+   * already held to that standard while the role, joined into the same host
+   * path and then mkdir'd and chmod'd through, was trusted outright.
+   *
+   * The containment root is `join(runRoot, "skills")` rather than
+   * `dirname(roleSkillsDir(runRoot, role))` on PRINCIPLE, not on a
+   * demonstrated exploit: a trust boundary must never be derived from the
+   * value it is validating, because the boundary then moves with whatever it
+   * is asked to judge. The derived form is not in fact exploitable today —
+   * `assertContained` runs its character-class check first and that check is
+   * root-independent, so every traversing role is refused before the root
+   * matters at all. But that makes this call's soundness a consequence of the
+   * order of two checks inside another function, which is not a property worth
+   * depending on.
    */
   assertContained(join(runRoot, "skills"), role, "role name");
   const dst = roleSkillsDir(runRoot, role);

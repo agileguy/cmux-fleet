@@ -436,13 +436,23 @@ describe("a skill name cannot escape the directories it is joined into", () => {
 /**
  * The ROLE is joined into a host path here exactly as a skill name is.
  *
- * This is DEFENCE IN DEPTH, not a live hole in `up`, and the distinction is
- * worth stating so nobody reads the test as evidence of one: `FleetConfigSchema`
- * already applies this grammar to every key of `roles:`, and `resolveWorker`
- * refuses a worker whose `role` is not one of those keys — so no config that
- * loads can carry a traversing role this far. `materializeRoleSkills` is
- * exported, though, and on THAT surface the role was the one name in the
- * function that nothing checked while every skill name beside it was.
+ * DEFENCE IN DEPTH, not a live hole in `up` — and the distinction needs stating
+ * carefully, because the obvious way to state it is wrong. `FleetConfigSchema`
+ * applies `SESSION_ID_RE` to every KEY of `roles:`, so a role an operator can
+ * declare cannot spell a separator, `.` or `..`. It does NOT follow that the
+ * `role` field is validated: it is a bare `shortStr`, and both `schema.ts`'s
+ * `w.role in cfg.roles` and `resolveWorker`'s `config.roles[entry.role]` walk
+ * the prototype chain — so `constructor`, `toString`, `valueOf`,
+ * `hasOwnProperty` and the rest of `Object.prototype` pass as declared roles
+ * and arrive at this function (all seven confirmed by running them). None
+ * contains a separator or spells `.`/`..`, so none is a traversal: the security
+ * conclusion holds, by a narrower argument than "the schema checked it". The
+ * prototype-chain hole is itself a real defect and a `schema.ts`/`load.ts`
+ * follow-up, not this module's to fix.
+ *
+ * What is left is the direct-call surface. `materializeRoleSkills` is exported,
+ * and on it the role was the one name in the function nothing checked while
+ * every skill name beside it was.
  */
 describe("a role name cannot escape the directories it is joined into either", () => {
   test("materializeRoleSkills refuses a hostile ROLE directly, and mutates nothing", async () => {
@@ -855,6 +865,57 @@ describe("a skill bundle entry is a filename, not a config identifier", () => {
 
   test("an ordinary name is joined into the root and returned", () => {
     expect(assertEntryContained("/tmp/bundle", ".DS_Store")).toBe("/tmp/bundle/.DS_Store");
+  });
+
+  /**
+   * `.git` is the one dotted name still refused, and it is refused BY NAME.
+   *
+   * Admitting ordinary dotfiles necessarily admitted dotted DIRECTORIES with
+   * them, and a skill source root that is a real checkout would then copy its
+   * whole git database into the `:ro` mount the worker reads as instruction —
+   * `.git/config` included, where a remote URL routinely carries a token. Same
+   * hazard as the symlink refusal above (content nobody reviewed as a skill,
+   * laundered into the prompt), reached by a different route.
+   */
+  test.each([
+    ["at the bundle root", ["pifleet-worker"]],
+    ["nested inside it", ["pifleet-worker", "nested"]],
+  ])("a .git directory %s is refused before anything of it is copied", async (_where, at) => {
+    const src = await skillSourceRoot();
+    const git = join(src, ...at, ".git");
+    await mkdir(git, { recursive: true });
+    const secret = '[remote "origin"]\n\turl = https://TOKEN@host/private.git\n';
+    await writeFile(join(git, "config"), secret);
+    const f = await fixture({ skillsRoot: src });
+
+    const err = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).exitCode).toBe(EXIT.USAGE);
+    expect((err as Error).message).toContain(git);
+    // Named as a git checkout rather than merely refused — the same reason the
+    // symlink test asserts the word "symlink": a neighbouring guard failing in
+    // the same class would otherwise keep this green.
+    expect((err as Error).message).toContain("git checkout");
+    // And not one byte of it reached the instruction mount.
+    const bundle = join(roleSkillsDir(f.run.root, "eng"), "pifleet-worker");
+    const copied = join(bundle, ...at.slice(1), ".git", "config");
+    expect(await Bun.file(copied).exists()).toBe(false);
+  });
+
+  test(".gitignore and .gitattributes are NOT caught by the .git refusal", async () => {
+    // The check is an exact name match, not a prefix — the copy-through test
+    // above already carries `.gitignore`, and this pins the pair explicitly so
+    // a later `startsWith(".git")` cannot slip in unnoticed.
+    const src = await skillSourceRoot();
+    for (const name of [".gitignore", ".gitattributes"]) {
+      await writeFile(join(src, "pifleet-worker", name), `${name}\n`);
+    }
+    const f = await fixture({ skillsRoot: src });
+
+    const [m] = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
+    const bundle = join(m!.skillsDir, "pifleet-worker");
+    expect(await Bun.file(join(bundle, ".gitignore")).text()).toBe(".gitignore\n");
+    expect(await Bun.file(join(bundle, ".gitattributes")).text()).toBe(".gitattributes\n");
   });
 });
 
