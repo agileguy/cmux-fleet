@@ -3,10 +3,11 @@
  *
  * Tags are `<prefix>:<pi-version>-<toolchain>-<config-hash>`. The hash covers
  * exactly the inputs that change the image — pi_version, toolchain,
- * apt_packages, and the Dockerfile's own content — so two configs that build
- * the same bytes share a tag and any edit that matters forces a new one. `up`
- * refuses to run against an image that is absent or fails `verify` — a run
- * must never silently use a stale image (SRD §5.7).
+ * apt_packages, and the content of every file in `BUILD_CONTEXT_ASSETS` (the
+ * Dockerfile plus everything it `COPY`s) — so two configs that build the same
+ * bytes share a tag and any edit that matters forces a new one. `up` refuses
+ * to run against an image that is absent or fails `verify` — a run must never
+ * silently use a stale image (SRD §5.7).
  */
 
 import { createHash } from "node:crypto";
@@ -45,37 +46,62 @@ export class BuildContextError extends Error {
 }
 
 /**
- * The one Dockerfile every worker image is built from.
+ * Every file under `docker/` that ends up INSIDE the image, in a fixed order.
  *
- * Named once so the file that is HASHED and the file that is passed to
- * `docker build -f` cannot drift apart — a hash over a different Dockerfile
- * than the build reads is worse than no hash at all.
+ * This is the enumeration the hash iterates and the list a future "does every
+ * Dockerfile `COPY` source appear here" check would compare against — adding a
+ * new build-context asset means adding one entry here and nothing else.
+ *
+ * The order is load-bearing: `configHash` walks this array rather than the
+ * digest record's own keys, so the tag cannot move because someone reordered
+ * an object literal.
  */
+export const BUILD_CONTEXT_ASSETS = ["Dockerfile", "verbgate", "entrypoint.sh"] as const;
+export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
+
+/**
+ * Resolve one build-context asset.
+ *
+ * Named once so the file that is HASHED and the file the build actually reads
+ * cannot drift apart — a hash over a different Dockerfile than `-f` passes is
+ * worse than no hash at all. `docker build` runs with `repoRoot()` as its
+ * context, so these are the same bytes the daemon COPYs.
+ */
+export function buildContextPath(asset: BuildContextAsset): string {
+  return join(repoRoot(), "docker", asset);
+}
+
+/** The one Dockerfile every worker image is built from — what `-f` receives. */
 export function dockerfilePath(): string {
-  return join(repoRoot(), "docker", "Dockerfile");
+  return buildContextPath("Dockerfile");
 }
 
 /**
- * Read the recipe at `path`. An unreadable Dockerfile is a broken checkout, and
- * it THROWS rather than degrading to a placeholder: a constant stand-in would
- * make every broken checkout hash alike, which is the silent tag collision
- * ISC-160 exists to prevent. `docker build` could not have succeeded anyway.
+ * sha256 of one build-context file, CRLF-normalized.
  *
- * Takes the path so the unreadable case is testable without deleting a file out
- * of the developer's own checkout.
+ * A digest rather than the text: the tag only needs to MOVE when the bytes
+ * move, and carrying three whole files (verbgate alone is ~11KB) around in
+ * every `ImageInputs` buys nothing.
+ *
+ * CRLF is folded to LF first because there is no `.gitattributes` in this repo,
+ * so a checkout with `core.autocrlf=true` would otherwise hash different bytes
+ * for the same content and rebuild an image that is already present.
+ *
+ * An unreadable file THROWS rather than degrading to a placeholder: a constant
+ * stand-in would make every broken checkout hash alike, which is the silent tag
+ * collision ISC-160 exists to prevent. Exported by path so the unreadable case
+ * is testable without breaking the developer's own checkout.
  */
-export function readDockerfileAt(path: string): string {
+export function assetDigestAt(path: string): string {
+  let text: string;
   try {
-    return readFileSync(path, "utf8");
+    text = readFileSync(path, "utf8");
   } catch (err) {
     throw new BuildContextError(
       `cannot read ${path}, so no image tag can be computed: ${String(err)}`,
     );
   }
-}
-
-function readDockerfile(): string {
-  return readDockerfileAt(dockerfilePath());
+  return createHash("sha256").update(text.replace(/\r\n/g, "\n")).digest("hex");
 }
 
 /** The image-shaping subset of config. Anything else changing must NOT retag. */
@@ -84,7 +110,7 @@ export interface ImageInputs {
   toolchain: Toolchain;
   aptPackages: string[];
   /**
-   * The Dockerfile's CONTENT, not its path (ISC-160).
+   * sha256 per build-context file — their CONTENT, not their paths (ISC-160).
    *
    * The three fields above are the build ARGS; they are not the recipe. The
    * base image, the tini and gcloud installs, the uid 10001 user, the
@@ -92,8 +118,22 @@ export interface ImageInputs {
    * they were outside the hash an edit to any of them left the tag unchanged —
    * so `up`, which only refuses an image that is ABSENT, found the stale one
    * present and ran the fleet on it with nothing reporting the reuse.
+   *
+   * Hashing the Dockerfile alone closed only part of that. The Dockerfile
+   * `COPY`s two files it does not contain: `docker/verbgate`, which IS the
+   * cloud-mutation gate enforcing ISC-104/105/106/107, and
+   * `docker/entrypoint.sh`, which renders `models.json`. Editing either left
+   * the tag fixed, so a stale image with an OLD verb gate — the highest-
+   * consequence staleness there is — was silently reusable.
    */
-  dockerfile: string;
+  assets: Record<BuildContextAsset, string>;
+}
+
+/** Digest every build-context asset, in enumeration order. */
+export function buildContextDigests(): Record<BuildContextAsset, string> {
+  const out = {} as Record<BuildContextAsset, string>;
+  for (const asset of BUILD_CONTEXT_ASSETS) out[asset] = assetDigestAt(buildContextPath(asset));
+  return out;
 }
 
 export function imageInputs(config: FleetConfig, toolchain: Toolchain): ImageInputs {
@@ -101,7 +141,7 @@ export function imageInputs(config: FleetConfig, toolchain: Toolchain): ImageInp
     piVersion: config.docker.pi_version,
     toolchain,
     aptPackages: [...config.docker.apt_packages].sort(),
-    dockerfile: readDockerfile(),
+    assets: buildContextDigests(),
   };
 }
 
@@ -111,7 +151,8 @@ export function configHash(inputs: ImageInputs): string {
     inputs.piVersion,
     inputs.toolchain,
     inputs.aptPackages,
-    inputs.dockerfile,
+    // Walked in enumeration order, so key order in `assets` cannot move a tag.
+    BUILD_CONTEXT_ASSETS.map((a) => [a, inputs.assets[a]]),
   ]);
   return createHash("sha256").update(canonical).digest("hex").slice(0, 12);
 }
