@@ -6,7 +6,7 @@
  * ARRAYS with every path canonicalized, so a test compares arrays rather than
  * a byte string that would encode one machine's home directory.
  *
- * Two rules here have a recorded failure behind them:
+ * Three rules here have a recorded failure behind them:
  *
  *  - `--append-system-prompt` is NOT repeatable — last wins, silently. All
  *    briefing fragments (defaults + role + worker) are therefore concatenated
@@ -16,11 +16,24 @@
  *    text, which is how a role briefing becomes a 40-character path string
  *    with no error. Rendering refuses to emit any `@`-prefixed argv element
  *    (ISC-66).
+ *  - NO path under the run directory is joined in this file. Every one comes
+ *    from `run/paths.ts`, which is where `up` gets them too. This module used
+ *    to derive its own run root from `config.run.root` — a field `up` never
+ *    reads — so a preview could name mounts the real launch would not use, and
+ *    a wrong preview is silent by construction (ISC-188).
  */
 
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { imageTag } from "../container/image.ts";
-import { workerOutboxDir } from "../run/paths.ts";
+import {
+  roleSkillsDir,
+  runPaths,
+  runsRoot,
+  workerOutboxDir,
+  workerPaths,
+  type RunPaths,
+  type WorkerPaths,
+} from "../run/paths.ts";
 import { ConfigError, expandPath, resolveWorker, type LoadedConfig, type ResolvedWorker } from "./load.ts";
 
 /** Container path the briefing file is mounted at. */
@@ -31,7 +44,10 @@ export interface RenderedWorker {
   workerId: string;
   role: string;
   runId: string;
-  /** Host directory this run's state lives under (canonicalized). */
+  /**
+   * Host directory this run's state lives under — `runPaths().root`, the same
+   * value `up` computes, never a second derivation of it (ISC-188).
+   */
   runDir: string;
   image: string;
   /** Full `docker run` argv, element 0 = "docker". */
@@ -99,15 +115,37 @@ export function buildPiArgv(w: ResolvedWorker, hasBriefing: boolean): string[] {
   return argv;
 }
 
-/** Build the full `docker run` argv. Pure given the resolved pieces. */
+/**
+ * Build the full `docker run` argv. Pure given the resolved pieces.
+ *
+ * Takes the `RunPaths`/`WorkerPaths` structs rather than a run-dir string
+ * precisely so no mount can be joined here: every host path below is one this
+ * function was HANDED by `run/paths.ts`, which is what makes "the preview and
+ * the launch name the same directory" a property of the types rather than of
+ * two `join()` calls agreeing (ISC-188).
+ */
 export function buildDockerArgv(
   loaded: LoadedConfig,
   w: ResolvedWorker,
-  opts: { runId: string; runDir: string; image: string; piFlags: string[]; hasBriefing: boolean },
+  opts: {
+    run: RunPaths;
+    worker: WorkerPaths;
+    image: string;
+    piFlags: string[];
+    hasBriefing: boolean;
+  },
 ): string[] {
-  const { docker, run, cloud } = loaded.config;
+  // `loaded.config.run` is deliberately NOT destructured here, and no local is
+  // named `run`. The config's run section and the `RunPaths` in `opts.run` are
+  // different objects that BOTH carry a `.root`, so a binding named `run`
+  // would leave the wrong one one keystroke away from every mount below —
+  // `join(run.root, "outbox", w.id)` would compile, typecheck, and silently
+  // restore the exact divergence this function was rewritten to close
+  // (ISC-188). With the name unbound, that line does not compile at all. The
+  // single field this function needs from the section is read at its use site.
+  const { docker, cloud } = loaded.config;
   const argv: string[] = ["docker", "run", "-i", "--rm"];
-  argv.push("--name", `pifleet-${opts.runId}-${w.id}`);
+  argv.push("--name", `pifleet-${opts.run.runId}-${w.id}`);
   argv.push("--user", "10001:10001");
   argv.push("--security-opt", "no-new-privileges");
   argv.push("--cap-drop", "ALL");
@@ -119,11 +157,16 @@ export function buildDockerArgv(
   argv.push("--memory", docker.memory);
   argv.push("--cpus", String(docker.cpus));
   argv.push("--network", docker.network);
-  argv.push("--env-file", join(opts.runDir, "workers", w.id, "env"));
+  argv.push("--env-file", opts.worker.envFile);
 
   // Mount table (SRD §5.5). Nothing else is mounted — notably not the main
   // checkout, ~/.ssh, ~/.env, the host ~/.config/gcloud, or the Docker socket.
-  const repo = expandPath(run.repo, loaded.dir);
+  //
+  // `run.repo` is the one host path in this function that config legitimately
+  // names — it is the operator's checkout, not a run-dir path. It is read at
+  // its use site rather than through a local; see the destructure above for
+  // why nothing in this function is named `run`.
+  const repo = expandPath(loaded.config.run.repo, loaded.dir);
   switch (w.isolation) {
     case "worktree":
       argv.push("-v", `${join(repo, ".worktrees", w.id)}:/workspace`);
@@ -135,22 +178,22 @@ export function buildDockerArgv(
       // No code mount at all — the role works against live systems, not the repo.
       break;
   }
-  argv.push("-v", `${workerOutboxDir(opts.runDir, w.id)}:/outbox`);
-  argv.push("-v", `${join(opts.runDir, "sessions")}:/sessions`);
-  argv.push("-v", `${join(opts.runDir, "skills", w.role)}:/skills:ro`);
+  argv.push("-v", `${workerOutboxDir(opts.run.root, w.id)}:/outbox`);
+  argv.push("-v", `${opts.run.sessionsDir}:/sessions`);
+  argv.push("-v", `${roleSkillsDir(opts.run.root, w.role)}:/skills:ro`);
   // The verbgate policy is mounted READ-ONLY and separately from /outbox. It
   // used to be read out of /outbox, which the worker owns — so the subject of
   // the policy could rewrite the policy, and the task-scoped cloud grant was a
   // suggestion rather than a control.
-  argv.push("-v", `${join(opts.runDir, "workers", w.id, "cloud-allow")}:/policy/cloud-allow:ro`);
+  argv.push("-v", `${opts.worker.cloudAllow}:/policy/cloud-allow:ro`);
   // Container-local Pi state — NEVER the host ~/.pi/agent, which holds real
   // auth and sessions (SRD §5.5).
   argv.push("-v", `pifleet-piagent-${w.id}:/home/pi/.pi/agent`);
   if (opts.hasBriefing) {
-    argv.push("-v", `${join(opts.runDir, "workers", w.id, "system-append.md")}:${BRIEFING_MOUNT}:ro`);
+    argv.push("-v", `${opts.worker.systemAppendMd}:${BRIEFING_MOUNT}:ro`);
   }
   if (cloud.kubeconfig !== null && w.cloudAccess) {
-    argv.push("-v", `${join(opts.runDir, "workers", w.id, "kubeconfig")}:/home/pi/.kube/config:ro`);
+    argv.push("-v", `${opts.worker.kubeconfig}:/home/pi/.kube/config:ro`);
   }
 
   argv.push(opts.image);
@@ -195,8 +238,24 @@ export async function renderWorker(
 ): Promise<RenderedWorker> {
   const runId = options.runId ?? "dry";
   const w = resolveWorker(loaded, workerId);
-  const runRoot = expandPath(loaded.config.run.root, loaded.dir);
-  const runDir = resolve(runRoot, runId);
+  /**
+   * The run directory comes from `run/paths.ts` and NOWHERE else (ISC-188).
+   *
+   * It used to be `expandPath(loaded.config.run.root, loaded.dir)`, which is a
+   * second, independent answer to a question `runsRoot()` already answers — and
+   * the two disagree the moment `PIFLEET_RUNS_DIR` is set, which is how every
+   * test rig and the detached daemon are pointed at their runs root. `up` calls
+   * `runsRoot()`; `render` read a config field `up` never consults. So the
+   * command that exists to say "here is exactly what `up` will run" named an
+   * `--env-file`, an `/outbox`, a `/skills` mount and a briefing under a
+   * directory the real launch would not use, and nothing failed — a preview is
+   * only ever compared to reality by a human, and only if they look.
+   *
+   * `config.run.root` is therefore not consulted here. It is still parsed and
+   * still defaulted (see `RunSchema`), and no other reader exists.
+   */
+  const run = runPaths(runId, runsRoot());
+  const worker = workerPaths(run, w.id);
 
   const content = await concatBriefing(w);
   const hasBriefing = content !== null;
@@ -207,8 +266,8 @@ export async function renderWorker(
   const pi = assertNoAtPaths(buildPiArgv(w, hasBriefing), `pi argv for ${w.id}`);
   const docker = assertNoAtPaths(
     buildDockerArgv(loaded, w, {
-      runId,
-      runDir,
+      run,
+      worker,
       image,
       piFlags: pi.slice(1),
       hasBriefing,
@@ -220,13 +279,14 @@ export async function renderWorker(
     workerId: w.id,
     role: w.role,
     runId,
-    runDir,
+    runDir: run.root,
     image,
     docker,
     pi,
     systemAppend: hasBriefing
       ? {
-          hostPath: join(runDir, "workers", w.id, "system-append.md"),
+          // The SAME string the `-v` above mounts, not a matching one.
+          hostPath: worker.systemAppendMd,
           containerPath: BRIEFING_MOUNT,
           content,
         }

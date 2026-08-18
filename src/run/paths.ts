@@ -19,11 +19,44 @@
 
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
-/** Root under which every run directory lives. */
+/**
+ * Root under which every run directory lives.
+ *
+ * The configured value is CANONICALIZED, never returned as authored.
+ * `PIFLEET_RUNS_DIR` is operator input and every path below is derived from
+ * it, ending up as the source half of `docker run -v` flags — and Docker does
+ * not reject a relative source there. A `-v` source with no leading `/` is a
+ * NAMED VOLUME, so an unresolved root gets the worker a fresh empty volume
+ * where the run directory should be: `harvest` then reads an empty `/outbox`
+ * and reports a task that produced artifacts as having produced none. Nothing
+ * throws, which puts it in the same class as the divergence this module's
+ * first rule exists to prevent.
+ *
+ * A leading `~` is expanded for the same reason and one more: nothing but a
+ * shell expands it, so `~/runs` works when typed at a prompt and fails when
+ * set from a launcher, a config file, or the detached daemon's env — which
+ * are the three ways this variable is actually set. Expansion follows
+ * `expandPath` in `config/load.ts`, the convention every other path in this
+ * codebase already uses; a relative value resolves against the cwd, because
+ * unlike a config path there is no document for it to be relative TO.
+ *
+ * Resolving HERE rather than at the call sites is what makes it hold: `up`
+ * hands this exact string to the detached daemon as its `PIFLEET_RUNS_DIR`
+ * and to each supervisor as `--runs-root`, and a relative value would
+ * otherwise re-resolve against whatever cwd those inherit — a second answer
+ * to the question this module exists to make singular.
+ */
 export function runsRoot(env: Record<string, string | undefined> = process.env): string {
-  return env["PIFLEET_RUNS_DIR"] ?? join(homedir(), ".pifleet", "runs");
+  const configured = env["PIFLEET_RUNS_DIR"];
+  // An exported-but-cleared variable arrives as "", which `??` passed
+  // through; `join("", runId)` is then relative, i.e. the named-volume case
+  // with nothing in the path to suggest a variable was ever set.
+  if (configured === undefined || configured === "") return join(homedir(), ".pifleet", "runs");
+  if (configured === "~") return homedir();
+  if (configured.startsWith("~/")) return resolve(homedir(), configured.slice(2));
+  return resolve(configured);
 }
 
 /**
@@ -115,6 +148,21 @@ export interface WorkerPaths {
    * within a single dispatch.
    */
   attendedJson: string;
+  /**
+   * The four per-worker container INPUTS (SRD §5.5): the `--env-file`, the
+   * concatenated briefing, the verbgate policy, and the filtered kubeconfig.
+   *
+   * Named here rather than joined at the mount site because `config/render.ts`
+   * built all four from its own separately-computed run-dir string, which was
+   * not the one `up` uses — so `render`, the command whose entire purpose is to
+   * say what `up` will do, described four mounts at paths no run would ever
+   * contain (ISC-188). Nothing writes these files yet; naming them now is what
+   * stops the eventual writer from inventing a fifth spelling.
+   */
+  envFile: string;
+  systemAppendMd: string;
+  cloudAllow: string;
+  kubeconfig: string;
 }
 
 export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
@@ -130,6 +178,10 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     controlSock: socketPath(run.runId, workerId),
     tasksDir: join(dir, "tasks"),
     attendedJson: join(dir, "attended.json"),
+    envFile: join(dir, "env"),
+    systemAppendMd: join(dir, "system-append.md"),
+    cloudAllow: join(dir, "cloud-allow"),
+    kubeconfig: join(dir, "kubeconfig"),
   };
 }
 
@@ -150,6 +202,18 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
  */
 export function workerOutboxDir(runRoot: string, workerId: string): string {
   return join(runRoot, "outbox", workerId);
+}
+
+/**
+ * Host directory mounted read-only at `/skills` (SRD §5.5).
+ *
+ * Keyed by ROLE, not worker: every worker in a role reads the same skill set,
+ * and a per-worker copy would let two workers of one role be briefed
+ * differently by whichever wrote last. Takes the run root as a string for the
+ * same reason `workerOutboxDir` does.
+ */
+export function roleSkillsDir(runRoot: string, role: string): string {
+  return join(runRoot, "skills", role);
 }
 
 /** Ledger shards are per writer (SRD §7.7); the shard name is the writer id. */

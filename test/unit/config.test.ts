@@ -445,6 +445,33 @@ describe("validation rejections", () => {
     await expectIssue(doc, "workers.0.role", "nosuchrole");
   });
 
+  /**
+   * A role name is a MOUNT PATH SEGMENT, not just a label.
+   *
+   * `roleSkillsDir` joins the role into the host directory mounted read-only
+   * at `/skills` in every worker of that role (SRD §5.5), and nothing between
+   * the config and the `-v` flag inspected it. A role named
+   * `../../../../../../etc` therefore resolves to the host's `/etc` and
+   * `render` prints — and `up` executes — a mount of it into the container.
+   * The traversal is authored by the same document that names the role, so
+   * this is refused at load, where the name enters the system.
+   */
+  test("a role name that would escape the skills directory is rejected", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { "../../../../../../etc": {} };
+    doc["workers"] = [{ id: "w1", role: "../../../../../../etc" }];
+    await expectIssue(doc, "roles.../../../../../../etc", "path segment");
+  });
+
+  test("a role name containing a separator is rejected even without a traversal", async () => {
+    // `..` is not the only escape: any separator makes the name more than one
+    // segment, and a name is only safe to join if it cannot be one.
+    const doc = baseDoc();
+    doc["roles"] = { "eng/sub": {} };
+    doc["workers"] = [{ id: "w1", role: "eng/sub" }];
+    await expectIssue(doc, "roles.eng/sub", "path segment");
+  });
+
   test("web_fetch is not a Pi tool and is rejected by the schema", async () => {
     // v1.1's researcher requested web_fetch and was silently granted nothing.
     const doc = baseDoc();

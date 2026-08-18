@@ -11,8 +11,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { stringify } from "yaml";
 import { exitCodeForError } from "../../src/cli/index.ts";
 import { imageStatus } from "../../src/cli/commands/doctor.ts";
@@ -34,7 +34,13 @@ import {
   type ImageInputs,
 } from "../../src/container/image.ts";
 import type { Exec } from "../../src/container/run.ts";
-import { runPaths, workerOutboxDir } from "../../src/run/paths.ts";
+import {
+  roleSkillsDir,
+  runPaths,
+  runsRoot,
+  workerOutboxDir,
+  workerPaths,
+} from "../../src/run/paths.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -49,20 +55,45 @@ async function digestOnDisk(asset: BuildContextAsset): Promise<string> {
 }
 
 const cleanups: string[] = [];
+const RUNS_DIR_BEFORE = process.env["PIFLEET_RUNS_DIR"];
 afterAll(async () => {
   for (const dir of cleanups) await rm(dir, { recursive: true, force: true });
+  if (RUNS_DIR_BEFORE === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+  else process.env["PIFLEET_RUNS_DIR"] = RUNS_DIR_BEFORE;
 });
 
 /**
- * A self-contained fixture: config + briefing fragments + local run root, all
- * inside one temp dir so every rendered path is fixture-relative.
+ * The config field that used to name the runs root, kept in every fixture as a
+ * DECOY (ISC-188).
+ *
+ * `run.root` is still a schema field with a default, and it is the value
+ * `render` used to build its run directory from. It must now appear in no
+ * rendered path at all, so it points somewhere `PIFLEET_RUNS_DIR` does not:
+ * every existing path assertion below is thereby a live statement that the env
+ * var won, and not — as it was when the two happened to name the same
+ * directory — a statement that would hold either way.
+ */
+const DECOY_CONFIG_RUN_ROOT = "./config-runs";
+
+/**
+ * A self-contained fixture: config + briefing fragments + runs root, all inside
+ * one temp dir so every rendered path is fixture-relative.
+ *
+ * Sets `PIFLEET_RUNS_DIR` rather than passing a root in, because that is the
+ * seam `up` and the detached daemon use and the one `runsRoot()` reads. A
+ * test-only injection parameter would have been a second way to answer the
+ * question this criterion exists to make singular.
  */
 async function fixture(mutate?: (doc: Record<string, unknown>) => void): Promise<{
   dir: string;
+  /** PIFLEET_RUNS_DIR for this fixture — the root every rendered path is under. */
+  runsDir: string;
   loaded: LoadedConfig;
 }> {
   const dir = await mkdtemp(join(tmpdir(), "pifleet-render-"));
   cleanups.push(dir);
+  const runsDir = join(dir, "runs");
+  process.env["PIFLEET_RUNS_DIR"] = runsDir;
   await mkdir(join(dir, "roles"), { recursive: true });
   await writeFile(join(dir, "roles", "common.md"), "Common fleet briefing.\n");
   await writeFile(join(dir, "roles", "eng.md"), "Engineer role briefing.\n");
@@ -72,7 +103,7 @@ async function fixture(mutate?: (doc: Record<string, unknown>) => void): Promise
     version: 2,
     name: "render-fixture",
     docker: { pi_version: "0.79.6" },
-    run: { root: "./runs", repo: ".", budget: { tokens_ceiling: 1_000_000 } },
+    run: { root: DECOY_CONFIG_RUN_ROOT, repo: ".", budget: { tokens_ceiling: 1_000_000 } },
     llm: { model: "DefaultModel", thinking: "medium" },
     defaults: { append_system_prompt_file: "./roles/common.md" },
     roles: {
@@ -99,7 +130,7 @@ async function fixture(mutate?: (doc: Record<string, unknown>) => void): Promise
   };
   mutate?.(doc);
   await writeFile(join(dir, "fleet.yaml"), stringify(doc));
-  return { dir, loaded: await loadConfig(join(dir, "fleet.yaml")) };
+  return { dir, runsDir, loaded: await loadConfig(join(dir, "fleet.yaml")) };
 }
 
 function countOf(argv: string[], flag: string): number {
@@ -109,6 +140,30 @@ function countOf(argv: string[], flag: string): number {
 function valueOf(argv: string[], flag: string): string | undefined {
   const i = argv.indexOf(flag);
   return i === -1 ? undefined : argv[i + 1];
+}
+
+/**
+ * Every host path the docker argv names for RUN STATE: the `--env-file` value
+ * plus the host half of each bind mount.
+ *
+ * Two things are deliberately NOT run state and are excluded rather than
+ * special-cased at each call site: the `/workspace` mount, which is the
+ * operator's own repository and has nothing to do with the runs root, and
+ * `pifleet-piagent-<id>`, which is a named volume and not a path at all.
+ */
+function runStateHostPaths(argv: string[]): string[] {
+  const out: string[] = [];
+  const envIdx = argv.indexOf("--env-file");
+  if (envIdx !== -1) out.push(argv[envIdx + 1]!);
+  argv.forEach((a, i) => {
+    if (argv[i - 1] !== "-v") return;
+    const sep = a.indexOf(":");
+    const host = a.slice(0, sep);
+    if (!host.startsWith("/")) return; // named volume
+    if (a.slice(sep + 1).startsWith("/workspace")) return; // the operator's repo
+    out.push(host);
+  });
+  return out;
 }
 
 function valuesOf(argv: string[], flag: string): string[] {
@@ -123,7 +178,7 @@ function valuesOf(argv: string[], flag: string): string[] {
 
 describe("exactly one --append-system-prompt (ISC-65)", () => {
   test("defaults + role + worker fragments fold into ONE flag and one file", async () => {
-    const { dir, loaded } = await fixture();
+    const { runsDir, loaded } = await fixture();
     const r = await renderWorker(loaded, "eng-1");
     expect(countOf(r.pi, "--append-system-prompt")).toBe(1);
     expect(countOf(r.docker, "--append-system-prompt")).toBe(1);
@@ -138,7 +193,9 @@ describe("exactly one --append-system-prompt (ISC-65)", () => {
     expect(a).toBeGreaterThanOrEqual(0);
     expect(b).toBeGreaterThan(a);
     expect(c).toBeGreaterThan(b);
-    expect(r.systemAppend!.hostPath).toBe(join(dir, "runs", "dry", "workers", "eng-1", "system-append.md"));
+    expect(r.systemAppend!.hostPath).toBe(
+      join(runsDir, "dry", "workers", "eng-1", "system-append.md"),
+    );
   });
 
   test("no fragments → no flag, no file, no briefing mount", async () => {
@@ -308,9 +365,9 @@ describe("docker argv (SRD §5.6)", () => {
   });
 
   test("state mounts: outbox, sessions, skills ro, container-local pi agent volume", async () => {
-    const { dir, loaded } = await fixture();
+    const { runsDir, loaded } = await fixture();
     const r = await renderWorker(loaded, "eng-1");
-    const runDir = join(dir, "runs", "dry");
+    const runDir = join(runsDir, "dry");
     expect(r.docker).toContain(`${join(runDir, "outbox", "eng-1")}:/outbox`);
     expect(r.docker).toContain(`${join(runDir, "sessions")}:/sessions`);
     expect(r.docker).toContain(`${join(runDir, "skills", "eng")}:/skills:ro`);
@@ -328,9 +385,9 @@ describe("docker argv (SRD §5.6)", () => {
    * that both sides happen to still call the same helper.
    */
   test("the /outbox mount is the same directory harvest reads from", async () => {
-    const { dir, loaded } = await fixture();
+    const { runsDir, loaded } = await fixture();
     const r = await renderWorker(loaded, "eng-1");
-    const runDir = join(dir, "runs", "dry");
+    const runDir = join(runsDir, "dry");
 
     const mounted = r.docker
       .find((a) => a.endsWith(":/outbox"))
@@ -339,19 +396,22 @@ describe("docker argv (SRD §5.6)", () => {
 
     // And that shared path is the one the harvest side resolves for the same
     // worker, through the RunPaths struct it works from.
-    const run = runPaths("dry", join(dir, "runs"));
+    const run = runPaths("dry", runsDir);
     expect(mounted).toBe(workerOutboxDir(run.root, "eng-1"));
   });
 
   test("kubeconfig mounts read-only only for cloud_access workers with cloud.kubeconfig set", async () => {
-    const { dir, loaded } = await fixture((doc) => {
+    const { runsDir, loaded } = await fixture((doc) => {
       doc["cloud"] = { adc: true, kubeconfig: "./kube/filtered.yaml" };
       (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
     });
     const eng = await renderWorker(loaded, "eng-1");
-    expect(eng.docker).toContain(
-      `${join(dir, "runs", "dry", "workers", "eng-1", "kubeconfig")}:/home/pi/.kube/config:ro`,
-    );
+    // Against `WorkerPaths.kubeconfig`, not a string rebuilt here. The
+    // credential mount is the one run-dir path this file used to spell out
+    // literally, which made it the one path that could drift out of
+    // `run/paths.ts` with this test still green (ISC-188).
+    const kubeconfig = workerPaths(runPaths("dry", runsDir), "eng-1").kubeconfig;
+    expect(eng.docker).toContain(`${kubeconfig}:/home/pi/.kube/config:ro`);
     const rev = await renderWorker(loaded, "rev-1"); // no cloud_access
     expect(rev.docker.some((a) => a.includes("/.kube/"))).toBe(false);
   });
@@ -362,6 +422,201 @@ describe("docker argv (SRD §5.6)", () => {
     const imageIdx = r.docker.indexOf(r.image);
     expect(imageIdx).toBeGreaterThan(0);
     expect(r.docker.slice(imageIdx + 1)).toEqual(r.pi.slice(1));
+  });
+});
+
+/**
+ * ISC-188 — the run directory is computed once, in `run/paths.ts`, not twice.
+ *
+ * `render` derived it from `config.run.root`; `up` derives it from
+ * `runsRoot()`, i.e. `PIFLEET_RUNS_DIR`. Nothing reconciled the two, so the
+ * command whose only job is to say what `up` will run described an
+ * `--env-file`, an `/outbox`, a `/skills` mount and a briefing file under a
+ * directory the real launch would never touch. A wrong preview throws nothing:
+ * it is compared to reality by a human, and only if they look.
+ *
+ * These assertions vary `PIFLEET_RUNS_DIR` and require every rendered path to
+ * follow it. The old fixture set `run.root: ./runs` AND left the env var unset,
+ * so the two sources coincidentally named the same directory and the whole file
+ * passed identically against either implementation — the coverage gap this
+ * repo's mutation convention exists to catch. The fixture now points them at
+ * different directories on purpose.
+ */
+describe("the run directory is computed once (ISC-188)", () => {
+  test("every rendered path is under PIFLEET_RUNS_DIR, and none under config run.root", async () => {
+    const { dir, runsDir, loaded } = await fixture((doc) => {
+      doc["cloud"] = { adc: true, kubeconfig: "./kube/filtered.yaml" };
+      (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+    });
+    const r = await renderWorker(loaded, "eng-1");
+
+    // The decoy is a real, resolvable directory the renderer simply must not
+    // use — otherwise "absent" could mean "the path never existed".
+    const decoy = join(dir, "config-runs");
+    expect(loaded.config.run.root).toBe(DECOY_CONFIG_RUN_ROOT);
+    expect(decoy).not.toBe(runsDir);
+
+    expect(r.runDir).toBe(join(runsDir, "dry"));
+    for (const a of [...r.docker, ...r.pi]) expect(a).not.toContain(decoy);
+    expect(r.systemAppend!.hostPath.startsWith(runsDir)).toBe(true);
+  });
+
+  /**
+   * Every run-dir path the criterion names, each against the helper the OTHER
+   * side of its contract uses — not against a string rebuilt here, which would
+   * only assert that two `join()` calls in this file agree.
+   *
+   * Cloud access is on so the kubeconfig is among them. It is the path that
+   * makes the point: while it was asserted as a literal `join(...)` it was the
+   * one member of this set that could drift out of `run/paths.ts` with this
+   * block still passing, which is the same "green test over a divergence"
+   * shape the criterion exists to close.
+   */
+  test("outbox, skills, sessions, env, briefing, policy and kubeconfig come from run/paths.ts", async () => {
+    const { runsDir, loaded } = await fixture((doc) => {
+      doc["cloud"] = { adc: true, kubeconfig: "./kube/filtered.yaml" };
+      (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+    });
+    const r = await renderWorker(loaded, "eng-1");
+
+    const run = runPaths("dry", runsDir);
+    const worker = workerPaths(run, "eng-1");
+    expect(r.docker).toContain(`${workerOutboxDir(run.root, "eng-1")}:/outbox`);
+    expect(r.docker).toContain(`${roleSkillsDir(run.root, "eng")}:/skills:ro`);
+    expect(r.docker).toContain(`${run.sessionsDir}:/sessions`);
+    expect(r.docker[r.docker.indexOf("--env-file") + 1]).toBe(worker.envFile);
+    expect(r.docker).toContain(`${worker.systemAppendMd}:${BRIEFING_MOUNT}:ro`);
+    expect(r.docker).toContain(`${worker.cloudAllow}:/policy/cloud-allow:ro`);
+    expect(r.docker).toContain(`${worker.kubeconfig}:/home/pi/.kube/config:ro`);
+    expect(r.systemAppend!.hostPath).toBe(worker.systemAppendMd);
+  });
+
+  /**
+   * The strongest form: the run dir `render` reports IS the one `up` computes,
+   * asserted through the same call `up` makes rather than through a literal.
+   * A renderer that hardcoded `~/.pifleet/runs` would satisfy "honours the env
+   * var" on a machine where the two happened to match; this cannot.
+   */
+  test("render's run dir is the one up would compute, for any runs root", async () => {
+    const { runsDir, loaded } = await fixture();
+    expect(runsRoot()).toBe(runsDir); // the fixture's env var is in force
+
+    const r = await renderWorker(loaded, "eng-1", { runId: "run-77" });
+    expect(r.runDir).toBe(runPaths("run-77", runsRoot()).root);
+  });
+
+  /**
+   * Moving the runs root moves EVERY run-state path, with none left behind.
+   *
+   * Asserting only that the two argvs differ by the prefix is not enough: a
+   * path that kept its own derivation does not MOVE, so it stays byte-identical
+   * across the two renders and a prefix-swap comparison passes over it. That is
+   * the exact shape of the bug — one path out of eight computed elsewhere —
+   * and it was measured: with the `--env-file` alone reverted, the prefix-swap
+   * form of this test stayed green.
+   *
+   * So the host paths are extracted and each is required to be under the run
+   * dir, which is a statement about where every path IS rather than about how
+   * the two renders relate.
+   */
+  test("changing PIFLEET_RUNS_DIR moves every run-state host path", async () => {
+    const { runsDir, loaded } = await fixture((doc) => {
+      doc["cloud"] = { adc: true, kubeconfig: "./kube/filtered.yaml" };
+      (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+    });
+    const before = await renderWorker(loaded, "eng-1");
+
+    const moved = await mkdtemp(join(tmpdir(), "pifleet-render-moved-"));
+    cleanups.push(moved);
+    process.env["PIFLEET_RUNS_DIR"] = moved;
+    const after = await renderWorker(loaded, "eng-1");
+    process.env["PIFLEET_RUNS_DIR"] = runsDir;
+
+    // Every run-state host path, under each root, is under THAT root's run dir.
+    for (const [rendered, root] of [
+      [before, runsDir],
+      [after, moved],
+    ] as const) {
+      const hostPaths = runStateHostPaths(rendered.docker);
+      // Or the loop below is vacuous: six mounts plus the env file.
+      expect(hostPaths.length).toBe(7);
+      for (const p of hostPaths) expect(p.startsWith(join(root, "dry"))).toBe(true);
+    }
+
+    expect(after.docker).not.toEqual(before.docker);
+    expect(after.docker.map((a) => a.replaceAll(moved, runsDir))).toEqual(before.docker);
+    expect(after.docker.some((a) => a.includes(runsDir))).toBe(false);
+  });
+
+  /**
+   * Computing the runs root once is only half the guarantee: the value it
+   * computes must also be one `docker run -v` will accept.
+   *
+   * `PIFLEET_RUNS_DIR` is operator input and was returned verbatim, so a
+   * relative or `~`-prefixed value reached the mount table unresolved. Docker
+   * does not reject that — a `-v` source with no leading `/` is a NAMED
+   * VOLUME, so the worker gets a fresh empty volume where the run directory
+   * should be, `harvest` reads an empty `/outbox`, and a task that produced
+   * artifacts is reported as having produced none. `runStateHostPaths` above
+   * encodes the same rule, dropping any host path that does not start with
+   * "/" as a named volume, which is why the count assertion below is the
+   * whole test.
+   *
+   * `~` is worse still: nothing but a shell expands it, so it works when
+   * typed at a prompt and fails when set from a launcher, a config file, or
+   * the detached daemon's env — the three ways this variable is actually set.
+   */
+  describe("the runs root is canonicalized to an absolute path", () => {
+    test("a ~-prefixed value expands, as every other path in the config does", () => {
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "~/fleet-runs" })).toBe(join(homedir(), "fleet-runs"));
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "~" })).toBe(homedir());
+    });
+
+    test("a relative value resolves rather than reaching docker as a named volume", () => {
+      const got = runsRoot({ PIFLEET_RUNS_DIR: "relative/runs" });
+      expect(isAbsolute(got)).toBe(true);
+      expect(got).toBe(resolve("relative/runs"));
+    });
+
+    test("an unset or empty value falls back to the documented default", () => {
+      const fallback = join(homedir(), ".pifleet", "runs");
+      expect(runsRoot({})).toBe(fallback);
+      // An exported-but-cleared variable arrives as "", which `??` passes
+      // through: `join("", runId)` is then a RELATIVE path, i.e. the
+      // named-volume case again, and with no clue in it that a var was set.
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "" })).toBe(fallback);
+    });
+
+    test("an already-absolute value is normalized, not rewritten", () => {
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "/srv/pifleet/runs" })).toBe("/srv/pifleet/runs");
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "/srv/pifleet/./runs/" })).toBe("/srv/pifleet/runs");
+    });
+
+    /**
+     * The end-to-end form. The cases above pin the helper; this one pins what
+     * reaches `docker run`, which is where the failure was reproduced.
+     */
+    test("every rendered host path stays absolute under a relative runs root", async () => {
+      const { loaded } = await fixture((doc) => {
+        doc["cloud"] = { adc: true, kubeconfig: "./kube/filtered.yaml" };
+        (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+      });
+      const saved = process.env["PIFLEET_RUNS_DIR"];
+      process.env["PIFLEET_RUNS_DIR"] = "relative-runs";
+      try {
+        const r = await renderWorker(loaded, "eng-1");
+        expect(isAbsolute(r.runDir)).toBe(true);
+        const hostPaths = runStateHostPaths(r.docker);
+        // Six mounts plus the env file. Unresolved, they are not absolute and
+        // `runStateHostPaths` drops them as named volumes — so this count is
+        // the assertion, and it read 0 before the root was canonicalized.
+        expect(hostPaths.length).toBe(7);
+        for (const p of hostPaths) expect(isAbsolute(p)).toBe(true);
+      } finally {
+        if (saved === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+        else process.env["PIFLEET_RUNS_DIR"] = saved;
+      }
+    });
   });
 });
 
@@ -559,8 +814,20 @@ describe("worker count follows config (ISC-61)", () => {
 });
 
 describe("render CLI (ISC-60)", () => {
+  /**
+   * `PIFLEET_RUNS_DIR` is passed EXPLICITLY, as every integration test in this
+   * repo passes it: `Bun.spawn`'s default env is captured from the real environ
+   * and does not reflect a `process.env` assignment made after the process
+   * started, so the child would otherwise render against the developer's own
+   * `~/.pifleet/runs` while the in-process comparison used the fixture's.
+   *
+   * Which makes this the end-to-end half of ISC-188: the subprocess is the real
+   * `pifleet render`, and its argv must equal the library's for the SAME runs
+   * root — a CLI that read the runs root differently from the module would
+   * differ here even though both halves individually looked right.
+   */
   test("render --worker --json emits the argv without spawning docker", async () => {
-    const { loaded, dir } = await fixture();
+    const { loaded, dir, runsDir } = await fixture();
     const proc = Bun.spawn(
       [
         "bun",
@@ -572,7 +839,12 @@ describe("render CLI (ISC-60)", () => {
         "--config",
         join(dir, "fleet.yaml"),
       ],
-      { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" },
+      {
+        cwd: REPO_ROOT,
+        env: { ...process.env, PIFLEET_RUNS_DIR: runsDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
     );
     const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
     expect(code).toBe(0);
@@ -581,6 +853,10 @@ describe("render CLI (ISC-60)", () => {
     expect(parsed.worker).toBe("eng-1");
     expect(parsed.docker).toEqual(lib.docker);
     expect(parsed.pi).toEqual(lib.pi);
+    // Both halves used the fixture's root, not a machine-default that happened
+    // to agree — otherwise the equality above is satisfied by two identical
+    // wrong answers.
+    expect(parsed.docker.some((a) => a.includes(runsDir))).toBe(true);
   });
 
   test("an unknown worker is a usage error", async () => {
