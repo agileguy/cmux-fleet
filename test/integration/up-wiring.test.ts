@@ -137,7 +137,12 @@ async function writeGcloudShim(binDir: string): Promise<void> {
 /** Minimal valid fleet.yaml naming the shimmed network and the seeded repo. */
 function fleetYaml(
   repo: string,
-  opts: { cloudAccess?: boolean; modelsAllowlist?: string[] } = {},
+  opts: {
+    cloudAccess?: boolean;
+    modelsAllowlist?: string[];
+    /** Role named by `eng-1`. A name absent from `roles:` is a config defect. */
+    workerRole?: string;
+  } = {},
 ): string {
   return [
     "version: 2",
@@ -160,7 +165,7 @@ function fleetYaml(
     "roles:",
     opts.cloudAccess === true ? "  engineer: {cloud_access: true}" : "  engineer: {}",
     "workers:",
-    "  - {id: eng-1, role: engineer}",
+    `  - {id: eng-1, role: ${opts.workerRole ?? "engineer"}}`,
     "",
   ].join("\n");
 }
@@ -467,6 +472,88 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
     },
     90_000,
   );
+
+  /**
+   * A worker naming an unknown role is refused BEFORE the run touches
+   * anything, allowlist present or not.
+   *
+   * Two independent guards have to hold for this, and this test pins the
+   * outcome they jointly produce rather than either one's internals:
+   * `FleetConfigSchema.superRefine` rejects the role at parse time (ISC-68),
+   * and the `models_allowlist` loop in `up.ts` no longer swallows a
+   * `resolveWorker` failure if it ever gets one. Whichever fires, the operator
+   * must get exit 2 naming the role.
+   *
+   * The last assertion is the load-bearing one. Everything downstream of the
+   * pre-flight checks mutates something the operator owns — `detectRepoHazards`
+   * QUARANTINES `AGENTS.md` by renaming it in their repository. A config defect
+   * must not buy a half-applied run, so the seeded hazard being untouched is
+   * how "refused before anything happened" is verified rather than assumed.
+   */
+  test("a worker naming an unknown role is refused before the repo is touched", async () => {
+    const rig = await makeRig();
+    const badRole = join(rig.base, "bad-role.yaml");
+    await writeFile(
+      badRole,
+      fleetYaml(rig.repo, {
+        workerRole: "no-such-role",
+        modelsAllowlist: ["probed-model-a"],
+      }),
+    );
+    const up = await runCli(rig, [
+      "up",
+      "--config",
+      badRole,
+      "--workers",
+      "eng-1",
+      "--backend",
+      "headless",
+    ]);
+    expect(up.code).toBe(EXIT.USAGE);
+    // Named and pathed at the key the operator has to edit — and NOT misfiled
+    // as an allowlist miss, which would send them to the wrong key entirely.
+    expect(up.stderr).toContain("unknown role");
+    expect(up.stderr).toContain("no-such-role");
+    expect(up.stderr).not.toContain("models_allowlist");
+    // A diagnosis, not a crash.
+    expect(up.stderr).not.toContain("at async");
+    expect(up.stdout).not.toContain("run ");
+
+    for (const runId of await readdir(rig.root)) {
+      const run = runPaths(runId, rig.root);
+      expect(await readdir(run.workersDir)).toEqual([]);
+      expect((await mergeLedger(run)).records).toEqual([]);
+    }
+    // The seeded hazard is still where the operator left it, under its own name.
+    expect(await readdir(rig.repo)).toEqual(["AGENTS.md"]);
+  });
+
+  /**
+   * …and the skip the bare catch existed to provide is still there. Narrowing
+   * it to a membership test must not start refusing a `--workers` id that
+   * exists only as a `PIFLEET_PI_COMMAND` double, or this fix trades one
+   * wrongly-refused fleet for another.
+   */
+  test("an id absent from workers: is still skipped, not refused", async () => {
+    const rig = await makeRig();
+    const gated = join(rig.base, "undefined-id.yaml");
+    await writeFile(gated, fleetYaml(rig.repo, { modelsAllowlist: ["probed-model-a"] }));
+    const up = await runCli(rig, [
+      "up",
+      "--config",
+      gated,
+      "--workers",
+      "ghost-1",
+      "--backend",
+      "headless",
+      "--json",
+    ]);
+    // `eng-1`'s model is NOT on this list, so a loop that checked configured
+    // workers rather than the named ones would refuse here. `ghost-1` is not in
+    // `workers:` at all, so the allowlist has nothing to say about it.
+    expect(up.stderr).not.toContain("models_allowlist");
+    expect(up.stderr).not.toContain("unknown role");
+  });
 });
 
 describe("the grant line names the real ADC identity (ISC-251)", () => {

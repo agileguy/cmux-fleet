@@ -20,7 +20,9 @@ import {
   loadConfig,
   resolveAllWorkers,
   resolveWorker,
+  type LoadedConfig,
 } from "../../src/config/load.ts";
+import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
 import { parseDuration } from "../../src/config/schema.ts";
 import { EXIT } from "../../src/contracts.ts";
 
@@ -320,6 +322,69 @@ describe("models_allowlist is enforced (ISC-190)", () => {
 
   test("a decorated allowlist entry is not a dead rule", async () => {
     expect(await check(["omlx/Allowed-A:high"], "Allowed-A")).toBeNull();
+  });
+
+  /**
+   * The gate's own error handling, which is where ISC-190 was escapable.
+   *
+   * `up` skips a `--workers` id the config does not define — a legitimate
+   * Phase 1 shape, since a `PIFLEET_PI_COMMAND` double has no configured model
+   * to check. That skip was a `catch { continue }` around `resolveWorker`, and
+   * `resolveWorker` throws `ConfigError` for two unrelated conditions: an id
+   * absent from `workers:`, and a worker that IS defined but names a role
+   * `roles:` does not. A bare catch cannot tell them apart, so the second —
+   * a real config defect — was silently treated as "nothing to check here".
+   *
+   * `FleetConfigSchema.superRefine` rejects that config at parse time
+   * (ISC-68), so the hole was not reachable through a config `up` could load.
+   * That is exactly why it needs pinning HERE, on a hand-built `LoadedConfig`
+   * that bypasses the schema: the value of a second line of defence is what it
+   * does when the first one is absent, and a second line that discards its own
+   * errors is not one. The construction is deliberate, not a shortcut.
+   */
+  describe("the gate does not swallow a resolution failure", () => {
+    /** A LoadedConfig assembled past the schema, so `w1` names a missing role. */
+    async function unresolvable(): Promise<LoadedConfig> {
+      const doc = baseDoc();
+      doc["llm"] = { model: "DefaultModel", models_allowlist: ["Allowed-A"] };
+      const loaded = await writeAndLoad(doc);
+      const workers = loaded.config.workers.map((w) => ({ ...w, role: "no-such-role" }));
+      return { ...loaded, config: { ...loaded.config, workers } };
+    }
+
+    test("a DEFINED worker naming an unknown role propagates, it is not skipped", async () => {
+      const loaded = await unresolvable();
+      // Sanity: `w1` really is in `workers:`, so this is the defect case and
+      // not the absent-id case the skip legitimately covers.
+      expect(loaded.config.workers.map((w) => w.id)).toContain("w1");
+
+      let caught: unknown;
+      try {
+        assertModelsAllowed(loaded, ["w1"]);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(ConfigError);
+      expect((caught as Error).message).toContain("unknown role");
+      expect((caught as Error).message).toContain("no-such-role");
+      // Loud the same way it would be without the allowlist feature at all.
+      expect((caught as ConfigError).exitCode).toBe(EXIT.USAGE);
+    });
+
+    test("an id absent from workers: is still skipped, not refused", async () => {
+      const loaded = await unresolvable();
+      expect(loaded.config.workers.map((w) => w.id)).not.toContain("ghost-1");
+      expect(() => assertModelsAllowed(loaded, ["ghost-1"])).not.toThrow();
+    });
+
+    test("a defined, resolvable worker is still checked against the list", async () => {
+      const doc = baseDoc();
+      doc["llm"] = { model: "DefaultModel", models_allowlist: ["Allowed-A"] };
+      doc["roles"] = { eng: { model: "Sneaky-C" } };
+      const loaded = await writeAndLoad(doc);
+      // The skip must not have widened into "check nothing".
+      expect(() => assertModelsAllowed(loaded, ["w1"])).toThrow(ModelNotAllowedError);
+    });
   });
 });
 
