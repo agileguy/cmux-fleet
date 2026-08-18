@@ -66,9 +66,22 @@ async function shimCmux(commands: readonly string[]): Promise<string> {
   // machine decides the exit code: no Docker daemon here means `doctor`
   // exits 3 on that account alone, which is how the first version of this
   // test passed while proving nothing.
+  // `doctor` probes the SERVER version (`docker version --format ...`), not
+  // `--version`, and since ISC-159 it floors what comes back. The shim used to
+  // answer only `--version` and let the catch-all return `{}` — so the probe
+  // that actually runs was reporting a docker whose server version was `{}`,
+  // and this "healthy stand-in" was healthy by accident.
   await writeFile(
     join(base, "docker"),
-    ['#!/bin/sh', 'case "$1" in', '  --version) echo "Docker version 28.0.0" ;;', '  *) echo "{}" ;;', "esac", ""].join("\n"),
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      '  --version) echo "Docker version 28.0.0, build test-shim" ;;',
+      '  version) echo "28.0.0" ;;',
+      '  *) echo "{}" ;;',
+      "esac",
+      "",
+    ].join("\n"),
   );
   await chmod(join(base, "docker"), 0o755);
   await writeFile(join(base, "git"), ["#!/bin/sh", 'echo "git version 2.50.1"', ""].join("\n"));
