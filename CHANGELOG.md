@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **`render`'s preview could name a different run directory than `up`'s real launch.**
+  `render` computed the run root from the config file's `run.root` field; `up` always used
+  `runsRoot()` (which honors `PIFLEET_RUNS_DIR`). Whenever that variable was set — every test
+  rig and the detached daemon — the two disagreed on where the `--env-file`, `/outbox`,
+  `/skills`, `cloud-allow` policy, kubeconfig, and briefing mount would land. `render` now
+  builds every one of those paths through the same `RunPaths`/`WorkerPaths` structs `up`
+  uses, so a mount path can't be computed twice in two places by construction. `runsRoot()`
+  also now resolves `~` and relative `PIFLEET_RUNS_DIR` values, and role names are validated
+  against a safe identifier pattern (closing a path-traversal gap that let a role literally
+  named `../../etc` mount a host directory read-only into a worker container).
 - **A chunk containing a fatal error kept dispatching the lines after it.** `RpcClient.feed()`
   and `feedText()` now share one line loop that re-checks `#closed` between lines, so nothing
   past the fatal line in the same chunk reaches a handler.
