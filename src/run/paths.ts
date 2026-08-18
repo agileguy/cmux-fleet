@@ -19,11 +19,44 @@
 
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
-/** Root under which every run directory lives. */
+/**
+ * Root under which every run directory lives.
+ *
+ * The configured value is CANONICALIZED, never returned as authored.
+ * `PIFLEET_RUNS_DIR` is operator input and every path below is derived from
+ * it, ending up as the source half of `docker run -v` flags — and Docker does
+ * not reject a relative source there. A `-v` source with no leading `/` is a
+ * NAMED VOLUME, so an unresolved root gets the worker a fresh empty volume
+ * where the run directory should be: `harvest` then reads an empty `/outbox`
+ * and reports a task that produced artifacts as having produced none. Nothing
+ * throws, which puts it in the same class as the divergence this module's
+ * first rule exists to prevent.
+ *
+ * A leading `~` is expanded for the same reason and one more: nothing but a
+ * shell expands it, so `~/runs` works when typed at a prompt and fails when
+ * set from a launcher, a config file, or the detached daemon's env — which
+ * are the three ways this variable is actually set. Expansion follows
+ * `expandPath` in `config/load.ts`, the convention every other path in this
+ * codebase already uses; a relative value resolves against the cwd, because
+ * unlike a config path there is no document for it to be relative TO.
+ *
+ * Resolving HERE rather than at the call sites is what makes it hold: `up`
+ * hands this exact string to the detached daemon as its `PIFLEET_RUNS_DIR`
+ * and to each supervisor as `--runs-root`, and a relative value would
+ * otherwise re-resolve against whatever cwd those inherit — a second answer
+ * to the question this module exists to make singular.
+ */
 export function runsRoot(env: Record<string, string | undefined> = process.env): string {
-  return env["PIFLEET_RUNS_DIR"] ?? join(homedir(), ".pifleet", "runs");
+  const configured = env["PIFLEET_RUNS_DIR"];
+  // An exported-but-cleared variable arrives as "", which `??` passed
+  // through; `join("", runId)` is then relative, i.e. the named-volume case
+  // with nothing in the path to suggest a variable was ever set.
+  if (configured === undefined || configured === "") return join(homedir(), ".pifleet", "runs");
+  if (configured === "~") return homedir();
+  if (configured.startsWith("~/")) return resolve(homedir(), configured.slice(2));
+  return resolve(configured);
 }
 
 /**

@@ -11,8 +11,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { stringify } from "yaml";
 import { exitCodeForError } from "../../src/cli/index.ts";
 import { imageStatus } from "../../src/cli/commands/doctor.ts";
@@ -406,9 +406,12 @@ describe("docker argv (SRD §5.6)", () => {
       (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
     });
     const eng = await renderWorker(loaded, "eng-1");
-    expect(eng.docker).toContain(
-      `${join(runsDir, "dry", "workers", "eng-1", "kubeconfig")}:/home/pi/.kube/config:ro`,
-    );
+    // Against `WorkerPaths.kubeconfig`, not a string rebuilt here. The
+    // credential mount is the one run-dir path this file used to spell out
+    // literally, which made it the one path that could drift out of
+    // `run/paths.ts` with this test still green (ISC-188).
+    const kubeconfig = workerPaths(runPaths("dry", runsDir), "eng-1").kubeconfig;
+    expect(eng.docker).toContain(`${kubeconfig}:/home/pi/.kube/config:ro`);
     const rev = await renderWorker(loaded, "rev-1"); // no cloud_access
     expect(rev.docker.some((a) => a.includes("/.kube/"))).toBe(false);
   });
@@ -459,12 +462,21 @@ describe("the run directory is computed once (ISC-188)", () => {
   });
 
   /**
-   * The four paths the criterion names, each against the helper the OTHER side
-   * of its contract uses — not against a string rebuilt here, which would only
-   * assert that two `join()` calls in this file agree.
+   * Every run-dir path the criterion names, each against the helper the OTHER
+   * side of its contract uses — not against a string rebuilt here, which would
+   * only assert that two `join()` calls in this file agree.
+   *
+   * Cloud access is on so the kubeconfig is among them. It is the path that
+   * makes the point: while it was asserted as a literal `join(...)` it was the
+   * one member of this set that could drift out of `run/paths.ts` with this
+   * block still passing, which is the same "green test over a divergence"
+   * shape the criterion exists to close.
    */
-  test("outbox, skills, env and briefing come from run/paths.ts", async () => {
-    const { runsDir, loaded } = await fixture();
+  test("outbox, skills, sessions, env, briefing, policy and kubeconfig come from run/paths.ts", async () => {
+    const { runsDir, loaded } = await fixture((doc) => {
+      doc["cloud"] = { adc: true, kubeconfig: "./kube/filtered.yaml" };
+      (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+    });
     const r = await renderWorker(loaded, "eng-1");
 
     const run = runPaths("dry", runsDir);
@@ -475,6 +487,7 @@ describe("the run directory is computed once (ISC-188)", () => {
     expect(r.docker[r.docker.indexOf("--env-file") + 1]).toBe(worker.envFile);
     expect(r.docker).toContain(`${worker.systemAppendMd}:${BRIEFING_MOUNT}:ro`);
     expect(r.docker).toContain(`${worker.cloudAllow}:/policy/cloud-allow:ro`);
+    expect(r.docker).toContain(`${worker.kubeconfig}:/home/pi/.kube/config:ro`);
     expect(r.systemAppend!.hostPath).toBe(worker.systemAppendMd);
   });
 
@@ -533,6 +546,77 @@ describe("the run directory is computed once (ISC-188)", () => {
     expect(after.docker).not.toEqual(before.docker);
     expect(after.docker.map((a) => a.replaceAll(moved, runsDir))).toEqual(before.docker);
     expect(after.docker.some((a) => a.includes(runsDir))).toBe(false);
+  });
+
+  /**
+   * Computing the runs root once is only half the guarantee: the value it
+   * computes must also be one `docker run -v` will accept.
+   *
+   * `PIFLEET_RUNS_DIR` is operator input and was returned verbatim, so a
+   * relative or `~`-prefixed value reached the mount table unresolved. Docker
+   * does not reject that — a `-v` source with no leading `/` is a NAMED
+   * VOLUME, so the worker gets a fresh empty volume where the run directory
+   * should be, `harvest` reads an empty `/outbox`, and a task that produced
+   * artifacts is reported as having produced none. `runStateHostPaths` above
+   * encodes the same rule, dropping any host path that does not start with
+   * "/" as a named volume, which is why the count assertion below is the
+   * whole test.
+   *
+   * `~` is worse still: nothing but a shell expands it, so it works when
+   * typed at a prompt and fails when set from a launcher, a config file, or
+   * the detached daemon's env — the three ways this variable is actually set.
+   */
+  describe("the runs root is canonicalized to an absolute path", () => {
+    test("a ~-prefixed value expands, as every other path in the config does", () => {
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "~/fleet-runs" })).toBe(join(homedir(), "fleet-runs"));
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "~" })).toBe(homedir());
+    });
+
+    test("a relative value resolves rather than reaching docker as a named volume", () => {
+      const got = runsRoot({ PIFLEET_RUNS_DIR: "relative/runs" });
+      expect(isAbsolute(got)).toBe(true);
+      expect(got).toBe(resolve("relative/runs"));
+    });
+
+    test("an unset or empty value falls back to the documented default", () => {
+      const fallback = join(homedir(), ".pifleet", "runs");
+      expect(runsRoot({})).toBe(fallback);
+      // An exported-but-cleared variable arrives as "", which `??` passes
+      // through: `join("", runId)` is then a RELATIVE path, i.e. the
+      // named-volume case again, and with no clue in it that a var was set.
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "" })).toBe(fallback);
+    });
+
+    test("an already-absolute value is normalized, not rewritten", () => {
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "/srv/pifleet/runs" })).toBe("/srv/pifleet/runs");
+      expect(runsRoot({ PIFLEET_RUNS_DIR: "/srv/pifleet/./runs/" })).toBe("/srv/pifleet/runs");
+    });
+
+    /**
+     * The end-to-end form. The cases above pin the helper; this one pins what
+     * reaches `docker run`, which is where the failure was reproduced.
+     */
+    test("every rendered host path stays absolute under a relative runs root", async () => {
+      const { loaded } = await fixture((doc) => {
+        doc["cloud"] = { adc: true, kubeconfig: "./kube/filtered.yaml" };
+        (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+      });
+      const saved = process.env["PIFLEET_RUNS_DIR"];
+      process.env["PIFLEET_RUNS_DIR"] = "relative-runs";
+      try {
+        const r = await renderWorker(loaded, "eng-1");
+        expect(isAbsolute(r.runDir)).toBe(true);
+        const hostPaths = runStateHostPaths(r.docker);
+        // Six mounts plus the env file. Unresolved, they are not absolute and
+        // `runStateHostPaths` drops them as named volumes — so this count is
+        // the assertion, and it read 0 before the root was canonicalized.
+        expect(hostPaths.length).toBe(7);
+        for (const p of hostPaths) expect(isAbsolute(p)).toBe(true);
+      } finally {
+        if (saved === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+        else process.env["PIFLEET_RUNS_DIR"] = saved;
+      }
+    });
   });
 });
 

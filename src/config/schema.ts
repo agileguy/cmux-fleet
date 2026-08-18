@@ -16,7 +16,7 @@
  */
 
 import { z } from "zod";
-import { workerId } from "../contracts.ts";
+import { SESSION_ID_RE, workerId } from "../contracts.ts";
 import { ruleHostError } from "../security/egress.ts";
 
 // ---------------------------------------------------------------------------
@@ -315,6 +315,27 @@ export const FleetConfigSchema = z
       }
       seen.add(w.id);
     });
+
+    // A role name is a MOUNT PATH SEGMENT, not merely a label. `roleSkillsDir`
+    // joins it into the host directory mounted read-only at `/skills` in every
+    // worker of that role (SRD §5.5), and nothing between this document and the
+    // `-v` flag inspected it — so a role named `../../../../../../etc` resolved
+    // to the host's `/etc`, and both `render` and `up` mounted it into the
+    // container. The name is refused here, where it enters the system, rather
+    // than sanitized at the join: a name that cannot be spelled cannot escape.
+    //
+    // Constrained to the grammar worker ids already use: one segment, no
+    // separator, and — because it must both begin and end alphanumeric —
+    // unable to spell `.` or `..`.
+    for (const name of Object.keys(cfg.roles)) {
+      if (!SESSION_ID_RE.test(name) || name.length > 64) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["roles", name],
+          message: `invalid role name "${name}" — a role name becomes a mount path segment (it is joined into the host /skills directory), so it must be 1-64 characters of letters, digits, ".", "_" or "-", beginning and ending alphanumeric`,
+        });
+      }
+    }
 
     // ISC-59: `read_only: true` combined with `bash` in the MERGED tool set.
     // Checked at the level that completes the combination, so the error points

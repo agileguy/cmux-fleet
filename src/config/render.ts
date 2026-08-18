@@ -135,7 +135,15 @@ export function buildDockerArgv(
     hasBriefing: boolean;
   },
 ): string[] {
-  const { docker, run, cloud } = loaded.config;
+  // `loaded.config.run` is deliberately NOT destructured here, and no local is
+  // named `run`. The config's run section and the `RunPaths` in `opts.run` are
+  // different objects that BOTH carry a `.root`, so a binding named `run`
+  // would leave the wrong one one keystroke away from every mount below —
+  // `join(run.root, "outbox", w.id)` would compile, typecheck, and silently
+  // restore the exact divergence this function was rewritten to close
+  // (ISC-188). With the name unbound, that line does not compile at all. The
+  // single field this function needs from the section is read at its use site.
+  const { docker, cloud } = loaded.config;
   const argv: string[] = ["docker", "run", "-i", "--rm"];
   argv.push("--name", `pifleet-${opts.run.runId}-${w.id}`);
   argv.push("--user", "10001:10001");
@@ -153,7 +161,12 @@ export function buildDockerArgv(
 
   // Mount table (SRD §5.5). Nothing else is mounted — notably not the main
   // checkout, ~/.ssh, ~/.env, the host ~/.config/gcloud, or the Docker socket.
-  const repo = expandPath(run.repo, loaded.dir);
+  //
+  // `run.repo` is the one host path in this function that config legitimately
+  // names — it is the operator's checkout, not a run-dir path. It is read at
+  // its use site rather than through a local; see the destructure above for
+  // why nothing in this function is named `run`.
+  const repo = expandPath(loaded.config.run.repo, loaded.dir);
   switch (w.isolation) {
     case "worktree":
       argv.push("-v", `${join(repo, ".worktrees", w.id)}:/workspace`);
