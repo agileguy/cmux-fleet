@@ -251,6 +251,13 @@ describe("a version below the floor is diagnosed as one (ISC-159)", () => {
    * capability probe already refuses to make — but the message says the floor
    * could not be VERIFIED, not that it was violated, because those are
    * different things and only one of them is known.
+   *
+   * The class is `misconfigured`, not `wrong-version`. Nothing parsed, so
+   * nothing lost a comparison and the tool may be perfectly current; what is
+   * known is that `git` on this PATH does not answer with a banner pifleet
+   * recognises. The message has always ended "check what `git` resolves to on
+   * PATH", which is a configuration fix — tagging that `wrong-version` sent
+   * an operator filtering on the class to upgrade on no evidence at all.
    */
   test("an unreadable version banner is reported as unverified, not as a pass", async () => {
     const bin = await shimBin({ docker: healthyDocker("28.0.1"), git: script('echo "git version unknown"') });
@@ -258,8 +265,12 @@ describe("a version below the floor is diagnosed as one (ISC-159)", () => {
 
     expect(r.code).toBe(EXIT.BACKEND_UNAVAILABLE);
     const d = findDiagnosis(r, "git-version-unreadable");
-    expect(d.class).toBe("wrong-version");
+    expect(d.class).toBe("misconfigured");
     expect(d.message).toContain("2.32.0");
+    // The distinction that makes the retag worth having: an unverifiable
+    // banner must not appear anywhere in the "upgrade something" bucket.
+    expect(r.json.diagnosis_classes).toContain("misconfigured");
+    expect(r.json.diagnosis_classes).not.toContain("wrong-version");
   });
 
   test("a required binary at or above its floor produces no diagnosis", async () => {
@@ -323,6 +334,47 @@ describe("the three classes are distinguishable without being separate exit code
     expect(out[1]).toContain("DIAGNOSIS [absent-daemon]");
     expect(out[2]).toContain("DIAGNOSIS [wrong-version]");
   });
+
+  /**
+   * `diagnosis_classes` is an ARRAY because one run can trip several classes
+   * at once — which is the stated reason the exit code refuses to encode the
+   * class at all. Every other case here drives exactly one fault, so the
+   * multi-class shape the field exists for was asserted nowhere: an
+   * implementation that reported only the first class found, or that let the
+   * last diagnosis overwrite the earlier one, passed the entire suite.
+   */
+  test("one run carries every class it found, deduplicated and sorted", async () => {
+    const bin = await shimBin({
+      docker: daemonlessDocker("28.0.1"), // absent-daemon
+      git: script('echo "git version 2.20.1"'), // wrong-version
+    });
+    const r = await doctor(bin);
+
+    expect(r.code, `stderr: ${r.stderr.slice(0, 600)}`).toBe(EXIT.BACKEND_UNAVAILABLE);
+    // Both findings survive, each keeping its own remediation.
+    expect(findDiagnosis(r, "docker-daemon-unreachable").class).toBe("absent-daemon");
+    expect(findDiagnosis(r, "git-version-below-minimum").class).toBe("wrong-version");
+    expect(r.json.diagnosis_classes).toEqual(["absent-daemon", "wrong-version"]);
+  });
+
+  /**
+   * The same shape with `misconfigured` in it — the class that had no coverage
+   * of its own at all. A stopped daemon beside a git whose banner will not
+   * parse: two findings, two classes, one exit code, neither erased by the
+   * other, and the unparseable banner NOT filed under "upgrade something".
+   */
+  test("a misconfigured finding coexists with another class", async () => {
+    const bin = await shimBin({
+      docker: daemonlessDocker("28.0.1"), // absent-daemon
+      git: script('echo "git version unknown"'), // misconfigured
+    });
+    const r = await doctor(bin);
+
+    expect(r.code, `stderr: ${r.stderr.slice(0, 600)}`).toBe(EXIT.BACKEND_UNAVAILABLE);
+    expect(r.json.diagnoses).toHaveLength(2);
+    expect(r.json.diagnosis_classes).toEqual(["absent-daemon", "misconfigured"]);
+    expect(findDiagnosis(r, "git-version-unreadable").class).toBe("misconfigured");
+  });
 });
 
 /**
@@ -361,5 +413,84 @@ describe("an optional tool's floor is reported, not enforced", () => {
 
     expect(r.code).toBe(EXIT.SUCCESS);
     expect(r.json.backends["tmux"]).toBe(true);
+  });
+
+  /**
+   * A tmux that is present and working must not disappear from the report.
+   *
+   * `backends.tmux` gated on `floor?.status === "ok"`, which folded the third
+   * status, `unreadable`, in with `below` and withdrew the backend. Nothing
+   * announced it: `floorDiagnosis` returns null for an optional tool, so the
+   * run pushed no finding and exited 0. The operator was told the tmux backend
+   * was unavailable and given no sentence anywhere in the report saying why —
+   * strictly worse than the merge ISC-159 set out to undo, because at least a
+   * merged diagnosis is a diagnosis.
+   *
+   * `tmux master` is what makes this concrete rather than theoretical: a tmux
+   * built from git prints exactly that, and it is NEWER than every numbered
+   * release. `TmuxBackend.probe()` keeps the banner token as a string and so
+   * reports `ok: true` for it — meaning `doctor` called a tmux dead that
+   * `up --backend tmux` then drove without complaint.
+   */
+  test("an unparseable tmux banner keeps the backend rather than silently dropping it", async () => {
+    const bin = await shimBin({
+      docker: healthyDocker("28.0.1"),
+      git: HEALTHY_GIT,
+      tmux: script('echo "tmux master"'),
+    });
+    const r = await doctor(bin);
+
+    expect(r.code, `stderr: ${r.stderr.slice(0, 600)}`).toBe(EXIT.SUCCESS);
+    // The regression itself. Absence of evidence that tmux is stale is not
+    // evidence that it is — and this binary is ahead of the floor, not behind.
+    expect(r.json.backends["tmux"]).toBe(true);
+
+    const tmux = r.json.probes.find((p) => p.name === "tmux");
+    expect(tmux?.ok).toBe(true);
+    // `unreadable` must survive as its own status all the way into the report;
+    // if it ever reads `below` here the gate has been re-collapsed upstream.
+    expect(tmux?.floor).toEqual({ min: "2.4.0", status: "unreadable" });
+
+    // No verdict may be reached without a sentence for it. The verdict here is
+    // "keep the backend", so the correct report is an empty one.
+    expect(r.json.diagnoses).toEqual([]);
+  });
+
+  /**
+   * The two non-`ok` floor statuses, side by side, reaching OPPOSITE verdicts.
+   *
+   * Pinned together in one test because the bug was precisely that they
+   * converged. Everything else about these two runs matches — same optional
+   * tool, same exit, same empty diagnosis list — so `backends.tmux` is the
+   * only thing distinguishing "confirmed too old to drive" from "cannot tell,
+   * and no reason to doubt it", and it has to keep doing so.
+   */
+  test("unreadable and below-the-floor reach opposite backend verdicts", async () => {
+    const [unreadable, below] = await Promise.all([
+      doctor(
+        await shimBin({
+          docker: healthyDocker("28.0.1"),
+          git: HEALTHY_GIT,
+          tmux: script('echo "tmux master"'),
+        }),
+      ),
+      doctor(
+        await shimBin({
+          docker: healthyDocker("28.0.1"),
+          git: HEALTHY_GIT,
+          tmux: script('echo "tmux 1.8"'),
+        }),
+      ),
+    ]);
+
+    expect(unreadable.json.backends["tmux"]).toBe(true);
+    expect(below.json.backends["tmux"]).toBe(false);
+
+    // Neither fails the run — tmux is optional, and this fix does not change
+    // that. The difference is confined to which backends are on offer.
+    expect(unreadable.code).toBe(EXIT.SUCCESS);
+    expect(below.code).toBe(EXIT.SUCCESS);
+    expect(unreadable.json.diagnoses).toEqual([]);
+    expect(below.json.diagnoses).toEqual([]);
   });
 });

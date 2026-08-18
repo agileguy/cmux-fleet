@@ -1229,6 +1229,32 @@ unknowable, so neither is ever followed by a floor verdict. An *unparseable* ban
 third status (`unreadable`), reported as "could not verify the minimum" rather than as a
 pass or as a violation, since only one of those is known.
 
+`unreadable` only pays for itself if every consumer honours all three states, and two
+places initially did not — both caught in review and fixed:
+
+- **`backends.tmux` gated on `floor?.status === "ok"`**, folding `unreadable` in with
+  `below` and withdrawing the backend. Because `floorDiagnosis` returns null for an
+  optional tool, nothing was pushed to explain it: a working tmux vanished from
+  `backends` with no finding anywhere in the report and an exit of 0. `tmux master` —
+  what a git-built tmux prints, and *newer* than every numbered release — landed there,
+  while `TmuxBackend.probe()` reported the same binary `ok: true`, so `doctor` called a
+  tmux dead that `up --backend tmux` drove without complaint. The gate now tests
+  `!== "below"`: only a version that actually parsed and actually lost the comparison is
+  evidence enough to withdraw a backend.
+- **The `unreadable` diagnosis was tagged `wrong-version`**, contradicting the
+  remediation it shipped with. It is `misconfigured`: nothing parsed, so nothing lost a
+  comparison and the tool may be current — what is known is that the name does not
+  resolve to something answering with a recognisable banner, which is a property of the
+  environment. Wrapper scripts, shims and version managers land here.
+
+`doctor`'s banner parser is renamed `parseVersionTriple`, because
+`backends/tmux/argv.ts` exports its own `parseVersion` over the same tmux banner
+answering a different question (raw token for display and a present/absent test, versus
+numbers for a comparison). They legitimately disagree on `tmux master` — `"master"` there,
+`null` here — and two same-named exports that disagree on one input is how a later
+"de-duplicate these" pass deletes the wrong one. Unifying them is a larger change and is
+deliberately not attempted here.
+
 Observed, per class, driven through PATH shims with `PATH` set to the shim dir **alone**
 so the developer's own binaries cannot answer a probe
 (`test/integration/doctor-diagnoses.test.ts`):
@@ -1241,10 +1267,22 @@ so the developer's own binaries cannot answer a probe
   client version found and says to start Docker; `missing-binary` absent from the classes.
 - *wrong-version*: `git version 2.20.1` → exit 3, `git-version-below-minimum`, message
   carries both 2.20.1 and 2.32.0. Docker `20.10.24` → `docker-version-below-minimum`.
-  `git version unknown` → `git-version-unreadable`.
+- *misconfigured*: `git version unknown` → exit 3, `git-version-unreadable`, with
+  `misconfigured` in `diagnosis_classes` and `wrong-version` asserted **absent** — the
+  fix the message names ("check what `git` resolves to on PATH") is a PATH change, not
+  an upgrade, and an operator filtering on `wrong-version` must not be sent here.
 - *control*: docker 23.0.0 + git 2.32.0 exactly at the floors → exit 0, zero diagnoses.
 - *optional floor*: `tmux 1.8` → exit 0, zero diagnoses, `backends.tmux: false`, probe
-  detail naming 2.4.0; `tmux 3.6a` → `backends.tmux: true`.
+  detail naming 2.4.0; `tmux 3.6a` → `backends.tmux: true`. `tmux master` — unparseable,
+  and newer than every numbered release — → exit 0, zero diagnoses, floor status
+  `unreadable`, and `backends.tmux: **true**`: a backend is withdrawn only on confirmed
+  evidence of staleness, never on the absence of evidence. The two non-`ok` statuses are
+  additionally asserted side by side reaching opposite verdicts, since the bug was
+  precisely that they converged.
+- *multi-class*: a single run tripping a dead daemon beside a below-floor git yields
+  `["absent-daemon", "wrong-version"]`, and beside an unparseable git
+  `["absent-daemon", "misconfigured"]` — the array shape `diagnosis_classes` exists for,
+  and which every single-fault case above leaves unexercised.
 - All three classes asserted to share exit 3 while yielding three distinct messages and
   three distinct `diagnosis_classes` — the decision above pinned as a test, not left
   incidental. The human-readable branch is asserted separately from `--json`, since it is

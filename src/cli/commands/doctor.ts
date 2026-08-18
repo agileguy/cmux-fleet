@@ -140,8 +140,17 @@ const VERSION_FLOORS: Readonly<Record<string, string>> = {
  * A two-field banner reads as patch `0`. tmux's point releases are letters
  * (`3.6a` is a patch of `3.6`), so this can only ever under-report a version,
  * which is the safe direction for a floor.
+ *
+ * Named `…Triple` because `backends/tmux/argv.ts` exports its own
+ * `parseVersion` over the SAME tmux banner, answering a different question:
+ * it returns the raw token (`"3.6a"`, `"master"`) for display and for a
+ * present/absent test, where this one returns numbers for a comparison. On
+ * `tmux master` they legitimately disagree — `"master"` there, `null` here —
+ * and while both are right for their own caller, two same-named exports that
+ * disagree on one input is how a later "de-duplicate these" pass deletes the
+ * wrong one. Distinct names make that pass read the difference first.
  */
-export function parseVersion(raw: string): [number, number, number] | null {
+export function parseVersionTriple(raw: string): [number, number, number] | null {
   const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(raw);
   if (m === null) return null;
   return [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
@@ -155,8 +164,8 @@ export function parseVersion(raw: string): [number, number, number] | null {
  * so that is a live bug rather than a hypothetical one.
  */
 export function versionAtLeast(raw: string, min: string): boolean | null {
-  const got = parseVersion(raw);
-  const want = parseVersion(min);
+  const got = parseVersionTriple(raw);
+  const want = parseVersionTriple(min);
   if (got === null || want === null) return null;
   for (let i = 0; i < 3; i += 1) {
     const g = got[i] ?? 0;
@@ -265,9 +274,23 @@ function floorDiagnosis(p: Probe): Diagnosis | null {
       message: `${p.name} ${got} is below the ${p.floor.min} minimum pifleet requires — upgrade ${p.name} to >= ${p.floor.min} and re-run`,
     };
   }
+  /**
+   * `misconfigured`, not `wrong-version`.
+   *
+   * `wrong-version` means "present, below the floor" — a real, parsed number
+   * that lost a comparison, whose fix is an upgrade. Nothing was parsed here,
+   * so nothing lost a comparison: the tool may well be current. What is known
+   * is that the probed name on this PATH does not answer with a version banner
+   * pifleet recognises, which is a property of the environment rather than of
+   * the tool's release. The message has always ended "check what `x` resolves
+   * to on PATH" — a configuration change, which is this class's definition —
+   * so the tag was contradicting the remediation it shipped with, and an
+   * operator filtering on `wrong-version` was being sent to upgrade on no
+   * evidence. Wrapper scripts, shims and version managers land here.
+   */
   return {
     name: `${p.name}-version-unreadable`,
-    class: "wrong-version",
+    class: "misconfigured",
     message: `${p.name} reported a version pifleet could not parse ("${got}"), so the >= ${p.floor.min} minimum could not be verified — check what \`${p.name}\` resolves to on PATH`,
   };
 }
@@ -672,7 +695,7 @@ export function register(program: Command): void {
        * probe failed. Whichever a reader believed, one of them was lying.
        */
       /**
-       * A below-floor tmux is not a tmux backend.
+       * A below-floor tmux is not a tmux backend. An UNVERIFIABLE one still is.
        *
        * This is where the optional floors land instead of in `diagnoses`. An
        * absent tmux has always answered `false` here without failing the run;
@@ -681,11 +704,28 @@ export function register(program: Command): void {
        * failure `doctor` exists to prevent. `ok` is left alone deliberately —
        * flipping it would re-conflate "not installed" with "too old", the
        * exact merge ISC-159 is about.
+       *
+       * The test is `!== "below"` and NOT `=== "ok"`, which is the whole point
+       * of `unreadable` being a third status. `=== "ok"` folds `unreadable` in
+       * with `below` and withdraws the backend — but `floorDiagnosis` returns
+       * null for an optional tool, so nothing is pushed to `diagnoses` to say
+       * why. A working tmux therefore vanished from `backends` with no finding
+       * anywhere in the report and an exit of 0: the operator is told the
+       * backend is unavailable, and given no sentence explaining it.
+       *
+       * A git-built tmux prints `tmux master`, which has no dotted numeric run
+       * and so parses to null here. That is not evidence the binary is stale —
+       * it is newer than every numbered release. `TmuxBackend.probe()` agrees
+       * and reports `ok: true` for it (it keeps the banner token as a string
+       * rather than comparing it), so the `=== "ok"` gate had `doctor` calling
+       * a tmux dead that `up --backend tmux` then drove perfectly well. Only a
+       * confirmed `below` — a version that actually parsed and actually lost
+       * the comparison — is evidence enough to withdraw a backend.
        */
       const tmuxProbe = probes.find((p) => p.name === "tmux");
       const backends = {
         cmux: cmux.probe.ok && !cmux.probeFailed && cmux.missingCommands.length === 0,
-        tmux: tmuxProbe?.ok === true && tmuxProbe.floor?.status === "ok",
+        tmux: tmuxProbe?.ok === true && tmuxProbe.floor?.status !== "below",
         headless: true, // always available — the acceptance suite runs on it
       };
 

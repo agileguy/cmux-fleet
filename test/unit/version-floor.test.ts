@@ -16,11 +16,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseVersion, versionAtLeast } from "../../src/cli/commands/doctor.ts";
+import { parseVersionTriple, versionAtLeast } from "../../src/cli/commands/doctor.ts";
 
-describe("parseVersion reads the banner each tool actually prints", () => {
+describe("parseVersionTriple reads the banner each tool actually prints", () => {
   test("git's `git version X.Y.Z`", () => {
-    expect(parseVersion("git version 2.43.0")).toEqual([2, 43, 0]);
+    expect(parseVersionTriple("git version 2.43.0")).toEqual([2, 43, 0]);
   });
 
   /**
@@ -28,7 +28,7 @@ describe("parseVersion reads the banner each tool actually prints", () => {
    * the version; everything after it is noise that must not reach the parse.
    */
   test("a vendor suffix does not change the parse", () => {
-    expect(parseVersion("git version 2.39.5 (Apple Git-154)")).toEqual([2, 39, 5]);
+    expect(parseVersionTriple("git version 2.39.5 (Apple Git-154)")).toEqual([2, 39, 5]);
   });
 
   /**
@@ -37,12 +37,12 @@ describe("parseVersion reads the banner each tool actually prints", () => {
    * only ever under-report — the safe direction for a floor check.
    */
   test("tmux's two-field banner with a letter suffix", () => {
-    expect(parseVersion("tmux 3.6a")).toEqual([3, 6, 0]);
-    expect(parseVersion("tmux 3.4")).toEqual([3, 4, 0]);
+    expect(parseVersionTriple("tmux 3.6a")).toEqual([3, 6, 0]);
+    expect(parseVersionTriple("tmux 3.4")).toEqual([3, 4, 0]);
   });
 
   test("docker's bare `{{.Server.Version}}`", () => {
-    expect(parseVersion("28.0.1")).toEqual([28, 0, 1]);
+    expect(parseVersionTriple("28.0.1")).toEqual([28, 0, 1]);
   });
 
   /**
@@ -50,11 +50,19 @@ describe("parseVersion reads the banner each tool actually prints", () => {
    * with no dotted numeric run yields null so the caller can say "could not
    * verify" instead of inventing a comparison — `doctor`'s shims and any
    * wrapper script land here.
+   *
+   * `tmux master` is the one to keep in mind when reading a null: a tmux built
+   * from git prints it, and that binary is NEWER than every numbered release,
+   * not older. Null means "no comparison was possible", never "the comparison
+   * failed" — a caller that treats the two alike withdraws the tmux backend
+   * from a machine whose tmux is ahead of the floor, which is what
+   * `doctor`'s `backends.tmux` gate did until it was changed to test for a
+   * confirmed `below` rather than for `=== "ok"`.
    */
   test("a banner with no version in it is null, not a guess", () => {
-    expect(parseVersion("{}")).toBeNull();
-    expect(parseVersion("")).toBeNull();
-    expect(parseVersion("tmux master")).toBeNull();
+    expect(parseVersionTriple("{}")).toBeNull();
+    expect(parseVersionTriple("")).toBeNull();
+    expect(parseVersionTriple("tmux master")).toBeNull();
   });
 });
 
