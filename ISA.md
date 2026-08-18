@@ -253,7 +253,7 @@ suite green on `headless` against a test double.
 ### Group K — Backends
 
 - [x] ISC-128: The full acceptance suite passes on `headless` with cmux not running.
-- [ ] ISC-129: `up` on the cmux backend creates one workspace and N panes, each showing its worker id and live activity.
+- [ ] ISC-129: `up` on the cmux backend creates one workspace and N panes, each showing its worker id and live activity. Workspace/panes ARE created against a live cmux 0.64.22; the viewer attach fails (`respawn-pane: Surface not found`) because this backend addresses panes by raw UUID and 0.64.22 only resolves `--surface` by ref (`surface:N`) — a version regression from the SRD's 0.64.20 baseline, not a socket-access problem. See `## Verification`, Phase 4 close-out, 2026-08-18 addendum.
 - [x] ISC-130: `attach --worker eng-2` focuses that pane.
 - [x] ISC-131: With the cmux socket unreachable, `up` exits 3 with a named diagnosis or falls back to `tmux`.
 - [x] ISC-132: `doctor` reports `read-screen` availability, and the run succeeds identically either way.
@@ -598,7 +598,21 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   tested but its checkbox never flipped, and that ISC-22 had been checked despite not meeting
   its own "every module" wording — both are on the orchestrator, not either engineer, and both
   are now fixed. All fixes and citations are in `## Verification`, "PR #7 review round."
-- **2026-07-27 — scratch directories that get bind-mounted live under `$HOME`, never `os.tmpdir()`.**
+- **2026-08-18 — "the cmux socket refuses every call from outside a pane" turned out to be the
+  wrong reason ISC-129 was open — the real one is a cmux version regression.** Two prior
+  close-out notes (Phase 4, Phase 6) both explained ISC-129 as blocked purely by
+  `socketControlMode: cmuxOnly` refusing non-pane callers, with the fix being "run from inside a
+  pane" — carried forward unquestioned for three phases. Actually configuring `password` mode
+  (per `Docs/SRD.md` §4.1, which says this is pifleet's own intended mode) and driving a real
+  `pifleet up --backend cmux` from an ordinary shell showed the socket access story was correct
+  and irrelevant: `doctor` reports `backends.cmux: true`, a workspace and both panes get
+  created, and the run fails somewhere else entirely — `respawn-pane`'s surface addressing,
+  which changed between cmux 0.64.20 (the SRD's verified baseline) and 0.64.22 (installed here).
+  **Learned: an unreachable-in-principle diagnosis and an actually-tried-and-found-broken
+  diagnosis look identical in a checkbox list, and only the second one tells the next person
+  what to fix.** Three phases of ISA notes described a plausible blocker that nobody had
+  actually tested since 0.64.20. Full reproduction and the exact fix scope are in
+  `## Verification`, "Phase 4 close-out," under the 2026-08-18 addendum to ISC-129.
   Measured on this machine: Colima shares `$HOME` and shares neither `/tmp` nor
   `/var/folders/...`. An unshared `-v` source does not error — the daemon mounts an empty
   directory in its place. `image verify` therefore failed on a perfectly good image, and the
@@ -753,10 +767,59 @@ than an idle `bash`, and a line appended to the event stream appears on screen
 (`pane-viewer.test.ts`, four tests; reverting the `attachViewer` call fails
 three). `events.jsonl` was chosen by measurement — `supervisor.log` was 0 bytes
 across a whole run, which would have produced a technically-live, permanently
-empty pane. The criterion names the **cmux** backend specifically, and cmux's
-`socketControlMode` is `cmuxOnly`, so its socket refuses every call from
-outside a pane and no live cmux run is possible from a normal shell. Claiming
-it needs a run from inside a cmux pane. It stays unchecked until then.
+empty pane. The criterion names the **cmux** backend specifically.
+
+**2026-08-18 — actually run against a live cmux 0.64.22, and it's broken, not
+merely unreachable.** The `cmuxOnly` socket restriction turned out not to be
+the real blocker: `automation.socketControlMode: "password"` in
+`~/.config/cmux/cmux.json` plus a password set once through cmux's own
+Settings UI (the JSON's own `socketPassword` field is write-only from cmux's
+side — it gets stripped back out on reload/restart, the real credential lives
+in `~/.local/state/cmux/socket-control-password`) lets `cmux ping` return
+`PONG` from a completely ordinary shell. `doctor` then reports
+`backends.cmux: true` with zero diagnoses. So a live run is genuinely
+possible without a human sitting inside a pane — the SRD's own §4.1 already
+says as much.
+
+`pifleet up --backend cmux` against that live cmux DOES create a real
+workspace and one pane per worker — confirmed via `cmux workspace list` and
+`cmux list-panes`, both panes present, workspace titled `pifleet-<run-id>`.
+But **both workers logged `viewer_failed`** in `ledger/cli-up.jsonl`:
+`Error: Surface not found: <uuid>` from `respawn-pane`, moments after
+`createPane` returned that exact surface id. Reproduced by hand outside
+pifleet entirely — a clean four-way test:
+
+| `--workspace` | `--surface` | Result |
+|---|---|---|
+| omitted | raw UUID | `Surface not found: <uuid>` |
+| omitted | `surface:N` ref | `Surface ref not found: surface:N` |
+| raw UUID | raw UUID | `Surface not found: <uuid>` |
+| `workspace:N` ref | raw UUID | `Surface not found: <uuid>` |
+| `workspace:N` ref | `surface:N` ref | **`OK`** — respawns, `read-screen` shows the new command |
+
+On cmux 0.64.22, `--surface` only resolves through the workspace-relative
+`surface:N` ref form, paired with a ref-form `--workspace`; a raw UUID never
+resolves, no matter what accompanies it — contradicting both `cmux --help`
+("take a UUID, a short ref, or an index") and `Docs/SRD.md` §4.1, which was
+verified against 0.64.20. `respawnPaneArgv` (`src/backends/cmux/client.ts`)
+passes a bare surface UUID and no `--workspace` at all; so do
+`readScreenArgv` and `sendKeyArgv`, and `createPane`/`attachViewer`
+(`src/backends/cmux/index.ts`) track pane identity as a composed
+`"<paneUUID> <surfaceUUID>"` string throughout (`composePaneId`/
+`splitPaneId`, `src/backends/cmux/parse.ts`) — UUIDs are the addressing
+scheme everywhere in this backend, not refs. Fixing this for real means
+reworking that addressing scheme to carry/resolve ref-form ids (workspace
+index included), across every call site listed above, not a one-line patch —
+scoped as a real follow-up, not attempted live during this verification.
+
+`pifleet down` still tore the run down cleanly despite the viewer failures
+(pane presentation is deliberately non-fatal to a run, per this same
+criterion's own design), and closed the cmux workspace as part of teardown.
+
+**ISC-129 stays open — now for a much more specific reason than "no live
+pane was available."** It has one: cmux 0.64.22's `respawn-pane`/`read-screen`
+surface addressing changed since the SRD's 0.64.20 baseline, and pifleet's
+cmux backend needs the same update.
 
 Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
 ISC-254.
