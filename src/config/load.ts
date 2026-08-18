@@ -312,3 +312,53 @@ export function resolveWorker(loaded: LoadedConfig, id: string): ResolvedWorker 
 export function resolveAllWorkers(loaded: LoadedConfig): ResolvedWorker[] {
   return loaded.config.workers.map((w) => resolveWorker(loaded, w.id));
 }
+
+// ---------------------------------------------------------------------------
+// models_allowlist (SRD §5.9; ISC-52, ISC-190)
+// ---------------------------------------------------------------------------
+
+/** A worker resolved to a model `llm.models_allowlist` does not name. */
+export class ModelNotAllowedError extends ConfigError {
+  constructor(
+    readonly workerId: string,
+    readonly model: string,
+    readonly allowlist: readonly string[],
+  ) {
+    super(
+      `worker "${workerId}" resolves to model "${model}", which is not in ` +
+        `llm.models_allowlist [${allowlist.join(", ")}] — add it there, or point ` +
+        `the worker at a listed model`,
+    );
+    this.name = "ModelNotAllowedError";
+  }
+}
+
+/**
+ * Refuse a worker whose resolved model is not on `llm.models_allowlist`.
+ *
+ * The field has been in the schema since v2 and NOTHING read it, so a typo'd
+ * or deliberately-swapped `model:` started a worker exactly as if the operator
+ * had listed it — the allowlist was documentation. It is the fleet's statement
+ * about which models it has probed for native tool calls (§5.9), and a model
+ * nobody probed is one that may answer in prose: the cost of discovering that
+ * is an hour of a burnt run rather than a second of `up`.
+ *
+ * An EMPTY list constrains nothing. That is the schema default and the shape
+ * of every config that omits the key, so reading it as "no model may run"
+ * would refuse fleets nobody asked to refuse.
+ *
+ * Both sides are compared AFTER §6.1 decomposition, because `provider/` and
+ * `:thinking` are flags rather than part of a model's identity. A raw string
+ * compare breaks in both directions: `omlx/Qwen3:high` would be refused by a
+ * list that names `Qwen3`, and an entry written `omlx/Qwen3` could never match
+ * anything — a rule that silently denies what it was written to permit, which
+ * is the dead-rule shape `EgressRuleSchema` already refuses to ship.
+ */
+export function assertModelAllowed(loaded: LoadedConfig, worker: ResolvedWorker): void {
+  const allowlist = loaded.config.llm.models_allowlist;
+  if (allowlist.length === 0) return;
+  const fallback = loaded.config.llm.provider;
+  const permitted = allowlist.map((e) => decomposeModel(e, fallback, undefined).model);
+  if (permitted.includes(worker.model)) return;
+  throw new ModelNotAllowedError(worker.id, worker.model, allowlist);
+}

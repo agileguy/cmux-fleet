@@ -17,6 +17,7 @@ import { makeWorkerAccessible } from "../../container/mounts.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
 import {
   ConfigError,
+  assertModelAllowed,
   expandPath,
   parseConfig,
   resolveConfigPath,
@@ -167,6 +168,38 @@ export function register(program: Command): void {
         heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
         egressNetwork = loadedConfig.config.docker.network;
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
+
+        /**
+         * `models_allowlist` is ENFORCED here (ISC-190, ISC-52), before the
+         * daemon, before any pane, before any supervisor.
+         *
+         * The field had been in the schema since v2 with no reader, so the
+         * list was documentation: a worker pointed at an unlisted model
+         * started exactly as if the operator had listed it. §5.9 makes the
+         * allowlist the fleet's statement about which models it has probed
+         * for native tool calls, and the whole value of that statement is
+         * that it costs a second at `up` rather than an hour of a run that
+         * answers in prose.
+         *
+         * EVERY named worker is checked before ANY is launched. Refusing
+         * inside the launch loop would leave a half-started fleet behind the
+         * refusal, which is the state the check exists to avoid.
+         *
+         * A `--workers` id the config does not define is skipped rather than
+         * refused: Phase 1 `up` legitimately names ids that exist only as a
+         * `PIFLEET_PI_COMMAND` double, and those have no configured model to
+         * check. `ModelNotAllowedError` is a `ConfigError`, so it already
+         * carries exit 2 and needs no wrapping.
+         */
+        for (const workerId of workers) {
+          let resolved;
+          try {
+            resolved = resolveWorker(loadedConfig, workerId);
+          } catch {
+            continue;
+          }
+          assertModelAllowed(loadedConfig, resolved);
+        }
       }
 
       /**

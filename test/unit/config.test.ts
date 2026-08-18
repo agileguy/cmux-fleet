@@ -14,12 +14,15 @@ import { stringify } from "yaml";
 import {
   ConfigError,
   ConfigValidationError,
+  ModelNotAllowedError,
+  assertModelAllowed,
   decomposeModel,
   loadConfig,
   resolveAllWorkers,
   resolveWorker,
 } from "../../src/config/load.ts";
 import { parseDuration } from "../../src/config/schema.ts";
+import { EXIT } from "../../src/contracts.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -247,6 +250,76 @@ describe("merge: model decomposition (§6.1 exception 2)", () => {
     const typo = decomposeModel("SomeModel:hot", "omlx", "low");
     expect(typo.model).toBe("SomeModel:hot");
     expect(typo.thinking).toBe("low");
+  });
+});
+
+/**
+ * ISC-190 / ISC-52 — `models_allowlist` is ENFORCED, not merely accepted.
+ *
+ * The field has been in the schema since v2 and nothing read it, so a typo'd
+ * or deliberately-swapped model started a worker exactly as if the operator
+ * had listed it. The list is the fleet's statement about which models it has
+ * probed for native tool calls (SRD §5.9); an unlisted one is a model nobody
+ * checked, and finding out costs an hour of a run rather than a second of
+ * `up`.
+ */
+describe("models_allowlist is enforced (ISC-190)", () => {
+  /** Resolve `w1` under an allowlist, returning the assertion's outcome. */
+  async function check(allowlist: string[], model: string): Promise<Error | null> {
+    const doc = baseDoc();
+    doc["llm"] = { model: "DefaultModel", models_allowlist: allowlist };
+    doc["roles"] = { eng: { model } };
+    const loaded = await writeAndLoad(doc);
+    try {
+      assertModelAllowed(loaded, resolveWorker(loaded, "w1"));
+      return null;
+    } catch (err) {
+      return err as Error;
+    }
+  }
+
+  test("a model absent from a non-empty allowlist is refused", async () => {
+    const err = await check(["Allowed-A", "Allowed-B"], "Sneaky-C");
+    expect(err).toBeInstanceOf(ModelNotAllowedError);
+    // Actionable: which worker, which model, and what it could have been.
+    expect(err!.message).toContain("w1");
+    expect(err!.message).toContain("Sneaky-C");
+    expect(err!.message).toContain("Allowed-A");
+  });
+
+  // ISC-52 names the code, so it is asserted rather than assumed.
+  test("the refusal carries exit 2, the usage code", async () => {
+    const err = await check(["Allowed-A"], "Sneaky-C");
+    expect((err as ModelNotAllowedError).exitCode).toBe(EXIT.USAGE);
+  });
+
+  // The other half: a gate that refuses everything is not a gate.
+  test("a model ON the allowlist is permitted", async () => {
+    expect(await check(["Allowed-A", "Allowed-B"], "Allowed-B")).toBeNull();
+  });
+
+  /**
+   * The schema default. Every existing config omits the key, and turning that
+   * into "no model may run" would be a refusal nobody asked for.
+   */
+  test("an empty allowlist constrains nothing", async () => {
+    expect(await check([], "Anything-At-All")).toBeNull();
+  });
+
+  /**
+   * Both sides are compared AFTER §6.1 decomposition, because `provider/` and
+   * `:thinking` are flags rather than part of the model's identity. Comparing
+   * raw strings would break in both directions: a worker written
+   * `omlx/Allowed-A:high` would be refused by an allowlist that names it, and
+   * an entry written `omlx/Allowed-A` would be a rule that can never match —
+   * the dead-rule shape `EgressRuleSchema` already refuses to ship.
+   */
+  test("a decorated worker model matches a bare allowlist entry", async () => {
+    expect(await check(["Allowed-A"], "omlx/Allowed-A:high")).toBeNull();
+  });
+
+  test("a decorated allowlist entry is not a dead rule", async () => {
+    expect(await check(["omlx/Allowed-A:high"], "Allowed-A")).toBeNull();
   });
 });
 
