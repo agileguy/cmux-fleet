@@ -82,6 +82,16 @@ All notable changes to this project are documented here.
   one, the harvester now also compares the configured surface against the built-in
   defaults and records a discrepancy — visible in both the human report and `--json` —
   whenever narrowing the surface would have changed the verdict.
+- **A 16-worker e2e test proving no container-name collision, no port-collision surface,
+  and no worker starves another's event loop under load.** Found and fixed along the
+  way: the supervisor's completion-latency measurement was stamped from the dispatch
+  CLI subprocess's exit rather than the actual dispatch ack, so it silently included
+  `writeJsonAtomic`'s real fsync time in the "quiet" baseline — measurably wrong on an
+  idle machine (recorded latencies below a scripted delay that made them physically
+  impossible) and capable of a silent false-pass under real load. Latency is now derived
+  from the supervisor's own event log. Also fixed: a failed `up` no longer orphans all
+  16 detached supervisors — cleanup now runs regardless of whether `up`'s own result
+  could be parsed.
 
 ## [1.0.0] — 2026-07-28 — Phase 6: attended
 
