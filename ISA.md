@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 193/255
+progress: 194/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-17
@@ -253,7 +253,7 @@ suite green on `headless` against a test double.
 ### Group K — Backends
 
 - [x] ISC-128: The full acceptance suite passes on `headless` with cmux not running.
-- [ ] ISC-129: `up` on the cmux backend creates one workspace and N panes, each showing its worker id and live activity. Workspace/panes ARE created against a live cmux 0.64.22; the viewer attach fails (`respawn-pane: Surface not found`) because this backend addresses panes by raw UUID and 0.64.22 only resolves `--surface` by ref (`surface:N`) — a version regression from the SRD's 0.64.20 baseline, not a socket-access problem. See `## Verification`, Phase 4 close-out, 2026-08-18 addendum.
+- [x] ISC-129: `up` on the cmux backend creates one workspace and N panes, each showing its worker id and live activity. Fixed and verified live against cmux 0.64.22: `respawn-pane`/`rename-tab` need an explicit `--workspace` alongside `--surface` (a flag this backend never sent), not the ref-vs-UUID rework an earlier write-up here mis-diagnosed. See `## Verification`, Phase 4 close-out, 2026-08-18 correction.
 - [x] ISC-130: `attach --worker eng-2` focuses that pane.
 - [x] ISC-131: With the cmux socket unreachable, `up` exits 3 with a named diagnosis or falls back to `tmux`.
 - [x] ISC-132: `doctor` reports `read-screen` availability, and the run succeeds identically either way.
@@ -622,6 +622,20 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   proved by reading back a sentinel rather than by a successful mount, and `doctor` probes the
   runs root so the failure is loud and early. The default runs root was already under `$HOME`
   and was never affected; `PIFLEET_RUNS_DIR` pointing elsewhere was, which is what ISC-164 guards.
+- **2026-08-18 — the ISC-129 root cause committed hours earlier (above) was itself wrong, caught
+  by re-testing rather than trusting the write-up.** That entry concluded cmux 0.64.22 requires
+  ref-form (`surface:N`) addressing and never resolves a raw UUID for `--surface` — a whole-backend
+  rework. Asked to actually implement that rework, a fresh controlled A/B test (not a repeat of the
+  same steps) showed every `--workspace`+`--surface` combination succeeds regardless of UUID-vs-ref
+  spelling on either flag; the only failing case is `--workspace` omitted entirely, which is what
+  `respawnPaneArgv`/`renameTabArgv` had always sent. The actual fix was two functions gaining a
+  `--workspace` parameter, not a backend-wide addressing rewrite. **Learned: a root-cause writeup
+  with a reproduction table still needs re-verification before code is built on top of it,
+  especially one written under the same "prior diagnosis turned out wrong" pressure that produced
+  this exact lesson three phases running now** — the corrected mechanism only surfaced by re-running
+  the experiment with tighter controls (one variable changed at a time, immediately re-confirmed
+  with a live shell + `send`/`read-screen`) instead of extending the earlier table's conclusion.
+  Full corrected reproduction is in `## Verification`, "Phase 4 close-out," 2026-08-18 correction.
 
 ## Changelog
 
@@ -816,10 +830,57 @@ scoped as a real follow-up, not attempted live during this verification.
 (pane presentation is deliberately non-fatal to a run, per this same
 criterion's own design), and closed the cmux workspace as part of teardown.
 
-**ISC-129 stays open — now for a much more specific reason than "no live
-pane was available."** It has one: cmux 0.64.22's `respawn-pane`/`read-screen`
-surface addressing changed since the SRD's 0.64.20 baseline, and pifleet's
-cmux backend needs the same update.
+**2026-08-18 correction — the diagnosis two paragraphs up was wrong.** It
+claimed cmux 0.64.22 only resolves `--surface` through the ref form
+(`surface:N`), never a raw UUID, and that fixing this needed reworking the
+whole backend to carry/resolve ref-form ids. A direct, controlled re-test
+disproves the mechanism, even though the earlier four-way table's raw
+observations were real:
+
+| `--workspace` | `--surface` | `respawn-pane` result |
+|---|---|---|
+| omitted | raw UUID | `Surface not found: <uuid>` |
+| raw UUID | raw UUID | **`OK`** |
+| raw UUID | `surface:N` ref | **`OK`** |
+| `workspace:N` ref | raw UUID | **`OK`** |
+| `workspace:N` ref | `surface:N` ref | **`OK`** |
+
+Every combination that includes `--workspace` succeeds, in **any** id-form
+mix; the only failing row is the one missing `--workspace` entirely — which
+is exactly what `respawnPaneArgv` sent (SRD's 0.64.20-era shape, unchanged
+until today). `rename-tab` has the identical bug (`not_found: Tab not found`
+without `--workspace`, `OK` with it, UUID or ref either way). `read-screen`,
+`send`, `send-key` and `focus-pane` all resolve a bare UUID fine with no
+`--workspace` at all — confirmed live by respawning a real shell, `send`-ing
+text into it, and reading it back.
+
+So the earlier four-way test's `(uuid, uuid)` and `(workspace:N ref, uuid)`
+rows reading as failures was a **procedural artifact** of that test run, not
+a property of id spelling — most likely a stale/already-superseded surface id
+reused across steps. The real, much smaller regression: cmux 0.64.22 added a
+`--workspace` requirement to `respawn-pane`/`rename-tab` that 0.64.20 (the
+SRD's baseline) did not have; ref-vs-UUID was never the actual variable.
+
+**Fixed**: `respawnPaneArgv`/`renameTabArgv` (`src/backends/cmux/client.ts`)
+now take a `workspaceId` and always send `--workspace`, using whatever id form
+the caller already holds (UUID — no resolution step needed). `composePaneId`/
+`splitPaneId` (`src/backends/cmux/parse.ts`) carry a third field so
+`attachViewer` has the workspace id available; `createPane`'s own rename-tab
+call already had it in scope. `readScreenArgv`, `sendArgv`, `sendKeyArgv`,
+`focusPaneArgv`, `newSplitArgv` are untouched — all confirmed still correct
+without a workspace flag.
+
+**Verified live** (cmux 0.64.22, real `pifleet up --backend cmux` with
+`PIFLEET_PI_COMMAND` pointed at `fake-pi.ts`, two workers): `backend_ready`
+logged `active: cmux, fell_back: false`; both panes' `read-screen` showed the
+worker's live `logs --follow --render` output (`fake-pi: scenario 'happy'
+loaded...`), not an idle shell and not `Surface not found`; `pifleet down`
+tore the run and the cmux workspace down cleanly. Unit coverage:
+`test/unit/cmux-client.test.ts` pins the new `--workspace ws-uuid --surface
+surf-uuid` argv shape and its injection-refusal cases; `test/unit/cmux-client.test.ts`
+and `test/unit/cmux-viewer-path.test.ts` updated for the 3-part composed id.
+Full suite: `bun test test/unit test/integration` → 1105 pass, 53 skip
+(Docker-gated), 0 fail. `bun run typecheck` clean.
 
 Carried open from Phase 3: ISC-248, ISC-249 (blocked on ISC-27/28), ISC-253,
 ISC-254.

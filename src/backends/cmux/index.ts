@@ -219,12 +219,12 @@ export class CmuxBackend implements FleetBackend {
     // pane that exists — the viewer prints the worker id anyway.
     const title = spec.title ?? spec.workerId;
     try {
-      await this.client.runOk(renameTabArgv(surfaceId, title));
+      await this.client.runOk(renameTabArgv(wsId, surfaceId, title));
     } catch {
       // Presentation-of-presentation; losing it costs a label, not a fact.
     }
 
-    return { backend: this.kind, id: composePaneId(paneId, surfaceId) };
+    return { backend: this.kind, id: composePaneId(paneId, surfaceId, wsId) };
   }
 
   /**
@@ -235,7 +235,7 @@ export class CmuxBackend implements FleetBackend {
    * us, spawned by path.
    */
   async attachViewer(p: PaneRef, argv: string[]): Promise<void> {
-    const { surfaceId } = splitPaneId(this.requirePaneId(p));
+    const { surfaceId, workspaceId } = splitPaneId(this.requirePaneId(p));
     if (argv.length === 0) throw new Error("cmux: attachViewer requires a non-empty argv");
 
     /**
@@ -244,7 +244,7 @@ export class CmuxBackend implements FleetBackend {
      * The guard existed but ran too late: its only caller was
      * `respawnPaneArgv`, on the last line of this method, while `surfaceId`
      * was interpolated into a filename and written with mode 0700 several
-     * lines earlier. `splitPaneId` requires only two non-empty
+     * lines earlier. `splitPaneId` requires only three non-empty
      * space-separated parts, so `/` and `.` both survive it, and a surfaceId
      * like `x/../../victim/target` escapes `viewerScriptDir` into a sibling
      * directory — an arbitrary-file overwrite with attacker-influenced
@@ -271,7 +271,7 @@ export class CmuxBackend implements FleetBackend {
       `exec ${shellQuote(argv)}\n`;
     await writeFile(script, body, { mode: 0o700 });
 
-    await this.client.runOk(respawnPaneArgv(surfaceId, `sh ${shellQuote([script])}`));
+    await this.client.runOk(respawnPaneArgv(workspaceId, surfaceId, `sh ${shellQuote([script])}`));
   }
 
   /** `pifleet attach --worker <id>` lands here (ISC-130). */

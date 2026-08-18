@@ -110,16 +110,32 @@ export function focusPaneArgv(paneId: string): string[] {
   return ["focus-pane", "--pane", paneId];
 }
 
-export function renameTabArgv(surfaceId: string, title: string): string[] {
+export function renameTabArgv(workspaceId: string, surfaceId: string, title: string): string[] {
+  assertCmuxValue("workspace id", workspaceId);
   assertCmuxValue("surface id", surfaceId);
   assertCmuxText("tab title", title);
   // `--title` keeps the text out of positional position (probed form).
-  return ["rename-tab", "--surface", surfaceId, "--title", title];
+  // `--workspace` is required as of 0.64.22 (probed live 2026-08-18): without
+  // it a surface id that demonstrably exists reports `not_found: Tab not
+  // found`, even though the identical id resolves fine for `send`/`send-key`/
+  // `read-screen`/`focus-pane` with no workspace at all. Either UUID or ref
+  // form works for both flags once `--workspace` is present — the regression
+  // was the missing flag, not the id spelling (see `respawnPaneArgv`).
+  return ["rename-tab", "--workspace", workspaceId, "--surface", surfaceId, "--title", title];
 }
 
-export function respawnPaneArgv(surfaceId: string, command: string): string[] {
+export function respawnPaneArgv(workspaceId: string, surfaceId: string, command: string): string[] {
+  assertCmuxValue("workspace id", workspaceId);
   assertCmuxValue("surface id", surfaceId);
-  return ["respawn-pane", "--surface", surfaceId, "--command", command];
+  // `--workspace` is required as of cmux 0.64.22. Probed live 2026-08-18: a
+  // bare `--surface <uuid>` — the shape this backend shipped, matching the
+  // SRD's 0.64.20 baseline — fails with `Surface not found: <uuid>` on a
+  // surface `new-split` had just returned moments earlier. Adding `--workspace`
+  // (any id form, UUID included) alongside the identical `--surface <uuid>`
+  // fixes it outright; ref-vs-UUID spelling was never the actual variable.
+  // A prior write-up in this project mis-attributed the failure to a UUID/ref
+  // addressing regression — corrected after this direct A/B test (see ISA.md).
+  return ["respawn-pane", "--workspace", workspaceId, "--surface", surfaceId, "--command", command];
 }
 
 export function setStatusArgv(

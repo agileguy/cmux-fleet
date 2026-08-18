@@ -24,6 +24,8 @@ import {
   listPanesArgv,
   newSplitArgv,
   readScreenArgv,
+  renameTabArgv,
+  respawnPaneArgv,
   sendArgv,
   sendKeyArgv,
   setProgressArgv,
@@ -151,6 +153,34 @@ describe("argv builders produce exactly the documented command line", () => {
     expect(sendKeyArgv("surf-uuid", "enter")).toEqual(["send-key", "--surface", "surf-uuid", "enter"]);
   });
 
+  /**
+   * Unlike `read-screen`/`send`/`send-key`, these two need `--workspace`
+   * ahead of `--surface` — cmux 0.64.22 fails to resolve an otherwise-valid
+   * surface id for `respawn-pane`/`rename-tab` without it (probed live
+   * 2026-08-18; the earlier ref-vs-UUID theory in this project's ISA.md was
+   * wrong — see `respawnPaneArgv`'s own comment).
+   */
+  test("respawn-pane and rename-tab address a surface scoped to its workspace", () => {
+    expect(respawnPaneArgv("ws-uuid", "surf-uuid", "sh /tmp/viewer.sh")).toEqual([
+      "respawn-pane",
+      "--workspace",
+      "ws-uuid",
+      "--surface",
+      "surf-uuid",
+      "--command",
+      "sh /tmp/viewer.sh",
+    ]);
+    expect(renameTabArgv("ws-uuid", "surf-uuid", "eng-1")).toEqual([
+      "rename-tab",
+      "--workspace",
+      "ws-uuid",
+      "--surface",
+      "surf-uuid",
+      "--title",
+      "eng-1",
+    ]);
+  });
+
   test("set-progress is clamped into cmux's 0..1 domain", () => {
     expect(setProgressArgv("ws", 2)).toContain("1.0000");
     expect(setProgressArgv("ws", -1)).toContain("0.0000");
@@ -182,6 +212,10 @@ describe("argv builders produce exactly the documented command line", () => {
     expect(() => workspaceCloseArgv("-x")).toThrow(/refusing/);
     expect(() => setStatusArgv("ws", "-k", "v")).toThrow(/refusing/);
     expect(() => sendArgv("surf", "-oops")).toThrow(/refusing/);
+    expect(() => respawnPaneArgv("-x", "surf", "cmd")).toThrow(/refusing/);
+    expect(() => respawnPaneArgv("ws", "-x", "cmd")).toThrow(/refusing/);
+    expect(() => renameTabArgv("-x", "surf", "title")).toThrow(/refusing/);
+    expect(() => renameTabArgv("ws", "-x", "title")).toThrow(/refusing/);
   });
 });
 
@@ -277,17 +311,25 @@ describe("output parsing tolerates cmux's two id spellings and refuses nonsense"
 
 describe("the composed pane id round-trips and rejects what would corrupt it", () => {
   test("compose then split is the identity", () => {
-    const composed = composePaneId("pane-uuid", "surface-uuid");
-    expect(splitPaneId(composed)).toEqual({ paneId: "pane-uuid", surfaceId: "surface-uuid" });
+    const composed = composePaneId("pane-uuid", "surface-uuid", "ws-uuid");
+    expect(splitPaneId(composed)).toEqual({
+      paneId: "pane-uuid",
+      surfaceId: "surface-uuid",
+      workspaceId: "ws-uuid",
+    });
   });
 
   test("an embedded space is refused rather than silently truncating a pane id", () => {
-    expect(() => composePaneId("pane uuid", "surface")).toThrow(CmuxParseError);
+    expect(() => composePaneId("pane uuid", "surface", "ws")).toThrow(CmuxParseError);
+    expect(() => composePaneId("pane", "surface", "ws id")).toThrow(CmuxParseError);
   });
 
-  test.each(["", "only-one", "a b c", " b", "a "])("splitPaneId refuses %j", (bad) => {
-    expect(() => splitPaneId(bad)).toThrow(CmuxParseError);
-  });
+  test.each(["", "only-one", "a b", "a b c d", " b c", "a  c", "a b "])(
+    "splitPaneId refuses %j",
+    (bad) => {
+      expect(() => splitPaneId(bad)).toThrow(CmuxParseError);
+    },
+  );
 });
 
 describe("shellQuote makes a config-derived argv inert in a sh script", () => {

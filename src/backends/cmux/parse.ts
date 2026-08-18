@@ -27,26 +27,32 @@ export class CmuxParseError extends Error {
 }
 
 /**
- * A pane in this backend is addressed by BOTH its pane id and the id of the
- * terminal surface inside it, because cmux splits the verbs across the two:
- * `focus-pane` wants a pane, while `respawn-pane`, `read-screen`, `send`,
- * `send-key` and `rename-tab` all want a surface. The seam's `PaneRef` carries
- * one opaque string, so the two UUIDs travel composed in it. A space is a safe
- * separator: UUIDs never contain one.
+ * A pane in this backend is addressed by its pane id, the id of the terminal
+ * surface inside it, AND the id of the workspace that owns it, because cmux
+ * splits the verbs three ways: `focus-pane` wants a pane; `read-screen`,
+ * `send` and `send-key` want a surface alone; `respawn-pane` and `rename-tab`
+ * want a surface AND its workspace — omitting `--workspace` on those two
+ * fails even a surface id `new-split` just returned, probed live against
+ * 0.64.22 on 2026-08-18 (see `respawnPaneArgv`). The seam's `PaneRef` carries
+ * one opaque string, so all three UUIDs travel composed in it. A space is a
+ * safe separator: UUIDs never contain one.
  */
-export function composePaneId(paneId: string, surfaceId: string): string {
-  if (paneId.includes(" ") || surfaceId.includes(" ")) {
-    throw new CmuxParseError("pane/surface id (embedded space)", `${paneId} ${surfaceId}`);
+export function composePaneId(paneId: string, surfaceId: string, workspaceId: string): string {
+  if (paneId.includes(" ") || surfaceId.includes(" ") || workspaceId.includes(" ")) {
+    throw new CmuxParseError(
+      "pane/surface/workspace id (embedded space)",
+      `${paneId} ${surfaceId} ${workspaceId}`,
+    );
   }
-  return `${paneId} ${surfaceId}`;
+  return `${paneId} ${surfaceId} ${workspaceId}`;
 }
 
-export function splitPaneId(composed: string): { paneId: string; surfaceId: string } {
+export function splitPaneId(composed: string): { paneId: string; surfaceId: string; workspaceId: string } {
   const parts = composed.split(" ");
-  if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
+  if (parts.length !== 3 || parts.some((p) => p === "")) {
     throw new CmuxParseError("composed pane id", composed);
   }
-  return { paneId: parts[0]!, surfaceId: parts[1]! };
+  return { paneId: parts[0]!, surfaceId: parts[1]!, workspaceId: parts[2]! };
 }
 
 function asObject(what: string, raw: string): Record<string, unknown> {
