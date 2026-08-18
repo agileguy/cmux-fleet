@@ -82,6 +82,17 @@ async function psField(pid: number, field: string): Promise<string> {
   return out;
 }
 
+/** The worker's `events.jsonl`, parsed; empty until the supervisor writes one. */
+async function readEvents(path: string): Promise<Array<Record<string, unknown>>> {
+  const text = await Bun.file(path)
+    .text()
+    .catch(() => "");
+  return text
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 async function waitFor(cond: () => Promise<boolean>, budgetMs: number): Promise<boolean> {
   const start = performance.now();
   for (;;) {
@@ -503,6 +514,101 @@ describe("settle() failure does not kill the supervisor (ISC-212)", () => {
 
       // THE assertion. An unhandled rejection exits the process; a caught one
       // does not. Nothing else here distinguishes the two.
+      expect(await processStartTime(pid)).not.toBeNull();
+
+      // And it is still answering, not merely un-exited.
+      await chmod(wp.tasksDir, 0o755);
+      const pong = await controlCall(run, "eng-1", { cmd: "ping" }).catch(() => null);
+      expect(pong).not.toBeNull();
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    45_000,
+  );
+
+  /**
+   * ISC-228. The ISC-212 fix guarded TWO `void settle(...)` sites, and only the
+   * deadline escalation above was ever driven — so the `.catch()` on the
+   * `late_prompt_failure` site could be deleted with the suite still green,
+   * which is precisely the hole round 3 exists to close. The two are not
+   * interchangeable: they are different call sites, reached by different
+   * events, and one is a timer while the other runs inside the stray-response
+   * handler on the RPC read loop.
+   *
+   * The condition is scenarios/late-failure.json: `prompt` acks success, then a
+   * SECOND response with the same id arrives `success:false` while that epoch is
+   * still live. That the late failure FAILS the epoch is proved elsewhere (the
+   * e2e lifecycle run asserts the recorded reason); what is proved here is that
+   * when the settle it triggers cannot write, the supervisor survives it.
+   *
+   * The write is broken BEFORE dispatch: the late response lands 150ms after
+   * the ack, which leaves no room to revoke permission afterwards.
+   */
+  test(
+    "a late prompt failure whose durable writes fail leaves the supervisor alive",
+    async () => {
+      const { chmod } = await import("node:fs/promises");
+      const root = await freshRoot();
+      const runId = testRunId("latefail");
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("late-failure.json") },
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      expect(await waitFor(async () => (await readWorkerState(wp))?.phase === "idle", 20_000)).toBe(
+        true,
+      );
+
+      // Same probe as the deadline test: 0555 on `tasks/` refuses the temp file
+      // writeTaskRecord creates, while fence.json and state.json — whose
+      // failure deliberately triggers an orderly shutdown, which this test
+      // could not tell from a crash — keep working.
+      await chmod(wp.tasksDir, 0o555);
+      cleanups.push(async () => {
+        await chmod(wp.tasksDir, 0o755).catch(() => {});
+      });
+
+      // The envelope's own deadline (300s) cannot fire inside this test, so the
+      // only settle reachable here is the late failure's.
+      const envelope = makeEnvelope(runId, "eng-1", "T-LATEFAIL");
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope,
+        attempt_id: "int-attempt-latefail",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      // The guard firing IS the observable: `settle_failed` is written by the
+      // `.catch()` under test. Without it the rejection is unhandled, which in
+      // Bun exits the process — so this never appears and the assertions below
+      // never get the chance to run.
+      const guarded = await waitFor(async () => {
+        const events = await readEvents(wp.eventsJsonl);
+        return events.some((e) => e["type"] === "settle_failed");
+      }, 30_000);
+      expect(guarded).toBe(true);
+
+      const events = await readEvents(wp.eventsJsonl);
+      // It is THAT settle: a late, failing response on the live prompt id...
+      expect(
+        events.some(
+          (e) => e["type"] === "stray_response" && e["kind"] === "late" && e["success"] === false,
+        ),
+      ).toBe(true);
+      // ...and not the deadline escalation wearing the same event name.
+      expect(events.some((e) => e["type"] === "deadline_exceeded")).toBe(false);
+
+      // THE assertion. An unhandled rejection exits the process; a caught one
+      // does not.
       expect(await processStartTime(pid)).not.toBeNull();
 
       // And it is still answering, not merely un-exited.
