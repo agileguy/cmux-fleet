@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Fixed
+- **The only test proving crash-recoverability of atomic writes was stochastic** — it
+  killed a writer process ~150ms into a loop, proving one of five syscall boundaries at
+  random and never saying which. Replaced with deterministic per-boundary tests
+  (open/write/fsync/rename/dir-fsync) against both `writeJsonAtomic` and the supervisor's
+  fence-persist path, using a test-only self-kill fixture with no production-code changes.
+  Found and fixed along the way: `up`'s idle-gate wait only checked `state.json`'s `phase`
+  field, which outlives the process that wrote it — a supervisor that reached idle and
+  then died (SIGKILL/OOM) left a file reading "idle" forever, so `up` could report a dead
+  fleet as successfully started. Now checks the recorded pid is actually live.
 - **A harvest re-run months later could grade a task against whatever `fleet.yaml`
   happened to be sitting in the current directory that day.** `artifacts`/`report`
   auto-discovered config from cwd when no `--config` was given, so the harness-pattern
