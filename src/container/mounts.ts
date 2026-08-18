@@ -90,9 +90,19 @@ export async function makeWorkerAccessible(dir: string, writable: boolean): Prom
  * this is pointed at is CONTENT a worker reads — policy lines, prompt text, a
  * kubeconfig — and none of them is a program; a mode that would let the
  * container execute one is a wider grant than the mount needs.
+ *
+ * `hostRewritable: false` drops the owner write bit as well, giving 0444, and
+ * the verbgate policy is why the distinction exists. `docker/verbgate` refuses
+ * EVERY verb (exit 78) when its allow file is writable by the uid consulting
+ * it — and the macOS VM squashes ownership to the container user, so a 0644
+ * policy reads as owner-writable INSIDE the container with only the `:ro`
+ * mount flag standing between that check and a fleet-wide refusal. Files a
+ * later phase must rewrite in place (the briefing, the kubeconfig) pass
+ * `true`; a policy file passes `false`, because nothing should hold write
+ * permission on it by any path.
  */
-export async function makeWorkerReadable(file: string): Promise<void> {
-  await chmod(file, 0o644);
+export async function makeWorkerReadable(file: string, hostRewritable: boolean): Promise<void> {
+  await chmod(file, hostRewritable ? 0o644 : 0o444);
 }
 
 /**

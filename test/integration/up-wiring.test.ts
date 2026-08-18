@@ -661,7 +661,11 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     "/outbox": { directory: true, mode: 0o777 },
     "/sessions": { directory: true, mode: 0o777 },
     "/skills": { directory: true, mode: 0o755 },
-    "/policy/cloud-allow": { directory: false, mode: 0o644 },
+    // 0444, not 0644: verbgate refuses every verb when its allow file is
+    // writable by the uid consulting it, and the macOS VM squashes ownership
+    // to the container user — so at 0644 only the `:ro` flag stands between
+    // that check and a fleet-wide refusal.
+    "/policy/cloud-allow": { directory: false, mode: 0o444 },
     [BRIEFING_MOUNT]: { directory: false, mode: 0o644 },
     "/home/pi/.kube/config": { directory: false, mode: 0o644 },
   };
@@ -778,8 +782,11 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
       expect(materialized).toBeDefined();
       expect(supervisor).toBeDefined();
       expect(materialized!.seq).toBeLessThan(supervisor!.seq);
-      // The ledger names WHAT was written, not merely that something was.
+      // The ledger names WHAT was written, not merely that something was —
+      // including the worker's own skill list, which is what diagnoses a
+      // bundle/`--skill` divergence after the fact.
       expect(materialized!.detail?.["skills"]).toBe(join(run.root, "skills", "engineer"));
+      expect(materialized!.detail?.["skill_names"]).toEqual(["pifleet-worker"]);
       expect(materialized!.detail?.["kubeconfig_source"]).toBe(kubeconfig);
     },
     90_000,

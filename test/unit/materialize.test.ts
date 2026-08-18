@@ -19,7 +19,17 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stringify } from "yaml";
@@ -121,7 +131,7 @@ async function fixture(
 }
 
 /** A fixture skill source root, so a hostile bundle never touches `skills/`. */
-async function skillSourceRoot(): Promise<string> {
+async function skillSourceRoot(extra: readonly string[] = []): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "pifleet-skillsrc-"));
   cleanups.push(root);
   // `pifleet-worker` is re-injected into every worker's list post-merge
@@ -129,7 +139,17 @@ async function skillSourceRoot(): Promise<string> {
   await mkdir(join(root, "pifleet-worker", "nested"), { recursive: true });
   await writeFile(join(root, "pifleet-worker", "SKILL.md"), "fixture bundle\n");
   await writeFile(join(root, "pifleet-worker", "nested", "extra.md"), "nested fragment\n");
+  for (const name of extra) {
+    await mkdir(join(root, name), { recursive: true });
+    await writeFile(join(root, name, "SKILL.md"), `${name} bundle\n`);
+  }
   return root;
+}
+
+/** `cloud.kubeconfig` set, `eng` granted cloud access, `quiet` deliberately not. */
+function withKubeconfigFixture(doc: Record<string, unknown>): void {
+  doc["cloud"] = { kubeconfig: "./filtered-kubeconfig" };
+  (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
 }
 
 describe("the outbox", () => {
@@ -251,6 +271,131 @@ describe("the role skill bundle", () => {
   });
 });
 
+/**
+ * The bundle is per-ROLE; `skills:` is per-WORKER overridable.
+ *
+ * `config/load.ts`'s `pick` gives a worker's own `skills:` priority over its
+ * role's, `render.ts:114` emits `--skill` from the resolved WORKER, and
+ * `render.ts:183` mounts one directory per ROLE. A cache keyed on the role and
+ * filled from whichever worker arrived first therefore produced a bundle whose
+ * contents depended on argument ORDER, and let a nonexistent bundle named only
+ * by a later worker of an already-cached role skip the refusal entirely.
+ */
+describe("a role's bundle is the union across its workers, not the first one seen", () => {
+  /** eng-1 keeps the role's list; eng-2 overrides with a name of its own. */
+  const twoWorkersOneRole = (doc: Record<string, unknown>): void => {
+    (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["skills"] = [
+      "pifleet-worker",
+      "alpha",
+    ];
+    (doc["workers"] as Array<Record<string, unknown>>).push({
+      id: "eng-2",
+      role: "eng",
+      skills: ["pifleet-worker", "beta"],
+    });
+  };
+
+  test("the bundle holds every skill any worker of the role named", async () => {
+    const src = await skillSourceRoot(["alpha", "beta"]);
+    const f = await fixture({ skillsRoot: src, mutate: twoWorkersOneRole });
+
+    const out = await materializeWorkerInputs(f.loaded, f.run, ["eng-1", "eng-2"]);
+    const bundle = out[0]!.skillsDir;
+    expect(out[1]!.skillsDir).toBe(bundle);
+    expect((await readdir(bundle)).sort()).toEqual(["alpha", "beta", "pifleet-worker"]);
+    // Each worker still reports only its OWN list — the `--skill` flags render
+    // emits — which is the half that used to disagree with the mount.
+    expect(out[0]!.skillNames).toEqual(["pifleet-worker", "alpha"]);
+    expect(out[1]!.skillNames).toEqual(["pifleet-worker", "beta"]);
+  });
+
+  test("the bytes on disk do not depend on the order --workers named ids", async () => {
+    const contents = async (order: string[]): Promise<string[]> => {
+      const src = await skillSourceRoot(["alpha", "beta"]);
+      const f = await fixture({ skillsRoot: src, mutate: twoWorkersOneRole });
+      const out = await materializeWorkerInputs(f.loaded, f.run, order);
+      // Sorted because `readdir` returns filesystem order, which is not the
+      // property under test — the CONTENTS are.
+      return (await readdir(out[0]!.skillsDir)).sort();
+    };
+    expect(await contents(["eng-1", "eng-2"])).toEqual(await contents(["eng-2", "eng-1"]));
+  });
+
+  test("a missing bundle named only by the LAST worker still refuses", async () => {
+    // `beta` has no source. Processed second, behind a cache hit on `eng`, the
+    // refusal never fired — the headline control silently skipped.
+    const src = await skillSourceRoot(["alpha"]);
+    const f = await fixture({ skillsRoot: src, mutate: twoWorkersOneRole });
+
+    const err = await materializeWorkerInputs(f.loaded, f.run, ["eng-1", "eng-2"]).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ConfigError);
+    const msg = (err as Error).message;
+    expect(msg).toContain('worker "eng-2"');
+    expect(msg).toContain('skill "beta"');
+    expect(msg).toContain(join(src, "beta"));
+    // Refused BEFORE anything was written, so no half-built bundle is left.
+    expect(await Bun.file(roleSkillsDir(f.run.root, "eng")).exists()).toBe(false);
+  });
+});
+
+/**
+ * A skill name is a MOUNT PATH SEGMENT, exactly as a role name is.
+ *
+ * Role names got this guard already (`schema.ts`, tested against
+ * `"../../../../../../etc"`); skill names did not, and `materialize.ts` is the
+ * first code to join one into a host path and then `mkdir`, `chmod` and
+ * `writeFile` through it.
+ */
+describe("a skill name cannot escape the directories it is joined into", () => {
+  test("a traversing name is refused at load, where it enters the system", async () => {
+    const err = await fixture({
+      mutate: (doc) => {
+        (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["skills"] = [
+          "pifleet-worker",
+          "../../../../victim",
+        ];
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toContain("path segment");
+  });
+
+  test("a per-WORKER override is checked too, not only the role's list", async () => {
+    // The merge takes the list from whichever level speaks last, so a guard on
+    // `roles:` alone is walked around by an override.
+    const err = await fixture({
+      mutate: (doc) => {
+        (doc["workers"] as Array<Record<string, unknown>>)[0]!["skills"] = ["../../escape"];
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toContain("path segment");
+  });
+
+  test("materializeRoleSkills refuses one directly, and mutates nothing", async () => {
+    // Belt to the schema's braces: this function is exported, and a caller that
+    // reaches it without schema validation must still be safe.
+    const f = await fixture();
+    const victim = join(f.dir, "victim");
+    await mkdir(victim, { recursive: true });
+    await writeFile(join(victim, "key"), "private\n");
+    await chmod(join(victim, "key"), 0o600);
+
+    const err = await materializeRoleSkills(
+      f.run.root,
+      "eng",
+      ["../../../../../../../../.." + victim],
+      join(f.dir, "skills-src"),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigError);
+    // The host file outside the run root is untouched, mode included — the
+    // reproduction was a 0600 key chmod'd to 0644.
+    expect(await mode(join(victim, "key"))).toBe(0o600);
+  });
+});
+
 describe("the verbgate policy file", () => {
   test("is a zero-byte REGULAR FILE, which is the whole point", async () => {
     const f = await fixture();
@@ -266,7 +411,15 @@ describe("the verbgate policy file", () => {
     // Empty is CORRECT — authorization is task-scoped (§5.10), so `up` has
     // nothing true to write and deny-all is the right run-time default.
     expect(st.size).toBe(0);
-    expect(await mode(m!.cloudAllow)).toBe(0o644);
+    /**
+     * 0444, not 0644. verbgate refuses EVERY verb (exit 78) when `[ -w ]`
+     * succeeds on its allow file, and the macOS VM squashes ownership to the
+     * container uid — so at 0644 the policy reads as owner-writable from
+     * inside the container and only the `:ro` mount flag separates that from a
+     * fleet-wide refusal. The mode should say what the `:ro` flag says.
+     */
+    expect(await mode(m!.cloudAllow)).toBe(0o444);
+    expect((await mode(m!.cloudAllow)) & 0o222).toBe(0);
   });
 });
 
@@ -298,12 +451,7 @@ describe("the briefing", () => {
 
 describe("the kubeconfig", () => {
   const KUBE = "apiVersion: v1\nkind: Config\nclusters: []\n";
-
-  /** `cloud.kubeconfig` set, `eng` granted cloud access, `quiet` not. */
-  const withKubeconfig = (doc: Record<string, unknown>): void => {
-    doc["cloud"] = { kubeconfig: "./filtered-kubeconfig" };
-    (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
-  };
+  const withKubeconfig = withKubeconfigFixture;
 
   test("is copied verbatim, and only for a worker with cloud access", async () => {
     const f = await fixture({ mutate: withKubeconfig });
@@ -345,6 +493,77 @@ describe("the kubeconfig", () => {
   });
 });
 
+/**
+ * Traversal is checked at EVERY path component, so the mode of a mounted file
+ * is only half the answer.
+ *
+ * `cloud-allow`, `system-append.md` and the kubeconfig all live under
+ * `<run>/workers/<id>/`. Under `umask 077` — or Linux's common 027 — the run
+ * root, `workers/` and `workers/<id>/` are all created 0700, and three
+ * carefully-chmod'd 0644 files underneath become unreachable to uid 10001 with
+ * nothing erroring anywhere. The rest of this suite cannot see it because it
+ * inherits the ambient 022, so this test sets the umask itself.
+ */
+describe("under a tightened umask", () => {
+  test("every directory on the way to a mounted file is still traversable", async () => {
+    const previous = process.umask(0o077);
+    try {
+      const f = await fixture({ mutate: withKubeconfigFixture });
+      await writeFile(join(f.dir, "filtered-kubeconfig"), "apiVersion: v1\n");
+      const [m] = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
+
+      // Every component from the run root down to each mounted file. `0o055`
+      // is read+execute for group and other — what a traverse actually needs.
+      const chain = [
+        f.run.root,
+        f.run.workersDir,
+        workerPaths(f.run, "eng-1").dir,
+        dirname(m!.outboxDir),
+        dirname(m!.skillsDir),
+        m!.skillsDir,
+      ];
+      for (const dir of chain) {
+        expect({ dir, bits: (await mode(dir)) & 0o055 }).toEqual({ dir, bits: 0o055 });
+      }
+      // …and the files themselves are world-readable, which is worth nothing
+      // without the chain above and is the half the old test checked alone.
+      for (const file of [m!.cloudAllow, m!.systemAppendMd!, m!.kubeconfig!]) {
+        expect({ file, bits: (await mode(file)) & 0o044 }).toEqual({ file, bits: 0o044 });
+      }
+    } finally {
+      process.umask(previous);
+    }
+  });
+});
+
+/**
+ * The destination side dereferenced links where the source side refused them.
+ *
+ * `mkdir` and `chmod` both FOLLOW a symlink, so a link planted at a
+ * destination path had pifleet reopen the permissions of whatever it pointed
+ * at — against `makeWorkerAccessible`'s own contract that it is only ever
+ * aimed at directories pifleet created under the run root.
+ */
+describe("a symlinked DESTINATION is refused, not written through", () => {
+  test("a linked bundle destination is refused and its target is untouched", async () => {
+    const f = await fixture();
+    const victim = join(f.dir, "victim");
+    await mkdir(victim, { recursive: true });
+    await chmod(victim, 0o700);
+
+    // Plant a link where the role's bundle directory would go.
+    const dst = roleSkillsDir(f.run.root, "eng");
+    await mkdir(dirname(dst), { recursive: true });
+    await symlink(victim, dst);
+
+    const err = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MaterializeError);
+    expect((err as MaterializeError).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+    // The chmod never reached through the link.
+    expect(await mode(victim)).toBe(0o700);
+  });
+});
+
 describe("membership and failure class", () => {
   /**
    * The same skip `assertModelsAllowed` makes, for the same reason: Phase 1
@@ -357,10 +576,59 @@ describe("membership and failure class", () => {
   });
 
   /**
+   * Each worker is reported as it COMPLETES.
+   *
+   * Materialization writes real directories and files, so a failure on the
+   * second worker leaves the first one's on disk. A caller that only records
+   * the returned array learns nothing about either — no ledger line, no trace
+   * of what exists — which is the forensic gap on the one path this module is
+   * built to make loud.
+   */
+  test("the sink fires per worker, so a mid-batch failure still records the finished ones", async () => {
+    const f = await fixture({
+      mutate: (doc) => {
+        // Only `quiet` takes cloud access, and the kubeconfig it names is
+        // never written — so `eng-1` succeeds and `quiet-1` refuses.
+        doc["cloud"] = { kubeconfig: "./missing-kubeconfig" };
+        (doc["roles"] as Record<string, Record<string, unknown>>)["quiet"]!["cloud_access"] = true;
+      },
+    });
+
+    const seen: string[] = [];
+    const err = await materializeWorkerInputs(f.loaded, f.run, ["eng-1", "quiet-1"], async (m) => {
+      seen.push(m.workerId);
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ConfigError);
+    // Reported BEFORE the failure, not in a batch that never returns.
+    expect(seen).toEqual(["eng-1"]);
+    // …and its inputs really are on disk, which is why the record matters.
+    expect(await Bun.file(workerPaths(f.run, "eng-1").cloudAllow).exists()).toBe(true);
+  });
+
+  /**
    * An environment that will not let a control be established is exit 3, the
    * same class as the egress guard and the hazard scan — not exit 2, which
    * would send the operator to edit a config that is already correct.
    */
+  test("an unreadable skill source root is exit 3, not a missing-bundle refusal", async () => {
+    // `catch { return null }` reported EACCES as "no bundle exists" — a config
+    // diagnosis for an environment fault, sending the operator to edit a
+    // config that was already right.
+    const src = await skillSourceRoot();
+    const f = await fixture({ skillsRoot: src });
+    await chmod(src, 0o000);
+    try {
+      const err = await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(MaterializeError);
+      expect((err as MaterializeError).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+    } finally {
+      await chmod(src, 0o755);
+    }
+  });
+
   test("a run root that cannot be written is exit 3, not a config error", async () => {
     const f = await fixture();
     const wedged = runPaths("wedged", join(f.dir, "runs"));

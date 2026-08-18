@@ -218,14 +218,32 @@ describe("worker-uid accessibility", () => {
    * cannot read at all. No execute bit: every one of them is content a worker
    * reads, none is a program.
    */
-  test("a read-only mounted FILE gets read but neither write nor execute", async () => {
+  test("a read-only mounted FILE gets read but neither write-for-others nor execute", async () => {
+    await withRoot(async (root) => {
+      const file = join(root, "system-append.md");
+      await writeFile(file, "");
+      await chmod(file, 0o600);
+      await makeWorkerReadable(file, true);
+      expect(await mode(file)).toBe(0o644);
+      expect((await mode(file)) & 0o111).toBe(0);
+    });
+  });
+
+  /**
+   * The policy-file case, which is not merely stricter — it is load-bearing.
+   *
+   * `docker/verbgate` refuses EVERY verb (exit 78) when `[ -w ]` succeeds on
+   * its allow file, and the macOS VM squashes ownership to the container uid,
+   * so 0644 reads as owner-writable from inside and only the `:ro` mount flag
+   * keeps that check from firing. At 0444 the mode says it too.
+   */
+  test("a policy file is readable by everyone and writable by no one", async () => {
     await withRoot(async (root) => {
       const file = join(root, "cloud-allow");
       await writeFile(file, "");
-      await chmod(file, 0o600);
-      await makeWorkerReadable(file);
-      expect(await mode(file)).toBe(0o644);
-      expect((await mode(file)) & 0o111).toBe(0);
+      await makeWorkerReadable(file, false);
+      expect(await mode(file)).toBe(0o444);
+      expect((await mode(file)) & 0o222).toBe(0);
     });
   });
 

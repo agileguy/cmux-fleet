@@ -397,6 +397,39 @@ export const FleetConfigSchema = z
       }
     }
 
+    // A SKILL name is a mount path segment for exactly the same reason, and it
+    // was left unchecked while the role beside it was fixed. `run/materialize.ts`
+    // joins the name into the host SOURCE root (`<repo>/skills/<name>`) and
+    // into the destination bundle (`<run>/skills/<role>/<name>`), then mkdirs,
+    // chmods and writes through both — so `skills: ["../../../../victim"]`
+    // walks out of the run directory and reopens the permissions of whatever
+    // it lands on. Refused here, where the name enters the system, under the
+    // grammar worker ids and role names already use: one segment, no
+    // separator, and unable to spell `.` or `..`.
+    //
+    // Checked at all three levels because the merge (§6.1 rule 1) can take the
+    // list from any of them — a name refused only under `roles:` would walk
+    // straight in through a per-worker override.
+    const checkSkillNames = (
+      skills: readonly string[] | undefined,
+      at: Array<string | number>,
+    ): void => {
+      if (skills === undefined) return;
+      skills.forEach((name, i) => {
+        if (SESSION_ID_RE.test(name) && name.length <= 64) return;
+        ctx.addIssue({
+          code: "custom",
+          path: [...at, i],
+          message: `invalid skill name "${name}" — a skill name becomes a mount path segment (it is joined into the host /skills directory), so it must be 1-64 characters of letters, digits, ".", "_" or "-", beginning and ending alphanumeric`,
+        });
+      });
+    };
+    checkSkillNames(cfg.defaults?.skills, ["defaults", "skills"]);
+    for (const [name, fields] of Object.entries(cfg.roles)) {
+      checkSkillNames(fields?.skills, ["roles", name, "skills"]);
+    }
+    cfg.workers.forEach((w, i) => checkSkillNames(w.skills, ["workers", i, "skills"]));
+
     // ISC-59: `read_only: true` combined with `bash` in the MERGED tool set.
     // Checked at the level that completes the combination, so the error points
     // at the document position a human would edit.

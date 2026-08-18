@@ -362,12 +362,20 @@ export function register(program: Command): void {
        * see `materialize.ts`'s second rule.
        */
       if (loadedConfig !== null) {
-        for (const m of await materializeWorkerInputs(loadedConfig, run, workers)) {
+        // Appended AS each worker completes, not once over the returned array.
+        // Materialization writes real directories and files, and a failure on
+        // worker three leaves worker one's and two's on disk — a batch append
+        // after the fact records neither, which is the forensic gap on exactly
+        // the failure path this is built to make loud.
+        await materializeWorkerInputs(loadedConfig, run, workers, async (m) => {
           await ledger.append("worker_inputs_materialized", {
             worker: m.workerId,
             detail: {
               role: m.role,
               outbox: m.outboxDir,
+              // The worker's OWN list, which is what `--skill` names; the
+              // bundle is per-role and holds the union across the role.
+              skill_names: m.skillNames,
               skills: m.skillsDir,
               cloud_allow: m.cloudAllow,
               system_append: m.systemAppendMd,
@@ -375,7 +383,7 @@ export function register(program: Command): void {
               kubeconfig_source: m.kubeconfigSource,
             },
           });
-        }
+        });
       }
 
       // The daemon: detached like the supervisors, single writer of registry.json.
