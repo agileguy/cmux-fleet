@@ -16,7 +16,7 @@
  */
 
 import { z } from "zod";
-import { SESSION_ID_RE, workerId } from "../contracts.ts";
+import { MAX_ITEMS, SESSION_ID_RE, workerId } from "../contracts.ts";
 import { ruleHostError } from "../security/egress.ts";
 
 // ---------------------------------------------------------------------------
@@ -272,6 +272,65 @@ export const EgressSchema = z
   .prefault({});
 
 // ---------------------------------------------------------------------------
+// Harness surface (SRD §8.2; ISC-150, ISC-232) — the globs that decide which
+// of a worker's changed files count as the exam rather than the answer.
+// ---------------------------------------------------------------------------
+
+/**
+ * Which repo-relative globs are the TEST HARNESS: the files an acceptance
+ * command's MEANING resolves through, as opposed to the code it grades. A
+ * worker whose diff touches one has produced an unfalsifiable claim — even a
+ * fresh clone at its head runs harness code the worker wrote — so
+ * `harvest/adjudicate.ts` caps the verdict. The matcher and the shipped
+ * defaults live in `harvest/acceptance.ts`; this key decides which list it
+ * runs with.
+ *
+ * `patterns` REPLACES `DEFAULT_HARNESS_PATTERNS`; it does not extend them
+ * (ISC-232). The defaults are what a config that stays SILENT gets, not a
+ * floor every config is measured on top of. Replacement is also what
+ * `harnessSurface()`'s second argument has always meant, and a second merge
+ * rule invented here would leave the effective surface as something no
+ * reader could compute from the document in front of them.
+ *
+ * The price of replacement is that a config can NARROW the surface, and a
+ * narrowed surface is a weakened ISC-150 cap. That is a legitimate operator
+ * decision — a repo whose suites do not live under `test/` needs it — but it
+ * is only defensible while it is deliberate, which is why an empty list is a
+ * validation error instead of "match nothing". `patterns: []` reads like "no
+ * opinion" and would silently switch the cap off entirely: `touched` could
+ * never be non-empty, and the one control standing between a rewritten exam
+ * and a certified success would be disabled by a key that looks like it says
+ * nothing. To mean "no opinion", omit the key.
+ *
+ * Capped at `MAX_ITEMS` rather than the 64 used by the other lists here,
+ * because these strings flow into `HarnessSurfaceSchema`, which caps at
+ * `MAX_ITEMS`: a config that validates must not then fail inside the
+ * harvester. 64 would also be below the ~90 globs the defaults already
+ * carry, so a config could not even restate what it was overriding.
+ */
+export const HarnessSchema = z
+  .object({
+    // The message carries the reasoning because the stock one ("expected
+    // array to have >=1 items") reads as a formatting nit, and the obvious
+    // way to satisfy a formatting nit is to put SOMETHING in the list — which
+    // is the more dangerous move, not the safe one: any list that matches
+    // nothing narrows the surface just as an empty one does. Naming the
+    // consequence and the actual escape hatch is the point of the override.
+    patterns: z
+      .array(shortStr)
+      .min(
+        1,
+        "harness.patterns cannot be empty: it REPLACES the built-in defaults, " +
+          "so an empty list would disable the ISC-150 test-harness cap entirely " +
+          "rather than mean 'no opinion'. Omit the harness key to get the defaults.",
+      )
+      .max(MAX_ITEMS)
+      .optional(),
+  })
+  .strict()
+  .prefault({});
+
+// ---------------------------------------------------------------------------
 // The whole document
 // ---------------------------------------------------------------------------
 
@@ -286,6 +345,7 @@ export const FleetConfigSchema = z
     cloud: CloudSchema,
     secrets: SecretsSchema,
     egress: EgressSchema,
+    harness: HarnessSchema,
     defaults: RoleFieldsSchema.prefault({}),
     roles: z.record(shortStr, RoleFieldsSchema),
     workers: z.array(WorkerEntrySchema).min(1).max(64),

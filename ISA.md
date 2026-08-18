@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 196/255
+progress: 197/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-18
@@ -403,7 +403,7 @@ of the same class it repaired.
 
 - [x] ISC-230: An acceptance command that was attempted and returned no answer caps the verdict — a timed-out exam cannot certify success, and the worker's claim is not adopted.
 - [x] ISC-231: `workerOutboxDir()` lives in `run/paths.ts`, computed once, rather than duplicating the expression inlined in `render.ts`.
-- [ ] ISC-232: Harness-surface patterns come from config; `DEFAULT_HARNESS_PATTERNS` is the fallback, not the source of truth.
+- [x] ISC-232: Harness-surface patterns come from config; `DEFAULT_HARNESS_PATTERNS` is the fallback, not the source of truth.
 - [ ] ISC-233: Acceptance commands run in a fresh CONTAINER from the same image, not only a fresh clone (SRD §8.2).
 - [ ] ISC-234: The control socket answers `export_html`, so `transcript --html` uses the live path rather than the local-render fallback.
 - [ ] ISC-235: `BudgetManager.admit` is called on the dispatch path and its snapshot persisted; `budgetExitCode` folds into `worstExit` after harvest.
@@ -1386,4 +1386,102 @@ version of `{}`.
 `bun run typecheck` → clean, zero diagnostics. `bun test` → **1142 pass, 53 skip, 0 fail**
 across 77 files. `src/contracts.ts` unmodified; `EXIT_SEVERITY` unchanged.
 
-Progress: 194/255 → 195/255.
+### ISC-232 close-out — 2026-08-18
+
+`harness.patterns` is now a `fleet.yaml` key, and `DEFAULT_HARNESS_PATTERNS` is
+what a config that says nothing falls back to. The shape is
+`harness: {patterns?: string[]}` — `.strict()`, `.prefault({})`, so every
+existing config keeps loading and keeps meaning what it meant.
+
+**Config REPLACES the defaults; it does not extend them.** That is what the
+criterion's "fallback, not the source of truth" asks for, and what
+`harnessSurface()`'s second argument has always meant — a union invented at
+the wiring layer would have left the effective surface as something no reader
+could compute from the document in front of them.
+
+- The seam was already there and already tested (`acceptance.test.ts`,
+  "explicit patterns replace the defaults"); what was missing was every
+  caller. `harvestTask` called `harnessSurface(paths)` with no second
+  argument, so no config could reach it.
+- Wired through `HarvestOptions.harnessPatterns` → `harvestTask` →
+  `harnessSurfaceFor`, which owns the fallback. Not a `??` at the call site:
+  `??` rescues `undefined` and `null` but not `[]`, so every caller building
+  `HarvestOptions` by hand could still have handed in an empty list and got
+  `touched: []` — the ISC-150 cap off, silently. Empty throws.
+- **Both** readers are wired, not just `artifacts`: `report/collect.ts` takes
+  `CollectOptions.harnessPatterns` and forwards it to every `harvestTask`.
+  They read the same run through the same adjudicator, so leaving `report` on
+  the defaults would have meant one command capping a verdict and the other
+  certifying it, with the answer depending on which one an operator typed —
+  a smaller copy of the exact bug this criterion names.
+- **The harvest path does not resolve config from the cwd.** `up` writes the
+  resolved surface into `run.json` as `harness_patterns` when the run is
+  created — the technique `heartbeat_interval_ms` already uses so a config
+  edited mid-run cannot retroactively change results — and
+  `harvest/patterns.ts` reads it back. `null` means "config had no opinion,
+  use the defaults" and is written explicitly, so a run states its surface
+  either way.
+
+  Auto-discovery was the bug, not a convenience: `resolveConfigPath` falls
+  through to `./fleet.yaml` and then a machine-global
+  `~/.config/pifleet/fleet.yaml`, so `artifacts`/`report` with no `--config`
+  graded an OLD run against whatever file was sitting in today's directory. A
+  task the ISC-150 cap had refused to certify came back `success` months
+  later with nothing about the run having changed — a verdict that is a
+  function of when and where the command was typed is not a verdict, and
+  `harvest/index.ts` had documented that exact prohibition while the CLI
+  violated it. `--config` remains as the explicit override, for a run that
+  predates persistence and for previewing a candidate config; it throws on
+  anything unusable, because a named file is unambiguous intent.
+- A configured surface that matches NOTHING in a diff the defaults would have
+  flagged is recorded as `harness.defaults_missed` and raised as a
+  discrepancy. Replacement means any narrow list disables the cap for some
+  diffs, and the realistic route there is not malice — `patterns: ["ci/**"]`
+  is the first thing an operator who cares about CI files writes, and it
+  costs them all ~91 defaults. `Bun.Glob` matches nothing for a malformed
+  pattern, so a typo is invisible to any check on the list itself; only
+  comparing the two surfaces over a real diff tells them apart. The verdict
+  still follows the config — narrowing is a legitimate decision — but it can
+  no longer happen silently.
+- `report --json` carries the harness surface and any degradation in
+  `collection_notes`, not only on stderr. A note that exists only on stderr is
+  invisible to `report --json > out.json`, which is the one consumer `--json`
+  exists for.
+- `patterns: []` is a validation error rather than "match nothing". An empty
+  list reads like "no opinion" and would mean the opposite: `touched` could
+  never be non-empty and the ISC-150 cap would be switched off by a key that
+  looks like it says nothing. Omitting the key is how you say nothing.
+- Capped at `MAX_ITEMS`, not the 64 the neighbouring config arrays use: these
+  strings flow into `HarnessSurfaceSchema` (also `MAX_ITEMS`), and 64 sits
+  below the ~91 globs the defaults already carry, so a config could not have
+  restated the list it was overriding.
+
+Evidence — `test/integration/harvest.test.ts`, fixture `T-cfg`, whose whole
+diff (`ci/grade.sh`, `src/feature.ts`) is invisible to every default pattern,
+so each assertion turns on config alone. Tested through the spawned CLI, not
+by importing the seam: an option with no caller is indistinguishable at
+runtime from one never written, which is what left ISC-150 dead.
+
+- no config → `patterns == DEFAULT_HARNESS_PATTERNS`, `touched == []` (the
+  backward-compatibility guarantee), and a config with no `harness:` key is
+  byte-for-byte the same result.
+- `harness: {patterns: [ci/**]}` → `touched == ["ci/grade.sh"]` and the
+  verdict is capped off `success` with a `harness` reason.
+- Replacement pinned against `T-harness` (`bunfig.toml` + `sneak.ts`, matched
+  by the defaults and NOT by `ci/**`): with the custom config its `touched` is
+  empty. A union implementation passes every other assertion and fails this.
+- `report` and `artifacts` agree on `T-cfg` in both directions, and the two
+  configs produce DIFFERENT verdicts (`success` → capped), so the test cannot
+  pass against a `report` that ignored config.
+- Mutation-verified in both directions: reverting the `harvest/index.ts`
+  wiring → `23 pass, 3 fail`; changing replace to union → `24 pass, 2 fail`;
+  restored → `26 pass, 0 fail`.
+
+Schema half in `test/unit/config.test.ts` (shape, `fleet.example.yaml` still
+omits the key, empty-list rejection, strict unknown-key, and a cap that admits
+the full default list) plus `harnessPatternsFromConfig`'s four cases.
+
+Full suite: `bun test` → **1137 pass, 53 skip, 0 fail** across 75 files
+(1121 → 1137, +16). `bun run typecheck` → clean.
+
+Progress: 196/255 → 197/255.

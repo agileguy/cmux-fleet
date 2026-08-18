@@ -140,7 +140,20 @@ export async function loadConfig(
   cwd: string = process.cwd(),
 ): Promise<LoadedConfig> {
   const path = await resolveConfigPath(explicit, cwd);
-  const text = await Bun.file(path).text();
+  let text: string;
+  try {
+    text = await Bun.file(path).text();
+  } catch (err) {
+    // A file that EXISTS and cannot be read (mode 000, a directory, a dangling
+    // symlink) is a bad config, not a bug in the tool. Left as a raw Error it
+    // escaped every `instanceof ConfigError` handler in the CLI and exited 8
+    // ("internal error"), which crashed `artifacts` and `report` outright
+    // while malformed YAML — strictly less recoverable — degraded politely.
+    // Same class of operator mistake, so the same class of error.
+    throw new ConfigError(
+      `config ${path} exists but could not be read: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   return parseConfig(text, path);
 }
 

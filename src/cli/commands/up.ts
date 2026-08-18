@@ -165,6 +165,22 @@ export function register(program: Command): void {
        * that omitted the key would have produced anyway.
        */
       let heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
+      /**
+       * The harness surface travels with the run for the same reason (ISC-232).
+       *
+       * `artifacts` and `report` grade this run later, from a run directory
+       * and nothing else. If they re-resolved `fleet.yaml` at harvest time
+       * they would grade it against whatever config happens to sit in the cwd
+       * on the day someone asks — so a task capped by the ISC-150 rule in
+       * March certifies `success` in June, purely as a function of where the
+       * command was typed. Resolved once, here, at the moment the run is
+       * created, and written into `run.json` below.
+       *
+       * `null` means "config had no opinion, use the built-in defaults" and is
+       * written explicitly rather than omitted, so the run states its surface
+       * either way instead of leaving a reader to infer it from an absence.
+       */
+      let harnessPatterns: readonly string[] | null = null;
       let egressNetwork: string | null = null;
       let repoRoot: string | null = null;
       let loadedConfig: LoadedConfig | null = null;
@@ -208,6 +224,7 @@ export function register(program: Command): void {
           );
         }
         heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
+        harnessPatterns = loadedConfig.config.harness.patterns ?? null;
         egressNetwork = loadedConfig.config.docker.network;
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
 
@@ -242,6 +259,7 @@ export function register(program: Command): void {
         backend: opts.backend,
         workers,
         heartbeat_interval_ms: heartbeatIntervalMs,
+        harness_patterns: harnessPatterns,
       });
       const ledger = new LedgerWriter(run, "cli-up");
       await ledger.append("run_created", { detail: { workers, backend: opts.backend } });

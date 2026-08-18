@@ -65,6 +65,68 @@ export async function readRunHeartbeatIntervalMs(run: RunPaths): Promise<number>
   return doc?.heartbeat_interval_ms ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
 }
 
+/** What `up` recorded about the harness surface, and whether it recorded anything. */
+export interface RunHarnessPatterns {
+  /** `undefined` = the harvester's built-in defaults apply. */
+  patterns: readonly string[] | undefined;
+  /** A degradation the caller must surface, or `null` when there is nothing to say. */
+  note: string | null;
+}
+
+/**
+ * The harness surface the run was CREATED under, as `up` recorded it (ISC-232).
+ *
+ * Same shape and the same reason as `readRunHeartbeatIntervalMs` above: a
+ * value that decides how a run is graded has to travel WITH the run. Harvest
+ * is handed a run directory and nothing else, and a run outlives the config
+ * that produced it, so resolving `./fleet.yaml` at harvest time would grade a
+ * months-old run against whatever file happens to sit in today's cwd — the
+ * same task certifying `success` today and capping at `unknown` tomorrow with
+ * no change to the run at all.
+ *
+ * Forgiving about ABSENCE, in the same way and for the same reason as the
+ * heartbeat threshold: a run directory written before this field existed, or
+ * assembled by hand in a test, must still be harvestable. A missing key and an
+ * explicit `null` both mean the built-in defaults, silently — and both are
+ * still reproducible, which is the property that matters, because neither
+ * consults the cwd.
+ *
+ * Not forgiving about a value that is WRONG. An empty array disables the
+ * ISC-150 cap (`touched` could never be non-empty), and the only way one
+ * reaches this file is a hand-edited or corrupt `run.json`; a non-array is the
+ * run dir disagreeing with itself about how it is graded. Both degrade to the
+ * defaults rather than crashing a pure read, but neither does it quietly.
+ */
+export async function readRunHarnessPatterns(run: RunPaths): Promise<RunHarnessPatterns> {
+  let doc: { harness_patterns?: readonly string[] | null } | null;
+  try {
+    doc = await readValidated(run.runJson, (v) =>
+      z
+        .object({ harness_patterns: z.array(z.string()).nullish() })
+        .loose()
+        .parse(v),
+    );
+  } catch (err) {
+    return {
+      patterns: undefined,
+      note:
+        `run.json does not record a readable harness surface (${err instanceof Error ? err.message : String(err)}); ` +
+        "grading with the built-in defaults",
+    };
+  }
+  const recorded = doc?.harness_patterns;
+  if (recorded === undefined || recorded === null) return { patterns: undefined, note: null };
+  if (recorded.length === 0) {
+    return {
+      patterns: undefined,
+      note:
+        "run.json records an EMPTY harness surface, which would disable the ISC-150 " +
+        "cap entirely; refusing it and grading with the built-in defaults",
+    };
+  }
+  return { patterns: recorded, note: null };
+}
+
 export async function writeWorkerState(paths: WorkerPaths, state: WorkerState): Promise<void> {
   await writeJsonAtomic(paths.stateJson, WorkerStateSchema.parse(state));
 }

@@ -61,10 +61,15 @@ import { HERMETIC_GIT_ENV, hardenedGitArgv } from "./git.ts";
  * The verdict is then capped (see `adjudicate.ts`); this list only decides
  * what counts as harness.
  *
- * These defaults belong in the config schema; that file is owned elsewhere,
- * so they live here as the exported fallback until the wiring lands. Both
- * bare and `**`-prefixed forms are listed so a root-level match does not
- * depend on any one glob engine's zero-segment `**` behavior.
+ * These are the FALLBACK, not the source of truth (ISC-232): `fleet.yaml`'s
+ * `harness.patterns` replaces this list outright when it is set, and the
+ * defaults are what a config that says nothing gets. The list stays here
+ * rather than in the config schema because it is the matcher's contract —
+ * `harnessSurface` must have a defined surface with no config in reach, as
+ * it does when `artifacts` reads a run whose config is long gone.
+ *
+ * Both bare and `**`-prefixed forms are listed so a root-level match does
+ * not depend on any one glob engine's zero-segment `**` behavior.
  */
 export const DEFAULT_HARNESS_PATTERNS: readonly string[] = [
   // Test trees and test files.
@@ -207,6 +212,59 @@ export function harnessSurface(
   const globs = patterns.map((p) => new Bun.Glob(p));
   const touched = changedFiles.filter((f) => globs.some((g) => g.match(f)));
   return HarnessSurfaceSchema.parse({ patterns: [...patterns], touched });
+}
+
+/**
+ * The harness surface as the HARVESTER must compute it: config when the
+ * operator set it, the built-in defaults when they did not, and a record of
+ * what the choice cost (ISC-232).
+ *
+ * This, not `harnessSurface`, is what `harvestTask` calls. The extra work is
+ * the second surface: whenever `configured` is supplied, the defaults are run
+ * over the same diff so the two can be compared. `patterns` REPLACES the
+ * defaults — that is the documented semantics and it is the right one — but
+ * replacement means any configured list that matches nothing in a particular
+ * diff silently switches the ISC-150 cap off for that diff, and the realistic
+ * way to get there is not malice. `patterns: ["ci/**"]` is the first thing an
+ * operator who cares about CI files would write, and it quietly costs all ~91
+ * defaults. `Bun.Glob` compiles malformed patterns and matches nothing with
+ * them, so a typo lands in the same place with no error anywhere.
+ *
+ * The response is to make it VISIBLE, not to refuse it: narrowing is a
+ * legitimate operator decision (a repo whose suites do not live under `test/`
+ * needs it), so the surface still comes from config and the verdict still
+ * follows from it. What changes is that the harvest now carries the files the
+ * defaults would have flagged, and `adjudicate.ts` raises them as a
+ * discrepancy, so "your harness config matched nothing here, but the defaults
+ * would have caught something" reaches a human and a JSON consumer instead of
+ * being certified in silence.
+ *
+ * An EMPTY `configured` list throws rather than falling back. It cannot come
+ * from a valid `fleet.yaml` — `HarnessSchema` rejects it with an explanation —
+ * so reaching here means a hand-edited `run.json` or a caller assembling
+ * `HarvestOptions` directly, and for those `??`-style rescue to the defaults
+ * would be the silent disable this function exists to prevent. Empty is a
+ * config error everywhere, not just at the YAML boundary.
+ */
+export function harnessSurfaceFor(
+  changedFiles: readonly string[],
+  configured: readonly string[] | undefined,
+): HarnessSurface {
+  if (configured === undefined) return harnessSurface(changedFiles, DEFAULT_HARNESS_PATTERNS);
+  if (configured.length === 0) {
+    throw new Error(
+      "harness.patterns is empty — an empty list would disable the ISC-150 " +
+        "test-harness cap entirely rather than mean 'no opinion'. Omit the " +
+        "harness key to get the built-in defaults.",
+    );
+  }
+  const surface = harnessSurface(changedFiles, configured);
+  // Only load-bearing when the config's narrowing is what stopped the cap
+  // firing. If `touched` is non-empty the verdict is capped either way, and a
+  // wider default surface would change nothing a reader could act on.
+  if (surface.touched.length > 0) return surface;
+  const byDefault = harnessSurface(changedFiles, DEFAULT_HARNESS_PATTERNS);
+  return { ...surface, defaults_missed: byDefault.touched };
 }
 
 // ---------------------------------------------------------------------------

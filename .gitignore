@@ -6,3 +6,4 @@ dist/
 .pifleet/
 run-*/
 coverage/
+fleet.yaml

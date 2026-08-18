@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot } from "../../run/paths.ts";
+import { resolveHarnessPatterns } from "../../harvest/patterns.ts";
 import { harvestAll, harvestTask, type TaskHarvest } from "../../harvest/index.ts";
 
 /**
@@ -43,6 +44,7 @@ export function register(program: Command): void {
     .option("--run <id>", "run id")
     .option("--task <id>", "single task id")
     .option("--all", "every task in the run")
+    .option("-c, --config <path>", "fleet.yaml to read harness.patterns from")
     .option("--include <kinds>", "extra payloads to include, e.g. diff")
     .option("--run-acceptance", "re-run the task's acceptance commands and grade on the result")
     .option("--json", "emit machine-readable output")
@@ -51,6 +53,7 @@ export function register(program: Command): void {
         run?: string;
         task?: string;
         all?: boolean;
+        config?: string;
         include?: string;
         runAcceptance?: boolean;
         json?: boolean;
@@ -82,8 +85,25 @@ export function register(program: Command): void {
         if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
         const run = runPaths(runId, root);
 
+        /**
+         * ISC-232: which globs count as the test harness is the operator's
+         * call, and `fleet.yaml` is where they make it — but the file that
+         * decides is the one the RUN was created under, not the one in the
+         * cwd today. `resolveHarnessPatterns` reads the run directory (or an
+         * explicit `--config`) and never auto-discovers, so re-harvesting a
+         * run cannot change its verdict.
+         *
+         * Notes go to STDERR, which keeps stdout's JSON contract intact.
+         * `artifacts` already publishes the surface it graded against inside
+         * the payload as `facts.harness.patterns`, so the machine consumer is
+         * covered there rather than by a second copy here.
+         */
+        const harness = await resolveHarnessPatterns(run, opts.config);
+        for (const w of harness.warnings) process.stderr.write(`warning: ${w}\n`);
+        const harvestOpts = { includeDiff, runAcceptance, harnessPatterns: harness.patterns };
+
         if (single) {
-          const t = await harvestTask(run, opts.task as string, { includeDiff, runAcceptance });
+          const t = await harvestTask(run, opts.task as string, harvestOpts);
           if (opts.json === true) process.stdout.write(`${JSON.stringify(serialize(t))}\n`);
           else printHuman(t);
           return;
@@ -91,7 +111,7 @@ export function register(program: Command): void {
 
         // --all: the single end-of-fanout call (§8.4). An empty run emits an
         // empty task list — still valid JSON, still exit 0.
-        const tasks = await harvestAll(run, { includeDiff, runAcceptance });
+        const tasks = await harvestAll(run, harvestOpts);
         if (opts.json === true) {
           process.stdout.write(`${JSON.stringify({ run_id: runId, tasks: tasks.map(serialize) })}\n`);
         } else {

@@ -223,6 +223,31 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
   }
 
   /**
+   * ISC-232: the cap did not fire, and the configured surface is the reason.
+   *
+   * A DISCREPANCY rather than another cap, and the distinction is deliberate.
+   * Narrowing the harness surface is a legitimate operator decision, so the
+   * configured patterns still decide the verdict — overriding them here would
+   * make `harness.patterns` unable to do the one thing it exists to do. But
+   * the operator who wrote `patterns: ["ci/**"]` to describe their CI files
+   * almost certainly did not intend to stop grading `test/**`, and nothing
+   * else in the pipeline would ever tell them: the config is valid, the globs
+   * are well-formed, the diff is real, and the verdict comes back `success`.
+   *
+   * It lands in `discrepancies` specifically because that array is the one
+   * `artifacts` prints at the top of the human report and carries verbatim
+   * into the JSON payload — the same channel a falsified `files_changed`
+   * claim uses. A weakened control has to be as loud as a caught lie.
+   */
+  if (facts.harness.defaults_missed.length > 0) {
+    discrepancies.push(
+      `configured harness.patterns (${facts.harness.patterns.join(", ")}) matched none of this diff, ` +
+        `but the built-in defaults would have flagged ${facts.harness.defaults_missed.join(", ")} — ` +
+        `the ISC-150 cap did not fire because of the config, not because the diff is clean`,
+    );
+  }
+
+  /**
    * ISC-230: an exam that did not FINISH cannot certify success either.
    *
    * `unknown` being the lattice identity is right for a missing CLAIM — a task

@@ -18,7 +18,7 @@ import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adjudicate as adjudicateFacts } from "./adjudicate.ts";
-import { harnessSurface, resolveFromEnvelope, runAcceptance } from "./acceptance.ts";
+import { harnessSurfaceFor, resolveFromEnvelope, runAcceptance } from "./acceptance.ts";
 import { Deadline } from "../util/clock.ts";
 import {
   DerivedFactsSchema,
@@ -57,6 +57,25 @@ export interface HarvestOptions {
    * nothing was verified, not a bug.
    */
   runAcceptance?: boolean;
+  /**
+   * Repo-relative globs that count as the test harness (ISC-232), from
+   * `harness.patterns`. Absent means no opinion was recorded and
+   * `DEFAULT_HARNESS_PATTERNS` applies; a present list REPLACES them. An
+   * empty list is rejected, not rescued — see `harnessSurfaceFor`.
+   *
+   * Passed in rather than loaded here on purpose. Harvest is handed a RUN
+   * directory, not a workspace, and a run routinely outlives the config that
+   * produced it — a harvester that resolved `./fleet.yaml` itself would grade
+   * an old run against whatever config happens to sit in today's cwd, which
+   * is a worse failure than using the defaults.
+   *
+   * That rule constrains the CLI as much as this module, and `harvest/
+   * patterns.ts` is where it is enforced: the value comes from the run
+   * directory, written when the run was created, so re-harvesting a run
+   * cannot pick up a `fleet.yaml` that appeared in the cwd afterwards. Cwd
+   * and `~/.config` discovery reach `up`; they do not reach harvest.
+   */
+  harnessPatterns?: readonly string[];
   /** Scratch root for the fresh clone. Defaults to the OS temp dir. */
   acceptanceScratch?: string;
   /** Whole-run budget for acceptance execution. */
@@ -251,10 +270,27 @@ export async function harvestTask(
    * The changed-file list comes from the DERIVED diff, never from the
    * envelope: the envelope is the actor being graded, and a worker asked to
    * self-declare whether it touched the tests has an obvious answer.
+   *
+   * WHICH globs count is the caller's to say (ISC-232): `harness.patterns`
+   * from `fleet.yaml` when the operator set it, and only otherwise the
+   * built-in defaults.
+   *
+   * `harnessSurfaceFor` owns that fallback rather than a `??` here, and the
+   * difference is not stylistic. `opts.harnessPatterns ?? DEFAULT_...` rescues
+   * `undefined` and `null` but NOT `[]`, so every caller assembling
+   * `HarvestOptions` by hand — a test, `report/collect.ts`, anything future —
+   * could hand in an empty list and get `touched: []` with no error, which
+   * disables the ISC-150 cap outright. The schema refuses `patterns: []` at
+   * the YAML boundary; the in-process path needs the same stance, and it also
+   * needs the wider check the config-aware helper performs, since a NON-empty
+   * list that simply matches nothing disables the cap just as completely.
    */
   const factsWithHarness: DerivedFacts = {
     ...git.facts,
-    harness: harnessSurface(git.facts.files_changed.map((f) => f.path)),
+    harness: harnessSurfaceFor(
+      git.facts.files_changed.map((f) => f.path),
+      opts.harnessPatterns,
+    ),
   };
 
   /**
