@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 191/255
+progress: 192/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-17
@@ -380,7 +380,7 @@ retires the criterion.
 - [x] ISC-216: An undiagnosed internal error is distinguishable by exit code from a usage error.
 - [x] ISC-217: A malformed `epoch` (negative, fractional) is a named error rather than silently normalized to a fresh allocation.
 - [ ] ISC-218: `writeJsonAtomic`'s directory-fsync failure cannot report a durable write as failed after the rename succeeded.
-- [ ] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses. `test/integration/verbgate.test.ts`, "a policy planted at the pre-fix /outbox path grants nothing" — its own assertions passed on CI's first run (real Docker, fresh image build), but a cleanup-only `EACCES` failed the job; fix pushed, awaiting a green CI run before checking this box (see `## Verification`, "ISC-219, resolved by CI").
+- [x] ISC-219: The verbgate policy-rewrite test attempts the `/outbox` path the pre-fix shim actually read, not only the path the fix uses. `test/integration/verbgate.test.ts`, "a policy planted at the pre-fix /outbox path grants nothing" — green on CI's `container` job (real Docker, fresh image build): 53/53 probes passed, anti-skip guard updated to match (see `## Verification`, "ISC-219, resolved by CI").
 
 ### Group R — Round-3 mutation review (added 2026-07-27)
 
@@ -949,10 +949,15 @@ created; macOS Docker Desktop's VM masks exactly this class of ownership mismatc
 it looked fine when written and reviewed locally on this machine — the same asymmetry Group N's
 mount-visibility notes already describe, on the write side instead of the read side. Fixed by
 having the same container `rm -rf` the two paths it created before the script exits, so nothing
-uid-10001-owned is left for the host-level cleanup to trip on. Pushed; **ISC-219 stays open
-until CI confirms green on this exact fix** — the test's own assertions already passing once is
-good evidence the logic is right, but checking the box on a run that hasn't gone green yet is
-exactly the overclaiming this same round of review just caught twice already.
+uid-10001-owned is left for the host-level cleanup to trip on. That push also exposed a second,
+unrelated issue: the `container` job's own anti-skip guard (`EXPECTED: "52"`) was never updated
+when the ISC-219 test was added, so a fully green 53/0/0 run still failed the guard on a count
+mismatch — fixed by bumping `EXPECTED` to 53 (`.github/workflows/ci.yml`; needed the `workflow`
+OAuth scope added to this machine's `gh` token, since the default scope set can't push changes
+to workflow files). Re-run: **both CI jobs green** — `test` and `container`, 53/53 probes, no
+skips. **ISC-219 closed.**
+
+Progress: 191/255 → 192/255.
 
 ### Phase 6 close-out — 2026-07-28
 
