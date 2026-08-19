@@ -33,6 +33,8 @@ import {
 import { describeCredentialPlan, planCredential, resolveIdentity } from "../../security/adc.ts";
 import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
+import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
+import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
 import { captureWorktreeBaseline, createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
@@ -110,7 +112,7 @@ export function register(program: Command): void {
     .option("--backend-fallback <kind>", "backend to use if the primary is unavailable")
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers: string; backend: string; backendFallback?: string; config?: string; json?: boolean }) => {
+    .action(async (opts: { workers: string; backend: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean }) => {
       if (!isBackendKind(opts.backend)) {
         throw new CliError(
           `unknown backend '${opts.backend}'; expected cmux, tmux or headless`,
@@ -128,6 +130,44 @@ export function register(program: Command): void {
         throw new CliError(
           "PIFLEET_PI_COMMAND is required in Phase 1 (path to the Pi double)",
           EXIT.USAGE,
+        );
+      }
+
+      /**
+       * Refuse while an MLX training run is active, unless `--i-know` (ISC-56).
+       *
+       * Here, among the cheap refusals, and BEFORE the run directory exists:
+       * §5.9 records this machine turning an OOM under concurrent heavy GPU
+       * load into a kernel watchdog panic, so the whole value of the check is
+       * that it costs nothing and happens before anything is on disk to clean
+       * up. Detection is a documented HEURISTIC (see the guard module) — it
+       * catches the common `mlx_lm.lora`-shaped accident and cannot see a
+       * bespoke training script, which is exactly why the override exists.
+       *
+       * `EXIT.BACKEND_UNAVAILABLE`, not `USAGE`: nothing is wrong with the
+       * command line, the host is busy. Same class as the egress-network and
+       * hazard-scan refusals below.
+       */
+      const mlxTraining = await checkMlxTrainingGuard();
+      if (mlxTraining.length > 0 && opts.iKnow !== true) {
+        throw new CliError(
+          `refusing to start: ${mlxTraining.length} MLX training process(es) appear to be ` +
+            `running, and a fleet's concurrent GPU load has panicked this host before ` +
+            `(SRD §5.9)\n${mlxTraining.map((m) => `  ${describeMatch(m)}`).join("\n")}\n` +
+            `Wait for the run to finish, or pass --i-know to proceed anyway`,
+          EXIT.BACKEND_UNAVAILABLE,
+        );
+      }
+      if (mlxTraining.length > 0) {
+        // Overridden, not absent. An operator who chose to race a training run
+        // must leave a trace of that choice: this goes to stderr NOW (the
+        // ledger does not exist for another ~170 lines, and a warning that
+        // arrives after the decision is not a warning) and is appended to the
+        // ledger below, so the record survives the terminal scrollback.
+        process.stderr.write(
+          `warning: --i-know overrode the MLX training guard; ${mlxTraining.length} ` +
+            `training process(es) are still running:\n` +
+            `${mlxTraining.map((m) => `  ${describeMatch(m)}`).join("\n")}\n`,
         );
       }
 
@@ -246,6 +286,22 @@ export function register(program: Command): void {
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
 
         assertModelsAllowed(loadedConfig, workers);
+        /**
+         * ISC-53, the second half of §5.9's model gate and deliberately the
+         * line after its first half.
+         *
+         * ISC-52 above asks "is this model on the list the operator vouched
+         * for"; this asks the server "can this model actually emit a native
+         * tool call". Both run over EVERY named worker before ANY supervisor
+         * launches, for the same reason: a refusal partway through the launch
+         * loop leaves a half-started fleet behind it.
+         *
+         * A model that answers in prose exits 2 (a usage error — the wrong
+         * model was named); oMLX being unreachable exits 3 (an environment
+         * failure — nothing was learned about the model). Both codes come off
+         * the thrown error's own `exitCode` via the `ExitCoded` protocol.
+         */
+        await assertModelsSupportToolCalls(loadedConfig, workers);
       }
 
       /**
@@ -309,6 +365,14 @@ export function register(program: Command): void {
       await writeJsonAtomic(run.runJson, runDoc);
       const ledger = new LedgerWriter(run, "cli-up");
       await ledger.append("run_created", { detail: { workers, backend: opts.backend } });
+      // The durable half of the `--i-know` override warned about above: a run
+      // that raced a training run must say so in its own record, so `report`
+      // can explain a panicked host months later.
+      if (mlxTraining.length > 0) {
+        await ledger.append("mlx_training_guard_overridden", {
+          detail: { matches: mlxTraining.map((m) => ({ pid: m.pid, command: m.command })) },
+        });
+      }
       if (egressNetwork !== null) {
         await ledger.append("egress_network_ready", {
           detail: { network: egressNetwork, internal: egressInternal },
