@@ -70,6 +70,34 @@ All notable changes to this project are documented here.
   make TLS *required* named up front: if the key ever gates billing authority or data access, is
   reused for a credential that does, or the LAN stops being one the operator controls. No billing
   authority remains unconditional; the Google credential never traverses this path.
+- **The bridge gateway residual is narrower than it was documented to be, and enumeration is what found it.**
+  `test/integration/relay.test.ts` now enumerates all three terms of SRD §12.8's reachable set instead of
+  sampling them — a full 1–65535 port scan of the gateway, of the relay's own bridge address, and an
+  authoritative `docker network inspect` of bridge membership. The scanner is built from what the worker
+  image already has: measured by running it, `nmap`, `nc`, `ncat`, `socat`, `ss`, `netstat` and `ip` are all
+  absent, but bash 5.2.15 has `/dev/tcp` compiled in. The expected gateway set is **not** derived from a
+  second probe of the same shape — that is circular in the way ISC-253's `decide()` gate was — but from
+  `/proc/net/tcp` read in a `--network host` container, the kernel's own socket table, obtained without
+  sending a packet. Measured: kernel `[22, 53, 39375, 40375]`, ordinary bridge `[22, 39375, 40375]`,
+  deny-all bridge `[22, 40375]`. Two strict narrowings, so the subset assertion is not a tautology.
+  **A published container port is NOT reachable from the internal bridge** — Docker's isolation DROP lives
+  in FORWARD, evaluated after nat/PREROUTING has rewritten the destination to an address outside the bridge
+  subnet — so the previous `reachable == served` assertion was false in general and held only because all
+  five of its guessed candidate ports happened to be host-namespace services. The §12.8 residual is
+  therefore every **host-namespace** listener, not every port the Docker host listens on. Nothing is
+  inconclusive and nothing is vacuous any more: both beacons and the stray sibling are **planted** before
+  anything is measured, which removes the old `[inconclusive]` early return that passed while proving
+  nothing, and makes an empty-set comparison impossible to mistake for a working scan.
+- **A live inference is now asserted through the relay, differentially.** A real completion —
+  `gemma-4-26b-a4b-it-4bit` answering in 428 ms from inside the deny-all bridge, with `completion_tokens > 0`
+  and the echoed model checked, because a 200 with an empty string is not an inference. Model selection is an
+  **allowlist, never a heuristic**: the embedding model is first in `/v1/models` and answers chat with an
+  error, and "the first id that is not obviously an embedding model" selects a model that SIGABRTs the
+  inference server during generation. Error shapes do not generalise either — the same embedding model
+  returns HTTP 500 on one host and HTTP 400 on another — so no classification rule is safe. The control is
+  re-checked **after** any relayed failure, because the server can die between the two calls; only a relayed
+  failure against a still-succeeding control is a real failure. The key is read from the environment and
+  passed by name via `-e OMLX_API_KEY`, never into argv.
 - **The deny-all bridge does not deny the bridge gateway, and this branch was claiming otherwise.**
   Measured, not inferred: a container attached to nothing but the `--internal` `pifleet-egress`
   network — no `--add-host`, no second network, no capabilities, no relay running — pulls a live
