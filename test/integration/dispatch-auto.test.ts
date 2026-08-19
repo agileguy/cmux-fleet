@@ -127,11 +127,9 @@ describe("dispatch --auto against a real fleet (happy chain)", () => {
       expect(byId["a"]).toMatchObject({ state: "done", verdict: "success", task_id: "a" });
       expect(byId["b"]).toMatchObject({ state: "done", verdict: "success" });
 
-      // Dependency gating, observed two independent ways. Worker landing:
-      // with w2 idle the whole time, only readiness explains 'b' on w1 —
-      // an ungated scheduler dispatches 'b' to w2 in the first pass.
+      // 'a' goes to the first idle worker in sorted order — deterministic:
+      // `scheduler.ts` sorts `listWorkers()` and takes `available[0]`.
       expect(byId["a"]!.worker).toBe("w1");
-      expect(byId["b"]!.worker).toBe("w1");
 
       // And ledger order: both dispatched rows sit in the ONE CLI shard, so
       // their seq numbers are totally ordered; 'b' strictly after 'a'.
@@ -141,6 +139,36 @@ describe("dispatch --auto against a real fleet (happy chain)", () => {
       expect(dispatched.map((r) => r.task_id)).toEqual(["a", "b"]);
       expect(dispatched[0]!.actor).toBe(dispatched[1]!.actor);
       expect(dispatched[0]!.seq).toBeLessThan(dispatched[1]!.seq);
+
+      /**
+       * Dependency gating, asserted on the ELAPSED GAP rather than on which
+       * worker 'b' landed on.
+       *
+       * This replaces `expect(byId["b"]!.worker).toBe("w1")`, which was
+       * load-sensitive and failed intermittently in CI (observed: `Expected:
+       * "w1" / Received: "w2"`). That assertion's stated reasoning — "with w2
+       * idle the whole time, only readiness explains 'b' on w1" — does not
+       * hold. Once 'a' settles, BOTH workers are idle and 'b' is ready, so
+       * which one takes it depends on whether w1's `workerHealth` probe has
+       * observed it return to idle yet. Under load it has not, `available`
+       * becomes `["w2"]`, and 'b' lands on w2 having been perfectly correctly
+       * gated. The old assertion conflated "was 'b' gated on 'a'" with "did w1
+       * recover first", and only the first is a claim about the scheduler.
+       *
+       * The gap is the direct evidence, and it is strictly stronger. An
+       * UNGATED scheduler dispatches both in the same pass, microseconds
+       * apart; a gated one cannot dispatch 'b' until 'a' has settled, which
+       * costs 'a's whole execution. Measured over 6 local runs: 237, 241, 241,
+       * 244, 246, 262 ms — versus ~0-5ms for a same-pass dispatch. 100ms sits
+       * clear of both, and the margin only WIDENS under load, because load
+       * makes 'a' take longer rather than shorter. That is the right direction
+       * for a CI assertion to be wrong in.
+       *
+       * Note this also catches a case the old assertion missed entirely: an
+       * ungated scheduler that happened to put 'b' on w1 anyway.
+       */
+      const gapMs = Date.parse(dispatched[1]!.ts) - Date.parse(dispatched[0]!.ts);
+      expect(gapMs).toBeGreaterThan(100);
 
       // The durable schedule record (run/paths.ts scheduleJson): what
       // `report` reads must be byte-for-byte the seam stdout carried.
