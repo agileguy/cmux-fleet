@@ -151,6 +151,20 @@ export async function sendTaskEnvelope(args: {
       detail: { note: recorded.note },
     });
   }
+  const perWorkerNote = recorded.perWorkerNotes.find((n) => n.startsWith(`${worker}:`));
+  if (perWorkerNote !== undefined) {
+    // This worker's own record failed to parse, even though the run overall
+    // has a readable worktrees list — a narrower degradation than `note`
+    // (which fires only when the WHOLE record is unreadable), and worth its
+    // own ledger row for the same reason: a fallback envelope naming a
+    // branch nothing actually checked out is a debugging trail a human will
+    // want later.
+    await args.ledger.append("worktree_record_degraded", {
+      worker,
+      task_id: taskId,
+      detail: { note: perWorkerNote },
+    });
+  }
   const wt = recorded.byWorker.get(worker);
 
   // Fill the envelope; epoch 0 is a placeholder the supervisor replaces
@@ -172,13 +186,20 @@ export async function sendTaskEnvelope(args: {
       container_workdir: partial["container_workdir"] ?? "/workspace",
       // With no record (a `shared-ro` fleet, a hand-assembled run dir, a run
       // created before checkouts were wired) the name still has to be
-      // DERIVED, not restated: `workerBranch` with the schema's own default
-      // produces the identical string the literal used to, and moves with the
-      // default if it ever changes.
+      // DERIVED, not restated: `workerBranch` reproduces the string a real
+      // checkout would have used. `recorded.branchPrefix` — THIS RUN's
+      // actual `run.branch_prefix`, persisted at `up` time — is preferred
+      // over the schema's global default: without it, an operator who set
+      // `branch_prefix: experiment` still got `fleet/<run>/<worker>` for
+      // every worker with no checkout of its own to read a branch off
+      // (`shared-ro`, `none`), because the fallback re-derived the DEFAULT
+      // rather than reading what the run was actually launched with — the
+      // exact dead-config-field shape this whole fix set out to close, one
+      // branch of this same `??` chain over.
       branch:
         partial["branch"] ??
         wt?.branch ??
-        workerBranch(DEFAULT_BRANCH_PREFIX, run.runId, worker),
+        workerBranch(recorded.branchPrefix ?? DEFAULT_BRANCH_PREFIX, run.runId, worker),
       base_ref: partial["base_ref"] ?? wt?.baseSha ?? "0".repeat(40),
       inputs: partial["inputs"] ?? [],
       acceptance: partial["acceptance"] ?? [],

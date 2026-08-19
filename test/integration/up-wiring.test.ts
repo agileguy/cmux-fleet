@@ -40,6 +40,8 @@ import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { EXIT } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
+import { readRunWorktrees } from "../../src/run/state.ts";
+import { inspectCloneDirt } from "../../src/run/worktree.ts";
 import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
 import { seedGitRepo } from "../fixtures/synthetic-repo.ts";
 
@@ -334,6 +336,31 @@ describe("up wires the security controls, in order (review finding 2)", () => {
       expect(firstSupervisor).toBeDefined();
       expect(egress!.seq).toBeLessThan(firstSupervisor!.seq);
       for (const h of hazards) expect(h.seq).toBeLessThan(firstSupervisor!.seq);
+
+      /**
+       * THE regression test for the hazard-neutralization-dirties-every-
+       * clone fix. The WORKER's clone gets a SECOND `repo_hazard` event —
+       * this one carrying `worker: "eng-1"` and `neutralized: true`, from
+       * `neutralizeRepoHazards` running against the clone rather than the
+       * operator's checkout. Quarantine is a RENAME of a tracked file,
+       * which is real, uncommitted change in `git status --porcelain` the
+       * instant it happens — so without `captureWorktreeBaseline`, this
+       * exact ordinary fixture (a root `AGENTS.md`, which this project's
+       * OWN skill-authoring conventions make common) would leave the clone
+       * reading as dirty from the moment `up` finished, before "eng-1" did
+       * anything at all, and `down --prune` would refuse it without
+       * `--force`.
+       */
+      const cloneHazard = hazards.find((h) => h.worker === "eng-1" && h.detail?.["kind"] === "agents_md");
+      expect(cloneHazard).toBeDefined();
+      expect(cloneHazard!.detail?.["neutralized"]).toBe(true);
+
+      const recorded = await readRunWorktrees(run);
+      const wt = recorded.byWorker.get("eng-1");
+      expect(wt).toBeDefined();
+      expect(await Bun.file(join(wt!.path, `AGENTS.md${QUARANTINE_SUFFIX}`)).exists()).toBe(true);
+      const dirt = await inspectCloneDirt(wt!);
+      expect(dirt).toMatchObject({ dirty: false, statusLines: 0 });
     },
     90_000,
   );

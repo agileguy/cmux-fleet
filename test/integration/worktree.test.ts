@@ -29,8 +29,11 @@ import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
 import { renderWorker } from "../../src/config/render.ts";
 import { runPaths, workerBranch, workerWorktree, type RunPaths } from "../../src/run/paths.ts";
 import {
+  MAX_ATTRIBUTE_BYTES,
   StaleWorktreeError,
+  WorktreeError,
   WorktreePreflightError,
+  assertBaseRefCloneable,
   createWorkerWorktrees,
   inspectBaseRef,
   inspectCloneDirt,
@@ -250,13 +253,43 @@ async function objectFiles(root: string): Promise<ObjectFile[]> {
 // ---------------------------------------------------------------------------
 
 describe("the clone is self-contained", () => {
-  test("origin is stripped and the host repo path does not survive in the config", async () => {
+  test("origin is stripped and the host repo path does not survive ANYWHERE under .git", async () => {
     const rig = await makeRig();
     const [wt] = await create(rig, ["eng-1"]);
 
     expect((await gitOk(wt!.path, "remote")).trim()).toBe("");
     const config = await Bun.file(join(wt!.path, ".git", "config")).text();
     expect(config).not.toContain(rig.repo);
+
+    /**
+     * `.git/config` alone is the WEAKER property. `git clone` writes
+     * "clone: from <absolute source path>" into `.git/logs/HEAD` and
+     * `.git/logs/refs/heads/<base branch>` — both inside the mount, both
+     * readable by the worker, and untouched by `remote remove origin`. An
+     * earlier version of this test asserted only `.git/config` and passed
+     * while that leak was live. Walk every file under `.git` instead.
+     */
+    const gitDir = join(wt!.path, ".git");
+    const offenders: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const name of await readdir(dir)) {
+        const abs = join(dir, name);
+        const st = await stat(abs);
+        if (st.isDirectory()) {
+          await walk(abs);
+          continue;
+        }
+        const content = await Bun.file(abs).text().catch(() => "");
+        if (content.includes(rig.repo)) offenders.push(abs);
+      }
+    };
+    await walk(gitDir);
+    expect(offenders).toEqual([]);
+
+    // The mechanism the property rests on: reflogs are gone entirely right
+    // after creation (git recreates them fresh on the worker's first ref
+    // update, per `core.logAllRefUpdates`, with no source path in them).
+    expect(await pathExists(join(gitDir, "logs"))).toBe(false);
 
     // Still fully functional without it — the point of removing origin is
     // that nothing needed it, not that the clone is degraded.
@@ -338,6 +371,43 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
     // leave two clones and a remote apiece behind the refusal.
     expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
   });
+
+  /**
+   * `BaseRefFindings.unscanned`'s own doc comment says "Never silent". This
+   * pins that literally: a `.gitattributes` too large to read must not let
+   * an LFS declaration inside it pass unnoticed just because nothing ELSE
+   * in the ref tripped a refusal.
+   */
+  test("an attribute file too large to scan REFUSES the clone, not silently accepts it", async () => {
+    const bigButUnderCap = "#".repeat(1000) + "\n*.psd filter=lfs -text\n";
+    const rig = await makeRig({
+      seed: { files: { "a.txt": "one\n", ".gitattributes": bigButUnderCap } },
+    });
+    // Sanity: under the cap, the scan reads it and finds LFS the normal way.
+    const readable = await inspectBaseRef(rig.repo, "main");
+    expect(readable.unscanned).toEqual([]);
+    expect(readable.lfs).toHaveLength(1);
+
+    // Now push the same file over MAX_ATTRIBUTE_BYTES with a padding comment
+    // line, keeping the LFS assignment on its own line so it would have been
+    // detected had the scan been ABLE to read the file.
+    const tooLarge = "#" + "x".repeat(MAX_ATTRIBUTE_BYTES) + "\n*.psd filter=lfs -text\n";
+    await writeFile(join(rig.repo, ".gitattributes"), tooLarge);
+    await gitOk(rig.repo, "add", "-A");
+    await gitOk(rig.repo, "commit", "-q", "-m", "grow gitattributes past the cap");
+
+    const findings = await inspectBaseRef(rig.repo, "main");
+    expect(findings.lfs).toEqual([]); // never read, so never "found"
+    expect(findings.unscanned).toHaveLength(1);
+    expect(findings.unscanned[0]).toContain(".gitattributes");
+
+    // The gate under test: `problems.length === 0` used to mean "accept",
+    // even with `unscanned` non-empty. It must not, any more.
+    expect(() => assertBaseRefCloneable(rig.repo, "main", findings)).toThrow(WorktreePreflightError);
+    expect(() => assertBaseRefCloneable(rig.repo, "main", findings)).toThrow(/could not be fully scanned/);
+    await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreePreflightError);
+    expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -359,6 +429,61 @@ describe("branch_prefix is honoured end to end", () => {
       expect(await create(rig, ["eng-1"])).toEqual([]);
       expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
     }
+  });
+
+  /**
+   * `SESSION_ID_RE` (worker ids) permits both a literal `..` and a trailing
+   * `.lock`, and `branch_prefix` has no grammar of its own at all — so
+   * without this preflight, each of these produces a branch name git
+   * refuses, and (before the atomicity fix in the next `describe`) an
+   * ORPHAN clone directory nothing had recorded yet. Refused here, before
+   * any clone exists at all — the property the second assertion in each
+   * case pins.
+   */
+  test("a branch_prefix that produces an invalid git ref name is refused BEFORE any clone exists", async () => {
+    const invalidPrefixes = ["a..b", "x.lock", "my prefix", "-leading-dash"];
+    for (const branchPrefix of invalidPrefixes) {
+      const rig = await makeRig({ branchPrefix });
+      await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreePreflightError);
+      await expect(create(rig, ["eng-1"])).rejects.toThrow(/refuses as a ref name/);
+      expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
+    }
+  });
+
+  test("with multiple workers, one bad branch_prefix refuses the whole batch before worker one clones", async () => {
+    const rig = await makeRig({ workers: ["eng-1", "eng-2"], branchPrefix: "a..b" });
+    await expect(create(rig, ["eng-1", "eng-2"])).rejects.toThrow(WorktreePreflightError);
+    expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("a failure after the clone exists is rolled back, not left as an orphan", () => {
+  /**
+   * THE regression test for the atomicity fix. `git clone` succeeds — the
+   * directory is real, on disk — and then `git switch -c <branch>` fails for
+   * a reason the ref-grammar preflight cannot catch: the NAME is perfectly
+   * valid, it is simply ALREADY the branch the clone just checked out
+   * (`--branch` cloned it by that exact name). Before the fix, `onCreated`
+   * — the only thing that records a checkout — never fires on this path, so
+   * the directory and any registered remote are left behind, invisible to
+   * `down --prune`, blocking every future `up` at this path with
+   * `StaleWorktreeError`.
+   */
+  test("a clone that exists but never finished setup is removed, not orphaned", async () => {
+    // The base branch IS the exact string `workerBranch` will compute for
+    // this rig's fixed run id ("run-abc") and worker id ("eng-1") under the
+    // default prefix ("fleet") — see `makeRig`/`create`.
+    const rig = await makeRig({ seed: { branch: "fleet/run-abc/eng-1" } });
+
+    await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreeError);
+    await expect(create(rig, ["eng-1"])).rejects.toThrow(/switch -c/);
+
+    // The clone directory does not survive the failure.
+    expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
+    // Nor does a dangling remote in the parent — the same rollback covers it.
+    expect((await git(rig.repo, "remote", "get-url", workerRemoteName("eng-1"))).code).not.toBe(0);
   });
 });
 
@@ -386,18 +511,26 @@ describe("operator visibility via a named remote", () => {
     expect(await gitOk(rig.repo, "status", "--porcelain", "--untracked-files=no")).toBe("");
 
     /**
-     * The ONE operator-visible trace, asserted rather than hidden: the
-     * `.worktrees/` directory shows up as untracked in their `git status`.
+     * `.worktrees/` does NOT show up in the operator's `git status` at all —
+     * revised from an earlier version of this test, which asserted the
+     * opposite and argued that excluding it would be a forbidden mutation of
+     * the operator's repository.
      *
-     * It is deliberately not suppressed. Writing `.worktrees/` into the
-     * parent's `.git/info/exclude` would silence it, and that is a mutation of
-     * the operator's repository — which SRD §12.8 forbids and which `up.ts`'s
-     * hazard block is emphatic about after ISC-249 damaged a real checkout by
-     * assuming a small edit there was harmless. One untracked directory that
-     * `down --prune` removes is the cheaper trade, and it is the operator's
-     * own call whether to add it to their `.gitignore`.
+     * That argument had it backwards. Leaving `.worktrees/` untracked-but-
+     * visible means an operator's completely ordinary `git add -A && git
+     * commit` embeds every worker's clone as a GITLINK (git treats an
+     * un-ignored nested `.git` directory as a candidate submodule, not as
+     * content to walk into) — which then makes THIS MODULE'S OWN preflight
+     * refuse every subsequent `up` with a "submodules present" diagnosis the
+     * operator never authored and cannot reconcile with `git submodule
+     * status` printing nothing. See the mutation test below. `.git/info/
+     * exclude` is not `.gitignore`: it is untracked, uncommitted, local-only
+     * bookkeeping read only by git itself — the same category of write
+     * `registerWorkerRemote` already makes to `.git/config` a few lines
+     * above this one, and no more a mutation of the operator's TRACKED
+     * checkout than that is.
      */
-    expect(await gitOk(rig.repo, "status", "--porcelain")).toBe("?? .worktrees/");
+    expect(await gitOk(rig.repo, "status", "--porcelain")).toBe("");
   });
 
   test("a stale same-named remote from a dead run is replaced, not fatal", async () => {
@@ -417,6 +550,54 @@ describe("operator visibility via a named remote", () => {
     });
     expect(created[0]?.replacedStaleRemote).toBe(true);
     expect(await gitOk(rig.repo, "remote", "get-url", wt!.remoteName)).toBe(wt!.path);
+  });
+
+  /**
+   * THE regression test for `.git/info/exclude`. Mutation-proved: commenting
+   * out the `excludeWorktreesDir` call in `createWorkerWorktrees` makes this
+   * fail at the FIRST assertion (a gitlink appears) rather than the second,
+   * confirming the exclude entry — not some other control — is what prevents
+   * it.
+   */
+  test("an operator's ordinary `git add -A && git commit` does not embed a worker's clone as a gitlink", async () => {
+    const rig = await makeRig();
+    await create(rig, ["eng-1"]);
+
+    await gitOk(rig.repo, "add", "-A");
+    // Nothing to commit if `.worktrees/` was truly excluded — proves the
+    // exclude entry actually suppressed it, not merely that this test forgot
+    // to look.
+    expect(await gitOk(rig.repo, "status", "--porcelain")).toBe("");
+    const committed = await git(rig.repo, "commit", "-q", "-m", "operator's own unrelated work");
+    expect(committed.code).not.toBe(0); // nothing staged to commit
+
+    // The property that actually matters: this module's OWN preflight, run
+    // again against the parent's current HEAD, must not see a gitlink and
+    // refuse every future `up` as though the operator had added a submodule.
+    const findings = await inspectBaseRef(rig.repo, "main");
+    expect(findings.gitlinks).toEqual([]);
+    expect(() => assertBaseRefCloneable(rig.repo, "main", findings)).not.toThrow();
+  });
+
+  test("excludeWorktreesDir is idempotent across repeated `up`s and preserves an operator's existing entries", async () => {
+    const rig = await makeRig();
+    const excludePath = join(rig.repo, ".git", "info", "exclude");
+    await mkdir(join(rig.repo, ".git", "info"), { recursive: true });
+    await writeFile(excludePath, "*.local\n", "utf8");
+
+    const [first] = await create(rig, ["eng-1"]);
+    const once = await Bun.file(excludePath).text();
+    expect(once).toContain("*.local");
+    expect(once).toContain("/.worktrees/");
+
+    await pruneWorkerWorktree({ repo: rig.repo, worktree: first!, force: true });
+    await create(rig, ["eng-1"]);
+    const twice = await Bun.file(excludePath).text();
+    // Appended exactly once, not once per `up` — a second entry would still
+    // be harmless to git, but would be evidence the idempotency check itself
+    // is broken.
+    expect(twice.split("/.worktrees/").length - 1).toBe(1);
+    expect(twice).toContain("*.local");
   });
 });
 

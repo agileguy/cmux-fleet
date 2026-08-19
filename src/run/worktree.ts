@@ -72,10 +72,12 @@
  * applies to it completely (ISC-249).
  */
 
-import { lstat, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts";
 import { EXIT } from "../contracts.ts";
 import { runGit, type GitResult } from "../harvest/git.ts";
+import { resolvedWithin } from "../harvest/outbox.ts";
 import { workerBranch, workerWorktree, type RunPaths } from "./paths.ts";
 
 /**
@@ -93,6 +95,15 @@ export interface WorkerWorktree {
   branch: string;
   baseSha: string;
   remoteName: string;
+  /**
+   * `git status --porcelain`, captured once the checkout is fully prepared —
+   * empty at creation, then overwritten by `captureWorktreeBaseline` after
+   * `up` runs hazard neutralization. See that function for why this exists:
+   * neutralization is a real, uncommitted change the instant it happens, and
+   * without a recorded baseline every clone of a repository with a root
+   * `AGENTS.md`/`CLAUDE.md` reads as dirty from birth.
+   */
+  baselineStatus: string;
 }
 
 /**
@@ -293,12 +304,25 @@ export function assertBaseRefCloneable(
         "graded on text that is not the file",
     );
   }
+  // A `.gitattributes` this scan declined to read is not evidence of absence —
+  // `findings.lfs` can only report what an assignment this scan actually READ
+  // said, and a file skipped for size or an unreadable blob is a question
+  // this preflight never answered. Returning past it silently was exactly the
+  // silent-wrong-answer failure this whole gate exists to refuse instead of
+  // warn about, and this struct's own doc comment says "Never silent" — so an
+  // unscanned file is now itself a refusal reason, not a caveat appended only
+  // when something else already triggered one.
+  if (findings.unscanned.length > 0) {
+    problems.push(
+      `${findings.unscanned.length} attribute file(s) could not be fully scanned, so this ref's ` +
+        `cloneability could not be confirmed rather than confirmed clean: ${findings.unscanned.join("; ")}`,
+    );
+  }
   if (problems.length === 0) return;
   throw new WorktreePreflightError(
     `refusing to create per-worker checkouts of ${baseRef} in ${repo}: ${problems.join(" / ")}. ` +
       `Use \`isolation: shared-ro\` or \`isolation: none\` for this repository (SRD §9.1), or ` +
-      `run the fleet against a ref without them.` +
-      (findings.unscanned.length > 0 ? ` Not fully scanned: ${findings.unscanned.join("; ")}.` : ""),
+      `run the fleet against a ref without them.`,
   );
 }
 
@@ -416,6 +440,85 @@ async function registerWorkerRemote(
   return { replacedStale };
 }
 
+/**
+ * `<branch_prefix>/<run-id>/<worker-id>` has to be a valid git ref name, and
+ * nothing upstream enforces that today. `run.branch_prefix` is an
+ * unconstrained string (an operator can set it to anything, including `..`,
+ * a leading `-`, or a trailing `.lock`) and `workerId`'s own grammar
+ * (`SESSION_ID_RE`) permits both of those too. Checked HERE, for every wanted
+ * worker, before ANY clone is attempted — the "pure work first" rule this
+ * module already applies to the base-ref scan — because a name git refuses
+ * only surfaces today at `git switch -c`, AFTER the clone directory already
+ * exists: exit 3 for what is actually a config mistake, and (before the
+ * atomicity fix below) an orphan checkout nothing had recorded yet.
+ *
+ * Delegates to git's own `check-ref-format --branch` rather than a
+ * hand-written regex: the ref grammar (no `..`, no trailing `.lock`, no
+ * control characters, no leading `-`, and more) is git's to define, and
+ * restating a subset of it here would drift the moment git's own grammar
+ * does. `--branch` mode specifically, not the bare `refs/heads/<name>` form:
+ * measured directly, `check-ref-format refs/heads/-x` exits 0 — a leading
+ * `-` is syntactically legal as a REF — while `git switch -c -x` and
+ * `check-ref-format --branch -x` both refuse it, because a branch NAME
+ * starting with `-` is indistinguishable from an option to the branch-taking
+ * commands that consume it. `--branch` mode is what actually answers "will
+ * `git switch -c` accept this", which is the question this function exists
+ * to ask.
+ */
+async function assertValidBranchName(repo: string, branch: string, workerId: string): Promise<void> {
+  const check = await runGit(repo, ["check-ref-format", "--branch", branch]);
+  if (check.code !== 0) {
+    throw new WorktreePreflightError(
+      `worker ${workerId} would commit on branch ${JSON.stringify(branch)}, which git refuses as a ` +
+        `ref name. This is built from run.branch_prefix, the run id and the worker id — check ` +
+        `run.branch_prefix for characters git's ref grammar disallows (no "..", no trailing ` +
+        `".lock", no leading "-", no spaces or control characters).`,
+    );
+  }
+}
+
+/**
+ * Idempotently add `.worktrees/` to the OPERATOR's own exclude list, once,
+ * before the first clone of a run is created.
+ *
+ * Without this, an operator's completely ordinary `git add -A && git commit`
+ * embeds every worker's clone as a GITLINK (mode 160000): git treats an
+ * un-ignored nested `.git` directory as a candidate submodule, not as content
+ * to walk into. That gitlink then makes THIS MODULE'S OWN preflight
+ * (`assertBaseRefCloneable`, above) refuse every subsequent `up` with a
+ * "submodules present" diagnosis the operator never authored and cannot
+ * reconcile with `git submodule status` printing nothing — reproduced
+ * directly: create one clone, `git add -A && git commit` in the parent, then
+ * re-run the ref scan against the new HEAD.
+ *
+ * Written to `.git/info/exclude`, never to `.gitignore`. SRD §12.8 requires
+ * the operator's checkout be left otherwise unchanged, and `.gitignore` is
+ * TRACKED content — writing to it would edit a file the operator did not ask
+ * to edit and put it in their next commit's diff for a reason they never
+ * authored. `info/exclude` is git's own mechanism for exactly this: local,
+ * untracked, read only by git itself. Resolved via `git rev-parse
+ * --git-path` rather than a hand-joined `<repo>/.git/info/exclude`, because
+ * the operator's OWN checkout can itself be a linked worktree, where `.git`
+ * is a pointer file and the real `info/exclude` lives elsewhere.
+ */
+async function excludeWorktreesDir(repo: string): Promise<void> {
+  const gitPath = await runGit(repo, ["rev-parse", "--git-path", "info/exclude"]);
+  if (gitPath.code !== 0) throw new WorktreeError(`rev-parse --git-path info/exclude in ${repo}`, gitPath);
+  const excludePath = resolvePath(repo, gitPath.stdout.trim());
+
+  let current = "";
+  try {
+    current = await readFile(excludePath, "utf8");
+  } catch {
+    // No exclude file yet — created below.
+  }
+  if (current.split("\n").some((l) => l.trim() === "/.worktrees/")) return;
+
+  await mkdir(dirname(excludePath), { recursive: true });
+  const prefix = current.length > 0 && !current.endsWith("\n") ? `${current}\n` : current;
+  await writeFile(excludePath, `${prefix}/.worktrees/\n`, "utf8");
+}
+
 export interface CreateWorktreesOptions {
   loaded: LoadedConfig;
   run: RunPaths;
@@ -468,6 +571,21 @@ export async function createWorkerWorktrees(
   const base = await resolveBaseRef(repo);
   assertBaseRefCloneable(repo, base.branch, await inspectBaseRef(repo, base.branch));
 
+  // Every wanted worker's branch name is validated BEFORE any clone exists —
+  // same "pure work first" reasoning as the ref scan above. Looping over all
+  // of `wanted` here, rather than checking lazily inside the per-worker loop
+  // below, is the point: refusing on worker four after three clones exist
+  // would leave exactly the mess an up-front gate exists to avoid.
+  for (const workerId of wanted) {
+    await assertValidBranchName(
+      repo,
+      workerBranch(loaded.config.run.branch_prefix, run.runId, workerId),
+      workerId,
+    );
+  }
+
+  await excludeWorktreesDir(repo);
+
   const created: WorkerWorktree[] = [];
   for (const workerId of wanted) {
     const path = workerWorktree(repo, workerId);
@@ -483,6 +601,7 @@ export async function createWorkerWorktrees(
     if (occupied) throw new StaleWorktreeError(workerId, path);
 
     const branch = workerBranch(loaded.config.run.branch_prefix, run.runId, workerId);
+    const remoteName = workerRemoteName(workerId);
 
     // `--single-branch` keeps the clone to the one ref a worker needs; it does
     // NOT prevent creating a branch afterwards (verified — `switch -c`
@@ -499,33 +618,108 @@ export async function createWorkerWorktrees(
     ]);
     if (cloned.code !== 0) throw new WorktreeError(`git clone into ${path}`, cloned);
 
-    const switched = await runGit(path, ["switch", "-c", branch]);
-    if (switched.code !== 0) throw new WorktreeError(`git switch -c ${branch} in ${path}`, switched);
+    /**
+     * From here the checkout exists on disk. Everything below either
+     * finishes and is RECORDED via `onCreated`, or is rolled back before the
+     * error propagates — the same argument this function's own docstring
+     * makes for `onCreated` firing per-worker, one level down: a clone
+     * abandoned mid-setup is invisible to `down --prune`, which reaps by
+     * RECORD, and blocks every later `up` at this exact path with
+     * `StaleWorktreeError`, whose own message points the operator at the one
+     * command that cannot see it. The branch-name preflight above removes
+     * the likeliest cause of a failure landing here; this is the backstop
+     * for the others (disk full, a concurrent `up` racing this same repo,
+     * anything `registerWorkerRemote`'s retry budget does not absorb).
+     */
+    let replacedStale = false;
+    let baseSha = "";
+    try {
+      const switched = await runGit(path, ["switch", "-c", branch]);
+      if (switched.code !== 0) throw new WorktreeError(`git switch -c ${branch} in ${path}`, switched);
 
-    const unremoted = await runGit(path, ["remote", "remove", "origin"]);
-    if (unremoted.code !== 0) throw new WorktreeError(`git remote remove origin in ${path}`, unremoted);
+      const unremoted = await runGit(path, ["remote", "remove", "origin"]);
+      if (unremoted.code !== 0) throw new WorktreeError(`git remote remove origin in ${path}`, unremoted);
 
-    const remoteName = workerRemoteName(workerId);
-    const { replacedStale } = await registerWorkerRemote(repo, remoteName, path);
+      // `remote remove` clears `.git/config`, but `git clone` ALSO writes
+      // "clone: from <absolute source path>" into `.git/logs/HEAD` and
+      // `.git/logs/refs/heads/<base branch>` — both inside the mount, both
+      // readable by the worker, and NEITHER touched by removing the remote.
+      // The line also carries the operator's committer identity (name and
+      // host, from `user.name`/gecos) via the reflog's actor field. Deleted
+      // wholesale rather than edited: a disposable clone whose history
+      // starts at the base sha has no use for its own reflog, and
+      // `core.logAllRefUpdates` defaults on for a non-bare repository, so
+      // git recreates `logs/HEAD` and `logs/refs/heads/<branch>` fresh — with
+      // no reference to the source path or the operator — on the worker's
+      // very first ref update.
+      await rm(join(path, ".git", "logs"), { recursive: true, force: true });
 
-    // Read back rather than trusting `base.sha`: this is the commit the clone
-    // ACTUALLY landed on, and it is the floor `down --prune` measures work
-    // against. The two agree in every normal case, and when they do not the
-    // recorded value must describe the tree that exists.
-    const head = await runGit(path, ["rev-parse", "HEAD"]);
-    if (head.code !== 0) throw new WorktreeError(`rev-parse HEAD in ${path}`, head);
+      const registered = await registerWorkerRemote(repo, remoteName, path);
+      replacedStale = registered.replacedStale;
+
+      // Read back rather than trusting `base.sha`: this is the commit the
+      // clone ACTUALLY landed on, and it is the floor `down --prune`
+      // measures work against. The two agree in every normal case, and when
+      // they do not the recorded value must describe the tree that exists.
+      const head = await runGit(path, ["rev-parse", "HEAD"]);
+      if (head.code !== 0) throw new WorktreeError(`rev-parse HEAD in ${path}`, head);
+      baseSha = head.stdout.trim();
+    } catch (err) {
+      await rm(path, { recursive: true, force: true });
+      // Best-effort: `registerWorkerRemote` may never have run, in which case
+      // this is "No such remote" and harmless; a failure here must not mask
+      // the original error.
+      await runGitWithConfigLockRetry(repo, ["remote", "remove", remoteName]);
+      throw err;
+    }
 
     const record: WorkerWorktree = {
       workerId,
       path,
       branch,
-      baseSha: head.stdout.trim(),
+      baseSha,
       remoteName,
+      // Empty until `up` calls `captureWorktreeBaseline` after hazard
+      // neutralization — this module has no reason to know about hazards.
+      baselineStatus: "",
     };
     created.push(record);
     if (opts.onCreated) await opts.onCreated(record, { replacedStaleRemote: replacedStale });
   }
   return created;
+}
+
+/**
+ * Snapshot `git status --porcelain` as the WORKING-TREE baseline `down
+ * --prune` and `pifleet worktrees` measure "this clone holds work" against,
+ * alongside `baseSha` for commit history.
+ *
+ * Called once, by `up`, AFTER hazard neutralization finishes — never by
+ * `createWorkerWorktrees` itself, which has no reason to know about hazards.
+ * Quarantine (`security/repo-hazards.ts`) neutralizes a tracked hazard file
+ * by RENAME, which is real, uncommitted change in `git status --porcelain`
+ * the instant it happens — so without this, a clone of ANY repository with a
+ * root `AGENTS.md`/`CLAUDE.md` reads as dirty from the moment `up` finishes,
+ * before the worker has done anything at all.
+ *
+ * Committing the change instead was considered and rejected. No git identity
+ * is configured in this module's hermetic environment — `runGit`'s
+ * `HERMETIC_GIT_ENV` sets `HOME=/dev/null` and blanks both config scopes —
+ * so a commit would fail outright; and even with an identity, a synthetic
+ * pifleet commit ahead of `baseSha` would itself register as "1 commit
+ * ahead" in `inspectCloneDirt` below, moving the exact same false positive
+ * from the working tree into history, and would pollute the exact-diff
+ * equality ISC-90 expects between a worker's reported diff and `git diff` on
+ * its own branch. A recorded STATUS baseline generalizes to every present
+ * and future hazard-neutralization shape (rename, in-place edit, whatever
+ * `repo-hazards.ts` grows next) without this module ever enumerating them,
+ * because `inspectCloneDirt` compares against whatever this actually
+ * captured rather than assuming empty.
+ */
+export async function captureWorktreeBaseline(wt: WorkerWorktree): Promise<WorkerWorktree> {
+  const status = await runGit(wt.path, ["status", "--porcelain"]);
+  if (status.code !== 0) throw new WorktreeError(`git status in ${wt.path}`, status);
+  return { ...wt, baselineStatus: status.stdout };
 }
 
 // ---------------------------------------------------------------------------
@@ -568,14 +762,36 @@ export interface DirtyState {
 export async function inspectCloneDirt(wt: WorkerWorktree): Promise<DirtyState> {
   const status = await runGit(wt.path, ["status", "--porcelain"]);
   if (status.code !== 0) throw new WorktreeError(`git status in ${wt.path}`, status);
-  const statusLines = status.stdout.split("\n").filter((l) => l.trim() !== "").length;
+  // Compared against the recorded BASELINE, not against empty. `up`'s own
+  // hazard neutralization (`security/repo-hazards.ts`) renames a tracked
+  // file the instant it runs, which is real, uncommitted change in
+  // `git status --porcelain` from that moment on — so without a baseline,
+  // every clone of a repository with a root `AGENTS.md`/`CLAUDE.md` reads as
+  // dirty from birth, and `down --prune` refuses every worker on an entirely
+  // ordinary repository without `--force`. `wt.baselineStatus` is empty for
+  // a checkout nothing has baselined (identical to the old always-empty
+  // assumption, so a caller that never calls `captureWorktreeBaseline` sees
+  // no change in behaviour); `captureWorktreeBaseline` sets it to whatever
+  // `up` actually produced. See that function's own docstring for why a
+  // status snapshot generalizes over trying to filter known artifact shapes.
+  const currentLines = new Set(status.stdout.split("\n").filter((l) => l.trim() !== ""));
+  const baselineLines = new Set(wt.baselineStatus.split("\n").filter((l) => l.trim() !== ""));
+  const statusLines =
+    [...currentLines].filter((l) => !baselineLines.has(l)).length +
+    [...baselineLines].filter((l) => !currentLines.has(l)).length;
 
   const ahead = await runGit(wt.path, ["rev-list", "--count", `${wt.baseSha}..HEAD`]);
   // A base commit the clone no longer contains (history rewritten by the
   // worker) is not "clean" — it is a tree whose relationship to its floor
   // cannot be established, and treating an unanswerable question as a
-  // negative answer is the mistake `deriveGitFacts` documents at length.
-  const commitsAhead = ahead.code === 0 ? Number(ahead.stdout.trim()) || 0 : Number.POSITIVE_INFINITY;
+  // negative answer is the mistake `deriveGitFacts` documents at length. That
+  // is also why a SUCCESSFUL but unparseable count (`Number(...)` is `NaN`)
+  // must not fall through `NaN || 0` to the literal `0` — a genuinely
+  // undetermined ahead-count silently reading as "zero commits ahead" is the
+  // exact same mistake with an extra step, and `rev-list --count` failing
+  // outright is handled one line below by the same `POSITIVE_INFINITY`.
+  const aheadCount = Number(ahead.stdout.trim());
+  const commitsAhead = ahead.code === 0 && !Number.isNaN(aheadCount) ? aheadCount : Number.POSITIVE_INFINITY;
   return { dirty: statusLines > 0 || commitsAhead > 0, statusLines, commitsAhead };
 }
 
@@ -600,6 +816,21 @@ export async function pruneWorkerWorktree(opts: {
   const { repo, worktree: wt, force } = opts;
   const base = { workerId: wt.workerId, path: wt.path };
 
+  // The recorded path is not container-writable — `run.json` is host-side —
+  // but it IS operator-editable, and this is the one place in the module
+  // that runs a RECURSIVE delete off a value read back from disk rather than
+  // computed from `workerWorktree(repo, id)`. A hand-edited or truncated
+  // `run.json` must not turn `--force` into an unbounded `rm -rf`; refused as
+  // a normal prune outcome, not a thrown error, for the same "runnable twice"
+  // reason a missing directory is not an error either.
+  if (!resolvedWithin(join(repo, ".worktrees"), wt.path)) {
+    return {
+      ...base,
+      pruned: false,
+      reason: `run.json records this checkout at ${wt.path}, which is outside ${join(repo, ".worktrees")}; refusing to delete it`,
+    };
+  }
+
   let present = true;
   try {
     await lstat(wt.path);
@@ -610,12 +841,16 @@ export async function pruneWorkerWorktree(opts: {
   if (present && !force) {
     const dirt = await inspectCloneDirt(wt);
     if (dirt.dirty) {
+      const ahead =
+        dirt.commitsAhead === Number.POSITIVE_INFINITY
+          ? `base sha ${wt.baseSha.slice(0, 12)} is no longer in this history`
+          : `${dirt.commitsAhead} commit(s) past ${wt.baseSha.slice(0, 12)}`;
       return {
         ...base,
         pruned: false,
         reason:
           `holds work that exists nowhere else ` +
-          `(${dirt.statusLines} uncommitted path(s), ${dirt.commitsAhead} commit(s) past ${wt.baseSha.slice(0, 12)}); ` +
+          `(${dirt.statusLines} uncommitted path(s), ${ahead}); ` +
           `fetch it with \`git -C ${repo} fetch ${wt.remoteName}\` or re-run with --force`,
       };
     }

@@ -115,6 +115,7 @@ describe("pifleet worktrees", () => {
         dirty: false,
         status_lines: 0,
         commits_ahead: 0,
+        base_unreachable: false,
         unreadable: null,
       },
     ]);

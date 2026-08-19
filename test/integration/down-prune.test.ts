@@ -262,6 +262,145 @@ describe("down --prune", () => {
     expect(r.code).toBe(EXIT.SUCCESS);
     expect(parse(r.stdout)).toMatchObject({ pruned: [] });
   });
+
+  /**
+   * THE regression test for the never-launched gate fix. `up` creates the
+   * clone and records it BEFORE launching any supervisor (`createWorker
+   * Worktrees` runs ahead of `launchDetached` in `up.ts`), so a crash in
+   * that window — or, here, a run dir assembled without ever reaching
+   * launch — leaves a real, recorded checkout with NO `workers/<id>`
+   * directory at all. §9.3's corruption hazard is about a container still
+   * WRITING; nothing was ever writing here, and treating "never launched"
+   * the same as "launched and survived the kill ladder" made `down
+   * --prune`'s own suggested recovery (this exact command) unable to reap
+   * exactly the mess it exists to clean up.
+   */
+  test("a checkout with NO supervisor state at all (crashed mid-`up`) is prunable, not refused", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pifleet-prune-neverlaunched-"));
+    bases.push(base);
+    const root = join(base, "runs");
+    const repo = join(base, "repo");
+    const runId = "2026-08-18T00-00-00Z-nvlc";
+    await seedGitRepo(repo);
+    const yaml = [
+      "version: 2",
+      "name: prune-test",
+      'docker: {pi_version: "0.79.6", network: prune-net}',
+      `run: {repo: ${repo}, budget: {tokens_ceiling: 1000000}}`,
+      "llm: {model: prune-model}",
+      "roles: {engineer: {}}",
+      "workers:",
+      "  - {id: eng-1, role: engineer}",
+      "",
+    ].join("\n");
+    const loaded = await parseConfig(yaml, join(base, "fleet.yaml"));
+    const run = runPaths(runId, root);
+    // `workersDir` itself exists (`up` creates it early), but NOTHING under
+    // it for eng-1 — deliberately, unlike `makeRig` above, which always
+    // creates `workers/<id>` regardless of `livePid`.
+    await mkdir(run.workersDir, { recursive: true });
+    const worktrees = await createWorkerWorktrees({ loaded, run, repo, workerIds: ["eng-1"] });
+    await writeFile(
+      run.runJson,
+      JSON.stringify({ schema: "pifleet.run/v1", run_id: runId, repo, worktrees }),
+      "utf8",
+    );
+
+    const r = await down({ base, root, runId, repo, worktrees }, ["--prune"]);
+    expect(r.code, `stderr: ${r.stderr.slice(0, 400)}`).toBe(EXIT.SUCCESS);
+    expect(parse(r.stdout)).toMatchObject({ pruned: [{ workerId: "eng-1", pruned: true }] });
+    expect(await pathExists(worktrees[0]!.path)).toBe(false);
+  });
+
+  test("a never-launched checkout that holds work still needs --force, exactly like any other", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pifleet-prune-neverlaunched-dirty-"));
+    bases.push(base);
+    const root = join(base, "runs");
+    const repo = join(base, "repo");
+    const runId = "2026-08-18T00-00-00Z-nvld";
+    await seedGitRepo(repo);
+    const yaml = [
+      "version: 2",
+      "name: prune-test",
+      'docker: {pi_version: "0.79.6", network: prune-net}',
+      `run: {repo: ${repo}, budget: {tokens_ceiling: 1000000}}`,
+      "llm: {model: prune-model}",
+      "roles: {engineer: {}}",
+      "workers:",
+      "  - {id: eng-1, role: engineer}",
+      "",
+    ].join("\n");
+    const loaded = await parseConfig(yaml, join(base, "fleet.yaml"));
+    const run = runPaths(runId, root);
+    await mkdir(run.workersDir, { recursive: true });
+    const worktrees = await createWorkerWorktrees({ loaded, run, repo, workerIds: ["eng-1"] });
+    await writeFile(join(worktrees[0]!.path, "unsaved.txt"), "a worker's only copy\n");
+    await writeFile(
+      run.runJson,
+      JSON.stringify({ schema: "pifleet.run/v1", run_id: runId, repo, worktrees }),
+      "utf8",
+    );
+
+    const refused = await down({ base, root, runId, repo, worktrees }, ["--prune"]);
+    expect(refused.code).toBe(EXIT.PARTIAL);
+    expect(await pathExists(join(worktrees[0]!.path, "unsaved.txt"))).toBe(true);
+
+    const forced = await down({ base, root, runId, repo, worktrees }, ["--prune", "--force"]);
+    expect(forced.code, `stderr: ${forced.stderr.slice(0, 400)}`).toBe(EXIT.SUCCESS);
+    expect(await pathExists(worktrees[0]!.path)).toBe(false);
+  });
+
+  /**
+   * THE regression test for the silent-success-on-unreadable-record fix. A
+   * `run.json` whose `worktrees` field is present but the wrong SHAPE (not
+   * an array) used to make `down --prune` iterate an empty map and exit 0
+   * with `pruned: []` — indistinguishable from "this run truly left nothing
+   * behind" to a script reaping runs in a loop, while real clones and
+   * remotes may still be sitting on disk with nothing left naming them.
+   */
+  test("an unreadable worktrees record refuses --prune instead of silently reporting success", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pifleet-prune-badrecord-"));
+    bases.push(base);
+    const root = join(base, "runs");
+    const repo = join(base, "repo");
+    const runId = "2026-08-18T00-00-00Z-bad1";
+    await seedGitRepo(repo);
+    const run = runPaths(runId, root);
+    await mkdir(run.workersDir, { recursive: true });
+    await writeFile(
+      run.runJson,
+      JSON.stringify({ schema: "pifleet.run/v1", run_id: runId, repo, worktrees: "not-an-array" }),
+      "utf8",
+    );
+
+    // `down()` always passes `--json`, which is precisely why this bug was
+    // easy to miss: the human-readable "cannot prune: ..." line only prints
+    // when `--json` is ABSENT, so a script driving `down --prune --json` in
+    // a loop had no stderr trail either — only the exit code told the truth,
+    // which is why THAT is what this test pins.
+    const r = await down({ base, root, runId, repo, worktrees: [] }, ["--prune"]);
+    expect(r.code).toBe(EXIT.PARTIAL);
+    expect(parse(r.stdout)).toMatchObject({ pruned: [] });
+  });
+
+  test("one worker's malformed record does not blind pruning for the others", async () => {
+    const rig = await makeRig({ workers: ["eng-1", "eng-2"] });
+    const raw = JSON.parse(await Bun.file(runPaths(rig.runId, rig.root).runJson).text()) as {
+      worktrees: Array<Record<string, unknown>>;
+    };
+    // Corrupt eng-2's entry only — drop its required `baseSha`.
+    for (const w of raw.worktrees) if (w["workerId"] === "eng-2") delete w["baseSha"];
+    await writeFile(runPaths(rig.runId, rig.root).runJson, JSON.stringify(raw), "utf8");
+
+    const r = await down(rig, ["--prune"]);
+    // eng-1's perfectly good record still gets reaped normally...
+    expect(r.code).toBe(EXIT.PARTIAL); // ...but eng-2's is a refusal, not silence.
+    const pruned = parse(r.stdout)["pruned"] as Array<Record<string, unknown>>;
+    expect(pruned.find((p) => p["workerId"] === "eng-1")).toMatchObject({ pruned: true });
+    const eng2 = pruned.find((p) => p["workerId"] === "eng-2");
+    expect(eng2).toMatchObject({ pruned: false });
+    expect(String(eng2!["reason"])).toContain("could not be read");
+  });
 });
 
 describe("dispatch names the checkout that actually exists", () => {
@@ -341,5 +480,89 @@ describe("dispatch names the checkout that actually exists", () => {
     expect(recorded.repo).toBe(repo);
     // …and that git agrees, which is the half a record-only assertion misses.
     expect(await gitOk(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt.branch);
+  });
+
+  /**
+   * THE regression test for the OTHER half of the `branch_prefix` fix.
+   * `wt?.branch ?? workerBranch(DEFAULT_BRANCH_PREFIX, ...)` — the fallback
+   * for a worker with no checkout of its own to read a branch off
+   * (`shared-ro`, `none`) — used to re-derive the SCHEMA's global default
+   * rather than reading what this run was actually launched with, so an
+   * operator who set `branch_prefix: experiment` still got `fleet/<run>/
+   * <worker>` for every such worker. `up` now persists `branch_prefix` into
+   * `run.json` itself; this asserts `dispatch` reads THAT, not the default.
+   */
+  test("a worker with no checkout of its own still gets the run's real branch_prefix", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pifleet-dispatch-noprefix-"));
+    bases.push(base);
+    const root = join(base, "runs");
+    const repo = join(base, "repo");
+    const runId = "2026-08-18T00-00-00Z-shrd";
+    await seedGitRepo(repo);
+
+    const run = runPaths(runId, root);
+    await mkdir(run.workersDir, { recursive: true });
+    await mkdir(run.inboxDir, { recursive: true });
+    // The shape `up` writes for an ALL-`shared-ro` fleet: `branch_prefix`
+    // recorded, `worktrees: []` (no checkout for anyone), never `null`.
+    await writeFile(
+      run.runJson,
+      JSON.stringify({
+        schema: "pifleet.run/v1",
+        run_id: runId,
+        repo,
+        branch_prefix: "experiment",
+        worktrees: [],
+      }),
+      "utf8",
+    );
+
+    // A minimal stand-in supervisor: accepts one line of JSON, replies with
+    // one line of JSON. `sendTaskEnvelope` only writes the durable inbox
+    // record on `accepted: true`, so proving the FALLBACK branch actually
+    // reaches the envelope needs a dispatch that succeeds — not merely one
+    // that fails after building the envelope, which is the shape every
+    // other test in this file uses precisely because it does NOT need this.
+    const { ensureControlAuth } = await import("../../src/security/control-auth.ts");
+    await ensureControlAuth(run);
+    const { socketPath } = await import("../../src/run/paths.ts");
+    const sockPath = socketPath(runId, "rev-1");
+    // Any well-formed request gets accepted — this fixture stands in for a
+    // supervisor's control socket, not for the auth check itself.
+    const server = Bun.listen({
+      unix: sockPath,
+      socket: {
+        data(socket) {
+          socket.write(`${JSON.stringify({ accepted: true, epoch: 1 })}\n`);
+          socket.end();
+        },
+        open() {},
+        close() {},
+        error() {},
+      },
+    });
+
+    try {
+      const { sendTaskEnvelope } = await import("../../src/cli/commands/dispatch.ts");
+      const { LedgerWriter } = await import("../../src/run/ledger.ts");
+      const outcome = await sendTaskEnvelope({
+        run,
+        worker: "rev-1",
+        taskId: "T-1",
+        partial: { title: "t", brief: "b" },
+        attemptId: "a-1",
+        requestedEpoch: null,
+        ledger: new LedgerWriter(run, "test"),
+      });
+      expect(outcome.accepted).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+
+    const written = JSON.parse(await Bun.file(join(run.inboxDir, "T-1.json")).text()) as {
+      branch: string;
+    };
+    expect(written.branch).toBe(`experiment/${runId}/rev-1`);
+    expect(written.branch).not.toContain("fleet/");
   });
 });

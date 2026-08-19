@@ -151,8 +151,33 @@ export interface RunWorktrees {
   byWorker: ReadonlyMap<string, WorkerWorktree>;
   /** The parent checkout, or null when the run did not record one. */
   repo: string | null;
-  /** A degradation the caller must surface, or null when there is nothing to say. */
+  /**
+   * The `run.branch_prefix` the run was actually launched with, or null when
+   * the run predates this field. Recorded for the same reason `repo` is:
+   * `fleet.yaml` can be edited after `up`, and `dispatch`'s no-record
+   * fallback (a `shared-ro`/`none` worker, or one with no config entry) must
+   * name the branch THIS run would have created, not whatever `branch_prefix`
+   * happens to read today.
+   */
+  branchPrefix: string | null;
+  /**
+   * A degradation the caller must surface, or null when there is nothing to
+   * say. Set when `run.json` itself could not be read at all — no longer set
+   * for one malformed worker entry among otherwise-valid ones; see
+   * `perWorkerNotes`.
+   */
   note: string | null;
+  /**
+   * `<workerId>: <reason>` for every entry that failed its OWN schema check,
+   * kept OUT of `note` deliberately: one worker's malformed record used to
+   * degrade `byWorker` to empty for every worker in the run, so a single
+   * future-shaped or hand-edited entry silently blinded `dispatch`'s
+   * `branch_prefix` fallback and `down --prune`'s reaping for workers whose
+   * OWN records were perfectly fine. Parsed per-entry instead: one bad
+   * record is dropped and named here; every good one still reaches
+   * `byWorker`.
+   */
+  perWorkerNotes: readonly string[];
 }
 
 const RunWorktreeRecordSchema = z.object({
@@ -161,36 +186,78 @@ const RunWorktreeRecordSchema = z.object({
   branch: z.string().min(1),
   baseSha: z.string().min(1),
   remoteName: z.string().min(1),
+  /** Defaulted for a record written before this field existed. */
+  baselineStatus: z.string().default(""),
 });
 
 export async function readRunWorktrees(run: RunPaths): Promise<RunWorktrees> {
   const empty = new Map<string, WorkerWorktree>();
-  let doc: { repo?: string | null; worktrees?: unknown } | null;
+  let doc: { repo?: string | null; branch_prefix?: string | null; worktrees?: unknown } | null;
   try {
     doc = await readValidated(run.runJson, (v) =>
-      z.object({ repo: z.string().nullish(), worktrees: z.unknown() }).loose().parse(v),
+      z
+        .object({
+          repo: z.string().nullish(),
+          branch_prefix: z.string().nullish(),
+          // `.optional()`, not bare `z.unknown()`: zod requires an object
+          // schema's keys to be STRUCTURALLY PRESENT unless marked optional,
+          // even when the value type is `unknown` — so a `run.json` that
+          // never had a `worktrees` key at all (a run predating this field,
+          // exactly the case this function's own docstring says must stay
+          // dispatchable) failed this parse and fell into the catch block
+          // below, `note` and all. Nothing acted on `note` before this
+          // module's callers started treating it as a genuine degradation,
+          // which is what turned an unnoticed latent bug into an observed
+          // false refusal.
+          worktrees: z.unknown().optional(),
+        })
+        .loose()
+        .parse(v),
     );
   } catch (err) {
     return {
       byWorker: empty,
       repo: null,
+      branchPrefix: null,
       note: `run.json could not be read for worker checkouts (${err instanceof Error ? err.message : String(err)})`,
+      perWorkerNotes: [],
     };
   }
+  const repo = doc?.repo ?? null;
+  const branchPrefix = doc?.branch_prefix ?? null;
   const raw = doc?.worktrees;
-  if (raw === undefined || raw === null) return { byWorker: empty, repo: doc?.repo ?? null, note: null };
-
-  const parsed = z.array(RunWorktreeRecordSchema).safeParse(raw);
-  if (!parsed.success) {
+  if (raw === undefined || raw === null) {
+    return { byWorker: empty, repo, branchPrefix, note: null, perWorkerNotes: [] };
+  }
+  if (!Array.isArray(raw)) {
     return {
       byWorker: empty,
-      repo: doc?.repo ?? null,
-      note: `run.json records worker checkouts in a shape this build cannot read (${parsed.error.message}); treating the run as having none`,
+      repo,
+      branchPrefix,
+      note: `run.json records worker checkouts in a shape this build cannot read (expected an array); treating the run as having none`,
+      perWorkerNotes: [],
     };
   }
+
   const byWorker = new Map<string, WorkerWorktree>();
-  for (const w of parsed.data) byWorker.set(w.workerId, w);
-  return { byWorker, repo: doc?.repo ?? null, note: null };
+  const perWorkerNotes: string[] = [];
+  for (const [i, entry] of raw.entries()) {
+    const parsed = RunWorktreeRecordSchema.safeParse(entry);
+    if (!parsed.success) {
+      // A raw object's own `workerId`, if it happens to be a readable
+      // string, names the row even though the schema that would confirm it
+      // is exactly what just failed — best-effort, for a diagnosis a human
+      // can act on rather than a bare array index.
+      const maybeId =
+        typeof entry === "object" && entry !== null && "workerId" in entry && typeof (entry as { workerId: unknown }).workerId === "string"
+          ? (entry as { workerId: string }).workerId
+          : `entry ${i}`;
+      perWorkerNotes.push(`${maybeId}: ${parsed.error.message}`);
+      continue;
+    }
+    byWorker.set(parsed.data.workerId, parsed.data);
+  }
+  return { byWorker, repo, branchPrefix, note: null, perWorkerNotes };
 }
 
 export async function writeWorkerState(paths: WorkerPaths, state: WorkerState): Promise<void> {

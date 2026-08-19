@@ -73,7 +73,83 @@ All notable changes to this project are documented here.
   were each caught in. Fixed at the single call site that names the branch
   (`workerBranch(loaded.config.run.branch_prefix, …)` in `run/worktree.ts`); `dispatch`'s
   envelope builder was already reading the branch back from what was actually checked out
-  rather than recomputing it, so it needed no change once creation was fixed.
+  rather than recomputing it, so it needed no change once creation was fixed. A second gap
+  in the same fix: a worker with no checkout of its own (`shared-ro`, `none`) still fell back
+  to the schema's global default rather than the run's actual prefix, because the fallback
+  never had anywhere to read it from — `up` now persists `branch_prefix` into `run.json`
+  itself, the same way it already does for `repo`.
+- **A per-worker checkout could clone successfully and then be lost, unrecorded, if any step
+  after the clone failed** — `git switch -c`, stripping `origin`, registering the parent-side
+  remote, or reading back `HEAD`. The clone directory stayed on disk with no `run.json` entry
+  and no ledger row, invisible to `down --prune` (which reaps by record) and blocking every
+  later `up` at that path with `StaleWorktreeError` — whose own suggested recovery,
+  `down --prune`, could not see the very thing it was supposed to reap. Everything after the
+  clone now runs inside a rollback: on any failure the checkout directory and any
+  partially-registered remote are removed before the error propagates. The likeliest cause is
+  independently closed: `run.branch_prefix` and worker ids reach `git switch -c` with zero
+  validation of their own, so a value like `"my prefix"`, `"a..b"`, `"x.lock"`, or a leading
+  `-` produced a branch name git refuses — after the clone already existed. Every wanted
+  worker's branch name is now checked with `git check-ref-format --branch` before any clone is
+  attempted, matching the "pure work first" refusal the submodule/LFS preflight already uses.
+- **`git remote remove origin` did not stop the host's absolute repository path — or the
+  operator's identity — from reaching the container.** `git clone` also writes
+  `clone: from <absolute source path>` into `.git/logs/HEAD` and
+  `.git/logs/refs/heads/<branch>`, both inside the mount and untouched by removing the
+  remote; the reflog line carries the committer's name too. The clone's `.git/logs` is now
+  deleted immediately after `origin` is stripped — git recreates it, clean, on the worker's
+  first ref update.
+- **An operator's ordinary `git add -A && git commit` embedded every worker's clone as a
+  GITLINK**, because an un-ignored nested `.git` directory reads to git as a candidate
+  submodule rather than as content — which then made the submodule/LFS preflight refuse
+  every SUBSEQUENT `up` with a "submodules present" diagnosis the operator never authored.
+  `.worktrees/` is now added to the operator's `.git/info/exclude` (idempotently, once, per
+  repo) — never `.gitignore`, which is tracked content this project's own containment rule
+  forbids editing; `.git/info/exclude` is untracked, local-only bookkeeping in the same
+  category as the `worker-<id>` remote this feature already writes to `.git/config`.
+- **`up`'s own hazard neutralization made a worker's clone read as dirty from the moment `up`
+  finished, on any repository with a root `AGENTS.md`/`CLAUDE.md`.** Quarantining a hazard
+  renames a tracked file, which is real uncommitted change in `git status --porcelain` from
+  that instant — so `down --prune` refused essentially every such worker without `--force`,
+  for work the worker never did. `up` now captures a `git status` baseline immediately AFTER
+  neutralization finishes, and every later dirt check compares against that baseline instead
+  of assuming a clean start — generalizing to any hazard-neutralization shape without having
+  to enumerate them.
+- **`down --prune` treated a checkout whose supervisor never launched at all the same as one
+  that survived the kill ladder, refusing to prune it even with `--force`.** The two are not
+  the same fact: §9.3's refusal exists to protect a checkout a LIVE container is still
+  writing to, and a worker id with no supervisor state was never written to by anything. A
+  never-launched checkout — the shape a crashed `up` leaves behind — now falls through to the
+  ordinary dirt check like any other, and `--force` works on it exactly as it does elsewhere.
+- **`down --prune` silently exited 0 and reported `pruned: []` when the checkout record
+  itself could not be read**, indistinguishable from "this run truly left nothing behind" —
+  exactly the loop-reaper data-loss shape this command's own `EXIT.PARTIAL` policy exists to
+  prevent, one case over. An unreadable record — whole or, now, per-worker (one malformed
+  entry no longer blinds every other worker's perfectly good one) — is a refusal, not silence.
+- **`pifleet report`'s merge pre-check silently stopped working for every worktree-isolated
+  worker** the moment `dispatch` started recording the parent repository in the envelope.
+  `report/collect.ts` preferred the parent over the worker's own checkout for resolving a
+  worker's branch — correct when isolation meant `git worktree add` (shared refs), false
+  once it means an independent clone whose branch is never fetched into the parent. Reversed:
+  the worker's own checkout is preferred, with the parent as a fallback only for modes with
+  no checkout of their own.
+- **`src/harvest/acceptance.ts`'s scratch clone — of a worker's own checkout, to run
+  worker-authored acceptance commands in — was missing `--no-hardlinks`**, one hop removed
+  from the exact object-store corruption class this slice's core safety property exists to
+  prevent.
+- **`Infinity` commits-ahead (history rewritten past `baseSha`) serialized to JSON `null`** —
+  the same encoding `pifleet worktrees --json` uses for "not computed", collapsing the
+  loudest possible dirty signal into the wire value for "nothing to report." Carried as its
+  own `base_unreachable` boolean now. A related, narrower bug in the same function: a
+  successful but unparseable `git rev-list --count` collapsed to "0 commits ahead" via
+  `NaN || 0` instead of the same unknown-is-not-zero treatment its sibling failure case
+  already got.
+- **A submodule/LFS preflight scan that could not fully read every `.gitattributes` file
+  (too large, too many) silently ACCEPTED the ref when nothing else tripped a refusal** —
+  the "not fully scanned" record existed but was only ever surfaced inside an error message
+  that never fired. An unscanned attribute file is now itself a refusal reason.
+- **`down --prune`'s recursive delete trusted a checkout path read back from `run.json` with
+  no containment check.** Not container-writable, but operator-editable; gated on the path
+  resolving inside `<repo>/.worktrees/` before anything is removed.
 
 ### Added
 - **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty

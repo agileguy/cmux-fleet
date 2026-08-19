@@ -50,6 +50,17 @@ export function register(program: Command): void {
         dirty: boolean | null;
         statusLines: number | null;
         commitsAhead: number | null;
+        /**
+         * `commitsAhead` was `Number.POSITIVE_INFINITY` — history rewritten
+         * past `baseSha`, an unanswerable "how many" rather than "none".
+         * Carried as its own field because `JSON.stringify(Infinity)` is
+         * `null`, the SAME encoding this row already uses for "not
+         * computed" (`!present`, or an inspection that threw) — collapsing
+         * the loudest possible dirty signal into the same wire value as
+         * "nothing to report" is exactly the false-negative
+         * `inspectCloneDirt`'s own docstring says must never happen.
+         */
+        baseUnreachable: boolean;
         unreadable: string | null;
       }> = [];
       for (const wt of [...recorded.byWorker.values()].sort((a, b) => a.workerId.localeCompare(b.workerId))) {
@@ -60,17 +71,27 @@ export function register(program: Command): void {
           present = false;
         }
         if (!present) {
-          rows.push({ wt, present, dirty: null, statusLines: null, commitsAhead: null, unreadable: null });
+          rows.push({
+            wt,
+            present,
+            dirty: null,
+            statusLines: null,
+            commitsAhead: null,
+            baseUnreachable: false,
+            unreadable: null,
+          });
           continue;
         }
         try {
           const dirt = await inspectCloneDirt(wt);
+          const baseUnreachable = dirt.commitsAhead === Number.POSITIVE_INFINITY;
           rows.push({
             wt,
             present,
             dirty: dirt.dirty,
             statusLines: dirt.statusLines,
-            commitsAhead: dirt.commitsAhead,
+            commitsAhead: baseUnreachable ? null : dirt.commitsAhead,
+            baseUnreachable,
             unreadable: null,
           });
         } catch (err) {
@@ -84,6 +105,7 @@ export function register(program: Command): void {
             dirty: null,
             statusLines: null,
             commitsAhead: null,
+            baseUnreachable: false,
             unreadable: err instanceof Error ? err.message : String(err),
           });
         }
@@ -105,8 +127,15 @@ export function register(program: Command): void {
               dirty: r.dirty,
               status_lines: r.statusLines,
               commits_ahead: r.commitsAhead,
+              base_unreachable: r.baseUnreachable,
               unreadable: r.unreadable,
             })),
+            // Worker ids whose OWN checkout record failed to parse — absent
+            // from `worktrees` above entirely (there is no `WorkerWorktree`
+            // to describe), so silently omitting this would make a broken
+            // record indistinguishable from a worker that was simply never
+            // created. `<workerId>: <reason>` per `run/state.ts`.
+            unreadable_records: recorded.perWorkerNotes,
           })}\n`,
         );
         return;
@@ -115,6 +144,7 @@ export function register(program: Command): void {
       process.stdout.write(`run ${runId}\n`);
       if (recorded.repo !== null) process.stdout.write(`repo ${recorded.repo}\n`);
       if (recorded.note !== null) process.stdout.write(`  note: ${recorded.note}\n`);
+      for (const n of recorded.perWorkerNotes) process.stdout.write(`  unreadable record: ${n}\n`);
       if (rows.length === 0) {
         process.stdout.write("  no per-worker checkouts recorded for this run\n");
         return;
@@ -126,6 +156,8 @@ export function register(program: Command): void {
           state = "MISSING (checkout not found on disk)";
         } else if (r.unreadable !== null) {
           state = `UNREADABLE (${r.unreadable})`;
+        } else if (r.baseUnreachable) {
+          state = `dirty (${r.statusLines} uncommitted path(s), base sha no longer in this history)`;
         } else if (r.dirty === true) {
           state = `dirty (${r.statusLines} uncommitted path(s), ${r.commitsAhead} commit(s) ahead)`;
         } else {

@@ -574,8 +574,19 @@ export async function runAcceptance(spec: AcceptanceSpec): Promise<AcceptanceRes
   // SHA: a plain clone checks out the default branch, which is not what is
   // being graded. A local clone transfers committed objects only — no dirty
   // files, no hooks, no caches — which is the entire point.
+  //
+  // `--no-hardlinks` is load-bearing here too, not only in `run/worktree.ts`.
+  // `repoAbs` is `spec.repo` — `envelope.host_workdir`, the WORKER's own
+  // clone — and a local-path `git clone` defaults to `--local`, which
+  // hardlinks object files into `cloneDir` rather than copying them. The
+  // acceptance commands this function is about to run are worker-authored
+  // (ISC-148..151's whole premise), and a hardlinked scratch clone means
+  // anything one of those commands does through what looks like its own
+  // private object file corrupts the WORKER's checkout's object store — the
+  // same corruption class `run/worktree.ts`'s module header names, one clone
+  // hop later, against the exact tree `report` is about to diff.
   const clone = await execBounded(
-    hardenedGitArgv(scratchAbs, ["clone", "--quiet", "--no-checkout", repoAbs, cloneDir]),
+    hardenedGitArgv(scratchAbs, ["clone", "--quiet", "--no-hardlinks", "--no-checkout", repoAbs, cloneDir]),
     scratchAbs,
     gitEnv(spec.env),
     spec.deadline.boundedBy(GIT_TIMEOUT_MS),

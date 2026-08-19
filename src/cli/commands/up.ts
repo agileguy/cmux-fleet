@@ -34,7 +34,7 @@ import { describeCredentialPlan, planCredential, resolveIdentity } from "../../s
 import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
-import { createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
+import { captureWorktreeBaseline, createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
 
 /**
@@ -297,8 +297,13 @@ export function register(program: Command): void {
         // The parent checkout travels with the run for the same reason the
         // harness surface does: `down --prune` removes remotes from THIS
         // repository, and re-resolving `fleet.yaml` months later could point
-        // that at a different one.
+        // that at a different one. `branch_prefix` travels for the same
+        // reason one level further: `dispatch`'s fallback for a worker with
+        // no checkout of its own to read a branch off (`shared-ro`, `none`)
+        // has to name what THIS run was launched with, not whatever
+        // `fleet.yaml` says today.
         repo: repoRoot,
+        branch_prefix: loadedConfig?.config.run.branch_prefix ?? null,
         worktrees: null,
       };
       await writeJsonAtomic(run.runJson, runDoc);
@@ -404,7 +409,23 @@ export function register(program: Command): void {
           run,
           repo,
           workerIds: workers,
-          onCreated: async (wt, note) => {
+          onCreated: async (created, note) => {
+            // Neutralization runs, and the post-neutralization baseline is
+            // captured, BEFORE anything is pushed or recorded — not after, as
+            // an earlier version of this callback did. Quarantine
+            // (`security/repo-hazards.ts`) neutralizes a tracked hazard file
+            // by RENAME, which is real, uncommitted change in `git status
+            // --porcelain` from the instant it happens; recording `created`
+            // (pre-neutralization) as the durable checkout would have made
+            // EVERY clone of a repository with a root `AGENTS.md`/`CLAUDE.md`
+            // read as dirty from birth, and `down --prune` would refuse every
+            // worker on an entirely ordinary repository without `--force`.
+            // See `captureWorktreeBaseline`'s own docstring for why a
+            // recorded STATUS baseline is the fix rather than a commit or a
+            // hand-filtered exclusion list.
+            const hazards = await neutralizeRepoHazards(created.path);
+            const wt = await captureWorktreeBaseline(created);
+
             worktrees.push(wt);
             // Re-written per worker, not once at the end. A clone is real
             // state on disk and a failure on worker three leaves workers one
@@ -428,7 +449,6 @@ export function register(program: Command): void {
               );
             }
 
-            const hazards = await neutralizeRepoHazards(wt.path);
             for (const h of hazards) {
               await ledger.append("repo_hazard", {
                 worker: wt.workerId,
@@ -444,6 +464,17 @@ export function register(program: Command): void {
             }
           },
         });
+        // Written even when `worktrees` is empty — `[]` is the legitimate
+        // final state of a fleet where no worker resolves to `worktree`
+        // isolation, and the comment above this block is explicit that only
+        // `[]`, never the initial `null`, should read that way to `down
+        // --prune`. `createWorkerWorktrees` returns early with nothing
+        // created for exactly that fleet shape, so `onCreated` never fires
+        // and `runDoc["worktrees"]` would otherwise be stuck at `null` —
+        // "creation never completed" — forever, on a run where creation was
+        // never supposed to do anything in the first place.
+        runDoc["worktrees"] = worktrees;
+        await writeJsonAtomic(run.runJson, runDoc);
         if (worktrees.length > 0 && opts.json !== true) {
           for (const wt of worktrees) {
             process.stdout.write(`  ${wt.workerId}: ${wt.path} on ${wt.branch}\n`);

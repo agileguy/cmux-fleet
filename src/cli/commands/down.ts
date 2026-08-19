@@ -126,18 +126,29 @@ export function register(program: Command): void {
        * failure is READ on, so anything that can fail loudly should fail while
        * one is still open.
        *
-       * Three refusals, none of which is an error in the run:
+       * Refusals, none of which is an error in the run:
        *
-       *  - a supervisor not confirmed dead. §9.3's own words: pruning a
-       *    checkout whose container is still writing would corrupt it. The
-       *    kill ladder above already computed the answer as
+       *  - a supervisor LAUNCHED and confirmed still alive. §9.3's own words:
+       *    pruning a checkout whose container is still writing would corrupt
+       *    it. The kill ladder above already computed the answer as
        *    `processStartTime(pid) === null`, so this reuses that fact rather
-       *    than asking a second, differently-shaped question.
+       *    than asking a second, differently-shaped question. A worker id
+       *    with NO supervisor state at all is NOT this case — nothing was
+       *    ever writing into that checkout, so the corruption hazard this
+       *    gate exists to enforce does not apply, and it falls through to the
+       *    dirt check below like any other checkout (see the loop for why).
        *  - a checkout that still holds work. `run/worktree.ts` defines what
        *    that means for a clone with no upstream — uncommitted paths, or
        *    commits past the recorded `baseSha`. `--force` overrides it.
-       *  - no record. A run whose `run.json` never recorded checkouts has
-       *    nothing to reap and says so, rather than guessing at paths.
+       *  - no record, or a record `readRunWorktrees` could not fully read. A
+       *    run whose `run.json` never recorded checkouts has nothing to reap
+       *    and says so. A run whose record COULD NOT BE READ is different and
+       *    must NOT read as the same "nothing to reap" success: real clones
+       *    and remotes may still be on disk with nothing left naming them,
+       *    which is exactly the loop-reaper data loss `EXIT.PARTIAL` exists
+       *    to prevent elsewhere in this function — silently exiting 0 here
+       *    with `pruned: []` would tell a script reaping runs in a loop that
+       *    this run left nothing behind, when the honest answer is "unknown".
        */
       const pruned: PruneOutcome[] = [];
       let pruneRefusals = 0;
@@ -146,9 +157,23 @@ export function register(program: Command): void {
         if (recorded.note !== null) {
           await ledger.append("prune_skipped", { detail: { reason: recorded.note } });
           if (opts.json !== true) process.stderr.write(`  cannot prune: ${recorded.note}\n`);
+          pruneRefusals++;
+        }
+        for (const note of recorded.perWorkerNotes) {
+          const workerId = note.split(":")[0] ?? "unknown";
+          await ledger.append("prune_skipped", { worker: workerId, detail: { reason: note } });
+          if (opts.json !== true) process.stderr.write(`  cannot prune ${workerId}: ${note}\n`);
+          pruned.push({
+            workerId,
+            path: "(unreadable record)",
+            pruned: false,
+            reason: `run.json's checkout record for this worker could not be read (${note}); refusing to guess at a path to delete`,
+          });
+          pruneRefusals++;
         }
         const stopped = new Map(report.map((r) => [r.id, r.stopped]));
-        for (const [id, wt] of recorded.byWorker) {
+        const byWorkerSorted = [...recorded.byWorker.entries()].sort(([a], [b]) => a.localeCompare(b));
+        for (const [id, wt] of byWorkerSorted) {
           if (recorded.repo === null) {
             pruned.push({
               workerId: id,
@@ -159,19 +184,21 @@ export function register(program: Command): void {
             pruneRefusals++;
             continue;
           }
-          // Absent from the report means no `workers/<id>` directory existed,
-          // so no supervisor was ever launched under that id in this run —
-          // which is not the same as one that was launched and confirmed
-          // dead, and must not be treated as it.
-          if (stopped.get(id) !== true) {
+          // A supervisor confirmed to have SURVIVED the kill ladder blocks
+          // its own prune — the §9.3 corruption hazard. Absent from the
+          // report entirely (no `workers/<id>` state file — a supervisor
+          // never launched under this id in this run, most likely because
+          // `up` failed partway through: the clone succeeded and was
+          // recorded, but daemon launch never reached this worker) is NOT
+          // the same fact and must not be treated as it: nothing was ever
+          // writing into the checkout, so it is exactly as prunable as one
+          // whose supervisor exited cleanly, subject to the same dirt check.
+          if (stopped.has(id) && stopped.get(id) !== true) {
             pruned.push({
               workerId: id,
               path: wt.path,
               pruned: false,
-              reason:
-                stopped.has(id)
-                  ? "its supervisor survived the kill ladder; a live container writing here would be corrupted by a delete"
-                  : "no supervisor state for this worker in the run dir, so it cannot be confirmed dead",
+              reason: "its supervisor survived the kill ladder; a live container writing here would be corrupted by a delete",
             });
             pruneRefusals++;
             continue;

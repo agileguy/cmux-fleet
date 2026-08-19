@@ -159,10 +159,23 @@ export async function collectRunReport(
     const key = `${env.worker}\0${env.branch}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    // The parent repository is preferred: worktrees share its refs, so the
-    // branch outlives a pruned worktree there. The worktree is the fallback
-    // for envelopes that never recorded a parent.
-    const repo = env.repo !== "" && env.repo !== "unset" ? env.repo : env.host_workdir;
+    // The worker's OWN checkout is preferred, not the parent — the opposite
+    // of what this line used to do, and used to be right FOR THE MECHANISM
+    // THAT USED TO EXIST: a `git worktree add` linked worktree shares the
+    // parent's `.git`, so the branch really did "outlive a pruned worktree"
+    // there. Isolation is now `git clone --no-hardlinks` per worker (SRD
+    // §9.2 erratum): the branch is created with `git switch -c` INSIDE the
+    // worker's own, independent clone, `origin` is stripped, and the parent
+    // gains only a `worker-<id>` REMOTE — not a fetched ref — so a bare
+    // `git -C <parent> rev-parse <branch>` can never resolve it. Preferring
+    // `env.repo` here once `dispatch` started populating it with the parent
+    // path (rather than the literal `"unset"`) silently degraded this
+    // pre-check to "branch does not resolve; nothing was checked" for every
+    // worktree-isolated worker — reachable on every ordinary run, and no
+    // test drove `report` against a real worktree-isolated dispatch to catch
+    // it. `env.repo` is the fallback, for a mode with no checkout of its own
+    // to prefer (`shared-ro`, `none`) or an envelope predating this field.
+    const repo = env.host_workdir !== "" && env.host_workdir !== "unset" ? env.host_workdir : env.repo;
     mergeInputs.push({ worker: env.worker, branch: env.branch, base_ref: env.base_ref, repo });
   }
   const precheck = opts.precheck ?? precheckMerges;
