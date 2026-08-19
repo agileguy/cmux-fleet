@@ -322,7 +322,10 @@ export function register(program: Command): void {
         try {
           egressInternal = (await ensureEgressNetwork(egressNetwork)).internal;
         } catch (err) {
-          throw new CliError(String(err), EXIT.BACKEND_UNAVAILABLE);
+          // `err.message` rather than `String(err)`: these errors already
+          // begin "egress: " / "relay: ", and `String(err)` prepends
+          // "Error: " so the operator reads "Error: relay: …".
+          throw new CliError(err instanceof Error ? err.message : String(err), EXIT.BACKEND_UNAVAILABLE);
         }
       }
 
@@ -345,7 +348,10 @@ export function register(program: Command): void {
         try {
           egressRelay = await ensureEgressRelay(loadedConfig.config, egressNetwork);
         } catch (err) {
-          throw new CliError(String(err), EXIT.BACKEND_UNAVAILABLE);
+          // `err.message` rather than `String(err)`: these errors already
+          // begin "egress: " / "relay: ", and `String(err)` prepends
+          // "Error: " so the operator reads "Error: relay: …".
+          throw new CliError(err instanceof Error ? err.message : String(err), EXIT.BACKEND_UNAVAILABLE);
         }
       }
 
@@ -403,8 +409,28 @@ export function register(program: Command): void {
         });
       }
       if (egressRelay !== null) {
+        /**
+         * `script_sha256` and `targets` are recorded on EVERY run, adopted or
+         * created, and that is the point rather than an accident.
+         *
+         * The relay executes a bind-mounted file from the operator's working
+         * tree — mutable on the host side, and re-exec'd by
+         * `--restart unless-stopped` after a reboot — and `ensureEgressRelay`
+         * adopts a running relay without comparing what it forwards. The
+         * ledger is therefore the only place where "this run would have run
+         * different code, or forwarded somewhere else, than the last one"
+         * becomes visible at all. Recording it only on creation would miss
+         * exactly the adopted case, which is the one nothing else can see.
+         */
         await ledger.append("egress_relay_ready", {
-          detail: { name: egressRelay.name, created: egressRelay.created },
+          detail: {
+            name: egressRelay.name,
+            created: egressRelay.created,
+            script_sha256: egressRelay.scriptSha256,
+            targets: egressRelay.targets.map(
+              (t) => `${t.name}:${t.listenPort}->${t.host}:${t.port}`,
+            ),
+          },
         });
       }
 

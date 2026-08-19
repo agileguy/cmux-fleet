@@ -4,6 +4,48 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Security
+- **The deny-all bridge does not deny the bridge gateway, and this branch was claiming otherwise.**
+  Measured, not inferred: a container attached to nothing but the `--internal` `pifleet-egress`
+  network — no `--add-host`, no second network, no capabilities, no relay running — pulls a live
+  `SSH-2.0-OpenSSH_9.6p1` banner off `172.18.0.1:22`. Docker implements internal-network isolation
+  as FORWARD-chain rules (`! -d 172.18.0.0/16 -i br-<id> -j DROP`), but the bridge gateway is
+  on-link and inside that subnet, so traffic to it is delivered through INPUT (policy ACCEPT) and
+  is never filtered. `--internal` really does remove the default route — `1.1.1.1`, the LAN oMLX
+  candidate, the Lima host address and `169.254.169.254` are all genuinely unreachable — but it
+  cannot filter the gateway. The prior evidence sampled two public destinations and never measured
+  it. Accepted as a documented residual (SRD §12.8 erratum) rather than fixed, because closing it
+  needs host-side iptables outside Docker's model, or a Docker host whose gateway serves nothing.
+  The reachable set is `{relay listen ports} ∪ {gateway ports} ∪ {sibling container ports}` and is
+  **not fixed** — anything the host or a sibling binds later joins it with no code change.
+  ISC-51/57 are re-worded to what Docker actually guarantees (no route off the bridge *subnet*),
+  ISC-50/51 downgraded from closed to partial, and the relay suite now **enumerates** the route
+  table instead of sampling addresses. The gateway residual is asserted as a positive, so hardening
+  it later turns that test red and flags §12.8 as stale rather than drifting silently.
+- **The oMLX API key no longer travels in `docker run` argv.** The live relay probe interpolated
+  the real key into a shell string passed as arguments — visible in `ps`, in the ephemeral
+  container's `docker inspect`, and in any CI log that echoes commands. It is now passed by name
+  and expanded inside the container. No leak occurred, because that test has only ever run on one
+  machine; it would have become a live exposure on the first CI run with a real secret.
+- **The relay container is pinned by image digest.** It bridges the deny-all bridge to a NAT'd
+  network under `--restart unless-stopped`, and it was pulling a floating Docker Hub tag — so the
+  code on that boundary could change under a machine reboot with no commit in this repo.
+- **The relay applies the egress policy instead of re-deriving it.** `omlxRelayTarget` pinned the
+  host but read the port straight from `llm.base_url` with nothing comparing it to `decide()`, so
+  `http://host.docker.internal:22/v1` produced a relay tunnelling the bridge to the host's sshd.
+  Targets are now gated through `decide()` before argv is built. The gate is still circular today
+  (the policy's LLM rule derives from the same field) and a test says so by name; its value is the
+  seam it creates for the pending off-host oMLX move, where it becomes blocking.
+- **One idle container could deny the whole fleet its model server.** The relay dialled upstream on
+  accept, before any byte arrived, with no timeouts and no connection cap: 300 client connections
+  sending zero bytes took it from 19 open FDs to 619, with 603 matching unauthenticated connections
+  against oMLX. Upstream is now dialled on first byte, both legs carry idle timeouts, and
+  concurrency is capped. Also: only a listen failure is fatal (an accept-time EMFILE used to
+  crash-loop the relay and cut model access fleet-wide), the relay gets the same pids/memory/cpu
+  limits as the workers it shares a bridge with, IP forwarding is turned off in its netns, and the
+  ports in its own env parsing are range-checked — `listen(0)` would have bound a random port and
+  reported healthy.
+
 ### Added
 - **`up` now refuses to start a fleet on a model that cannot emit native tool calls**
   (SRD §5.9 F39, ISC-53). Whether a model answers a `tools`-bearing request with `tool_calls`
@@ -153,6 +195,15 @@ All notable changes to this project are documented here.
   nothing to do with what any of them assert. The fixture now states the gate's absence
   explicitly (the same convention `models_allowlist` already used there) rather than the gate
   being weakened; the tests that do exercise it point `base_url` at a stub they own.
+- **The relay suite's deny-half assertions could pass having proven nothing.** The probe helper
+  returned `stdout + stderr` and never checked the exit code, so a failed `docker run` returned an
+  error message — and `expect(x).not.toContain("ip=0")` is true of every error message ever
+  written. That was the whole of ISC-51/57's evidence. The helper now throws on a non-zero exit and
+  the negatives became positives. Two further bugs were caught by the new socket-level suite that
+  this made possible: a lazy-dial ordering bug that deadlocked every relayed connection
+  (`pause()` before `once("data")` never fires), and an incomplete half-close fix —
+  `allowHalfOpen` must be set on **both** legs, or Node ends the writable side on FIN and tears the
+  socket down before any handler can forward it.
 - **The only test proving crash-recoverability of atomic writes was stochastic** — it
   killed a writer process ~150ms into a loop, proving one of five syscall boundaries at
   random and never saying which. Replaced with deterministic per-boundary tests

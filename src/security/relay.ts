@@ -94,6 +94,23 @@
  * never torn down by `down`. Several fleets share one relay, so tearing it
  * down at the end of any single run would cut the model server out from under
  * whatever else is still running.
+ *
+ * Say the consequence out loud, because no CLI output does: after the first
+ * successful `up`, this container carries `--restart unless-stopped` and so
+ * comes back on every daemon start and every reboot, INDEFINITELY, whether or
+ * not a fleet is running. `down` does not remove it and there is no
+ * `--purge-egress` flag. Removal is manual and the ORDER IS FORCED, because
+ * Docker refuses to remove a network that still has an endpoint attached and
+ * the relay holds two:
+ *
+ *     docker rm -f pifleet-egress-relay-<egress-network>
+ *     docker network rm <egress-network>-uplink
+ *     docker network rm <egress-network>        # only if nothing else uses it
+ *
+ * `relayContainerName` and `uplinkNetworkName` derive those first two names,
+ * and both are pure functions of the configured egress network — so the exact
+ * strings are always recoverable from `fleet.yaml` alone, with no hunting
+ * through `docker ps`.
  */
 
 import { createHash } from "node:crypto";
