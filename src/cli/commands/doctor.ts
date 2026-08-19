@@ -579,43 +579,52 @@ interface OmlxReport {
 }
 
 /**
- * Explain a host-vantage failure that is not an outage.
+ * Explain a host-vantage failure that is NOT an outage — as a note on the
+ * report, deliberately not as a `Diagnosis`.
  *
  * `llm.base_url` is written for the WORKERS, so the default names
  * `host.docker.internal` — a name that resolves only on the egress bridge,
- * where the relay puts it. `doctor` runs on the host and cannot resolve it, so
- * without this the report reads "oMLX unreachable" on a perfectly healthy
- * machine and sends the operator to restart a server that is fine.
+ * where the relay publishes it. `doctor` runs on the host and cannot resolve
+ * it, so without this the report reads a bare "oMLX unreachable" on a
+ * perfectly healthy machine and sends the operator to restart a server that is
+ * fine.
  *
  * `hostFacingBaseUrl` used to prevent that by rewriting the name to
  * `localhost`. That was the wrong fix: it answered a question nobody asked
  * (can this host reach SOME oMLX) in place of the one that was asked, and it
- * silently stopped being even approximately right the moment the server was
- * not on this box. Saying what happened costs one diagnosis and lies about
- * nothing.
+ * stopped being even approximately right the moment the server was not on this
+ * box.
+ *
+ * ## Why this is not a Diagnosis, which is the second wrong fix
+ *
+ * It WAS one, briefly, and the integration suite caught it: `doctor` exits 3
+ * whenever any diagnosis is present, so a note whose own text reads "this is
+ * not a fault to fix" turned eight green runs red and made a healthy machine
+ * report a failure. A finding that grades as a fault while denying it is one
+ * is exactly the self-contradiction this command exists to avoid, and the
+ * diagnosis list is the wrong instrument for a fact about VANTAGE.
+ *
+ * `omlx.ok === false` on an unreachable endpoint was never a graded fault
+ * here, and it still is not. The explanation rides on `omlx.detail`, where it
+ * reaches both `--json` and the text output and changes no exit code.
  */
-function omlxVantageDiagnosis(report: OmlxReport, network: string | null): Diagnosis | null {
-  if (report.ok) return null;
+function vantageNote(baseUrl: string, network: string | null): string {
   let hostname: string;
   try {
-    hostname = new URL(report.baseUrl).hostname;
+    hostname = new URL(baseUrl).hostname;
   } catch {
     // A base_url that will not parse is a config defect, not a vantage
     // problem, and the schema's `z.string().url()` already refuses it.
-    return null;
+    return "";
   }
-  if (hostname !== CONTAINER_HOSTNAME) return null;
-  return {
-    name: "omlx-unreachable-from-host",
-    class: "misconfigured",
-    message:
-      `llm.base_url names ${CONTAINER_HOSTNAME}, which resolves only inside the egress ` +
-      `network${network === null ? "" : ` (${network})`} — where the relay publishes it. ` +
-      `doctor probes from the HOST, so it cannot reach that name and the numbers above are ` +
-      `absent for that reason, not because oMLX is down. This is not a fault to fix: the ` +
-      `field is written for the workers. Whether the workers can actually reach it is ` +
-      `checked by \`up\`'s native-tool-call gate, which probes from inside that network.`,
-  };
+  if (hostname !== CONTAINER_HOSTNAME) return "";
+  return (
+    ` — NOT necessarily an outage: ${CONTAINER_HOSTNAME} resolves only inside the egress ` +
+    `network${network === null ? "" : ` (${network})`}, where the relay publishes it, and ` +
+    `doctor probes from the host. That field is written for the workers. Whether the WORKERS ` +
+    `can reach it is checked by \`up\`'s native-tool-call gate, which probes from inside that ` +
+    `network (ISC-260)`
+  );
 }
 
 async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
@@ -624,8 +633,8 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
    *
    * The consequence is deliberate: when `llm.base_url` names the
    * container-facing hostname (the default), this probe cannot resolve it and
-   * says so, and `omlxVantageDiagnosis` turns that into an explanation rather
-   * than leaving it looking like an outage.
+   * says so — and `vantageNote` appends WHY, so the bare "unreachable" does
+   * not read as an outage on a healthy machine.
    */
   const baseUrl = loaded?.config.llm.base_url ?? `http://${CONTAINER_HOSTNAME}:8000/v1`;
   const keyEnv = loaded?.config.llm.api_key_env ?? "OMLX_API_KEY";
@@ -653,7 +662,9 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
     const body = (await res.json()) as { data?: { id?: string }[] };
     report.models = (body.data ?? []).map((m) => m.id ?? "").filter((id) => id.length > 0);
   } catch (err) {
-    report.detail = `oMLX unreachable at ${baseUrl}: ${(err as Error).message}`;
+    report.detail =
+      `oMLX unreachable at ${baseUrl}: ${(err as Error).message}` +
+      vantageNote(baseUrl, loaded?.config.docker.network ?? null);
     return report;
   }
 
@@ -765,11 +776,6 @@ export function register(program: Command): void {
       }
 
       const omlx = await probeOmlx(loaded);
-      // Why the host could not reach a worker-facing URL, when that is what
-      // happened. Pushed here rather than inside `probeOmlx` because that
-      // function reports a measurement and this is an interpretation of one.
-      const vantage = omlxVantageDiagnosis(omlx, loaded?.config.docker.network ?? null);
-      if (vantage !== null) diagnoses.push(vantage);
 
       // docker classified itself above — it is the one probe whose failure has
       // two possible causes and needs a second command to tell them apart.
