@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { HarvestSchema, VerdictSchema } from "../../src/contracts.ts";
 import { DEFAULT_HARNESS_PATTERNS, harnessSurfaceFor } from "../../src/harvest/acceptance.ts";
 import { deriveGitFacts } from "../../src/harvest/git.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
 const RUN_ID = "2026-07-27T00-00-00Z-hrvt";
@@ -611,6 +612,9 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
    * config and not the other would make the answer depend on which command
    * the operator happened to type.
    */
+  // Four CLI spawns: two `report`, then two `artifacts` for the cross-check.
+  // The two `report` calls dominate — each grades the whole run, so this is
+  // the slowest test in the file (3.6-3.9 s idle) and the one ISC-266 caught.
   test("report honours the same config as artifacts", async () => {
     const withCfg = await runCli(["report", "--run", RUN_ID, "--config", cfgCustom, "--json"]);
     const without = await runCli(["report", "--run", RUN_ID, "--json"]);
@@ -635,7 +639,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     // Without it, both fall back to the defaults — still agreeing.
     const artNo = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--json"]);
     expect((JSON.parse(artNo.stdout) as { verdict: string }).verdict).toBe(verdictOf(without.stdout));
-  });
+  }, cliBudget(4));
 
   // An operator who NAMED a config meant it: silently harvesting with the
   // defaults would ignore the one case where the intent is explicit.
@@ -770,14 +774,14 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const payload = JSON.parse(r.stdout) as { collection_notes: string[] };
     expect(payload.collection_notes.join(" ")).toContain("harness surface");
     expect(payload.collection_notes.join(" ")).toContain(cfgCustom);
-  });
+  }, cliBudget(1));
 
   test("report --json says so when it graded against the built-in defaults", async () => {
     const r = await runCli(["report", "--run", RUN_ID, "--json"]);
     expect(r.code).toBe(0);
     const payload = JSON.parse(r.stdout) as { collection_notes: string[] };
     expect(payload.collection_notes.join(" ")).toContain("built-in defaults");
-  });
+  }, cliBudget(1));
 
   /**
    * A run.json that records an empty surface would disable the ISC-150 cap.
@@ -921,7 +925,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const ids = obj.tasks.map((t) => t["task_id"]);
     for (const id of ["T-1", "T-2", "T-3", "T-4", "T-conceal"]) expect(ids).toContain(id);
     for (const t of obj.tasks) HarvestSchema.parse(t); // ISC-88 for the fanout shape
-  });
+  }, cliBudget(1));
 
   // Usage errors are the one legitimate nonzero: neither task nor all named.
   /**
@@ -962,7 +966,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     } finally {
       await chmod(poisoned, 0o644);
     }
-  });
+  }, cliBudget(1));
 
   test("naming neither --task nor --all is a usage error", async () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--json"]);
