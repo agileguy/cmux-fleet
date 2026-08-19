@@ -43,6 +43,10 @@ import { mergeLedger } from "../../src/run/ledger.ts";
 import { readRunWorktrees } from "../../src/run/state.ts";
 import { inspectCloneDirt } from "../../src/run/worktree.ts";
 import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
+// The ISC-56 decoy waits for its own process to become visible to the very
+// scan `up` runs, rather than sleeping a hopeful interval — see
+// `startDecoyTrainingRun`.
+import { checkMlxTrainingGuard } from "../../src/safety/mlx-training-guard.ts";
 import { seedGitRepo } from "../fixtures/synthetic-repo.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
@@ -169,6 +173,13 @@ function fleetYaml(
     roleFields?: string[];
     /** `cloud.kubeconfig`; omitted entirely when absent, as the schema default is null. */
     kubeconfig?: string;
+    /**
+     * The ISC-53 native-tool-call gate. OFF unless a test asks for it — see the
+     * comment at the emitted key below for why that default is not laziness.
+     */
+    requireNativeToolCalls?: boolean;
+    /** `llm.base_url`; only the ISC-53 tests set it, at their stub server. */
+    llmBaseUrl?: string;
   } = {},
 ): string {
   const roleFields = [
@@ -188,6 +199,29 @@ function fleetYaml(
     ...(opts.kubeconfig === undefined ? [] : ["cloud:", `  kubeconfig: ${opts.kubeconfig}`]),
     "llm:",
     "  model: wiring-test-model",
+    ...(opts.llmBaseUrl === undefined ? [] : [`  base_url: ${opts.llmBaseUrl}`]),
+    /**
+     * OFF by default, and this is the load-bearing line in the fixture.
+     *
+     * `require_native_tool_calls` defaults to TRUE in the schema, so with this
+     * key absent every `up` in this file sends a real `tools`-bearing request
+     * to `llm.base_url` — which resolves to `localhost:8000`, a machine-local
+     * oMLX that no CI runner has and that serves nothing called
+     * `wiring-test-model` even here. Measured: four tests in this file
+     * (egress/hazard ordering, the ISC-190 allow case, the ISC-251 grant line,
+     * and the §5.5 mount materialization) failed with exit 3 —
+     * `ToolCallProbeUnavailableError` — for that reason alone, having nothing
+     * to do with what any of them assert.
+     *
+     * The fix is to state the gate's absence rather than to weaken the gate.
+     * These tests are about egress, hazards, credentials and mounts; making
+     * them depend on a live inference server would make four unrelated
+     * controls untestable without one. Same convention as `models_allowlist`
+     * above: the gate stays invisible until a test asks for it, and the tests
+     * that DO ask for it (ISC-53, below) point `base_url` at a stub they own,
+     * so the criterion is proven against a server whose answers are chosen.
+     */
+    `  require_native_tool_calls: ${opts.requireNativeToolCalls === true}`,
     // Omitted by default, which is the shape of every other test in this file:
     // an empty allowlist constrains nothing, so the ISC-190 gate stays
     // invisible until a test asks for it.
@@ -631,6 +665,415 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
     expect(up.stderr).not.toContain("models_allowlist");
     expect(up.stderr).not.toContain("unknown role");
   });
+});
+
+/**
+ * ISC-53 — the native-tool-call gate is enforced on the LAUNCH path.
+ *
+ * Exactly the disease the header of this file describes, and exactly the shape
+ * of the ISC-190 pair above: `probeNativeToolCalls` and
+ * `assertModelsSupportToolCalls` are exhaustively unit-tested against an
+ * injected fetch, and NOTHING would notice if the call were deleted from
+ * `up.ts`. The criterion is "a model that answers a `tools`-bearing probe with
+ * prose is refused at `up` with exit 2" — a statement about the CLI process,
+ * not about a pure function.
+ *
+ * The server is a stub this file owns rather than the machine's real oMLX. The
+ * failure being certified — a model answering a `tools` request in prose — is a
+ * property of a specific model's chat template (§5.9 records it on
+ * `Qwen3-8B-4bit`), so it cannot be summoned on demand from whatever models a
+ * given host happens to serve. A stub makes the answer chosen, makes both
+ * directions testable, and makes the whole suite runnable in CI, which has no
+ * inference server at all. The live positive half — a REAL oMLX model emitting
+ * a real native call — is proven in `test/integration/model-probe.test.ts`.
+ */
+interface StubOmlx {
+  /** `llm.base_url` for a config that should talk to this stub. */
+  baseUrl: string;
+  /** Every request received, in order. Empty means the gate never fired. */
+  requests: { path: string; body: Record<string, unknown> }[];
+  stop: () => Promise<void>;
+}
+
+/**
+ * An oMLX-shaped HTTP server that answers `/chat/completions` with one canned
+ * body.
+ *
+ * Port 0 — the OS picks a free one. A hardcoded port makes two test files (or
+ * two checkouts, or a developer's own oMLX) collide on a machine, and the
+ * resulting failure looks like a bug in the gate rather than in the harness.
+ */
+function stubOmlx(body: unknown, status = 200): StubOmlx {
+  const requests: { path: string; body: Record<string, unknown> }[] = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const url = new URL(req.url);
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = (await req.json()) as Record<string, unknown>;
+      } catch {
+        // GET /models and friends carry no body; the path alone is the record.
+      }
+      requests.push({ path: url.pathname, body: parsed });
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  return {
+    baseUrl: `http://127.0.0.1:${server.port}/v1`,
+    requests,
+    stop: async () => {
+      await server.stop(true);
+    },
+  };
+}
+
+/** A well-formed native tool call — the shape a compatible model returns. */
+const STUB_TOOL_CALL = {
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_wiring", type: "function", function: { name: "pifleet_probe", arguments: "{}" } },
+        ],
+      },
+      finish_reason: "tool_calls",
+    },
+  ],
+};
+
+/** The §5.9 failure: tools offered, prose returned. */
+const STUB_PROSE = {
+  choices: [
+    {
+      index: 0,
+      message: { role: "assistant", content: "Certainly! I will call the probe tool.", tool_calls: null },
+      finish_reason: "stop",
+    },
+  ],
+};
+
+describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
+  test("a model that answers the probe with prose exits 2 and launches nothing", async () => {
+    const rig = await makeRig();
+    const stub = stubOmlx(STUB_PROSE);
+    try {
+      const gated = join(rig.base, "prose.yaml");
+      await writeFile(
+        gated,
+        fleetYaml(rig.repo, { requireNativeToolCalls: true, llmBaseUrl: stub.baseUrl }),
+      );
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        gated,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+      ]);
+
+      // The criterion names the code, so it is asserted and not inferred.
+      expect(up.code).toBe(EXIT.USAGE);
+      // Actionable: which worker, which model, what went wrong, and the knob.
+      expect(up.stderr).toContain("eng-1");
+      expect(up.stderr).toContain("wiring-test-model");
+      expect(up.stderr).toContain("prose");
+      expect(up.stderr).toContain("require_native_tool_calls");
+      // A diagnosis, not a crash.
+      expect(up.stderr).not.toContain("at async");
+      expect(up.stdout).not.toContain("run ");
+
+      // The probe genuinely happened, against the endpoint the config named,
+      // carrying tools. Without this the test would also pass if `up` had
+      // refused for some unrelated reason that happens to exit 2.
+      expect(stub.requests.length).toBe(1);
+      expect(stub.requests[0]!.path).toBe("/v1/chat/completions");
+      expect(Array.isArray(stub.requests[0]!.body["tools"])).toBe(true);
+
+      // Nothing started. The run dir is created before the config is read, so
+      // it may exist — no supervisor and no ledger is what "does not start"
+      // means, same standard the ISC-190 refusal is held to.
+      for (const runId of await readdir(rig.root)) {
+        const run = runPaths(runId, rig.root);
+        expect(await readdir(run.workersDir)).toEqual([]);
+        expect((await mergeLedger(run)).records).toEqual([]);
+      }
+    } finally {
+      await stub.stop();
+    }
+  });
+
+  test(
+    "a model that DOES emit a native call still starts — the gate is a filter, not a wall",
+    async () => {
+      const rig = await makeRig();
+      const stub = stubOmlx(STUB_TOOL_CALL);
+      try {
+        const ok = join(rig.base, "toolcalls.yaml");
+        await writeFile(
+          ok,
+          fleetYaml(rig.repo, { requireNativeToolCalls: true, llmBaseUrl: stub.baseUrl }),
+        );
+        const up = await runCli(rig, [
+          "up",
+          "--config",
+          ok,
+          "--workers",
+          "eng-1",
+          "--backend",
+          "headless",
+          "--json",
+        ]);
+        expect(up.code).toBe(EXIT.SUCCESS);
+        rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+        // The fleet genuinely came up rather than merely exiting 0…
+        const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+        expect(records.map((r) => r.event)).toContain("supervisor_launched");
+        // …and it came up HAVING been probed. This is the assertion that dies
+        // if `assertModelsSupportToolCalls` is deleted from `up.ts`: the exit
+        // code above would stay 0 and only this count would fall to zero.
+        expect(stub.requests.length).toBe(1);
+      } finally {
+        await stub.stop();
+      }
+    },
+    90_000,
+  );
+
+  /**
+   * The exit-code split, end to end. oMLX being down says nothing about the
+   * model, so reporting it as a usage error would send an operator to edit a
+   * `model:` line that is perfectly correct instead of starting their server.
+   */
+  test("an unreachable oMLX exits 3, not 2", async () => {
+    const rig = await makeRig();
+    // Bind and immediately release, so the port is real, free, and — barring a
+    // deliberate race — listening to nothing. Picking a constant would risk
+    // hitting whatever the developer happens to be running.
+    const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+    const deadUrl = `http://127.0.0.1:${probe.port}/v1`;
+    await probe.stop(true);
+
+    const gated = join(rig.base, "dead.yaml");
+    await writeFile(
+      gated,
+      fleetYaml(rig.repo, { requireNativeToolCalls: true, llmBaseUrl: deadUrl }),
+    );
+    const up = await runCli(rig, [
+      "up",
+      "--config",
+      gated,
+      "--workers",
+      "eng-1",
+      "--backend",
+      "headless",
+    ]);
+    expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+    expect(up.code).not.toBe(EXIT.USAGE);
+    // It must say the server could not be reached, NOT that the model is bad.
+    expect(up.stderr).toContain("oMLX");
+    expect(up.stderr).not.toContain("prose");
+  });
+
+  /** §5.9: `require_native_tool_calls: false` "disables both". */
+  test("with the gate off, a prose-answering model starts and is never probed", async () => {
+    const rig = await makeRig();
+    const stub = stubOmlx(STUB_PROSE);
+    try {
+      const off = join(rig.base, "gate-off.yaml");
+      await writeFile(
+        off,
+        fleetYaml(rig.repo, { requireNativeToolCalls: false, llmBaseUrl: stub.baseUrl }),
+      );
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        off,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+      // Not merely "did not refuse": the network was never touched. This is
+      // also what makes the default in `fleetYaml` above honest — every other
+      // test in this file really does skip the probe rather than getting lucky.
+      expect(stub.requests).toEqual([]);
+    } finally {
+      await stub.stop();
+    }
+  }, 90_000);
+});
+
+/**
+ * ISC-56 — `up` refuses while an MLX training run is active, unless `--i-know`.
+ *
+ * The parser is unit-tested from canned `ps` strings; this proves the CLI
+ * actually runs it, actually reads the real host process list, and actually
+ * refuses. A decoy process supplies the training run: the guard's patterns key
+ * on the command line, so a `#!/bin/sh` script NAMED `mlx_lm.lora` produces a
+ * genuine `ps` entry of exactly the shape a real `mlx_lm.lora` run has, with no
+ * GPU, no model weights, and no way to hurt the host.
+ *
+ * The script sleeps rather than `exec`ing sleep on purpose: `exec` would
+ * REPLACE the argv with `sleep`, the decoy would stop matching, and the test
+ * would pass or fail on the guard having nothing to find.
+ */
+interface Decoy {
+  pid: number;
+  stop: () => Promise<void>;
+}
+
+async function startDecoyTrainingRun(dir: string): Promise<Decoy> {
+  const script = join(dir, "mlx_lm.lora");
+  await writeFile(script, "#!/bin/sh\nsleep 300\n");
+  await chmod(script, 0o755);
+  const proc = Bun.spawn([script, "--model", "Qwen3-8B", "--train", "--iters", "600"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  /**
+   * Wait for the kernel to publish the argv before returning. `Bun.spawn`
+   * resolves once the child exists, which is not the same instant `ps` can see
+   * its command line — without this the test races the process table and fails
+   * intermittently on a loaded machine, which would look like guard flakiness.
+   */
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const found = await checkMlxTrainingGuard();
+    if (found.some((m) => m.pid === proc.pid)) break;
+    if (Date.now() > deadline) throw new Error(`decoy pid ${proc.pid} never appeared in ps`);
+    await Bun.sleep(50);
+  }
+  return {
+    pid: proc.pid,
+    stop: async () => {
+      proc.kill("SIGKILL");
+      // Reaped, not merely signalled. A zombie keeps its command line in `ps`,
+      // so an unreaped decoy would make every LATER `up` in this suite refuse
+      // with exit 3 — the worst kind of cross-test contamination, because it
+      // lands on files that never mentioned MLX.
+      await proc.exited;
+    },
+  };
+}
+
+describe("the MLX training guard gates the launch path (ISC-56)", () => {
+  test("an active training run refuses `up`, naming the process and the override", async () => {
+    const rig = await makeRig();
+    const decoy = await startDecoyTrainingRun(rig.base);
+    try {
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+      ]);
+      // Not a usage error: the command line is fine, the host is busy.
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+      expect(up.stderr).toContain("refusing to start");
+      expect(up.stderr).toContain(String(decoy.pid));
+      expect(up.stderr).toContain("mlx_lm.lora");
+      // The escape hatch has to be discoverable from the refusal itself.
+      expect(up.stderr).toContain("--i-know");
+      expect(up.stderr).not.toContain("at async");
+
+      // The guard runs before the run directory is populated, so nothing at
+      // all should have been launched.
+      for (const runId of await readdir(rig.root)) {
+        const run = runPaths(runId, rig.root);
+        expect(await readdir(run.workersDir)).toEqual([]);
+        expect((await mergeLedger(run)).records).toEqual([]);
+      }
+    } finally {
+      await decoy.stop();
+    }
+  });
+
+  test(
+    "--i-know proceeds, warns on stderr, and records the override in the ledger",
+    async () => {
+      const rig = await makeRig();
+      const decoy = await startDecoyTrainingRun(rig.base);
+      try {
+        const up = await runCli(rig, [
+          "up",
+          "--config",
+          rig.configPath,
+          "--workers",
+          "eng-1",
+          "--backend",
+          "headless",
+          "--i-know",
+          "--json",
+        ]);
+        expect(up.code).toBe(EXIT.SUCCESS);
+        rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+        // Overridden, not silent. An operator racing a training run must see it.
+        expect(up.stderr).toContain("--i-know overrode");
+        expect(up.stderr).toContain(String(decoy.pid));
+
+        /**
+         * And the DURABLE half. The stderr warning dies with the scrollback;
+         * `report` explaining a panicked host months later has only the run
+         * directory to read. Asserting the pid inside the event — rather than
+         * the event's mere presence — is what makes this fail if the ledger
+         * append is ever reduced to a bare marker.
+         */
+        const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+        const override = records.find((r) => r.event === "mlx_training_guard_overridden");
+        expect(override).toBeDefined();
+        const matches = (override!.detail as { matches?: { pid: number }[] }).matches ?? [];
+        expect(matches.map((m) => m.pid)).toContain(decoy.pid);
+        // It really did start, rather than exiting 0 having done nothing.
+        expect(records.map((r) => r.event)).toContain("supervisor_launched");
+      } finally {
+        await decoy.stop();
+      }
+    },
+    90_000,
+  );
+
+  /**
+   * The converse, and the one that matters most for day-to-day use: with no
+   * training run on the host the guard must be INVISIBLE. A guard that refuses
+   * every `up` is not a safety feature, and the obvious over-broad
+   * implementation — matching /mlx/ — would do exactly that on any machine
+   * running the oMLX inference server this fleet requires.
+   */
+  test("with no training run active, `up` is unaffected", async () => {
+    const rig = await makeRig();
+    const up = await runCli(rig, [
+      "up",
+      "--config",
+      rig.configPath,
+      "--workers",
+      "eng-1",
+      "--backend",
+      "headless",
+      "--json",
+    ]);
+    expect(up.code).toBe(EXIT.SUCCESS);
+    rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+    expect(up.stderr).not.toContain("MLX training");
+    const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+    expect(records.map((r) => r.event)).not.toContain("mlx_training_guard_overridden");
+  }, 90_000);
 });
 
 describe("the grant line names the real ADC identity (ISC-251)", () => {
