@@ -188,6 +188,13 @@ const RunWorktreeRecordSchema = z.object({
   remoteName: z.string().min(1),
   /** Defaulted for a record written before this field existed. */
   baselineStatus: z.string().default(""),
+  /**
+   * Defaulted to `""` for a record written before this field existed —
+   * which reads as permanently dirty in `inspectCloneDirt` (an empty string
+   * can never equal a real git tree SHA), the honest answer for "this
+   * record does not describe a baseline", not a silent pass-through.
+   */
+  baselineTree: z.string().default(""),
 });
 
 export async function readRunWorktrees(run: RunPaths): Promise<RunWorktrees> {
@@ -226,8 +233,34 @@ export async function readRunWorktrees(run: RunPaths): Promise<RunWorktrees> {
   const repo = doc?.repo ?? null;
   const branchPrefix = doc?.branch_prefix ?? null;
   const raw = doc?.worktrees;
-  if (raw === undefined || raw === null) {
+  if (raw === undefined) {
+    // The KEY is absent entirely — a run predating this field, a hand-built
+    // test fixture, or a fleet with no `worktree`-isolation worker at all.
+    // Genuinely indistinguishable from "nothing to record", and must stay
+    // that way: this is the shape `readRunHarnessPatterns`'s own
+    // forgiving-about-absence rule exists to keep dispatchable.
     return { byWorker: empty, repo, branchPrefix, note: null, perWorkerNotes: [] };
+  }
+  if (raw === null) {
+    // The key is PRESENT and explicitly `null` — a different fact from
+    // absence. `up.ts` writes `worktrees: null` the moment `run.json` first
+    // exists and OVERWRITES it with a real array (`[]` for a legitimate
+    // all-shared-ro/none fleet, or the created records otherwise) once
+    // `createWorkerWorktrees` returns; see that module's own comment on
+    // why the two must never collapse to the same on-disk shape. `null`
+    // surviving to a READ means `up` crashed between those two writes —
+    // exactly the "a clone may exist with nothing describing it" case
+    // `down --prune` cannot safely read as "nothing to reap".
+    return {
+      byWorker: empty,
+      repo,
+      branchPrefix,
+      note:
+        "run.json records worktree creation as INCOMPLETE (worktrees: null) — 'up' did not finish; " +
+        "a checkout may exist on disk with nothing describing it. Check the repository's .worktrees/ " +
+        "directory by hand before assuming there is nothing to reap.",
+      perWorkerNotes: [],
+    };
   }
   if (!Array.isArray(raw)) {
     return {

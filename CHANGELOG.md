@@ -150,6 +150,39 @@ All notable changes to this project are documented here.
 - **`down --prune`'s recursive delete trusted a checkout path read back from `run.json` with
   no containment check.** Not container-writable, but operator-editable; gated on the path
   resolving inside `<repo>/.worktrees/` before anything is removed.
+- **The atomicity fix above stopped one step short of its own goal: the rollback covered every
+  git step but not the call that actually RECORDS a checkout.** `createWorkerWorktrees`'s
+  `onCreated` callback — the only thing that writes `run.json` and the ledger — ran outside
+  the rollback's `try`/`catch`, and the same round's dirty-clone fix (below) moved hazard
+  neutralization and baseline capture INTO that callback, widening the exact window the
+  atomicity fix had just closed. A throw there reproduced the identical orphan: a real clone
+  on disk, a remote registered in the parent, nothing in `run.json`. Fixed by moving the
+  record and the callback inside the try block, so any failure anywhere in the sequence rolls
+  back the same way.
+- **The dirty-clone baseline fix (`WorkerWorktree.baselineStatus`, above) compared
+  `git status --porcelain` LINES against a recorded baseline, which has two false-negative
+  classes that delete real worker output without `--force`.** `git status` collapses a
+  wholly-untracked directory into one line, so a file written beneath a directory
+  `repo-hazards.ts` already quarantined as a unit is invisible to a line diff; and `git
+  status` reports a status CODE per tracked path, not content, so a worker's further edit to
+  a file the baseline already shows modified produces an identical line and cancels out as
+  "no change". Replaced with a content-addressed git tree hash (`WorkerWorktree.baselineTree`,
+  via a `git add -A` + `git write-tree` against a throwaway index) as the authoritative
+  dirty/clean signal; the status-line diff survives only for the informational "N uncommitted
+  path(s)" display count.
+- **`worktrees: null` and `worktrees: []` read identically to `down --prune`**, defeating the
+  distinction `up` itself documents as load-bearing — a crashed `up` (leaving `null`) reported
+  the same "nothing to reap" as a legitimately empty fleet (`[]`). `readRunWorktrees` now
+  treats a present-but-`null` `worktrees` key as "creation did not finish" (a refusal), and
+  `up`'s no-config path now explicitly writes `[]` rather than leaving the key `null` forever.
+- **The merge-precheck fix above (worker's own clone preferred over the parent) silently
+  disabled sibling-vs-sibling conflict detection.** `checkPairwise` only runs between two
+  workers sharing one `repo` value, which stopped being true for any two worktree-isolated
+  workers the moment each got its own independent clone. `conflicts_with: []` then read as an
+  affirmative "no conflicts", never actually computed — the SRD's own wire contract. The skip
+  is now an explicit `detail` note rather than silence; actually computing cross-clone
+  conflicts (fetching each sibling's branch into the parent via its existing `worker-<id>`
+  remote) is filed as a follow-up, not built in this pass.
 
 ### Added
 - **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty

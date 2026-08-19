@@ -72,7 +72,9 @@
  * applies to it completely (ISC-249).
  */
 
+import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts";
 import { EXIT } from "../contracts.ts";
@@ -96,14 +98,39 @@ export interface WorkerWorktree {
   baseSha: string;
   remoteName: string;
   /**
-   * `git status --porcelain`, captured once the checkout is fully prepared —
-   * empty at creation, then overwritten by `captureWorktreeBaseline` after
-   * `up` runs hazard neutralization. See that function for why this exists:
-   * neutralization is a real, uncommitted change the instant it happens, and
-   * without a recorded baseline every clone of a repository with a root
-   * `AGENTS.md`/`CLAUDE.md` reads as dirty from birth.
+   * `git status --porcelain --untracked-files=all`, captured once the
+   * checkout is fully prepared. INFORMATIONAL ONLY — set at creation to the
+   * clone's true post-clone status (normally empty), then overwritten by
+   * `captureWorktreeBaseline` after `up` runs hazard neutralization. Used
+   * only to produce the human/JSON-facing "N uncommitted path(s)" count;
+   * `baselineTree` below is what the dirty/clean DECISION is made from. See
+   * `baselineTree`'s own doc for why a status-line diff cannot be trusted
+   * for that decision.
    */
   baselineStatus: string;
+  /**
+   * A content-addressed digest of the ENTIRE working tree (tracked and
+   * untracked, respecting `.gitignore`) at the same moment `baselineStatus`
+   * was captured — the git tree object `snapshotWorkingTree` produces via a
+   * throwaway index, never `HEAD`'s own tree (which does not reflect
+   * uncommitted quarantine renames).
+   *
+   * This, not `baselineStatus`, is what `inspectCloneDirt` compares against
+   * to decide dirty vs. clean. A LINE-based diff of `git status --porcelain`
+   * has two false-negative classes, both reproduced against real git before
+   * this field existed: (a) status collapses a wholly-untracked directory
+   * into ONE line, so a file written beneath a directory `security/
+   * repo-hazards.ts` already quarantined as a unit is invisible to a line
+   * diff; (b) status reports a STATUS CODE per tracked path, not content, so
+   * a worker's edit to a file the baseline ALSO shows modified (e.g. a
+   * `.gitattributes` `repo-hazards.ts` already commented a line out of)
+   * produces the identical status line and cancels out as "no change" —
+   * silently discarding the worker's real edit, which `pruneWorkerWorktree`
+   * then deletes WITHOUT requiring `--force`. A tree-object hash is a full
+   * content comparison and is immune to both: any byte anywhere that
+   * differs from the baseline changes the hash.
+   */
+  baselineTree: string;
 }
 
 /**
@@ -630,9 +657,21 @@ export async function createWorkerWorktrees(
      * the likeliest cause of a failure landing here; this is the backstop
      * for the others (disk full, a concurrent `up` racing this same repo,
      * anything `registerWorkerRemote`'s retry budget does not absorb).
+     *
+     * `onCreated` — and `created.push` — are INSIDE this try, not after it.
+     * An earlier version of this rollback closed the try block before
+     * calling `onCreated`, on the reasoning that everything git-related was
+     * covered; but `onCreated` is the only thing that actually RECORDS a
+     * checkout (`up.ts`'s callback writes `run.json` and the ledger), and it
+     * runs real work first — hazard neutralization, a `git status` snapshot
+     * — either of which can throw before recording happens. A throw there
+     * used to reproduce the exact orphan this rollback exists to prevent,
+     * just one step further down the call stack. Reproduced and fixed.
      */
     let replacedStale = false;
     let baseSha = "";
+    let baselineTree = "";
+    let record: WorkerWorktree | null = null;
     try {
       const switched = await runGit(path, ["switch", "-c", branch]);
       if (switched.code !== 0) throw new WorktreeError(`git switch -c ${branch} in ${path}`, switched);
@@ -664,42 +703,91 @@ export async function createWorkerWorktrees(
       const head = await runGit(path, ["rev-parse", "HEAD"]);
       if (head.code !== 0) throw new WorktreeError(`rev-parse HEAD in ${path}`, head);
       baseSha = head.stdout.trim();
+
+      // The baseline tree at creation time is cheaply exact: nothing has
+      // touched the working tree yet, so it is byte-for-byte `HEAD`'s own
+      // tree — no need for `snapshotWorkingTree`'s throwaway-index dance
+      // until something (hazard neutralization) actually changes the tree.
+      const headTree = await runGit(path, ["rev-parse", "HEAD^{tree}"]);
+      if (headTree.code !== 0) throw new WorktreeError(`rev-parse HEAD^{tree} in ${path}`, headTree);
+      baselineTree = headTree.stdout.trim();
+
+      record = { workerId, path, branch, baseSha, remoteName, baselineStatus: "", baselineTree };
+      created.push(record);
+      if (opts.onCreated) await opts.onCreated(record, { replacedStaleRemote: replacedStale });
     } catch (err) {
-      await rm(path, { recursive: true, force: true });
-      // Best-effort: `registerWorkerRemote` may never have run, in which case
-      // this is "No such remote" and harmless; a failure here must not mask
-      // the original error.
-      await runGitWithConfigLockRetry(repo, ["remote", "remove", remoteName]);
+      if (record !== null) created.pop();
+      // Best-effort, and ordered the same way `pruneWorkerWorktree` orders
+      // its own teardown: the remote first, since a remote whose directory
+      // is gone is the failure an operator meets long after they have
+      // forgotten this run, while an orphan directory with no remote is
+      // merely untidy. Neither cleanup step may mask the ORIGINAL error —
+      // `err` is what actually explains the failure, and a cleanup that
+      // fails (EPERM, EBUSY, "no such remote") must not replace it.
+      await runGitWithConfigLockRetry(repo, ["remote", "remove", remoteName]).catch(() => {});
+      await rm(path, { recursive: true, force: true }).catch(() => {});
       throw err;
     }
-
-    const record: WorkerWorktree = {
-      workerId,
-      path,
-      branch,
-      baseSha,
-      remoteName,
-      // Empty until `up` calls `captureWorktreeBaseline` after hazard
-      // neutralization — this module has no reason to know about hazards.
-      baselineStatus: "",
-    };
-    created.push(record);
-    if (opts.onCreated) await opts.onCreated(record, { replacedStaleRemote: replacedStale });
   }
   return created;
 }
 
 /**
- * Snapshot `git status --porcelain` as the WORKING-TREE baseline `down
- * --prune` and `pifleet worktrees` measure "this clone holds work" against,
- * alongside `baseSha` for commit history.
+ * A content-addressed digest of the ENTIRE working tree at `path` — tracked
+ * and untracked, respecting `.gitignore` — independent of `HEAD`.
+ *
+ * `git add -A` followed by `git write-tree`, against a THROWAWAY index file
+ * (`GIT_INDEX_FILE` points at a fresh temp path, never the checkout's real
+ * `.git/index`) so this read produces a real git tree object — a full
+ * content hash — without staging anything a `git status` in the same
+ * checkout would ever see. The temp index is removed unconditionally
+ * afterward.
+ *
+ * This is the mechanism `captureWorktreeBaseline` and `inspectCloneDirt`
+ * both build on, and the reason is entirely about what a LINE-based
+ * `git status --porcelain` diff cannot see. Measured against real git before
+ * either function existed:
+ *
+ *  - `git status` collapses a wholly-untracked directory into ONE `?? dir/`
+ *    line. `repo-hazards.ts` quarantines a directory as one unit, so a file
+ *    written beneath an already-quarantined directory changes nothing about
+ *    that one line — invisible to a status diff, visible to a tree hash.
+ *  - `git status` reports a STATUS CODE per tracked path (`M`, `D`, …), not
+ *    content. A worker's edit to a file the baseline ALSO shows modified
+ *    (e.g. a `.gitattributes` `repo-hazards.ts` already commented a line out
+ *    of) produces the IDENTICAL status line before and after — a false
+ *    "nothing changed" that a status diff cannot distinguish from silence,
+ *    and that `pruneWorkerWorktree` would then delete without `--force`.
+ *
+ * Both were reproduced directly (two scratch repos, `git write-tree` run by
+ * hand) before this function replaced the status-line comparison an earlier
+ * version of this baseline used.
+ */
+async function snapshotWorkingTree(path: string): Promise<string> {
+  const tmpIndex = join(tmpdir(), `pifleet-snapshot-${randomUUID()}.index`);
+  try {
+    const env = { GIT_INDEX_FILE: tmpIndex };
+    const added = await runGit(path, ["add", "-A"], env);
+    if (added.code !== 0) throw new WorktreeError(`git add -A (snapshot) in ${path}`, added);
+    const tree = await runGit(path, ["write-tree"], env);
+    if (tree.code !== 0) throw new WorktreeError(`git write-tree (snapshot) in ${path}`, tree);
+    return tree.stdout.trim();
+  } finally {
+    await rm(tmpIndex, { force: true });
+  }
+}
+
+/**
+ * Snapshot the WORKING-TREE baseline `down --prune` and `pifleet worktrees`
+ * measure "this clone holds work" against, alongside `baseSha` for commit
+ * history.
  *
  * Called once, by `up`, AFTER hazard neutralization finishes — never by
  * `createWorkerWorktrees` itself, which has no reason to know about hazards.
  * Quarantine (`security/repo-hazards.ts`) neutralizes a tracked hazard file
- * by RENAME, which is real, uncommitted change in `git status --porcelain`
- * the instant it happens — so without this, a clone of ANY repository with a
- * root `AGENTS.md`/`CLAUDE.md` reads as dirty from the moment `up` finishes,
+ * by RENAME, which is real, uncommitted change from the instant it happens —
+ * so without this, a clone of ANY repository with a root
+ * `AGENTS.md`/`CLAUDE.md` reads as dirty from the moment `up` finishes,
  * before the worker has done anything at all.
  *
  * Committing the change instead was considered and rejected. No git identity
@@ -710,16 +798,17 @@ export async function createWorkerWorktrees(
  * ahead" in `inspectCloneDirt` below, moving the exact same false positive
  * from the working tree into history, and would pollute the exact-diff
  * equality ISC-90 expects between a worker's reported diff and `git diff` on
- * its own branch. A recorded STATUS baseline generalizes to every present
- * and future hazard-neutralization shape (rename, in-place edit, whatever
+ * its own branch. A recorded baseline generalizes to every present and
+ * future hazard-neutralization shape (rename, in-place edit, whatever
  * `repo-hazards.ts` grows next) without this module ever enumerating them,
  * because `inspectCloneDirt` compares against whatever this actually
  * captured rather than assuming empty.
  */
 export async function captureWorktreeBaseline(wt: WorkerWorktree): Promise<WorkerWorktree> {
-  const status = await runGit(wt.path, ["status", "--porcelain"]);
+  const status = await runGit(wt.path, ["status", "--porcelain", "--untracked-files=all"]);
   if (status.code !== 0) throw new WorktreeError(`git status in ${wt.path}`, status);
-  return { ...wt, baselineStatus: status.stdout };
+  const baselineTree = await snapshotWorkingTree(wt.path);
+  return { ...wt, baselineStatus: status.stdout, baselineTree };
 }
 
 // ---------------------------------------------------------------------------
@@ -760,20 +849,30 @@ export interface DirtyState {
 }
 
 export async function inspectCloneDirt(wt: WorkerWorktree): Promise<DirtyState> {
-  const status = await runGit(wt.path, ["status", "--porcelain"]);
+  // The AUTHORITATIVE signal: a full content hash of the current working
+  // tree, compared against the recorded baseline tree — never against
+  // assumed-empty, for the reason `captureWorktreeBaseline`'s docstring
+  // gives at length, and never via a `git status` LINE diff, for the two
+  // false-negative classes `snapshotWorkingTree`'s docstring reproduces.
+  // `wt.baselineTree` is `""` only for a record built before this field
+  // existed (a run.json from before this fix, degraded by
+  // `RunWorktreeRecordSchema`'s default) — never for one this module wrote,
+  // which always sets it at creation. An empty baseline can never equal a
+  // real tree hash, so such a record reads as permanently dirty; that is
+  // the honest answer for "the recorded baseline for this checkout does not
+  // describe anything", not a regression to guard against.
+  const currentTree = await snapshotWorkingTree(wt.path);
+  const contentChanged = currentTree !== wt.baselineTree;
+
+  // Informational only, for the "N uncommitted path(s)" message `down
+  // --prune` and `pifleet worktrees` print — NOT what the `dirty` decision
+  // is made from. `--untracked-files=all` (matching `captureWorktreeBaseline`)
+  // at least avoids the worst of the directory-collapse undercount for
+  // display purposes, though the in-place-edit-cancellation class can still
+  // under-report the COUNT here; that is an accepted, non-safety-critical
+  // limitation now that `dirty` itself no longer depends on this diff.
+  const status = await runGit(wt.path, ["status", "--porcelain", "--untracked-files=all"]);
   if (status.code !== 0) throw new WorktreeError(`git status in ${wt.path}`, status);
-  // Compared against the recorded BASELINE, not against empty. `up`'s own
-  // hazard neutralization (`security/repo-hazards.ts`) renames a tracked
-  // file the instant it runs, which is real, uncommitted change in
-  // `git status --porcelain` from that moment on — so without a baseline,
-  // every clone of a repository with a root `AGENTS.md`/`CLAUDE.md` reads as
-  // dirty from birth, and `down --prune` refuses every worker on an entirely
-  // ordinary repository without `--force`. `wt.baselineStatus` is empty for
-  // a checkout nothing has baselined (identical to the old always-empty
-  // assumption, so a caller that never calls `captureWorktreeBaseline` sees
-  // no change in behaviour); `captureWorktreeBaseline` sets it to whatever
-  // `up` actually produced. See that function's own docstring for why a
-  // status snapshot generalizes over trying to filter known artifact shapes.
   const currentLines = new Set(status.stdout.split("\n").filter((l) => l.trim() !== ""));
   const baselineLines = new Set(wt.baselineStatus.split("\n").filter((l) => l.trim() !== ""));
   const statusLines =
@@ -792,7 +891,7 @@ export async function inspectCloneDirt(wt: WorkerWorktree): Promise<DirtyState> 
   // outright is handled one line below by the same `POSITIVE_INFINITY`.
   const aheadCount = Number(ahead.stdout.trim());
   const commitsAhead = ahead.code === 0 && !Number.isNaN(aheadCount) ? aheadCount : Number.POSITIVE_INFINITY;
-  return { dirty: statusLines > 0 || commitsAhead > 0, statusLines, commitsAhead };
+  return { dirty: contentChanged || commitsAhead > 0, statusLines, commitsAhead };
 }
 
 /**

@@ -161,13 +161,45 @@ async function checkAgainstBase(input: MergeCheckInput, run: GitRunner): Promise
  * `conflicts_with` names WORKER ids because the operator's next action is a
  * conversation with whoever owns the other branch; a list of paths alone
  * sends them off to re-derive the owner by hand.
+ *
+ * "Sharing a repository" USED TO be every worktree-isolated worker, back
+ * when `env.repo` was the one parent path every envelope carried and a
+ * linked worktree shared the parent's own object store. Under clone-based
+ * isolation (SRD §9.2 erratum) each worker's `repo` (per the
+ * `report/collect.ts` fix that prefers `host_workdir`) is its OWN
+ * independent clone, sharing no object store with any sibling by
+ * construction — so `a.input.repo !== b.input.repo` is now the ORDINARY
+ * case for two worktree-isolated workers, not a degraded one, and this
+ * function cannot run `git merge-tree` for them at all without first
+ * fetching one clone's objects into the other. That capability does not
+ * exist yet (filed as a follow-up — each worker already has a
+ * `worker-<id>` remote registered in the PARENT, which is the natural place
+ * to fetch siblings' branches into for this check, but nothing wires it
+ * up). What changed here, deliberately: the skip used to be SILENT — `paths`
+ * empty, `detail` empty — which reads as an AFFIRMATIVE "no conflicts with
+ * any sibling", a claim never actually computed. That is the exact lie
+ * `checkAgainstBase`'s own docstring forbids for `clean`, one field over,
+ * and on the isolation mode this whole feature exists to ship. Recorded
+ * explicitly instead, so `report`'s consumer can tell "checked, clean" from
+ * "not checked" for the one field the wire contract otherwise cannot
+ * distinguish.
  */
 async function checkPairwise(checks: PrecheckState[], run: GitRunner): Promise<void> {
   for (let i = 0; i < checks.length; i++) {
     for (let j = i + 1; j < checks.length; j++) {
       const a = checks[i]!;
       const b = checks[j]!;
-      if (a.input.repo !== b.input.repo) continue;
+      if (a.input.repo !== b.input.repo) {
+        a.details.push(
+          `pairwise check with sibling ${b.input.worker} not performed: different repositories ` +
+            `(${a.input.repo} vs ${b.input.repo}) — cannot merge-tree across independent clones`,
+        );
+        b.details.push(
+          `pairwise check with sibling ${a.input.worker} not performed: different repositories ` +
+            `(${b.input.repo} vs ${a.input.repo}) — cannot merge-tree across independent clones`,
+        );
+        continue;
+      }
       if (a.branchSha === null || b.branchSha === null) continue; // unresolvable: no invented conflicts
       const mt = await run(a.input.repo, [
         "merge-tree",

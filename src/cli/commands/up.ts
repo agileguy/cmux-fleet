@@ -480,6 +480,18 @@ export function register(program: Command): void {
             process.stdout.write(`  ${wt.workerId}: ${wt.path} on ${wt.branch}\n`);
           }
         }
+      } else {
+        // The no-config Phase 1 path (`up --workers eng-1` against a
+        // `PIFLEET_PI_COMMAND` double, no `fleet.yaml` reachable): there is
+        // no config to resolve a worker's isolation mode against, so no
+        // worktree was ever going to be created — `[]`, not the initial
+        // `null`, for the identical reason the branch above states. Without
+        // this, `readRunWorktrees` (which now treats a surviving `null` as
+        // "creation never finished" rather than "nothing to record") would
+        // misdiagnose every legitimate no-config run the same way it now
+        // correctly diagnoses a crashed `up`.
+        runDoc["worktrees"] = [];
+        await writeJsonAtomic(run.runJson, runDoc);
       }
 
       /**

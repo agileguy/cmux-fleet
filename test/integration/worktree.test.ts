@@ -665,4 +665,58 @@ describe("pruning (SRD §9.3)", () => {
     expect(second.pruned).toBe(true);
     expect(second.reason).toContain("already absent");
   });
+
+  /**
+   * `baseSha` that no longer resolves at all — not merely a rewritten but
+   * still-reachable history — is the case `commitsAhead: Infinity` exists
+   * for, distinct from "N commits ahead". `git rev-list --count` fails
+   * outright only when the LEFT side of the range does not resolve as a
+   * commit, which a merely-rewritten-but-still-present history does not
+   * reproduce (verified: `git reset --hard` past the recorded sha, then a
+   * fresh commit, still leaves `rev-list --count <old>..HEAD` succeeding —
+   * the old sha is still a real, resolvable ancestor). A record naming a sha
+   * this clone's object store never had at all is the honest way to pin it.
+   */
+  test("a baseSha that does not resolve at all is Infinity commits ahead, not zero", async () => {
+    const rig = await makeRig();
+    const [created] = await create(rig, ["eng-1"]);
+    const wt: WorkerWorktree = { ...created!, baseSha: "0".repeat(40) };
+
+    const dirt = await inspectCloneDirt(wt);
+    expect(dirt.commitsAhead).toBe(Number.POSITIVE_INFINITY);
+    expect(dirt.dirty).toBe(true);
+
+    const refused = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt, force: false });
+    expect(refused.pruned).toBe(false);
+    expect(refused.reason).toContain("no longer in this history");
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("pruneWorkerWorktree refuses a recursive delete outside .worktrees/", () => {
+  /**
+   * THE regression test for the containment check. `run.json`'s recorded
+   * `path` is host-side and not container-writable, but it IS
+   * operator-editable, and this is the only recursive delete in the module
+   * driven by a value read back from disk rather than computed from
+   * `workerWorktree(repo, id)`. A hand-edited or truncated record must not
+   * turn `--force` into an unbounded `rm -rf`.
+   */
+  test("a record naming a path outside <repo>/.worktrees/ is refused, not deleted", async () => {
+    const rig = await makeRig();
+    const [created] = await create(rig, ["eng-1"]);
+
+    // A directory OUTSIDE .worktrees/ that must survive this call untouched.
+    const outside = join(rig.base, "not-a-worktree");
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "do-not-delete.txt"), "real data\n");
+
+    const wt: WorkerWorktree = { ...created!, path: outside };
+    const outcome = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt, force: true });
+
+    expect(outcome.pruned).toBe(false);
+    expect(outcome.reason).toContain("outside");
+    expect(await pathExists(join(outside, "do-not-delete.txt"))).toBe(true);
+  });
 });

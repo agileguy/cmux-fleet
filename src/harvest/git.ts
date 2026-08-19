@@ -162,13 +162,23 @@ export function hardenedGitArgv(cwd: string, args: readonly string[]): string[] 
 
 /**
  * Spawn git in `cwd`. Argv array in, decoded streams out — no shell, ever.
+ *
+ * `extraEnv` layers ON TOP of `HERMETIC_GIT_ENV`, never replaces it — the
+ * hermeticity guarantee stays intact for every caller. The one legitimate
+ * use today is `GIT_INDEX_FILE`, which `run/worktree.ts`'s working-tree
+ * snapshot points at a throwaway file so `git add`/`write-tree` never
+ * touches the REAL index a `git status` in the same checkout would read.
  */
-export async function runGit(cwd: string, args: string[]): Promise<GitResult> {
+export async function runGit(
+  cwd: string,
+  args: string[],
+  extraEnv?: Readonly<Record<string, string>>,
+): Promise<GitResult> {
   const p = Bun.spawn(hardenedGitArgv(cwd, args), {
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-    env: { ...HERMETIC_GIT_ENV },
+    env: { ...HERMETIC_GIT_ENV, ...extraEnv },
   });
   const [stdout, stderr, code] = await Promise.all([
     new Response(p.stdout).text(),

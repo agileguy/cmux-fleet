@@ -20,7 +20,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -191,6 +191,71 @@ describe("fresh-clone execution (ISC-149)", () => {
       expect(runs[0]!.outcome).toBe("passed");
     } finally {
       delete process.env["POISON"];
+    }
+  });
+
+  /**
+   * THE regression test for `--no-hardlinks` on THIS scratch clone —
+   * distinct from, and just as load-bearing as, the one `run/worktree.ts`
+   * pins for the per-worker checkout. `repo` here IS a worker's own
+   * checkout (`envelope.host_workdir`), and acceptance commands are
+   * worker-authored by design (ISC-148..151); a hardlinked scratch clone
+   * would let one of those commands corrupt the worker's object store one
+   * hop removed from the corruption class this whole feature exists to
+   * prevent. Mutation-proved: dropping `--no-hardlinks` from
+   * `hardenedGitArgv`'s clone call leaves every other test in this file
+   * green — the clone still works, commands still run — which is exactly
+   * why this has to be an inode assertion rather than a behavioural one,
+   * the same argument `worktree.test.ts`'s own `--no-hardlinks` describe
+   * block makes for the per-worker clone.
+   */
+  test("the scratch clone shares no inode with the worker's own checkout", async () => {
+    const { context, runs } = await runAcceptance({
+      repo,
+      head_sha: honestSha,
+      scratch_dir: scratch,
+      commands: resolveFromEnvelope(["grep -q needle data.txt"], baseSha),
+      deadline: new Deadline(60_000),
+      per_command_timeout_ms: 20_000,
+    });
+    expect(runs[0]!.outcome).toBe("passed");
+
+    const objectFiles = async (root: string): Promise<Array<{ rel: string; nlink: number; ino: number }>> => {
+      const out: Array<{ rel: string; nlink: number; ino: number }> = [];
+      const walk = async (dir: string, rel: string): Promise<void> => {
+        let names: string[];
+        try {
+          names = await readdir(dir);
+        } catch {
+          return;
+        }
+        for (const n of names) {
+          if (n === "info") continue;
+          const abs = join(dir, n);
+          const st = await stat(abs);
+          if (st.isDirectory()) {
+            await walk(abs, rel === "" ? n : `${rel}/${n}`);
+          } else {
+            out.push({ rel: rel === "" ? n : `${rel}/${n}`, nlink: st.nlink, ino: st.ino });
+          }
+        }
+      };
+      await walk(join(root, ".git", "objects"), "");
+      return out;
+    };
+
+    const cloneObjects = await objectFiles(context.clone_path);
+    const workerObjects = await objectFiles(repo);
+    expect(cloneObjects.length).toBeGreaterThan(0);
+
+    for (const o of cloneObjects) {
+      expect(`${o.rel} nlink=${o.nlink}`).toBe(`${o.rel} nlink=1`);
+    }
+    const workerInodes = new Set(workerObjects.map((o) => o.ino));
+    for (const o of cloneObjects) {
+      expect(`${o.rel} shares-worker-inode=${workerInodes.has(o.ino)}`).toBe(
+        `${o.rel} shares-worker-inode=false`,
+      );
     }
   });
 });
