@@ -27,7 +27,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { ensureEgressNetwork } from "../../src/security/network.ts";
+import { ensureEgressNetwork, ensureUplinkNetwork } from "../../src/security/network.ts";
 import {
   ensureEgressRelay,
   inspectRelayContainer,
@@ -121,7 +121,7 @@ function registerRelayArtifacts(net: string): void {
  * the least-privileged container this project can produce, because the claim
  * under test is that an ordinary worker needs nothing special.
  */
-async function onInternalNetwork(
+async function onNetwork(
   net: string,
   script: string,
   env: Readonly<Record<string, string>> = {},
@@ -163,6 +163,77 @@ async function onInternalNetwork(
 }
 
 /**
+ * The least-privileged container this project can produce, on the INTERNAL
+ * bridge specifically — no `--add-host`, no extra networks, no capabilities.
+ * Most claims here are about what an ordinary worker can do, and an ordinary
+ * worker gets exactly this.
+ */
+const onInternalNetwork = onNetwork;
+
+/**
+ * Bash that derives THIS container's gateway and probes a TCP port on it.
+ *
+ * No `ip` and no `nc` in the worker image (measured), so both halves come from
+ * things that are always there: `/proc/net/route` and `curl`.
+ *
+ *  - Gateway: the default route's gateway when there is one. On an `--internal`
+ *    bridge there is NO default route, so it is derived from the single on-link
+ *    route the way Docker assigns it — network address + 1. `/proc/net/route`
+ *    is little-endian hex, hence the byte reversal.
+ *  - Reachability: `curl` exit 7 is "could not connect" (refused, or no route).
+ *    Anything else means the TCP connection was ESTABLISHED — measured live: a
+ *    port with sshd behind it returns exit 1 (`unsupported protocol`, because
+ *    an SSH banner is not HTTP), a closed port on a reachable host returns 7,
+ *    and an unroutable address returns 7. Exit 28 (timeout) is treated as NOT
+ *    connected, which is the conservative direction for a deny assertion.
+ */
+// Deliberately written with no `${...}` bash parameter expansions: this is a
+// JS template literal, and `${` would be interpolated by JavaScript before
+// bash ever sees it. Only `$VAR` and `$(...)` forms appear below.
+const GATEWAY_PROBE = `
+  hex2ip() {
+    h=$1
+    printf "%d.%d.%d.%d\\n" \\
+      0x$(echo "$h" | cut -c7-8) 0x$(echo "$h" | cut -c5-6) \\
+      0x$(echo "$h" | cut -c3-4) 0x$(echo "$h" | cut -c1-2)
+  }
+  GWHEX=$(awk '$2=="00000000" {print $3; exit}' /proc/net/route)
+  if [ -n "$GWHEX" ] && [ "$GWHEX" != "00000000" ]; then
+    GW=$(hex2ip "$GWHEX")
+  else
+    DEST=$(awk 'NR==2 {print $2; exit}' /proc/net/route)
+    NET=$(hex2ip "$DEST")
+    GW="$(echo "$NET" | cut -d. -f1-3).1"
+  fi
+  echo "gateway=$GW"
+  probe() {
+    curl -sS -m 3 "http://$1:$2/" >/dev/null 2>&1
+    code=$?
+    if [ "$code" -eq 7 ] || [ "$code" -eq 28 ]; then
+      echo "port$2=closed"
+    else
+      echo "port$2=open"
+    fi
+  }
+`;
+
+/** Ports worth asking about on a Docker host. 22 is the live case here. */
+const GATEWAY_CANDIDATE_PORTS = [22, 2375, 2376, 111, 53] as const;
+
+function gatewayScan(ports: readonly number[]): string {
+  return `${GATEWAY_PROBE}\n${ports.map((p) => `probe "$GW" ${p}`).join("\n")}`;
+}
+
+function parseKv(out: string, key: string): string | null {
+  const line = out.split("\n").find((l) => l.trim().startsWith(`${key}=`));
+  return line === undefined ? null : line.trim().slice(key.length + 1);
+}
+
+function openPorts(out: string): number[] {
+  return [...out.matchAll(/^port(\d+)=open$/gm)].map((m) => Number(m[1]));
+}
+
+/**
  * A full `RelayConfigView` (= `EgressConfigView`).
  *
  * `ensureEgressRelay` now runs each target through `decide()` before it builds
@@ -187,6 +258,127 @@ function curlProbe(key: string, url: string, header = ""): string {
      done
      echo "${key}=$body"`;
 }
+
+/**
+ * What the deny-all bridge ACTUALLY denies (M1; SRD §12.8; ISC-51, ISC-57).
+ *
+ * These replace sampling with enumeration, and they exist because the sampled
+ * version did not catch the thing that was actually open. The old evidence
+ * probed two destinations — `1.1.1.1` and `example.com` — concluded "no route
+ * to the public internet", and never measured the bridge GATEWAY, which was
+ * serving sshd the entire time.
+ */
+describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sampled", () => {
+  test(
+    "exactly one on-link route, no default route, and nothing off-subnet is reachable",
+    async () => {
+      const net = testNetName();
+      cleanupNetworks.push(net);
+      await ensureEgressNetwork(net);
+
+      const out = await onInternalNetwork(
+        net,
+        `${GATEWAY_PROBE}
+         echo "routecount=$(($(wc -l < /proc/net/route) - 1))"
+         echo "defaultroutes=$(awk '$2=="00000000"' /proc/net/route | wc -l)"
+         echo "onlink=$(awk 'NR>1 && $3=="00000000"' /proc/net/route | wc -l)"
+         curl -sS -m 4 https://1.1.1.1/          >/dev/null 2>&1; echo "pubip=$?"
+         curl -sS -m 4 https://example.com/      >/dev/null 2>&1; echo "pubname=$?"
+         curl -sS -m 4 http://192.168.86.49:8000/ >/dev/null 2>&1; echo "lan=$?"
+         curl -sS -m 4 http://169.254.169.254/   >/dev/null 2>&1; echo "metadata=$?"
+         curl -sS -m 4 http://192.168.5.2:22/    >/dev/null 2>&1; echo "limahost=$?"`,
+      );
+
+      // ENUMERATION, not sampling. One route, on-link, no default. This is the
+      // structural claim — "nothing off the bridge subnet is routable" — and it
+      // is strictly stronger than probing a handful of addresses, because it
+      // bounds the whole address space rather than five points in it.
+      expect(parseKv(out, "routecount")).toBe("1");
+      expect(parseKv(out, "defaultroutes")).toBe("0");
+      expect(parseKv(out, "onlink")).toBe("1");
+
+      // The sampled probes are kept as corroboration, now as POSITIVE
+      // assertions of a non-zero curl exit rather than `not.toContain("=0")`.
+      // Note what each one actually proves: an IP literal proves the ROUTE is
+      // absent; a NAME proves the resolver is too. The LAN address matters
+      // because it is where oMLX is proposed to move (ISC-259), and the
+      // metadata address because it is the classic container escape target.
+      for (const key of ["pubip", "pubname", "lan", "metadata", "limahost"]) {
+        expect(out).toMatch(new RegExp(`^${key}=[1-9][0-9]*$`, "m"));
+      }
+    },
+    180_000,
+  );
+
+  test(
+    "ACCEPTED RESIDUAL: the bridge gateway IS reachable from the deny-all bridge",
+    async () => {
+      /**
+       * This test asserts a HOLE, on purpose. Read it before changing it.
+       *
+       * `--internal` is not "no route off this container". Docker implements
+       * internal-network isolation as FORWARD-chain rules:
+       *
+       *   -A DOCKER-ISOLATION-STAGE-1 ! -d 172.18.0.0/16 -i br-<id> -j DROP
+       *
+       * The bridge gateway is on-link and INSIDE that subnet, so traffic to it
+       * is delivered locally through INPUT (policy ACCEPT) and never meets
+       * those rules. Every port the Docker host listens on is therefore
+       * reachable from the "deny-all" bridge, relay or no relay. Measured here
+       * on 2026-08-19: a container with no default route pulled a full
+       * `SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.13` banner off 172.18.0.1:22.
+       *
+       * That is recorded as an accepted, documented residual in SRD §12.8, and
+       * ISC-51/57 are worded to what Docker actually guarantees — no route off
+       * the bridge SUBNET — rather than to the stronger claim the branch used
+       * to make. Closing it needs host-side iptables outside Docker's model or
+       * a Docker host whose gateway serves nothing; neither is in this PR.
+       *
+       * IF THIS TEST FAILS, that is very likely GOOD NEWS: the gateway was
+       * hardened, the residual closed, and SRD §12.8 plus ISC-51/57 should be
+       * tightened to match. Do not "fix" it by deleting the assertion.
+       *
+       * It is deliberately NOT circular. The port under test is discovered from
+       * a NON-internal network first — where reaching the gateway is expected
+       * and uncontroversial — and only then asserted from the internal one. So
+       * the claim is "a port the Docker host genuinely serves is reachable from
+       * the deny-all bridge exactly as it is from an ordinary bridge", not "a
+       * port I already found open is open".
+       */
+      const net = testNetName();
+      const uplink = uplinkNetworkName(net);
+      cleanupNetworks.push(net);
+      cleanupNetworks.push(uplink);
+      await ensureEgressNetwork(net);
+      await ensureUplinkNetwork(uplink);
+
+      const fromUplink = await onNetwork(uplink, gatewayScan([...GATEWAY_CANDIDATE_PORTS]));
+      const served = openPorts(fromUplink);
+      if (served.length === 0) {
+        // Nothing to prove against. Loud, and NOT a silent pass: on a host
+        // whose gateway serves none of the candidate ports there is no
+        // residual to demonstrate, and inventing one would be theatre.
+        console.warn(
+          `[inconclusive] gateway residual: the Docker host serves none of ` +
+            `${GATEWAY_CANDIDATE_PORTS.join(", ")} on ${parseKv(fromUplink, "gateway")}, so the ` +
+            `§12.8 residual could not be demonstrated here. It is NOT thereby closed — any port ` +
+            `the host binds later is reachable from the bridge with no code change.`,
+        );
+        return;
+      }
+
+      const fromInternal = await onNetwork(net, gatewayScan(served));
+      const reachable = openPorts(fromInternal);
+
+      // The gateways are DIFFERENT addresses on the same machine — the uplink
+      // bridge and the internal bridge each have their own — which is what
+      // makes this a statement about the host rather than about one IP.
+      expect(parseKv(fromInternal, "gateway")).not.toBe(parseKv(fromUplink, "gateway"));
+      expect(reachable).toEqual(served);
+    },
+    180_000,
+  );
+});
 
 describe.skipIf(!DOCKER)("egress relay", () => {
   test(

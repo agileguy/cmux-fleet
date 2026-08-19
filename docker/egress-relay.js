@@ -142,7 +142,20 @@ function main() {
   }
 
   const servers = targets.map((t) => {
-    const server = net.createServer((client) => {
+    /**
+     * `allowHalfOpen: true` is load-bearing, not a tuning knob.
+     *
+     * With the default (`false`), Node ends the WRITABLE side of a socket as
+     * soon as it receives a FIN, so the socket closes outright and
+     * `client.on("close")` fires — tearing the upstream down mid-response.
+     * That means forwarding half-close is impossible to express at all: an
+     * `on("end", () => upstream.end())` handler is correct and still never
+     * gets the chance to matter, because the socket is already gone.
+     *
+     * Both legs opt in, and the idle timeouts above are what stop a socket
+     * that half-closes and never finishes from lingering forever.
+     */
+    const server = net.createServer({ allowHalfOpen: true }, (client) => {
       let upstream = null;
       let torn = false;
 
@@ -160,14 +173,28 @@ function main() {
       client.on("error", teardown);
       client.on("close", teardown);
 
-      const dial = () => {
-        upstream = net.connect({ host: t.host, port: t.port });
+      const dial = (firstChunk) => {
+        // `allowHalfOpen` on THIS leg too, for the mirror-image reason: when
+        // the upstream finishes its response and sends FIN, the default would
+        // close our socket outright and take with it anything the client still
+        // owed. Because Node no longer auto-destroys either socket, the `close`
+        // handlers do the teardown explicitly — that is the trade
+        // `allowHalfOpen` makes, not an oversight to be tidied away.
+        upstream = net.connect({ host: t.host, port: t.port, allowHalfOpen: true });
         upstream.setTimeout(IDLE_TIMEOUT_MS, teardown);
         upstream.on("error", teardown);
         upstream.on("close", teardown);
         upstream.on("connect", () => {
+          // The bytes that triggered the dial go out FIRST, then the live
+          // stream. Writing the chunk and only then piping is what keeps the
+          // request intact; `unshift`-ing it before any pipe exists races the
+          // rest of the request into the void.
+          upstream.write(firstChunk);
           client.pipe(upstream);
           upstream.pipe(client);
+          // `pipe` resumes the client itself; this is belt and braces for
+          // bytes that arrived while the dial was in flight.
+          client.resume();
           // Half-close is FORWARDED, not treated as teardown. A client FIN
           // used to destroy the upstream outright, discarding an in-flight
           // response — fine for curl, wrong for an HTTP/1.0
@@ -183,15 +210,17 @@ function main() {
        * for the FD measurement in the header: an idle client now costs one
        * socket in this process and ZERO against oMLX.
        *
-       * `pause()` until the pipes exist, `once` so a second chunk cannot dial
-       * a second upstream, and `unshift` so the byte that triggered the dial
-       * is put back for `pipe` rather than dropped on the floor.
+       * `once` so a second chunk cannot dial a second upstream, and `pause()`
+       * INSIDE the handler — never before it. Calling `pause()` first sets
+       * `flowing = false`, and attaching a `data` listener does not undo that,
+       * so the handler never fires and every connection deadlocks until the
+       * client gives up. A version of this file shipped exactly that bug and
+       * the integration suite caught it: the deny half still passed while
+       * `models=` came back empty.
        */
-      client.pause();
       client.once("data", (chunk) => {
-        client.unshift(chunk);
-        client.resume();
-        if (!torn) dial();
+        client.pause();
+        if (!torn) dial(chunk);
       });
     });
 
