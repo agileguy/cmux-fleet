@@ -156,8 +156,28 @@ export function hostGcloudConfigDir(): string {
   return join(homedir(), ".config", "gcloud");
 }
 
-/** The one file `file` mode is allowed to read out of `hostGcloudConfigDir()`. */
-export function hostAdcFile(): string {
+/**
+ * The host ADC file — the one artifact `file` mode is allowed to read out of
+ * `hostGcloudConfigDir()`.
+ *
+ * `GOOGLE_APPLICATION_CREDENTIALS` wins when set, because that is gcloud's own
+ * ADC lookup order: the env var overrides the well-known location, and an
+ * operator who exports it HAS moved their ADC. Reading the well-known path
+ * regardless would have named a file gcloud itself would not use, which is the
+ * same class of mistake as resolving the identity from the wrong store.
+ *
+ * Deliberately NOT applied to `hostGcloudConfigDir()`. That function answers
+ * "which directory must never be mounted", and letting an env var redirect a
+ * security boundary is how the boundary stops meaning anything. The two are
+ * separate questions and only this one follows the env var — with the
+ * consequence, harmless and worth stating, that `hostAdcFile()` need not sit
+ * under `hostGcloudConfigDir()` any more. `classifyHostGcloudExposure` copes:
+ * a file outside the store never reaches the inside-the-store branch where the
+ * exception is applied.
+ */
+export function hostAdcFile(env: Record<string, string | undefined> = process.env): string {
+  const explicit = env["GOOGLE_APPLICATION_CREDENTIALS"];
+  if (explicit !== undefined && explicit !== "") return explicit;
   return join(hostGcloudConfigDir(), "application_default_credentials.json");
 }
 
@@ -382,15 +402,74 @@ export function mintArgv(impersonateServiceAccount: string | null): string[] {
 }
 
 /**
- * Resolve the identity label for the injection record: the SA when
- * impersonating (the token really carries the SA's identity — acceptance 15),
- * otherwise the host gcloud account.
+ * The principal an ADC file mints as, read out of the file itself, or `null`.
+ *
+ * `authorized_user` ADC — what `gcloud auth application-default login`
+ * writes — carries an `account` field naming the user it was minted for.
+ * `service_account` ADC carries `client_email`. Either way the FILE knows who
+ * it is, offline, with no network round-trip and no token minting.
+ *
+ * Returns `null` rather than throwing on a missing, unreadable, unparseable or
+ * unrecognised file: the caller has a documented fallback, and a credential
+ * PLAN that cannot be printed must not be the thing that fails `up`.
+ */
+export async function readAdcPrincipal(path: string): Promise<string | null> {
+  try {
+    const raw = await Bun.file(path).text();
+    const d = JSON.parse(raw) as { type?: unknown; account?: unknown; client_email?: unknown };
+    // Service-account ADC: the email IS the principal.
+    if (typeof d.client_email === "string" && d.client_email !== "") return d.client_email;
+    // User ADC: written by `gcloud auth application-default login`. Older
+    // gcloud versions omitted `account`, hence the `null` return and the
+    // fallback at the call site rather than an assumption that it is there.
+    if (typeof d.account === "string" && d.account !== "") return d.account;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the identity label for the injection record.
+ *
+ * THREE sources, in strict order, and the ordering is the whole point:
+ *
+ *  1. The impersonated SA, when impersonating. The token really does carry the
+ *     SA's identity (acceptance 15), so nothing else needs asking.
+ *  2. The ADC FILE's own principal. This is the correction: the label must
+ *     name the identity the worker was actually GRANTED, and in both modes
+ *     that identity comes from ADC — `mintArgv` mints with
+ *     `gcloud auth application-default print-access-token`, and `file` mode
+ *     hands over `application_default_credentials.json` itself.
+ *  3. `gcloud config get-value account`, and ONLY as a fallback, with the
+ *     caveat that it is a DIFFERENT STORE. That is the `gcloud auth login`
+ *     account; ADC is written separately by
+ *     `gcloud auth application-default login`. The two routinely differ — an
+ *     operator who logged in as one account and ran the ADC login as another
+ *     has two perfectly valid, unequal answers on one machine — and this
+ *     function used to return only this one. So the printed grant line could
+ *     name an identity the worker was never given, in either mode, and ISC-49
+ *     and ISC-251 were asserting that wrong line was correct.
+ *
+ *     It is kept because it is right more often than it is wrong (the ADC
+ *     login usually follows the ordinary login, and on a machine where they
+ *     agree it is the same string) and because an older gcloud may not have
+ *     written `account` into the ADC file at all. It is a fallback, not the
+ *     answer.
+ *
+ * `adcFile` is injectable so tests can point at a fixture rather than at the
+ * operator's real credential.
  */
 export async function resolveIdentity(
   exec: Exec,
   impersonateServiceAccount: string | null,
+  opts: { adcFile?: string } = {},
 ): Promise<string> {
   if (impersonateServiceAccount !== null) return impersonateServiceAccount;
+
+  const fromAdc = await readAdcPrincipal(opts.adcFile ?? hostAdcFile());
+  if (fromAdc !== null) return fromAdc;
+
   const r = await exec(["gcloud", "config", "get-value", "account"], { timeoutMs: 15_000 });
   const account = r.stdout.trim();
   if (r.code !== 0 || account === "") {

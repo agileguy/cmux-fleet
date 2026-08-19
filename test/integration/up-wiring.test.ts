@@ -67,6 +67,18 @@ interface Rig {
   configPath: string;
   /** Where this rig's `gcloud` shim records every argv it was handed. */
   gcloudCalls: string;
+  /**
+   * This rig's fixture ADC file, pointed at by `GOOGLE_APPLICATION_CREDENTIALS`
+   * in `env`. Pinning it is what makes the identity assertions deterministic:
+   * `resolveIdentity` reads the ADC principal FIRST and only falls back to the
+   * `gcloud config get-value account` shim when the file cannot name one, so
+   * without a fixture the behaviour would depend on whether the developer's
+   * real ADC happens to carry an `account` field. (Measured: on the machine
+   * this was written on, `gcloud auth application-default login` wrote
+   * `"account": ""` — present and empty — so the fallback fires. On a machine
+   * where it is populated it would not, and an unpinned test would flip.)
+   */
+  adcFile: string;
   env: Record<string, string>;
   /** Filled in once `up` succeeds, so afterAll can `down` it. */
   runId: string;
@@ -136,6 +148,18 @@ async function writeDockerShim(binDir: string): Promise<void> {
 const SHIM_ACCOUNT = "wiring-shim-operator@example.test";
 
 /**
+ * The account the fixture ADC FILE names, when a test asks for one.
+ *
+ * Deliberately unequal to `SHIM_ACCOUNT`, because the two are read out of two
+ * different credential stores and the only way to prove the right one was
+ * consulted is to make them disagree. On a machine where the operator's
+ * `gcloud auth login` and `gcloud auth application-default login` happen to
+ * name the same address — the common case, and the case on the machine this
+ * was written on — a test using one value could not tell the stores apart.
+ */
+const ADC_ONLY_ACCOUNT = "wiring-adc-principal@example.test";
+
+/**
  * A `gcloud` that answers `config get-value account` with a fixed account.
  * `resolveIdentity` runs exactly that argv — a local config read, no token
  * minting — so this is the whole surface the shim has to cover. Same loud
@@ -157,8 +181,20 @@ async function writeGcloudShim(binDir: string, callLog: string): Promise<void> {
     shim,
     [
       "#!/bin/sh",
-      // `$*` excludes $0, so a line reads exactly `config get-value account`.
-      `printf '%s\\n' "$*" >> '${callLog}'`,
+      // The log path arrives through the ENVIRONMENT, not interpolated into the
+      // script body. It used to be single-quoted inline, which breaks outright
+      // on any path containing a `'` — and TMPDIR is not ours to constrain, so
+      // that was a fixture that would fail on someone else's machine for a
+      // reason having nothing to do with the code under test.
+      `PIFLEET_SHIM_LOG=${JSON.stringify(callLog)}`,
+      // A failed append must be LOUD. ISC-48's load-bearing claim is that the
+      // log is EMPTY for an impersonating run, so a shim that silently failed
+      // to write would manufacture that evidence — the one failure mode this
+      // test cannot tolerate, and the reason the write is checked at all.
+      `if ! printf '%s\\n' "$*" >> "$PIFLEET_SHIM_LOG"; then`,
+      `  echo "gcloud shim: cannot append to $PIFLEET_SHIM_LOG" >&2`,
+      "  exit 90",
+      "fi",
       'case "$1 $2 $3" in',
       '  "config get-value account")',
       `    echo "${SHIM_ACCOUNT}"`,
@@ -196,7 +232,15 @@ function credentialPlanLines(records: LedgerRecord[]): Map<string, string> {
   const out = new Map<string, string>();
   for (const r of records) {
     if (r.actor !== "cli-up" || r.event !== "credential_plan") continue;
-    out.set(r.worker ?? "(unattributed)", String(r.detail?.["plan"]));
+    // `String(undefined)` is the string `"undefined"`, which is truthy, has
+    // non-zero length, and contains none of the things the ISC-48/49 tests
+    // assert are absent — so a record that lost its `plan` field entirely
+    // would satisfy every `not.toContain` in this file vacuously while looking
+    // like a real line. Assert the type before coercing, so a missing field is
+    // a failure here rather than a silent pass three tests away.
+    const plan = r.detail?.["plan"];
+    expect(typeof plan).toBe("string");
+    out.set(r.worker ?? "(unattributed)", plan as string);
   }
   return out;
 }
@@ -248,6 +292,22 @@ interface FleetOptions {
   requireNativeToolCalls?: boolean;
   /** `llm.base_url`; only the ISC-53 tests set it, at their stub server. */
   llmBaseUrl?: string;
+  /**
+   * The `account` field written into this rig's fixture ADC file.
+   *
+   * Default `""` — present but empty, which is the shape `gcloud auth
+   * application-default login` actually produced on the machine this was
+   * written on, and which forces `resolveIdentity` down to its documented
+   * `gcloud config get-value account` fallback (the shim, i.e. SHIM_ACCOUNT).
+   * Every pre-existing test wants that, because it is what they were written
+   * against.
+   *
+   * Set it to a real address to exercise the OTHER branch: the ADC file naming
+   * its own principal, which must then WIN over the config account. Those are
+   * two different credential stores and the grant line has to name the one the
+   * token is minted from.
+   */
+  adcAccount?: string;
 }
 
 /** Minimal valid fleet.yaml naming the shimmed network and the seeded repo. */
@@ -355,6 +415,30 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
   // for this one's.
   const gcloudCalls = join(base, "gcloud-calls.log");
   await writeGcloudShim(bin, gcloudCalls);
+  /**
+   * The fixture ADC file. Written for EVERY rig, not only the cloud ones, for
+   * the same reason both shims are installed unconditionally: the developer's
+   * real `~/.config/gcloud/application_default_credentials.json` must never be
+   * what a test happens to read. `GOOGLE_APPLICATION_CREDENTIALS` is gcloud's
+   * own override for the ADC location and `hostAdcFile()` honours it, so this
+   * redirects production's lookup rather than reaching past it through a
+   * test-only seam.
+   *
+   * It is NOT a credential and grants nothing — the refresh_token is a literal
+   * marker string. It exists so `resolveIdentity` has a deterministic file to
+   * read.
+   */
+  const adcFile = join(base, "adc.json");
+  await writeFile(
+    adcFile,
+    JSON.stringify({
+      type: "authorized_user",
+      account: opts.adcAccount ?? "",
+      client_id: "fixture.apps.googleusercontent.com",
+      client_secret: "fixture-not-a-real-secret",
+      refresh_token: "1//fixture-not-a-real-token",
+    }),
+  );
   // The seeded hazard. Root-level AGENTS.md is the instruction-file class the
   // scanner quarantines by rename; one is enough to make the wiring visible.
   await writeFile(join(repo, "AGENTS.md"), "# MANDATORY fixture instructions\n");
@@ -381,12 +465,15 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
     repo,
     configPath,
     gcloudCalls,
+    adcFile,
     runId: "",
     env: {
       PIFLEET_RUNS_DIR: root,
       PIFLEET_PI_COMMAND: `${process.execPath} ${FAKE_PI} --scenario ${join(SCENARIOS, "happy.json")}`,
       // The shim shadows the real docker for the CLI and everything it spawns.
       PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      // Pins whose ADC `resolveIdentity` reads. See `Rig.adcFile`.
+      GOOGLE_APPLICATION_CREDENTIALS: adcFile,
     },
   };
   rigs.push(rig);
@@ -1337,6 +1424,70 @@ describe("the grant line names the real ADC identity (ISC-251)", () => {
     },
     90_000,
   );
+
+  /**
+   * The grant line must name the identity from the store the TOKEN IS MINTED
+   * FROM — and that is ADC, not `gcloud config get-value account`.
+   *
+   * These are two different stores. `gcloud auth login` writes the config
+   * account; `gcloud auth application-default login` writes ADC. They
+   * routinely differ: an operator who logged in as one account and ran the ADC
+   * login as another has two perfectly valid, unequal answers on one machine.
+   * `mintArgv` mints with `gcloud auth application-default print-access-token`
+   * and `file` mode hands over `application_default_credentials.json`, so in
+   * BOTH modes the granted identity is ADC's — yet `resolveIdentity` read only
+   * the config account, and the test above pinned `SHIM_ACCOUNT` (the config
+   * account) as correct. The suite was therefore asserting that a possibly
+   * wrong identity was the right one.
+   *
+   * The fixture makes the two stores DISAGREE on purpose, which is the only
+   * arrangement that can tell them apart: the ADC file names
+   * `ADC_ONLY_ACCOUNT`, the shim answers `SHIM_ACCOUNT`. The line must carry
+   * the first and not the second. On a fixture where the two matched, this
+   * test would pass under either implementation and prove nothing — which is
+   * exactly why the defect survived: on the machine this was written on, the
+   * operator's two stores happen to name the same address.
+   *
+   * Mutation check: reverting `resolveIdentity` to read the config account
+   * first turns this red on `not.toContain(SHIM_ACCOUNT)` while leaving every
+   * other test in this file green — which is why this is a separate case
+   * rather than an extra assertion on the test above.
+   */
+  test(
+    "the ADC file's own principal wins over the gcloud config account",
+    async () => {
+      const rig = await makeRig({ cloudAccess: true, adcAccount: ADC_ONLY_ACCOUNT });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      const { records, errors } = await mergeLedger(runPaths(rig.runId, rig.root));
+      expect(errors).toEqual([]);
+      const line = credentialPlanLines(records).get("eng-1");
+      expect(line).toBeDefined();
+      expect(line).toContain(ADC_ONLY_ACCOUNT);
+      // THE assertion: the other store's answer must not appear. Both are
+      // valid-looking addresses, so only their difference distinguishes a
+      // correct resolution from a plausible one.
+      expect(line).not.toContain(SHIM_ACCOUNT);
+      expect(line).not.toContain("(adc user)");
+
+      // …and the config account was never even asked for, because ADC answered
+      // offline. Stronger than "the line does not mention it", and the same
+      // shape of evidence ISC-48 relies on.
+      expect(await readGcloudCalls(rig)).toEqual([]);
+    },
+    90_000,
+  );
 });
 
 /**
@@ -1381,6 +1532,38 @@ describe("impersonation replaces the launching user's identity outright (ISC-48)
         impersonateServiceAccount: SERVICE_ACCOUNT,
         extraWorkers: [{ id: "eng-2", role: "engineer" }],
       });
+
+      /**
+       * Before anything else: prove THIS rig's log records what it is given.
+       *
+       * The whole test rests on an empty log, and that zero has to be a
+       * MEASUREMENT rather than an absence of measuring. The control at the
+       * bottom is a DIFFERENT rig — its own `mkdtemp` base, its own
+       * `gcloudCalls` path, its own shim install — so any failure confined to
+       * this one (shim not written, `bin` missing from PATH, PATH ordering
+       * putting the real gcloud first, the log's directory gone) yields an
+       * empty log here and a green test. That is exactly the hazard the
+       * control is supposed to have closed, and a control in another rig
+       * cannot speak for this one.
+       *
+       * So: one throwaway call through THIS rig's PATH, assert it landed in
+       * THIS rig's log, then truncate and let `up` write into a log now known
+       * to work. The verb is deliberately one the shim does not recognise,
+       * which also exercises the unexpected-argv branch that records
+       * unconditionally — making an empty log mean "no gcloud call of ANY
+       * kind", not merely "no account read".
+       */
+      const probe = Bun.spawnSync(["gcloud", "pifleet-shim-liveness-probe"], {
+        env: { ...process.env, ...impersonating.env },
+      });
+      // The shim's unexpected-argv branch exits 1. 90 would be its "cannot
+      // append" path and 127 would mean it was never on PATH at all — both are
+      // the silent-empty-log failure this probe exists to convert into a red.
+      expect(probe.exitCode).toBe(1);
+      expect(await readGcloudCalls(impersonating)).toEqual(["pifleet-shim-liveness-probe"]);
+      await writeFile(impersonating.gcloudCalls, "");
+      expect(await readGcloudCalls(impersonating)).toEqual([]);
+
       const up = await runCli(impersonating, [
         "up",
         "--config",
@@ -1411,6 +1594,8 @@ describe("impersonation replaces the launching user's identity outright (ISC-48)
 
       // THE assertion. Not "the account is absent from the line" — that
       // survives the mutation — but "nothing ever asked the host for it".
+      // Meaningful because the liveness probe above already proved THIS rig's
+      // log records what it is given.
       expect(await readGcloudCalls(impersonating)).toEqual([]);
 
       // Control: the same shim, the same fixture, impersonation removed. This
