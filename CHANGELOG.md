@@ -88,6 +88,43 @@ All notable changes to this project are documented here.
   which is what §5.9 makes the probe mandatory to prevent.
 
 ### Fixed
+- **The relay suite ran in no CI job at all, and the live-oMLX probes skipped invisibly**
+  (ISC-257, ISC-262). `test/integration/relay.test.ts` is `PIFLEET_DOCKER`-gated exactly like
+  `image`/`verbgate`/`egress`/`adc`, but the `container` job named those four literally and
+  the relay file was not among them, while the fast `test` job never sets `PIFLEET_DOCKER` —
+  so ISC-50/51/57's evidence executed on one machine and nowhere else. It is now in the job's
+  `bun test` list and in the guard's accounting, and its probes genuinely execute: measured
+  against a real daemon, **5 pass, 1 skip, 0 fail**, with Docker networks and containers
+  verified identical before and after. Separately, `test/integration/model-probe.test.ts`
+  gates on `PIFLEET_OMLX=1` and `grep -rn PIFLEET_OMLX .github/` returned nothing, so its
+  four probes skipped everywhere and nothing counted them; they are now graded by their own
+  step in the fast job. **Be precise about that second one: it does not make those probes
+  run.** They need a real Apple-silicon inference server no runner has, so they still skip —
+  every one. What changed is that an invisible skip became a name-pinned, enumerated one that
+  goes red if a probe is renamed, deleted, added, or starts skipping for a different reason.
+  That is a real improvement and it is not coverage, which is why ISC-262 is graded partial
+  and not closed. `TOTAL_EXPECTED` 66 → 72, recomputed once for both changes rather than
+  twice against a moving target, and derived by a method now written into the workflow: run
+  the same file list with the gate variable UNSET, where every gate closes and the collection
+  total is the summary line (`0 pass, 72 skip`, 49ms, no daemon). No secret is wired in for
+  either — `OMLX_API_KEY` would flip nothing, because both suites also require a reachable
+  server, so shipping a live credential to a runner would be pure exposure for zero coverage.
+- **The probe guard could not itself be tested, and is now.** The grading logic lived inline
+  in `ci.yml`, where the only way to exercise it was to push and hope; a second job now needs
+  the same grading with a different file list, and two copies of subtle shell is how a parsing
+  fix lands in one and not the other. It is now `.github/scripts/probe-guard.sh`, and
+  `test/integration/probe-guard.test.ts` drives it against fixtures and asserts it goes RED
+  for each failure mode separately — a file dropped from the list, a pin whose test was
+  renamed, a pinned test that ran instead of skipping, an unpinned test that skipped while
+  the count still matched, a real failure reported as a failure rather than as total drift, a
+  `test.todo()`, an empty file list, and a missing required variable.
+- **The total-count check gave shortfall advice for a surplus.** Mutating `TOTAL_EXPECTED`
+  against a real relay run printed "a test dropped out of collection entirely" when the total
+  had gone UP, sending the reader hunting a file that was never deleted. A surplus is a live
+  scenario rather than a hypothetical, because `bun test` arguments are SUBSTRING filters over
+  discovered paths — `bun test pinned.test.ts` also collects `unpinned.test.ts`, measured — so
+  a future file whose name contains a listed one is swept in silently. The check now branches,
+  with a cause and a fix named for each direction.
 - **Every `gcloud` call in a worker crashed on a read-only filesystem, with a perfectly
   good credential in hand.** The image bakes `CLOUDSDK_CONFIG=/home/pi/.config/gcloud` as
   an ordinary directory on the root filesystem, and SRD §5.6 launches with `--read-only`
