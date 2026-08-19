@@ -76,7 +76,15 @@ async function spawnDecoy(name: string, args: string[]): Promise<{ pid: number }
   const base = await mkdtemp(join(tmpdir(), "pifleet-trainguard-"));
   bases.push(base);
   const script = join(base, name);
-  await writeFile(script, "#!/bin/sh\nsleep 300\n");
+  /**
+   * 30s, not 300. `afterAll` reaps these, but a SIGKILLed test RUN never gets
+   * to `afterAll` — and an orphan whose command line is literally `mlx_lm.lora`
+   * makes the ISC-56 guard refuse every `up` on the developer's own machine
+   * until it exits. Five minutes of that is a self-inflicted outage on the one
+   * host this project is developed on; 30 seconds still outlives any test here
+   * by an order of magnitude.
+   */
+  await writeFile(script, "#!/bin/sh\nsleep 30\n");
   await chmod(script, 0o755);
   const proc = Bun.spawn([script, ...args], { stdout: "ignore", stderr: "ignore" });
   running.push({ kill: () => proc.kill("SIGKILL"), exited: proc.exited });
@@ -136,6 +144,45 @@ describe("the guard reads the real host process list (ISC-56)", () => {
 
       const hits = detectActiveMlxTraining(listed);
       expect(hits.find((h) => h.pid === server.pid)).toBeUndefined();
+    },
+    30_000,
+  );
+
+  /**
+   * The oMLX negative, made non-trivial.
+   *
+   * The test above spawns `mlx_lm.server --port 8000 --model gemma-…`, whose
+   * command line contains no training entry point at all — so it passed under
+   * the ORIGINAL substring matcher too, and could only ever have failed if
+   * someone added a bare `/mlx/` pattern. It pinned the pattern list; it was
+   * not evidence the matcher discriminates.
+   *
+   * This is the case that discriminates. Serving a fine-tune means pointing the
+   * inference server at the directory the training run wrote, and that
+   * directory is conventionally named for the entry point that produced it — so
+   * the command line of a perfectly healthy oMLX contains the exact string
+   * `mlx_lm.lora`. Verified MATCHING before the fix, against a real process in a
+   * real process table: the guard refused every `up` on a host doing exactly
+   * what the fleet requires.
+   */
+  test(
+    "an inference server SERVING a LoRA adapter is not mistaken for training it",
+    async () => {
+      const server = await spawnDecoy("mlx_lm.server", [
+        "--port",
+        "8000",
+        "--model",
+        "gemma-4-26b-a4b-it-4bit",
+        "--adapter-path",
+        "/Users/dan/out/mlx_lm.lora",
+      ]);
+      const listed = await listHostProcesses();
+      // Precondition, and the whole point: the training entry point's name IS
+      // on this line. A pass below is the matcher rejecting a string it can
+      // see, never the string being absent.
+      expect(new RegExp(`^\\s*${server.pid}\\s.*mlx_lm\\.lora`, "m").test(listed)).toBe(true);
+
+      expect(detectActiveMlxTraining(listed).find((h) => h.pid === server.pid)).toBeUndefined();
     },
     30_000,
   );

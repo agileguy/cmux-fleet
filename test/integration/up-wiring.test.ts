@@ -937,7 +937,14 @@ interface Decoy {
 
 async function startDecoyTrainingRun(dir: string): Promise<Decoy> {
   const script = join(dir, "mlx_lm.lora");
-  await writeFile(script, "#!/bin/sh\nsleep 300\n");
+  /**
+   * 30s, not 300. `stop()` reaps this in a `finally`, but a SIGKILLed test RUN
+   * never reaches it — and an orphan named `mlx_lm.lora` makes the ISC-56 guard
+   * refuse every `up` on the developer's own machine until it exits. Five
+   * minutes of that is a self-inflicted outage on the host this project is
+   * developed on; 30s still outlives every test in this file.
+   */
+  await writeFile(script, "#!/bin/sh\nsleep 30\n");
   await chmod(script, 0o755);
   const proc = Bun.spawn([script, "--model", "Qwen3-8B", "--train", "--iters", "600"], {
     stdout: "ignore",
