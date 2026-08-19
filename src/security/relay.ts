@@ -6,7 +6,15 @@
  * bridge: no default route, no NAT, nothing OFF THE BRIDGE SUBNET reachable.
  * That is deny-all in hardware, and it denies the fleet's own model server
  * too. This module stands up the single container that re-opens exactly one
- * destination — oMLX on the Docker host — and nothing else.
+ * destination — the fleet's oMLX endpoint — and nothing else.
+ *
+ * That endpoint is the Docker host BY DEFAULT and may be a trusted LAN peer
+ * (SRD §5.9, ISC-259). The two legs are separately named and separately
+ * decided: workers always dial `RELAY_LISTEN_ALIAS` on the internal bridge,
+ * while the relay dials `llm.relay_upstream`. Anything but the Docker-host
+ * default requires an `egress.allow` entry the operator wrote — see
+ * `relayGatePolicy`, which is the check that stops "one destination" from
+ * meaning "any destination someone typed into a YAML string".
  *
  * Read "nothing off the bridge subnet" literally: it is narrower than the
  * "no route to anything" this header used to claim, and the difference is a
@@ -115,14 +123,16 @@
 
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { join } from "node:path";
 import { realExec, repoRoot, type Exec } from "../container/run.ts";
 import {
   decide,
+  makeRule,
   normalizeHost,
-  policyFromConfig,
   type EgressConfigView,
   type EgressPolicy,
+  type EgressRule,
 } from "./egress.ts";
 import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
 
@@ -134,22 +144,54 @@ import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
  * `host.docker.internal:8000` resolve to the relay instead of failing to
  * resolve at all, so `models.json` and `llm.base_url` need no rewriting to
  * work inside a containment they know nothing about.
+ *
+ * ## The name is now an OVERLOAD, and that was a deliberate choice (ISC-259)
+ *
+ * Once the dial side can point at a LAN peer, this alias no longer means "the
+ * Docker host" to a worker — it means "wherever this fleet's oMLX lives". The
+ * honest rename is `omlx.pifleet.internal`, and it was considered and REJECTED
+ * for this change for two reasons, both checkable rather than aesthetic:
+ *
+ *  1. **The name has no prior meaning on this bridge to shadow.** Measured (see
+ *     the header): a container on an `--internal` network cannot resolve
+ *     `host.docker.internal` AT ALL — Docker's automatic injection does not
+ *     happen there. Inside the egress bridge this alias resolves ONLY because
+ *     `relayConnectArgv` attaches it, so nothing is being displaced. Anything
+ *     that genuinely wants the Docker host from inside the bridge must use the
+ *     gateway address (SRD §12.8 measures it as reachable), never this name —
+ *     which was already true before this change.
+ *  2. **NO LONGER TRUE — kept because it dated the decision, not to justify
+ *     it now.** When this deferral was taken,
+ *     `model-probe.ts:hostFacingBaseUrl` rewrote exactly this literal to
+ *     `localhost` so `up`/`doctor` could probe from the host, and a second
+ *     accepted spelling that that function did not know about would have
+ *     skipped the rewrite and probed a name the host cannot resolve. ISC-260
+ *     then DELETED that helper: the `up` probe runs inside the egress network
+ *     and dials `llm.base_url` verbatim, exactly as a worker does, so no
+ *     rewrite keyed to this literal survives. `doctor` keeps a host vantage on
+ *     purpose and labels it (`"vantage": "host"`), which is a reporting choice
+ *     rather than a dependency on this name.
+ *
+ * So the overload is ACCEPTED and stated in SRD §5.9 rather than papered over,
+ * on reason 1 alone. Reason 2's removal makes the rename CHEAPER than when it
+ * was deferred, not more urgent — the remaining cost is the rename itself
+ * across `models.json`, `llm.base_url`, `doctor` and `docker/entrypoint.sh`,
+ * which belongs in its own change (ISC-264).
  */
 export const RELAY_LISTEN_ALIAS = "host.docker.internal";
 
 /**
- * The name the relay itself DIALS — the uplink-side target.
+ * The DEFAULT dial target's host — used when `llm.relay_upstream` is unset.
  *
- * Deliberately a SEPARATE constant that happens to hold the same string.
- * Today both legs are `host.docker.internal`, and that coincidence is the
- * trick the listen alias above describes. But they are two different
- * resolutions of one literal — the listen side is a Docker network alias on
- * the internal bridge, the dial side is an `--add-host` mapping to the Docker
- * host on the uplink — and conflating them into one constant is what made
- * pointing the dial side elsewhere a redesign instead of a rename (ISC-259).
- * Splitting them now costs nothing and is a prerequisite for that work.
+ * Was `RELAY_DIAL_HOST`, renamed because it stopped being "the host the relay
+ * dials" and became "the host the relay dials WHEN NOBODY SAID OTHERWISE". The
+ * old name would now read as a guarantee the code no longer makes.
+ *
+ * It is a compile-time constant and NOT a config field, which is the property
+ * `relayGatePolicy` leans on: the one destination reachable without an
+ * operator-written allow rule cannot be steered by editing YAML.
  */
-export const RELAY_DIAL_HOST = "host.docker.internal";
+export const RELAY_DEFAULT_DIAL_HOST = "host.docker.internal";
 
 /**
  * Plain upstream Node, not the worker image — PINNED BY DIGEST.
@@ -205,15 +247,164 @@ export interface RelayTarget {
 
 /**
  * The slice of `FleetConfig` this module reads — structural, so nothing here
- * imports the config schema. Identical to `EgressConfigView`, which is what
+ * imports the config schema. A superset of `EgressConfigView`, which is what
  * lets `up` pass one config object to both subsystems.
  *
  * It carries the `egress` half — not just `llm` — because `ensureEgressRelay`
- * now runs every target it is about to forward through `decide()` (ISC-253).
- * A view narrow enough to build a target but too narrow to build the policy
- * that judges it is precisely how the two drifted apart.
+ * runs every target it is about to forward through `decide()` (ISC-253). A view
+ * narrow enough to build a target but too narrow to build the policy that
+ * judges it is precisely how the two drifted apart.
+ *
+ * `relay_upstream` is optional at the TYPE level so a caller holding a plain
+ * `EgressConfigView` still type-checks; absent and `null` mean the same thing
+ * (`relayUpstreamFor` derives the Docker-host default), which is what keeps
+ * every pre-ISC-259 `fleet.yaml` behaving exactly as it did.
  */
-export type RelayConfigView = EgressConfigView;
+export type RelayConfigView = EgressConfigView & {
+  llm: { base_url: string; relay_upstream?: string | null };
+};
+
+/** A fully-resolved dial target: an explicit host and an explicit port. */
+export interface RelayUpstream {
+  readonly host: string;
+  readonly port: number;
+}
+
+/**
+ * Why `raw` cannot be a `relay_upstream` value, or null when it can.
+ *
+ * Shared with the config schema (`src/config/schema.ts` imports it) so a bad
+ * value is a loud, field-level `config validate` error rather than a throw from
+ * deep inside `up` after containers exist — the same contract `ruleHostError`
+ * keeps for `egress.allow`, for the same reason.
+ *
+ * ## Why the host must be an IP literal or the Docker-host alias
+ *
+ * A LAN *hostname* is refused, and this is the measured reason rather than a
+ * stylistic one. The relay dials from the uplink bridge, whose resolver is
+ * Docker's embedded DNS; that forwards to the host resolver, and on this
+ * machine the host resolver **does not answer mDNS/`.local` names** — resolving
+ * `macbook.local` needed `dns-sd`, not `getaddrinfo`. A hostname upstream would
+ * therefore produce a relay that starts cleanly, reports ready, and then fails
+ * every single connection with a resolution error no operator-facing surface
+ * shows. Refusing at config-validate time converts that into a sentence.
+ *
+ * It also keeps `--add-host` honest: with an IP literal there is nothing to
+ * resolve and no flag to get wrong (see `relayRunArgv`). An operator who really
+ * has a resolvable LAN name should still write its ADDRESS here — the name buys
+ * nothing at this layer and costs the failure mode above.
+ *
+ * An explicit port is REQUIRED, with no default. A bare host would have to
+ * inherit a port from somewhere, and every candidate source is the `base_url`
+ * this field exists to stop deriving things from.
+ */
+export function relayUpstreamError(raw: string): string | null {
+  const parsed = splitHostPort(raw);
+  if (parsed === null) {
+    return (
+      `${JSON.stringify(raw)} is not a host:port — write an explicit port, e.g. ` +
+      `${JSON.stringify("192.168.86.49:8000")} or ${JSON.stringify("[fd00::1]:8000")}`
+    );
+  }
+  const host = normalizeHost(parsed.host);
+  if (host === null) return `${JSON.stringify(parsed.host)} is not a valid hostname or IP literal`;
+  if (!validPort(parsed.port)) return `invalid port ${JSON.stringify(String(parsed.port))} — expected 1..65535`;
+  if (host !== RELAY_DEFAULT_DIAL_HOST && isIP(host) === 0) {
+    return (
+      `${JSON.stringify(host)} is a hostname; relay_upstream must be an IP literal or ` +
+      `${JSON.stringify(RELAY_DEFAULT_DIAL_HOST)}. The relay resolves through Docker's embedded ` +
+      `DNS, which forwards to the host resolver — measured NOT to answer mDNS/.local names on ` +
+      `this machine — so a name here yields a relay that starts and then fails every connection. ` +
+      `Use the address.`
+    );
+  }
+  return null;
+}
+
+/**
+ * Split `host:port` / `[v6]:port`, or null when the shape is wrong.
+ *
+ * Hand-written rather than routed through `new URL`, because every scheme that
+ * makes `URL` accept a bare authority also makes it accept things this field
+ * must refuse — a path, a query, credentials — and silently drop them. Here the
+ * whole string must be a host and a port and nothing else.
+ */
+function splitHostPort(raw: string): { host: string; port: number } | null {
+  const s = raw.trim();
+  if (s === "") return null;
+  let host: string;
+  let portText: string;
+  if (s.startsWith("[")) {
+    const close = s.indexOf("]");
+    if (close === -1 || s[close + 1] !== ":") return null;
+    host = s.slice(1, close);
+    portText = s.slice(close + 2);
+  } else {
+    const colon = s.indexOf(":");
+    // Exactly one colon: a bare IPv6 literal has several and MUST be bracketed,
+    // otherwise `fd00::1` reads as host `fd00` on a port that is not a number.
+    if (colon === -1 || s.indexOf(":", colon + 1) !== -1) return null;
+    host = s.slice(0, colon);
+    portText = s.slice(colon + 1);
+  }
+  if (host === "" || portText === "") return null;
+  // `Number` accepts `" 8000"`, `"0x1f"` and `"8e3"`; a port is decimal digits.
+  if (!/^\d+$/.test(portText)) return null;
+  return { host, port: Number(portText) };
+}
+
+/**
+ * Parse a validated `relay_upstream`. Throws on anything `relayUpstreamError`
+ * refuses — the schema should have caught it first, so reaching this throw
+ * means config validation was bypassed, not that the operator mistyped.
+ */
+export function parseRelayUpstream(raw: string): RelayUpstream {
+  const err = relayUpstreamError(raw);
+  if (err !== null) throw new Error(`relay: llm.relay_upstream ${err}`);
+  const parsed = splitHostPort(raw)!;
+  // Through the SAME normalizer the policy matcher uses, so a trailing root dot
+  // or an upper-case spelling cannot read as one host here and another there.
+  return { host: normalizeHost(parsed.host)!, port: parsed.port };
+}
+
+/**
+ * The dial target for this config: explicit `relay_upstream`, or the
+ * Docker-host default at the listen port.
+ *
+ * The default is what makes this change invisible to every existing
+ * `fleet.yaml`: absent `relay_upstream`, the relay dials
+ * `host.docker.internal:<port from base_url>` — byte-for-byte the behaviour
+ * `omlxRelayTarget` had before ISC-259.
+ */
+export function relayUpstreamFor(cfg: RelayConfigView, listenPort: number): RelayUpstream {
+  const raw = cfg.llm.relay_upstream;
+  if (raw === null || raw === undefined || raw === "") {
+    return { host: RELAY_DEFAULT_DIAL_HOST, port: listenPort };
+  }
+  return parseRelayUpstream(raw);
+}
+
+/**
+ * NOTE ON THE HOST-SIDE PROBE VANTAGE (ISC-259 × ISC-260) — nothing to do here.
+ *
+ * Moving the dial side off-host falsifies any rule that rewrites
+ * `llm.base_url` into "something the HOST can reach": `base_url` still names
+ * the relay's listen alias (it must — it is what WORKERS dial), so rewriting it
+ * to `localhost` probes the Docker host's oMLX while the relay forwards to a
+ * LAN peer. Measured here 2026-08-19, and the divergence is not cosmetic:
+ * `127.0.0.1:8000` serves 3 models and NONE of `fleet.example.yaml`'s three
+ * allowlisted ones, while `192.168.86.49:8000` serves 32 including all three.
+ * A localhost-rewriting probe would therefore fail `up` with an allowlist error
+ * describing a server the fleet was never going to use.
+ *
+ * This module deliberately exports NO host-facing URL helper to fix that. The
+ * concurrent ISC-260 change deletes the rewrite outright and probes from INSIDE
+ * the egress network, dialling `llm.base_url` verbatim exactly as a worker
+ * does — so the probe follows whatever this relay forwards, with no second
+ * derivation of the endpoint to keep in step. That is the correct fix and it
+ * belongs there; a helper here would be a duplicate of a decision this file
+ * does not own. Recorded so the absence reads as a decision rather than a gap.
+ */
 
 export interface RelayContainerStatus {
   name: string;
@@ -286,14 +477,32 @@ export function relayContainerName(egressNetwork: string): string {
  * literal port in its own `base_url`, so the relay must accept on that port;
  * and it is forwarding to the same server, so it must dial that port too.
  *
- * A `base_url` naming any other host THROWS. This relay is single-purpose:
- * `host.docker.internal` is the only name aliased onto the internal bridge, so
- * a target built for anything else would be a listener no worker can reach —
+ * A `base_url` naming any other host THROWS, and that pin survives ISC-259
+ * unchanged, because it is a claim about the LISTEN side only:
+ * `RELAY_LISTEN_ALIAS` is the one name aliased onto the internal bridge, so a
+ * `base_url` naming anything else describes a listener no worker can reach —
  * the fleet would report a healthy relay while every worker failed to resolve
- * its model server. Refusing loudly is the only honest answer; supporting
- * other hosts is real work, not a defaulting decision.
+ * its model server. What ISC-259 changed is the DIAL side, which is now
+ * `llm.relay_upstream` and no longer this field at all.
  */
 export function omlxRelayTarget(cfg: RelayConfigView): RelayTarget {
+  const listenPort = relayListenPort(cfg);
+  const upstream = relayUpstreamFor(cfg, listenPort);
+  // Listen side and dial side are now genuinely independent: the worker
+  // connects to `listenPort` on the alias, and the relay dials `upstream`,
+  // which may be another machine entirely (SRD §5.9, ISC-259).
+  return { listenPort, host: upstream.host, port: upstream.port, name: "omlx" };
+}
+
+/**
+ * The port the relay must ACCEPT on — parsed from `llm.base_url`.
+ *
+ * Still `base_url` and deliberately so: a worker connects to the literal port
+ * in its own `base_url`, so that is the port the relay has to be listening on.
+ * Port handling mirrors `policyFromConfig` exactly (explicit port, else 443 for
+ * https and 80 otherwise) rather than inventing a second rule.
+ */
+function relayListenPort(cfg: RelayConfigView): number {
   let url: URL;
   try {
     url = new URL(cfg.llm.base_url);
@@ -307,18 +516,71 @@ export function omlxRelayTarget(cfg: RelayConfigView): RelayTarget {
   if (host !== RELAY_LISTEN_ALIAS) {
     throw new Error(
       `relay: llm.base_url host ${JSON.stringify(url.hostname)} is not ${RELAY_LISTEN_ALIAS} — ` +
-        `the egress relay forwards only the oMLX endpoint on the Docker host (SRD §5.9), and ` +
-        `${RELAY_LISTEN_ALIAS} is the only name resolvable from the internal bridge. ` +
-        `Point llm.base_url at the Docker host, or run without an egress network.`,
+        `${RELAY_LISTEN_ALIAS} is the only name resolvable from the internal bridge, so a ` +
+        `base_url naming anything else is a listener no worker can reach. To point the fleet ` +
+        `at an oMLX on another machine, leave base_url alone and set llm.relay_upstream ` +
+        `(SRD §5.9) — base_url describes what WORKERS dial, not where the model server is.`,
     );
   }
   const port = url.port !== "" ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
   if (!validPort(port)) {
     throw new Error(`relay: llm.base_url has an invalid port ${JSON.stringify(url.port)}`);
   }
-  // Listen side and dial side are separate fields even though both resolve to
-  // the same literal today — see RELAY_DIAL_HOST.
-  return { listenPort: port, host: RELAY_DIAL_HOST, port, name: "omlx" };
+  return port;
+}
+
+/**
+ * The policy the relay's own targets are judged against — deliberately NOT
+ * `policyFromConfig` (ISC-253, ISC-259).
+ *
+ * ## This function is the whole point of ISC-253
+ *
+ * The gate that landed in PR #18 was vacuous BY CONSTRUCTION: it judged a
+ * target derived from `llm.base_url` against a policy whose `llm` rule was
+ * derived from `llm.base_url`. Two derivations of one field agree without
+ * anyone checking anything, and a unit test named `DOCUMENTED VACUITY` pinned
+ * that so it could not be mistaken for protection.
+ *
+ * Passing `relay_upstream` to `policyFromConfig` would NOT have fixed it. An
+ * operator who writes `base_url: http://192.168.86.49:8000/v1` gets an `llm`
+ * rule for `192.168.86.49:8000`, which would then authorize the very upstream
+ * under test — the circularity reappears through a different field. The fix has
+ * to be a policy that contains **no host derived from config at all** except
+ * ones the operator wrote as ALLOW RULES, and that is what this builds:
+ *
+ *  1. `relay-docker-host` — `RELAY_LISTEN_ALIAS` at the LISTEN port. A
+ *     compile-time constant host, unreachable by editing YAML.
+ *  2. every `egress.allow` entry, which the operator authored by hand.
+ *
+ * `egress.google_hosts` is excluded on purpose: the relay does not forward
+ * Google (see the header), so letting those rules authorize a relay target
+ * would be an allowance for traffic that does not exist.
+ *
+ * ## What rule 1 costs, stated exactly
+ *
+ * Rule 1 is why an existing `fleet.yaml` needs no new allow entry, and it is
+ * also the ONLY vacuity left: a `base_url` of `http://host.docker.internal:22/v1`
+ * with no `relay_upstream` still builds a listen port of 22, a default upstream
+ * of `host.docker.internal:22`, and a rule that matches it. That case is
+ * BOUNDED and the bound is measured, not assumed — SRD §12.8 records that every
+ * port on the bridge gateway is already reachable from the deny-all bridge with
+ * no relay running at all, so the relay grants no reachability there that the
+ * bridge did not already have. The gate demands operator authorization for
+ * exactly the reachability the relay actually CREATES, which is everything
+ * off-host.
+ *
+ * Note what rule 1 does NOT cover, because it is a real tightening over PR #18:
+ * an upstream on the Docker host at a port OTHER than the listen port —
+ * `base_url` on 8000, `relay_upstream: host.docker.internal:22` — matches no
+ * rule and is refused. Under the old gate that combination was unexpressible;
+ * under a naive `policyFromConfig` gate it would have passed.
+ */
+export function relayGatePolicy(cfg: RelayConfigView): EgressPolicy {
+  const rules: EgressRule[] = [makeRule("relay-docker-host", RELAY_LISTEN_ALIAS, relayListenPort(cfg))];
+  for (const r of cfg.egress.allow) {
+    rules.push(makeRule(`config:${r.host}:${r.port}`, r.host, r.port));
+  }
+  return { rules };
 }
 
 /**
@@ -333,30 +595,30 @@ export function omlxRelayTarget(cfg: RelayConfigView): RelayTarget {
  * relay was an independent second derivation of "what may be reached" rather
  * than an application of the one in `egress.ts`. This makes it an application.
  *
- * ## What this does NOT close today, and why it is still worth having
+ * ## What it closes NOW that the dial side is decoupled (ISC-259)
  *
- * Be precise about the limit, because the obvious reading of this function is
- * wrong. `policyFromConfig` derives its `llm` rule from THE SAME
- * `llm.base_url` this target came from, with the same port rule. So the two
- * agree BY CONSTRUCTION, and this gate does NOT currently refuse
- * `llm.base_url: http://host.docker.internal:22/v1` — it builds an allow rule
- * for port 22 and then passes the target against it. The circularity is real
- * and is not fixed here.
+ * This function's own text used to end by describing the gate as a SEAM whose
+ * value was future: it judged a `base_url`-derived target against a
+ * `base_url`-derived policy, so the two agreed by construction and nothing was
+ * actually checked. That is no longer the shape. The target's host and port now
+ * come from `llm.relay_upstream`, and the policy comes from `relayGatePolicy`,
+ * which contains no config-derived host except the ones the operator wrote into
+ * `egress.allow`. The two inputs are independent, so this comparison is a
+ * check.
  *
- * What bounds that case today is `omlxRelayTarget`'s host pin: the worst a
- * bad port can do is expose a port on the Docker host, a machine the operator
- * already fully controls (and which, per SRD §12.8, is reachable from the
- * bridge gateway anyway — so the relay adds no reachability the bridge did not
- * already have).
+ * The consequence that matters: pointing the fleet at an off-host oMLX takes
+ * TWO edits, in two different blocks, one of which is unambiguously a security
+ * decision. `llm.relay_upstream: 192.168.86.49:8000` alone is REFUSED —
+ * `test/unit/relay.test.ts` proves it by mutation, removing the allow entry and
+ * asserting the refusal. Without that, decoupling the dial side would have
+ * turned this module into a TCP tunnel from a bridge running untrusted model
+ * output to an arbitrary host:port on the operator's LAN, established by
+ * editing one YAML string.
  *
- * That bound disappears the moment the dial side is decoupled from the listen
- * alias to reach an off-host oMLX (ISC-259). At that point an unchecked,
- * config-derived target becomes a TCP tunnel from a bridge running untrusted
- * model output to an arbitrary host:port, established by editing one YAML
- * string — and this gate is the seam where that gets stopped, PROVIDED the
- * decoupled dial target is judged against an explicit `egress.allow` entry the
- * operator wrote rather than against a rule re-derived from the same field.
- * Landing the seam now makes that a change of input, not a change of design.
+ * The one case still decided without an operator-written rule is an upstream on
+ * the Docker host at the listen port — `relayGatePolicy`'s rule 1. See that
+ * function for why that is bounded by measurement (SRD §12.8) rather than by
+ * assumption.
  */
 export function assertTargetsAllowed(
   targets: readonly RelayTarget[],
@@ -416,6 +678,21 @@ export function relayRunArgv(
     // at `up` rather than a container that quietly is not there.
     throw new Error("relay: refusing to start a relay with no forwarding target");
   }
+  // `--add-host` is emitted ONLY when a target actually dials that name.
+  //
+  // It is the sole reliable route from the uplink bridge to the Docker host, so
+  // it is mandatory for the default upstream. It is also pure noise for a LAN
+  // upstream — an /etc/hosts line for a name the relay never looks up — and
+  // ISC-259 called that out as the flag becoming "dead weight or a bug". An
+  // argv that lists a mapping nothing uses invites the reader to believe the
+  // relay reaches the Docker host when it does not, so the honest argv is the
+  // one that carries the flag exactly when it is load-bearing.
+  //
+  // There is no third case to handle: `relayUpstreamError` refuses a hostname
+  // upstream outright, so a target is either this alias or an IP literal, and
+  // an IP literal needs no resolution at all. That refusal is what keeps this
+  // conditional from having to guess at an `--add-host <lanhost>:<ip>`.
+  const dialsDockerHost = targets.some((t) => t.host === RELAY_DEFAULT_DIAL_HOST);
   return [
     "run",
     "-d",
@@ -423,8 +700,7 @@ export function relayRunArgv(
     containerName,
     "--network",
     uplinkNetwork,
-    "--add-host",
-    `${RELAY_DIAL_HOST}:host-gateway`,
+    ...(dialsDockerHost ? ["--add-host", `${RELAY_DEFAULT_DIAL_HOST}:host-gateway`] : []),
     // Durable and shared: it must come back after a daemon or machine restart,
     // because `up` adopts a running relay and several fleets depend on one.
     "--restart",
@@ -600,13 +876,25 @@ export async function inspectRelayContainer(
  * — rather than silently reaching the wrong server, which is why it is
  * documented here instead of being guessed at automatically.
  *
- * That limit is FAIR for a port change and becomes UNFAIR the moment the dial
- * target is configurable (ISC-259): adoption would then silently keep
- * forwarding to the old destination, which is not loud anywhere. The mitigation
- * that makes it detectable now and blockable later is the returned
- * `scriptSha256`/`targets` pair, which `up` writes into the
- * `egress_relay_ready` ledger event on EVERY run, adopted or created — so two
- * runs that disagree about what the relay forwards leave a record that says so.
+ * That limit was FAIR for a port change and is now UNFAIR, because ISC-259 made
+ * the dial target configurable. **Say the new failure precisely: after changing
+ * `llm.relay_upstream`, an adopted relay keeps forwarding to the OLD machine,
+ * and nothing is loud about it.** Every worker connects successfully, gets real
+ * completions, and is talking to the previous oMLX — there is no port-closed
+ * error to notice. `docker rm -f <relay>` is required for an upstream change to
+ * take effect, and this is the one place that says so.
+ *
+ * Not fixed here, deliberately: comparing an adopted relay's live targets means
+ * reading `PIFLEET_RELAY_TARGETS` back out of `docker inspect` and deciding
+ * whether a mismatch should kill a relay other fleets may be using — a
+ * lifecycle decision, not a parsing one, and out of scope for the change that
+ * created the need. Tracked as ISC-265.
+ *
+ * What makes it DETECTABLE meanwhile is the returned `scriptSha256`/`targets`
+ * pair, which `up` writes into the `egress_relay_ready` ledger event on EVERY
+ * run, adopted or created — so two runs that disagree about what the relay
+ * forwards leave a record that says so. Detectable in a ledger is weaker than
+ * refused at `up`, and the gap is named rather than closed.
  */
 export async function ensureEgressRelay(
   cfg: RelayConfigView,
@@ -617,9 +905,11 @@ export async function ensureEgressRelay(
   // this function has created anything at all.
   const target = omlxRelayTarget(cfg);
   const targets = [target] as const;
-  // …and POLICY before Docker too. The relay may only carry what `decide()`
-  // allows; see `assertTargetsAllowed` for exactly how much that proves today.
-  assertTargetsAllowed(targets, policyFromConfig(cfg));
+  // …and POLICY before Docker too. Judged against `relayGatePolicy`, NOT
+  // `policyFromConfig` — the latter derives its `llm` rule from config fields
+  // that also feed the target, so it can only ever agree with itself. See
+  // `relayGatePolicy` for why this one cannot.
+  assertTargetsAllowed(targets, relayGatePolicy(cfg));
   const containerName = relayContainerName(egressNetwork);
   const uplink = uplinkNetworkName(egressNetwork);
   // Hashed from the path that is about to be mounted, before the mount — so

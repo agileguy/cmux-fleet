@@ -25,6 +25,51 @@ All notable changes to this project are documented here.
   container test asserts the far end received an `Authorization` header without putting a
   credential anywhere in the repository.
 
+- **The relay's `decide()` gate is no longer vacuous, and the oMLX server may now live on a trusted
+  LAN peer.** These are one change, in that order, because doing them the other way round would
+  have been dangerous. The gate that landed previously judged a target derived from `llm.base_url`
+  against a policy whose LLM rule derived from `llm.base_url`: two derivations of one field agree
+  without checking anything. That was survivable only because the relay threw unless the dial host
+  was literally `host.docker.internal`, so the worst case was a port on a machine the operator
+  fully controls — and that host pin is exactly what permitting a LAN oMLX removes. Pointing the
+  dial side at a LAN host while the target was still an unchecked derivation of `base_url` would
+  have made this module a TCP tunnel from a bridge running untrusted model output to an arbitrary
+  `host:port` on the operator's home LAN, established by editing one YAML string. So the dial side
+  was decoupled and gated against operator-written allow rules **first**, and the pin relaxed only
+  after.
+  - **New `llm.relay_upstream`** (`host:port`, explicit port) is what the RELAY dials. `base_url`
+    keeps its `host.docker.internal` pin and means only what a WORKER dials — that alias is the
+    only name resolvable on the internal bridge. Default is
+    `host.docker.internal:<port from base_url>`, so **every existing `fleet.yaml` is unaffected**.
+  - **Relay targets are judged by `relayGatePolicy`, not `policyFromConfig`.** This is the fix, and
+    the distinction is not cosmetic: passing the new field to `policyFromConfig` would re-open the
+    circularity through a different field, since `base_url: http://192.168.86.49:8000/v1` yields an
+    LLM rule authorizing the very upstream under test. `relayGatePolicy` contains no config-derived
+    host except ones the operator wrote as allow rules — a compile-time-constant host at the listen
+    port, plus `egress.allow`. `google_hosts` are excluded, because the relay forwards no Google
+    traffic and a rule for a path that does not exist must not authorize one that does.
+  - **A LAN upstream therefore needs two edits in two config blocks**, one of which is
+    unambiguously a security decision. `relay_upstream` alone is refused with `rule: default-deny`
+    before Docker is contacted at all. Proven by mutation rather than by inspection: with the allow
+    entry the upstream is accepted, without it — from a byte-identical target — it is refused, and
+    mutating the source to re-derive a rule from the upstream turns 5 tests red while ignoring
+    `egress.allow` turns 2 red.
+  - **A hostname upstream is refused at `config validate`.** The relay resolves through Docker's
+    embedded DNS, which forwards to the host resolver, and this machine's resolver does not answer
+    mDNS/`.local` names (`macbook.local` needed `dns-sd`). A name there yields a relay that starts
+    cleanly, reports ready, and fails every connection with an error no operator surface shows.
+    Consequently `--add-host host.docker.internal:host-gateway` is now emitted **only** when a
+    target actually dials the Docker host, so it is never inert argv implying a route nothing uses.
+- **SRD §12.4's credential argument was quoted, retired and restated rather than quietly edited.**
+  It justified injecting `OMLX_API_KEY` straight into workers because the key "carries no billing
+  authority and no value off this host". The second clause was load-bearing and true *by
+  measurement* — oMLX here binds `127.0.0.1:8000`, loopback only. A LAN oMLX is bound to a routable
+  interface by definition and `base_url` is plain `http://`, so **the key crosses an unencrypted
+  LAN hop on every request and now has value on at least one other host**. Recorded as an
+  **accepted residual** on the stated basis that the LAN is trusted, with the conditions that would
+  make TLS *required* named up front: if the key ever gates billing authority or data access, is
+  reused for a credential that does, or the LAN stops being one the operator controls. No billing
+  authority remains unconditional; the Google credential never traverses this path.
 - **The deny-all bridge does not deny the bridge gateway, and this branch was claiming otherwise.**
   Measured, not inferred: a container attached to nothing but the `--internal` `pifleet-egress`
   network — no `--add-host`, no second network, no capabilities, no relay running — pulls a live
@@ -53,9 +98,9 @@ All notable changes to this project are documented here.
 - **The relay applies the egress policy instead of re-deriving it.** `omlxRelayTarget` pinned the
   host but read the port straight from `llm.base_url` with nothing comparing it to `decide()`, so
   `http://host.docker.internal:22/v1` produced a relay tunnelling the bridge to the host's sshd.
-  Targets are now gated through `decide()` before argv is built. The gate is still circular today
-  (the policy's LLM rule derives from the same field) and a test says so by name; its value is the
-  seam it creates for the pending off-host oMLX move, where it becomes blocking.
+  Targets are now gated through `decide()` before argv is built. **That gate was circular when it
+  landed** — the policy's LLM rule derived from the same field — and a test said so by name; it has
+  since been made non-vacuous by the trusted-LAN change below, which is where it became blocking.
 - **One idle container could deny the whole fleet its model server.** The relay dialled upstream on
   accept, before any byte arrived, with no timeouts and no connection cap: 300 client connections
   sending zero bytes took it from 19 open FDs to 619, with 603 matching unauthenticated connections
@@ -83,6 +128,15 @@ All notable changes to this project are documented here.
   turning live coverage into a self-skip.
 
 ### Added
+- **`llm.relay_upstream` — where the egress relay dials, as distinct from where workers dial.**
+  `host:port` with an explicit port; unset means `host.docker.internal:<port from base_url>`, which
+  is exactly the previous behaviour. Must be an IP literal or the Docker-host alias, and anything
+  other than the Docker host also requires a matching `egress.allow` entry. SRD §5.9 is retitled
+  "The LLM is self-hosted — oMLX on the Docker host or a trusted LAN peer"; **the no-hosted-provider
+  prohibition is unchanged and is explicitly not what was relaxed.** The motivating measurement:
+  this Docker host's oMLX serves 3 models and none of `fleet.example.yaml`'s three allowlisted ones
+  (it has `Qwen3.5-35B-A3B-4bit`, not the allowlisted `-8bit`), so `up` exits 2 against it, while
+  the LAN server at `192.168.86.49:8000` serves 32 including all three.
 - **`up` now refuses to start a fleet on a model that cannot emit native tool calls**
   (SRD §5.9 F39, ISC-53). Whether a model answers a `tools`-bearing request with `tool_calls`
   or with prose is a property of its chat template, not of oMLX — and a worker on such a

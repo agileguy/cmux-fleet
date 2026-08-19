@@ -41,10 +41,39 @@ run:
     event_stall_kill: 25m
     heartbeat_interval: 5s
 
-llm:                         # ALWAYS local oMLX on the Docker host — see §5.9
+llm:                         # ALWAYS self-hosted oMLX, never a provider — see §5.9
   provider: omlx
+  # What a WORKER dials, from inside the egress bridge. The host must stay
+  # `host.docker.internal` — that is the relay's listen-side alias on that
+  # bridge, so a base_url naming anything else is a listener no worker can
+  # resolve. It does NOT say where the model server runs; relay_upstream does.
   base_url: http://host.docker.internal:8000/v1
-  api_key_env: OMLX_API_KEY  # local server credential, injected by the supervisor
+  #
+  # What the RELAY dials — host:port, explicit port required (§5.9).
+  #
+  # Unset (the default) means `host.docker.internal:<port from base_url>`: oMLX
+  # on the Docker host, exactly as it behaved before this key existed.
+  #
+  # To use an oMLX on a trusted LAN peer, set it to that machine's ADDRESS. A
+  # hostname is refused: the relay resolves through Docker's embedded DNS, which
+  # forwards to the host resolver, and that resolver was measured NOT to answer
+  # mDNS/.local names here — a name would give you a relay that starts cleanly
+  # and then fails every connection.
+  #
+  # A value other than the Docker host ALSO requires a matching `egress.allow`
+  # entry (see `egress:` below). That second edit is the security decision, and
+  # it is deliberately not derivable from this one: the relay is the single hole
+  # in a deny-all bridge carrying untrusted model output, and one YAML string
+  # should not be enough to point it at an arbitrary machine on your LAN.
+  #
+  # relay_upstream: 192.168.86.49:8000
+  #
+  # …paired with this, at TOP LEVEL (not nested here):
+  #
+  #   egress:
+  #     allow:
+  #       - {host: 192.168.86.49, port: 8000}
+  api_key_env: OMLX_API_KEY  # self-hosted server credential, injected by the supervisor
   model: Qwen3-Coder-30B-A3B-Instruct-4bit
   thinking: medium
   models_allowlist:          # checked against GET /v1/models at `up`

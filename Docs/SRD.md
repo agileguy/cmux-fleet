@@ -485,19 +485,43 @@ docker run -i --rm \
 
 `pifleet up` **refuses to start** if a configured role's image is absent or fails `verify` — no implicit builds, so a run never silently uses a stale image.
 
-### 5.9 The LLM is local — oMLX on the Docker host
+### 5.9 The LLM is self-hosted — oMLX on the Docker host or a trusted LAN peer
 
-**Every worker's model is served by oMLX running on the same machine as Docker.** No hosted provider is involved, in any role, ever. This is a constraint, not a default, and it deletes or simplifies several things earlier drafts specified.
+**Every worker's model is served by an oMLX instance the operator runs.** No hosted provider is involved, in any role, ever. **That prohibition is unchanged and is not what this section relaxed** — it is the constraint that deletes `usd_ceiling`, deletes the provider key, and collapses §12.4's Class 1 to a single env var.
 
-**Verified topology (2026-07-26):**
+What *did* change (2026-08-19, ISC-259) is the word **local**. This section previously read "oMLX running on the same machine as Docker" and stated same-machine locality as a hard constraint. The Docker host is now the **default**, not the requirement; a **trusted LAN** oMLX is permitted. Two measurements forced the amendment, neither of them a preference:
+
+- The oMLX on this Docker host serves **none** of `fleet.example.yaml`'s allowlisted models, so `up` exits 2 against it on the mandatory allowlist check. The machine that does serve them is a different one.
+- Keeping the pin would mean either loading every allowlisted model onto every Docker host, or narrowing each fleet's allowlist to whatever its own host happens to hold.
+
+**Verified topology.** Rows are dated: `2026-07-26` is the original measurement, `2026-08-19` was re-measured for this amendment.
 
 | Fact | Evidence |
 |---|---|
-| oMLX listens on `:8000` on the host | `lsof -iTCP:8000 -sTCP:LISTEN` → `python3.1` |
-| A container reaches it | `docker run --add-host=host.docker.internal:host-gateway` → resolves to `192.168.5.2`; `GET /v1/models` through it returned the server's own auth error, proving the path end-to-end |
-| It requires a key | `{"error":{"message":"API key required","type":"authentication_error"}}` — a **local server credential** (`OMLX_API_KEY` in `~/.env`), not a billing credential |
-| It serves 10 models | incl. `Qwen3-Coder-30B-A3B-Instruct-4bit`, `Qwen3.5-35B-A3B-8bit`, `GLM-4.5-Air-MLX-4bit`, `Llama-3.3-70B-Instruct-4bit` |
-| **It passes the OpenAI `tools` param through correctly** | `Qwen3-Coder-30B-A3B` and `Qwen3.5-35B-A3B` both returned `finish_reason: tool_calls` with well-formed calls and valid JSON arguments |
+| The **Docker host's** oMLX listens on `127.0.0.1:8000` — **loopback only** | `lsof -nP -iTCP:8000 -sTCP:LISTEN` → `Python … TCP 127.0.0.1:8000 (LISTEN)` (2026-08-19). Load-bearing for §12.4: this is what makes "no value off this host" true, and it is exactly what stops being true for a LAN server |
+| It serves 3 models, **none of them allowlisted** | `GET /v1/models` → `Qwen3-Embedding-4B-4bit-DWQ`, `Qwen3.5-35B-A3B-4bit`, `gemma-4-26b-a4b-it-4bit`. Note `-4bit`, not the allowlisted `Qwen3.5-35B-A3B-8bit` (2026-08-19) |
+| The **LAN** oMLX at `192.168.86.49:8000` serves 32 models, **including all three** allowlisted | `GET /v1/models` → HTTP 200; `Qwen3-Coder-30B-A3B-Instruct-4bit`, `Qwen3.5-35B-A3B-8bit`, `GLM-4.5-Air-MLX-4bit` all present (2026-08-19) |
+| It is one L2 hop away, not routed | this host is `192.168.86.58/24` on `en0`; `route -n get 192.168.86.49` → `interface: en0`, no gateway. The `10.x` addresses on this machine are Parallels bridges and a VPN tunnel, not the LAN (2026-08-19) |
+| A container reaches the Docker host | `docker run --add-host=host.docker.internal:host-gateway` → resolves to `192.168.5.2`; `GET /v1/models` through it returned the server's own auth error, proving the path end-to-end (2026-07-26) |
+| It requires a key | `{"error":{"message":"API key required","type":"authentication_error"}}` — a **local server credential** (`OMLX_API_KEY` in `~/.env`), not a billing credential (2026-07-26) |
+| **It passes the OpenAI `tools` param through correctly** | `Qwen3-Coder-30B-A3B` and `Qwen3.5-35B-A3B` both returned `finish_reason: tool_calls` with well-formed calls and valid JSON arguments (2026-07-26) |
+
+**How a LAN oMLX is configured — two fields, deliberately.**
+
+`llm.base_url` describes **what a worker dials**, and its host must remain `host.docker.internal`: that is the relay's listen-side alias on the internal bridge, so a `base_url` naming anything else is a listener no worker can resolve. `llm.relay_upstream` describes **what the relay dials** — `host:port`, explicit port required, defaulting to `host.docker.internal:<port from base_url>` so an untouched `fleet.yaml` behaves exactly as it did before.
+
+Two keys rather than one overloaded key, because `base_url` already serves two masters — the worker's URL *and* the egress policy's LLM rule. Judging the relay's dial target against a policy derived from that same field is a check that can only agree with itself, and that circularity is why ISC-253 stayed open across two PRs. See `src/security/relay.ts:relayGatePolicy`.
+
+**A LAN upstream additionally requires an explicit `egress.allow` entry**, and this is not ceremony. The relay is the one sanctioned hole in a deny-all bridge carrying untrusted model output. Pointing its dial side off-host without an operator-authored allow rule would make an arbitrary `host:port` on the operator's LAN reachable from that bridge by editing a single YAML string. The allow entry *is* the security decision, and it is deliberately not derivable from the endpoint change.
+
+**`relay_upstream` must be an IP literal (or the Docker-host alias) — never a LAN hostname.** Measured: the relay resolves through Docker's embedded DNS, which forwards to the host resolver, and this machine's resolver does **not** answer mDNS/`.local` names (`macbook.local` needed `dns-sd`). A hostname there produces a relay that starts cleanly, reports ready, and then fails every connection with a resolution error no operator-facing surface shows. `config validate` refuses it, so the failure becomes a sentence instead. Consequently `--add-host host.docker.internal:host-gateway` is emitted **only** when the relay actually dials the Docker host; for a LAN IP there is nothing to resolve and the flag is omitted rather than left in the argv implying a route that is not used.
+
+**Known overload: `host.docker.internal` no longer means "the Docker host" to a worker.** Once the dial side may be a LAN peer, that alias means "wherever this fleet's oMLX is". The honest rename (`omlx.pifleet.internal`) was considered and **deliberately deferred**, for two checkable reasons rather than for convenience:
+
+1. **Still true.** The name has no prior meaning on an `--internal` bridge to shadow. Measured: a container on such a bridge cannot resolve `host.docker.internal` at all — Docker does not inject it there — so it resolves only because the relay attaches it as an alias.
+2. **No longer true, and recorded rather than deleted so the decision can be re-judged on current facts.** When this deferral was taken, `model-probe.ts:hostFacingBaseUrl` rewrote exactly this literal to `localhost` for host-side probing, so a second accepted spelling would have skipped that rewrite and misprobed — a new quiet failure introduced by a cosmetic rename. **ISC-260 deleted that helper**: the `up` probe now runs inside the egress network and dials `llm.base_url` verbatim, exactly as a worker does, so no rewrite keyed to this literal remains. That removes the hazard and makes the rename *cheaper* than when it was deferred.
+
+Anything needing the *actual* Docker host from inside the bridge must use the gateway address (§12.8), never this name — which was already true before this amendment. Note that `doctor` deliberately retains a **host** vantage (its output is labelled `omlx (from host)` / `"vantage": "host"`), so it is not affected by this alias either way. Tracked as ISC-264, whose remaining cost is the rename across `models.json`, `llm.base_url`, `doctor` and `docker/entrypoint.sh`.
 
 **The native-tool-call probe is mandatory (F39).** Whether native tool calls come back is a property of the **model's chat template**, not of oMLX: this codebase has a recorded live measurement of `Qwen3-8B-4bit` emitting reasoning *prose* instead of `tool_calls` through this same server. A Pi worker pointed at such a model looks perfectly healthy — it streams tokens, ends turns, settles — and accomplishes **nothing**, because its intended actions never become tool calls. That is the "correct-fix-as-prose" failure documented in `~/mlx-lab/docs/agentic-sre-srd.md`, and at fleet scale it would burn a whole run before anyone noticed.
 
@@ -510,9 +534,9 @@ Two guards, because a startup probe alone can be passed by a model that then dri
 
 **What the constraint deletes:**
 
-- **The host auth proxy is not built.** There is no cloud provider key to keep out of a container, so §12.4's Class 1 collapses to a single env var. The oMLX key guards a local inference server; losing it costs nothing beyond this machine, and injecting it directly is proportionate.
+- **The host auth proxy is not built.** There is no cloud provider key to keep out of a container, so §12.4's Class 1 collapses to a single env var. The oMLX key guards a self-hosted inference server with no billing authority, and injecting it directly is proportionate. **The "costs nothing beyond this machine" half of that argument is weaker for a LAN oMLX and is restated honestly in §12.4** — it is not silently carried over.
 - **`usd_ceiling` is meaningless and is removed.** A local model has no price table, so `get_session_stats.cost` is `0` forever. **`tokens_ceiling` is the only real ceiling** and is mandatory. This also dissolves F27 — an unpriced model is now the expected case, not an error to catch.
-- **Containers need no internet for inference.** The egress bridge allows `host.docker.internal:8000` plus the Google endpoints that `cloud_access` roles require, and **denies everything else by default** — a far tighter posture than a hosted-provider design permits.
+- **Containers need no internet for inference.** The egress bridge allows `host.docker.internal:8000` plus the Google endpoints that `cloud_access` roles require, and **denies everything else by default** — a far tighter posture than a hosted-provider design permits. A LAN oMLX does not change what a *worker* reaches: workers still dial only the alias, and it is the relay — not the worker — whose reachable set gains the LAN endpoint (§12.8).
 
 **What the constraint adds — shared inference (F40).** Six workers are no longer six independent API clients; they are **six clients queuing on one Apple-silicon inference server.** Fleet parallelism is bounded by oMLX throughput, not by an API rate limit:
 
@@ -607,10 +631,13 @@ run:
     event_stall_kill: 25m
     heartbeat_interval: 5s
 
-llm:                         # ALWAYS local oMLX on the Docker host — see §5.9
+llm:                         # ALWAYS self-hosted oMLX, never a provider — §5.9
   provider: omlx
-  base_url: http://host.docker.internal:8000/v1
-  api_key_env: OMLX_API_KEY  # local server credential, injected by the supervisor
+  base_url: http://host.docker.internal:8000/v1   # what a WORKER dials (relay alias)
+  # relay_upstream: 192.168.86.49:8000            # what the RELAY dials; unset =
+                             # host.docker.internal:<port from base_url>. Anything
+                             # else ALSO needs a matching egress.allow entry (§5.9)
+  api_key_env: OMLX_API_KEY  # self-hosted server credential, injected by the supervisor
   model: Qwen3-Coder-30B-A3B-Instruct-4bit
   thinking: medium
   models_allowlist:          # checked against GET /v1/models at `up`
@@ -699,7 +726,7 @@ workers:
   - {id: rev-1,  role: reviewer}
 ```
 
-**On the configurable LLM.** `llm:` sets the fleet default and any role overrides `model` or `thinking`. There is exactly one auth path, because there is exactly one provider: the local oMLX server, reached at `host.docker.internal:8000` with `OMLX_API_KEY` injected by the supervisor (§5.9). `models_allowlist` is checked at `up` against `GET /v1/models` **and** against a native-tool-call probe, so a model that would silently answer in prose fails the run before a worker starts rather than after it has burned an hour.
+**On the configurable LLM.** `llm:` sets the fleet default and any role overrides `model` or `thinking`. There is exactly one auth path, because there is exactly one provider: a self-hosted oMLX server, which every worker reaches at `host.docker.internal:8000` with `OMLX_API_KEY` injected by the supervisor (§5.9). That address is the relay's listen-side alias and is what workers dial regardless of where the server actually runs; `llm.relay_upstream` decides the latter, and moving it off the Docker host also requires an explicit `egress.allow` entry. `models_allowlist` is checked at `up` against `GET /v1/models` **and** against a native-tool-call probe, so a model that would silently answer in prose fails the run before a worker starts rather than after it has burned an hour.
 
 Two things changed from v1.1's example and both were review findings: the reviewer no longer has `bash` (a role labelled read-only that could `cd /` and `git push`), and the researcher no longer requests `web_fetch`, which is not a Pi tool and silently granted nothing.
 
@@ -1059,7 +1086,32 @@ Pi's bash tool inherits the whole environment, so any worker with `bash` can `ec
 
 **Class 1 — the LLM credential: local, low-stakes, injected directly.**
 
-Because inference is always local oMLX on the Docker host (§5.9), there is **no cloud provider key in this system at all**. The only LLM credential is `OMLX_API_KEY`, which guards a local inference server on Dan's own machine — it carries no billing authority and no value off this host. It is injected as an env var, and the auth proxy earlier drafts specified is **not built**. The egress bridge allows `host.docker.internal:8000` and denies all other outbound traffic except the Google endpoints `cloud_access` roles need.
+Because inference is always self-hosted oMLX (§5.9), there is **no cloud provider key in this system at all**. The only LLM credential is `OMLX_API_KEY`. It carries **no billing authority** — that part of the argument is unconditional and is what collapses Class 1 to a single env var. It is injected as an env var, and the auth proxy earlier drafts specified is **not built**. The egress bridge allows `host.docker.internal:8000` and denies all other outbound traffic except the Google endpoints `cloud_access` roles need.
+
+> **Erratum (2026-08-19, ISC-259) — this paragraph used to say the key "guards a local inference server on Dan's own machine — it carries no billing authority and no value off this host." The second clause was load-bearing, it was true by measurement, and for a LAN oMLX it is false. Restated rather than left standing.**
+>
+> The old sentence was true *because of a measured binding*, not because of anything about the key: the Docker host's oMLX listens on `127.0.0.1:8000`, loopback only (`lsof -nP -iTCP:8000 -sTCP:LISTEN` → `TCP 127.0.0.1:8000 (LISTEN)`, 2026-08-19). A credential that can only be presented over loopback genuinely has no value anywhere else.
+>
+> **A LAN oMLX at `192.168.86.49:8000` is bound to a routable interface by definition** — that is what makes it reachable at all — so it is reachable by every device on `192.168.86.0/24`. And `llm.base_url` is plain `http://`, with no TLS anywhere in the path. Therefore, stated plainly and without hedging:
+>
+> - **The key crosses an unencrypted LAN hop on every single request.** Any device that can observe that segment can read it in cleartext from an `Authorization: Bearer` header.
+> - **The key now has value on at least one other host.** "No value off this host" is retired; the accurate claim is *no value off this **LAN**, and no billing authority anywhere*.
+>
+> **Accepted as a residual, not mitigated, and the reasoning is recorded so it can be revisited rather than re-derived:**
+>
+> | Consideration | Assessment |
+> |---|---|
+> | What the key protects | free inference on a self-hosted server. No money, no cloud identity, no data at rest |
+> | Who can already reach the endpoint | anyone on `192.168.86.0/24` can reach `192.168.86.49:8000` **directly**, with or without the key crossing the wire. Capturing it buys an attacker access to a port they can already open a socket to |
+> | Blast radius of theft | inference cycles on a machine the attacker is already adjacent to |
+> | What is *not* on this hop | the Google credential (Class 2), which is where the real blast radius lives. It never traverses the oMLX path |
+> | Cost of the alternative | oMLX terminates no TLS itself, so requiring it means a reverse proxy plus a certificate the relay container must trust — real operational weight on a home LAN, for the exposure above |
+>
+> **This is the operator's accepted risk, on the explicit basis that `192.168.86.0/24` is a trusted home network.** It is documented here rather than mitigated, which is the honest disposition given §5.9's decision that a LAN server is sufficient.
+>
+> **The condition under which this must be revisited** — stated now so the trigger is not a judgement call later: if `OMLX_API_KEY` ever gates something with billing authority or data access, if the same key is reused for a credential that does, or if the LAN stops being one the operator controls (a guest network, an office, a shared flat), then TLS to the oMLX endpoint becomes **required**, not advisory. None of those hold today.
+>
+> Note the key is the same on the loopback and LAN servers. That does not widen the exposure: the loopback server cannot be reached off-host at all, so a key captured on the LAN buys nothing additional there.
 
 **Class 2 — Google Cloud identity: enters the container by design, bounded and opt-in.**
 
@@ -1136,6 +1188,31 @@ Post-run, `pifleet` asserts: no ref outside `fleet/<run-id>/*` moved; `git -C <m
 > **What changed instead:** ISC-51 and ISC-57 are re-worded to what Docker actually guarantees — *no route off the bridge subnet* — rather than "no route to the public internet" / "any host other than". ISC-50/51 are downgraded from `[x]` to `[~]`, because the evidence that closed them was sampled (`1.1.1.1`, `example.com`) and sampling is what missed this. `test/integration/relay.test.ts` now **enumerates** instead: exactly one on-link route and no default route, asserted structurally; and the gateway residual asserted as a POSITIVE, so that hardening it later shows up as a failing test rather than as silent drift. ISC-261 tracks re-taking this evidence against an enumerated reachable set if oMLX moves off-host.
 >
 > One consequence worth stating for §12.4's benefit: because the Docker host is reachable from the bridge anyway, the egress relay does not *widen* the worker's reach to the host — it only makes one port on it resolvable by name. The relay's containment value is real but narrower than "the only path off the bridge".
+
+> **Erratum (2026-08-19, ISC-259) — the reachable set gains one LAN endpoint, and this is the first time the relay genuinely WIDENS a worker's reach.**
+>
+> The paragraph immediately above is why this erratum matters. While the relay only ever dialled the Docker host, it added no reachability the bridge did not already have — the gateway was reachable regardless, so the relay merely made one port resolvable *by name*. §5.9 now permits `llm.relay_upstream` to name a trusted LAN oMLX, and a LAN peer is **not** reachable from the bridge by any other path: the measurements above record `nc 192.168.86.49 8000` being **refused** from a container on the bare `--internal` bridge. So the relay now creates reachability rather than renaming it.
+>
+> **The reachable set from a worker becomes:**
+>
+> ```
+> {relay listen ports} ∪ {every port on the bridge gateway}
+>                      ∪ {every port on every sibling container on the bridge}
+>                      ∪ {one LAN host:port}          <- NEW, and bounded
+> ```
+>
+> **The new term is the tightest one in the union, and deliberately so.** The first three are open-ended — anything the host or a sibling binds later joins them with no code change. The fourth is **exactly one `host:port`**, and it is the only term in this set that requires the operator to have written an authorizing rule:
+>
+> - it is a single explicit `host:port` from `llm.relay_upstream`, not a host, not a subnet, and not a port range;
+> - it must be an **IP literal** (`config validate` refuses a hostname — §5.9 records the resolver measurement behind that);
+> - it must **also** match an explicit `egress.allow` entry, judged by `decide()` against a policy containing no host derived from the endpoint being judged (`relay.ts:relayGatePolicy`). Without that entry `up` refuses with `rule: default-deny` before contacting Docker at all;
+> - it changes only what the **relay** dials. Workers still resolve one alias on the internal bridge and cannot address the LAN peer directly.
+>
+> **What is genuinely worse than before, stated plainly:** a bridge running untrusted model output now has a TCP path to a machine that is not the operator's Docker host. The containment argument is no longer "the worst case is a port on a machine the operator fully controls". It is "the worst case is one operator-nominated port on one operator-nominated LAN machine, authorized twice in two different config blocks". That is a real widening and it is the price of §5.9's amendment; it is recorded here rather than absorbed silently.
+>
+> **This closes ISC-253's blocking condition.** ISC-253 required a non-vacuous `decide()` gate to land *before* the host pin was relaxed, because the pin was the only thing bounding the relay's blast radius. Both are in this change, in that order: the dial side was decoupled from `llm.base_url` and gated against operator-written allow rules first, and only then was the pin relaxed. `test/unit/relay.test.ts` proves the gate by mutation — the LAN upstream is accepted with the allow entry and refused with `rule: default-deny` without it, from an otherwise byte-identical config.
+>
+> **Not re-measured here:** ISC-261's enumerated-reachable-set evidence still describes the pre-amendment topology. Re-taking it against a live LAN upstream is that criterion's work, not this one's.
 
 ### 12.9 No AI attribution
 
