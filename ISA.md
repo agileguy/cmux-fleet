@@ -3,10 +3,10 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 201/255
+progress: 205/256
 mode: build
 started: 2026-07-27
-updated: 2026-08-18
+updated: 2026-08-19
 ---
 
 # cmux-fleet — Ideal State Artifact
@@ -159,11 +159,12 @@ suite green on `headless` against a test double.
 - [ ] ISC-50: A container completes a model call against `host.docker.internal:8000`.
 - [ ] ISC-51: That call succeeds with no route to the public internet.
 - [x] ISC-52: A model outside `models_allowlist` is refused at `up` with exit 2.
-- [ ] ISC-53: A model that answers a `tools`-bearing probe with prose is refused at `up` with exit 2.
-- [ ] ISC-54: `doctor` reports the oMLX model list.
-- [ ] ISC-55: `doctor` reports a measured single-request oMLX latency.
-- [ ] ISC-56: `up` refuses to start while an MLX training run is active, unless `--i-know` is passed.
+- [x] ISC-53: A model that answers a `tools`-bearing probe with prose is refused at `up` with exit 2. **[CLOSED 2026-08-19, Group E]** `security/model-probe.ts` sends one `tools`-bearing completion per DISTINCT resolved model (deduped — six workers on one model is the normal §5.9 F40 shape, and six real generations to learn one fact is a tax on every `up`), and refuses unless BOTH `finish_reason === "tool_calls"` and a non-empty `tool_calls[]` come back; either half alone lets through a server claiming a call it did not make. The refusal is a `ConfigError` subclass, so exit 2 is inherited from the machinery ISC-52 already uses rather than restated. Proven at the CLI, not just at the module: `test/integration/up-wiring.test.ts` → `the native-tool-call probe gates the launch path (ISC-53)` runs the real `up` against a stub oMLX that answers in prose and asserts exit 2, a message naming `eng-1`/`wiring-test-model`/`require_native_tool_calls`, and — the part that makes "launches nothing" a fact rather than a claim — an empty `workersDir` and an empty ledger. Mutation-proved: replacing `await assertModelsSupportToolCalls(...)` in `up.ts` with a no-op turns 3 of that describe's 4 tests red (measured), so the wiring is held in place by tests rather than by hope. The three failure classes are kept apart deliberately: prose → exit 2 (the operator named the wrong model); unreachable/malformed → exit 3 (nothing was learned about the model, so sending the operator to edit a correct `model:` line would be a misdiagnosis). **Stated gap:** the live PROSE case is reproduced nowhere. §5.9 records `Qwen3-8B-4bit` answering in prose, but that model on the `192.168.86.49` endpoint returned a well-formed native `tool_calls` on 2026-08-19 — oMLX now applies per-model output parsers (`VLM tool calling enabled: parser=gemma4` in its own log), so the incompatibility may have been fixed server-side. The refusal is therefore proven against frozen wire shapes only; the POSITIVE control is live. That is the right way round: a gate must not require a broken model to exist in order to be testable.
+- [x] ISC-54: `doctor` reports the oMLX model list. **[CLOSED 2026-08-19, Group E]** `doctor --json` emits `omlx.models`, and `test/integration/model-probe.test.ts` → `the model list doctor prints is the list the server is serving (ISC-54)` asserts it SET-EQUAL to what an independent `GET /v1/models` returned inside the same test. Set-equality is the load-bearing choice: a hardcoded list, a stale cache, or an echo of the configured `llm.model` all satisfy "non-empty", and none of them is reporting the server's model list. Measured live against `http://192.168.86.49:8000/v1` → 32 models reported, matching exactly.
+- [x] ISC-55: `doctor` reports a measured single-request oMLX latency. **[CLOSED 2026-08-19, Group E]** `doctor --json` emits `omlx.list_latency_ms` and `omlx.completion_latency_ms`, the latter from one real `max_tokens: 1` generation — the number §5.9 F40 says `max_concurrent` must be set from. Measured live: `/models 155ms, 1-token completion 63ms` against `Qwen3.5-0.8B-MLX-bf16`. The test asserts the value is non-null, finite, `> 0` and `< 120_000`; a bounded range is what distinguishes a measurement from a timeout or a clock read twice. Fixed along the way, and the reason this was not already closed: with no config `doctor` fell back to `models[0]`, which on a server whose list begins with an embedding model returns HTTP 500 — leaving `completion_latency_ms` null and ISC-55 silently unreported on exactly the invocation someone runs when they have no config yet. `chatProbeModel`/`isEmbeddingModelId` skip self-named embedding ids on the fallback path ONLY; a configured `llm.model` is always used verbatim, because second-guessing the operator would report a latency for a model no worker runs.
+- [x] ISC-56: `up` refuses to start while an MLX training run is active, unless `--i-know` is passed. **[CLOSED 2026-08-19, Group E]** `safety/mlx-training-guard.ts` scans `ps -axo pid=,command=` for command lines pairing an `mlx_lm`/`mlx-lm`/`mlx.` module with a TRAINING verb (`lora`, `train`, `fuse`, `dpo`, `sft`) and never `server` or `generate` — the pairing is the entire design, because a bare `/mlx/` match would hit `mlx_lm.server`, the inference server a fleet REQUIRES, and refuse every `up` on every correctly configured host. `up` refuses with exit 3 (`BACKEND_UNAVAILABLE`: the command line is fine, the host is busy) before the run directory is populated, and `--i-know` proceeds while writing BOTH an immediate stderr warning and an `mlx_training_guard_overridden` ledger event, so the choice survives the scrollback for whoever reads `report` after a panic. Proven with a real process rather than a canned string: `test/integration/up-wiring.test.ts` → `the MLX training guard gates the launch path (ISC-56)` spawns a `#!/bin/sh` script literally named `mlx_lm.lora`, waits until the real `ps` publishes its argv, then asserts the refusal names that pid; the `--i-know` test asserts the pid INSIDE the ledger event, which is what fails if the append is ever reduced to a bare marker. `test/integration/mlx-training-guard.test.ts` adds the critical negative live — a real process named `mlx_lm.server` is spawned and NOT matched. Mutation-proved: forcing the scan to return `[]` turns 2 of the 3 launch-path tests red. **Stated gap, by design:** this is a documented HEURISTIC, not an interlock. It cannot see a bespoke training script (`python train_my_model.py`), a run inside a container, a run on another machine, or a notebook kernel whose argv is just `python -m ipykernel_launcher`. `--i-know` exists because the operator knows things the scan cannot, in both directions; a false negative is merely the status quo before the guard existed, and a false positive costs one flag.
 - [ ] ISC-57: Egress to any host other than the oMLX endpoint and the configured Google endpoints is denied from inside a container.
+- [ ] ISC-256: `doctor` reports, for every model in `models_allowlist`, whether the configured oMLX endpoint actually serves it — and flags any that it does not. *(Added 2026-08-19 by the Group E close-out. **Number may collide**: ISC-255 is taken by the Group D branch and numbering is not centrally allocated, so this may need renumbering at merge.)* Motivated by a live finding, not by symmetry: `fleet.example.yaml`'s allowlist names `Qwen3-Coder-30B-A3B-Instruct-4bit`, `Qwen3.5-35B-A3B-8bit` and `GLM-4.5-Air-MLX-4bit`, and the endpoint `llm.base_url` points at by default — oMLX on the Docker host — serves NONE of the three. All three exist on a different machine on the LAN. Today nothing reports that: ISC-52 checks the resolved model against the allowlist (a config-vs-config comparison that passes happily), and the ISC-53 probe only touches models workers actually resolve to, so an allowlist entry that exists nowhere is invisible until someone points a role at it and `up` dies at exit 3. The check is nearly free — `GET /v1/models` is already fetched for ISC-54 and the comparison is a set difference. Worth folding in at the same time: oMLX will accept a model it cannot fit, logging `Loading <model> without KV headroom (need 24.93GB, available 24.00GB)` and then aborting the whole server on a Metal command-buffer error mid-generation (observed three times on 2026-08-19, SIGABRT in `mlx::core::gpu::check_error`). A `doctor` that compared each allowlisted model's size against the server's `--max-model-memory` would catch both the missing-model and the will-not-fit cases before `up` ever loads anything.
 
 ### Group F — Configuration
 
@@ -2258,3 +2259,91 @@ for the erratum in place of a silent rewrite of the original spec.
   tests). `git fsck --no-progress` on the real `~/repos/cmux-fleet` re-verified clean a third
   time; `git status --short` there shows only the pre-existing untracked `.corrupted-pack-
   backup/` from the original spike, never anything this session wrote.
+
+### Group E probe/guard close-out — 2026-08-19
+
+Closes ISC-53, ISC-54, ISC-55, ISC-56. Adds ISC-256. Group E's remaining criteria (ISC-50,
+ISC-51, ISC-57) are container-side and stay open — they need a worker actually calling oMLX
+from inside the egress bridge, which is Group C/J territory, not this branch's.
+
+**Validation.** `bun run typecheck` → `rc=0`, zero diagnostics. `bun test test/unit` →
+`1006 pass, 0 fail` across 48 files. `bun test test/integration` → `340 pass, 57 skip,
+0 fail` across 36 files. `PIFLEET_DOCKER=1 bun test test/integration/{image,verbgate,egress,adc}.test.ts`
+→ `53 pass, 0 fail` — the exact count `ci.yml`'s guard pins, unchanged by this branch.
+Live oMLX suite (`PIFLEET_OMLX=1`, against `http://192.168.86.49:8000/v1`) → `4 pass, 0 fail`.
+
+**The handover was red, in a way the test suite could not see.** Two defects arrived with the
+recovered work and both had to be fixed before any criterion could be called closed:
+
+1. `tsc --noEmit` failed with five diagnostics in `test/unit/model-probe.test.ts`, while
+   `bun test` reported the same file green — Bun strips types without checking them, so the
+   suite was certifying code the project's own CI gate rejects. Root cause was
+   `FetchLike = typeof fetch`, which under `@types/bun` carries the static `preconnect`
+   property, making every hand-written double — the entire purpose of the type —
+   un-assignable. Narrowed to the call signature the module actually uses. The remaining two
+   were a `.catch()` whose `void | Error` union also concealed a real bug: had the gate ever
+   failed to refuse, the test would have read `undefined.message` and reported a TypeError
+   instead of the assertion failure.
+2. Four tests in `test/integration/up-wiring.test.ts` failed with exit 3. `require_native_tool_calls`
+   defaults to TRUE, so adding the ISC-53 gate made every `up` in that file send a real
+   `tools` request to `localhost:8000` for a model called `wiring-test-model` that no server
+   anywhere serves. The egress-ordering, ISC-190-allow, ISC-251-grant and §5.5-mount tests
+   were failing for a reason with nothing to do with what any of them assert. Fixed by
+   stating the gate's absence in the fixture (`require_native_tool_calls: false` by default,
+   same convention `models_allowlist` already uses there) rather than by weakening the gate;
+   the tests that DO exercise it point `base_url` at a stub they own.
+
+**Per-criterion evidence.**
+
+- ISC-53 — refusal proven at the CLI in `up-wiring.test.ts` → `a model that answers the probe
+  with prose exits 2 and launches nothing`: real `up`, stub oMLX returning the §5.9 prose
+  shape, `code === EXIT.USAGE`, stderr naming worker/model/knob, `workersDir` empty and ledger
+  empty. The converse (`a model that DOES emit a native call still starts`) asserts
+  `stub.requests.length === 1`, which is the assertion that dies if the gate is deleted while
+  the exit code stays 0. `an unreachable oMLX exits 3, not 2` pins the class split. Mutation:
+  gate → no-op ⇒ 3 of 4 red. Live positive control in `model-probe.test.ts` →
+  `Qwen3.5-0.8B-MLX-bf16 → ok=true (answered with 1 native tool_call(s))`. Live prose case NOT
+  reproducible — see the criterion for why, and why that is acceptable.
+- ISC-54 — `the model list doctor prints is the list the server is serving`: `doctor --json`'s
+  `omlx.models` set-equal to an independent `GET /v1/models`. Live: 32 models.
+- ISC-55 — `the completion latency doctor prints is a real measured number`: `/models 155ms,
+  1-token completion 63ms against Qwen3.5-0.8B-MLX-bf16`. Bounded-range assertion, plus
+  `probe_model` identity. The no-config fallback's selection rule is asserted separately and
+  ordering-independently (`the no-config fallback never picks an embedding model to chat with`)
+  after a first version of that test encoded one machine's `GET /v1/models` order as a fact
+  and passed locally while failing against the remote.
+- ISC-56 — `an active training run refuses `up`, naming the process and the override` and
+  `--i-know proceeds, warns on stderr, and records the override in the ledger`, both against a
+  really-spawned decoy whose argv the real `ps` really publishes; plus `with no training run
+  active, up is unaffected`, which is the one that matters daily. `mlx-training-guard.test.ts`
+  spawns a real `mlx_lm.server` and asserts it is NOT matched. Mutation: scan → `[]` ⇒ 2 of 3
+  red.
+
+**An incident this work caused, recorded because the ISA is where that belongs.** The first
+live run of the ISC-53/55 probes auto-selected its own model via `chatProbeModel(null, served)`
+and landed on `Qwen3.5-35B-A3B-4bit` on the LOCAL oMLX, which runs with `--max-model-memory
+24GB`. The server logged `Loading Qwen3.5-35B-A3B-4bit without KV headroom (need 24.93GB,
+available 24.00GB)`, then SIGABRT'd inside a Metal completion handler
+(`mlx::core::gpu::check_error` → uncaught C++ exception → `std::terminate`). Twice, at 05:51:52
+and 05:55:46; the second landed two seconds after `Chat completion: 16 tokens in 50.92s`, which
+was this branch's own native-tool-call probe. So the ISC-55 measurement destroyed the thing it
+was measuring. The fix is not a bigger timeout: `test/integration/model-probe.test.ts` no
+longer chooses its own workload at all — `PIFLEET_OMLX_MODEL` is required and an unset variable
+fails loudly. A test suite must not pick its own GPU workload, because the set of models a
+server lists is not the set it can safely load and oMLX exposes no metadata distinguishing
+them. This is also the direct motivation for ISC-256.
+
+**Endpoint discrepancy — flagged, deliberately NOT fixed here.** `fleet.example.yaml:46` sets
+`base_url: http://host.docker.internal:8000/v1`, i.e. oMLX on the Docker host, and SRD §5.9 is
+categorical about it: *"Every worker's model is served by oMLX running on the same machine as
+Docker. No hosted provider is involved, in any role, ever. This is a constraint, not a
+default."* But `fleet.example.yaml:50-54`'s allowlist names three models the Docker host does
+not serve, all three of which exist on a different machine on the LAN (`192.168.86.49`) — so
+the shipped config's model list was written against one endpoint and its `base_url` points at
+another. Note also that the allowlist names `Qwen3.5-35B-A3B-8bit` while the local box has the
+**4bit** build. Resolving this is a design decision about where the fleet's inference lives —
+and it is not free: §12's security argument ("guards a local inference server on Dan's own
+machine — carries no value off this host") and §5.9's egress posture both assume local, though
+`security/egress.ts` parses the allowed endpoint FROM `llm.base_url` and would follow a change.
+Left for the owner. The live tests reach the LAN endpoint through `PIFLEET_OMLX_BASE_URL`,
+which changes no shipped default.

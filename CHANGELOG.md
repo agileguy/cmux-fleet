@@ -4,7 +4,55 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`up` now refuses to start a fleet on a model that cannot emit native tool calls**
+  (SRD §5.9 F39, ISC-53). Whether a model answers a `tools`-bearing request with `tool_calls`
+  or with prose is a property of its chat template, not of oMLX — and a worker on such a
+  model looks perfectly healthy while accomplishing nothing, because its intended actions
+  never become tool calls. `up` sends one probe per distinct resolved model (deduped: six
+  workers on one model is the normal fleet shape, and six real generations to learn one fact
+  would be a tax on every launch) and refuses with exit 2. An oMLX that cannot be reached
+  exits 3 instead — nothing has been learned about the model, so reporting it as a usage
+  error would send the operator to edit a `model:` line that is probably correct.
+  `llm.require_native_tool_calls: false` disables the gate.
+- **`up` now refuses to start while an MLX training run appears to be active**, unless
+  `--i-know` is passed (ISC-56). §5.9 records concurrent heavy GPU load on this machine
+  turning a process OOM into a kernel watchdog panic, which costs the training run as well as
+  the fleet. Detection is an explicitly documented heuristic over `ps`: it matches
+  `mlx_lm`/`mlx-lm`/`mlx.` paired with a training verb (`lora`, `train`, `fuse`, `dpo`, `sft`)
+  and deliberately never `server` or `generate`, because a bare `/mlx/` match would hit the
+  oMLX inference server every fleet requires and refuse every `up` on a correctly configured
+  host. An override is recorded both on stderr and in the run ledger
+  (`mlx_training_guard_overridden`), so a run that raced a training run says so in its own
+  record months later.
+- **New criterion ISC-256**: `doctor` should report whether each `models_allowlist` entry is
+  actually served by the configured endpoint. `fleet.example.yaml`'s allowlist names three
+  models the default `base_url` serves none of, and nothing reports that today — the
+  allowlist check is config-vs-config, and the tool-call probe only touches models a worker
+  resolves to. (Number may collide with the Group D branch — see the ISA entry.)
+
 ### Fixed
+- **`doctor` reported no oMLX latency at all on the invocation that most needs it.** With no
+  config it probed `models[0]`, and on a server whose model list begins with an embedding
+  model that completion returns HTTP 500 — so `completion_latency_ms` came back `null` and
+  ISC-55's number went unreported on exactly the run someone makes when they have no config
+  yet and are trying to size `max_concurrent`. The no-config fallback now skips models whose
+  ids name themselves as embedding models; a configured `llm.model` is still used verbatim,
+  because second-guessing the operator would report a latency for a model no worker runs.
+- **`tsc --noEmit` failed on the model-probe tests while `bun test` reported them green.**
+  Bun strips types without checking them, so the suite was certifying code the project's own
+  CI gate rejects. `FetchLike` was `typeof fetch`, which under `@types/bun` carries the static
+  `preconnect` property and makes every hand-written test double — the entire point of the
+  type — un-assignable; it is now the call signature the module actually uses. A related
+  `.catch()` returning `void | Error` would additionally have thrown a TypeError instead of an
+  assertion failure had the gate ever failed to refuse.
+- **Adding the ISC-53 gate broke four unrelated `up` integration tests.**
+  `require_native_tool_calls` defaults to true, so the egress-ordering, allowlist-allow,
+  ADC-grant and mount-materialization tests all began sending a real `tools` request to
+  `localhost:8000` for a model no server serves, and failed with exit 3 for a reason having
+  nothing to do with what any of them assert. The fixture now states the gate's absence
+  explicitly (the same convention `models_allowlist` already used there) rather than the gate
+  being weakened; the tests that do exercise it point `base_url` at a stub they own.
 - **The only test proving crash-recoverability of atomic writes was stochastic** — it
   killed a writer process ~150ms into a loop, proving one of five syscall boundaries at
   random and never saying which. Replaced with deterministic per-boundary tests
