@@ -22,6 +22,66 @@ jobs:
         run: bun test test/integration
       - name: E2E tests
         run: bun test test/e2e
+      - name: The live-oMLX probes, accounted for rather than silently skipped
+        # ISC-262. `test/integration/model-probe.test.ts` gates on
+        # `PIFLEET_OMLX=1`; before this step, `grep -rn PIFLEET_OMLX .github/`
+        # returned NOTHING, so its four probes skipped in every job and nothing
+        # counted them. The step above collects the file — it is part of
+        # `test/integration` — and reports its four skips inside a summary of
+        # several hundred, where no human has ever noticed them.
+        #
+        # BE PRECISE ABOUT WHAT THIS STEP DOES AND DOES NOT ACHIEVE. It does
+        # NOT make those probes run. They need a real Apple-silicon inference
+        # server, which no GitHub-hosted runner has and none ever will, so on
+        # this runner they still skip — every one of them. What changes is that
+        # the skip is now PINNED BY NAME and ACCOUNTED FOR: if a probe is
+        # renamed, deleted, added, or starts skipping for a different reason,
+        # this step goes red and says which. An invisible skip became a
+        # visible, enumerated one. That is a real improvement and it is not
+        # coverage, and ISC-262 is graded `[~]` in ISA.md accordingly.
+        #
+        # The inverse case is handled by the same guard for free. Point this at
+        # a self-hosted runner with `PIFLEET_OMLX=1` and the pins below must be
+        # removed, at which point an empty pin list permits NO skips — so a
+        # half-configured environment that asks for the live probes and gets
+        # skips fails loudly instead of quietly, which is exactly what the
+        # file's own header asks for.
+        #
+        # NO SECRET IS WIRED IN HERE, deliberately. `OMLX_API_KEY` would not
+        # change a single outcome: the probes reach for `http://localhost:8000`
+        # and nothing is listening, so they skip with or without a key. Putting
+        # a live credential on a runner to buy nothing is a cost with no
+        # benefit, and this file went to some trouble in #18 to stop that key
+        # leaking through argv.
+        #
+        # Cheap enough to run twice: everything in it skips, so the whole step
+        # is milliseconds. It is kept SEPARATE from the container job on
+        # purpose — that job needs a Docker daemon and a multi-minute image
+        # build, and hanging the oMLX accounting off it would make this
+        # evidence unavailable on any PR where the image happens to be broken.
+        env:
+          LABEL: live-oMLX
+          # Four probes, all `test.skipIf(!LIVE)` — measured, not assumed:
+          # `bun test test/integration/model-probe.test.ts` reports
+          # "Ran 4 tests across 1 file". Collection, not passes: see the total
+          # check in probe-guard.sh for why that is the number that catches a
+          # file falling out of the run entirely.
+          TOTAL_EXPECTED: "4"
+          # The exact NAMES, checked against the junit report, not merely how
+          # many. A bare count cannot tell "the live probes skipped" apart from
+          # "one live probe was deleted and some unrelated test started
+          # skipping" — the arithmetic reads identical, and only one of those
+          # is fine to ship.
+          EXPECTED_LIVE_OMLX_PROBE_SKIPS: |
+            a served chat model answers the tools-bearing probe with a native call
+            the model list doctor prints is the list the server is serving (ISC-54)
+            the completion latency doctor prints is a real measured number (ISC-55)
+            the no-config fallback never picks an embedding model to chat with
+        run: |
+          set -eu
+          JUNIT_FILE="${RUNNER_TEMP:?RUNNER_TEMP is not set by actions/runner}/pifleet-omlx-probes.junit.xml" \
+          EXPECTED_SKIPS="$EXPECTED_LIVE_OMLX_PROBE_SKIPS" \
+            .github/scripts/probe-guard.sh test/integration/model-probe.test.ts
 
   # The container suite is a separate job because it builds the worker image
   # (google-cloud-cli, kubectl, helm — many minutes) and must not gate fast
@@ -54,6 +114,25 @@ jobs:
                            if (!t) { console.error("image list returned no images"); process.exit(1); }
                            console.log(t);')"
           docker tag "$tag" pifleet/pi-worker:verify
+      - name: Pull the relay image the egress relay runs
+        # `relay.test.ts` starts real relay containers, and the relay runs plain
+        # upstream Node pinned by digest — NOT the worker image, deliberately,
+        # so `up` cannot be taken down by an unrelated image problem. `docker
+        # run` would pull it implicitly on first use, inside a test with a 180s
+        # budget; pulling it here instead puts the download in a step of its
+        # own, so a registry failure reads as a registry failure rather than as
+        # a mysteriously slow relay probe.
+        #
+        # The digest is read FROM THE SOURCE rather than copied here. A second
+        # copy of a pinned digest in a workflow is a copy that goes stale the
+        # first time the real one is bumped, and this way a rename of the export
+        # fails the step instead of silently pulling nothing.
+        run: |
+          set -eux
+          relay_image="$(bun -e 'import { RELAY_IMAGE } from "./src/security/relay.ts";
+                                 if (!RELAY_IMAGE) { console.error("RELAY_IMAGE is empty"); process.exit(1); }
+                                 console.log(RELAY_IMAGE);')"
+          docker pull "$relay_image"
       - name: Write a synthetic ADC credential for the file-mode mount-shape probe
         # adc.test.ts's "file mode mounts the one ADC file, never its parent
         # directory" test is `test.skipIf(!ADC_FILE_PRESENT)`, where
@@ -101,13 +180,14 @@ jobs:
           adc_file="${RUNNER_TEMP:?RUNNER_TEMP is not set by actions/runner}/pifleet-ci-synthetic-adc.json"
           printf '%s\n' '{"type":"authorized_user","account":"ci-synthetic@example.test","client_id":"ci.apps.googleusercontent.com","client_secret":"ci-not-a-real-secret","refresh_token":"1//ci-synthetic-not-a-real-token"}' > "$adc_file"
           echo "PIFLEET_TEST_ADC_FILE=$adc_file" >> "$GITHUB_ENV"
-      - name: Container, verbgate, egress, and ADC probes, verified rather than merely run
+      - name: Container, verbgate, egress, relay, and ADC probes, verified rather than merely run
         env:
           PIFLEET_DOCKER: "1"
-          # All four PIFLEET_DOCKER-gated files, run ONCE by this step, which
+          LABEL: container
+          # All five PIFLEET_DOCKER-gated files, run ONCE by this step, which
           # both prints their output and grades it. This used to be two
-          # separate steps — a "probes" step that ran these four files for
-          # their own sake, and a "guard" step below it that ran the SAME four
+          # separate steps — a "probes" step that ran these files for
+          # their own sake, and a "guard" step below it that ran the SAME
           # files a SECOND time just to check the summary counts. That doubled
           # real Docker cost for no additional coverage: 65 tests against a
           # real daemon, several individually timed out at 60-180s (see
@@ -119,23 +199,41 @@ jobs:
           # Capturing the one real run's output and grading THAT is strictly
           # better: same coverage, roughly half the Docker time, one truth.
           #
-          # TOTAL_EXPECTED is 66 = 20 (image.test.ts: 15 fixed cases + 5
+          # TOTAL_EXPECTED is 72 = 20 (image.test.ts: 15 fixed cases + 5
           # generated from the toolchain-baseline `probes` array — gcloud,
           # kubectl, helm, jq, curl) + 23 (verbgate.test.ts) + 5
           # (egress.test.ts) + 18 (adc.test.ts — up from 12 now that the
-          # ISC-44/45/46 mount-shape and credential-absence blocks exist).
-          # Measured two ways, and both matter:
-          #   - On a host WITH a real ADC file, all 66 run and pass: 66 pass,
-          #     0 fail, 0 skip. That is the number to trust when re-deriving
-          #     this constant by hand after adding or removing a probe.
+          # ISC-44/45/46 mount-shape and credential-absence blocks exist) + 6
+          # (relay.test.ts, added here by ISC-257: 2 bridge-denial probes and 4
+          # relay probes, of which the live-oMLX one always skips on a runner).
+          #
+          # 66 -> 72 is the ONLY arithmetic change, and it was recomputed once
+          # for both ISC-257 and ISC-262 together rather than twice against a
+          # moving target — which is why those two criteria are fixed in one
+          # PR. ISC-262 adds nothing to this number: `model-probe.test.ts` is
+          # graded by its own step in the fast `test` job, because it needs no
+          # Docker and should not be hostage to the image build.
+          #
+          # DERIVING IT BY HAND, cheaply and exactly. Run the same file list
+          # with PIFLEET_DOCKER UNSET: every gate closes, every test reports as
+          # a skip, and the summary line is the collection total this constant
+          # must equal. Measured 2026-08-19 on bun 1.3.11:
+          #     bun test test/integration/{image,verbgate,egress,adc,relay}.test.ts
+          #     -> 0 pass, 72 skip, 0 fail. Ran 72 tests across 5 files.
+          # No daemon, no image, 53ms. Do this before changing the number.
+          #
+          # And measured two ways with the gate OPEN, because both matter:
+          #   - On a host WITH a real ADC file and a real oMLX, all 72 run and
+          #     pass: 72 pass, 0 fail, 0 skip.
           #   - In THIS job, with no real host ADC but PIFLEET_TEST_ADC_FILE
           #     set by the step above, the file-mode mount-shape test RUNS
           #     (that is the whole point of that step) while the four tests
-          #     that need a REAL host ADC to mint a live token cannot, and
-          #     skip: 62 pass, 4 skip. Same total either way, because the
-          #     check below treats pass+skip as one number — see that check's
-          #     own comment for why that pairing, specifically, is correct.
-          TOTAL_EXPECTED: "66"
+          #     that need a REAL host ADC to mint a live token cannot, and the
+          #     one relay probe that needs a real inference server cannot
+          #     either: 67 pass, 5 skip. Same total either way, because the
+          #     check treats pass+skip as one number — see probe-guard.sh's
+          #     total check for why that pairing, specifically, is correct.
+          TOTAL_EXPECTED: "72"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -143,8 +241,12 @@ jobs:
           # probe got converted to .skip while one of these un-skipped" — the
           # arithmetic reads identical in both cases, and only one of them is
           # fine to ship. Pinning identity, checked against the junit report
-          # this step also produces (see JUNIT_FILE in the script below),
-          # closes that gap.
+          # probe-guard.sh also produces (see JUNIT_FILE below), closes that
+          # gap. That the check really does close it is not taken on faith:
+          # test/integration/probe-guard.test.ts mutates each case — a renamed
+          # pin, a pinned test that ran, an unpinned test that skipped while
+          # the count still matched — and asserts the guard goes red for that
+          # specific reason.
           #
           # All four are `test.skipIf(!HOST_ADC_PRESENT)` in adc.test.ts and
           # need a REAL, already-authenticated host Google credential to mint
@@ -161,167 +263,64 @@ jobs:
             with cloud_access and a token, gcloud auth print-access-token succeeds (ISC-41)
             a gcloud call still succeeds after a refresh re-injection (ISC-47)
             injecting a real minted token flips the same command from exit 1 to exit 0
+          # The relay suite's ONE live-oMLX probe, pinned by name for the same
+          # reason and by the same mechanism (ISC-257).
+          #
+          # `relay.test.ts` computes `OMLX_LIVE = PIFLEET_DOCKER=1 AND
+          # OMLX_API_KEY is set AND http://localhost:8000/v1/models answers`.
+          # A GitHub-hosted runner fails the third condition unconditionally —
+          # there is no Apple-silicon inference server behind it and there will
+          # not be — so this probe skips here always. That is NOT a defect and
+          # it is NOT covered elsewhere: it is the only assertion in the repo
+          # that a REAL model list comes back through the relay, and it is
+          # recorded as live-only in ISC-50's ISA close-out rather than papered
+          # over here.
+          #
+          # NO SECRET IS WIRED IN, for the reason spelled out on the fast job's
+          # live-oMLX step: a key alone would not flip this probe, because the
+          # reachability check would still fail. Adding one would put a live
+          # credential on a runner and buy exactly nothing. #18 moved this key
+          # out of argv and into `-e OMLX_API_KEY` precisely so it stops
+          # appearing in `ps`, `docker inspect`, and command-echoing logs; the
+          # cheapest way to keep that fixed is not to ship the key here at all.
+          #
+          # The OTHER five relay probes run unconditionally and are expected to
+          # PASS. The gateway-residual one can return early on a host whose
+          # gateway serves none of the candidate ports — it logs
+          # `[inconclusive]` and counts as a pass, deliberately, so it needs no
+          # skip allowance and must not be given one.
+          EXPECTED_LIVE_OMLX_RELAY_SKIPS: |
+            the REAL oMLX model list comes back through the relay, from inside the bridge
         run: |
           set -eu
-          # A skip prints an announcement and still exits 0, and the four
-          # files below self-skip EVERY test whenever PIFLEET_DOCKER is
-          # unset, so a green step here has never, on its own, been evidence
-          # that a single probe actually ran. Arithmetic on the parsed
-          # summary is what turns "the command succeeded" into "the probes
-          # ran and passed" — everything below exists to make that arithmetic
-          # trustworthy, which the previous version of this check was not:
-          # see the fail/todo comment and the total-check comment further
-          # down for the two concrete ways it used to lie.
+          # The grading itself lives in .github/scripts/probe-guard.sh, which
+          # is where every measured note about HOW it grades now lives too —
+          # the blackhole bug behind its `set +e` / capture-`$?` / `set -e`
+          # dance, why the ANSI escapes are stripped before the summary is
+          # parsed, why fail and todo are checked BEFORE the total, and why a
+          # filter that matches no file is invisible without the total check.
+          # It moved out of this file because a second job now needs the same
+          # grading with a different file list, and two copies of subtle shell
+          # is how a parsing fix lands in one and not the other.
           #
-          # bun's own console reporter never prints individual skipped test
-          # names (only the aggregate "N skip" summary line) — measured, not
-          # assumed: a `test.skip`/`test.skipIf` case produces no per-test
-          # line at all in the default reporter, unlike a failure, which
-          # prints its name and stack trace. Pinning skip IDENTITY (see
-          # EXPECTED_HOST_ADC_MINT_SKIPS above) therefore can't be done by
-          # grepping the console text no matter how it's parsed; it needs a
-          # machine-readable side artifact. `--reporter=junit` is the
-          # cheapest one bun ships for that — verified it does not change
-          # what runs or what the console prints (identical output with and
-          # without the flag in every case tried), it only writes a second,
-          # structured report alongside the console text this step still
-          # captures and prints exactly as before.
-          JUNIT_FILE="${RUNNER_TEMP:?RUNNER_TEMP is not set by actions/runner}/pifleet-container-probes.junit.xml"
-
-          # THE BLACKHOLE BUG, and why this is `set +e` / capture-`$?` /
-          # `set -e`, rather than the previous `set -eu` wrapping the
-          # assignment directly. Under `set -eu`, `out="$(bun test ... 2>&1)"`
-          # aborts the WHOLE script the instant the command substitution
-          # returns non-zero: bash treats a failing command on the right-hand
-          # side of an assignment as a command failure like any other, and
-          # `set -e` kills the script at that statement — before `echo "$out"`
-          # on the next line ever ran. Reproduced directly: a failing
-          # container probe under the old script produced a RED step with
-          # ZERO output. Not a truncated stack trace — nothing. No test
-          # names, no `::error::` lines, not even bun's own summary, because
-          # the only place that output existed was the `$out` variable the
-          # aborted script never reached the `echo` for. Disabling `-e`
-          # around exactly the assignment, capturing `$?` immediately after,
-          # and re-enabling `-e` afterward is what lets the diagnostics
-          # survive long enough to be printed.
-          set +e
-          out="$(bun test \
-            test/integration/image.test.ts \
-            test/integration/verbgate.test.ts \
-            test/integration/egress.test.ts \
-            test/integration/adc.test.ts \
-            --reporter=junit --reporter-outfile="$JUNIT_FILE" \
-            2>&1)"
-          rc=$?
-          set -e
-          echo "$out"
-
-          # `sed`'s `$` end-of-line anchor below matches a literal end of
-          # line — but bun colors its summary lines with ANSI escape codes
-          # when it believes its output is going to a color-capable
-          # terminal, and a colored line ends in a reset sequence
-          # (`\x1b[0m`), not bare digits. This fails SAFE today: GitHub
-          # Actions runners do not set FORCE_COLOR, and bun's own isatty
-          # check sees a pipe rather than a terminal when this script
-          # captures its output via `$(...)`, so the anchors have always
-          # matched here in practice — verified both ways: with
-          # FORCE_COLOR=1 forced on, every anchored pattern below comes back
-          # empty, the parsed counts default to 0, and the total check at the
-          # bottom fails loudly on the resulting mismatch rather than
-          # reporting a false pass. Still worth closing cheaply, since
-          # "fails safe" is not the same as "parses correctly": stripping
-          # ANSI CSI sequences first is one extra `sed` pass, and it makes
-          # the counts actually right instead of merely non-lying, in case a
-          # future change to this job (a different shell, a `script -q`
-          # wrapper, anything that makes bun believe it has a tty) ever
-          # turns color on by accident.
-          clean="$(printf '%s\n' "$out" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')"
-          pass="$(printf '%s\n' "$clean" | sed -n 's/^ *\([0-9][0-9]*\) pass$/\1/p' | tail -1)"
-          fail="$(printf '%s\n' "$clean" | sed -n 's/^ *\([0-9][0-9]*\) fail$/\1/p' | tail -1)"
-          skip="$(printf '%s\n' "$clean" | sed -n 's/^ *\([0-9][0-9]*\) skip$/\1/p' | tail -1)"
-          todo="$(printf '%s\n' "$clean" | sed -n 's/^ *\([0-9][0-9]*\) todo$/\1/p' | tail -1)"
-          : "${pass:=0}" "${fail:=0}" "${skip:=0}" "${todo:=0}"
-          total=$(( pass + skip ))
-          echo "parsed: pass=$pass fail=$fail skip=$skip todo=$todo total=$total expected=$TOTAL_EXPECTED rc=$rc"
-
-          # `fail` and `todo` used to go unparsed entirely, and that was worse
-          # than merely incomplete. `total` above is pass+skip, so a FAILING
-          # test doesn't produce a "wrong" total by itself — it just makes
-          # `total` come up SHORT, indistinguishable, arithmetically, from a
-          # probe that was never added or one whose file silently dropped out
-          # of collection (see the bun-filter note on the total check below).
-          # The guard's own message used to read "expected N container
-          # probes, N-3 were collected — update TOTAL_EXPECTED if probes were
-          # added", which is actively wrong advice when the real cause is
-          # three failures: it tells the reader to RAISE the constant to
-          # match the failure, papering over exactly the regression this job
-          # exists to catch. Checking fail and todo FIRST, before total is
-          # ever consulted, is what makes a failure get reported as a
-          # failure instead of as arithmetic drift.
-          if [ "$fail" -gt 0 ]; then
-            echo "::error::$fail container probe(s) FAILED — see the bun output printed above for which ones and why. This is a real test failure, not a total-count drift: do not raise TOTAL_EXPECTED to make this message go away."
-            exit 1
-          fi
-          if [ "$todo" -gt 0 ]; then
-            echo "::error::$todo container probe(s) are test.todo() — a written-but-not-implemented test. None of the four files this step runs use test.todo() today, so this firing means one was just added; treat it as a real gap, not an accepted skip, and either finish the test or remove test.todo()."
-            exit 1
-          fi
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::bun test exited $rc for a reason the fail/todo checks above did not explain (both parsed as 0). Treat this as a real failure — see the full output above for what bun actually reported."
-            exit 1
-          fi
-
-          # Identity, not arithmetic: confirm every name in
-          # EXPECTED_HOST_ADC_MINT_SKIPS appears in the junit report as a
-          # skip, by looking each one up directly, rather than trusting the
-          # aggregate skip COUNT to mean the right tests produced it. A probe
-          # elsewhere in these four files converting to `.skip`, paired with
-          # one of these four un-skipping (for instance because a runner
-          # somehow does have a host ADC), would leave `skip` at the same
-          # number while meaning something completely different — exactly
-          # the case a ceiling on count alone (the previous
-          # MAX_HOST_ADC_SKIPS: "2") could not detect.
-          missing=0
-          expected_skip_count=0
-          while IFS= read -r name; do
-            [ -z "$name" ] && continue
-            expected_skip_count=$((expected_skip_count + 1))
-            block="$(grep -A1 -F "name=\"$name\"" "$JUNIT_FILE" 2>/dev/null || true)"
-            if [ -z "$block" ]; then
-              echo "::error::expected host-ADC skip \"$name\" does not appear in the junit report at all. It may have been renamed or removed from adc.test.ts — confirm that before touching EXPECTED_HOST_ADC_MINT_SKIPS."
-              missing=1
-              continue
-            fi
-            if ! printf '%s' "$block" | grep -q '<skipped'; then
-              echo "::error::expected host-ADC skip \"$name\" RAN instead of skipping. That most likely means HOST_ADC_PRESENT is somehow true on this runner (a real host ADC file, which should not exist in CI), or its skipIf condition changed."
-              missing=1
-            fi
-          done <<< "$EXPECTED_HOST_ADC_MINT_SKIPS"
-          [ "$missing" -eq 0 ] || exit 1
-
-          if [ "$skip" -ne "$expected_skip_count" ]; then
-            echo "::error::$skip container probes skipped, but exactly $expected_skip_count host-ADC probes are pinned by name above, and all $expected_skip_count were individually confirmed present and skipped. The mismatch means an UNPINNED probe skipped too — find it in the output above; a skip ceiling on count alone would have let this through as long as the count still matched."
-            exit 1
-          fi
-
-          # The total check, last and on purpose: fail, todo, and the skip
-          # IDENTITY have all already been confirmed clean above, so if
-          # `total` still doesn't match TOTAL_EXPECTED, none of those explain
-          # it — a test dropped out of COLLECTION entirely, before it could
-          # even be counted as passing, failing, or skipping. The likely
-          # mechanism, measured directly against this job's own invocation
-          # shape: `bun test fileA fileB fileC fileD` treats each argument as
-          # an independent filter, and a filter that matches ZERO test files
-          # is silently dropped as long as at least one OTHER filter still
-          # matches something — no warning, exit code 0. Rename or delete any
-          # one of the four files this step lists and the other three still
-          # run fine; the only visible symptom is a lower `total` here. That
-          # is the entire reason this check exists, and it is the last thing
-          # standing between "the job is green" and "a whole file's worth of
-          # criteria silently stopped being tested".
-          if [ "$total" -ne "$TOTAL_EXPECTED" ]; then
-            echo "::error::expected $TOTAL_EXPECTED container probes (pass+skip), $total were collected. fail=0, todo=0, and the skip set matches the pinned host-ADC names exactly, so this is not a failure or an identity problem: a test dropped out of collection entirely, most likely because one of the four files above was renamed or deleted and its filter silently matched nothing (see the comment above this check). Confirm all four files still exist under these exact names before raising TOTAL_EXPECTED to match a lower number."
-            exit 1
-          fi
-
-          echo "ok: $total container probes accounted for (pass=$pass skip=$skip), fail=0, todo=0, and the skip set matches all $expected_skip_count pinned host-ADC names exactly."
+          # The two pin lists are kept SEPARATE above, and concatenated only
+          # here, because they are pinned for unrelated reasons — one needs an
+          # operator's Google login, the other an Apple-silicon inference
+          # server — and a reader deleting one should not have to disentangle
+          # it from the other. Blank lines from the block scalars are ignored
+          # by the guard; that is asserted in probe-guard.test.ts rather than
+          # assumed, because a miscount there would fail a CLEAN run.
+          JUNIT_FILE="${RUNNER_TEMP:?RUNNER_TEMP is not set by actions/runner}/pifleet-container-probes.junit.xml" \
+          EXPECTED_SKIPS="$(printf '%s\n%s\n' "$EXPECTED_HOST_ADC_MINT_SKIPS" "$EXPECTED_LIVE_OMLX_RELAY_SKIPS")" \
+            .github/scripts/probe-guard.sh \
+              test/integration/image.test.ts \
+              test/integration/verbgate.test.ts \
+              test/integration/egress.test.ts \
+              test/integration/adc.test.ts \
+              test/integration/relay.test.ts
+          # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
+          # It exercises the relay script against real sockets with no Docker
+          # and no gate, so it already runs in the fast `test` job on every
+          # push. Adding it here would buy no coverage and cost a second run
+          # inside the expensive job — the same doubling this step was
+          # collapsed to avoid.
