@@ -37,7 +37,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
-import { EXIT } from "../../src/contracts.ts";
+import { EXIT, type LedgerRecord } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { readRunWorktrees } from "../../src/run/state.ts";
@@ -65,6 +65,8 @@ interface Rig {
   /** The `run.repo` target, seeded with a root AGENTS.md hazard. */
   repo: string;
   configPath: string;
+  /** Where this rig's `gcloud` shim records every argv it was handed. */
+  gcloudCalls: string;
   env: Record<string, string>;
   /** Filled in once `up` succeeds, so afterAll can `down` it. */
   runId: string;
@@ -139,13 +141,24 @@ const SHIM_ACCOUNT = "wiring-shim-operator@example.test";
  * minting — so this is the whole surface the shim has to cover. Same loud
  * failure on anything else as the docker shim, for the same reason: a silent
  * stand-in would absorb a changed gcloud invocation instead of surfacing it.
+ *
+ * It also APPENDS every invocation's argv to `callLog`, one line each, before
+ * dispatching. ISC-48's load-bearing claim is a NEGATIVE — an impersonating
+ * run never asks the host who the operator is — and a subprocess that was
+ * never spawned leaves nothing in stdout, a ledger, or a run dir to assert on.
+ * The log is the only place its absence becomes evidence. Recording
+ * unconditionally, including on the unexpected-argv branch, makes an empty log
+ * mean "no gcloud call of ANY kind", which is strictly stronger than "no
+ * account read" and cannot be satisfied by a call this shim failed to classify.
  */
-async function writeGcloudShim(binDir: string): Promise<void> {
+async function writeGcloudShim(binDir: string, callLog: string): Promise<void> {
   const shim = join(binDir, "gcloud");
   await writeFile(
     shim,
     [
       "#!/bin/sh",
+      // `$*` excludes $0, so a line reads exactly `config get-value account`.
+      `printf '%s\\n' "$*" >> '${callLog}'`,
       'case "$1 $2 $3" in',
       '  "config get-value account")',
       `    echo "${SHIM_ACCOUNT}"`,
@@ -161,38 +174,106 @@ async function writeGcloudShim(binDir: string): Promise<void> {
   await chmod(shim, 0o755);
 }
 
+/**
+ * Every gcloud argv this rig's CLI ran, in order. An absent file is a genuine
+ * zero rather than a missing observation: `makeRig` installs the shim and
+ * points it at this path unconditionally, so "no file" can only mean "the shim
+ * never executed".
+ */
+async function readGcloudCalls(rig: Rig): Promise<string[]> {
+  const f = Bun.file(rig.gcloudCalls);
+  if (!(await f.exists())) return [];
+  return (await f.text()).split("\n").filter((l) => l !== "");
+}
+
+/**
+ * `up`'s per-worker grant lines, keyed by worker id. Keyed rather than
+ * filtered because ISC-49 is a claim about EVERY `cloud_access` worker, and a
+ * `find` for one id would pass just as happily on a run that printed a line
+ * for one worker and silently skipped the others.
+ */
+function credentialPlanLines(records: LedgerRecord[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const r of records) {
+    if (r.actor !== "cli-up" || r.event !== "credential_plan") continue;
+    out.set(r.worker ?? "(unattributed)", String(r.detail?.["plan"]));
+  }
+  return out;
+}
+
+/**
+ * Knobs for the fixture config. Every field is optional and every default
+ * reproduces the original single-worker, no-`cloud:`-block document, so a call
+ * site that asks for nothing gets exactly what it got before.
+ */
+interface FleetOptions {
+  cloudAccess?: boolean;
+  modelsAllowlist?: string[];
+  /** Role named by `eng-1`. A name absent from `roles:` is a config defect. */
+  workerRole?: string;
+  /** Extra `engineer:` role fields, written into its flow mapping. */
+  roleFields?: string[];
+  /** `cloud.kubeconfig`; omitted entirely when absent, as the schema default is null. */
+  kubeconfig?: string;
+  /**
+   * `cloud.impersonate_service_account`. RUN-GLOBAL in this schema, not
+   * per-role — which is why ISC-48 compares two separate `up` invocations
+   * rather than two roles in one document: there is no config that makes one
+   * worker impersonate while its neighbour does not.
+   */
+  impersonateServiceAccount?: string;
+  /** `cloud.quota_project`. */
+  quotaProject?: string;
+  /** `cloud.adc_mode`; omitted leaves the schema default (`token`). */
+  adcMode?: "token" | "file";
+  /**
+   * Workers beyond `eng-1`. A role name not yet in `roles:` is declared as an
+   * empty role; `cloudAccess` is written on the WORKER entry (legal —
+   * `WorkerEntrySchema` extends `RoleFieldsSchema`, and `resolveWorker` gives
+   * the entry precedence over its role), so each worker's grant is stated at
+   * the worker rather than inferred from whichever one declared the role first.
+   */
+  extraWorkers?: { id: string; role: string; cloudAccess?: boolean }[];
+  /**
+   * The ISC-53 native-tool-call gate, TRI-STATE on purpose.
+   *
+   *  - `false` — the key is written, explicitly OFF. Every test in this file
+   *    that is not about ISC-53 passes this, and passing it explicitly is the
+   *    point: the fixture STATES the gate's absence.
+   *  - `true` — written on. The ISC-53 tests pass this and point `llmBaseUrl`
+   *    at a stub they own.
+   *  - OMITTED — no key at all, which is what a real operator's fleet.yaml
+   *    looks like, and the only shape that exercises the SCHEMA DEFAULT.
+   */
+  requireNativeToolCalls?: boolean;
+  /** `llm.base_url`; only the ISC-53 tests set it, at their stub server. */
+  llmBaseUrl?: string;
+}
+
 /** Minimal valid fleet.yaml naming the shimmed network and the seeded repo. */
-function fleetYaml(
-  repo: string,
-  opts: {
-    cloudAccess?: boolean;
-    modelsAllowlist?: string[];
-    /** Role named by `eng-1`. A name absent from `roles:` is a config defect. */
-    workerRole?: string;
-    /** Extra `engineer:` role fields, written into its flow mapping. */
-    roleFields?: string[];
-    /** `cloud.kubeconfig`; omitted entirely when absent, as the schema default is null. */
-    kubeconfig?: string;
-    /**
-     * The ISC-53 native-tool-call gate, TRI-STATE on purpose.
-     *
-     *  - `false` — the key is written, explicitly OFF. Every test in this file
-     *    that is not about ISC-53 passes this, and passing it explicitly is the
-     *    point: the fixture STATES the gate's absence.
-     *  - `true` — written on. The ISC-53 tests pass this and point `llmBaseUrl`
-     *    at a stub they own.
-     *  - OMITTED — no key at all, which is what a real operator's fleet.yaml
-     *    looks like, and the only shape that exercises the SCHEMA DEFAULT.
-     */
-    requireNativeToolCalls?: boolean;
-    /** `llm.base_url`; only the ISC-53 tests set it, at their stub server. */
-    llmBaseUrl?: string;
-  } = {},
-): string {
+function fleetYaml(repo: string, opts: FleetOptions = {}): string {
   const roleFields = [
     ...(opts.cloudAccess === true ? ["cloud_access: true"] : []),
     ...(opts.roleFields ?? []),
   ];
+  /**
+   * `cloud:` is emitted only when some field asks for it. `CloudSchema` is
+   * `prefault({})`, so an absent block and an empty one are the same document
+   * — but writing the key unconditionally would change the fixture every other
+   * test in this file loads, for no gain.
+   */
+  const cloudFields = [
+    ...(opts.kubeconfig === undefined ? [] : [`  kubeconfig: ${opts.kubeconfig}`]),
+    ...(opts.adcMode === undefined ? [] : [`  adc_mode: ${opts.adcMode}`]),
+    ...(opts.quotaProject === undefined ? [] : [`  quota_project: ${opts.quotaProject}`]),
+    ...(opts.impersonateServiceAccount === undefined
+      ? []
+      : [`  impersonate_service_account: ${opts.impersonateServiceAccount}`]),
+  ];
+  const extraWorkers = opts.extraWorkers ?? [];
+  // Distinct role names the extra workers introduce; `engineer` is already
+  // declared above with the fixture's own fields.
+  const extraRoles = [...new Set(extraWorkers.map((w) => w.role))].filter((r) => r !== "engineer");
   return [
     "version: 2",
     "name: up-wiring",
@@ -203,7 +284,7 @@ function fleetYaml(
     `  repo: ${repo}`,
     "  budget:",
     "    tokens_ceiling: 1000000",
-    ...(opts.kubeconfig === undefined ? [] : ["cloud:", `  kubeconfig: ${opts.kubeconfig}`]),
+    ...(cloudFields.length === 0 ? [] : ["cloud:", ...cloudFields]),
     "llm:",
     "  model: wiring-test-model",
     ...(opts.llmBaseUrl === undefined ? [] : [`  base_url: ${opts.llmBaseUrl}`]),
@@ -243,13 +324,19 @@ function fleetYaml(
       : [`  models_allowlist: [${opts.modelsAllowlist.join(", ")}]`]),
     "roles:",
     `  engineer: {${roleFields.join(", ")}}`,
+    ...extraRoles.map((r) => `  ${r}: {}`),
     "workers:",
     `  - {id: eng-1, role: ${opts.workerRole ?? "engineer"}}`,
+    ...extraWorkers.map(
+      (w) =>
+        `  - {id: ${w.id}, role: ${w.role}` +
+        `${w.cloudAccess === undefined ? "" : `, cloud_access: ${w.cloudAccess}`}}`,
+    ),
     "",
   ].join("\n");
 }
 
-async function makeRig(opts: { cloudAccess?: boolean } = {}): Promise<Rig> {
+async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
   const base = await mkdtemp(join(tmpdir(), "pifleet-wiring-"));
   const root = join(base, "runs");
   const repo = join(base, "repo");
@@ -261,7 +348,13 @@ async function makeRig(opts: { cloudAccess?: boolean } = {}): Promise<Rig> {
   // Both shims always: only a cloud_access run invokes gcloud, but a shim
   // that is present regardless means any UNEXPECTED gcloud call from another
   // path fails loudly instead of reaching the developer's real gcloud.
-  await writeGcloudShim(bin);
+  //
+  // The call log is per-rig — one scratch dir per `makeRig`, and `makeRig` is
+  // called once per fixture — so a zero read by one test can never be another
+  // test's run having not written yet, nor another test's calls be mistaken
+  // for this one's.
+  const gcloudCalls = join(base, "gcloud-calls.log");
+  await writeGcloudShim(bin, gcloudCalls);
   // The seeded hazard. Root-level AGENTS.md is the instruction-file class the
   // scanner quarantines by rename; one is enough to make the wiring visible.
   await writeFile(join(repo, "AGENTS.md"), "# MANDATORY fixture instructions\n");
@@ -287,6 +380,7 @@ async function makeRig(opts: { cloudAccess?: boolean } = {}): Promise<Rig> {
     root,
     repo,
     configPath,
+    gcloudCalls,
     runId: "",
     env: {
       PIFLEET_RUNS_DIR: root,
@@ -1228,8 +1322,257 @@ describe("the grant line names the real ADC identity (ISC-251)", () => {
       const line = String(plan!.detail?.["plan"]);
       expect(line).toContain(SHIM_ACCOUNT);
       expect(line).not.toContain("(adc user)");
+      /**
+       * …and the mode this fixture never mentions is named as `token`.
+       *
+       * `adc_mode` is absent from this config, so `token` here is the SCHEMA
+       * DEFAULT arriving intact through `planCredential` — the half of ISC-49's
+       * "prints the ADC mode" that an explicit `adc_mode:` fixture cannot
+       * check, because an explicit value would still print if the default were
+       * broken. The ISC-49 case below sets `file` and asserts the same field;
+       * between them both modes are exercised, which is what makes the line a
+       * report of the mode rather than a constant that happens to read right.
+       */
+      expect(line).toContain("token mode");
     },
     90_000,
+  );
+});
+
+/**
+ * ISC-48 — "with `impersonate_service_account` set, the token's identity is
+ * the SA, not the launching user's account."
+ *
+ * Two claims live in that sentence and only one of them is positive. The
+ * positive one — the grant line names the SA — is cheap, and a wrong
+ * implementation could still satisfy it by naming the SA while ALSO reading
+ * and minting for the operator. The negative one is the security property:
+ * "not the launching user's account" means the launching user's account is not
+ * merely unprinted but never consulted, because a run that resolves the
+ * operator's identity has already reached for the credential the SA exists to
+ * avoid, and would mint against it the moment Phase 1's planning became a mint.
+ *
+ * `up` gets that right by construction — `describeCredentialPlan` reads
+ * `plan.impersonateServiceAccount` directly, and the `resolveIdentity` call is
+ * guarded on some plan having NO impersonation — but "by construction" is
+ * exactly the kind of correctness that a later refactor drops without a single
+ * test going red. Mutating that guard to `plans.some((p) => p.plan.kind ===
+ * "inject")` leaves every grant line byte-identical, because the resolved
+ * account is then computed and thrown away. Nothing downstream changes. Only
+ * the subprocess count does.
+ *
+ * So the assertion is on the subprocess count, and the control half is in the
+ * same test on purpose: an empty call log proves nothing unless the same shim,
+ * written by the same function, is shown recording a call when one is made.
+ * Without it a typo in the log path would pass this test forever.
+ */
+describe("impersonation replaces the launching user's identity outright (ISC-48)", () => {
+  /** Plausibly shaped and obviously synthetic; no such project exists. */
+  const SERVICE_ACCOUNT = "deploy-bot@pifleet-test.iam.gserviceaccount.com";
+
+  test(
+    "every worker's grant names the SA, and the operator's own account is never read",
+    async () => {
+      // Impersonating: BOTH workers have cloud access, and `cloud:` is
+      // run-global, so this is a run in which no worker's plan can want the
+      // ADC user — the shape under which the guard must skip resolution.
+      const impersonating = await makeRig({
+        cloudAccess: true,
+        impersonateServiceAccount: SERVICE_ACCOUNT,
+        extraWorkers: [{ id: "eng-2", role: "engineer" }],
+      });
+      const up = await runCli(impersonating, [
+        "up",
+        "--config",
+        impersonating.configPath,
+        "--workers",
+        "eng-1,eng-2",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      impersonating.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      const merged = await mergeLedger(runPaths(impersonating.runId, impersonating.root));
+      expect(merged.errors).toEqual([]);
+      const lines = credentialPlanLines(merged.records);
+      // Every worker got a line — not just the one an assertion happened to ask
+      // about.
+      expect([...lines.keys()].sort()).toEqual(["eng-1", "eng-2"]);
+      for (const [worker, line] of lines) {
+        expect(`${worker}: ${line}`).toContain(SERVICE_ACCOUNT);
+        // The identity is the SA INSTEAD OF the operator's, not alongside it.
+        expect(line).not.toContain(SHIM_ACCOUNT);
+        // …and not the placeholder either, which would be a different way of
+        // failing to name the SA.
+        expect(line).not.toContain("(adc user)");
+      }
+
+      // THE assertion. Not "the account is absent from the line" — that
+      // survives the mutation — but "nothing ever asked the host for it".
+      expect(await readGcloudCalls(impersonating)).toEqual([]);
+
+      // Control: the same shim, the same fixture, impersonation removed. This
+      // is what makes the zero above evidence rather than an artefact of a log
+      // nothing could ever write to.
+      const asOperator = await makeRig({ cloudAccess: true });
+      const plainUp = await runCli(asOperator, [
+        "up",
+        "--config",
+        asOperator.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(plainUp.code).toBe(EXIT.SUCCESS);
+      asOperator.runId = (JSON.parse(plainUp.stdout.trim()) as { run_id: string }).run_id;
+      // Exactly one call: the log is live, AND the resolution is memoized
+      // across the run rather than re-shelled per worker.
+      expect(await readGcloudCalls(asOperator)).toEqual(["config get-value account"]);
+    },
+    120_000,
+  );
+});
+
+/**
+ * ISC-49 — "`up` prints the granted identity, project, and ADC mode for every
+ * `cloud_access` worker."
+ *
+ * Three nouns and a quantifier, and the quantifier is the part that fails
+ * quietly. `describeCredentialPlan` assembles all three into one line, so a
+ * test that inspects a single worker is really only testing the formatter that
+ * `adc.test.ts` already owns. What `up` adds is the loop: one line PER NAMED
+ * WORKER, including the ones that got nothing. A regression that planned only
+ * the first worker, or only the cloud ones, or resolved a per-worker identity
+ * and let a later worker overwrite an earlier one's line, leaves the formatter
+ * untouched and every unit test green.
+ *
+ * So: three workers over two roles, and every line is read back by id. The
+ * `cloud_access: false` worker is not a control decoration — SRD §5.8 makes
+ * "this worker has no credential" a statement the run is required to make, so
+ * its line is as load-bearing as the other two, and it must not carry an
+ * identity, a project, or a mode it was never granted.
+ *
+ * `adc_mode: file` deliberately, against the schema default: the ISC-251 case
+ * above pins `token` arriving from the default, and a suite that only ever ran
+ * the default could not tell "prints the mode" from "prints the word token".
+ */
+describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
+  const QUOTA_PROJECT = "pifleet-test-project-49";
+
+  test(
+    "identity, project and mode appear per cloud worker — and none of them for a worker without cloud access",
+    async () => {
+      const rig = await makeRig({
+        // `engineer` carries the grant; `eng-1` and `eng-2` inherit it.
+        cloudAccess: true,
+        adcMode: "file",
+        quotaProject: QUOTA_PROJECT,
+        extraWorkers: [
+          { id: "eng-2", role: "engineer" },
+          // A second role with no grant at all, and the denial restated on the
+          // worker so the fixture says what it means rather than relying on the
+          // reader knowing `cloud_access` defaults to false.
+          { id: "quiet-1", role: "scribe", cloudAccess: false },
+        ],
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,eng-2,quiet-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      const { records, errors } = await mergeLedger(runPaths(rig.runId, rig.root));
+      expect(errors).toEqual([]);
+      const lines = credentialPlanLines(records);
+      // EVERY named worker, not merely the cloud ones: the §5.8 requirement is
+      // that the grant is never silent, and silence about a worker that got
+      // nothing is still silence.
+      expect([...lines.keys()].sort()).toEqual(["eng-1", "eng-2", "quiet-1"]);
+
+      for (const workerId of ["eng-1", "eng-2"]) {
+        const line = lines.get(workerId)!;
+        // Identity — the account the gcloud shim reported, not the placeholder.
+        expect(line).toContain(SHIM_ACCOUNT);
+        expect(line).not.toContain("(adc user)");
+        // Project — the distinctive fixture value, so a hard-coded or inherited
+        // project cannot pass.
+        expect(line).toContain(QUOTA_PROJECT);
+        expect(line).not.toContain("(no quota project)");
+        // Mode — the configured `file`, NOT the schema default the sibling test
+        // pins. A line that ignored `cloud.adc_mode` would say `token mode`.
+        expect(line).toContain("file mode");
+        expect(line).not.toContain("token mode");
+      }
+
+      /**
+       * The worker that was granted nothing says so, and says nothing else. If
+       * this line ever carried the identity or the project, an operator
+       * auditing the run would read a grant into a worker that has none — the
+       * precise inverse of the failure §5.8's "never silent" rule exists to
+       * prevent, and harder to notice, because it reads like a normal line.
+       */
+      const quiet = lines.get("quiet-1")!;
+      expect(quiet).toContain("no credential");
+      expect(quiet).toContain("cloud_access: false");
+      expect(quiet).not.toContain(SHIM_ACCOUNT);
+      expect(quiet).not.toContain(QUOTA_PROJECT);
+      expect(quiet).not.toContain("file mode");
+      expect(quiet).not.toContain("token mode");
+
+      // And the identity really was resolved once for the whole run, not once
+      // per cloud worker — two cloud workers, one subprocess.
+      expect(await readGcloudCalls(rig)).toEqual(["config get-value account"]);
+    },
+    120_000,
+  );
+
+  /**
+   * …and the same lines reach the OPERATOR, not only the ledger.
+   *
+   * §5.8 says `pifleet up` PRINTS the grant. The ledger append and the
+   * `process.stdout.write` are two separate statements guarded by
+   * `opts.json !== true`, so deleting the print leaves every ledger assertion
+   * above green while the human-facing half — the only half an operator
+   * running `up` by hand ever sees — is gone.
+   */
+  test(
+    "without --json the grant lines are printed on stdout, one per worker",
+    async () => {
+      const rig = await makeRig({
+        cloudAccess: true,
+        adcMode: "file",
+        quotaProject: QUOTA_PROJECT,
+        extraWorkers: [{ id: "quiet-1", role: "scribe", cloudAccess: false }],
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,quiet-1",
+        "--backend",
+        "headless",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      // Recovered from disk rather than stdout, because this run prints prose.
+      const [runId] = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
+      rig.runId = runId ?? "";
+
+      expect(up.stdout).toContain(`eng-1: google: file mode as ${SHIM_ACCOUNT}, project ${QUOTA_PROJECT}`);
+      expect(up.stdout).toContain("quiet-1: google: no credential (cloud_access: false)");
+    },
+    120_000,
   );
 });
 

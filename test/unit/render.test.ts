@@ -34,6 +34,7 @@ import {
   type ImageInputs,
 } from "../../src/container/image.ts";
 import type { Exec } from "../../src/container/run.ts";
+import { HOST_GCLOUD_CONFIG_DIR } from "../../src/security/adc.ts";
 import {
   roleSkillsDir,
   runPaths,
@@ -414,6 +415,48 @@ describe("docker argv (SRD §5.6)", () => {
     expect(eng.docker).toContain(`${kubeconfig}:/home/pi/.kube/config:ro`);
     const rev = await renderWorker(loaded, "rev-1"); // no cloud_access
     expect(rev.docker.some((a) => a.includes("/.kube/"))).toBe(false);
+  });
+
+  /**
+   * ISC-44 — the host `~/.config/gcloud` directory (the FULL multi-account
+   * gcloud auth store, `credentials.db` and all — SRD §5.8) must never appear
+   * as a bind-mount source, for any worker, in either `adc_mode`.
+   *
+   * `renderWorker` is the exact function `up` calls to build the argv it
+   * launches (ISC-188), so this is a statement about production code, not
+   * about a hand-rolled re-implementation of the mount table. Checked against
+   * `HOST_GCLOUD_CONFIG_DIR` — `adc.ts`'s own exported constant — rather than
+   * a second `join(homedir(), ".config", "gcloud")` here, so the two
+   * definitions cannot drift apart.
+   *
+   * Mutation check: temporarily adding
+   * `argv.push("-v", `${HOST_GCLOUD_CONFIG_DIR}:/home/pi/.config/gcloud`)` to
+   * `buildDockerArgv` (§5.6's mount table) turns this red — see the ISA
+   * close-out for the confirmed run.
+   */
+  test("no rendered docker argv ever mounts the host gcloud config directory (ISC-44)", async () => {
+    const { loaded } = await fixture((doc) => {
+      doc["cloud"] = { adc: true, adc_mode: "file", kubeconfig: "./kube/filtered.yaml" };
+      (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+    });
+    for (const id of ["eng-1", "rev-1"]) {
+      // eng-1: cloud_access true, adc_mode file (the mode most likely to grow
+      // a credential mount). rev-1: cloud_access false — the other shape ISC-44
+      // must hold for, since a role that gets no plan at all must still never
+      // acquire this particular mount by accident.
+      const r = await renderWorker(loaded, id);
+      for (const a of r.docker) {
+        expect(a).not.toContain(HOST_GCLOUD_CONFIG_DIR);
+      }
+      // Explicitly on the `-v` SOURCE half of every bind mount, matching the
+      // ISC's literal wording ("mount list", i.e. `docker inspect .Mounts`) —
+      // not merely "the string never appears anywhere in argv", which a
+      // future `--env` reference naming the path in prose would also satisfy
+      // without actually mounting anything.
+      const sources = runStateHostPaths(r.docker);
+      expect(sources).not.toContain(HOST_GCLOUD_CONFIG_DIR);
+      for (const s of sources) expect(s.startsWith(HOST_GCLOUD_CONFIG_DIR)).toBe(false);
+    }
   });
 
   test("pi argv equals the docker argv tail after the image", async () => {

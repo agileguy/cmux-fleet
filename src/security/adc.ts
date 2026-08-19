@@ -29,6 +29,8 @@
  * refreshable, and the env-file in the run dir never holds a secret.
  */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   CredentialInjectionSchema,
   type AdcMode,
@@ -55,6 +57,22 @@ export const TOKEN_FILE = `${TOKEN_DIR}/access-token`;
 
 /** File-mode mount point for the ADC file (§5.8) — bind-mounted at run, ro. */
 export const ADC_FILE_PATH = "/creds/adc.json";
+
+/**
+ * The host directory that must NEVER cross the container boundary (§5.8,
+ * ISC-44) — `credentials.db`, `legacy_credentials/`, `access_tokens.db`: the
+ * full gcloud auth store for every account the operator has logged in, which
+ * is strictly more powerful than ADC itself. `file` mode mounts exactly one
+ * file OUT of this directory (`HOST_ADC_FILE`, below); `token` mode mounts
+ * nothing here at all. A single exported constant so "never mounted" has one
+ * definition every test and every future mount-table change reads from,
+ * rather than each call site re-deriving `~/.config/gcloud` and one of them
+ * drifting.
+ */
+export const HOST_GCLOUD_CONFIG_DIR = join(homedir(), ".config", "gcloud");
+
+/** The one file `file` mode is allowed to read out of `HOST_GCLOUD_CONFIG_DIR`. */
+export const HOST_ADC_FILE = join(HOST_GCLOUD_CONFIG_DIR, "application_default_credentials.json");
 
 /**
  * Measured TTL of a user access token (§5.8: `expires_in: 3599`). Used ONLY
