@@ -160,16 +160,23 @@ import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
  *     that genuinely wants the Docker host from inside the bridge must use the
  *     gateway address (SRD §12.8 measures it as reachable), never this name —
  *     which was already true before this change.
- *  2. **A synonym would misroute the HOST-side probe, silently.**
- *     `model-probe.ts:hostFacingBaseUrl` rewrites exactly this literal to
- *     `localhost` so `up`/`doctor` can probe from the host. A second accepted
- *     spelling that that function does not know about would skip the rewrite
- *     and probe a name the host cannot resolve — a new quiet failure, which is
- *     the one thing this subsystem exists to refuse.
+ *  2. **NO LONGER TRUE — kept because it dated the decision, not to justify
+ *     it now.** When this deferral was taken,
+ *     `model-probe.ts:hostFacingBaseUrl` rewrote exactly this literal to
+ *     `localhost` so `up`/`doctor` could probe from the host, and a second
+ *     accepted spelling that that function did not know about would have
+ *     skipped the rewrite and probed a name the host cannot resolve. ISC-260
+ *     then DELETED that helper: the `up` probe runs inside the egress network
+ *     and dials `llm.base_url` verbatim, exactly as a worker does, so no
+ *     rewrite keyed to this literal survives. `doctor` keeps a host vantage on
+ *     purpose and labels it (`"vantage": "host"`), which is a reporting choice
+ *     rather than a dependency on this name.
  *
- * So the overload is ACCEPTED and stated in SRD §5.9 rather than papered over.
- * The rename is real work across four consumers (`models.json`, `llm.base_url`,
- * `doctor`, `docker/entrypoint.sh`) and belongs in its own change.
+ * So the overload is ACCEPTED and stated in SRD §5.9 rather than papered over,
+ * on reason 1 alone. Reason 2's removal makes the rename CHEAPER than when it
+ * was deferred, not more urgent — the remaining cost is the rename itself
+ * across `models.json`, `llm.base_url`, `doctor` and `docker/entrypoint.sh`,
+ * which belongs in its own change (ISC-264).
  */
 export const RELAY_LISTEN_ALIAS = "host.docker.internal";
 
