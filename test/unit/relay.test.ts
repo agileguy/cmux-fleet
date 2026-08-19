@@ -183,7 +183,7 @@ describe("relayRunArgv", () => {
     //                              no commit in this repo. This byte-for-byte
     //                              comparison is what stops the digest being
     //                              quietly dropped again.
-    expect(relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.js")).toEqual([
+    expect(relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.cjs")).toEqual([
       "run",
       "-d",
       "--name",
@@ -214,7 +214,7 @@ describe("relayRunArgv", () => {
       "--label",
       "pifleet.component=egress-relay",
       "-v",
-      "/repo/docker/egress-relay.js:/relay/egress-relay.js:ro",
+      "/repo/docker/egress-relay.cjs:/relay/egress-relay.cjs:ro",
       "-e",
       'PIFLEET_RELAY_TARGETS=[{"listenPort":8000,"host":"host.docker.internal","port":8000,"name":"omlx"}]',
       "--entrypoint",
@@ -225,7 +225,7 @@ describe("relayRunArgv", () => {
   });
 
   test("an empty target list is refused — a relay that forwards nothing is a lie", () => {
-    expect(() => relayRunArgv("relay-x", "uplink-x", [], "/repo/docker/egress-relay.js")).toThrow(
+    expect(() => relayRunArgv("relay-x", "uplink-x", [], "/repo/docker/egress-relay.cjs")).toThrow(
       /target/,
     );
   });

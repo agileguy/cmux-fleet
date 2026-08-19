@@ -156,7 +156,7 @@ export const RELAY_DIAL_HOST = "host.docker.internal";
  *
  * The relay must not depend on `pifleet image build` having run — `up` would
  * then refuse to start over an unrelated image problem — and it needs nothing
- * the worker image adds. `docker/egress-relay.js` is dependency-free Node for
+ * the worker image adds. `docker/egress-relay.cjs` is dependency-free Node for
  * the same reason.
  *
  * The digest is not decoration. This is the ONE container bridging the
@@ -176,8 +176,24 @@ export const RELAY_DIAL_HOST = "host.docker.internal";
 export const RELAY_IMAGE =
   "node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03";
 
-/** Where the bind-mounted script lands inside the container. */
-export const RELAY_SCRIPT_CONTAINER_PATH = "/relay/egress-relay.js";
+/**
+ * Where the bind-mounted script lands inside the container.
+ *
+ * The `.cjs` EXTENSION IS LOAD-BEARING — do not "tidy" it back to `.js`. This
+ * repo's `package.json` declares `"type": "module"`, so a `.js` file anywhere
+ * in the checkout is treated as an ES module and the script's `require()`
+ * calls die with `ReferenceError: require is not defined in ES module scope`.
+ *
+ * It worked in the container regardless, and that is exactly what made it
+ * dangerous: the file is mounted ALONE at `/relay/`, with no `package.json`
+ * beside it, so Node there falls back to CommonJS. The script was correct only
+ * by virtue of where it was mounted — running `node docker/egress-relay.js` on
+ * the host to debug it failed instantly, and no amount of exercising the
+ * Docker path would ever have revealed that. Caught by
+ * `test/integration/relay-script.test.ts`, which runs the script on the host.
+ * `.cjs` is CommonJS in both places, by definition rather than by accident.
+ */
+export const RELAY_SCRIPT_CONTAINER_PATH = "/relay/egress-relay.cjs";
 
 /** One forward: accept on `listenPort`, connect to `host:port`. */
 export interface RelayTarget {
@@ -395,7 +411,7 @@ export function relayRunArgv(
   assertDockerName("container", containerName);
   assertDockerName("network", uplinkNetwork);
   if (targets.length === 0) {
-    // A relay with no targets exits 1 immediately (see docker/egress-relay.js).
+    // A relay with no targets exits 1 immediately (see docker/egress-relay.cjs).
     // Refusing here turns "the fleet has no model server" into a config error
     // at `up` rather than a container that quietly is not there.
     throw new Error("relay: refusing to start a relay with no forwarding target");
@@ -487,7 +503,7 @@ export function relayRemoveArgv(containerName: string): string[] {
 
 /** Absolute path to the relay script in this checkout, resolved from module location. */
 export function relayScriptPath(): string {
-  return join(repoRoot(), "docker", "egress-relay.js");
+  return join(repoRoot(), "docker", "egress-relay.cjs");
 }
 
 /**

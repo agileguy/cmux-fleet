@@ -1,5 +1,5 @@
 /**
- * `docker/egress-relay.js` itself, against real sockets (S1, S2, S9, S10).
+ * `docker/egress-relay.cjs` itself, against real sockets (S1, S2, S9, S10).
  *
  * NO DOCKER. The relay script is dependency-free Node and its interesting
  * properties are properties of TCP, not of containers — so they can be
@@ -23,7 +23,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, connect, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 
-const SCRIPT = join(import.meta.dir, "..", "..", "docker", "egress-relay.js");
+const SCRIPT = join(import.meta.dir, "..", "..", "docker", "egress-relay.cjs");
 
 interface Upstream {
   server: Server;
@@ -129,7 +129,7 @@ async function once(sock: Socket, event: string, ms = 5_000): Promise<unknown> {
   });
 }
 
-describe("egress-relay.js — forwarding", () => {
+describe("egress-relay.cjs — forwarding", () => {
   test("forwards a request and its response", async () => {
     const up = await startUpstream();
     upstreams.push(up);
@@ -189,7 +189,7 @@ describe("egress-relay.js — forwarding", () => {
   });
 });
 
-describe("egress-relay.js — S1: an idle client costs the upstream nothing", () => {
+describe("egress-relay.cjs — S1: an idle client costs the upstream nothing", () => {
   test("connections that send no bytes do NOT dial the upstream", async () => {
     /**
      * The measurement this replaces: 300 idle connections, zero bytes sent,
@@ -241,7 +241,7 @@ describe("egress-relay.js — S1: an idle client costs the upstream nothing", ()
   });
 });
 
-describe("egress-relay.js — S10: a client FIN is forwarded, not turned into a kill", () => {
+describe("egress-relay.cjs — S10: a client FIN is forwarded, not turned into a kill", () => {
   /**
    * WHAT IS ASSERTED, AND WHY IT IS ASSERTED FROM THE UPSTREAM SIDE.
    *
@@ -275,7 +275,7 @@ describe("egress-relay.js — S10: a client FIN is forwarded, not turned into a 
    * exactly the vacuous-pass shape this whole review round exists to delete.
    *
    * So: `allowHalfOpen` and the explicit end-forwarding are IMPLEMENTED and
-   * argued for in `docker/egress-relay.js`, and they are NOT covered by a test
+   * argued for in `docker/egress-relay.cjs`, and they are NOT covered by a test
    * that would fail if someone removed them. Proving the real consequence — a
    * response written after the client's half-close still reaches the client —
    * needs a client that half-closes and keeps reading, and a raw Node socket
@@ -308,7 +308,7 @@ describe("egress-relay.js — S10: a client FIN is forwarded, not turned into a 
   });
 });
 
-describe("egress-relay.js — S9: ports are range-checked, not just typed", () => {
+describe("egress-relay.cjs — S9: ports are range-checked, not just typed", () => {
   const cases: Array<[string, unknown]> = [
     ["zero would listen(0) and bind a RANDOM port", 0],
     ["negative", -1],
@@ -334,7 +334,7 @@ describe("egress-relay.js — S9: ports are range-checked, not just typed", () =
   });
 });
 
-describe("egress-relay.js — S2: only a LISTEN failure is fatal", () => {
+describe("egress-relay.cjs — S2: only a LISTEN failure is fatal", () => {
   test("a relay whose port is already held exits non-zero", async () => {
     // The half that must stay fatal: a relay that cannot bind has nothing to
     // offer, and `ensureEgressRelay` depends on it dying so that "started"

@@ -204,6 +204,14 @@ All notable changes to this project are documented here.
   (`pause()` before `once("data")` never fires), and an incomplete half-close fix —
   `allowHalfOpen` must be set on **both** legs, or Node ends the writable side on FIN and tears the
   socket down before any handler can forward it.
+- **The relay script was only valid CommonJS because of where it was mounted.** `package.json`
+  declares `"type": "module"`, so `docker/egress-relay.js` was an ES module inside the checkout and
+  its `require()` calls threw `ReferenceError: require is not defined in ES module scope` the
+  moment anything ran it on the host. It worked in the container purely because the file is
+  mounted alone at `/relay/` with no `package.json` beside it, so Node fell back to CommonJS —
+  meaning the script's correctness depended on its mount location, and no amount of exercising the
+  Docker path could have surfaced it. Renamed to `docker/egress-relay.cjs`, which is CommonJS in
+  both places by definition. Found by the new host-side suite on its first CI run.
 - **The only test proving crash-recoverability of atomic writes was stochastic** — it
   killed a writer process ~150ms into a loop, proving one of five syscall boundaries at
   random and never saying which. Replaced with deterministic per-boundary tests
