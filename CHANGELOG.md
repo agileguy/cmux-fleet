@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **A CI-executable guard test was failing on the clock's precision rather than on the property it
+  defends (ISC-267).** `doctor-omlx.test.ts` asserted a measured latency against the delay its stub
+  **requested** (`await Bun.sleep(40)`). A sleep is a request to be woken no earlier than N, not a
+  guarantee a caller can assert on, and it came in at 39 on a GitHub runner — a run that was
+  otherwise 374 pass / 1 fail. This is NOT the load-sensitivity of ISC-266: load makes a measurement
+  take *longer*; missing a floor by 1ms is the opposite signature. Measured 400 trials on
+  macOS/bun 1.3.11, `Bun.sleep(40)` never resumed early (min 40.032ms), so the defect does not
+  reproduce on the maintainer's machine at all — which is why the fix stops depending on timer
+  precision instead of tuning a margin. The stub now holds via a deadline loop the clock has to
+  agree with, and the floor is the delay the stub **observed itself taking**. That cannot be flaky
+  by construction: the client's interval strictly contains the handler's hold, and `Math.round` is
+  monotonic. **Fixing it exposed a real hole**: the assertion's comment claimed a stamped-in
+  constant would fail, and it would not — `completionLatencyMs = 42` cleared a 40ms floor and left
+  the suite green. A floor is about magnitude; "tracks elapsed time", which the test is named for,
+  is about variation. The probe now runs twice against different delays and requires the figure to
+  move, so no constant satisfies both floors. Mutation-verified: `42` fails (it passed before),
+  `5000` fails, a clock read twice fails.
+
 ### Security
 - **The mandatory native-tool-call gate was certifying a network path no worker uses.** `up`
   probed oMLX from the HOST, through a helper (`hostFacingBaseUrl`) whose only job was rewriting

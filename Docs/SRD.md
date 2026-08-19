@@ -1243,7 +1243,15 @@ Post-run, `pifleet` asserts: no ref outside `fleet/<run-id>/*` moved; `git -C <m
 >
 > Still not a fixed set: anything the host binds **in its own namespace**, or a sibling binds at all, joins it with no code change. The narrowing is real but modest — it removes published container ports from the residual, and nothing else.
 >
-> **What this does NOT claim.** The enumeration is now taken against the post-ISC-259 code (all eight relay probes pass against it), but it does not exercise a live LAN upstream: the `{one LAN host:port}` term is asserted by `test/unit/relay.test.ts`'s mutation of the `decide()` gate, not by a packet sent to a LAN peer through a running relay. #20's "not re-measured here" note is therefore only partly discharged — the first three terms are enumerated, the fourth is not. Separately, these probes have not yet been observed on a GitHub runner; they are wired into the `container` job and pinned by the guard's total, so a failure there is a red build rather than a silent green, but every measurement quoted here is from Colima/macOS, where the host's listener set is materially smaller than a native-Linux runner's.
+> **What this does NOT claim.** The enumeration is now taken against the post-ISC-259 code (all eight relay probes pass against it), but it does not exercise a live LAN upstream: the `{one LAN host:port}` term is asserted by `test/unit/relay.test.ts`'s mutation of the `decide()` gate, not by a packet sent to a LAN peer through a running relay. #20's "not re-measured here" note is therefore only partly discharged — the first three terms are enumerated, the fourth is not. Separately, the probes have NOW been observed on a native-Linux GitHub runner and pass there: `total=79 expected=79`, 73 pass / 6 skip / 0 fail, all six pinned skips matched by name. **That run also falsifies a claim made in the erratum above.** It states that "on native-Linux Docker (where CI runs) the host's listener set is materially larger than Colima's". Measured on the runner, the shape is identical to Colima's — `22, 53` plus the two beacons this test plants, with the published one again unreachable from the deny-all bridge:
+>
+> ```
+> kernel socket table                             : 22, 53, 39440, 40440
+> ordinary bridge (172.19.0.1), full-range scan   : 22,     39440, 40440
+> deny-all bridge (172.18.0.1), full-range scan   : 22,            40440
+> ```
+>
+> So the residual is not materially worse on a runner than on the maintainer's machine; that sentence was reasoning, not measurement, and is corrected here. The enumeration is roughly 2.2x slower there — 154.9s and 153.8s for the two probes against ~70s locally — comfortably inside the 600s per-test budget those timeouts were sized for.
 
 ### 12.9 No AI attribution
 
