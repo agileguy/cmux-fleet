@@ -346,6 +346,26 @@ All notable changes to this project are documented here.
   the third names a token that nothing in the CLI ever mints.
 
 ### Added
+- **An egress relay, so the deny-all bridge stops denying the fleet its own model server.**
+  Workers sit on a Docker `--internal` bridge with no default route and no NAT, which is
+  deny-all in hardware — and denies `host.docker.internal:8000` along with everything else,
+  so every worker started healthy and could accomplish nothing. `src/security/relay.ts`
+  stands up the single container that reopens exactly one destination: it runs with a
+  dedicated NON-internal uplink network as its primary network so `--add-host` has something
+  to route through, then attaches to the internal bridge under the DNS alias
+  `host.docker.internal`, so a worker's baked-in `llm.base_url` resolves to it with no
+  per-worker flags at all. Measured live rather than read from documentation: a container on
+  an internal network cannot reach the host even WITH `--add-host` (internal genuinely
+  removes the route), and Docker's automatic `/etc/hosts` injection was not dependable on
+  this project's Colima setup, so the alias and the `--add-host` are both always explicit.
+  The relay runs `--read-only`, `--cap-drop ALL`, `no-new-privileges`, and as uid `node`,
+  because it listens on a bridge every worker can reach. `up` ensures it immediately after
+  the network and records `egress_relay_ready`; failure is `BACKEND_UNAVAILABLE`.
+- **The relay forwards oMLX and nothing else, on purpose.** `egress.google_hosts` remains a
+  policy-level allow rule with no live traffic path — a Docker network alias cannot be a
+  wildcard, so routing `*.googleapis.com` needs an HTTP CONNECT proxy or SNI passthrough,
+  neither of which is built. A `cloud_access` worker on the internal bridge consequently
+  cannot reach Google at all. Tracked as ISC-253/ISC-57 rather than implied away.
 - **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
   allowlist refuses to start, checked for every worker before any of them launch.
 - **Exit code `8` (internal error) documented in the README's exit ladder.**
