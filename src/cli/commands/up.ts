@@ -35,6 +35,7 @@ import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
 import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
+import { ensureEgressRelay, type RelayStatus } from "../../security/relay.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
 import { captureWorktreeBaseline, createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
@@ -326,6 +327,29 @@ export function register(program: Command): void {
       }
 
       /**
+       * …and the relay that reopens exactly one destination through it.
+       *
+       * The internal bridge denies the fleet's own model server along with
+       * everything else, so without this every worker starts healthy and
+       * accomplishes nothing — §5.9's quiet-failure shape exactly. The relay
+       * is a durable, shared resource: `ensureEgressRelay` adopts a running
+       * one unchanged, and `down` never tears it down, for the same reason it
+       * never removes the egress network.
+       *
+       * It forwards oMLX ONLY. The Google endpoints in `egress.google_hosts`
+       * remain policy-level allow rules with no live relay path (ISC-253);
+       * a `cloud_access` worker on this bridge still cannot reach them.
+       */
+      let egressRelay: RelayStatus | null = null;
+      if (egressNetwork !== null && loadedConfig !== null) {
+        try {
+          egressRelay = await ensureEgressRelay(loadedConfig.config, egressNetwork);
+        } catch (err) {
+          throw new CliError(String(err), EXIT.BACKEND_UNAVAILABLE);
+        }
+      }
+
+      /**
        * ONE document object, written more than once.
        *
        * `run.json` has to exist before anything else so a run that refuses
@@ -376,6 +400,11 @@ export function register(program: Command): void {
       if (egressNetwork !== null) {
         await ledger.append("egress_network_ready", {
           detail: { network: egressNetwork, internal: egressInternal },
+        });
+      }
+      if (egressRelay !== null) {
+        await ledger.append("egress_relay_ready", {
+          detail: { name: egressRelay.name, created: egressRelay.created },
         });
       }
 
