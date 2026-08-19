@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Security
+- **The mandatory native-tool-call gate was certifying a network path no worker uses.** `up`
+  probed oMLX from the HOST, through a helper (`hostFacingBaseUrl`) whose only job was rewriting
+  the worker-facing `host.docker.internal` into `localhost` so the host could reach it — while
+  every worker reaches oMLX from inside the `--internal` egress bridge, where that name resolves
+  to the relay and nothing else resolves at all. On a Docker-host-local oMLX both land on the same
+  box, which hid the asymmetry completely. It is not harmless: the gate certifies a model, the
+  fleet launches, and the workers are denied at RUNTIME — the "burns a whole run before anyone
+  notices" failure §5.9 makes this probe mandatory to prevent. A gate that certifies reachability
+  it did not test is worse than no gate, because it is trusted. The probe now runs in a throwaway
+  container on `docker.network` and dials `llm.base_url` verbatim, so it tests the workers' path;
+  `hostFacingBaseUrl` is deleted rather than relocated, and `fetchImpl` lost its global-`fetch`
+  default so a host-side probe is no longer one omitted argument away. Nothing here names an oMLX
+  address, which is what makes it independent of where the server moves next: relocating oMLX
+  rewrites the relay's dial target, not the probe.
+- **The probe's API key travels on stdin, never in argv.** `docker run` argv is visible in `ps` to
+  every user on the host and is recorded by `docker inspect` for the container's lifetime. The
+  script goes in argv, where it is not secret; the URL, headers and body go in on stdin. The
+  container test asserts the far end received an `Authorization` header without putting a
+  credential anywhere in the repository.
+
 - **The deny-all bridge does not deny the bridge gateway, and this branch was claiming otherwise.**
   Measured, not inferred: a container attached to nothing but the `--internal` `pifleet-egress`
   network — no `--add-host`, no second network, no capabilities, no relay running — pulls a live
@@ -45,6 +65,22 @@ All notable changes to this project are documented here.
   limits as the workers it shares a bridge with, IP forwarding is turned off in its netns, and the
   ports in its own env parsing are range-checked — `listen(0)` would have bound a random port and
   reported healthy.
+
+### Changed
+- **`up` runs the ISC-53 gate after the egress network and relay, not before.** Not a preference:
+  on an `--internal` bridge `host.docker.internal` resolves to the relay, and resolves to nothing
+  before the relay exists, so the probe cannot test anything real until both are up. It still runs
+  before `run.json`, the ledger and every supervisor, so a refusal still launches nothing.
+- **`doctor` says which vantage its oMLX numbers come from.** It reports `vantage: "host"` in
+  `--json`, prints `omlx (from host):` in the text output, and uses `llm.base_url` verbatim
+  instead of silently rewriting it — the old rewrite answered "can this host reach SOME oMLX" in
+  place of the question actually asked, and stops being even approximately right once the server
+  is not on this box. When a container-facing hostname is unreachable from the host, `omlx.detail`
+  now explains why rather than leaving a bare "unreachable" that reads as an outage. That
+  explanation is a note, not a diagnosis: as a diagnosis it made `doctor` exit 3 on a healthy
+  machine, because any diagnosis is a failure. `doctor` deliberately does NOT probe from inside
+  the network — doing so would make ISC-54/55's only CI-executable test require a Docker daemon,
+  turning live coverage into a self-skip.
 
 ### Added
 - **`up` now refuses to start a fleet on a model that cannot emit native tool calls**
