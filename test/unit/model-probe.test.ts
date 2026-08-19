@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { EXIT } from "../../src/contracts.ts";
 import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
 import {
+  ModelNotServedError,
   NativeToolCallRefusedError,
   ToolCallProbeUnavailableError,
   assertModelsSupportToolCalls,
@@ -109,18 +110,27 @@ describe("probeNativeToolCalls reads the wire shape correctly", () => {
   });
 
   /**
-   * BOTH halves are required, and this is the case that proves it: a server
-   * claiming `finish_reason: tool_calls` over an EMPTY array has not produced a
-   * call the worker can act on. Checking the finish reason alone would let it
-   * through.
+   * BOTH halves are required for a PASS, and this is the case that proves it: a
+   * server claiming `finish_reason: tool_calls` over an EMPTY array has not
+   * produced a call the worker can act on. Checking the finish reason alone
+   * would let it through.
+   *
+   * It used to be classified `prose` — exit 2 — and that was wrong for the same
+   * reason M1 was wrong. A server announcing a finish reason it did not honour
+   * is contradicting ITSELF; nothing there is evidence about the model's chat
+   * template, so the operator has no `model:` line to fix and must not be sent
+   * to look for one. The gate is exactly as strict as before (`ok` is still
+   * false); only the blame moved off the model.
    */
-  test("finish_reason=tool_calls with an empty array is still prose", async () => {
+  test("finish_reason=tool_calls with an empty array still fails, but not as prose", async () => {
     const { fetch } = jsonFetch({
       choices: [{ message: { tool_calls: [] }, finish_reason: "tool_calls" }],
     });
     const r = await probeNativeToolCalls(BASE, "k", "m", fetch);
+    // The load-bearing half: it must NOT pass.
     expect(r.ok).toBe(false);
-    expect(r.failure).toBe("prose");
+    expect(r.failure).toBe("inconclusive");
+    expect(r.failure).not.toBe("prose");
   });
 
   /** The converse half: calls present under a non-tool finish reason. */
@@ -131,6 +141,70 @@ describe("probeNativeToolCalls reads the wire shape correctly", () => {
       ],
     });
     expect((await probeNativeToolCalls(BASE, "k", "m", fetch)).ok).toBe(false);
+  });
+
+  /**
+   * THE case this classification exists for, and the one the suite was missing:
+   * the mirror image of the test above.
+   *
+   * A reasoning model emits a `<think>` preamble before it acts. If that
+   * preamble outruns the probe's token budget the server answers
+   * `finish_reason: "length"` with no tool_calls — and `prose` used to be the
+   * FALL-THROUGH bucket, so that answer was reported as "this model does not
+   * emit native tool calls", exit 2, naming a model that had done nothing
+   * wrong. This host serves Qwen3.5-* reasoning models, and §5.9's original
+   * `Qwen3-8B-4bit` "prose" observation is itself consistent with truncation.
+   *
+   * Truncation is not evidence about the chat template, so it is not the
+   * operator's `model:` line, so it is not exit 2.
+   */
+  test("finish_reason=length with NO tool_calls is inconclusive, never prose", async () => {
+    const { fetch } = jsonFetch({
+      choices: [
+        {
+          message: { role: "assistant", content: "<think>Let me consider" },
+          finish_reason: "length",
+        },
+      ],
+    });
+    const r = await probeNativeToolCalls(BASE, "k", "Qwen3.5-35B-A3B-4bit", fetch);
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBe("inconclusive");
+    expect(r.failure).not.toBe("prose");
+    // And it says WHY, so nobody is sent to change a model that is fine.
+    expect(r.detail).toContain("TRUNCATED");
+    expect(r.detail).toContain("not evidence");
+  });
+
+  /**
+   * `prose` is now POSITIVE — `stop` and nothing else. Every other finish
+   * reason is a question the probe failed to answer, not an answer.
+   */
+  test("content_filter, an unknown reason and an absent one are all inconclusive", async () => {
+    for (const body of [
+      { choices: [{ message: {}, finish_reason: "content_filter" }] },
+      { choices: [{ message: {}, finish_reason: "some_future_reason" }] },
+      { choices: [{ message: {} }] },
+    ]) {
+      const { fetch } = jsonFetch(body);
+      expect((await probeNativeToolCalls(BASE, "k", "m", fetch)).failure).toBe("inconclusive");
+    }
+  });
+
+  /**
+   * The budget the truncation case turns on. 200 tokens sits inside a reasoning
+   * preamble; 2048 clears one. Asserted on the WIRE rather than on the
+   * constant, because it is the request the server actually sees that decides
+   * whether a model gets cut off mid-thought.
+   */
+  test("the probe asks for enough tokens to clear a reasoning preamble", async () => {
+    let body: Record<string, unknown> = {};
+    const fetch = (async (_i: unknown, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify(TOOL_CALL_BODY), { status: 200 });
+    }) as FetchLike;
+    await probeNativeToolCalls(BASE, "k", "m", fetch);
+    expect(body["max_tokens"]).toBeGreaterThanOrEqual(2048);
   });
 
   test("a network throw fails as `unreachable`, not as prose", async () => {
@@ -144,11 +218,73 @@ describe("probeNativeToolCalls reads the wire shape correctly", () => {
     expect(r.detail).toContain("ECONNREFUSED");
   });
 
+  /**
+   * A timeout is not "down" (S1).
+   *
+   * `AbortSignal.timeout` rejects with a `TimeoutError`, and §5.9 records cold
+   * model loads on this host running past 60s — so the old catch-all told the
+   * operator to "Start oMLX" about a server that was up and loading their
+   * weights. The connection succeeded; only the answer was late.
+   *
+   * `TimeoutError` is the name the REAL `AbortSignal.timeout` produces under
+   * Bun, checked against a live server that never answers rather than taken
+   * from the spec.
+   */
+  test("a timeout is its own class and reads as a cold load, not as 'down'", async () => {
+    const fetch = (async () => {
+      const err = new Error("The operation timed out.");
+      err.name = "TimeoutError";
+      throw err;
+    }) as FetchLike;
+    const r = await probeNativeToolCalls(BASE, "k", "big-cold-model", fetch, 60_000);
+    expect(r.failure).toBe("timeout");
+    expect(r.failure).not.toBe("unreachable");
+    // The operator must be told to WAIT, not to restart a healthy server.
+    expect(r.detail).toContain("COLD-LOADING");
+    expect(r.detail).not.toContain("unreachable");
+  });
+
   test("a non-2xx fails as `unreachable` and reports the status", async () => {
     const { fetch } = jsonFetch({ error: "nope" }, 500);
     const r = await probeNativeToolCalls(BASE, "k", "m", fetch);
     expect(r.failure).toBe("unreachable");
     expect(r.detail).toContain("500");
+  });
+
+  /**
+   * The body of a non-2xx reaches the operator (S2). A bare status code cannot
+   * distinguish "the server is down" from "the server is fine and is telling
+   * you exactly what is wrong", and the detail is all the operator sees.
+   */
+  test("a non-2xx body reaches the operator rather than being discarded", async () => {
+    const { fetch } = jsonFetch({ error: { message: "tools are not supported here" } }, 400);
+    const r = await probeNativeToolCalls(BASE, "k", "m", fetch);
+    expect(r.detail).toContain("tools are not supported here");
+  });
+
+  /**
+   * A 404 that talks about models is the server saying it does not serve this
+   * one — the `model:` line, and therefore a usage error. The old code called
+   * it `unreachable` and sent the operator to restart a healthy server.
+   */
+  test("a model-not-found 404 is classified as the config problem it is", async () => {
+    const { fetch } = jsonFetch({ error: { message: "Model 'ghost-model' not found" } }, 404);
+    const r = await probeNativeToolCalls(BASE, "k", "ghost-model", fetch);
+    expect(r.failure).toBe("model-not-found");
+    expect(r.detail).toContain("does not serve it");
+  });
+
+  /**
+   * …and the narrowing that stops that becoming a NEW misdiagnosis. A 404 with
+   * no mention of a model is far more likely a wrong path — a `base_url`
+   * missing its `/v1`, or a proxy answering for a route it does not have — and
+   * blaming the model for that merely relocates the defect.
+   */
+  test("a bare 404 is NOT blamed on the model", async () => {
+    const fetch = (async () => new Response("Not Found", { status: 404 })) as FetchLike;
+    const r = await probeNativeToolCalls(BASE, "k", "m", fetch);
+    expect(r.failure).toBe("unreachable");
+    expect(r.failure).not.toBe("model-not-found");
   });
 
   test("a missing API key is called out in the failure detail", async () => {
@@ -187,6 +323,39 @@ describe("probeNativeToolCalls reads the wire shape correctly", () => {
 
   test("a URL with no container hostname is left alone", () => {
     expect(hostFacingBaseUrl("http://127.0.0.1:9000/v1")).toBe("http://127.0.0.1:9000/v1");
+  });
+
+  /**
+   * The rewrite is a HOST rewrite, so it parses rather than substring-replaces.
+   *
+   * `baseUrl.replace("host.docker.internal", "localhost")` corrupts any URL
+   * that merely contains the name somewhere other than the host component, and
+   * the resulting failure reads as "oMLX is down" at an endpoint nobody
+   * configured. `egress.ts` already parses this same field with `new URL`.
+   */
+  test("only the HOST component is rewritten, never a substring of one", () => {
+    // A real hostname that merely starts with the container name.
+    expect(hostFacingBaseUrl("https://host.docker.internal.example.com/v1")).toBe(
+      "https://host.docker.internal.example.com/v1",
+    );
+    // The name as a PATH segment.
+    expect(hostFacingBaseUrl("http://proxy:8000/host.docker.internal/v1")).toBe(
+      "http://proxy:8000/host.docker.internal/v1",
+    );
+  });
+
+  /** Rewriting must not introduce a `//` in the request path. */
+  test("a base URL with no path does not gain a trailing slash", () => {
+    expect(hostFacingBaseUrl("http://host.docker.internal:8000")).toBe("http://localhost:8000");
+  });
+
+  /**
+   * The schema validates `llm.base_url` already, so re-litigating it here would
+   * turn a probe helper into a second config validator. An unparseable value
+   * passes through and fails at the fetch, classified `unreachable` — true.
+   */
+  test("an unparseable base URL passes through rather than throwing", () => {
+    expect(hostFacingBaseUrl("not a url at all")).toBe("not a url at all");
   });
 
   /**
@@ -272,6 +441,76 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
     expect(caught).toBeInstanceOf(ToolCallProbeUnavailableError);
     expect((caught as ToolCallProbeUnavailableError).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
     expect(caught).not.toBeInstanceOf(NativeToolCallRefusedError);
+  });
+
+  /**
+   * M1 at the gate, which is where it does the damage: a truncated answer must
+   * NOT reach the exit-2 path.
+   *
+   * Before the fix this threw `NativeToolCallRefusedError` and told the
+   * operator their model "does not emit native tool calls" — about a model that
+   * had been cut off mid-`<think>` by the probe's own 200-token budget. The
+   * assertion is on the exit code AND on the class, because the two are what
+   * `up` and the operator respectively act on.
+   */
+  test("a TRUNCATED answer exits 3, not 2 — nothing was learned about the model", async () => {
+    const loaded = await load({});
+    const { fetch } = jsonFetch({
+      choices: [{ message: { content: "<think>" }, finish_reason: "length" }],
+    });
+    const err = await assertModelsSupportToolCalls(loaded, ["w1"], fetch).then(
+      () => null,
+      (e: unknown) => e as Error & { exitCode?: number },
+    );
+    expect(err).not.toBeNull();
+    expect(err).toBeInstanceOf(ToolCallProbeUnavailableError);
+    expect(err).not.toBeInstanceOf(NativeToolCallRefusedError);
+    expect(err!.exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+    // It must not tell the operator to go and change a model that is fine.
+    expect(err!.message).not.toContain("Point the role at a model");
+    expect(err!.message).toContain("did not settle");
+  });
+
+  /**
+   * S2 at the gate. A model the server does not serve is exit 2 — the operator
+   * has a `model:` line to fix — but it is a DIFFERENT edit from "this model
+   * cannot do tools", so it is a different error and a different sentence.
+   */
+  test("a model the server does not serve exits 2, naming the config line", async () => {
+    const loaded = await load({});
+    const { fetch } = jsonFetch({ error: { message: "Model 'DefaultModel' not found" } }, 404);
+    const err = await assertModelsSupportToolCalls(loaded, ["w1"], fetch).then(
+      () => null,
+      (e: unknown) => e as Error & { exitCode?: number },
+    );
+    expect(err).toBeInstanceOf(ModelNotServedError);
+    expect(err!.exitCode).toBe(EXIT.USAGE);
+    expect(err!.message).toContain("does not serve");
+    expect(err!.message).toContain("w1");
+    // Not the prose diagnosis: the model may well support tools perfectly.
+    expect(err!.message).not.toContain("prose");
+  });
+
+  /**
+   * S1 at the gate. Still exit 3 — nothing downstream changes — but the
+   * REMEDY has to differ, because "Start oMLX" is a wasted trip when oMLX is
+   * up and loading the weights that were asked for.
+   */
+  test("a timeout exits 3 and advises waiting, not restarting", async () => {
+    const loaded = await load({});
+    const fetch = (async () => {
+      const e = new Error("The operation timed out.");
+      e.name = "TimeoutError";
+      throw e;
+    }) as FetchLike;
+    const err = await assertModelsSupportToolCalls(loaded, ["w1"], fetch).then(
+      () => null,
+      (e: unknown) => e as Error & { exitCode?: number },
+    );
+    expect(err).toBeInstanceOf(ToolCallProbeUnavailableError);
+    expect(err!.exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+    expect(err!.message).toContain("wait for the load to finish");
+    expect(err!.message).not.toContain("Start oMLX");
   });
 
   /** §5.9: "`require_native_tool_calls: false` disables both". */
