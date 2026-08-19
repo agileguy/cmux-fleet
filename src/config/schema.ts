@@ -18,6 +18,7 @@
 import { z } from "zod";
 import { MAX_ITEMS, SESSION_ID_RE, workerId } from "../contracts.ts";
 import { ruleHostError } from "../security/egress.ts";
+import { relayUpstreamError } from "../security/relay.ts";
 
 // ---------------------------------------------------------------------------
 // Durations
@@ -211,11 +212,49 @@ export const RunSchema = z
  */
 export const DEFAULT_BRANCH_PREFIX: string = RunSchema.shape.branch_prefix.parse(undefined);
 
+/**
+ * `llm.relay_upstream` is validated HERE, with the predicate the relay itself
+ * uses, for the same reason `egressRuleHost` below is: a value the relay will
+ * refuse must be a field-level `config validate` error, not a throw from inside
+ * `up` after containers already exist.
+ */
+const relayUpstream = shortStr.superRefine((raw, ctx) => {
+  const err = relayUpstreamError(raw);
+  if (err !== null) ctx.addIssue({ code: "custom", message: err });
+});
+
 export const LlmSchema = z
   .object({
-    /** Always local oMLX on the Docker host — a constraint, not a default (§5.9). */
+    /** oMLX — on the Docker host, or on a trusted LAN peer (§5.9). */
     provider: shortStr.default("omlx"),
+    /**
+     * What a WORKER dials, from inside the egress bridge — NOT necessarily
+     * where the model server is. The host component must stay
+     * `host.docker.internal`, the relay's listen-side alias on that bridge
+     * (§5.9). To move the server itself, set `relay_upstream`.
+     */
     base_url: z.string().url().default("http://host.docker.internal:8000/v1"),
+    /**
+     * Where the RELAY dials — `host:port`, explicit port required (§5.9; ISC-259).
+     *
+     * `null` (the default) means `host.docker.internal:<port from base_url>` —
+     * exactly the pre-ISC-259 behaviour, so every existing `fleet.yaml` keeps
+     * working untouched. The default is `null` rather than a literal because it
+     * depends on ANOTHER field's value; a static default here would be a
+     * second, drifting derivation of that port.
+     *
+     * A separate key rather than more meaning loaded onto `base_url`, and the
+     * separation is load-bearing rather than tidy: it is what lets the relay's
+     * `decide()` gate judge the dial target against a policy the target was not
+     * derived from (`relay.ts:relayGatePolicy`). Overloading `base_url` — which
+     * already serves both the worker's URL and the egress policy's LLM rule —
+     * is precisely what kept that check circular and therefore vacuous (ISC-253).
+     *
+     * Any value other than the Docker-host default ALSO requires a matching
+     * `egress.allow` entry. That second edit is the security decision, and it is
+     * deliberately not derivable from this one.
+     */
+    relay_upstream: relayUpstream.nullable().default(null),
     /** Names the env var; the value never appears in config (SRD §12.4). */
     api_key_env: shortStr.default("OMLX_API_KEY"),
     model: z.string().min(1).max(256),
