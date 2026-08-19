@@ -100,14 +100,28 @@ jobs:
   # That dismissal is the actual harm ISC-266 describes.
   #
   # WHAT IT DOES NOT PROVE, stated because the difference is the whole reason
-  # this criterion exists. A GitHub runner is not a developer workstation: it
-  # has ~4 cores against the 14 the ISC-266 numbers were measured on, and none
-  # of the editor, language server, browser and concurrent agents that produced
-  # the load average of 18.40 recorded in the criterion. This job reproduces
-  # the SHAPE of the defect — CPU contention stretching subprocess spawns past
-  # a fixed ceiling — at a smaller magnitude. It is a floor on the evidence,
-  # not a ceiling, and ISA.md grades ISC-266 with that limitation written into
-  # the criterion rather than left implied.
+  # this criterion exists. A GitHub runner is not a developer workstation:
+  # measured on run 32291463113 it reports TWO cores, against the 14 the
+  # ISC-266 numbers were taken on, and it carries none of the editor, language
+  # server, browser and concurrent agents that produced the load average of
+  # 18.40 recorded in the criterion. This job reproduces the SHAPE of the
+  # defect — CPU contention stretching subprocess spawns past a fixed ceiling —
+  # at a smaller magnitude. It is a floor on the evidence, not a ceiling, and
+  # ISA.md grades ISC-266 with that limitation written into the criterion
+  # rather than left implied.
+  #
+  # IT DOES MEASURABLY APPLY LOAD, which is worth pinning down because a job
+  # that is green having done nothing is the failure mode this repo has spent
+  # a session eliminating. On run 32291463113, the same commit and the same
+  # runner class ran `test/integration` in 124.32s in the `test` job and
+  # 222.78s here — 1.79x, which is the SAME inflation factor measured locally
+  # on 14 cores (167.76s -> 300.87s). Two loops against two cores is genuine
+  # contention: three runnable threads competing for two CPUs.
+  #
+  # Do NOT read the "load average now" line the script prints as the evidence.
+  # It is a one-minute average sampled two seconds after the generators start,
+  # so it always reads low (0.95 on the run above) and says nothing about
+  # whether load was applied. The wall-clock comparison above is the evidence.
   #
   # WHY IT IS A SEPARATE JOB. It deliberately makes the machine slow. Hanging
   # it off `test` would contaminate the clean timings that job exists to
