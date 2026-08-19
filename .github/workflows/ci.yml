@@ -72,12 +72,22 @@ jobs:
       - name: Fail if the container probes silently skipped
         env:
           PIFLEET_DOCKER: "1"
-          # Every test in all four files must run. Raise this when probes are
-          # added; a mismatch is the point, not an inconvenience.
-          # 53 = 43 (image + verbgate, +1 for ISC-219's pre-fix-path case) + 5
-          # (egress) + 5 (adc), measured by running the four files together
-          # with PIFLEET_DOCKER=1.
-          EXPECTED: "53"
+          # Every test in all four files must be ACCOUNTED FOR — run, or skipped
+          # for exactly one documented reason. Raise these when probes are added;
+          # a mismatch is the point, not an inconvenience.
+          #
+          # 60 = 43 (image + verbgate, +1 for ISC-219's pre-fix-path case) + 5
+          # (egress) + 12 (adc: 5 original + 5 for ISC-44/45/46 + 2 host-ADC
+          # cases counted below), measured by running the four files together
+          # with PIFLEET_DOCKER=1 on a host that HAS an ADC file.
+          TOTAL_EXPECTED: "60"
+          # Two adc probes are `test.skipIf(!HOST_ADC_PRESENT)`: the `file`-mode
+          # mount shape and ISC-46's live token mint both need a real host ADC
+          # to be about anything at all, and a CI runner has none. They are the
+          # ONLY legitimate skips in this job — hence a ceiling, not a range.
+          # Docker down or the image missing makes far more than two skip, so
+          # this still fails loudly for the reason the guard was written.
+          MAX_HOST_ADC_SKIPS: "2"
         run: |
           set -eu
           # A skip prints an announcement and still exits 0, so a green job is
@@ -90,17 +100,19 @@ jobs:
           # Docker up but the image missing would have run half the probes and
           # passed this check, which is exactly what it claims to prevent.
           #
-          # So: assert the exact number that ran, and that none skipped.
+          # So: assert every probe is accounted for (ran or legitimately
+          # skipped), and that the skips are only the documented host-ADC ones.
           out="$(bun test test/integration/image.test.ts test/integration/verbgate.test.ts \
                           test/integration/egress.test.ts test/integration/adc.test.ts 2>&1)"
           echo "$out"
           pass="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) pass$/\1/p' | tail -1)"
           skip="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) skip$/\1/p' | tail -1)"
           : "${pass:=0}" "${skip:=0}"
-          echo "parsed: pass=$pass skip=$skip expected=$EXPECTED"
-          if [ "$skip" -ne 0 ]; then
-            echo "::error::$skip container probes skipped — they must all execute here"; exit 1
+          total=$(( pass + skip ))
+          echo "parsed: pass=$pass skip=$skip total=$total expected=$TOTAL_EXPECTED max_skip=$MAX_HOST_ADC_SKIPS"
+          if [ "$skip" -gt "$MAX_HOST_ADC_SKIPS" ]; then
+            echo "::error::$skip container probes skipped, at most $MAX_HOST_ADC_SKIPS host-ADC cases may — the rest must execute here"; exit 1
           fi
-          if [ "$pass" -ne "$EXPECTED" ]; then
-            echo "::error::expected $EXPECTED container probes, $pass ran — update EXPECTED if probes were added"; exit 1
+          if [ "$total" -ne "$TOTAL_EXPECTED" ]; then
+            echo "::error::expected $TOTAL_EXPECTED container probes, $total were collected — update TOTAL_EXPECTED if probes were added"; exit 1
           fi
