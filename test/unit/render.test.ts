@@ -34,7 +34,14 @@ import {
   type ImageInputs,
 } from "../../src/container/image.ts";
 import type { Exec } from "../../src/container/run.ts";
-import { HOST_GCLOUD_CONFIG_DIR } from "../../src/security/adc.ts";
+import {
+  CONTAINER_GCLOUD_CONFIG_DIR,
+  CREDENTIAL_ENV_VARS,
+  classifyHostGcloudExposure,
+  gcloudConfigTmpfsArgv,
+  hostGcloudConfigDir,
+} from "../../src/security/adc.ts";
+import { WORKER_UID } from "../../src/container/mounts.ts";
 import {
   roleSkillsDir,
   runPaths,
@@ -162,6 +169,30 @@ function runStateHostPaths(argv: string[]): string[] {
     const host = a.slice(0, sep);
     if (!host.startsWith("/")) return; // named volume
     if (a.slice(sep + 1).startsWith("/workspace")) return; // the operator's repo
+    out.push(host);
+  });
+  return out;
+}
+
+/**
+ * The host half of EVERY bind mount in the argv, with nothing excluded.
+ *
+ * The sibling `runStateHostPaths` above drops `/workspace` deliberately and
+ * correctly — it answers "is every run-state path under the runs root", and
+ * the operator's repo is not run state. Any criterion about what the container
+ * can REACH must not use it: `/workspace`'s source is `run.repo`, the one
+ * entry in the mount table that comes from operator config rather than from a
+ * literal in `render.ts`, and therefore the only one that can be aimed at a
+ * sensitive directory. An exemption that is right for one question is a blind
+ * spot for the other, so the two have separate helpers rather than a flag.
+ */
+function allBindMountSources(argv: string[]): string[] {
+  const out: string[] = [];
+  argv.forEach((a, i) => {
+    if (argv[i - 1] !== "-v") return;
+    const sep = a.indexOf(":");
+    const host = sep === -1 ? a : a.slice(0, sep);
+    if (!host.startsWith("/")) return; // named volume, not a host path
     out.push(host);
   });
   return out;
@@ -425,12 +456,19 @@ describe("docker argv (SRD §5.6)", () => {
    * `renderWorker` is the exact function `up` calls to build the argv it
    * launches (ISC-188), so this is a statement about production code, not
    * about a hand-rolled re-implementation of the mount table. Checked against
-   * `HOST_GCLOUD_CONFIG_DIR` — `adc.ts`'s own exported constant — rather than
-   * a second `join(homedir(), ".config", "gcloud")` here, so the two
-   * definitions cannot drift apart.
+   * `hostGcloudConfigDir()` — `adc.ts`'s own definition — rather than a second
+   * `join(homedir(), ".config", "gcloud")` here, so the two cannot drift.
+   *
+   * Sources come from `allBindMountSources`, NOT from `runStateHostPaths`. The
+   * latter drops every mount whose destination starts with `/workspace`, which
+   * is correct for the run-state criteria it was written for and exactly wrong
+   * here: `/workspace` is the mount whose source is `run.repo`, the one host
+   * path in the whole table an operator controls, and therefore the only one
+   * that can be pointed at `$HOME`. Routing ISC-44 through that helper made
+   * this assertion blind to the single mount it most needed to see.
    *
    * Mutation check: temporarily adding
-   * `argv.push("-v", `${HOST_GCLOUD_CONFIG_DIR}:/home/pi/.config/gcloud`)` to
+   * `argv.push("-v", `${hostGcloudConfigDir()}:/home/pi/.config/gcloud`)` to
    * `buildDockerArgv` (§5.6's mount table) turns this red — see the ISA
    * close-out for the confirmed run.
    */
@@ -439,6 +477,7 @@ describe("docker argv (SRD §5.6)", () => {
       doc["cloud"] = { adc: true, adc_mode: "file", kubeconfig: "./kube/filtered.yaml" };
       (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
     });
+    const store = hostGcloudConfigDir();
     for (const id of ["eng-1", "rev-1"]) {
       // eng-1: cloud_access true, adc_mode file (the mode most likely to grow
       // a credential mount). rev-1: cloud_access false — the other shape ISC-44
@@ -446,16 +485,146 @@ describe("docker argv (SRD §5.6)", () => {
       // acquire this particular mount by accident.
       const r = await renderWorker(loaded, id);
       for (const a of r.docker) {
-        expect(a).not.toContain(HOST_GCLOUD_CONFIG_DIR);
+        expect(a).not.toContain(store);
       }
       // Explicitly on the `-v` SOURCE half of every bind mount, matching the
       // ISC's literal wording ("mount list", i.e. `docker inspect .Mounts`) —
       // not merely "the string never appears anywhere in argv", which a
       // future `--env` reference naming the path in prose would also satisfy
       // without actually mounting anything.
-      const sources = runStateHostPaths(r.docker);
-      expect(sources).not.toContain(HOST_GCLOUD_CONFIG_DIR);
-      for (const s of sources) expect(s.startsWith(HOST_GCLOUD_CONFIG_DIR)).toBe(false);
+      const sources = allBindMountSources(r.docker);
+      expect(sources).not.toContain(store);
+      // BOTH directions. The trailing separator is what keeps
+      // `~/.config/gcloud-backup` — a different directory this criterion says
+      // nothing about — from turning this red for no reason; a false red is
+      // how an assertion gets weakened later. `classifyHostGcloudExposure` is
+      // the production predicate, so the test and the launcher agree by
+      // construction rather than by two people writing the same `startsWith`.
+      for (const s of sources) expect(classifyHostGcloudExposure(s)).toBeNull();
+    }
+  });
+
+  /**
+   * The ancestor direction, stated as its own case because the assertion above
+   * would have passed without it for the entire life of this criterion.
+   *
+   * `run.repo: ~` is a legal fleet.yaml. It mounts the operator's home
+   * directory at `/workspace`, which contains `~/.config/gcloud` entire — every
+   * account, `credentials.db`, `legacy_credentials/` — and it satisfies "the
+   * source is not, and is not under, `~/.config/gcloud`" perfectly, because it
+   * is the other way round. So the mount the criterion exists to prevent was
+   * reachable through supported config while every ISC-44 assertion stayed
+   * green.
+   *
+   * Driven through `renderWorker` rather than by calling the predicate
+   * directly: the claim is that PRODUCTION refuses this, and the refusal lives
+   * in `buildDockerArgv`. A test of the predicate alone would still pass if
+   * nobody called it — which is precisely the state the constants were in.
+   */
+  test("a run.repo that CONTAINS the host gcloud store is refused, not rendered (ISC-44)", async () => {
+    for (const repo of ["~", "~/.config"]) {
+      const { loaded } = await fixture((doc) => {
+        (doc["run"] as Record<string, unknown>)["repo"] = repo;
+      });
+      // `rev-1` is `shared-ro`, so the repo is mounted verbatim rather than as
+      // a per-worker worktree under it — the tightest form of the exposure.
+      const err = await renderWorker(loaded, "rev-1").then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err).not.toBeNull();
+      expect(err?.name).toBe("HostGcloudMountError");
+      expect(err?.message).toContain("CONTAINS the host gcloud auth store");
+    }
+  });
+
+  /**
+   * ISC-45's cheap, always-runs counterpart.
+   *
+   * The live evidence for "a `cloud_access: false` role has no Google
+   * credential" is in `test/integration/adc.test.ts`, which needs a Docker
+   * daemon and a built image and therefore runs in exactly one CI job. This
+   * closes the same hole at the altitude ISC-44 is already covered at: the
+   * argv and the env-file `up` would actually write, checked with no daemon
+   * anywhere, so the mistake is caught at the point it is typed.
+   *
+   * The env FILE and not just the argv, because §5.6 delivers a worker's
+   * environment through `--env-file` — the integration test's `-e` flags are a
+   * test-rig convenience and prove nothing about the real delivery path. A
+   * credential leaking into that file is the failure this asserts against.
+   */
+  test("a cloud_access: false worker's argv and env-file name no credential vector (ISC-45)", async () => {
+    const { loaded } = await fixture((doc) => {
+      doc["cloud"] = { adc: true, adc_mode: "token", kubeconfig: "./kube/filtered.yaml" };
+      (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+    });
+    // rev-1 has no `cloud_access`, so `planCredential` returns `none` for it.
+    const r = await renderWorker(loaded, "rev-1");
+    const envFile = valueOf(r.docker, "--env-file");
+    expect(envFile).toBeDefined();
+    await mkdir(join(envFile!, ".."), { recursive: true });
+    await renderAllWorkers(loaded);
+    const envText = await readFile(envFile!, "utf8").catch(() => "");
+
+    for (const v of CREDENTIAL_ENV_VARS) {
+      for (const a of r.docker) expect(a).not.toContain(v);
+      for (const line of envText.split("\n")) expect(line).not.toContain(v);
+    }
+
+    // The contrast, so the absence above is a property of the ROLE and not of
+    // a renderer that never emits these vars for anyone. `eng-1` is the same
+    // fixture with `cloud_access: true` — and today it too carries no
+    // credential var, because the mint/inject wiring is not in `up` yet
+    // (ISC-248). That is the honest state, so it is asserted as such rather
+    // than dressed up: what differs between the two workers right now is the
+    // kubeconfig mount, which IS a credential-bearing mount (see below).
+    const eng = await renderWorker(loaded, "eng-1");
+    expect(eng.docker.some((a) => a.includes("/home/pi/.kube/config"))).toBe(true);
+    expect(r.docker.some((a) => a.includes("/home/pi/.kube/config"))).toBe(false);
+  });
+
+  /**
+   * ISC-255 — every rendered worker gets the writable `$CLOUDSDK_CONFIG`
+   * tmpfs, for EVERY role.
+   *
+   * This is the link in the chain the integration test cannot supply.
+   * `adc.test.ts` proves the tmpfs makes real gcloud work and that its absence
+   * makes gcloud crash, but it builds its container from
+   * `gcloudConfigTmpfsArgv()` directly — so deleting the `argv.push` from
+   * `render.ts` would leave every one of those probes green while shipping the
+   * broken shape to operators. The claim "production launches this" has to be
+   * asserted against production, and this is where.
+   *
+   * Not gated on `cloud_access`: gcloud is on every worker's PATH whatever its
+   * credential plan, so a `cloud_access: false` role that runs `gcloud version`
+   * must get verbgate's refusal or a clean answer — not a Python traceback
+   * about a read-only filesystem.
+   */
+  test("every worker's argv carries the writable gcloud config tmpfs (ISC-255)", async () => {
+    const { loaded } = await fixture((doc) => {
+      doc["cloud"] = { adc: true, adc_mode: "token", kubeconfig: "./kube/filtered.yaml" };
+      (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
+    });
+    const [expectedFlag, expectedSpec] = gcloudConfigTmpfsArgv();
+    expect(expectedFlag).toBe("--tmpfs");
+    for (const id of ["eng-1", "rev-1"]) {
+      const r = await renderWorker(loaded, id);
+      expect(valuesOf(r.docker, "--tmpfs")).toContain(expectedSpec!);
+
+      // The uid on the tmpfs must equal the uid the container runs as, or the
+      // mount is root-owned and gcloud degrades to warning on every call while
+      // still exiting 0 — the near-miss that looks like it works. Both come
+      // from `WORKER_UID` in production; this asserts they actually agree in
+      // the emitted argv rather than trusting that they do.
+      expect(valueOf(r.docker, "--user")).toBe(`${WORKER_UID}:${WORKER_UID}`);
+      expect(expectedSpec).toContain(`uid=${WORKER_UID},gid=${WORKER_UID}`);
+
+      // A tmpfs and NOT a bind mount: a bind mount would add a `.Mounts` entry
+      // and perturb ISC-44's mount-table claim, which is asserted separately
+      // and must not be quietly broken by the fix for a different criterion.
+      for (const s of allBindMountSources(r.docker)) {
+        expect(s).not.toBe(CONTAINER_GCLOUD_CONFIG_DIR);
+      }
     }
   });
 

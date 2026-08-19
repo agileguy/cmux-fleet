@@ -1,6 +1,6 @@
 /**
  * ADC injection probed against a real container (SRD §5.8; acceptance 11, 13,
- * 14; ISC-41..47).
+ * 14; ISC-41..47, ISC-255).
  *
  * Gated like the verbgate suite: these need a Docker daemon and a built worker
  * image, because the claims under test are claims ABOUT a container — that a
@@ -14,45 +14,64 @@
  * rename) is the real production code either way, and that path is what they
  * own.
  *
- * ISC-46 is the one claim a fake cannot carry. It is about what real `gcloud`
- * DOES with a credential present versus absent, and a made-up string fails
- * that command for the WRONG reason — a malformed token, not a missing one —
- * which would let the test pass while proving nothing about the criterion. So
- * that block mints a genuine ~1h access token from the operator's own
- * already-authenticated ADC (no impersonation; the exact production
- * `gcloudMinter` path) and skips itself on a machine with no host ADC. The
- * token is never printed: assertions on its VALUE compare sha256 digests or a
- * boolean, because a failing `toBe(token)` prints both sides and would put a
- * live bearer token in the test log — the one place `adc.ts`'s header promises
- * a credential never reaches.
+ * ISC-41/46/47/255 are the claims a fake cannot carry. They are about what real
+ * `gcloud` DOES with a credential present versus absent, and a made-up string
+ * fails that command for the WRONG reason — a malformed token, not a missing
+ * one — which would let the test pass while proving nothing. So those blocks
+ * mint a genuine ~1h access token from the operator's own already-authenticated
+ * ADC (no impersonation; the exact production `gcloudMinter` path) and skip
+ * themselves on a machine with no host ADC. The token is never printed:
+ * assertions on its VALUE compare sha256 digests or a boolean, because a
+ * failing `toBe(token)` prints both sides and would put a live bearer token in
+ * the test log — the one place `adc.ts`'s header promises a credential never
+ * reaches.
+ *
+ * THE CONTAINER SHAPE IS PRODUCTION'S, NOT THIS FILE'S. `startContainer` builds
+ * the flags `buildDockerArgv` emits, and takes the gcloud-config tmpfs from
+ * `gcloudConfigTmpfsArgv()` — the same exported function `render.ts` calls —
+ * rather than spelling it out here. That is a correction, and the bug it fixes
+ * is the reason ISC-255 exists: this file used to add a `$CLOUDSDK_CONFIG`
+ * tmpfs of its own that production never created, which silently gave every
+ * test in it a container shape `pifleet up` could not launch. The tmpfs both
+ * neutralised the vector ISC-45/46 exist to disprove (a credential landing in
+ * gcloud's real store would have been shadowed by an empty overlay) and made
+ * ISC-43's filesystem sweep search that empty overlay instead of the directory
+ * gcloud actually writes into. The fix was to put the tmpfs in PRODUCTION,
+ * where §5.2 always said it belonged, and let the tests inherit it. Deviations
+ * from the production shape are now opt-in fields on `ContainerShape`, default
+ * off, and exactly one test uses one (ISC-255's negative control).
  *
  * Why these build containers by hand rather than driving `pifleet up`: the
  * mint+inject mechanism is not yet wired into a real launch — `up` prints a
  * `credential_plan` and stops (tracked separately as ISC-248). ISA.md's Test
  * Strategy prescribes exactly this shape for ISC-41..49 ("integration |
- * in-container gcloud probes | `docker exec`"): construct the production
- * container SHAPE and drive `adc.ts`'s exported primitives against it, which
- * is what the ISC-41/42/43/47 tests below already do.
+ * in-container gcloud probes | `docker exec`").
  *
  * ISC-44 is covered at two altitudes and both are needed. `render.test.ts`
  * asserts the ARGV `up` would launch never names the host gcloud config dir —
- * cheap, runs everywhere, and catches the mistake at the point it is written.
- * The block here asserts the same thing about a container that actually
- * exists, read back out of `docker inspect`, which is the ISC's literal wording
- * and the only version that survives a mount arriving from somewhere other
- * than `renderWorker`.
+ * cheap, runs everywhere, and catches the mistake at the point it is written;
+ * it also owns the ANCESTOR direction, which is reachable from operator config.
+ * The block here asserts the same thing about a container that actually exists,
+ * read back out of `docker inspect`, which is the ISC's literal wording and the
+ * only version that survives a mount arriving from somewhere other than
+ * `renderWorker`.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { realpath } from "node:fs/promises";
 import { type ExecResult, realExec } from "../../src/container/run.ts";
+import { WORKER_UID } from "../../src/container/mounts.ts";
 import {
   ADC_FILE_PATH,
-  HOST_ADC_FILE,
-  HOST_GCLOUD_CONFIG_DIR,
+  CONTAINER_GCLOUD_CONFIG_DIR,
+  CREDENTIAL_ENV_VARS,
   TOKEN_FILE,
   type CredentialPlan,
+  classifyHostGcloudExposure,
   fileModeMaterials,
+  gcloudConfigTmpfsArgv,
   gcloudMinter,
+  hostAdcFile,
   injectToken,
   planCredential,
   proveRefreshTokenAbsent,
@@ -83,43 +102,51 @@ const FAKE_TOKEN = "ya29.pifleet-fake-token-f00d-do-not-mint";
  * the credential-absent case alike, so a test driving PATH's `gcloud` would go
  * green while measuring the gate rather than the credential. That gate is
  * §5.10 / Group J and is tested there. Calling `.real` isolates the §5.8
- * credential layer ISC-45/46 are actually about — the same reason the tests
+ * credential layer ISC-41/45/46 are actually about — the same reason the tests
  * below probe the token file directly instead of through a wrapped CLI.
+ *
+ * The consequence is recorded rather than hidden, and it matters to anyone
+ * reading ISC-46's criterion literally: in a REAL worker, `gcloud auth
+ * print-access-token` never exits 0 even WITH a perfectly valid credential,
+ * because verbgate refuses it first. The ISC-46 block below asserts that
+ * directly, so the criterion's literal command is covered somewhere.
  */
 const REAL_GCLOUD = "/usr/local/libexec/gcloud.real";
 
 /**
- * The image's baked `CLOUDSDK_CONFIG` (docker/Dockerfile) — a container-LOCAL
- * empty directory, never the host's. Named once so the tmpfs below and the
- * ISC-44 assertions read the same value.
+ * The ADC file the `file`-mode SHAPE test mounts.
+ *
+ * Overridable so that assertion can run in CI. What it actually needs is A FILE
+ * at a path under the host gcloud store — it inspects the resulting mount
+ * table, and Docker does not care whether the bytes are a usable credential.
+ * Pinning it to the operator's real ADC made a CI-runnable check host-only for
+ * no reason, and part of ISC-44's `[x]` rested on a test that executed in no
+ * automated job at all.
+ *
+ * The LIVE MINT is a different matter and stays gated on the real thing: it
+ * needs a credential Google will actually honour, which no synthetic file can
+ * be. Hence two flags, not one.
  */
-const CONTAINER_GCLOUD_CONFIG = "/home/pi/.config/gcloud";
+const ADC_FILE = process.env.PIFLEET_TEST_ADC_FILE ?? hostAdcFile();
+const ADC_FILE_PRESENT = await Bun.file(ADC_FILE).exists();
 
 /**
- * Every env var §5.8 can use to hand a worker a Google credential, in either
- * mode. ISC-45's claim is about the whole set rather than whichever one the
- * current default happens to use, so absence is asserted across all four —
- * otherwise a change of delivery mechanism would silently make the test
- * vacuous while still passing.
+ * Does this machine have a real host ADC to MINT from? `gcloudMinter` shells
+ * `gcloud auth application-default print-access-token` on the HOST, which reads
+ * the real store regardless of `PIFLEET_TEST_ADC_FILE`, so this deliberately
+ * ignores the override.
  */
-const CREDENTIAL_ENV_VARS = [
-  "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
-  "CLOUDSDK_AUTH_ACCESS_TOKEN",
-  "GOOGLE_OAUTH_ACCESS_TOKEN",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-] as const;
+const HOST_ADC_PRESENT = await Bun.file(hostAdcFile()).exists();
 
-/**
- * Does this machine have a host ADC file? The `file`-mode shape and the live
- * mint need one, and SKIP rather than fail without it: their subject is what
- * the credential layer does with a REAL credential, and on a machine with no
- * Google login there is no such thing to observe.
- */
-const HOST_ADC_PRESENT = await Bun.file(HOST_ADC_FILE).exists();
-
+if (DOCKER && !ADC_FILE_PRESENT) {
+  console.warn(
+    `[skip] adc file-mode shape test needs a file at ${ADC_FILE}. ` +
+      `Set PIFLEET_TEST_ADC_FILE to a synthetic ADC JSON to include it.`,
+  );
+}
 if (DOCKER && !HOST_ADC_PRESENT) {
   console.warn(
-    `[skip] adc live-credential tests need ${HOST_ADC_FILE}. ` +
+    `[skip] adc live-credential tests need ${hostAdcFile()}. ` +
       `Run 'gcloud auth application-default login' to include them.`,
   );
 }
@@ -149,31 +176,41 @@ interface ContainerShape {
   env?: Record<string, string>;
   /** Extra `docker run` arguments — the mount table ISC-44 reads back. */
   extraArgs?: string[];
+  /**
+   * OPT-IN DEVIATION, default `true` (i.e. production). Set `false` to build
+   * the pre-ISC-255 shape, where `$CLOUDSDK_CONFIG` sits on the read-only root
+   * and real gcloud crashes. Exactly one test sets it: the negative control
+   * that proves the production tmpfs is what makes the difference. Nothing else
+   * may, because a container without it is a container `pifleet up` cannot
+   * launch, and a criterion proved in a shape production cannot produce is not
+   * proved.
+   */
+  gcloudConfigTmpfs?: boolean;
+  /**
+   * OPT-IN DEVIATION, default `"none"`. Production always passes `--network`
+   * (`render.ts`), and this file mounts a live
+   * `application_default_credentials.json` — refresh token included — into one
+   * of these containers, in an image that ships `curl`. Started on the default
+   * bridge, that is an operator's permanent Google grant sitting in a container
+   * with full egress, which is precisely what `adc.ts`'s header says this
+   * module exists to prevent. Measured: every probe in this file passes under
+   * `--network none`, because the mint happens on the HOST and
+   * `print-access-token` only reads a local file. So the safe default costs
+   * nothing, and it also closes the GCE metadata-server fallback
+   * (169.254.169.254) as a credential vector for the ISC-45 probes. No test
+   * overrides it today.
+   */
+  network?: string;
 }
 
 /**
- * Start a detached container in the §5.6 deployment shape that matters here:
- * read-only root, tmpfs /tmp with noexec — the environment the injection path
- * claims to work inside. The default startup env is the production pointer
- * env, so the test also proves that env carries no secret.
- *
- * The second tmpfs is `CLOUDSDK_CONFIG`, and it is load-bearing rather than
- * decoration. SRD §5.2 says that path is a "container-local WRITABLE gcloud
- * config so the CLI can write its token cache", but the image bakes it as an
- * ordinary directory on the root filesystem and §5.6's flag list makes the root
- * `--read-only` with only `/tmp` as tmpfs — so as launched today it is not
- * writable, and real gcloud does not merely warn:
- *
- *   ERROR: gcloud crashed (OSError): [Errno 30] Read-only file system:
- *   '/home/pi/.config/gcloud/configurations'
- *
- * measured on this image with a VALID token present. Every `gcloud` call in a
- * worker fails that way, and it reads as a broken credential rather than a
- * missing mount. A tmpfs is the smallest thing that matches what §5.2 already
- * promises — container-local, host-disk-free, and (unlike a bind mount) it
- * contributes no `.Mounts` entry, so ISC-44's mount-table claim is untouched.
- * The gap in the production flag list is real and is reported separately; this
- * helper does not paper over it, it makes the criteria under test observable.
+ * Start a detached container in the §5.6 deployment shape `buildDockerArgv`
+ * actually produces: read-only root, tmpfs /tmp with noexec, the worker uid,
+ * and the `$CLOUDSDK_CONFIG` tmpfs — the last taken from production's own
+ * `gcloudConfigTmpfsArgv()` rather than retyped, so this file cannot drift back
+ * into probing a shape production does not build (ISC-255). The default startup
+ * env is the production pointer env, so the tests also prove that env carries
+ * no secret.
  */
 async function startContainer(shape: ContainerShape = {}): Promise<string> {
   const name = `pifleet-adc-test-${Math.random().toString(36).slice(2, 10)}`;
@@ -183,8 +220,12 @@ async function startContainer(shape: ContainerShape = {}): Promise<string> {
   );
   const r = await realExec([
     "docker", "run", "-d", "--name", name,
+    "--user", `${WORKER_UID}:${WORKER_UID}`,
+    "--security-opt", "no-new-privileges",
+    "--cap-drop", "ALL",
+    "--network", shape.network ?? "none",
     "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-    "--tmpfs", `${CONTAINER_GCLOUD_CONFIG}:rw,noexec,nosuid,size=16m,uid=10001,gid=10001`,
+    ...(shape.gcloudConfigTmpfs === false ? [] : gcloudConfigTmpfsArgv()),
     ...env,
     ...(shape.extraArgs ?? []),
     "--entrypoint", "bash", IMAGE, "-c", "sleep 300",
@@ -200,6 +241,16 @@ async function inContainerResult(name: string, script: string): Promise<ExecResu
 
 async function inContainer(name: string, script: string): Promise<string> {
   return (await inContainerResult(name, script)).stdout;
+}
+
+/** Mint a real token through the exact production path, no impersonation. */
+async function mintReal(): Promise<string> {
+  const minted = await gcloudMinter(realExec, {
+    impersonateServiceAccount: null,
+    identity: await resolveIdentity(realExec, null),
+  })();
+  expect(minted.token.length).toBeGreaterThan(0);
+  return minted.token;
 }
 
 /**
@@ -239,27 +290,42 @@ async function mountsOf(name: string): Promise<DockerMount[]> {
 /**
  * ISC-44 applied to one container's real mount table.
  *
- * Two assertions, because the literal criterion is not quite enough on its own.
- * The first is the ISC's own wording: the host `~/.config/gcloud` DIRECTORY is
- * not a mount source. The second catches the near-miss that wording permits —
- * mounting `~/.config/gcloud/credentials.db` or `legacy_credentials/` instead,
- * which hands over the same multi-account auth store one path segment deeper.
- * So nothing UNDER the directory may be a source either, with exactly one
- * documented exception: `HOST_ADC_FILE`, the single artifact §5.8 allows `file`
- * mode to mount.
+ * Delegates the relation test to `classifyHostGcloudExposure`, production's own
+ * predicate, so this and the launcher's guard cannot disagree about what counts
+ * — and so this inherits the ANCESTOR direction for free. The literal criterion
+ * ("the host `~/.config/gcloud` directory is not a mount source") is not enough
+ * on its own in either direction: mounting `credentials.db` or
+ * `legacy_credentials/` hands over the same multi-account store one segment
+ * deeper, and mounting `$HOME` hands it over one segment shallower.
  *
- * The prefix test uses a trailing separator. Plain `startsWith(dir)` would also
- * flag `~/.config/gcloud-backup`, a different directory that this criterion
- * says nothing about — a false red teaches people to weaken the assertion.
+ * Sources are `realpath`-normalised before comparison, and both sides are. A
+ * lexical compare passes a symlinked source — `/tmp -> /private/tmp` on macOS
+ * is the everyday case — and an APFS case variant, either of which would mount
+ * the store while this function reported clean. `realpath` is affordable here
+ * because this side is already async and already shelling out to
+ * `docker inspect`; the production guard stays lexical for the reason given on
+ * `classifyHostGcloudExposure`.
+ *
+ * The assertion compares two rendered STRINGS rather than calling
+ * `expect(relation).toBeNull()` so a failure names the offending source and how
+ * it offends, instead of printing `"inside-the-store" is not null`.
  */
-function expectNoHostGcloudConfigMount(
+async function expectNoHostGcloudConfigMount(
   mounts: DockerMount[],
   opts: { allowAdcFile: boolean },
-): void {
-  const sources = mounts.map((m) => m.Source ?? "");
-  expect(sources).not.toContain(HOST_GCLOUD_CONFIG_DIR);
-  const under = sources.filter((s) => s.startsWith(`${HOST_GCLOUD_CONFIG_DIR}/`));
-  expect(under).toEqual(opts.allowAdcFile ? [HOST_ADC_FILE] : []);
+): Promise<void> {
+  // `realpath` throws on a path that does not exist; a mount source normally
+  // does exist, but fall back to the raw value rather than turning a missing
+  // path into a confusing test error.
+  const norm = async (p: string): Promise<string> => realpath(p).catch(() => p);
+  for (const m of mounts) {
+    const source = m.Source ?? "";
+    if (source === "") continue;
+    const relation = classifyHostGcloudExposure(await norm(source), {
+      allowAdcFile: opts.allowAdcFile,
+    });
+    expect(`${source} -> ${relation ?? "clean"}`).toBe(`${source} -> clean`);
+  }
 }
 
 describe.skipIf(!DOCKER)("adc token injection", () => {
@@ -310,13 +376,17 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
   });
 
   /**
-   * Acceptance 11: no `refresh_token` string anywhere in the container — not
-   * in the env, not on disk, not in /creds. Probed AFTER a real injection, so
-   * a production change that started shipping the ADC blob would be seen
-   * here, not reasoned away. The writable surfaces are enumerated (tmpfs,
-   * /creds if present, the gcloud config dir) because that is where injected
-   * material can land under a read-only root; the env is read from PID 1's
-   * environ as well as a fresh exec, since the two can differ.
+   * Acceptance 11 / ISC-43: no `refresh_token` string anywhere in the
+   * container — not in the env, not on disk, not in /creds. Probed AFTER a real
+   * injection, so a production change that started shipping the ADC blob would
+   * be seen here, not reasoned away.
+   *
+   * `$CLOUDSDK_CONFIG` is swept as a real, writable, production-shaped
+   * directory. When this file added its own tmpfs there, this sweep searched an
+   * empty overlay production never created — an already-closed criterion,
+   * quietly weakened to searching nothing. It now searches the directory gcloud
+   * actually writes into, which is the only version of this assertion worth
+   * having.
    */
   test("no refresh_token appears anywhere: env, disk, or /creds", async () => {
     const name = await startContainer();
@@ -327,9 +397,14 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
        env | grep -q refresh_token && hits=$((hits+1))
        tr "\\0" "\\n" < /proc/1/environ | grep -q refresh_token && hits=$((hits+1))
        grep -rq refresh_token /tmp /creds "\${CLOUDSDK_CONFIG:-/nonexistent}" 2>/dev/null && hits=$((hits+1))
-       echo "hits=$hits"`,
+       echo "hits=$hits"
+       echo "cloudsdk_config=\${CLOUDSDK_CONFIG:-unset}"`,
     );
     expect(out).toContain("hits=0");
+    // The sweep only means anything if it looked at the real directory. Pin the
+    // var so a future image that stopped baking it turns this red rather than
+    // silently degrading the third grep to `/nonexistent`.
+    expect(out).toContain(`cloudsdk_config=${CONTAINER_GCLOUD_CONFIG_DIR}`);
   });
 
   /** The env file's contract, observed live: pointer only, no token value. */
@@ -340,6 +415,106 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
     expect(out).toContain(`CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=${TOKEN_FILE}`);
     expect(out).not.toContain(FAKE_TOKEN);
   });
+});
+
+/**
+ * ISC-255 / ISC-41 — real gcloud works in the shape `pifleet up` launches.
+ *
+ * These two are one block because they are one measurement taken twice. ISC-255
+ * is the defect: the image bakes `$CLOUDSDK_CONFIG` as an ordinary directory on
+ * the root filesystem and §5.6 makes the root `--read-only` with only `/tmp` as
+ * tmpfs, so gcloud could not write its own config and CRASHED — with a valid
+ * credential present. ISC-41 is the criterion that could not have been true
+ * while that held, and it had no test of its own: before this, no test in this
+ * file invoked `gcloud` at all, and `ISC-41` appeared only in a comment.
+ *
+ * The negative control is the whole argument, so it is asserted rather than
+ * described. One container in the pre-fix shape (`gcloudConfigTmpfs: false`)
+ * and one in production's, identical in every other respect, the same kind of
+ * real token injected into both: the first crashes on a read-only filesystem,
+ * the second prints the token back. That rules out "gcloud was broken anyway"
+ * and "the token was bad" in a single comparison.
+ */
+describe.skipIf(!DOCKER)("ISC-255/ISC-41: gcloud in the production container shape", () => {
+  test.skipIf(!HOST_ADC_PRESENT)(
+    "without the production tmpfs, gcloud crashes on the read-only config dir (ISC-255)",
+    async () => {
+      const token = await mintReal();
+      const name = await startContainer({ gcloudConfigTmpfs: false });
+      await injectToken(realExec, name, token);
+      const r = await inContainerResult(name, `${REAL_GCLOUD} auth print-access-token`);
+
+      expect(r.code).not.toBe(0);
+      expect(r.stdout.trim()).toBe("");
+      // The measured failure, matched on the parts that carry meaning: a
+      // read-only filesystem, naming the config dir. Not pinned verbatim — the
+      // wording is google-cloud-cli's and the image does not pin the SDK
+      // version, so an exact string is a scheduled false red.
+      expect(r.stderr).toMatch(/Read-only file system/i);
+      expect(r.stderr).toContain(CONTAINER_GCLOUD_CONFIG_DIR);
+    },
+    120_000,
+  );
+
+  test.skipIf(!HOST_ADC_PRESENT)(
+    "with cloud_access and a token, gcloud auth print-access-token succeeds (ISC-41)",
+    async () => {
+      const token = await mintReal();
+      const name = await startContainer();
+      await injectToken(realExec, name, token);
+      const r = await inContainerResult(name, `${REAL_GCLOUD} auth print-access-token`);
+
+      expect(r.code).toBe(0);
+      // Digest, never the value: a failing equality would print a live bearer
+      // token into the test log.
+      expect(digest(r.stdout.trim())).toBe(digest(token));
+      // gcloud must be CLEAN, not merely exiting 0. A tmpfs mounted without
+      // `uid`/`gid` is root-owned, and gcloud then tolerates the EACCES while
+      // warning on every call and caching nothing — it exits 0 and looks fine.
+      // Requiring empty stderr is what distinguishes the real fix from that
+      // near-miss.
+      expect(r.stderr.trim()).toBe("");
+    },
+    120_000,
+  );
+
+  /**
+   * ISC-47 — after `token_refresh` elapses, a `gcloud` call inside a
+   * long-running container still succeeds.
+   *
+   * The container is the long-running thing; the refresh is the event. Rather
+   * than sleep out a real `token_refresh` interval (minutes of wall clock for
+   * no extra information), this drives the same production step the refresh
+   * loop drives — a second `injectToken` into the still-running container,
+   * which is what a refresh IS at this layer — and re-probes. The second mint
+   * is a genuinely separate call, so the assertion is that gcloud picked up the
+   * NEW value, not that it kept working from a cache.
+   *
+   * What this does not prove, stated plainly: that the supervisor's timer fires
+   * at the configured interval. That is `supervisor.test.ts`'s monotonic-clock
+   * territory (ISC-155) and is not re-litigated here.
+   */
+  test.skipIf(!HOST_ADC_PRESENT)(
+    "a gcloud call still succeeds after a refresh re-injection (ISC-47)",
+    async () => {
+      const name = await startContainer();
+
+      const first = await mintReal();
+      await injectToken(realExec, name, first);
+      const before = await inContainerResult(name, `${REAL_GCLOUD} auth print-access-token`);
+      expect(before.code).toBe(0);
+      expect(digest(before.stdout.trim())).toBe(digest(first));
+
+      // Generation 2 — the refresh loop's actual production step.
+      const second = await mintReal();
+      await injectToken(realExec, name, second);
+      const after = await inContainerResult(name, `${REAL_GCLOUD} auth print-access-token`);
+      expect(after.code).toBe(0);
+      expect(after.stderr.trim()).toBe("");
+      expect(digest(after.stdout.trim())).toBe(digest(second));
+    },
+    180_000,
+  );
 });
 
 /**
@@ -357,7 +532,7 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
 describe.skipIf(!DOCKER)("ISC-44: the host gcloud config dir is never a mount source", () => {
   test("cloud_access: false — nothing is mounted from the host gcloud store", async () => {
     const name = await startContainer({ env: NO_CLOUD_ENV });
-    expectNoHostGcloudConfigMount(await mountsOf(name), { allowAdcFile: false });
+    await expectNoHostGcloudConfigMount(await mountsOf(name), { allowAdcFile: false });
   }, 60_000);
 
   test("token mode, after a real injection — still nothing", async () => {
@@ -367,40 +542,71 @@ describe.skipIf(!DOCKER)("ISC-44: the host gcloud config dir is never a mount so
     // that touches a live container's contents. A mount cannot appear from a
     // `docker exec` — proving that is the point.
     await injectToken(realExec, name, FAKE_TOKEN);
-    expectNoHostGcloudConfigMount(await mountsOf(name), { allowAdcFile: false });
+    await expectNoHostGcloudConfigMount(await mountsOf(name), { allowAdcFile: false });
   }, 60_000);
 
   /**
-   * `file` mode, built from `fileModeMaterials` so the mount destination and
-   * the env var come from production code rather than being retyped here.
+   * `file` mode. FORWARD-LOOKING, and that qualifier is not modesty.
    *
-   * Two things are proved at once. First the ISC: the mount table names the
-   * single ADC FILE and never the directory holding it — the distinction
-   * between handing over one credential and handing over the whole
-   * multi-account auth store. Second, on the same real file,
-   * `proveRefreshTokenAbsent` returns FALSE — live evidence for the §5.8
-   * decision that `token` mode is the default, since the artifact `file` mode
-   * mounts genuinely does carry a non-expiring `refresh_token`.
+   * No production code path mounts an ADC file: `buildDockerArgv` emits no
+   * `/creds` mount, and `fileModeMaterials`/`fileModeStartupEnv`/
+   * `ADC_FILE_PATH` have no caller in `src/`. So the `-v` below is hand-written
+   * BY THIS TEST, which means the mount-table assertion inspects a shape this
+   * file authored — the "assert on our own beliefs" the header disclaims. It is
+   * kept because the destination and the env still come from production's
+   * `fileModeMaterials`, so it pins the contract `file` mode must satisfy WHEN
+   * it is wired and would catch a future implementation reaching for the parent
+   * directory. It is not evidence about a launch `up` can perform today, and
+   * ISA.md's ISC-44 close-out says so.
    */
-  test.skipIf(!HOST_ADC_PRESENT)(
+  test.skipIf(!ADC_FILE_PRESENT)(
     "file mode mounts the one ADC file, never its parent directory",
     async () => {
-      const materials = fileModeMaterials(await Bun.file(HOST_ADC_FILE).text());
+      const raw = await Bun.file(ADC_FILE).text();
+      const materials = fileModeMaterials(raw);
       expect(Object.keys(materials.files)).toEqual([ADC_FILE_PATH]);
-      // The reason `file` mode is opt-in, measured rather than asserted.
-      expect(proveRefreshTokenAbsent(materials)).toBe(false);
+
+      // The reason `file` mode is opt-in, measured rather than asserted — but
+      // only where the artifact is the kind that carries one. A bare
+      // `toBe(false)` failed with an uninformative `true !== false` on any host
+      // whose ADC is a service-account or external-account file, which has no
+      // `refresh_token` string at all (it carries a private key or an external
+      // credential config — still a permanent grant, just not this shape).
+      // Naming what was found turns that from a puzzle into a fact.
+      const kind = ((): string => {
+        try {
+          return String((JSON.parse(raw) as { type?: unknown }).type ?? "unknown");
+        } catch {
+          return "unparseable";
+        }
+      })();
+      const absent = proveRefreshTokenAbsent(materials);
+      if (kind === "authorized_user") {
+        expect(`${kind}: refresh_token_absent=${absent}`).toBe(
+          `${kind}: refresh_token_absent=false`,
+        );
+      } else {
+        // Not a failure — a different credential shape. Recorded so the run
+        // says which one it saw rather than silently asserting nothing.
+        console.warn(
+          `[note] ${ADC_FILE} is type "${kind}", not authorized_user; ` +
+            `the refresh_token contrast is only meaningful for the latter.`,
+        );
+      }
 
       const name = await startContainer({
         env: materials.env,
-        extraArgs: ["-v", `${HOST_ADC_FILE}:${ADC_FILE_PATH}:ro`],
+        extraArgs: ["-v", `${ADC_FILE}:${ADC_FILE_PATH}:ro`],
       });
       const mounts = await mountsOf(name);
-      expectNoHostGcloudConfigMount(mounts, { allowAdcFile: true });
+      await expectNoHostGcloudConfigMount(mounts, { allowAdcFile: true });
 
       // Exactly one source is the ADC file — "the one file, not the directory"
-      // stated positively, so the test would also catch the mount silently
-      // disappearing and leaving a vacuous pass above.
-      const adcSources = mounts.filter((m) => m.Source === HOST_ADC_FILE);
+      // stated positively, so the test also catches the mount silently
+      // disappearing and leaving a vacuous pass above. Both spellings are
+      // accepted because Docker may report the realpath of a symlinked source.
+      const real = await realpath(ADC_FILE).catch(() => ADC_FILE);
+      const adcSources = mounts.filter((m) => m.Source === ADC_FILE || m.Source === real);
       expect(adcSources).toHaveLength(1);
       expect(adcSources[0]?.Destination).toBe(ADC_FILE_PATH);
 
@@ -432,6 +638,14 @@ describe.skipIf(!DOCKER)("ISC-44: the host gcloud config dir is never a mount so
  * under any configuration would satisfy it just as well. So the contrast is
  * asserted in the same block: the identical probe run against an injected
  * token-mode container finds every one of those things present.
+ *
+ * On the vector set: the four env vars are §5.8's delivery mechanisms, but they
+ * were never the whole surface, and calling them "four vectors" oversold it.
+ * `$CLOUDSDK_CONFIG` is the vector this file used to blind itself to (ISC-255)
+ * and is now swept; `/home/pi/.kube/config` is the only credential-bearing
+ * mount `buildDockerArgv` emits TODAY and gets its own case below; and the GCE
+ * metadata fallback at 169.254.169.254 is closed by `--network none`, which
+ * `startContainer` applies by default.
  */
 describe.skipIf(!DOCKER)("ISC-45: cloud_access: false has no Google credential", () => {
   test("no token file, no /creds content, and no credential env var", async () => {
@@ -441,6 +655,7 @@ describe.skipIf(!DOCKER)("ISC-45: cloud_access: false has no Google credential",
       name,
       `test -f ${TOKEN_FILE} && echo "token=present" || echo "token=absent"
        echo "creds_entries=$(ls -A /creds 2>/dev/null | wc -l)"
+       echo "gcloud_entries=$(ls -A "\${CLOUDSDK_CONFIG:-/nonexistent}" 2>/dev/null | wc -l)"
        echo "---ENV---"
        env
        echo "---PID1---"
@@ -449,6 +664,10 @@ describe.skipIf(!DOCKER)("ISC-45: cloud_access: false has no Google credential",
 
     expect(out).toContain("token=absent");
     expect(out).toContain("creds_entries=0");
+    // The vector ISC-255 was about: gcloud's own store starts empty too. With
+    // the tmpfs now arriving from production, this is a real statement about
+    // the launched shape rather than about an overlay the test invented.
+    expect(out).toContain("gcloud_entries=0");
 
     // Both env sources are read because they can differ: `env` is a fresh
     // exec's environment, `/proc/1/environ` is what the container was LAUNCHED
@@ -492,6 +711,32 @@ describe.skipIf(!DOCKER)("ISC-45: cloud_access: false has no Google credential",
       expect(out).not.toContain(`${v}=`);
     }
   }, 60_000);
+
+  /**
+   * The kubeconfig vector, which the four-env-var set does not cover.
+   *
+   * `buildDockerArgv` mounts `/home/pi/.kube/config` when
+   * `cloud.kubeconfig !== null && w.cloudAccess` — the ONLY credential-bearing
+   * mount production emits today, and it had no probe here at all. A kubeconfig
+   * with a `gcp` auth-provider block, or an embedded bearer token, IS a Google
+   * credential by any definition ISC-45 cares about, so "no Google credential"
+   * has to mean that path is empty too for a `cloud_access: false` role.
+   *
+   * The mount is gated on `w.cloudAccess`, so the correct assertion for this
+   * container is that the directory exists (the image creates it) and is empty.
+   */
+  test("cloud_access: false — the kubeconfig mount point is empty", async () => {
+    const name = await startContainer({ env: NO_CLOUD_ENV });
+    const out = await inContainer(
+      name,
+      `test -d /home/pi/.kube && echo "dir=present" || echo "dir=absent"
+       echo "kube_entries=$(ls -A /home/pi/.kube 2>/dev/null | wc -l)"
+       test -f /home/pi/.kube/config && echo "config=present" || echo "config=absent"`,
+    );
+    expect(out).toContain("dir=present");
+    expect(out).toContain("kube_entries=0");
+    expect(out).toContain("config=absent");
+  }, 60_000);
 });
 
 /**
@@ -500,16 +745,16 @@ describe.skipIf(!DOCKER)("ISC-45: cloud_access: false has no Google credential",
  *
  * A test that only asserted a nonzero exit would be satisfied by gcloud being
  * broken, absent, or refused by the verb gate, none of which is the criterion.
- * So the failure is pinned to gcloud's own credential-absence message, read off
- * a real run rather than guessed, and the block carries a positive control: the
- * SAME command, in the SAME image, succeeds the moment a credential is present.
+ * So the failure is pinned to gcloud's own credential-absence message, and the
+ * block carries a positive control: the SAME command, in the SAME image,
+ * succeeds the moment a credential is present.
  *
  * That pair is the "reproduce the failure, then prove the fix flips it" bar.
- * The second test is the tighter of the two — one container, probed before and
- * after `injectToken`, so the ONLY thing that changes between exit 1 and exit 0
- * is the presence of the token file. Nothing about the image, the flags, the
- * env, or the mount table differs, which is what rules out an incidental
- * environment difference explaining the flip.
+ * The differential test is the tighter of the two — one container, probed
+ * before and after `injectToken`, so the ONLY thing that changes between exit 1
+ * and exit 0 is the presence of the token file. Nothing about the image, the
+ * flags, the env, or the mount table differs, which is what rules out an
+ * incidental environment difference explaining the flip.
  */
 describe.skipIf(!DOCKER)("ISC-46: gcloud fails without a credential, succeeds with one", () => {
   test("cloud_access: false — real gcloud reports no active account", async () => {
@@ -518,13 +763,42 @@ describe.skipIf(!DOCKER)("ISC-46: gcloud fails without a credential, succeeds wi
 
     expect(r.code).not.toBe(0);
     expect(r.stdout.trim()).toBe("");
-    // gcloud's own words for "there is no credential here", verbatim from a
-    // real run against this image. Asserting the message and not just the exit
-    // code is what separates the criterion from a gcloud that is merely
-    // missing or gated — a 127 or a verbgate 77 would not contain this.
-    expect(r.stderr).toContain(
-      "(gcloud.auth.print-access-token) You do not currently have an active account selected",
-    );
+    // gcloud's own words for "there is no credential here". Matched as REGEXES
+    // on the invariant parts rather than pinned verbatim: this is
+    // google-cloud-cli's English, the image installs it unpinned and CI rebuilds
+    // the image every run, so an exact string is a false red waiting on an
+    // upstream copy edit. The parts that carry the meaning — that it is THIS
+    // command failing, and that the reason is an absent active account — are
+    // what the patterns require. Still far more than a nonzero exit: a 127
+    // (missing) or a verbgate 77 (gated) matches neither.
+    expect(r.stderr).toMatch(/gcloud\.auth\.print-access-token/);
+    expect(r.stderr).toMatch(/do not currently have an active account/i);
+  }, 60_000);
+
+  /**
+   * The criterion's LITERAL command, through PATH, where a real worker meets
+   * it.
+   *
+   * The tests either side of this deliberately call `gcloud.real` to isolate
+   * the §5.8 credential layer from the §5.10 verb gate. That is the right call
+   * for measuring the credential — but it leaves the criterion's own wording,
+   * `gcloud auth print-access-token`, unexercised in the form an agent actually
+   * types. So: assert the PATH binary refuses too, and record WHY the exit code
+   * differs. 77 is verbgate's refusal, not gcloud's.
+   *
+   * The consequence is worth stating because it surprises anyone reading ISC-46
+   * literally: in a real worker this command never exits 0, credential or no
+   * credential, because verbgate classifies token minting as mutating under the
+   * default empty `cloud_allow` policy. ISC-46's "fails without a credential"
+   * is therefore true for a stronger reason than the criterion claims.
+   */
+  test("through PATH, verbgate refuses the same command with exit 77", async () => {
+    const name = await startContainer({ env: NO_CLOUD_ENV });
+    const r = await inContainerResult(name, "gcloud auth print-access-token");
+    expect(r.code).toBe(77);
+    expect(r.stderr).toContain("not authorized for task");
+    // Not gcloud's credential message — this never reached gcloud at all.
+    expect(r.stderr).not.toMatch(/do not currently have an active account/i);
   }, 60_000);
 
   /**
@@ -543,17 +817,14 @@ describe.skipIf(!DOCKER)("ISC-46: gcloud fails without a credential, succeeds wi
       const before = await inContainerResult(name, `${REAL_GCLOUD} auth print-access-token`);
       expect(before.code).not.toBe(0);
       expect(before.stdout.trim()).toBe("");
-      // A different message from the test above, and correctly so: this role
+      // A different failure from the test above, and correctly so: this role
       // HAS a credential pointer, so gcloud fails on the missing file the
-      // pointer names rather than on having no account configured.
-      expect(before.stderr).toContain(`Unable to read file [${TOKEN_FILE}]`);
+      // pointer names rather than on having no account configured. Matched on
+      // the path rather than on gcloud's phrasing around it.
+      expect(before.stderr).toContain(TOKEN_FILE);
 
-      const minted = await gcloudMinter(realExec, {
-        impersonateServiceAccount: null,
-        identity: await resolveIdentity(realExec, null),
-      })();
-      expect(minted.token.length).toBeGreaterThan(0);
-      await injectToken(realExec, name, minted.token);
+      const token = await mintReal();
+      await injectToken(realExec, name, token);
 
       const after = await inContainerResult(name, `${REAL_GCLOUD} auth print-access-token`);
       expect(after.code).toBe(0);
@@ -561,11 +832,11 @@ describe.skipIf(!DOCKER)("ISC-46: gcloud fails without a credential, succeeds wi
 
       // Equality with the minted token, asserted without printing it. The
       // digest comparison is what fails informatively; the boolean states the
-      // literal claim. `toBe(minted.token)` would say the same thing and dump a
-      // live bearer token into the log on failure.
+      // literal claim. `toBe(token)` would say the same thing and dump a live
+      // bearer token into the log on failure.
       const printed = after.stdout.trim();
-      expect(digest(printed)).toBe(digest(minted.token));
-      expect(printed === minted.token).toBe(true);
+      expect(digest(printed)).toBe(digest(token));
+      expect(printed === token).toBe(true);
     },
     120_000,
   );
