@@ -725,6 +725,8 @@ describe("up wires the security controls, in order (review finding 2)", () => {
       const dirt = await inspectCloneDirt(wt!);
       expect(dirt).toMatchObject({ dirty: false, statusLines: 0 });
     },
+    // ISC-266 audit: stands. One `up` spawn derives cliBudget(1) = 11_400 ms;
+    // measured idle is 1264-1273 ms. Not reduced.
     90_000,
   );
 
@@ -1798,6 +1800,8 @@ describe("impersonation replaces the launching user's identity outright (ISC-48)
       // across the run rather than re-shelled per worker.
       expect(await readGcloudCalls(asOperator)).toEqual(["config get-value account"]);
     },
+    // ISC-266 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 2581-2732 ms. Not reduced.
     120_000,
   );
 });
@@ -1899,6 +1903,8 @@ describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
       // per cloud worker — two cloud workers, one subprocess.
       expect(await readGcloudCalls(rig)).toEqual(["config get-value account"]);
     },
+    // ISC-266 audit: stands. One `up` spawn derives cliBudget(1) = 11_400 ms;
+    // measured idle is 1692-1773 ms. Not reduced.
     120_000,
   );
 
@@ -1937,6 +1943,8 @@ describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
       expect(up.stdout).toContain(`eng-1: google: file mode as ${SHIM_ACCOUNT}, project ${QUOTA_PROJECT}`);
       expect(up.stdout).toContain("quiet-1: google: no credential (cloud_access: false)");
     },
+    // ISC-266 audit: stands. One `up` spawn derives cliBudget(1) = 11_400 ms;
+    // measured idle is 1446-1533 ms. Not reduced.
     120_000,
   );
 });

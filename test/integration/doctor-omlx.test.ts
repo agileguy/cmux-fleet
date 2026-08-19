@@ -365,6 +365,8 @@ describe("doctor reports a measured completion latency (ISC-55, stub-backed)", (
         await stub.stop();
       }
     },
+    // ISC-266 audit: stands. Two `doctorOmlx` spawns derive cliBudget(2) =
+    // 22_800 ms; measured idle is 1964-2039 ms. Not reduced.
     30_000,
   );
 

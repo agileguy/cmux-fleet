@@ -232,6 +232,8 @@ describe("ISC-131: fallback lands on tmux and the switch is VISIBLE", () => {
       const down = await cli(rig, ["down", "--run", runId, "--json"]);
       expect(down.code).toBe(EXIT.SUCCESS);
     },
+    // ISC-266 audit: stands. Two spawns (`up`, then `down`) derive
+    // cliBudget(2) = 22_800 ms; measured idle is 1516-1741 ms. Not reduced.
     90_000,
   );
 });

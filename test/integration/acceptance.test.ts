@@ -382,6 +382,10 @@ describe("timeouts and budget (ISC-152)", () => {
     for (const r of runs) {
       expect(["passed", "timed_out", "not_run"]).toContain(r.outcome);
     }
+    // ISC-266 audit: stands, and `cliBudget` does not apply here. This test
+    // spawns no CLI at all — `runAcceptance` is called in-process — so there is
+    // no spawn count to derive from. Its 6006 ms idle IS the 6s run budget the
+    // test deliberately sets, which is the work rather than an accident.
   }, 30_000);
 });
 
