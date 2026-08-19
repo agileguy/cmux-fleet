@@ -251,6 +251,54 @@ export function roleSkillsDir(runRoot: string, role: string): string {
   return join(runRoot, "skills", role);
 }
 
+/**
+ * The per-worker code checkout mounted rw at `/workspace` (SRD §5.5, §9.1).
+ *
+ * Named here for the reason this module exists at all: `config/render.ts`
+ * open-coded `join(repo, ".worktrees", w.id)` to build the `-v`, and
+ * `run/worktree.ts` is the thing that has to CREATE that directory. Two
+ * `join()` calls agreeing today is not the same property as one function, and
+ * a divergence here has the shape ISC-188 and ISC-231 both had: Docker creates
+ * a missing bind-mount source rather than refusing, so a worker pointed at a
+ * path nothing populated gets an empty `/workspace` and reports as an agent
+ * that changed nothing rather than as a mount fault.
+ *
+ * Takes the REPO root, not the run root: unlike everything else in this
+ * module, this path lives beside the operator's checkout rather than under
+ * `~/.pifleet/runs`, because git objects must be on the same filesystem the
+ * container bind-mounts and the SRD's §5.5 mount table names it there.
+ *
+ * NOT run-scoped, deliberately and consequentially: two concurrent runs naming
+ * the same worker id resolve to the same directory. `run/worktree.ts` turns
+ * that into a loud refusal rather than a silent adoption — see its
+ * `StaleWorktreeError`.
+ */
+export function workerWorktree(repo: string, workerId: string): string {
+  return join(repo, ".worktrees", workerId);
+}
+
+/**
+ * The branch a worker commits on (SRD §9.1), honouring `run.branch_prefix`.
+ *
+ * `branch_prefix` sat in the schema with ZERO readers while
+ * `cli/commands/dispatch.ts` hard-coded the literal `fleet/${runId}/${worker}`
+ * into every envelope — so an operator who set `branch_prefix: exp` got a
+ * config key that validated, documented itself in `fleet.example.yaml`, and
+ * changed nothing. That is the same dead-field shape `models_allowlist` and
+ * `--keep-panes` were each caught in, and the fix is the same one: a single
+ * helper both the creator and the envelope builder call, so there is no second
+ * spelling to drift.
+ *
+ * A name, not a path — but it belongs to this module's rule rather than to
+ * either caller's, for exactly the reason the rule is stated in the header: a
+ * value derived in two places will eventually be derived differently in two
+ * places, and here the two places are the branch git checks out and the branch
+ * the envelope tells the worker it is on.
+ */
+export function workerBranch(branchPrefix: string, runId: string, workerId: string): string {
+  return `${branchPrefix}/${runId}/${workerId}`;
+}
+
 /** Ledger shards are per writer (SRD §7.7); the shard name is the writer id. */
 export function ledgerShard(run: RunPaths, writerId: string): string {
   return join(run.ledgerDir, `${writerId}.jsonl`);

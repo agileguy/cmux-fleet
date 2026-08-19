@@ -139,7 +139,7 @@ Every requirement below is assigned to exactly one plane, and **no requirement c
         ┌──────────────────▼──────────────────────────────────────┐
         │ Durable state (the artifact surface)                    │
         │  <run-dir>/sessions/<ts>_<session-id>.jsonl             │
-        │  <repo>/.worktrees/<worker>/          (git worktree)    │
+        │  <repo>/.worktrees/<worker>/    (independent clone — §9.2 erratum) │
         │  <run-dir>/workers/<id>/state.json                      │
         │  <run-dir>/workers/<id>/events.jsonl                    │
         │  <run-dir>/outbox/<task-id>/result.json                 │
@@ -916,7 +916,7 @@ pifleet report --run <run-id> --md
 
 | Value | Worktree | Container mounts |
 |---|---|---|
-| `worktree` *(default)* | own worktree + branch | `/workspace` rw |
+| `worktree` *(default)* | own worktree + branch [†see erratum] | `/workspace` rw |
 | `shared-ro` | none of its own | other workers' worktrees mounted **read-only** under `/review/<worker>/` |
 | `none` | none | no repo mount; `/workspace` is an empty tmpfs |
 
@@ -926,6 +926,21 @@ pifleet report --run <run-id> --md
 
 Before creating any worktree: `git worktree prune`; refuse a branch already checked out elsewhere; **serialize `worktree add` per repo** to avoid `.git/index.lock` contention across concurrent workers; fail fast with a named error when submodules or LFS are present (shared object/cache paths across worktrees are a known hazard).
 
+> **Erratum (2026-08-18, implementation Slice 2) — `git worktree add` was never built; every worker checkout is a `git clone --no-hardlinks` instead.**
+>
+> The paragraph above is kept verbatim as the historical record of what this SRD originally specified; it is not what `run/worktree.ts` implements, and should not be re-derived from by a future reader. Two designs were built and run against a real container before the design in this codebase was chosen, and both were disqualified by evidence rather than by preference:
+>
+> 1. **`git worktree add`, mounting only the linked worktree directory.** Fails outright. A linked worktree's `.git` is a FILE holding a `gitdir:` pointer into the parent's `.git/worktrees/<name>`, a path outside anything the container's mount table can name — so git inside the container answers `fatal: not a git repository` and the worker cannot commit at all.
+> 2. **`git worktree add`, additionally mounting the parent's real gitdir so the pointer resolves.** Works, and is a confirmed **container-to-host remote code execution.** A container with write access to the mounted gitdir can rewrite the host repository's own `refs/heads/main` and plant an executable `.git/hooks/post-checkout` that runs as the OPERATOR'S host user on their very next `git checkout` outside the container — the container boundary is this SRD's primary isolation control (§5, §12), and a mount that hands the confined party write access to the confining party's hook directory dissolves it. This is not a theoretical finding; it was reproduced in the security spike that investigated this feature. **Never build this.**
+>
+> The design actually shipped is **design 3: `git clone --no-hardlinks --single-branch --branch <parent's checked-out branch>` per worker**, with `origin` stripped immediately after and the clone's `.git/logs` deleted wholesale (so the host's absolute repository path never survives ANYWHERE under `.git` — `.git/config` alone was the weaker claim an earlier draft of this erratum made; `git clone` also writes the source path into `.git/logs/HEAD`'s reflog, which `remote remove origin` does not touch, and which a worker container could otherwise read straight out of the mount), and the parent's own git configured with a `worker-<id>` remote pointing AT the clone (`git -C <repo> fetch worker-<id>` is how an operator reads a worker's commits without leaving their own checkout — see `pifleet worktrees`, §10, which replaces `git worktree list` for the same reason this note exists). The clone is self-contained: `.git` is a real directory INSIDE the mount, nothing the container touches resolves outside `/workspace`, and the parent repository is unaffected by anything a worker does to its copy.
+>
+> **`--single-branch` bounds the REFS a clone tracks, not the objects it holds.** Measured directly: a blob reachable only from a second branch the operator never checked out is still present in a `--single-branch` clone of a local repository, because a local-path `git clone` copies the whole object store regardless of `--single-branch` — that flag constrains which remote-tracking refs and fetch config the clone ends up with, not what `git clone` transfers to get there. So the per-worker cost this design pays is `sizeof(.git) × N` on disk and N sequential full copies at `up` time (clones are not parallelized — see `run/worktree.ts`'s per-worker loop), not the fraction `--single-branch`'s name suggests; and a worker's container can read every out-of-scope branch's content through its own `/workspace` mount regardless of which branch it was handed. Neither is new relative to `git worktree add` (a linked worktree shares the same object store, at zero marginal disk cost, which this design does not), and the SRD's original text did not anticipate paying it — recorded here rather than silently accepted.
+>
+> **`--no-hardlinks` is load-bearing, not hygiene, and its absence is the second finding this spike produced.** `git clone` from a local source path defaults to `--local`, which HARDLINKS the source repository's object files into the clone rather than copying them — one inode, two names. The 0444 mode git sets on a pack file does not stop the owning uid from `chmod +w` first, so a worker container writing through what it believes is its own private copy corrupts the PARENT'S object store. This is exactly how the spike investigating this feature destroyed this repository's own pack file during development, before the feature existed to protect against it (recovered via `git fetch origin --refetch`, verified clean, no data lost). `test/integration/worktree.test.ts` pins both the `nlink=1` property and disjoint-inode identity between every clone object and the parent's, because nothing else in the suite notices the flag going missing — the clone still works, the branch is still right, the worker still commits, and the only symptom is that a worker container can now silently corrupt the operator's real repository.
+>
+> §9.1's `worktree` row is retitled but not otherwise changed by this pivot: a worker still gets its own writable checkout on its own branch, mounted rw at `/workspace`; only the mechanism underneath the word "worktree" changed. `isolation: worktree` stays the config vocabulary for the same reason `run/worktree.ts` keeps its filename — it is what an operator writes in `fleet.yaml`, and renaming the vocabulary to chase the mechanism would just move the drift into `fleet.yaml` instead of fixing it.
+
 ### 9.3 Admission control and merge
 
 **Panes and concurrency are deliberately decoupled: 6 panes, 2 generating.** All six workers are up, warm, and visible for the whole run; `run.max_concurrent: 2` means only two hold the oMLX server at any moment and the rest queue in admission control. This buys full fleet visibility without oversubscribing a single local inference server (§5.9 F40) — you watch six specialists, two of them are thinking, and no worker pays container-start latency when its turn arrives.
@@ -934,7 +949,11 @@ Before creating any worktree: `git worktree prune`; refuse a branch already chec
 
 `pifleet` never merges. Per run it produces N branches, N diffs, N adjudicated verdicts, and a `git merge-tree` conflict pre-check in `report`. Workers whose self-report disagrees with their diff are surfaced at the top.
 
-`down` is **two-phase**: quiesce (abort → await `dead` → kill ladder on timeout) *then* prune. Since supervisors outlive the CLI by design, pruning a worktree whose container is still writing would corrupt it; `down` refuses to prune any worktree whose supervisor is not confirmed dead, and never force-removes a dirty worktree without `--force`.
+> **Erratum (2026-08-18, Slice 2 review round) — the conflict pre-check above is real for one worker against its own base, and NOT YET real sibling-to-sibling.** Under the clone design (§9.2 erratum) each worker's branch lives only in its own independent clone; two siblings share no object store, so `git merge-tree` cannot run between them without first fetching one's objects into a place the other can see. Every worker already gets a `worker-<id>` remote registered in the PARENT (§9.2) for exactly this kind of cross-worker access, but `report` does not yet use it to fetch siblings before checking them against each other — filed as a follow-up, not fixed here. `report` now says so explicitly per pair (`"pairwise check ... not performed: different repositories"`) rather than the wire contract's `conflicts_with: []` silently reading as "checked, none found" when it was never checked at all.
+
+`down` is **two-phase**: quiesce (abort → await `dead` → kill ladder on timeout) *then* prune. Since supervisors outlive the CLI by design, pruning a checkout whose container is still writing would corrupt it; `down` refuses to prune any checkout whose supervisor is CONFIRMED STILL ALIVE, and never force-removes a dirty checkout without `--force`.
+
+> **Erratum (2026-08-18, Slice 2 review round) — "confirmed dead" is narrower than the original sentence implies.** A worker id with NO supervisor state at all — never launched, e.g. because a prior `up` created the clone and then crashed before reaching this worker's launch — is not "not confirmed dead"; nothing was ever alive to write to it, so the corruption hazard this refusal exists to prevent does not apply, and such a checkout is prunable (subject to the same dirty check as any other) rather than permanently stuck. Only a supervisor CONFIRMED TO HAVE SURVIVED the kill ladder blocks its own prune.
 
 ---
 
@@ -951,6 +970,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet up [--config p] [--workers a,b] [--backend k] [--backend-fallback k]` | build run-dir, worktrees, skill bundles, containers, panes |
 | `pifleet daemon [--run r]` | registry/reaper (started by `up`; separately runnable) |
 | `pifleet status [--run r] [--watch]` | fleet snapshot |
+| `pifleet worktrees [--run r]` | list every worker's per-worker checkout — branch, path, clean/dirty; the operator-visibility surface `git worktree list` no longer answers now that each worker is an independent clone rather than a linked worktree (§9.2 erratum) |
 | `pifleet dispatch --worker <id> --task <file\|->` / `--auto --tasks <f>` | send task envelopes |
 | `pifleet steer --worker <id> "msg"` | mid-turn correction |
 | `pifleet abort --worker <id>` | cancel current epoch |
@@ -1079,6 +1099,14 @@ Workers can see `<run-dir>` if it is mounted, and the control socket accepts `di
 
 Post-run, `pifleet` asserts: no ref outside `fleet/<run-id>/*` moved; `git -C <main-repo> status --porcelain` and a content hash of the main checkout are unchanged; no container remains running. Ref-only checking (v1.1) cannot see working-tree writes into the main checkout — which is precisely the failure that already cost this codebase a phase of work.
 
+> **Erratum (2026-08-18, implementation Slice 2) — both assertions above are now false as literally stated, and deliberately so; each is narrowed to what actually survives the §9.2 clone pivot.**
+>
+> `no ref outside fleet/<run-id>/* moved` assumed `branch_prefix` was dead (it was — see the §9.2 erratum, and ISA.md's Slice 2 close-out for the fix). With `branch_prefix` real, the namespace a run's branches live under is `<branch_prefix>/<run-id>/*`, operator-configurable, not the literal string `fleet/`. Read as "no ref outside THIS RUN's own configured namespace moved" and the assertion still holds — verified by `test/integration/worktree.test.ts`'s own operator-visibility tests, which fetch a worker's commits into the parent under `worker-<id>/<branch>` and assert nothing on the parent's OWN branch moves.
+>
+> `git -C <main-repo> status --porcelain` … unchanged` is false by construction under the clone design, and knowingly so: `up` creates `<repo>/.worktrees/` inside the operator's working tree (the per-worker checkouts live there), and that directory is excluded via `.git/info/exclude` rather than hidden from `git status` entirely — see `run/worktree.ts`'s `excludeWorktreesDir`. With the exclude entry in place, `git status --porcelain` genuinely reads EMPTY (pinned by `test/integration/worktree.test.ts`'s "operator visibility via a named remote" describe block), so the letter of this assertion is restored — but it depends on a write this SRD's original text did not anticipate: `.git/info/exclude` is not `.gitignore` (untracked, local-only, read only by git itself, never part of the operator's diff), and is the same category of write §9.2's own `registerWorkerRemote` already makes to `.git/config` for the same reason — operator visibility and tool self-consistency, achieved through git's own local bookkeeping rather than through the operator's tracked content. The alternative (leaving `.worktrees/` untracked-but-visible) was tried first and rejected: an operator's ordinary `git add -A && git commit` then embeds every worker's clone as a GITLINK, which makes this very module's OWN §9.2 preflight refuse every subsequent `up` with a "submodules present" diagnosis the operator never authored — a worse containment failure than the one this exclude entry accepts.
+>
+> One more correction, found while checking the two above: this section's OPENING sentence — "Post-run, `pifleet` asserts…" — describes a runtime CHECK that does not exist anywhere in `src/`, and did not before this slice either. Nothing in this codebase automatically verifies any of these three properties post-run; they are true (or, above, narrowed-and-true) as static properties of what the code DOES, checked here by hand and pinned by the tests this erratum cites, not by an assertion `pifleet` itself runs and could fail loudly on. That gap is not new to this PR and is not closed by it — recorded so a future reader does not go looking for a `containment_verify` step that was never built.
+
 ### 12.9 No AI attribution
 
 The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Generated with", and any mention of AI/LLM in commits, branches, or PR bodies. Enforced by a grep gate in CI.
@@ -1105,13 +1133,13 @@ The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Gen
 | F14 | Session file rewritten, not appended | inode/size change | `(dev,ino,size,offset)` tracking (§8.3) |
 | F15 | Pane closed by Dan | surface missing | supervisor is detached — unaffected (**rpc mode only**) |
 | F16 | Secrets rendered into a pane | — | no provider key exists in the container (§12.4) |
-| F17 | Stale worktrees accumulate | preflight prune | two-phase `down`; refuse dirty without `--force` |
+| F17 | Stale checkouts accumulate | `StaleWorktreeError` refuses to adopt one at `up` (§9.2 erratum — `git worktree prune` retired with `git worktree add`) | two-phase `down`; refuse dirty without `--force` |
 | F18 | Orchestrator crashes mid-run | ledger + registry on disk | detached supervisors; replayable `wait`; idempotent dispatch |
 | F19 | Worker ends turn asking a question | no diff + no envelope + interrogative | `blocked`; question surfaced |
 | F20 | `pi` wedged but alive | `last_event_at` stall | two-signal liveness |
 | F21 | Torn read / multi-byte split | — | `StringDecoder` across polls; whole-line watermark (§8.3) |
 | F22 | `result.json` half-written | schema/epoch check | atomic write + dir fsync |
-| F23 | `index.lock` contention; branch checked out; submodules/LFS | `worktree add` exit | serialized adds; preflight; named fail-fast |
+| F23 | `.git/config` lock contention (concurrent operators registering a `worker-<id>` remote in the same parent — §9.2 erratum retired the `index.lock`/`worktree add` contention this row originally named); branch name git refuses; submodules/LFS | bounded retry-with-backoff on the config lock; `check-ref-format --branch` preflight; ref-scoped LFS/submodule scan | named fail-fast before any clone exists; no orphan left behind on a later failure |
 | F24 | Budget overshoot between polls | ledger reconciliation | per-task reservation + soft-stop band |
 | F25 | Pane closed → orphaned worker | registry orphan scan | supervisors detached; reaper (§13.1) |
 | F26 | **Stale epoch attributes one task's success to the next** | epoch not quiesced | correlated `get_state` fence (§7.5) |

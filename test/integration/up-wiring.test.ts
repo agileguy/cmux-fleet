@@ -40,7 +40,10 @@ import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { EXIT } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
+import { readRunWorktrees } from "../../src/run/state.ts";
+import { inspectCloneDirt } from "../../src/run/worktree.ts";
 import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
+import { seedGitRepo } from "../fixtures/synthetic-repo.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -215,6 +218,21 @@ async function makeRig(opts: { cloudAccess?: boolean } = {}): Promise<Rig> {
   // The seeded hazard. Root-level AGENTS.md is the instruction-file class the
   // scanner quarantines by rename; one is enough to make the wiring visible.
   await writeFile(join(repo, "AGENTS.md"), "# MANDATORY fixture instructions\n");
+  // `run.repo` is a real git repository now, because `isolation: worktree`
+  // (the schema default, and what this fixture gets) makes `up` clone one
+  // checkout per worker. A plain directory is a config error there, not a
+  // degraded mode: the operator asked for a per-worker checkout of something
+  // that cannot produce one.
+  //
+  // SYNTHETIC — `git init` in this test's own scratch dir, seeded with its own
+  // commits. Never a clone or worktree of this project's repository: `git
+  // clone` from a local path HARDLINKS object files by default, so a fixture
+  // built that way shares inodes with the real repo and a test that writes
+  // into it writes into the real repo's object store. That is not a
+  // hypothetical — it is how the spike behind this feature destroyed a pack
+  // file. It is also the same discipline `materialize.test.ts` applies to
+  // `skills/`, one layer down.
+  await seedGitRepo(repo);
   const configPath = join(base, "fleet.yaml");
   await writeFile(configPath, fleetYaml(repo, opts));
   const rig: Rig = {
@@ -318,6 +336,31 @@ describe("up wires the security controls, in order (review finding 2)", () => {
       expect(firstSupervisor).toBeDefined();
       expect(egress!.seq).toBeLessThan(firstSupervisor!.seq);
       for (const h of hazards) expect(h.seq).toBeLessThan(firstSupervisor!.seq);
+
+      /**
+       * THE regression test for the hazard-neutralization-dirties-every-
+       * clone fix. The WORKER's clone gets a SECOND `repo_hazard` event —
+       * this one carrying `worker: "eng-1"` and `neutralized: true`, from
+       * `neutralizeRepoHazards` running against the clone rather than the
+       * operator's checkout. Quarantine is a RENAME of a tracked file,
+       * which is real, uncommitted change in `git status --porcelain` the
+       * instant it happens — so without `captureWorktreeBaseline`, this
+       * exact ordinary fixture (a root `AGENTS.md`, which this project's
+       * OWN skill-authoring conventions make common) would leave the clone
+       * reading as dirty from the moment `up` finished, before "eng-1" did
+       * anything at all, and `down --prune` would refuse it without
+       * `--force`.
+       */
+      const cloneHazard = hazards.find((h) => h.worker === "eng-1" && h.detail?.["kind"] === "agents_md");
+      expect(cloneHazard).toBeDefined();
+      expect(cloneHazard!.detail?.["neutralized"]).toBe(true);
+
+      const recorded = await readRunWorktrees(run);
+      const wt = recorded.byWorker.get("eng-1");
+      expect(wt).toBeDefined();
+      expect(await Bun.file(join(wt!.path, `AGENTS.md${QUARANTINE_SUFFIX}`)).exists()).toBe(true);
+      const dirt = await inspectCloneDirt(wt!);
+      expect(dirt).toMatchObject({ dirty: false, statusLines: 0 });
     },
     90_000,
   );
@@ -553,8 +596,13 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
       expect(await readdir(run.workersDir)).toEqual([]);
       expect((await mergeLedger(run)).records).toEqual([]);
     }
-    // The seeded hazard is still where the operator left it, under its own name.
-    expect(await readdir(rig.repo)).toEqual(["AGENTS.md"]);
+    // The seeded hazard is still where the operator left it, under its own
+    // name — and, now that `up` also CLONES, no per-worker checkout was
+    // created either. Listing the whole directory is what makes both claims
+    // at once: a `.worktrees` entry or an `AGENTS.md.pifleet-quarantined`
+    // would each fail this, and each is a distinct way "refused before
+    // anything happened" could stop being true.
+    expect((await readdir(rig.repo)).sort()).toEqual([".git", "AGENTS.md", "README.md"]);
   });
 
   /**

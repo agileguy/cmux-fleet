@@ -192,6 +192,25 @@ export const RunSchema = z
   })
   .strict();
 
+/**
+ * The branch prefix a run gets when no config is reachable.
+ *
+ * Derived from the schema for the same reason `DEFAULT_HEARTBEAT_INTERVAL_MS`
+ * above is: `dispatch` must name a worker's branch even for the no-config
+ * Phase 1 path, and a literal `"fleet"` there would be correct today and
+ * silently wrong the first time the default moves — which is precisely the
+ * class of drift that left `branch_prefix` unread in the first place.
+ *
+ * Read off the FIELD rather than by parsing a whole `RunSchema` object, which
+ * is how the first version of this line was written and why it is worth a
+ * comment: `RunSchema` has two members with no default (`repo` and `budget`),
+ * so `RunSchema.parse({ repo: "." })` throws — at module load, out of a file
+ * every command imports, taking 274 tests down with it. A default is a
+ * property of one field and asking that field for it needs no valid
+ * neighbours.
+ */
+export const DEFAULT_BRANCH_PREFIX: string = RunSchema.shape.branch_prefix.parse(undefined);
+
 export const LlmSchema = z
   .object({
     /** Always local oMLX on the Docker host — a constraint, not a default (§5.9). */

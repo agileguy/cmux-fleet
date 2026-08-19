@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 200/255
+progress: 201/255
 mode: build
 started: 2026-07-27
 updated: 2026-08-18
@@ -423,7 +423,7 @@ of the same class it repaired.
 ### Phase 3 — security and cloud identity
 
 - [x] ISC-248a: `up` refuses to start when the configured egress network exists but is NOT internal, rather than adopting it and reporting deny-all it does not enforce.
-- [ ] ISC-249: A checked-out repository is neutralized BEFORE any worker reads it; each hazard records `detected` and `neutralized` independently. **[OPEN — was marked met in error]** The scanner and the neutralizer both work and are pinned; they were aimed at the wrong tree. `up` scanned `config.run.repo`, the OPERATOR'S working repository, while `render.ts` mounts `<repo>/.worktrees/<worker>` as `/workspace` — and nothing in this phase creates those worktrees. So the call defended nothing and damaged the operator: it renamed their real `AGENTS.md` aside and commented out `filter.lfs.*` while leaving `filter.lfs.required = true`, which hard-fails every later `git add` on an LFS-tracked path, against SRD §12.8's requirement that this checkout be left unchanged. A linked worktree materializes committed files from git objects at checkout time regardless, so renaming in the parent could not have suppressed them anyway. `up` now DETECTS and reports only; neutralization belongs on the per-worker worktree at the moment it is created. The `detected`/`neutralized` half of this criterion IS met and pinned. **Blocked on ISC-27/ISC-28** (worktree creation and bind-mount round-tripping), which are the criteria that make a per-worker tree exist to neutralize; whoever closes those closes this at the same site, and SRD §9.2 already requires that path to fail fast on LFS — the same hazard this defect hit from the other direction.
+- [x] ISC-249: A checked-out repository is neutralized BEFORE any worker reads it; each hazard records `detected` and `neutralized` independently. **[CLOSED 2026-08-18, Slice 2]** Was open, blocked on ISC-27/ISC-28 (worktree/bind-mount round-tripping — both since closed) because neutralization needs a per-worker tree to run against, and nothing before Slice 2 created one. `run/worktree.ts`'s clone-based checkouts (SRD §9.2 erratum) close that gap: `up.ts`'s `onCreated` callback runs `neutralizeRepoHazards` against each finished CLONE — not the operator's own checkout, which stays detect-only, per SRD §12.8 — and unlike a linked worktree's pointer-file `.git` (which the scanner explicitly declines to follow), a clone's `.git` is a real directory the scanner acts on completely. Verified end to end, not inferred: `test/integration/up-wiring.test.ts`'s `egress verification and hazard neutralization...` test seeds a root `AGENTS.md` in the operator's repo, runs the real `up` CLI, and asserts a SECOND `repo_hazard` ledger event (`worker: "eng-1"`, `neutralized: true`) distinct from the operator-side detect-only one, that `AGENTS.md.pifleet-quarantined` exists inside the CLONE, and — closing the loop this criterion's own history warns about — that `inspectCloneDirt` reports the resulting checkout CLEAN rather than dirty-from-birth (see the `captureWorktreeBaseline` fix, ISA Changelog and Slice 2 close-out below, for why that last part needed its own fix once this test was written to check for it).
 - [x] ISC-250: Every control-socket verb requires the per-run secret, `ping` included; a wrong or missing token is a clean refusal and the server stays up.
 - [x] ISC-251: The Google grant is never silent — `up` states per worker which identity it got, or that it got none.
 - [x] ISC-252: Egress host matching requires a label boundary; `evil-googleapis.com` and an empty leftmost label cannot ride a `*.googleapis.com` rule.
@@ -480,6 +480,23 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 
 ## Decisions
 
+- **2026-08-18 — Slice 2 real per-worker git isolation: clone, not `git worktree add`, decided
+  after a security spike produced a confirmed RCE.** SRD §9.2 specified linked worktrees. Two
+  worktree-based designs were built and run against a real container before this decision: one
+  fails outright (a linked worktree's `.git` is a pointer file resolving outside the container's
+  mounts), the other works and is a confirmed container-to-host RCE (a container with write
+  access to the mounted gitdir zeroed the host's `refs/heads/main` and planted an executable
+  post-checkout hook that ran as the operator on their next `git checkout`). Presented to the
+  user with both findings; the user chose `git clone --no-hardlinks` (plus `--single-branch`,
+  origin stripped, a parent-side `worker-<id>` remote for visibility) over abandoning per-worker
+  isolation entirely. `--no-hardlinks` is not a hardening extra — a bare local clone hardlinks
+  object files by default, and the spike that investigated this feature destroyed this
+  repository's own pack file exactly that way before the flag was added; every clone path in
+  both the implementation and the test fixtures now passes it, and `test/integration/
+  worktree.test.ts` pins `nlink=1` and disjoint parent/clone inodes directly rather than trusting
+  clone success as a proxy. SRD §9.2 carries this as an erratum rather than a silent rewrite; see
+  `## Changelog` for the full conjectured/refuted/learned record and the Slice 2 close-out below
+  for verification.
 - **2026-08-18 — `config.run.root` left in the schema, and now read by nothing (ISC-188).**
   Closing ISC-188 meant deciding which of two answers to the runs root is THE answer.
   `run.root` is not a different concept from `runsRoot()` — its schema default is
@@ -721,6 +738,39 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   EVIDENCE; the two had been conflated because ISC-94 only ever exercised the first.
   **criterion now:** ISC-230 caps the verdict when an attempted command returns no answer, while
   ISC-152 still forbids calling it `failed`.
+
+- **conjectured:** SRD §9.2 specified `git worktree add` (linked worktrees, `git worktree prune`,
+  per-repo serialization) as the mechanism behind `isolation: worktree` — a worker gets its own
+  branch and its own tree, and a linked worktree is the obvious way to give it one without a
+  full clone's cost.
+  **refuted by:** a security spike that built and ran two `git worktree add`-based designs against
+  a real container, not merely reasoned about them. Mounting only the linked worktree directory
+  fails outright: a linked worktree's `.git` is a FILE holding a `gitdir:` pointer into the
+  parent's `.git/worktrees/<name>`, a path outside anything the container's mount table can name,
+  so git inside the container answers `fatal: not a git repository` and the worker cannot commit
+  at all. Also mounting the gitdir at its real host path to fix that makes it work — and is a
+  confirmed container-to-host remote code execution: from inside the container the spike zeroed
+  the host's `refs/heads/main` and planted an executable `.git/hooks/post-checkout` that ran as
+  the OPERATOR'S host user on their very next ordinary `git checkout`.
+  **learned:** §9.1's "two nested boundaries" table treats the container and the worktree as
+  independent controls, but they are not independent when the worktree mechanism's own control
+  file (`.git`) is a pointer that must resolve OUTSIDE the container to work at all — mounting
+  what makes it resolve hands the confined party write access to the confining party's hook
+  directory, and the outer boundary dissolves. A design has to be run against a real container to
+  find this; reading `git worktree add --help` does not surface it.
+  **criterion now:** `run/worktree.ts` implements `isolation: worktree` as `git clone
+  --no-hardlinks --single-branch --branch <the operator's checked-out branch>` per worker, with
+  `origin` stripped immediately after (so the host's absolute repository path cannot be read out
+  of a container-readable `.git/config`) and a `worker-<id>` remote registered in the PARENT so
+  an operator can still read a worker's commits (`git -C <repo> fetch worker-<id>`) without
+  leaving their own checkout. `--no-hardlinks` is independently load-bearing: a bare local clone
+  defaults to `--local`, which hardlinks object files into the copy rather than copying them, and
+  a worker container writing through its own "copy" then corrupts the PARENT'S object store
+  through the shared inode — not hypothetical, it is how the spike investigating this feature
+  destroyed this repository's own pack file, recovered via `git fetch origin --refetch` with no
+  data lost. SRD §9.2 now carries this as a full erratum rather than a silent rewrite, and
+  `pifleet worktrees` (new CLI command, §10) replaces the operator-visibility `git worktree list`
+  used to provide, since an independent clone has no entry in the parent's worktree list at all.
 
 ## Verification
 
@@ -1784,3 +1834,427 @@ stays 200/255.
   `assertContained`, the `.DS_Store` case failed with the exact production error; without the
   `.git` guard, materialization SUCCEEDED and `.git/config` — embedded credential and all —
   was readable inside the run's `/skills` bundle.
+
+### Slice 2 close-out — real per-worker git isolation — 2026-08-18
+
+SRD §9.2 specified `git worktree add` per worker. A security spike, run against a real
+container rather than reasoned about, disqualified it outright: mounting only the linked
+worktree directory fails (its `.git` is a `gitdir:` pointer FILE resolving into the parent's
+`.git/worktrees/<name>`, a path outside anything the container's mount table can name, so git
+inside the container answers `fatal: not a git repository`); also mounting the parent's real
+gitdir to fix that works, and is a confirmed **container-to-host remote code execution** — from
+inside such a container the spike zeroed the host's `refs/heads/main` and planted an executable
+`.git/hooks/post-checkout` that ran as the OPERATOR'S host user on their next ordinary
+`git checkout`. Presented to the user with both findings; the user chose **`git clone
+--no-hardlinks`** per worker over dropping per-worker isolation. See `## Decisions` and
+`## Changelog` above for the full conjectured/refuted/learned record, and `Docs/SRD.md` §9.2
+for the erratum in place of a silent rewrite of the original spec.
+
+- **Mechanism.** New `src/run/worktree.ts`. `resolveBaseRef` refuses a detached parent HEAD
+  by name rather than silently cloning the wrong commit (`git clone --branch` accepts a branch
+  or tag, never a SHA). `inspectBaseRef`/`assertBaseRefCloneable` scan the ref BEFORE any clone
+  exists — a submodule clones as an empty directory and LFS-tracked content clones as a pointer
+  stub, both silent-wrong-answer failures a clone cannot recover from after the fact, so both
+  are a named refusal rather than a warning. `createWorkerWorktrees` then, per worker:
+  `git clone --no-hardlinks --single-branch --branch <parent's branch> <repo> <path>`, `git
+  switch -c <branch>`, `git remote remove origin`, and registers a `worker-<id>` remote in the
+  PARENT pointing at the clone — the operator-visibility substitute for what a linked worktree
+  used to give for free, since `git worktree list` against the parent now shows nothing about
+  workers that are independent clones. `pruneWorkerWorktree` (SRD §9.3) defines "dirty" for a
+  clone with no upstream — uncommitted paths OR commits past the recorded `baseSha`, since
+  `origin` is stripped and there is no "it's pushed somewhere" case to fall back on. `up.ts`
+  wires `neutralizeRepoHazards` onto each finished clone (not the operator's own checkout,
+  which is scan-only) — unlike a linked worktree's pointer-file `.git`, which that scanner
+  explicitly declines to follow, a clone's `.git` is a real directory the scanner can act on
+  completely.
+
+- **`branch_prefix` was configured, validated, and silently ignored.** `run.branch_prefix` has
+  sat in the schema since Phase 1 with a `"fleet"` default and zero readers. `createWorker
+  Worktrees` called `workerBranch("fleet", …)` with the literal string hard-coded rather than
+  reading `loaded.config.run.branch_prefix` — the same dead-config-field shape this ISA has
+  already caught twice (`models_allowlist`, `run.root`/ISC-188). An operator who set
+  `branch_prefix: experiment` got a config key that validated, appeared in
+  `fleet.example.yaml`, and changed nothing: every worker still committed on `fleet/<run>/
+  <worker>`. Fixed at the one call site — `workerBranch(loaded.config.run.branch_prefix,
+  run.runId, workerId)` — rather than by adding a second helper, per `run/paths.ts`'s own
+  stated rule that a value derived in two places eventually derives differently in two places.
+  `dispatch.ts`'s envelope builder was already correct on inspection: it reads `branch` back
+  from the `WorkerWorktree` record `up` wrote (`readRunWorktrees`), which is the checkout that
+  actually exists, rather than recomputing the branch name itself — so once the creation-time
+  bug was fixed, dispatch's envelopes were automatically right with no second change. Both
+  `test/integration/worktree.test.ts` (`branch_prefix is honoured end to end`) and
+  `test/integration/down-prune.test.ts` (`dispatch names the checkout that actually exists`)
+  assert the actual git branch a non-default prefix produces, not merely that the config field
+  parses.
+
+- **The `origin`-strip fix was already solid, not merely passing by accident.** Traced the
+  "origin strip" reference in the prior progress note to `createWorkerWorktrees`'s `git remote
+  remove origin` call (worktree.ts) and to a dedicated regression test, `the clone is
+  self-contained > origin is stripped and the host repo path does not survive in the config`
+  (`worktree.test.ts`), which asserts BOTH `git remote` prints nothing AND the literal host
+  repo path is absent from `.git/config` — not just that the command exited 0. Reverting the
+  `remote remove` call makes that test fail on the first assertion; the second guards against a
+  narrower fix (e.g. renaming the remote) that would still leak the host path. Nothing further
+  was needed here.
+
+- **Hardlink safety, re-verified independently of the pinned test.** Per the standing
+  constraint that a prior spike using local-path clones WITHOUT `--no-hardlinks` corrupted this
+  repository's real object store, every clone path — implementation (`run/worktree.ts`) AND
+  every test fixture (`test/fixtures/synthetic-repo.ts`, which never clones anything and only
+  ever `git init`s a fresh temp repo) — was re-audited for the flag before this slice was
+  considered done. Beyond the suite's own `--no-hardlinks` describe block (asserts `nlink=1`
+  and disjoint parent/clone inodes for every object), verified by hand against a disposable
+  synthetic repo under `/tmp` (never `~/repos/cmux-fleet`): `git clone --no-hardlinks
+  --single-branch --branch main <src> <clone>` followed by `stat -f nlink,ino` over every file
+  under `<clone>/.git/objects` showed `nlink=1` uniformly, and the clone's and source's inode
+  sets were disjoint (`comm -12` on the sorted lists: 0 overlapping inodes). The real
+  `~/repos/cmux-fleet` object store was checked read-only afterward — `git fsck --no-progress`
+  exits 0 with no missing/corrupt objects — as a final sanity check that no step of this slice's
+  work (implementation, tests, or manual verification) touched it.
+
+- **New: `pifleet worktrees` (SRD §10), the `git worktree list` replacement.** A worker
+  checkout is now an independent clone with no entry in the parent's `.git/worktrees/`, so
+  `git worktree list` run against the parent answers "one worktree" regardless of how many
+  workers `up` created — an operator reaching for the old habit sees nothing and could
+  reasonably read that as "no workers running," which is wrong while a run is live. The new
+  command reads the same `WorkerWorktree` record `dispatch` and `down --prune` already trust
+  (`readRunWorktrees`) rather than re-deriving anything from git, lists every worker's branch,
+  path, base sha, and remote name, and reports each checkout's state — `clean`, `dirty (N
+  uncommitted path(s), M commit(s) ahead)`, or `MISSING` for one removed from disk by hand or
+  by a prior prune — via `inspectCloneDirt`, the same function `down --prune` gates on. A pure
+  read like `status` and `artifacts`: it exits 0 for any successfully emitted report, because a
+  dirty or missing checkout is exactly the fact an operator runs it to find, not a failure of
+  the command itself. `--run` and `--json` follow the same conventions as every other run-scoped
+  command; `test/unit/cli.test.ts`'s ISC-14 SRD-surface check now names it.
+
+- **Review round 1 — four independent reviewers (Claude, Gemini, Codex, and a fourth
+  multi-angle pass), each probing the diff against real git rather than reasoning about it, all
+  four returning CHANGES_REQUESTED with overlapping and distinct critical findings.** Every
+  finding below was reproduced before being fixed.
+
+  - **No atomicity between `git clone` succeeding and a checkout being RECORDED (Claude,
+    Codex, and the fourth reviewer, independently).** `createWorkerWorktrees`'s six-step
+    sequence (clone, switch, strip origin, register remote, read HEAD) recorded nothing until
+    the LAST step; a failure anywhere after the clone left a real, on-disk checkout with no
+    `run.json` entry, no ledger row, and a `StaleWorktreeError` on the next `up` whose own
+    suggested recovery (`down --prune`) could not see it, because pruning reaps by RECORD.
+    Reproduced by seeding a repo whose checked-out branch is already the exact string a
+    worker's own branch would compute to, which makes `git switch -c` collide with the branch
+    the clone just checked out — a git-ref-valid name the preflight below cannot catch. Fixed:
+    everything after `git clone` now runs inside a `try`/`catch` that removes the clone
+    directory and best-effort removes any registered remote before rethrowing, so a partial
+    failure leaves NOTHING behind rather than an orphan (`test/integration/worktree.test.ts`,
+    "a clone that exists but never finished setup is removed, not orphaned").
+
+  - **`run.branch_prefix` and worker ids can produce a branch name git refuses, discovered only
+    at `git switch -c` — after the clone (and, before the fix above, the orphan) already
+    exists (Claude, Codex, Gemini — 3/3).** `branch_prefix` had zero grammar of its own, and
+    `SESSION_ID_RE` (worker ids) permits both `..` and a trailing `.lock`. Fixed with a
+    preflight, run for every wanted worker BEFORE any clone is attempted (the same "pure work
+    first" rule the base-ref scan already follows): `git check-ref-format --branch <name>` on
+    the exact computed branch. Delegated to git rather than hand-rolled, and to `--branch`
+    mode specifically — measured directly, the bare `refs/heads/<name>` form accepts a leading
+    `-` that `--branch` mode (and `git switch -c` itself) correctly refuses, because a NAME
+    starting with `-` is indistinguishable from an option to the commands that consume it.
+
+  - **`origin` being stripped does not stop the host's absolute path — or the operator's
+    identity — from reaching the container (Claude, independently verified by Gemini).**
+    `git clone` writes `clone: from <absolute source path>` into `.git/logs/HEAD` and
+    `.git/logs/refs/heads/<base>`, neither of which `git remote remove origin` touches; the
+    reflog line also carries the committer identity. `.git/config` alone — the property the
+    original test asserted — is the weaker claim. Fixed: the clone's `.git/logs` is deleted
+    wholesale right after `origin` is stripped (`core.logAllRefUpdates` recreates it, clean, on
+    the worker's first ref update). The regression test now walks every file under `.git`
+    rather than reading `.git/config` alone (`test/integration/worktree.test.ts`, "origin is
+    stripped and the host repo path does not survive ANYWHERE under .git").
+
+  - **An operator's ordinary `git add -A && git commit` embeds every worker's clone as a
+    GITLINK, which then makes this module's OWN preflight refuse every future `up` with a
+    "submodules present" diagnosis nobody authored (Codex, reproduced and mutation-tested).**
+    Invisible in THIS repository's own development, because cmux-fleet's `.gitignore` already
+    excludes `.worktrees/` — and therefore reachable by every other repository this tool runs
+    against. Fixed: `.worktrees/` is now written into the operator's `.git/info/exclude`
+    (idempotently, once, before the first clone) — never `.gitignore`, which is tracked
+    content SRD §12.8 forbids editing. `.git/info/exclude` is untracked, local-only,
+    read only by git itself — the same category of write `registerWorkerRemote` already makes
+    to `.git/config`. SRD §12.8 itself is corrected by its own erratum, below.
+
+  - **`up`'s own hazard neutralization made every clone dirty from the moment `up` finished,
+    breaking `down --prune`'s core signal on essentially any real repository (Gemini,
+    reproduced and mutation-tested against this exact fix).** Quarantine
+    (`security/repo-hazards.ts`) neutralizes a tracked hazard file by RENAME — real,
+    uncommitted change in `git status --porcelain` the instant it happens — so a clone of any
+    repository with a root `AGENTS.md`/`CLAUDE.md` (common; this project's own skill-authoring
+    conventions produce them) read as dirty before the worker had done anything, and
+    `down --prune` refused every such worker without `--force`. Committing the change was
+    considered and rejected: this module's git environment is hermetic (`HOME=/dev/null`, both
+    config scopes blanked), so no identity exists to commit with, and a synthetic commit would
+    have moved the exact same false positive from the working tree into `commitsAhead`, while
+    also polluting the exact-diff equality ISC-90 expects. Fixed with a new
+    `WorkerWorktree.baselineStatus` field and `captureWorktreeBaseline` (`run/worktree.ts`),
+    called by `up` AFTER neutralization: `inspectCloneDirt` now compares CURRENT
+    `git status --porcelain` against the recorded baseline rather than against assumed-empty,
+    which generalizes to every present and future hazard-neutralization shape without this
+    module ever enumerating them. `test/integration/up-wiring.test.ts` gained the missing
+    end-to-end assertion (closing ISC-249, above) and is mutation-proved: reverting the fix
+    reproduces `dirty: true, statusLines: 2` on exactly the fixture this finding described.
+
+  - **`down --prune` treated "no supervisor ever launched" the same as "launched and
+    survived the kill ladder", so a checkout orphaned by a crashed `up` was unreapable even
+    with `--force` (Claude, independently reproduced by Gemini).** §9.3's refusal exists to
+    protect a checkout a LIVE container is writing; a worker id with no `workers/<id>` state at
+    all was never launched, so nothing was ever writing into it. Fixed:
+    `stopped.has(id) && stopped.get(id) !== true` (survived the ladder) refuses; `!stopped.has(id)`
+    (never launched) now falls through to the ordinary dirt check, which `--force` can
+    override like any other. Two new tests in `down-prune.test.ts` cover both the clean
+    (prunable) and dirty (needs `--force`) cases.
+
+  - **`down --prune` silently exited 0 and reported `pruned: []` when the worktree record
+    itself could not be read, indistinguishable from "this run truly left nothing behind"
+    (Gemini, reproduced).** `readRunWorktrees` degrading to `note !== null` was logged but never
+    counted as a refusal, so real clones and remotes could sit on disk with nothing left
+    naming them while a script reaping runs in a loop read exit 0 as "safe to delete this run
+    directory" — precisely the loop-reaper data loss this function's own comment says
+    `EXIT.PARTIAL` exists to prevent, one case over. Fixed: a whole-record read failure, and
+    now also a PER-WORKER one (see next item), both count toward `pruneRefusals`.
+
+  - **One worker's malformed checkout record degraded ALL workers' records to "unreadable",
+    including perfectly valid ones (the fourth reviewer).** `readRunWorktrees` parsed the
+    entire `worktrees` array with one `z.array(...).safeParse()`; any single bad entry failed
+    the whole array. Fixed: each entry is now parsed independently — a bad one is dropped and
+    named in a new `perWorkerNotes: readonly string[]` field, every good one still reaches
+    `byWorker`. `dispatch` and `down --prune` both surface `perWorkerNotes` (a ledger event and
+    a refusal respectively) rather than silently losing the other workers.
+
+  - **`dispatch`'s `branch_prefix` fix had a second gap: a worker with no checkout of its own
+    (`shared-ro`, `none`) still fell back to the SCHEMA's global default rather than the run's
+    actual `branch_prefix` (Claude).** The fallback chain's last link re-derived
+    `DEFAULT_BRANCH_PREFIX` instead of reading what `up` actually launched with. Fixed: `up`
+    now persists `branch_prefix` into `run.json` itself (the same pattern already used for
+    `repo`), and `readRunWorktrees`/`dispatch` read it back. New test drives a real (minimal)
+    control-socket exchange — the durable inbox record is only written on `accepted: true`, so
+    proving the fallback reaches the envelope needed a dispatch that actually succeeds, not
+    merely one that fails after building the envelope.
+
+  - **`src/harvest/acceptance.ts`'s scratch clone was missing `--no-hardlinks` (Claude) —
+    the ISA's own PR #14 close-out and this PR's body both claimed "every clone path... now
+    passes it", which was false as stated.** This clone's source is `envelope.host_workdir` —
+    the WORKER's own checkout — and acceptance commands are worker-authored by design (ISC-148
+    ..151); a hardlinked scratch clone meant those commands could corrupt the worker's object
+    store one hop removed from the host-corruption case this whole feature exists to prevent.
+    Fixed: `--no-hardlinks` added to that `hardenedGitArgv` call.
+
+  - **`Infinity` (an unanswerable "how many commits ahead") collapsed to JSON `null` — the
+    same encoding `pifleet worktrees --json` uses for "not computed" (Claude, Codex, and the
+    fourth reviewer — 3/3).** Fixed with an explicit `base_unreachable: boolean` field
+    alongside `commits_ahead`, so the loudest possible dirty signal can no longer read as "no
+    data" to a machine consumer.
+
+  - **A successful-but-unparseable `git rev-list --count` collapsed to `commitsAhead: 0` via
+    `NaN || 0` (the fourth reviewer).** An undetermined ahead-count silently read as "definitely
+    zero", the same mistake `POSITIVE_INFINITY` two lines away exists to avoid for the sibling
+    failure case. Fixed: `Number.isNaN` is checked explicitly.
+
+  - **`pruneWorkerWorktree`'s recursive delete trusted a path read back from `run.json` with no
+    containment check (Claude, Codex).** Not container-writable, but operator-editable; a
+    hand-edited or truncated record could turn `--force` into an unbounded `rm -rf`. Fixed:
+    gated on `resolvedWithin(join(repo, ".worktrees"), wt.path)`, refusing (as a normal
+    `PruneOutcome`, not a throw) rather than deleting outside the expected root.
+
+  - **Preflight's own `unscanned` findings — attribute files too large or too numerous to
+    read — were silently dropped whenever nothing ELSE triggered a refusal (Gemini,
+    reproduced).** `BaseRefFindings.unscanned`'s own doc comment says "Never silent"; a
+    `.gitattributes` past `MAX_ATTRIBUTE_BYTES` declaring an LFS filter passed preflight with
+    no warning at all, because `findings.lfs` can only report what the scan actually READ.
+    Fixed: `assertBaseRefCloneable` now fails closed — any unscanned file is itself a refusal
+    reason, not merely an appendix to one.
+
+  - **`report/collect.ts`'s merge pre-check preferred the PARENT repository over the worker's
+    own checkout for resolving a worker's branch — correct for `git worktree add` (shared
+    refs), silently wrong for the clone design this PR ships (the fourth reviewer, most severe
+    finding of the round).** Once `dispatch.ts` started populating `envelope.repo` with the
+    parent path (rather than the literal `"unset"`), `report/collect.ts`'s pre-existing "prefer
+    `env.repo`" logic activated for every worktree-isolated worker — but under the clone
+    design a worker's branch is created with `git switch -c` INSIDE its own independent clone
+    and never fetched into the parent, so `git -C <parent> rev-parse <branch>` fails to resolve
+    it, silently degrading the merge pre-check to "branch does not resolve; nothing was
+    checked" for a branch that may be perfectly clean. Fixed: the preference is reversed
+    (worker's own checkout first, parent as fallback for modes with none of their own). New
+    regression test builds a REAL independent clone (not `git worktree add`, which shares refs
+    regardless of which path is checked and so cannot fail this way) whose branch exists ONLY
+    in the clone, and asserts the merge pre-check resolves it; mutation-proved by reverting the
+    fix and observing the exact reported failure.
+
+  Filed, not fixed in this round (judged out of scope, each a narrower or more speculative
+  finding than the ones above): a TOCTOU between `lstat`'s stale-directory check and the actual
+  `git clone` for two concurrent `up` invocations racing the same repo+worker id; a matching gap
+  where a losing racer's "remote already exists" is not recognized as retryable lock contention;
+  the base-ref preflight scan running once per `up` rather than once per clone, so a branch that
+  advances mid-fleet is not re-scanned for a later worker; `docker/Dockerfile`'s
+  `git config --system` grant being broader (all-uid) than the single uid the container runs as;
+  and `pifleet worktrees`'s per-worker git spawns running serially rather than via `Promise.all`
+  (a pure-read command, unlike creation/prune, has no contention argument for it).
+
+- **Verification.** `bun run typecheck` clean. `bun test` → **1308 pass, 53 skip, 0 fail**
+  across 83 files (up from 1260/53/80 at PR #14 — 48 new tests across the review round: the
+  atomicity/branch-validation/exclude/reflog/unscanned coverage in `worktree.test.ts`, the
+  never-launched/unreadable-record/malformed-entry/branch_prefix-fallback coverage in
+  `down-prune.test.ts`, the hazard-neutralization-baseline assertion added to
+  `up-wiring.test.ts`, and the merge-pre-check regression test in `report-collect.test.ts`, on
+  top of the 8 already added for `pifleet worktrees` in the prior pass). Both originally-failing
+  regression tests pass: `branch_prefix is honoured end to end > a non-default prefix names the
+  branch git actually checks out` and `dispatch names the checkout that actually exists >
+  branch_prefix and the recorded path reach the envelope`. Most fixes in the round above were
+  mutation-proved individually at the time — reverted, the exact reported failure reproduced,
+  restored. **Correction (round 2, below): that claim was not true for all fourteen.** Four
+  fixes (`--no-hardlinks` on the acceptance scratch clone, the `Infinity`→`base_unreachable`
+  encoding, the `NaN`-collapse guard, and the prune path-containment check) shipped with no test
+  that actually failed on their own revert — caught by a second review pass, not by this one.
+  See below for what that pass found and how it was closed. Hardlink safety independently
+  re-verified a second time after the round, against synthetic repos only; `git fsck
+  --no-progress` on the real `~/repos/cmux-fleet` still exits 0 with no missing/corrupt objects.
+
+- **Review round 2 — three more independent reviewers (Claude, Gemini, Codex again), reviewing
+  round 1's FIXES rather than the original diff, all three converging independently on the same
+  core defect: round 1's atomicity fix and dirty-clone fix each closed one door and left another
+  open at the exact seam the first review didn't look at.**
+
+  - **The rollback still didn't cover the one thing that actually records a checkout (Claude
+    and Codex, independently reproduced; the third reviewer initially flagged the same seam
+    from a stale pre-fix read before self-correcting).** Round 1's `try`/`catch` in
+    `createWorkerWorktrees` closed before `created.push(record)` and `await opts.onCreated(...)`
+    — and `onCreated` is the ONLY thing that records a checkout (`up.ts`'s callback writes
+    `run.json` and the ledger). Worse, round 1 also moved hazard neutralization and baseline
+    capture INTO that callback, ahead of the `run.json` write, specifically to fix the
+    dirty-clone bug — which widened the very window the atomicity fix had just closed. A throw
+    from `neutralizeRepoHazards` or `captureWorktreeBaseline` reproduced the identical orphan
+    (clone on disk, remote registered, nothing in `run.json`) the round-1 fix's own commit
+    message claimed was closed. Fixed: `created.push` and `opts.onCreated(...)` now run INSIDE
+    the try block, so any failure anywhere in that sequence triggers the same rollback.
+    Rollback ordering also tightened per a Codex recommendation: the remote is removed before
+    the directory, and both cleanup steps are `.catch(() => {})`-guarded so a cleanup failure
+    (EPERM, EBUSY, "no such remote") can never replace the ORIGINAL error as what propagates.
+
+  - **The dirty-clone fix's own comparison mechanism had two false-negative classes that
+    delete real worker output (Codex and Gemini, both independently reproduced against real
+    git before either had seen the other's finding).** `inspectCloneDirt`'s
+    `git status --porcelain` line-set comparison against a recorded baseline — the round-1 fix
+    for the hazard-neutralization-dirties-every-clone bug — has two blind spots, both
+    verified: (a) `git status` collapses a wholly-untracked directory into ONE line, so a file
+    written beneath a directory `repo-hazards.ts` already quarantined as a unit changes
+    nothing about that line; (b) `git status` reports a STATUS CODE per tracked path, not
+    content, so a worker's edit to a file the baseline ALSO shows modified (a `.gitattributes`
+    `repo-hazards.ts` already commented a line out of) produces the IDENTICAL status line and
+    cancels out as "no change". Both reproduced directly: build a baseline with a quarantined
+    directory and a quarantine-modified file, then have "the worker" add a file inside that
+    directory and further edit that file — `statusLines` stays `0`, `dirty` reads `false`, and
+    `pruneWorkerWorktree` deletes the checkout with no `--force` and no warning. Silent data
+    loss on the exact signal `--force` exists to protect, and on any repo where
+    `repo-hazards.ts` quarantines a directory or edits a tracked file in place — which is to
+    say, most real repositories with a root `AGENTS.md`/`CLAUDE.md`.
+
+    Fixed with a different mechanism entirely, not a patch to the line-diff: `WorkerWorktree`
+    gained `baselineTree`, a git TREE OBJECT hash (`snapshotWorkingTree` in `run/worktree.ts`) —
+    `git add -A` into a throwaway `GIT_INDEX_FILE`, then `git write-tree`, producing a full
+    content digest of the entire working tree (tracked and untracked, respecting
+    `.gitignore`) without ever touching the checkout's real index. `inspectCloneDirt`'s
+    `dirty` decision now compares the CURRENT tree hash against `wt.baselineTree`, which is
+    immune to both false-negative classes by construction (any byte anywhere that differs
+    changes the hash) — verified against the exact two scratch-repo reproductions above before
+    the fix was written, and again after. `git status --porcelain --untracked-files=all` is
+    still captured (`baselineStatus`) and still diffed the old way, but ONLY for the
+    human/JSON "N uncommitted path(s)" display count now — never for the safety-critical
+    boolean. `runGit` (`harvest/git.ts`) gained an optional `extraEnv` parameter to make the
+    throwaway-index technique possible without bypassing its own hardening: `GIT_INDEX_FILE`
+    layers on top of `HERMETIC_GIT_ENV`, never replaces it.
+
+  - **`worktrees: null` and `worktrees: []` still read identically to `readRunWorktrees`,
+    defeating the very distinction `up.ts`'s own comment calls load-bearing (Claude,
+    reproduced; chains directly with the rollback finding above — a crashed `up` leaves
+    `null`, which then read as "nothing to reap" rather than "unknown").** Fixed:
+    `readRunWorktrees` now branches on the key being ABSENT (a run predating this field —
+    stays "nothing recorded", backward compatible) versus PRESENT and explicitly `null`
+    (creation started and did not finish — now a `note`, counted as a `down --prune` refusal,
+    same as an unreadable record). `up.ts`'s no-config Phase 1 path — the other legitimate
+    producer of a run with no worktrees — now explicitly writes `worktrees: []` too, so it
+    is not swept into the new `null` refusal by omission.
+
+  - **The round-1 merge-precheck field swap (worker's own clone preferred over the parent —
+    itself a necessary fix, see round 1 above) silently disabled sibling-vs-sibling conflict
+    detection entirely (Claude and Gemini, both independently reproduced).** `checkPairwise`
+    only runs `git merge-tree` between two workers sharing ONE `repo` value — true when every
+    worker's `repo` was the same parent path (pre-round-1, via the literal string `"unset"`,
+    which was itself already a degenerate, non-functional case — this is not a regression from
+    working to broken, but from silently-broken-one-way to silently-broken-a-different-way),
+    false the moment `repo` became each worker's own independent clone. Reproduced: two
+    workers editing the same line of the same file, checked pairwise, report
+    `conflicts_with: []` — indistinguishable, on the wire, from "checked, no conflicts",
+    which was never actually computed. `conflicts_with` is an SRD §9.3 wire-contract field and
+    an empty array is an affirmative claim; the same "never claim what was not computed"
+    standard `checkAgainstBase`'s own docstring states for `clean`.
+
+    Fixed to the extent scoped for this round: the skip is now EXPLICIT — each side's
+    `detail` records `"pairwise check with sibling <id> not performed: different
+    repositories"` rather than silently leaving `conflicts_with`/`detail` empty. **Filed, not
+    fully fixed here:** actually computing sibling-vs-sibling conflicts under the clone design
+    needs the parent to `fetch worker-<id> <branch>` for each sibling before diffing — the
+    `worker-<id>` remote SRD §9.2 already registers is the natural place to do this from, but
+    nothing wires the fetch up yet. `Docs/SRD.md` §9.3 carries this as its own erratum.
+
+  - **A concurrency hazard in this review round itself, worth recording rather than
+    quietly avoiding a mention of.** An earlier `code-review` skill invocation, launched by
+    habit before the user's explicit "use CodeReviewer" instruction was followed, continued
+    running as a background agent through this entire review round — including doing its own
+    live `cp`-based file backup/restore mutation tests against `src/run/worktree.ts` and
+    `src/harvest/acceptance.ts` WHILE this session was actively editing those same files to
+    apply the round-2 fixes above. Given this repository's own history (the security spike
+    that corrupted the real `~/repos/cmux-fleet` object store), any concurrent, uncoordinated
+    mutation of shared working-tree state is treated as a real hazard, not a curiosity.
+    Verified afterward: `git status --short` in the worktree showed exactly the files this
+    session intended to have modified and nothing else, no stray `.bak`/backup files were
+    left behind, `bun run typecheck` was clean, and the full suite was green (1308/53/0,
+    unchanged from before the concern was raised) — the concurrent activity did not corrupt
+    anything, but it was luck rather than a designed safety property, and no further
+    live-file-mutating review agents were launched against this worktree after the risk was
+    identified.
+
+  - **Test coverage gap closed for two of the four fixes round 2's own reviewers found
+    untested (the other two — `NaN`-collapse and the `Infinity`/`base_unreachable`
+    JSON-field split — are addressed partially; see below).** `--no-hardlinks` on the
+    acceptance scratch clone (`test/integration/acceptance.test.ts`, "the scratch clone
+    shares no inode with the worker's own checkout" — walks `.git/objects` under
+    `context.clone_path`, asserts `nlink=1` and disjoint inodes against the worker's own
+    checkout, mirroring `worktree.test.ts`'s own pattern for the per-worker clone) and the
+    prune path-containment check (`test/integration/worktree.test.ts`, "a record naming a
+    path outside `<repo>/.worktrees/` is refused, not deleted") are now both mutation-proved:
+    reverting each reproduces the exact defect the finding described. A third gap
+    (`commitsAhead: Infinity` for a `baseSha` that does not resolve at all, as distinct from
+    N commits ahead) is now covered at the `inspectCloneDirt` level
+    (`worktree.test.ts`, "a baseSha that does not resolve at all is Infinity commits ahead,
+    not zero" — constructs a `WorkerWorktree` with a deliberately bogus `baseSha` against a
+    real clone) but not independently at the `pifleet worktrees --json` boundary specifically;
+    left as a smaller residual gap given the JSON-serialization logic downstream of that value
+    is a single ternary with no git calls of its own. The `NaN`-from-a-successful-but-
+    unparseable-`rev-list`-count guard has NO new test — `git rev-list --count` does not
+    fail this way under any git-level manipulation this session found, only under a stubbed
+    return value, and stubbing `runGit`'s return would require an injection seam this module
+    does not have. Left as defensive code without its own regression test, named here rather
+    than silently left uncounted.
+
+  - **`Docs/SRD.md` gained two more erratum blocks** (§9.3, on "confirmed dead" narrowing to
+    exclude never-launched checkouts, and on the sibling-conflict-detection gap above) and a
+    correction to §13's F23 row (the `index.lock`/`worktree add` contention it named no longer
+    exists; the real contention point is the `.git/config` lock `registerWorkerRemote`
+    already retries against). §12.8's erratum (round 1) also gained a note that its OPENING
+    sentence — "Post-run, `pifleet` asserts…" — describes a runtime check that has never
+    existed in `src/`, before or after this slice; the properties below it are true as static
+    facts about what the code does, pinned by tests, not enforced by an assertion `pifleet`
+    itself runs.
+
+- **Verification (round 2).** `bun run typecheck` clean. `bun test` → **1311 pass, 53 skip,
+  0 fail** across 83 files (one additional flaky, environment-sensitive failure —
+  `logs.test.ts`'s SIGINT-follower test, exit 130 instead of 0 under system load — reproduced
+  as green in isolation and confirmed unrelated: this session never touched `logs.ts` or its
+  tests). `git fsck --no-progress` on the real `~/repos/cmux-fleet` re-verified clean a third
+  time; `git status --short` there shows only the pre-existing untracked `.corrupted-pack-
+  backup/` from the original spike, never anything this session wrote.

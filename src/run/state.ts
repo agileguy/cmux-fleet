@@ -36,6 +36,7 @@ import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../config/schema.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import { emptyFence, type FenceSnapshot } from "../rpc/epoch.ts";
 import type { RunPaths, WorkerPaths } from "./paths.ts";
+import type { WorkerWorktree } from "./worktree.ts";
 
 // ---------------------------------------------------------------------------
 // Worker state
@@ -125,6 +126,171 @@ export async function readRunHarnessPatterns(run: RunPaths): Promise<RunHarnessP
     };
   }
   return { patterns: recorded, note: null };
+}
+
+/**
+ * The per-worker checkouts `up` created, keyed by worker id, plus the parent
+ * repository they were cloned from.
+ *
+ * Third reader of `run.json` in this file and the same shape as the two above,
+ * for the same reason: a fact that decides what a later command DOES has to
+ * travel with the run. `dispatch` names a worker's `host_workdir` and `branch`
+ * in every envelope, and `down --prune` deletes directories — resolving either
+ * from today's `fleet.yaml` would let a config edited after `up` send a worker
+ * to a path this run never created, or point `rm -rf` at one.
+ *
+ * Forgiving about ABSENCE for the reason `readRunHarnessPatterns` is: a run
+ * created before this field existed, a hand-assembled test fixture, and a run
+ * whose workers are all `shared-ro` are the same on-disk shape, and all three
+ * must stay dispatchable. An entry that is present but MALFORMED degrades to
+ * "no record" rather than crashing a pure read, but never silently — `note`
+ * carries the reason, and `dispatch` puts it in the ledger.
+ */
+export interface RunWorktrees {
+  /** Empty when the run recorded none; never null, so callers need no branch. */
+  byWorker: ReadonlyMap<string, WorkerWorktree>;
+  /** The parent checkout, or null when the run did not record one. */
+  repo: string | null;
+  /**
+   * The `run.branch_prefix` the run was actually launched with, or null when
+   * the run predates this field. Recorded for the same reason `repo` is:
+   * `fleet.yaml` can be edited after `up`, and `dispatch`'s no-record
+   * fallback (a `shared-ro`/`none` worker, or one with no config entry) must
+   * name the branch THIS run would have created, not whatever `branch_prefix`
+   * happens to read today.
+   */
+  branchPrefix: string | null;
+  /**
+   * A degradation the caller must surface, or null when there is nothing to
+   * say. Set when `run.json` itself could not be read at all — no longer set
+   * for one malformed worker entry among otherwise-valid ones; see
+   * `perWorkerNotes`.
+   */
+  note: string | null;
+  /**
+   * `<workerId>: <reason>` for every entry that failed its OWN schema check,
+   * kept OUT of `note` deliberately: one worker's malformed record used to
+   * degrade `byWorker` to empty for every worker in the run, so a single
+   * future-shaped or hand-edited entry silently blinded `dispatch`'s
+   * `branch_prefix` fallback and `down --prune`'s reaping for workers whose
+   * OWN records were perfectly fine. Parsed per-entry instead: one bad
+   * record is dropped and named here; every good one still reaches
+   * `byWorker`.
+   */
+  perWorkerNotes: readonly string[];
+}
+
+const RunWorktreeRecordSchema = z.object({
+  workerId: z.string().min(1),
+  path: z.string().min(1),
+  branch: z.string().min(1),
+  baseSha: z.string().min(1),
+  remoteName: z.string().min(1),
+  /** Defaulted for a record written before this field existed. */
+  baselineStatus: z.string().default(""),
+  /**
+   * Defaulted to `""` for a record written before this field existed —
+   * which reads as permanently dirty in `inspectCloneDirt` (an empty string
+   * can never equal a real git tree SHA), the honest answer for "this
+   * record does not describe a baseline", not a silent pass-through.
+   */
+  baselineTree: z.string().default(""),
+});
+
+export async function readRunWorktrees(run: RunPaths): Promise<RunWorktrees> {
+  const empty = new Map<string, WorkerWorktree>();
+  let doc: { repo?: string | null; branch_prefix?: string | null; worktrees?: unknown } | null;
+  try {
+    doc = await readValidated(run.runJson, (v) =>
+      z
+        .object({
+          repo: z.string().nullish(),
+          branch_prefix: z.string().nullish(),
+          // `.optional()`, not bare `z.unknown()`: zod requires an object
+          // schema's keys to be STRUCTURALLY PRESENT unless marked optional,
+          // even when the value type is `unknown` — so a `run.json` that
+          // never had a `worktrees` key at all (a run predating this field,
+          // exactly the case this function's own docstring says must stay
+          // dispatchable) failed this parse and fell into the catch block
+          // below, `note` and all. Nothing acted on `note` before this
+          // module's callers started treating it as a genuine degradation,
+          // which is what turned an unnoticed latent bug into an observed
+          // false refusal.
+          worktrees: z.unknown().optional(),
+        })
+        .loose()
+        .parse(v),
+    );
+  } catch (err) {
+    return {
+      byWorker: empty,
+      repo: null,
+      branchPrefix: null,
+      note: `run.json could not be read for worker checkouts (${err instanceof Error ? err.message : String(err)})`,
+      perWorkerNotes: [],
+    };
+  }
+  const repo = doc?.repo ?? null;
+  const branchPrefix = doc?.branch_prefix ?? null;
+  const raw = doc?.worktrees;
+  if (raw === undefined) {
+    // The KEY is absent entirely — a run predating this field, a hand-built
+    // test fixture, or a fleet with no `worktree`-isolation worker at all.
+    // Genuinely indistinguishable from "nothing to record", and must stay
+    // that way: this is the shape `readRunHarnessPatterns`'s own
+    // forgiving-about-absence rule exists to keep dispatchable.
+    return { byWorker: empty, repo, branchPrefix, note: null, perWorkerNotes: [] };
+  }
+  if (raw === null) {
+    // The key is PRESENT and explicitly `null` — a different fact from
+    // absence. `up.ts` writes `worktrees: null` the moment `run.json` first
+    // exists and OVERWRITES it with a real array (`[]` for a legitimate
+    // all-shared-ro/none fleet, or the created records otherwise) once
+    // `createWorkerWorktrees` returns; see that module's own comment on
+    // why the two must never collapse to the same on-disk shape. `null`
+    // surviving to a READ means `up` crashed between those two writes —
+    // exactly the "a clone may exist with nothing describing it" case
+    // `down --prune` cannot safely read as "nothing to reap".
+    return {
+      byWorker: empty,
+      repo,
+      branchPrefix,
+      note:
+        "run.json records worktree creation as INCOMPLETE (worktrees: null) — 'up' did not finish; " +
+        "a checkout may exist on disk with nothing describing it. Check the repository's .worktrees/ " +
+        "directory by hand before assuming there is nothing to reap.",
+      perWorkerNotes: [],
+    };
+  }
+  if (!Array.isArray(raw)) {
+    return {
+      byWorker: empty,
+      repo,
+      branchPrefix,
+      note: `run.json records worker checkouts in a shape this build cannot read (expected an array); treating the run as having none`,
+      perWorkerNotes: [],
+    };
+  }
+
+  const byWorker = new Map<string, WorkerWorktree>();
+  const perWorkerNotes: string[] = [];
+  for (const [i, entry] of raw.entries()) {
+    const parsed = RunWorktreeRecordSchema.safeParse(entry);
+    if (!parsed.success) {
+      // A raw object's own `workerId`, if it happens to be a readable
+      // string, names the row even though the schema that would confirm it
+      // is exactly what just failed — best-effort, for a diagnosis a human
+      // can act on rather than a bare array index.
+      const maybeId =
+        typeof entry === "object" && entry !== null && "workerId" in entry && typeof (entry as { workerId: unknown }).workerId === "string"
+          ? (entry as { workerId: string }).workerId
+          : `entry ${i}`;
+      perWorkerNotes.push(`${maybeId}: ${parsed.error.message}`);
+      continue;
+    }
+    byWorker.set(parsed.data.workerId, parsed.data);
+  }
+  return { byWorker, repo, branchPrefix, note: null, perWorkerNotes };
 }
 
 export async function writeWorkerState(paths: WorkerPaths, state: WorkerState): Promise<void> {

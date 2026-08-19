@@ -311,11 +311,19 @@ describe("collectRunReport — merge pre-check wiring", () => {
     });
     const w1 = seen.filter((i) => i.worker === "w1");
     expect(w1).toHaveLength(1);
+    // The worker's OWN checkout (`host_workdir`, here `wtGood`), not the
+    // parent `repo` — under the clone-based isolation design a worker's
+    // branch is created inside its own independent clone and never fetched
+    // into the parent, so checking the parent would fail to resolve it for
+    // every real worktree-isolated worker (this fixture's `wtGood` happens to
+    // be a linked `git worktree add` sharing the parent's refs either way,
+    // which is exactly why this assertion has to pin the FIELD CHOSEN rather
+    // than merely "the check still finds the branch somewhere").
     expect(w1[0]).toEqual({
       worker: "w1",
       branch: `fleet/${RUN_ID}/w1`,
       base_ref: baseSha,
-      repo,
+      repo: wtGood,
     });
     // The workdir-less task falls back to its (unusable) worktree rather
     // than being dropped: an uncheckable branch is a row, not an omission.
@@ -333,6 +341,77 @@ describe("collectRunReport — merge pre-check wiring", () => {
     expect(report.merge).toEqual([]);
     expect(report.schedule.length).toBeGreaterThan(0);
     expect(notes.some((n) => n.includes("merge pre-check failed"))).toBe(true);
+  });
+
+  /**
+   * THE regression test for this fix. Every fixture above is a `git worktree
+   * add` linked worktree, which shares the parent's refs regardless of which
+   * path the merge pre-check is pointed at — so none of them can fail under
+   * the bug this guards against. This one is built the way `run/worktree.ts`
+   * ACTUALLY builds a worker checkout now: an independent `git clone
+   * --no-hardlinks`, with `origin` stripped, whose branch exists ONLY inside
+   * the clone. Checking it against the parent (the pre-fix preference) makes
+   * `git -C <parent> rev-parse <branch>` fail to resolve, and the merge
+   * section silently degrades to "does not resolve; nothing was checked" for
+   * a branch that is, in fact, perfectly clean.
+   */
+  test("a worker's branch that exists only in its own clone still resolves", async () => {
+    const cloneId = "2026-07-27T00-00-02Z-clon";
+    const cloneRunDir = join(runsDir, cloneId);
+    const cloneRepo = join(tmp, "clone-parent");
+    const workerClone = join(tmp, "clone-worker");
+
+    await mkdir(cloneRepo, { recursive: true });
+    await git(cloneRepo, "init", "-q", "-b", "main");
+    await git(cloneRepo, "config", "user.email", "fixture@test");
+    await git(cloneRepo, "config", "user.name", "fixture");
+    await writeFile(join(cloneRepo, "f.txt"), "one\n");
+    await git(cloneRepo, "add", ".");
+    await git(cloneRepo, "commit", "-q", "-m", "base");
+    const cloneBaseSha = (await git(cloneRepo, "rev-parse", "HEAD")).trim();
+
+    // The real mechanism: an independent clone, never `git worktree add`.
+    await git(cloneRepo, "clone", "-q", "--no-hardlinks", "--single-branch", "--branch", "main", cloneRepo, workerClone);
+    const branch = `fleet/${cloneId}/w1`;
+    await git(workerClone, "switch", "-q", "-c", branch);
+    await git(workerClone, "remote", "remove", "origin");
+    // The branch has never existed anywhere but this clone: the parent's own
+    // refs cannot resolve it, which is exactly the property this test needs.
+    const parentSeesBranch = await git(cloneRepo, "rev-parse", "--verify", `${branch}^{commit}`)
+      .then(() => true)
+      .catch(() => false);
+    expect(parentSeesBranch).toBe(false);
+
+    await mkdir(join(cloneRunDir, "inbox"), { recursive: true });
+    await writeFile(join(cloneRunDir, "run.json"), JSON.stringify({ run_id: cloneId }));
+    await writeFile(
+      join(cloneRunDir, "inbox", "T-clone.json"),
+      JSON.stringify({
+        schema: "pifleet.task/v1",
+        task_id: "T-clone",
+        run_id: cloneId,
+        epoch: 1,
+        attempt: 1,
+        worker: "w1",
+        dispatched_at: new Date().toISOString(),
+        title: "T-clone",
+        brief: "clone fixture",
+        repo: cloneRepo,
+        host_workdir: workerClone,
+        container_workdir: "/workspace",
+        branch,
+        base_ref: cloneBaseSha,
+        outbox: "/outbox/T-clone",
+        deadline_s: 1500,
+      }),
+    );
+
+    const { report } = await collectRunReport(runPaths(cloneId, runsDir));
+    expect(report.merge).toHaveLength(1);
+    // `clean: true` (a no-op merge, branch === base) is only reachable if the
+    // pre-check resolved the branch AT ALL. Under the pre-fix preference this
+    // entry is `branch ... does not resolve; nothing was checked` instead.
+    expect(report.merge[0]).toMatchObject({ worker: "w1", clean: true });
   });
 });
 
