@@ -4,6 +4,48 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Security
+- **The deny-all bridge does not deny the bridge gateway, and this branch was claiming otherwise.**
+  Measured, not inferred: a container attached to nothing but the `--internal` `pifleet-egress`
+  network — no `--add-host`, no second network, no capabilities, no relay running — pulls a live
+  `SSH-2.0-OpenSSH_9.6p1` banner off `172.18.0.1:22`. Docker implements internal-network isolation
+  as FORWARD-chain rules (`! -d 172.18.0.0/16 -i br-<id> -j DROP`), but the bridge gateway is
+  on-link and inside that subnet, so traffic to it is delivered through INPUT (policy ACCEPT) and
+  is never filtered. `--internal` really does remove the default route — `1.1.1.1`, the LAN oMLX
+  candidate, the Lima host address and `169.254.169.254` are all genuinely unreachable — but it
+  cannot filter the gateway. The prior evidence sampled two public destinations and never measured
+  it. Accepted as a documented residual (SRD §12.8 erratum) rather than fixed, because closing it
+  needs host-side iptables outside Docker's model, or a Docker host whose gateway serves nothing.
+  The reachable set is `{relay listen ports} ∪ {gateway ports} ∪ {sibling container ports}` and is
+  **not fixed** — anything the host or a sibling binds later joins it with no code change.
+  ISC-51/57 are re-worded to what Docker actually guarantees (no route off the bridge *subnet*),
+  ISC-50/51 downgraded from closed to partial, and the relay suite now **enumerates** the route
+  table instead of sampling addresses. The gateway residual is asserted as a positive, so hardening
+  it later turns that test red and flags §12.8 as stale rather than drifting silently.
+- **The oMLX API key no longer travels in `docker run` argv.** The live relay probe interpolated
+  the real key into a shell string passed as arguments — visible in `ps`, in the ephemeral
+  container's `docker inspect`, and in any CI log that echoes commands. It is now passed by name
+  and expanded inside the container. No leak occurred, because that test has only ever run on one
+  machine; it would have become a live exposure on the first CI run with a real secret.
+- **The relay container is pinned by image digest.** It bridges the deny-all bridge to a NAT'd
+  network under `--restart unless-stopped`, and it was pulling a floating Docker Hub tag — so the
+  code on that boundary could change under a machine reboot with no commit in this repo.
+- **The relay applies the egress policy instead of re-deriving it.** `omlxRelayTarget` pinned the
+  host but read the port straight from `llm.base_url` with nothing comparing it to `decide()`, so
+  `http://host.docker.internal:22/v1` produced a relay tunnelling the bridge to the host's sshd.
+  Targets are now gated through `decide()` before argv is built. The gate is still circular today
+  (the policy's LLM rule derives from the same field) and a test says so by name; its value is the
+  seam it creates for the pending off-host oMLX move, where it becomes blocking.
+- **One idle container could deny the whole fleet its model server.** The relay dialled upstream on
+  accept, before any byte arrived, with no timeouts and no connection cap: 300 client connections
+  sending zero bytes took it from 19 open FDs to 619, with 603 matching unauthenticated connections
+  against oMLX. Upstream is now dialled on first byte, both legs carry idle timeouts, and
+  concurrency is capped. Also: only a listen failure is fatal (an accept-time EMFILE used to
+  crash-loop the relay and cut model access fleet-wide), the relay gets the same pids/memory/cpu
+  limits as the workers it shares a bridge with, IP forwarding is turned off in its netns, and the
+  ports in its own env parsing are range-checked — `listen(0)` would have bound a random port and
+  reported healthy.
+
 ### Added
 - **`up` now refuses to start a fleet on a model that cannot emit native tool calls**
   (SRD §5.9 F39, ISC-53). Whether a model answers a `tools`-bearing request with `tool_calls`
@@ -153,6 +195,23 @@ All notable changes to this project are documented here.
   nothing to do with what any of them assert. The fixture now states the gate's absence
   explicitly (the same convention `models_allowlist` already used there) rather than the gate
   being weakened; the tests that do exercise it point `base_url` at a stub they own.
+- **The relay suite's deny-half assertions could pass having proven nothing.** The probe helper
+  returned `stdout + stderr` and never checked the exit code, so a failed `docker run` returned an
+  error message — and `expect(x).not.toContain("ip=0")` is true of every error message ever
+  written. That was the whole of ISC-51/57's evidence. The helper now throws on a non-zero exit and
+  the negatives became positives. Two further bugs were caught by the new socket-level suite that
+  this made possible: a lazy-dial ordering bug that deadlocked every relayed connection
+  (`pause()` before `once("data")` never fires), and an incomplete half-close fix —
+  `allowHalfOpen` must be set on **both** legs, or Node ends the writable side on FIN and tears the
+  socket down before any handler can forward it.
+- **The relay script was only valid CommonJS because of where it was mounted.** `package.json`
+  declares `"type": "module"`, so `docker/egress-relay.js` was an ES module inside the checkout and
+  its `require()` calls threw `ReferenceError: require is not defined in ES module scope` the
+  moment anything ran it on the host. It worked in the container purely because the file is
+  mounted alone at `/relay/` with no `package.json` beside it, so Node fell back to CommonJS —
+  meaning the script's correctness depended on its mount location, and no amount of exercising the
+  Docker path could have surfaced it. Renamed to `docker/egress-relay.cjs`, which is CommonJS in
+  both places by definition. Found by the new host-side suite on its first CI run.
 - **The only test proving crash-recoverability of atomic writes was stochastic** — it
   killed a writer process ~150ms into a loop, proving one of five syscall boundaries at
   random and never saying which. Replaced with deterministic per-boundary tests
@@ -346,6 +405,26 @@ All notable changes to this project are documented here.
   the third names a token that nothing in the CLI ever mints.
 
 ### Added
+- **An egress relay, so the deny-all bridge stops denying the fleet its own model server.**
+  Workers sit on a Docker `--internal` bridge with no default route and no NAT, which is
+  deny-all in hardware — and denies `host.docker.internal:8000` along with everything else,
+  so every worker started healthy and could accomplish nothing. `src/security/relay.ts`
+  stands up the single container that reopens exactly one destination: it runs with a
+  dedicated NON-internal uplink network as its primary network so `--add-host` has something
+  to route through, then attaches to the internal bridge under the DNS alias
+  `host.docker.internal`, so a worker's baked-in `llm.base_url` resolves to it with no
+  per-worker flags at all. Measured live rather than read from documentation: a container on
+  an internal network cannot reach the host even WITH `--add-host` (internal genuinely
+  removes the route), and Docker's automatic `/etc/hosts` injection was not dependable on
+  this project's Colima setup, so the alias and the `--add-host` are both always explicit.
+  The relay runs `--read-only`, `--cap-drop ALL`, `no-new-privileges`, and as uid `node`,
+  because it listens on a bridge every worker can reach. `up` ensures it immediately after
+  the network and records `egress_relay_ready`; failure is `BACKEND_UNAVAILABLE`.
+- **The relay forwards oMLX and nothing else, on purpose.** `egress.google_hosts` remains a
+  policy-level allow rule with no live traffic path — a Docker network alias cannot be a
+  wildcard, so routing `*.googleapis.com` needs an HTTP CONNECT proxy or SNI passthrough,
+  neither of which is built. A `cloud_access` worker on the internal bridge consequently
+  cannot reach Google at all. Tracked as ISC-253/ISC-57 rather than implied away.
 - **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
   allowlist refuses to start, checked for every worker before any of them launch.
 - **Exit code `8` (internal error) documented in the README's exit ladder.**

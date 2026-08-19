@@ -1107,6 +1107,36 @@ Post-run, `pifleet` asserts: no ref outside `fleet/<run-id>/*` moved; `git -C <m
 >
 > One more correction, found while checking the two above: this section's OPENING sentence — "Post-run, `pifleet` asserts…" — describes a runtime CHECK that does not exist anywhere in `src/`, and did not before this slice either. Nothing in this codebase automatically verifies any of these three properties post-run; they are true (or, above, narrowed-and-true) as static properties of what the code DOES, checked here by hand and pinned by the tests this erratum cites, not by an assertion `pifleet` itself runs and could fail loudly on. That gap is not new to this PR and is not closed by it — recorded so a future reader does not go looking for a `containment_verify` step that was never built.
 
+> **Erratum (2026-08-19, egress relay review) — KNOWN RESIDUAL: an `--internal` bridge does not deny the bridge gateway, and the fleet's containment claim is narrowed accordingly.**
+>
+> This was found by measurement, and it falsified the stronger claim the egress work had been making. A container attached to nothing but the deny-all `pifleet-egress` bridge — no `--add-host`, no second network, no capabilities, and with no relay running at all — pulled a full SSH banner off the bridge gateway:
+>
+> ```
+> $ docker run --rm --network pifleet-egress alpine
+> # ip route
+> 172.18.0.0/16 dev eth0 scope link  src 172.18.0.2      <- the ONLY route; no default
+> # nc 172.18.0.1 22
+> SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.13
+> # nc 1.1.1.1 443 / 192.168.86.49 8000 / 192.168.5.2 22 / 169.254.169.254 80
+> (every one refused)
+> ```
+>
+> The mechanism, confirmed against the live rule set rather than inferred from documentation: Docker implements internal-network isolation in the **FORWARD** chain —
+>
+> ```
+> -A DOCKER-ISOLATION-STAGE-1 ! -d 172.18.0.0/16 -i br-<id> -j DROP
+> ```
+>
+> — but the bridge gateway is **on-link and inside that subnet**, so traffic addressed to it is delivered locally through INPUT (policy `ACCEPT`) and never meets those rules. `--internal` genuinely removes the default route, which is why every off-subnet destination above is unreachable; it does not and cannot filter the gateway itself.
+>
+> **The honest reachable set from a worker is therefore:** `{relay listen ports} ∪ {every port on the bridge gateway} ∪ {every port on every sibling container on the bridge}`. It is **not a fixed set** — anything the Docker host or a sibling worker binds later joins it with no code change — and on native-Linux Docker (where CI runs) the host's listener set is materially larger than Colima's.
+>
+> **Accepted as a residual, not fixed.** Closing it requires either host-side `iptables` DROP rules for gateway-destined traffic from the bridge (outside Docker's model, and outside what this tool should be installing on an operator's machine), or a dedicated Docker host whose gateway serves nothing. Neither is in scope here.
+>
+> **What changed instead:** ISC-51 and ISC-57 are re-worded to what Docker actually guarantees — *no route off the bridge subnet* — rather than "no route to the public internet" / "any host other than". ISC-50/51 are downgraded from `[x]` to `[~]`, because the evidence that closed them was sampled (`1.1.1.1`, `example.com`) and sampling is what missed this. `test/integration/relay.test.ts` now **enumerates** instead: exactly one on-link route and no default route, asserted structurally; and the gateway residual asserted as a POSITIVE, so that hardening it later shows up as a failing test rather than as silent drift. ISC-261 tracks re-taking this evidence against an enumerated reachable set if oMLX moves off-host.
+>
+> One consequence worth stating for §12.4's benefit: because the Docker host is reachable from the bridge anyway, the egress relay does not *widen* the worker's reach to the host — it only makes one port on it resolvable by name. The relay's containment value is real but narrower than "the only path off the bridge".
+
 ### 12.9 No AI attribution
 
 The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Generated with", and any mention of AI/LLM in commits, branches, or PR bodies. Enforced by a grep gate in CI.

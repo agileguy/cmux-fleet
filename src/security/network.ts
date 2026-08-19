@@ -22,9 +22,14 @@
  * is why the name is validated against Docker's own grammar first.
  */
 
-/** Docker network-name grammar; also refuses a leading `-` becoming a flag. */
-const NETWORK_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
-const MAX_NETWORK_NAME = 128;
+// Name validation lives in `./docker-names.ts`. It was never a network
+// concern — `relay.ts` validates CONTAINER names through it too, and got
+// `egress: invalid docker container name …` out of a module named for
+// networks. Re-exported here so existing importers keep working against one
+// implementation rather than a second copy of the regex.
+import { assertDockerName, assertNetworkName } from "./docker-names.ts";
+
+export { assertDockerName, assertNetworkName };
 
 export interface EgressNetworkStatus {
   name: string;
@@ -32,13 +37,6 @@ export interface EgressNetworkStatus {
   /** True only when Docker itself reports `Internal: true` — the deny-all bit. */
   internal: boolean;
   id: string | null;
-}
-
-/** Throws on a name that could not have come from a validated config. */
-export function assertNetworkName(name: string): void {
-  if (name.length === 0 || name.length > MAX_NETWORK_NAME || !NETWORK_NAME_RE.test(name)) {
-    throw new Error(`egress: invalid docker network name ${JSON.stringify(name)}`);
-  }
 }
 
 /**
@@ -149,6 +147,48 @@ export async function ensureEgressNetwork(name: string): Promise<EgressNetworkSt
   if (!after.exists || !after.internal) {
     throw new Error(
       `egress: created network ${JSON.stringify(name)} but the daemon does not report it internal`,
+    );
+  }
+  return after;
+}
+
+/**
+ * The relay's uplink — a plain (non-internal) bridge, dedicated to the
+ * egress-relay container alone (`src/security/relay.ts`; ISC-50/51/57).
+ *
+ * Workers never attach here; only the relay does, and only the relay needs
+ * real connectivity to reach `host.docker.internal` and mint the one
+ * sanctioned forward to oMLX. Sharing `ensureEgressNetwork`'s inspect-then-
+ * create shape rather than reimplementing it: the property that matters here
+ * is the INVERSE of that function's guard — this network must NOT be
+ * internal, or the relay itself could never reach anything to relay.
+ *
+ * A pre-existing network wearing this name that IS internal is refused for
+ * the same reason `ensureEgressNetwork` refuses the opposite mismatch: silent
+ * adoption would report a working relay that can reach nothing, which is
+ * worse than a loud refusal at `up`.
+ */
+export async function ensureUplinkNetwork(name: string): Promise<EgressNetworkStatus> {
+  const before = await inspectEgressNetwork(name);
+  if (before.exists) {
+    if (before.internal) {
+      throw new Error(
+        `egress: uplink network ${JSON.stringify(name)} exists but IS internal — ` +
+          `the egress relay attaches here to reach host.docker.internal and cannot do so on ` +
+          `an internal bridge. Remove or rename it (docker network rm ${name}) and re-run.`,
+      );
+    }
+    return before;
+  }
+  assertNetworkName(name);
+  const created = await docker(["network", "create", name]);
+  if (created.code !== 0) {
+    throw new Error(`egress: 'docker network create ${name}' failed: ${created.stderr.trim()}`);
+  }
+  const after = await inspectEgressNetwork(name);
+  if (!after.exists || after.internal) {
+    throw new Error(
+      `egress: created uplink network ${JSON.stringify(name)} but the daemon reports it internal`,
     );
   }
   return after;

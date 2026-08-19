@@ -113,9 +113,27 @@ afterAll(async () => {
 }, 120_000);
 
 /**
- * A `docker` that answers `network inspect` with an existing INTERNAL network.
- * `ensureEgressNetwork` then verifies and adopts it without ever reaching
- * `network create` — the deterministic happy path, no daemon required.
+ * A `docker` that answers the whole egress surface `up` touches, without a
+ * daemon: the internal bridge, the relay's non-internal uplink, and the relay
+ * container itself.
+ *
+ * Two details make it a faithful stand-in rather than a rubber stamp:
+ *
+ *  1. `network inspect` reports `Internal: true` for every name EXCEPT the
+ *     `-uplink` one, which reports false. That is not cosmetic — it is the
+ *     exact pair of opposite assertions `ensureEgressNetwork` and
+ *     `ensureUplinkNetwork` make, and a shim answering `true` to both would
+ *     hide a relay wired onto an internal network that could never reach the
+ *     Docker host.
+ *  2. `inspect` (container) is STATEFUL via a marker file: "no such object"
+ *     until `run` has been called, "running" after. `ensureEgressRelay`
+ *     re-inspects after creating, because `docker run -d` exiting 0 means the
+ *     container STARTED, not that it stayed up — a shim that reported a
+ *     running container before anything ran would absorb that check.
+ *
+ * Everything else still fails loudly, for the reason the gcloud shim does: a
+ * silent `exit 0` stand-in absorbs a changed docker invocation instead of
+ * surfacing it.
  */
 async function writeDockerShim(binDir: string): Promise<void> {
   const shim = join(binDir, "docker");
@@ -123,11 +141,45 @@ async function writeDockerShim(binDir: string): Promise<void> {
     shim,
     [
       "#!/bin/sh",
-      'case "$1 $2" in',
-      '  "network inspect")',
-      `    printf '[{"Name":"%s","Id":"wiring-shim","Internal":true}]\\n' "$3"`,
+      // Marker for "the relay container has been created", per shim dir so
+      // parallel rigs never see each other's relay.
+      'STATE="$(dirname "$0")/.relay-created"',
+      'case "$1" in',
+      "  network)",
+      '    case "$2" in',
+      "      inspect)",
+      // The uplink MUST report non-internal or ensureUplinkNetwork refuses it.
+      '        case "$3" in',
+      "          *-uplink)",
+      `            printf '[{"Name":"%s","Id":"wiring-shim-uplink","Internal":false}]\\n' "$3"`,
+      "            ;;",
+      "          *)",
+      `            printf '[{"Name":"%s","Id":"wiring-shim","Internal":true}]\\n' "$3"`,
+      "            ;;",
+      "        esac",
+      "        ;;",
+      "      create|connect)",
+      "        ;;",
+      "      *)",
+      '        echo "docker shim: unexpected network argv: $*" >&2',
+      "        exit 1",
+      "        ;;",
+      "    esac",
       "    ;;",
-      '  "network create")',
+      "  run)",
+      '    : > "$STATE"',
+      '    echo "wiring-shim-relay-id"',
+      "    ;;",
+      "  inspect)",
+      '    if [ -f "$STATE" ]; then',
+      `      printf '[{"Name":"/%s","Id":"wiring-shim-relay-id","State":{"Running":true}}]\\n' "$2"`,
+      "    else",
+      '      echo "Error: No such object: $2" >&2',
+      "      exit 1",
+      "    fi",
+      "    ;;",
+      "  rm)",
+      '    rm -f "$STATE"',
       "    ;;",
       "  *)",
       '    echo "docker shim: unexpected argv: $*" >&2',
@@ -539,6 +591,34 @@ describe("up wires the security controls, in order (review finding 2)", () => {
       expect(egress!.detail?.["network"]).toBe(NETWORK);
       expect(egress!.detail?.["internal"]).toBe(true);
 
+      // …and the relay that reopens the oMLX endpoint through it was ensured
+      // too. Without it the bridge denies the fleet its own model server, and
+      // every worker starts healthy and accomplishes nothing (SRD §5.9).
+      const relay = cliUp.find((r) => r.event === "egress_relay_ready");
+      expect(relay).toBeDefined();
+      expect(relay!.detail?.["name"]).toBe(`pifleet-egress-relay-${NETWORK}`);
+      // Ordering is the same requirement the hazard assertions below carry: a
+      // relay ensured after the supervisors launch is a relay the first turns
+      // could not use.
+      expect(relay!.seq).toBeGreaterThan(egress!.seq);
+
+      /**
+       * The ledger is `up`'s CLAIM; the shim's marker file is the FACT.
+       *
+       * This assertion exists because the obvious one does not work. Deleting
+       * the `ensureEgressRelay` call and leaving the ledger append behind was
+       * measured to keep every detail-field assertion above green — `name` is
+       * derivable from the network name and `created: true` is just a boolean
+       * — which is the exact failure mode this file's header describes for
+       * `egress_network_ready`. `ensureEgressNetwork` had `internal: true` to
+       * pin it with; `ensureEgressRelay` has no comparable value in its
+       * return, so the proof has to come from outside the ledger.
+       *
+       * The shim writes this marker only from its `run` branch, so the file
+       * existing means a real `docker run` argv was built and executed.
+       */
+      expect(await Bun.file(join(rig.base, "bin", ".relay-created")).exists()).toBe(true);
+
       // The seeded hazard was found and REPORTED, per the ledger…
       const hazards = cliUp.filter((r) => r.event === "repo_hazard");
       const agentsMd = hazards.find((h) => h.detail?.["kind"] === "agents_md");
@@ -616,6 +696,11 @@ describe("up wires the security controls, in order (review finding 2)", () => {
       const events = records.filter((r) => r.actor === "cli-up").map((r) => r.event);
       expect(events).toContain("supervisor_launched");
       expect(events).not.toContain("egress_network_ready");
+      // The relay is gated on the same config as the network it attaches to:
+      // with no config there is no egress network, so relaying onto one would
+      // be meaningless — and creating a durable container anyway would be a
+      // side effect of running `up` in an empty directory.
+      expect(events).not.toContain("egress_relay_ready");
       expect(events).not.toContain("repo_hazard");
       // And the config-gated controls left the would-be repo alone.
       expect(await Bun.file(join(rig.repo, "AGENTS.md")).exists()).toBe(true);
@@ -949,7 +1034,28 @@ function stubOmlx(body: unknown, status = 200): StubOmlx {
     },
   });
   return {
-    baseUrl: `http://127.0.0.1:${server.port}/v1`,
+    /**
+     * Named `host.docker.internal`, NOT `127.0.0.1`, though the stub binds
+     * loopback — because two subsystems read this one field with different
+     * requirements and only this spelling satisfies both.
+     *
+     *  - The ISC-53 gate probes from the HOST, and `hostFacingBaseUrl`
+     *    (`security/model-probe.ts`) rewrites the HOSTNAME ONLY, leaving the
+     *    port alone: `host.docker.internal:<port>` -> `localhost:<port>`,
+     *    which reaches this server.
+     *  - The egress relay (ISC-50/51/57) requires the host to be literally
+     *    `host.docker.internal`, since that is the only name the deny-all
+     *    bridge resolves; `omlxRelayTarget` refuses anything else, and a
+     *    `127.0.0.1` base_url therefore failed `up` with exit 3 once the relay
+     *    landed.
+     *
+     * That is the same rewrite production relies on — the default
+     * `http://host.docker.internal:8000/v1` probes as `localhost:8000` and
+     * relays as `host.docker.internal:8000` — so this fixture now exercises
+     * the real arrangement rather than a loopback-only one that no live fleet
+     * can use.
+     */
+    baseUrl: `http://host.docker.internal:${server.port}/v1`,
     requests,
     stop: async () => {
       await server.stop(true);
