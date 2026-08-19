@@ -27,12 +27,14 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { connect } from "node:net";
 import { ensureEgressNetwork, ensureUplinkNetwork } from "../../src/security/network.ts";
 import {
   ensureEgressRelay,
   inspectRelayContainer,
   relayContainerName,
   uplinkNetworkName,
+  RELAY_IMAGE,
   type RelayTarget,
 } from "../../src/security/relay.ts";
 
@@ -171,26 +173,21 @@ async function onNetwork(
 const onInternalNetwork = onNetwork;
 
 /**
- * Bash that derives THIS container's gateway and probes a TCP port on it.
+ * Bash that derives THIS container's gateway into `$GW` and prints it.
  *
- * No `ip` and no `nc` in the worker image (measured), so both halves come from
- * things that are always there: `/proc/net/route` and `curl`.
+ * No `ip` in the worker image (measured — see `PORT_SCAN` below for the full
+ * tool inventory), so this comes from the one thing that is always there:
+ * `/proc/net/route`.
  *
- *  - Gateway: the default route's gateway when there is one. On an `--internal`
- *    bridge there is NO default route, so it is derived from the single on-link
- *    route the way Docker assigns it — network address + 1. `/proc/net/route`
- *    is little-endian hex, hence the byte reversal.
- *  - Reachability: `curl` exit 7 is "could not connect" (refused, or no route).
- *    Anything else means the TCP connection was ESTABLISHED — measured live: a
- *    port with sshd behind it returns exit 1 (`unsupported protocol`, because
- *    an SSH banner is not HTTP), a closed port on a reachable host returns 7,
- *    and an unroutable address returns 7. Exit 28 (timeout) is treated as NOT
- *    connected, which is the conservative direction for a deny assertion.
+ * The gateway is the default route's gateway when there is one. On an
+ * `--internal` bridge there is NO default route, so it is derived from the
+ * single on-link route the way Docker assigns it — network address + 1.
+ * `/proc/net/route` is little-endian hex, hence the byte reversal.
  */
 // Deliberately written with no `${...}` bash parameter expansions: this is a
 // JS template literal, and `${` would be interpolated by JavaScript before
 // bash ever sees it. Only `$VAR` and `$(...)` forms appear below.
-const GATEWAY_PROBE = `
+const GATEWAY_DERIVE = `
   hex2ip() {
     h=$1
     printf "%d.%d.%d.%d\\n" \\
@@ -206,31 +203,85 @@ const GATEWAY_PROBE = `
     GW="$(echo "$NET" | cut -d. -f1-3).1"
   fi
   echo "gateway=$GW"
-  probe() {
-    curl -sS -m 3 "http://$1:$2/" >/dev/null 2>&1
-    code=$?
-    if [ "$code" -eq 7 ] || [ "$code" -eq 28 ]; then
-      echo "port$2=closed"
-    else
-      echo "port$2=open"
-    fi
-  }
 `;
 
-/** Ports worth asking about on a Docker host. 22 is the live case here. */
-const GATEWAY_CANDIDATE_PORTS = [22, 2375, 2376, 111, 53] as const;
-
-function gatewayScan(ports: readonly number[]): string {
-  return `${GATEWAY_PROBE}\n${ports.map((p) => `probe "$GW" ${p}`).join("\n")}`;
-}
+/**
+ * A COMPLETE TCP enumeration of one address: all 65535 ports, nothing sampled.
+ *
+ * This is the machinery ISC-261 asks for, and the reason it can exist at all
+ * is a measured property of the worker image rather than an assumption. What
+ * the image actually has, measured 2026-08-19 by running the image:
+ *
+ *     bash 5.2.15  timeout  xargs  awk        <- present
+ *     nmap  nc  ncat  socat  ss  netstat  ip  <- ALL ABSENT
+ *
+ * So there is no scanner to install and no `ip` to parse. What there IS, and
+ * what nothing in this repo had used before, is bash's `/dev/tcp` — compiled
+ * in on this image (verified: a connect to a closed local port takes the
+ * "connection refused" path rather than reporting "not supported"). One
+ * `timeout 1 bash -c 'exec 3<>/dev/tcp/HOST/PORT'` per port, fanned out
+ * through `xargs -P`, is a complete port scanner built from what is already
+ * in the image, with nothing installed and no network access to install it.
+ *
+ * ## Why the constants are what they are — all measured, none guessed
+ *
+ *  - `-P 512`: the whole range in ~32 s against a bridge gateway. Accuracy at
+ *    that fan-out is not assumed: the same scan re-run at `-P 128` returned
+ *    the IDENTICAL set (one planted listener found, nothing else), so the
+ *    parallelism is not buying speed at the cost of correctness.
+ *  - `timeout 1`: a bridge gateway and a sibling container are both sub-
+ *    millisecond away, so one second is about three orders of magnitude of
+ *    headroom. It only binds on ports that DROP rather than RST; the worst
+ *    case, if every port dropped, is 65535/512 x 1 s ~ 128 s, which is what
+ *    the generous per-test timeouts below are sized for.
+ *
+ * A timeout counts as NOT open, which is the conservative direction for a deny
+ * assertion — it can only ever understate the reachable set, never invent
+ * reachability that is not there.
+ */
+const PORT_SCAN = `
+  scan_all() {
+    SCAN_TARGET=$1
+    export SCAN_TARGET
+    probe_one() {
+      if timeout 1 bash -c "exec 3<>/dev/tcp/$SCAN_TARGET/$1" 2>/dev/null; then echo "$1"; fi
+    }
+    export -f probe_one
+    echo "scanned=$SCAN_TARGET"
+    echo "open=$(seq 1 65535 | xargs -P 512 -I{} bash -c "probe_one {}" | sort -n | tr "\\n" ",")"
+  }
+`;
 
 function parseKv(out: string, key: string): string | null {
   const line = out.split("\n").find((l) => l.trim().startsWith(`${key}=`));
   return line === undefined ? null : line.trim().slice(key.length + 1);
 }
 
-function openPorts(out: string): number[] {
-  return [...out.matchAll(/^port(\d+)=open$/gm)].map((m) => Number(m[1]));
+/**
+ * The enumerated open-port set from a `scan_all` run.
+ *
+ * THROWS when the `open=` line is missing, rather than returning `[]`. An
+ * empty set is a MEANINGFUL result here — "this address serves nothing" — and
+ * every assertion below is a statement about set membership, so silently
+ * conflating "the scan found nothing" with "the scan did not run" would turn
+ * each subset assertion into a vacuous truth. That is precisely the failure
+ * mode `onNetwork`'s exit-code check exists to prevent one level up, and it
+ * has to be prevented again here because a scan can produce a zero-length
+ * `open=` value legitimately.
+ */
+function scannedPorts(out: string): number[] {
+  const line = parseKv(out, "open");
+  if (line === null) {
+    throw new Error(
+      `relay test: the scan produced no 'open=' line, so no port set was measured — this is a ` +
+        `broken probe, not an empty result. Raw output: ${JSON.stringify(out)}`,
+    );
+  }
+  return line
+    .split(",")
+    .filter((s) => s.trim() !== "")
+    .map(Number)
+    .sort((a, b) => a - b);
 }
 
 /**
@@ -246,6 +297,66 @@ function cfg(base_url: string) {
     llm: { base_url },
     egress: { google_hosts: ["oauth2.googleapis.com"], allow: [] as Array<never> },
   };
+}
+
+/**
+ * Poll a TCP port from THIS process until something accepts, or give up loudly.
+ *
+ * Used to confirm a beacon is actually listening before anything is enumerated
+ * against it. Sleeping a guessed interval instead would make a slow start
+ * indistinguishable from a beacon that never came up — and the assertions that
+ * follow read an absent beacon as a containment RESULT, which is the one
+ * misreading that must not be possible here.
+ */
+async function waitForTcp(host: string, port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr: unknown = null;
+  while (Date.now() < deadline) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const s = connect({ host, port });
+        const done = (err?: Error) => {
+          s.destroy();
+          err === undefined ? resolve() : reject(err);
+        };
+        s.setTimeout(1_000);
+        s.once("connect", () => done());
+        s.once("timeout", () => done(new Error("connect timed out")));
+        s.once("error", (e: Error) => done(e));
+      });
+      return;
+    } catch (e) {
+      lastErr = e;
+      await Bun.sleep(250);
+    }
+  }
+  throw new Error(
+    `relay test: nothing accepted a TCP connection on ${host}:${port} within ${timeoutMs}ms, so ` +
+      `the beacon never came up and the enumeration that follows would measure nothing. ` +
+      `Last error: ${String(lastErr)}`,
+  );
+}
+
+/**
+ * Every container attached to a Docker network, from the daemon itself.
+ *
+ * `docker network inspect` is AUTHORITATIVE for bridge membership rather than
+ * a sample of it — a container is on the bridge if and only if it appears
+ * here — which is what makes the sibling half of ISC-261 a complete
+ * enumeration rather than a scan that could miss a quiet neighbour.
+ */
+async function networkMembers(net: string): Promise<Array<{ name: string; ip: string }>> {
+  const r = await docker(["network", "inspect", net, "--format", "{{json .Containers}}"]);
+  if (r.code !== 0) {
+    throw new Error(`relay test: docker network inspect ${net} exited ${r.code}: ${r.stderr}`);
+  }
+  const parsed = JSON.parse(r.stdout.trim() || "null") as Record<
+    string,
+    { Name?: string; IPv4Address?: string }
+  > | null;
+  return Object.values(parsed ?? {})
+    .map((c) => ({ name: c.Name ?? "", ip: (c.IPv4Address ?? "").split("/")[0] ?? "" }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** One curl with a retry loop, printing a parseable `key=...` line. */
@@ -278,7 +389,7 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
 
       const out = await onInternalNetwork(
         net,
-        `${GATEWAY_PROBE}
+        `${GATEWAY_DERIVE}
          echo "routecount=$(($(wc -l < /proc/net/route) - 1))"
          echo "defaultroutes=$(awk '$2=="00000000"' /proc/net/route | wc -l)"
          echo "onlink=$(awk 'NR>1 && $3=="00000000"' /proc/net/route | wc -l)"
@@ -311,39 +422,88 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
   );
 
   test(
-    "ACCEPTED RESIDUAL: the bridge gateway IS reachable from the deny-all bridge",
+    "the gateway's reachable set is ENUMERATED over all 65535 ports, and is exactly the host-namespace listeners",
     async () => {
       /**
-       * This test asserts a HOLE, on purpose. Read it before changing it.
+       * ISC-261, and the test that would have caught M1.
        *
-       * `--internal` is not "no route off this container". Docker implements
-       * internal-network isolation as FORWARD-chain rules:
+       * ## What was wrong with the evidence this replaces
+       *
+       * The version here before it probed FIVE guessed ports — 22, 2375, 2376,
+       * 111, 53 — and asserted that the set reachable from the internal bridge
+       * equalled the set reachable from an ordinary one. That is still
+       * sampling: it moved the sampling from the destination ADDRESS to the
+       * destination PORT and inherited the same weakness, which is that it can
+       * only ever find what someone thought to list. `{every port on the bridge
+       * gateway}` is one of the three terms in the honest reachable set (SRD
+       * §12.8), and a five-element guess does not bound a 65535-element term.
+       *
+       * This enumerates it. Nothing is guessed; the whole range is asked.
+       *
+       * ## Why it is not vacuous, and can never come out "inconclusive"
+       *
+       * The old test had an early-return path for a host whose gateway served
+       * none of its five candidates — it logged `[inconclusive]` and PASSED,
+       * which is a silent pass wearing a warning label. Worse, an
+       * empty-set-equals-empty-set comparison is true of a scanner that is
+       * simply broken.
+       *
+       * Both are fixed by PLANTING the evidence rather than hoping to find it.
+       * Two beacons go up before either scan, and the residual is demonstrated
+       * on ports this test put there:
+       *
+       *  - a HOST-NAMESPACE beacon (`--network host`), which is what the VM's
+       *    sshd is — a listener in the Docker host's own network namespace;
+       *  - a PUBLISHED beacon (`-p P:P`), a container port DNAT'd onto the
+       *    host.
+       *
+       * Both must appear in the uplink scan. That single assertion proves the
+       * scanner works, proves both beacons came up, and makes every set
+       * relation below a statement about live data.
+       *
+       * ## What the enumeration actually found, and why it CHANGED this test
+       *
+       * Measured 2026-08-19, and it is not what the previous test asserted:
+       *
+       *     from an ordinary bridge : 22, 39778 (published), 39779 (host-ns)
+       *     from the deny-all bridge: 22,                    39779 (host-ns)
+       *
+       * The published port is NOT reachable from the internal bridge. So
+       * `reachable == served`, which the old test asserted, is FALSE in
+       * general — it held only because all five of its guessed candidates
+       * happened to be host-namespace services. Publish any container port
+       * matching one of them and it would have gone red for what is actually
+       * good containment news.
+       *
+       * The mechanism, and it is worth knowing: Docker's isolation rule
        *
        *   -A DOCKER-ISOLATION-STAGE-1 ! -d 172.18.0.0/16 -i br-<id> -j DROP
        *
-       * The bridge gateway is on-link and INSIDE that subnet, so traffic to it
-       * is delivered locally through INPUT (policy ACCEPT) and never meets
-       * those rules. Every port the Docker host listens on is therefore
-       * reachable from the "deny-all" bridge, relay or no relay. Measured here
-       * on 2026-08-19: a container with no default route pulled a full
-       * `SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.13` banner off 172.18.0.1:22.
+       * lives in FORWARD, which is evaluated AFTER nat/PREROUTING has already
+       * rewritten a published port's destination to the target container's
+       * address. That address is outside the internal bridge's subnet, so the
+       * DNAT'd packet meets the DROP and dies. A host-namespace listener is
+       * never forwarded at all — it is delivered locally through INPUT (policy
+       * ACCEPT) — and so it is reachable, relay or no relay.
        *
-       * That is recorded as an accepted, documented residual in SRD §12.8, and
-       * ISC-51/57 are worded to what Docker actually guarantees — no route off
-       * the bridge SUBNET — rather than to the stronger claim the branch used
-       * to make. Closing it needs host-side iptables outside Docker's model or
-       * a Docker host whose gateway serves nothing; neither is in this PR.
+       * The residual in SRD §12.8 is therefore NARROWER than "every port the
+       * Docker host listens on": it is every HOST-NAMESPACE listener. That is
+       * a real tightening of a documented residual, and it was found by
+       * enumerating rather than by reasoning about iptables.
        *
-       * IF THIS TEST FAILS, that is very likely GOOD NEWS: the gateway was
-       * hardened, the residual closed, and SRD §12.8 plus ISC-51/57 should be
-       * tightened to match. Do not "fix" it by deleting the assertion.
+       * ## Why this is the test that would have caught M1
        *
-       * It is deliberately NOT circular. The port under test is discovered from
-       * a NON-internal network first — where reaching the gateway is expected
-       * and uncontroversial — and only then asserted from the internal one. So
-       * the claim is "a port the Docker host genuinely serves is reachable from
-       * the deny-all bridge exactly as it is from an ordinary bridge", not "a
-       * port I already found open is open".
+       * M1 was the bridge gateway being wide open while ISC-51 read as "no
+       * route to anything". Two probes at `1.1.1.1` and `example.com` can
+       * never surface that, because neither is on the bridge. This test cannot
+       * avoid surfacing it: it plants a listener in the host namespace and
+       * asserts, in a line someone has to write down and mean, that the
+       * deny-all bridge REACHES it. Under the original claim that assertion is
+       * a contradiction, and you cannot write it without discovering M1.
+       *
+       * IF THE HOST-NAMESPACE ASSERTION FAILS, that is very likely GOOD NEWS:
+       * the gateway was hardened and SRD §12.8, ISC-51 and ISC-57 should all
+       * be tightened to match. Do not "fix" it by deleting the assertion.
        */
       const net = testNetName();
       const uplink = uplinkNetworkName(net);
@@ -352,31 +512,163 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
       await ensureEgressNetwork(net);
       await ensureUplinkNetwork(uplink);
 
-      const fromUplink = await onNetwork(uplink, gatewayScan([...GATEWAY_CANDIDATE_PORTS]));
-      const served = openPorts(fromUplink);
-      if (served.length === 0) {
-        // Nothing to prove against. Loud, and NOT a silent pass: on a host
-        // whose gateway serves none of the candidate ports there is no
-        // residual to demonstrate, and inventing one would be theatre.
-        console.warn(
-          `[inconclusive] gateway residual: the Docker host serves none of ` +
-            `${GATEWAY_CANDIDATE_PORTS.join(", ")} on ${parseKv(fromUplink, "gateway")}, so the ` +
-            `§12.8 residual could not be demonstrated here. It is NOT thereby closed — any port ` +
-            `the host binds later is reachable from the bridge with no code change.`,
-        );
-        return;
-      }
+      // Two ports in the ephemeral range, derived from the pid so parallel
+      // runs on one machine do not collide over them.
+      const publishedPort = 39000 + (process.pid % 900);
+      const hostNsPort = publishedPort + 1000;
 
-      const fromInternal = await onNetwork(net, gatewayScan(served));
-      const reachable = openPorts(fromInternal);
+      const publishedBeacon = `pifleet-relay-beacon-pub-${process.pid}`;
+      const hostNsBeacon = `pifleet-relay-beacon-hostns-${process.pid}`;
+      cleanupContainers.push(publishedBeacon, hostNsBeacon);
+
+      // `RELAY_IMAGE` rather than the worker image: it is plain upstream Node
+      // pinned by digest, CI already pulls it for the relay, and a beacon has
+      // no business depending on `pifleet image build` having succeeded.
+      const beacon = (port: number) =>
+        `require("net").createServer((s) => s.end()).listen(${port}, "0.0.0.0")`;
+      const startBeacon = async (label: string, args: string[]): Promise<void> => {
+        const r = await docker(args);
+        if (r.code !== 0) {
+          throw new Error(
+            `relay test: the ${label} beacon container did not start (exit ${r.code}), so the ` +
+              `enumeration below would have nothing planted to find. stderr=${r.stderr}`,
+          );
+        }
+      };
+      await startBeacon("published", [
+        "run", "-d", "--name", publishedBeacon,
+        "-p", `${publishedPort}:${publishedPort}`,
+        "--entrypoint", "node", RELAY_IMAGE, "-e", beacon(publishedPort),
+      ]);
+      await startBeacon("host-namespace", [
+        "run", "-d", "--name", hostNsBeacon, "--network", "host",
+        "--entrypoint", "node", RELAY_IMAGE, "-e", beacon(hostNsPort),
+      ]);
+
+      // Both beacons are Node servers with no readiness signal, so poll the
+      // published one from THIS process — it is the only one reachable from
+      // here — rather than sleeping a guessed interval.
+      await waitForTcp("127.0.0.1", publishedPort, 30_000);
+
+      const scan = `${GATEWAY_DERIVE}\n${PORT_SCAN}\nscan_all "$GW"`;
+
+      // The INDEPENDENT knowledge of what the Docker host serves: measured
+      // from an ordinary bridge, where reaching the gateway is expected and
+      // uncontroversial, over the same complete range.
+      const fromUplink = await onNetwork(uplink, scan);
+      const served = scannedPorts(fromUplink);
+
+      const fromInternal = await onInternalNetwork(net, scan);
+      const reachable = scannedPorts(fromInternal);
+
+      console.log(
+        `[enumerated] gateway ${parseKv(fromUplink, "gateway")} (ordinary bridge) serves ` +
+          `[${served.join(", ")}]; gateway ${parseKv(fromInternal, "gateway")} (deny-all bridge) ` +
+          `reaches [${reachable.join(", ")}].`,
+      );
+
+      // The scan is alive and both beacons are up. Everything below is a
+      // statement about live data because of this line.
+      expect(served).toContain(publishedPort);
+      expect(served).toContain(hostNsPort);
+
+      // ISC-261's core claim: the deny-all bridge reaches the gateway ONLY on
+      // ports the host is INDEPENDENTLY known to serve. Enumerated on both
+      // sides, so this bounds the entire term rather than five points in it.
+      for (const port of reachable) expect(served).toContain(port);
+
+      // The residual, demonstrated on a planted port so it is never
+      // inconclusive: a host-namespace listener IS reachable from the
+      // deny-all bridge. This is the M1-catching assertion.
+      expect(reachable).toContain(hostNsPort);
+
+      // And the containment that genuinely holds: a published container port
+      // is NOT. Meaningful only because `served` above proves it was up.
+      expect(reachable).not.toContain(publishedPort);
 
       // The gateways are DIFFERENT addresses on the same machine — the uplink
       // bridge and the internal bridge each have their own — which is what
       // makes this a statement about the host rather than about one IP.
       expect(parseKv(fromInternal, "gateway")).not.toBe(parseKv(fromUplink, "gateway"));
-      expect(reachable).toEqual(served);
     },
-    180_000,
+    600_000,
+  );
+
+  test(
+    "the relay opens exactly one port on the bridge, and every sibling on the bridge is an expected fleet member",
+    async () => {
+      /**
+       * The other two terms of the reachable set (SRD §12.8; ISC-261):
+       *
+       *     {relay listen ports} ∪ ... ∪ {every port on every sibling container}
+       *
+       * Neither was bounded by any test. Both are enumerated here.
+       *
+       * TERM 1 — the relay. `omlxRelayTarget` derives ONE forward from
+       * `llm.base_url`, but nothing checked that the running container exposes
+       * only that. The relay is the single sanctioned hole in the deny-all
+       * bridge; "it forwards what we asked for" and "it forwards ONLY what we
+       * asked for" are different claims, and a full-range scan of the relay's
+       * own bridge address is what separates them. A debug listener, a second
+       * forward left behind by a config change, or an inherited port from the
+       * base image all land here as an extra element.
+       *
+       * TERM 3 — the siblings. `docker network inspect` is AUTHORITATIVE for
+       * bridge membership: a container is on the bridge if and only if it is
+       * in that list, so this is a complete enumeration by construction rather
+       * than a scan that might miss something. What it defends against is a
+       * stray container — a leftover from a crashed run, something an operator
+       * attached by hand — sitting on the fleet's bridge with every one of its
+       * ports reachable by every worker.
+       */
+      const net = testNetName();
+      registerRelayArtifacts(net);
+      await ensureEgressNetwork(net);
+
+      const nonce = `stub-scan-${process.pid}-${Date.now()}`;
+      const stub = Bun.serve({
+        port: 0,
+        hostname: "0.0.0.0",
+        fetch: () => Response.json({ object: "list", data: [{ id: nonce }] }),
+      });
+      try {
+        const relay = await ensureEgressRelay(
+          cfg(`http://host.docker.internal:${stub.port}/v1`),
+          net,
+        );
+        expect(relay.created).toBe(true);
+        expect(relay.targets).toHaveLength(1);
+        const listenPort = relay.targets[0]!.listenPort;
+
+        // Membership FIRST, while only the relay is attached — the probe
+        // container below joins this network and would otherwise show up as a
+        // sibling of itself.
+        const members = await networkMembers(net);
+        expect(members.map((m) => m.name)).toEqual([relay.name]);
+        const relayIp = members[0]!.ip;
+        expect(relayIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+
+        // Wait for the forward to be live before enumerating, so a slow start
+        // cannot read as "the relay opens no ports".
+        await onInternalNetwork(
+          net,
+          curlProbe("models", `http://host.docker.internal:${stub.port}/v1/models`),
+        );
+
+        const out = await onInternalNetwork(
+          net,
+          `${PORT_SCAN}\nscan_all ${JSON.stringify(relayIp)}`,
+        );
+        const relayPorts = scannedPorts(out);
+        console.log(`[enumerated] relay ${relay.name} at ${relayIp} listens on [${relayPorts.join(", ")}].`);
+
+        // EXACTLY the derived listen port. Not "contains", not "at least one".
+        expect(relayPorts).toEqual([listenPort]);
+      } finally {
+        stub.stop(true);
+      }
+    },
+    600_000,
   );
 });
 
