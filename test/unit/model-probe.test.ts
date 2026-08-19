@@ -26,7 +26,6 @@ import {
   ToolCallProbeUnavailableError,
   assertModelsSupportToolCalls,
   chatProbeModel,
-  hostFacingBaseUrl,
   isEmbeddingModelId,
   probeNativeToolCalls,
   type FetchLike,
@@ -310,52 +309,45 @@ describe("probeNativeToolCalls reads the wire shape correctly", () => {
   });
 
   /**
-   * `llm.base_url` is written for the CONTAINERS. `up` and `doctor` run on the
-   * host, where `host.docker.internal` does not resolve at all (measured: curl
-   * returns 000) — so without this rewrite the mandatory probe would report
-   * every correct fleet.yaml as unreachable and exit 3 on every run.
+   * `llm.base_url` is used VERBATIM (ISC-260) — the exact inverse of what this
+   * block used to assert, and that inversion IS the criterion.
+   *
+   * Five tests here pinned `hostFacingBaseUrl`, a helper whose whole job was
+   * rewriting the worker-facing `host.docker.internal` to `localhost` so the
+   * probe could be issued from the HOST. It is deleted. The probe now runs
+   * from a container on `docker.network` (`security/probe-transport.ts`),
+   * which is where the workers run — so the URL a worker dials is the URL the
+   * probe must dial, and ANY transformation of it would reintroduce precisely
+   * the host-vs-worker asymmetry the criterion exists to remove.
+   *
+   * Pinned on the container-facing spelling specifically, because that is the
+   * only one the old code altered. The same assertion written against
+   * `127.0.0.1` would pass with the rewrite fully restored and prove nothing.
    */
-  test("the container-facing hostname is rewritten to one the host can reach", async () => {
+  test("the base URL reaches the transport verbatim, with no rewriting", async () => {
     const { fetch, calls } = jsonFetch(TOOL_CALL_BODY);
     await probeNativeToolCalls("http://host.docker.internal:8000/v1", "k", "m", fetch);
-    expect(calls[0]).toBe("http://localhost:8000/v1/chat/completions");
-  });
-
-  test("a URL with no container hostname is left alone", () => {
-    expect(hostFacingBaseUrl("http://127.0.0.1:9000/v1")).toBe("http://127.0.0.1:9000/v1");
+    expect(calls[0]).toBe("http://host.docker.internal:8000/v1/chat/completions");
+    expect(calls[0]).not.toContain("localhost");
   });
 
   /**
-   * The rewrite is a HOST rewrite, so it parses rather than substring-replaces.
+   * The deadline reaches the transport as a NUMBER, not only as a signal.
    *
-   * `baseUrl.replace("host.docker.internal", "localhost")` corrupts any URL
-   * that merely contains the name somewhere other than the host component, and
-   * the resulting failure reads as "oMLX is down" at an endpoint nobody
-   * configured. `egress.ts` already parses this same field with `new URL`.
+   * A containerized transport cannot be handed the caller's `AbortSignal` —
+   * see `ProbeRequestInit` — so it reads `init.timeoutMs` and REFUSES without
+   * one. Nothing else in this suite would notice that field going missing,
+   * because every double here honours the signal instead; the failure would
+   * surface only in production, as a gate that cannot run at all.
    */
-  test("only the HOST component is rewritten, never a substring of one", () => {
-    // A real hostname that merely starts with the container name.
-    expect(hostFacingBaseUrl("https://host.docker.internal.example.com/v1")).toBe(
-      "https://host.docker.internal.example.com/v1",
-    );
-    // The name as a PATH segment.
-    expect(hostFacingBaseUrl("http://proxy:8000/host.docker.internal/v1")).toBe(
-      "http://proxy:8000/host.docker.internal/v1",
-    );
-  });
-
-  /** Rewriting must not introduce a `//` in the request path. */
-  test("a base URL with no path does not gain a trailing slash", () => {
-    expect(hostFacingBaseUrl("http://host.docker.internal:8000")).toBe("http://localhost:8000");
-  });
-
-  /**
-   * The schema validates `llm.base_url` already, so re-litigating it here would
-   * turn a probe helper into a second config validator. An unparseable value
-   * passes through and fails at the fetch, classified `unreachable` — true.
-   */
-  test("an unparseable base URL passes through rather than throwing", () => {
-    expect(hostFacingBaseUrl("not a url at all")).toBe("not a url at all");
+  test("the request carries the deadline as a number, not only as a signal", async () => {
+    let seen: number | undefined;
+    const fetch = (async (_url, init) => {
+      seen = init?.timeoutMs;
+      return new Response(JSON.stringify(TOOL_CALL_BODY), { status: 200 });
+    }) as FetchLike;
+    await probeNativeToolCalls(BASE, "k", "m", fetch, 12_345);
+    expect(seen).toBe(12_345);
   });
 
   /**

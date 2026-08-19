@@ -41,7 +41,30 @@ import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts
  * real global `fetch` stays assignable, which is all the default argument
  * needs.
  */
-export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export type FetchLike = (
+  input: string | URL | Request,
+  init?: ProbeRequestInit,
+) => Promise<Response>;
+
+/**
+ * `RequestInit` plus the deadline as a NUMBER.
+ *
+ * `signal` alone was enough while the probe ran in this process. It stopped
+ * being enough when the probe moved into a container (ISC-260): an
+ * `AbortSignal` is a host-process object with no representation on the wire,
+ * so a container has to be told the INTERVAL and build its own.
+ *
+ * Both are carried and neither is redundant. The signal is what every
+ * host-side `FetchLike` already understands — the global `fetch`, and every
+ * double in the unit suite — so keeping it leaves this type a strict widening
+ * of what those accept, and the doubles need no change. The number is what
+ * actually ends the request in the containerized case, and that difference is
+ * more than tidiness: a container that reaches its own deadline EXITS, while
+ * one killed from outside can be left running.
+ */
+export interface ProbeRequestInit extends RequestInit {
+  timeoutMs?: number;
+}
 
 /**
  * Which class of failure a probe hit. The exit code hangs off this, and none of
@@ -156,59 +179,6 @@ const PROBE_MAX_TOKENS = 2048;
 /** Read at most this much of a non-2xx body into the operator-facing detail. */
 const ERROR_BODY_CHARS = 400;
 
-/**
- * The container-facing hostname `llm.base_url` is written with.
- *
- * Named rather than inlined because the rewrite below and the reason for it are
- * two different facts, and only one of them is a string.
- */
-const CONTAINER_HOSTNAME = "host.docker.internal";
-
-/**
- * Rewrite a container-facing oMLX URL to one the HOST can reach.
- *
- * `llm.base_url` defaults to `http://host.docker.internal:8000/v1` because it
- * is written for the WORKERS, which reach oMLX from inside a container. `up`
- * and `doctor` run on the host, where that name does not resolve at all
- * (measured: `curl` returns 000). Without this, the mandatory ISC-53 probe
- * would fail as `unreachable` on every correctly-written fleet.yaml and exit 3
- * — a gate that refuses every run there is.
- *
- * Parsed, not substring-replaced. The original spelling was
- * `baseUrl.replace("host.docker.internal", "localhost")`, which corrupts any
- * URL that merely CONTAINS the name somewhere other than the host component —
- * `https://host.docker.internal.example.com/v1` (a real hostname that only
- * starts with it) and `http://proxy:8000/host.docker.internal/v1` (a path
- * segment) both get silently rewritten into an endpoint nobody configured, and
- * the resulting failure reads as "oMLX is down". `egress.ts:policyFromConfig`
- * already parses this same field with `new URL`; this is the same rule, applied
- * the same way, so the two cannot disagree about what the endpoint is.
- *
- * A URL this cannot parse is returned UNTOUCHED rather than thrown on: the
- * schema validates `llm.base_url` with `z.string().url()` already, and a probe
- * helper is the wrong place to re-litigate config validation — the caller's
- * fetch will fail loudly and be classified `unreachable`, which is true.
- *
- * Shared with `doctor` rather than duplicated: the rule is one rule, and two
- * copies of it drift.
- */
-export function hostFacingBaseUrl(baseUrl: string): string {
-  let url: URL;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    return baseUrl;
-  }
-  if (url.hostname !== CONTAINER_HOSTNAME) return baseUrl;
-  url.hostname = "localhost";
-  const rewritten = url.toString();
-  // `URL.toString()` normalizes an empty path to `/`, which would turn
-  // `…:8000` into `…:8000/` and then `…:8000//chat/completions` downstream.
-  // Only the rewritten string is normalized at all — the untouched path above
-  // returns the operator's own spelling, byte for byte.
-  return baseUrl.endsWith("/") || !rewritten.endsWith("/") ? rewritten : rewritten.slice(0, -1);
-}
-
 /** Doctor's convention: no key in the environment means no header at all. */
 function authHeaders(apiKey: string): Record<string, string> {
   return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
@@ -224,15 +194,32 @@ function authHeaders(apiKey: string): Record<string, string> {
  * carrying its own class. The response body is read defensively for the same
  * reason: this is untrusted input from a server that has been observed
  * returning 500s with a JSON error body.
+ *
+ * ## `fetchImpl` has no default, deliberately (ISC-260)
+ *
+ * It used to default to the global `fetch`, which meant the mandatory §5.9
+ * gate probed oMLX FROM THE HOST while every worker reaches it through the
+ * internal egress bridge — and a helper called `hostFacingBaseUrl` rewrote the
+ * worker-facing hostname to `localhost` to make that work at all. Both are
+ * gone. A caller now has to say where the probe is asked from, and `up` says
+ * `containerFetch` (`./probe-transport.ts`).
+ *
+ * Removing the default is the load-bearing half of that change. Leaving it
+ * would leave the host-side probe one omitted argument away, in a gate whose
+ * entire value is that it tests the path the workers actually use.
+ *
+ * `baseUrl` is likewise used VERBATIM now — no rewriting of any kind. It is
+ * the worker-facing URL, the probe runs where the workers run, so the correct
+ * transformation is none.
  */
 export async function probeNativeToolCalls(
   baseUrl: string,
   apiKey: string,
   model: string,
-  fetchImpl: FetchLike = fetch,
+  fetchImpl: FetchLike,
   timeoutMs: number = PROBE_TIMEOUT_MS,
 ): Promise<ToolCallProbeResult> {
-  const url = `${hostFacingBaseUrl(baseUrl)}/chat/completions`;
+  const url = `${baseUrl}/chat/completions`;
   let res: Response;
   try {
     res = await fetchImpl(url, {
@@ -244,7 +231,11 @@ export async function probeNativeToolCalls(
         tools: [PROBE_TOOL],
         max_tokens: PROBE_MAX_TOKENS,
       }),
+      // BOTH forms of the deadline — see `ProbeRequestInit`. A host-side
+      // double honours the signal; a containerized transport cannot be handed
+      // one and reads the number instead.
       signal: AbortSignal.timeout(timeoutMs),
+      timeoutMs,
     });
   } catch (err) {
     /**
@@ -538,7 +529,12 @@ export class ToolCallProbeUnavailableError extends Error {
 export async function assertModelsSupportToolCalls(
   loaded: LoadedConfig,
   workerIds: readonly string[],
-  fetchImpl: FetchLike = fetch,
+  /**
+   * REQUIRED, for the reason spelled out on `probeNativeToolCalls`: a default
+   * of the global `fetch` is a host-side probe one omitted argument away, and
+   * ISC-260 is precisely the criterion that a host-side probe does not satisfy.
+   */
+  fetchImpl: FetchLike,
 ): Promise<void> {
   if (!loaded.config.llm.require_native_tool_calls) return;
 

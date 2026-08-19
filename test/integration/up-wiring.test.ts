@@ -167,6 +167,61 @@ async function writeDockerShim(binDir: string): Promise<void> {
       "    esac",
       "    ;;",
       "  run)",
+      // ---------------------------------------------------------------
+      // The ISC-260 probe container, stood in for.
+      //
+      // `up` now issues its native-tool-call probe as
+      // `docker run --rm -i --network <egress> <image> node -e <script>`,
+      // reading the request off stdin. This shim cannot run a container, so
+      // it runs THE SAME SCRIPT on the host through `bun -e`, with stdin
+      // piped straight through. The script is production's own text, lifted
+      // out of the argv it was about to be handed to Docker in — not a
+      // reimplementation that could drift away from it.
+      //
+      // BE PRECISE ABOUT WHAT THIS DOES AND DOES NOT PROVE. It does NOT
+      // prove the probe ran inside the egress network; it cannot, because
+      // there is no network here. That claim needs a real daemon and is
+      // proven in `test/integration/probe-in-network.test.ts`, which puts a
+      // stub oMLX on the bridge where the HOST cannot reach it at all, so a
+      // probe issued from the host fails outright. What this file proves is
+      // the WIRING: that `up` issues the probe, against the configured
+      // endpoint, carrying tools, at the right point in the sequence, and
+      // refuses with the right exit code. Deleting
+      // `assertModelsSupportToolCalls` from `up.ts` still drops
+      // `stub.requests.length` to 0 and turns these tests red, which is the
+      // mutation this file has always existed to catch.
+      //
+      // The `sed` is this stand-in's one liberty, and it stands in for a
+      // real mechanism rather than papering over one: on the bridge,
+      // `host.docker.internal` resolves to the relay, which forwards to the
+      // Docker host. Here it resolves to loopback, where the stub is. The
+      // fixture must keep spelling the base URL `host.docker.internal`
+      // because `omlxRelayTarget` refuses every other host — so the rewrite
+      // lives here, in the Docker stand-in, and NOT in the product, which is
+      // the whole point of ISC-260.
+      '    case " $* " in',
+      '      *" pifleet.probe=native-tool-calls "*)',
+      "        script=''",
+      "        prev=''",
+      '        for a in "$@"; do',
+      '          if [ "$prev" = "-e" ]; then script="$a"; fi',
+      '          prev="$a"',
+      "        done",
+      '        if [ -z "$script" ]; then',
+      '          echo "docker shim: probe run carried no -e script: $*" >&2',
+      "          exit 1",
+      "        fi",
+      // A missing `bun` would leave stdout empty, which the transport reports
+      // as "exited without a readable result" — true, but three steps removed
+      // from the cause. Say it here instead.
+      "        if ! command -v bun >/dev/null 2>&1; then",
+      '          echo "docker shim: bun is not on PATH; cannot stand in for the probe container" >&2',
+      "          exit 1",
+      "        fi",
+      "        sed 's/host\\.docker\\.internal/127.0.0.1/g' | bun -e \"$script\"",
+      "        exit $?",
+      "        ;;",
+      "    esac",
       '    : > "$STATE"',
       '    echo "wiring-shim-relay-id"',
       "    ;;",
@@ -1036,24 +1091,26 @@ function stubOmlx(body: unknown, status = 200): StubOmlx {
   return {
     /**
      * Named `host.docker.internal`, NOT `127.0.0.1`, though the stub binds
-     * loopback — because two subsystems read this one field with different
-     * requirements and only this spelling satisfies both.
+     * loopback. The reason has changed since this comment was last written,
+     * and the new one is simpler.
      *
-     *  - The ISC-53 gate probes from the HOST, and `hostFacingBaseUrl`
-     *    (`security/model-probe.ts`) rewrites the HOSTNAME ONLY, leaving the
-     *    port alone: `host.docker.internal:<port>` -> `localhost:<port>`,
-     *    which reaches this server.
-     *  - The egress relay (ISC-50/51/57) requires the host to be literally
-     *    `host.docker.internal`, since that is the only name the deny-all
-     *    bridge resolves; `omlxRelayTarget` refuses anything else, and a
-     *    `127.0.0.1` base_url therefore failed `up` with exit 3 once the relay
-     *    landed.
+     * It used to be a coincidence that had to be explained: the ISC-53 gate
+     * probed from the HOST through `hostFacingBaseUrl`, which rewrote the
+     * hostname and preserved the port, while the relay demanded the literal
+     * `host.docker.internal` — and this one spelling happened to satisfy
+     * both. That rewrite is gone (ISC-260); the product transforms
+     * `llm.base_url` in no way at all.
      *
-     * That is the same rewrite production relies on — the default
-     * `http://host.docker.internal:8000/v1` probes as `localhost:8000` and
-     * relays as `host.docker.internal:8000` — so this fixture now exercises
-     * the real arrangement rather than a loopback-only one that no live fleet
-     * can use.
+     * So there is now ONE requirement, not two: `omlxRelayTarget` accepts
+     * `host.docker.internal` and refuses every other host, because it is the
+     * only name the deny-all bridge resolves. This fixture writes the URL a
+     * real fleet.yaml writes, and the probe dials it verbatim exactly as a
+     * worker would.
+     *
+     * Reaching the loopback stub from there is the docker SHIM's problem, and
+     * it is solved where a topology problem belongs — see the probe branch in
+     * `writeDockerShim`. In production the same hop is real: the bridge
+     * resolves the name to the relay, and the relay forwards to the host.
      */
     baseUrl: `http://host.docker.internal:${server.port}/v1`,
     requests,
@@ -1194,7 +1251,24 @@ describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
     // deliberate race — listening to nothing. Picking a constant would risk
     // hitting whatever the developer happens to be running.
     const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
-    const deadUrl = `http://127.0.0.1:${probe.port}/v1`;
+    /**
+     * Spelled `host.docker.internal`, and it has to be, which is a
+     * consequence of the ISC-260 reordering worth stating.
+     *
+     * This URL used to be `127.0.0.1:<port>` and reached the probe first,
+     * because the probe used to run BEFORE the relay was built. The probe now
+     * runs from inside the egress network, so it cannot run until that
+     * network and its relay exist — and `omlxRelayTarget` refuses any host
+     * but `host.docker.internal`. A loopback spelling now fails at the RELAY
+     * with exit 3 and a message about `llm.base_url`, which is the same exit
+     * code for an entirely different reason: the test would still be green
+     * while no longer testing the probe at all.
+     *
+     * With this spelling the relay accepts it, the probe runs, the shim
+     * rewrites it to the dead loopback port, and the connection is refused —
+     * which is the failure this test is actually about.
+     */
+    const deadUrl = `http://host.docker.internal:${probe.port}/v1`;
     await probe.stop(true);
 
     const gated = join(rig.base, "dead.yaml");

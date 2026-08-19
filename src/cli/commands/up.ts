@@ -34,6 +34,7 @@ import { describeCredentialPlan, planCredential, resolveIdentity } from "../../s
 import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
 import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
+import { containerFetch } from "../../security/probe-transport.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
 import { ensureEgressRelay, type RelayStatus } from "../../security/relay.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
@@ -286,23 +287,15 @@ export function register(program: Command): void {
         egressNetwork = loadedConfig.config.docker.network;
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
 
-        assertModelsAllowed(loadedConfig, workers);
         /**
-         * ISC-53, the second half of §5.9's model gate and deliberately the
-         * line after its first half.
+         * ISC-52 — a config-vs-config comparison, so it runs at the earliest
+         * possible moment.
          *
-         * ISC-52 above asks "is this model on the list the operator vouched
-         * for"; this asks the server "can this model actually emit a native
-         * tool call". Both run over EVERY named worker before ANY supervisor
-         * launches, for the same reason: a refusal partway through the launch
-         * loop leaves a half-started fleet behind it.
-         *
-         * A model that answers in prose exits 2 (a usage error — the wrong
-         * model was named); oMLX being unreachable exits 3 (an environment
-         * failure — nothing was learned about the model). Both codes come off
-         * the thrown error's own `exitCode` via the `ExitCoded` protocol.
+         * Its twin, the ISC-53 native-tool-call probe, USED to be the very
+         * next line. It is now further down, after the egress network and the
+         * relay, and the reason is ISC-260 — see the comment at that call.
          */
-        await assertModelsSupportToolCalls(loadedConfig, workers);
+        assertModelsAllowed(loadedConfig, workers);
       }
 
       /**
@@ -353,6 +346,58 @@ export function register(program: Command): void {
           // "Error: " so the operator reads "Error: relay: …".
           throw new CliError(err instanceof Error ? err.message : String(err), EXIT.BACKEND_UNAVAILABLE);
         }
+      }
+
+      /**
+       * ISC-53, the second half of §5.9's model gate — asked FROM INSIDE the
+       * egress network (ISC-260).
+       *
+       * ISC-52 above asked "is this model on the list the operator vouched
+       * for". This asks the server "can this model actually emit a native tool
+       * call", and both run over EVERY named worker before ANY supervisor
+       * launches, for the same reason: a refusal partway through the launch
+       * loop leaves a half-started fleet behind it.
+       *
+       * ## Why it is HERE and not next to its twin
+       *
+       * It used to be the line after `assertModelsAllowed`, roughly eighty
+       * lines above, and it probed with the host's own `fetch`. Workers do not
+       * have the host's `fetch`. They reach oMLX from inside `docker.network`,
+       * an `--internal` bridge with no default route, where
+       * `host.docker.internal` resolves to the egress relay because the relay
+       * puts that alias there — and where nothing resolves before the relay
+       * exists.
+       *
+       * So the probe cannot run until the bridge and the relay are up, which
+       * is what the two blocks above do. The ordering is not a preference; it
+       * is the precondition for the probe testing anything real.
+       *
+       * The old position looked safer and was not. Probing from the host meant
+       * the gate certified a path no worker uses, via a hostname rewrite that
+       * quietly turned the worker-facing URL into `localhost` — invisible only
+       * because a Docker-host-local oMLX happens to answer on both. Move oMLX
+       * off this box and the gate passes while every worker is denied, which
+       * is the runtime failure §5.9 makes the probe mandatory to prevent.
+       *
+       * ## What is still true
+       *
+       * Nothing below has started. `run.json`, the ledger and every supervisor
+       * come after this point, so a refusal here leaves the same "nothing
+       * launched" state it always did — which is what `up-wiring.test.ts`
+       * asserts, and why this sits BEFORE the run document rather than merely
+       * before the launch loop.
+       *
+       * A model that answers in prose exits 2 (a usage error — the wrong model
+       * was named); oMLX being unreachable exits 3 (an environment failure —
+       * nothing was learned about the model). Both codes come off the thrown
+       * error's own `exitCode` via the `ExitCoded` protocol.
+       */
+      if (loadedConfig !== null && egressNetwork !== null) {
+        await assertModelsSupportToolCalls(
+          loadedConfig,
+          workers,
+          containerFetch({ network: egressNetwork }),
+        );
       }
 
       /**
