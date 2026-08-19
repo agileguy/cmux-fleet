@@ -258,23 +258,23 @@ function parseKv(out: string, key: string): string | null {
 }
 
 /**
- * The enumerated open-port set from a `scan_all` run.
+ * A `key=<comma-separated ports>` line, as a sorted numeric set.
  *
- * THROWS when the `open=` line is missing, rather than returning `[]`. An
- * empty set is a MEANINGFUL result here — "this address serves nothing" — and
- * every assertion below is a statement about set membership, so silently
- * conflating "the scan found nothing" with "the scan did not run" would turn
- * each subset assertion into a vacuous truth. That is precisely the failure
- * mode `onNetwork`'s exit-code check exists to prevent one level up, and it
- * has to be prevented again here because a scan can produce a zero-length
- * `open=` value legitimately.
+ * THROWS when the line is missing, rather than returning `[]`. An empty set is
+ * a MEANINGFUL result here — "this address serves nothing" — and every
+ * assertion below is a statement about set membership, so silently conflating
+ * "the probe found nothing" with "the probe did not run" would turn each
+ * subset assertion into a vacuous truth. That is precisely the failure mode
+ * `onNetwork`'s exit-code check exists to prevent one level up, and it has to
+ * be prevented again here because these probes can legitimately produce a
+ * zero-length value.
  */
-function scannedPorts(out: string): number[] {
-  const line = parseKv(out, "open");
+function parsePortList(out: string, key: string): number[] {
+  const line = parseKv(out, key);
   if (line === null) {
     throw new Error(
-      `relay test: the scan produced no 'open=' line, so no port set was measured — this is a ` +
-        `broken probe, not an empty result. Raw output: ${JSON.stringify(out)}`,
+      `relay test: the probe produced no '${key}=' line, so no port set was measured — this is ` +
+        `a broken probe, not an empty result. Raw output: ${JSON.stringify(out)}`,
     );
   }
   return line
@@ -282,6 +282,65 @@ function scannedPorts(out: string): number[] {
     .filter((s) => s.trim() !== "")
     .map(Number)
     .sort((a, b) => a - b);
+}
+
+/**
+ * The Docker host's LISTENING SOCKETS, read from the kernel — never probed.
+ *
+ * This is the "independently known to serve" half of ISC-261, and it exists
+ * because deriving the expected set from a probe of the same shape as the one
+ * under test is circular in exactly the way ISC-253's `decide()` gate was:
+ * `policyFromConfig` derived its rule from the same field the target came
+ * from, so the two agreed BY CONSTRUCTION and the gate could not refuse
+ * anything. A gateway test whose ground truth is "whatever a second scan
+ * found" has the same defect — two probes that share a bug agree with each
+ * other perfectly.
+ *
+ * So the ground truth here is not a probe at all. `/proc/net/tcp` and
+ * `/proc/net/tcp6` ARE the kernel's socket table; state `0A` is `TCP_LISTEN`.
+ * Read from a `--network host` container, that is the Docker host's own
+ * account of what it is listening on, obtained without sending a single
+ * packet. Nothing about the bridge, the isolation rules, or `/dev/tcp` can
+ * influence the answer.
+ *
+ * The relation to the scanned sets is a STRICT subset, and measurably so
+ * rather than in principle. Measured 2026-08-19 on this workstation:
+ *
+ *     listening (kernel socket table)  : 22, 53
+ *     reachable (deny-all bridge scan) : 22
+ *
+ * Port 53 is a real listening socket that is NOT reachable from the bridge,
+ * because the resolver binds a loopback address. If `reachable ⊆ listening`
+ * were a tautology that gap could not exist, and the assertion would be
+ * worthless. It exists, so the assertion has content.
+ *
+ * The ports are little-endian hex in the second field. `mawk` — which is what
+ * this image ships, not `gawk` — has no `strtonum`, so the conversion is done
+ * by bash `printf` rather than in awk. Measured: `strtonum` errors out here.
+ */
+const HOST_LISTEN_SOCKETS = `
+  echo "listening=$(awk 'NR>1 && $4=="0A" {split($2,a,":"); print a[2]}' /proc/net/tcp /proc/net/tcp6 \\
+    | sort -u \\
+    | while read -r h; do printf "%d\\n" "0x$h"; done \\
+    | sort -n | uniq | tr "\\n" ",")"
+`;
+
+/**
+ * Bridge members that are NOT accounted for by the fleet.
+ *
+ * A pure function, so the RULE is inspectable rather than buried in an
+ * `expect` that only ever sees the one arrangement a test happened to build.
+ * Expected members are passed in explicitly: this project names workers
+ * `pifleet-<runId>-<workerId>` (`src/config/render.ts`) and the relay
+ * `pifleet-egress-relay-<network>` (`src/security/relay.ts`), but matching on
+ * a `pifleet-` PREFIX would accept exactly the thing this is meant to catch —
+ * a leftover from a crashed run wears a `pifleet-` name too.
+ */
+function unexpectedMembers(
+  members: ReadonlyArray<{ name: string }>,
+  expected: readonly string[],
+): string[] {
+  return members.map((m) => m.name).filter((n) => !expected.includes(n));
 }
 
 /**
@@ -552,29 +611,43 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
 
       const scan = `${GATEWAY_DERIVE}\n${PORT_SCAN}\nscan_all "$GW"`;
 
-      // The INDEPENDENT knowledge of what the Docker host serves: measured
-      // from an ordinary bridge, where reaching the gateway is expected and
-      // uncontroversial, over the same complete range.
+      // GROUND TRUTH, and deliberately not a probe: the Docker host's own
+      // kernel socket table, read from its network namespace. See
+      // `HOST_LISTEN_SOCKETS` for why the expected set must not come from a
+      // second scan of the same shape as the one under test.
+      const listening = parsePortList(await onNetwork("host", HOST_LISTEN_SOCKETS), "listening");
+
+      // A corroborating probe from an ordinary bridge, where reaching the
+      // gateway is expected and uncontroversial, over the same complete range.
       const fromUplink = await onNetwork(uplink, scan);
-      const served = scannedPorts(fromUplink);
+      const served = parsePortList(fromUplink, "open");
 
       const fromInternal = await onInternalNetwork(net, scan);
-      const reachable = scannedPorts(fromInternal);
+      const reachable = parsePortList(fromInternal, "open");
 
       console.log(
-        `[enumerated] gateway ${parseKv(fromUplink, "gateway")} (ordinary bridge) serves ` +
-          `[${served.join(", ")}]; gateway ${parseKv(fromInternal, "gateway")} (deny-all bridge) ` +
-          `reaches [${reachable.join(", ")}].`,
+        `[enumerated] host kernel socket table listens on [${listening.join(", ")}]; gateway ` +
+          `${parseKv(fromUplink, "gateway")} (ordinary bridge) serves [${served.join(", ")}]; ` +
+          `gateway ${parseKv(fromInternal, "gateway")} (deny-all bridge) reaches ` +
+          `[${reachable.join(", ")}].`,
       );
 
-      // The scan is alive and both beacons are up. Everything below is a
-      // statement about live data because of this line.
+      // The probes are alive and both beacons are up. Everything below is a
+      // statement about live data because of these lines.
+      expect(listening).toContain(hostNsPort);
       expect(served).toContain(publishedPort);
       expect(served).toContain(hostNsPort);
 
       // ISC-261's core claim: the deny-all bridge reaches the gateway ONLY on
-      // ports the host is INDEPENDENTLY known to serve. Enumerated on both
-      // sides, so this bounds the entire term rather than five points in it.
+      // ports the host is INDEPENDENTLY known to serve — "independently" being
+      // the kernel's own socket table, not another scan. Enumerated over the
+      // whole range, so this bounds the entire term rather than five points in
+      // it. Strict, not vacuous: 53 listens and is NOT reachable.
+      for (const port of reachable) expect(listening).toContain(port);
+
+      // And the same relation against the corroborating bridge scan, which
+      // catches the narrower drift of the internal bridge reaching something
+      // an ordinary bridge cannot.
       for (const port of reachable) expect(served).toContain(port);
 
       // The residual, demonstrated on a planted port so it is never
@@ -640,12 +713,13 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
         expect(relay.targets).toHaveLength(1);
         const listenPort = relay.targets[0]!.listenPort;
 
-        // Membership FIRST, while only the relay is attached — the probe
-        // container below joins this network and would otherwise show up as a
-        // sibling of itself.
-        const members = await networkMembers(net);
-        expect(members.map((m) => m.name)).toEqual([relay.name]);
-        const relayIp = members[0]!.ip;
+        // The IDLE case first, while only the relay is attached — the probe
+        // containers below join this network and would otherwise show up as
+        // siblings of themselves.
+        const idle = await networkMembers(net);
+        expect(idle.map((m) => m.name)).toEqual([relay.name]);
+        expect(unexpectedMembers(idle, [relay.name])).toEqual([]);
+        const relayIp = idle[0]!.ip;
         expect(relayIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
 
         // Wait for the forward to be live before enumerating, so a slow start
@@ -655,15 +729,73 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
           curlProbe("models", `http://host.docker.internal:${stub.port}/v1/models`),
         );
 
-        const out = await onInternalNetwork(
+        const relayScan = await onInternalNetwork(
           net,
           `${PORT_SCAN}\nscan_all ${JSON.stringify(relayIp)}`,
         );
-        const relayPorts = scannedPorts(out);
-        console.log(`[enumerated] relay ${relay.name} at ${relayIp} listens on [${relayPorts.join(", ")}].`);
+        const relayPorts = parsePortList(relayScan, "open");
+        console.log(
+          `[enumerated] relay ${relay.name} at ${relayIp} listens on [${relayPorts.join(", ")}].`,
+        );
 
         // EXACTLY the derived listen port. Not "contains", not "at least one".
         expect(relayPorts).toEqual([listenPort]);
+
+        /**
+         * Now the LIVE case, because the idle assertion above passes on a
+         * network that has no siblings to get wrong — the vacuous-pass shape
+         * M3 was filed about in PR #18. A test that only ever sees an empty
+         * sibling set cannot distinguish a working enumeration from one that
+         * returns nothing, and cannot show that an unexpected member would
+         * actually be caught.
+         *
+         * So a sibling is PLANTED, exactly as the beacons are planted in the
+         * gateway test above, and all three claims are then checked against a
+         * bridge that genuinely has a neighbour on it: that the enumeration
+         * sees it, that the rule flags it as unaccounted for, and that its
+         * ports really are reachable from an ordinary worker — which is the
+         * third term of SRD §12.8's reachable set, demonstrated rather than
+         * asserted in prose.
+         */
+        const strayPort = 47000 + (process.pid % 900);
+        const stray = `pifleet-relay-stray-${process.pid}`;
+        cleanupContainers.push(stray);
+        const started = await docker([
+          "run", "-d", "--name", stray, "--network", net,
+          "--entrypoint", "node", RELAY_IMAGE,
+          "-e", `require("net").createServer((s) => s.end()).listen(${strayPort}, "0.0.0.0")`,
+        ]);
+        if (started.code !== 0) {
+          throw new Error(
+            `relay test: the planted sibling did not start (exit ${started.code}), so the live ` +
+              `half of this test would have measured an idle bridge again. stderr=${started.stderr}`,
+          );
+        }
+
+        const live = await networkMembers(net);
+        const strayIp = live.find((m) => m.name === stray)?.ip ?? "";
+        console.log(`[enumerated] bridge ${net} members: ${live.map((m) => `${m.name}@${m.ip}`).join(", ")}`);
+
+        // The enumeration SEES the sibling — this is what the idle case cannot
+        // show, and what makes the idle assertion meaningful rather than lucky.
+        expect(live.map((m) => m.name).sort()).toEqual([relay.name, stray].sort());
+        // And the rule has teeth: an unaccounted-for member is reported.
+        expect(unexpectedMembers(live, [relay.name])).toEqual([stray]);
+        expect(strayIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+
+        // Third term of the reachable set, measured: a worker on the deny-all
+        // bridge reaches its siblings, on exactly the ports they serve. This
+        // is a residual, not a bug — but it should be a NUMBER, not prose.
+        const strayScan = await onInternalNetwork(
+          net,
+          `${PORT_SCAN}\nscan_all ${JSON.stringify(strayIp)}`,
+        );
+        expect(parsePortList(strayScan, "open")).toEqual([strayPort]);
+
+        // Removing it returns the bridge to an accounted-for state, so the
+        // rule is not simply reporting everything it is shown.
+        expect((await docker(["rm", "-f", stray])).code).toBe(0);
+        expect(unexpectedMembers(await networkMembers(net), [relay.name])).toEqual([]);
       } finally {
         stub.stop(true);
       }
