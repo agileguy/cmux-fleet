@@ -174,8 +174,15 @@ function fleetYaml(
     /** `cloud.kubeconfig`; omitted entirely when absent, as the schema default is null. */
     kubeconfig?: string;
     /**
-     * The ISC-53 native-tool-call gate. OFF unless a test asks for it — see the
-     * comment at the emitted key below for why that default is not laziness.
+     * The ISC-53 native-tool-call gate, TRI-STATE on purpose.
+     *
+     *  - `false` — the key is written, explicitly OFF. Every test in this file
+     *    that is not about ISC-53 passes this, and passing it explicitly is the
+     *    point: the fixture STATES the gate's absence.
+     *  - `true` — written on. The ISC-53 tests pass this and point `llmBaseUrl`
+     *    at a stub they own.
+     *  - OMITTED — no key at all, which is what a real operator's fleet.yaml
+     *    looks like, and the only shape that exercises the SCHEMA DEFAULT.
      */
     requireNativeToolCalls?: boolean;
     /** `llm.base_url`; only the ISC-53 tests set it, at their stub server. */
@@ -201,7 +208,8 @@ function fleetYaml(
     "  model: wiring-test-model",
     ...(opts.llmBaseUrl === undefined ? [] : [`  base_url: ${opts.llmBaseUrl}`]),
     /**
-     * OFF by default, and this is the load-bearing line in the fixture.
+     * Written only when a caller has an opinion — the same convention
+     * `models_allowlist` uses below, and the reason for it is the same.
      *
      * `require_native_tool_calls` defaults to TRUE in the schema, so with this
      * key absent every `up` in this file sends a real `tools`-bearing request
@@ -211,17 +219,22 @@ function fleetYaml(
      * (egress/hazard ordering, the ISC-190 allow case, the ISC-251 grant line,
      * and the §5.5 mount materialization) failed with exit 3 —
      * `ToolCallProbeUnavailableError` — for that reason alone, having nothing
-     * to do with what any of them assert.
+     * to do with what any of them assert. So those tests state
+     * `requireNativeToolCalls: false` and mean it. Making four unrelated
+     * controls depend on a live inference server would be weakening the gate by
+     * another route.
      *
-     * The fix is to state the gate's absence rather than to weaken the gate.
-     * These tests are about egress, hazards, credentials and mounts; making
-     * them depend on a live inference server would make four unrelated
-     * controls untestable without one. Same convention as `models_allowlist`
-     * above: the gate stays invisible until a test asks for it, and the tests
-     * that DO ask for it (ISC-53, below) point `base_url` at a stub they own,
-     * so the criterion is proven against a server whose answers are chosen.
+     * What this spelling FIXES: the key used to be emitted unconditionally as
+     * `${opts.requireNativeToolCalls === true}`, so `false` was written even
+     * when no caller asked for it and no config in this file ever omitted the
+     * key. The schema's own default was therefore never proven to reach the
+     * CLI — flipping `require_native_tool_calls` to `false` in
+     * `config/schema.ts` left this entire file green, on a gate SRD §5.9 calls
+     * mandatory. `the gate is ON by default` below is the test that closes it.
      */
-    `  require_native_tool_calls: ${opts.requireNativeToolCalls === true}`,
+    ...(opts.requireNativeToolCalls === undefined
+      ? []
+      : [`  require_native_tool_calls: ${opts.requireNativeToolCalls}`]),
     // Omitted by default, which is the shape of every other test in this file:
     // an empty allowlist constrains nothing, so the ISC-190 gate stays
     // invisible until a test asks for it.
@@ -268,7 +281,7 @@ async function makeRig(opts: { cloudAccess?: boolean } = {}): Promise<Rig> {
   // `skills/`, one layer down.
   await seedGitRepo(repo);
   const configPath = join(base, "fleet.yaml");
-  await writeFile(configPath, fleetYaml(repo, opts));
+  await writeFile(configPath, fleetYaml(repo, { requireNativeToolCalls: false, ...opts }));
   const rig: Rig = {
     base,
     root,
@@ -454,7 +467,13 @@ describe("a config that exists but cannot be loaded refuses to start (review fin
 
     // Nothing launched: the run dir may exist (created before config load),
     // but no supervisor was started and no ledger written.
-    for (const runId of await readdir(rig.root)) {
+    const runIds = await readdir(rig.root);
+    // Non-vacuous: `up` mkdirs the run directory before it reads the config, so
+    // the refusals below happen with the directory already on disk. Without
+    // this line the loop body could simply never execute and the assertions
+    // would pass by not running.
+    expect(runIds.length).toBeGreaterThan(0);
+    for (const runId of runIds) {
       const run = runPaths(runId, rig.root);
       expect(await readdir(run.workersDir)).toEqual([]);
       expect((await mergeLedger(run)).records).toEqual([]);
@@ -465,7 +484,7 @@ describe("a config that exists but cannot be loaded refuses to start (review fin
     const rig = await makeRig();
     const bad = join(rig.base, "bad-schema.yaml");
     // Valid YAML, invalid document: an unknown key is a field-level error.
-    await writeFile(bad, `${fleetYaml(rig.repo)}surprise_key: true\n`);
+    await writeFile(bad, `${fleetYaml(rig.repo, { requireNativeToolCalls: false })}surprise_key: true\n`);
     const up = await runCli(rig, [
       "up",
       "--config",
@@ -519,7 +538,10 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
     // other models, so the fleet's own default is the thing refused.
     await writeFile(
       gated,
-      fleetYaml(rig.repo, { modelsAllowlist: ["probed-model-a", "probed-model-b"] }),
+      fleetYaml(rig.repo, {
+        requireNativeToolCalls: false,
+        modelsAllowlist: ["probed-model-a", "probed-model-b"],
+      }),
     );
     const up = await runCli(rig, [
       "up",
@@ -543,7 +565,13 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
     // Nothing started. The run dir is created before the config is read, so it
     // may exist — but no supervisor was launched and no ledger written, which
     // is what "does not start" means.
-    for (const runId of await readdir(rig.root)) {
+    const runIds = await readdir(rig.root);
+    // Non-vacuous: `up` mkdirs the run directory before it reads the config, so
+    // the refusals below happen with the directory already on disk. Without
+    // this line the loop body could simply never execute and the assertions
+    // would pass by not running.
+    expect(runIds.length).toBeGreaterThan(0);
+    for (const runId of runIds) {
       const run = runPaths(runId, rig.root);
       expect(await readdir(run.workersDir)).toEqual([]);
       expect((await mergeLedger(run)).records).toEqual([]);
@@ -557,7 +585,10 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
       const allowed = join(rig.base, "allowed.yaml");
       await writeFile(
         allowed,
-        fleetYaml(rig.repo, { modelsAllowlist: ["wiring-test-model", "probed-model-b"] }),
+        fleetYaml(rig.repo, {
+          requireNativeToolCalls: false,
+          modelsAllowlist: ["wiring-test-model", "probed-model-b"],
+        }),
       );
       const up = await runCli(rig, [
         "up",
@@ -602,6 +633,7 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
     await writeFile(
       badRole,
       fleetYaml(rig.repo, {
+        requireNativeToolCalls: false,
         workerRole: "no-such-role",
         modelsAllowlist: ["probed-model-a"],
       }),
@@ -625,7 +657,13 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
     expect(up.stderr).not.toContain("at async");
     expect(up.stdout).not.toContain("run ");
 
-    for (const runId of await readdir(rig.root)) {
+    const runIds = await readdir(rig.root);
+    // Non-vacuous: `up` mkdirs the run directory before it reads the config, so
+    // the refusals below happen with the directory already on disk. Without
+    // this line the loop body could simply never execute and the assertions
+    // would pass by not running.
+    expect(runIds.length).toBeGreaterThan(0);
+    for (const runId of runIds) {
       const run = runPaths(runId, rig.root);
       expect(await readdir(run.workersDir)).toEqual([]);
       expect((await mergeLedger(run)).records).toEqual([]);
@@ -648,7 +686,13 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
   test("an id absent from workers: is still skipped, not refused", async () => {
     const rig = await makeRig();
     const gated = join(rig.base, "undefined-id.yaml");
-    await writeFile(gated, fleetYaml(rig.repo, { modelsAllowlist: ["probed-model-a"] }));
+    await writeFile(
+      gated,
+      fleetYaml(rig.repo, {
+        requireNativeToolCalls: false,
+        modelsAllowlist: ["probed-model-a"],
+      }),
+    );
     const up = await runCli(rig, [
       "up",
       "--config",
@@ -801,7 +845,10 @@ describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
       // Nothing started. The run dir is created before the config is read, so
       // it may exist — no supervisor and no ledger is what "does not start"
       // means, same standard the ISC-190 refusal is held to.
-      for (const runId of await readdir(rig.root)) {
+      const runIds = await readdir(rig.root);
+      // Non-vacuous — see the identical guard above.
+      expect(runIds.length).toBeGreaterThan(0);
+      for (const runId of runIds) {
         const run = runPaths(runId, rig.root);
         expect(await readdir(run.workersDir)).toEqual([]);
         expect((await mergeLedger(run)).records).toEqual([]);
@@ -882,6 +929,51 @@ describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
     // It must say the server could not be reached, NOT that the model is bad.
     expect(up.stderr).toContain("oMLX");
     expect(up.stderr).not.toContain("prose");
+  });
+
+  /**
+   * The gate is ON when nobody says otherwise — the shape a real fleet.yaml has.
+   *
+   * Every other test in this file writes `require_native_tool_calls`
+   * explicitly, and the fixture used to emit the key unconditionally, so no
+   * config anywhere ever OMITTED it. §5.9 calls this gate mandatory, and the
+   * schema encodes that as `.default(true)` — but nothing proved that default
+   * survived the trip through `parseConfig` into `up`. Flipping it to `false`
+   * in `config/schema.ts` left the whole file green, which is a mandatory
+   * control held in place by nothing at all.
+   *
+   * So: no key, a stub that answers in prose, and the refusal must still
+   * happen. `stub.requests.length` is the load-bearing assertion — an exit 2
+   * from some unrelated cause would satisfy the code alone.
+   */
+  test("the gate is ON by default, with no key in fleet.yaml at all", async () => {
+    const rig = await makeRig();
+    const stub = stubOmlx(STUB_PROSE);
+    try {
+      const defaulted = join(rig.base, "no-gate-key.yaml");
+      // requireNativeToolCalls deliberately absent — see `fleetYaml`.
+      const yaml = fleetYaml(rig.repo, { llmBaseUrl: stub.baseUrl });
+      expect(yaml).not.toContain("require_native_tool_calls");
+      await writeFile(defaulted, yaml);
+
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        defaulted,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+      ]);
+
+      expect(up.code).toBe(EXIT.USAGE);
+      expect(up.stderr).toContain("prose");
+      // The probe genuinely fired, from a config that never mentioned it.
+      expect(stub.requests.length).toBe(1);
+      expect(stub.requests[0]!.path).toBe("/v1/chat/completions");
+    } finally {
+      await stub.stop();
+    }
   });
 
   /** §5.9: `require_native_tool_calls: false` "disables both". */
@@ -999,13 +1091,23 @@ describe("the MLX training guard gates the launch path (ISC-56)", () => {
       expect(up.stderr).toContain("--i-know");
       expect(up.stderr).not.toContain("at async");
 
-      // The guard runs before the run directory is populated, so nothing at
-      // all should have been launched.
-      for (const runId of await readdir(rig.root)) {
-        const run = runPaths(runId, rig.root);
-        expect(await readdir(run.workersDir)).toEqual([]);
-        expect((await mergeLedger(run)).records).toEqual([]);
-      }
+      /**
+       * A STRONGER claim than the other refusals in this file, and the
+       * difference is real rather than stylistic.
+       *
+       * The ISC-53 and ISC-190 gates read the config, which `up` does only
+       * AFTER it has created the run directory — so their "launches nothing"
+       * assertion is about an existing directory being empty. The MLX guard
+       * runs earlier still, before that mkdir, so a refusal here must leave the
+       * runs root with no run directory in it at all.
+       *
+       * This was previously written as the same `for (const runId of await
+       * readdir(rig.root))` loop the others use. That loop iterated zero times
+       * here, so it asserted nothing whatsoever — the exact vacuity the review
+       * flagged, and it only became visible once the loop was required to be
+       * non-empty.
+       */
+      expect(await readdir(rig.root)).toEqual([]);
     } finally {
       await decoy.stop();
     }
@@ -1180,6 +1282,7 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
       await writeFile(
         configPath,
         fleetYaml(rig.repo, {
+          requireNativeToolCalls: false,
           kubeconfig,
           roleFields: [
             // No `/workspace` mount at all: the worktree that would back one is
