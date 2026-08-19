@@ -378,60 +378,26 @@ export function relayUpstreamFor(cfg: RelayConfigView, listenPort: number): Rela
 }
 
 /**
- * The oMLX URL **the host** should dial for this fleet — `base_url` rewritten
- * to the resolved upstream.
+ * NOTE ON THE HOST-SIDE PROBE VANTAGE (ISC-259 × ISC-260) — nothing to do here.
  *
- * ## This function currently has NO CALLER, and that is a named gap, not an
- * oversight
+ * Moving the dial side off-host falsifies any rule that rewrites
+ * `llm.base_url` into "something the HOST can reach": `base_url` still names
+ * the relay's listen alias (it must — it is what WORKERS dial), so rewriting it
+ * to `localhost` probes the Docker host's oMLX while the relay forwards to a
+ * LAN peer. Measured here 2026-08-19, and the divergence is not cosmetic:
+ * `127.0.0.1:8000` serves 3 models and NONE of `fleet.example.yaml`'s three
+ * allowlisted ones, while `192.168.86.49:8000` serves 32 including all three.
+ * A localhost-rewriting probe would therefore fail `up` with an allowlist error
+ * describing a server the fleet was never going to use.
  *
- * `up` and `doctor` probe oMLX from the host, through
- * `model-probe.ts:hostFacingBaseUrl`, which rewrites the literal
- * `host.docker.internal` to `localhost`. That rule was exactly right while the
- * only oMLX was the loopback one. It is WRONG the moment `relay_upstream` names
- * a LAN peer: `base_url` still says `host.docker.internal` (it describes what
- * WORKERS dial, and must), so the probe rewrites it to `localhost` and measures
- * the LOCAL server while the relay forwards to the LAN one.
- *
- * Measured on this machine, 2026-08-19, which is what makes the consequence
- * concrete rather than theoretical: `127.0.0.1:8000` serves 3 models
- * (`Qwen3-Embedding-4B-4bit-DWQ`, `Qwen3.5-35B-A3B-4bit`,
- * `gemma-4-26b-a4b-it-4bit`) and NONE of `fleet.example.yaml`'s three
- * allowlisted models; `192.168.86.49:8000` serves 32 including all three. So a
- * correctly-configured LAN fleet still exits 2 at `up` on an allowlist failure
- * that describes a server it is not going to use.
- *
- * `src/security/model-probe.ts`, `src/cli/commands/doctor.ts` and
- * `src/cli/commands/up.ts` are owned by a concurrent change (ISC-260) and are
- * deliberately untouched here. Adopting this is a one-line call-site swap in
- * `hostFacingBaseUrl`'s callers; it is tracked as **ISC-265** and is what
- * actually makes a LAN oMLX usable end-to-end. Until it lands, this PR moves
- * the RELAY and the POLICY, not the probe.
- *
- * The `localhost` special case is kept rather than emitting
- * `host.docker.internal`: the host cannot resolve that name at all (measured —
- * `curl` returns 000), which is the whole reason the rewrite exists.
+ * This module deliberately exports NO host-facing URL helper to fix that. The
+ * concurrent ISC-260 change deletes the rewrite outright and probes from INSIDE
+ * the egress network, dialling `llm.base_url` verbatim exactly as a worker
+ * does — so the probe follows whatever this relay forwards, with no second
+ * derivation of the endpoint to keep in step. That is the correct fix and it
+ * belongs there; a helper here would be a duplicate of a decision this file
+ * does not own. Recorded so the absence reads as a decision rather than a gap.
  */
-export function hostFacingUpstreamUrl(cfg: RelayConfigView): string {
-  let url: URL;
-  try {
-    url = new URL(cfg.llm.base_url);
-  } catch {
-    // Same contract as `hostFacingBaseUrl`: a probe helper is the wrong place
-    // to re-litigate config validation, and the caller's fetch fails loudly.
-    return cfg.llm.base_url;
-  }
-  const listenPort = url.port !== "" ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
-  const upstream = relayUpstreamFor(cfg, listenPort);
-  url.hostname = upstream.host === RELAY_DEFAULT_DIAL_HOST ? "localhost" : upstream.host;
-  url.port = String(upstream.port);
-  const rewritten = url.toString();
-  // `URL.toString()` normalizes an empty path to `/`, which would turn `…:8000`
-  // into `…:8000/` and then `…:8000//chat/completions` downstream. Same
-  // correction `hostFacingBaseUrl` makes, for the same reason.
-  return cfg.llm.base_url.endsWith("/") || !rewritten.endsWith("/")
-    ? rewritten
-    : rewritten.slice(0, -1);
-}
 
 export interface RelayContainerStatus {
   name: string;

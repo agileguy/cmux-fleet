@@ -21,7 +21,6 @@ import { policyFromConfig } from "../../src/security/egress.ts";
 import {
   assertTargetsAllowed,
   ensureEgressRelay,
-  hostFacingUpstreamUrl,
   omlxRelayTarget,
   parseRelayInspect,
   parseRelayUpstream,
@@ -609,53 +608,6 @@ describe("relay_upstream parsing (ISC-259)", () => {
   });
 });
 
-describe("hostFacingUpstreamUrl — where the HOST reaches this fleet's oMLX", () => {
-  // NOTE FOR REVIEW: this function has no production caller yet. `up`/`doctor`
-  // still probe through `model-probe.ts:hostFacingBaseUrl`, which rewrites
-  // `host.docker.internal` to `localhost` unconditionally — correct for a
-  // loopback oMLX, WRONG for a LAN one. That file is owned by the concurrent
-  // ISC-260 change and is deliberately untouched here; adopting this is tracked
-  // as ISC-265. These tests pin the replacement rule so the swap is a one-liner.
-
-  test("with no upstream it reproduces hostFacingBaseUrl's localhost rewrite", () => {
-    // The host cannot resolve `host.docker.internal` at all (measured: curl
-    // returns 000), which is why the rewrite exists in the first place.
-    expect(hostFacingUpstreamUrl(cfg(DEFAULT_BASE_URL))).toBe("http://localhost:8000/v1");
-  });
-
-  test("with a LAN upstream it points at the LAN server, NOT at localhost", () => {
-    // The bug this exists to prevent, stated as an assertion: measured on this
-    // machine, 127.0.0.1:8000 serves none of fleet.example.yaml's three
-    // allowlisted models and 192.168.86.49:8000 serves all three, so probing
-    // localhost here fails `up` with an allowlist error about a server the
-    // fleet is not going to use.
-    expect(hostFacingUpstreamUrl(cfg(DEFAULT_BASE_URL, {}, `${LAN_OMLX}:8000`))).toBe(
-      `http://${LAN_OMLX}:8000/v1`,
-    );
-  });
-
-  test("the upstream's PORT wins over base_url's", () => {
-    expect(hostFacingUpstreamUrl(cfg(DEFAULT_BASE_URL, {}, `${LAN_OMLX}:9999`))).toBe(
-      `http://${LAN_OMLX}:9999/v1`,
-    );
-  });
-
-  test("a trailing slash is preserved rather than normalized in or out", () => {
-    // `URL.toString()` normalizes an empty path to `/`, which downstream
-    // becomes `…:8000//chat/completions`. Same correction hostFacingBaseUrl
-    // makes, for the same reason.
-    expect(hostFacingUpstreamUrl(cfg("http://host.docker.internal:8000"))).toBe(
-      "http://localhost:8000",
-    );
-    expect(hostFacingUpstreamUrl(cfg("http://host.docker.internal:8000/"))).toBe(
-      "http://localhost:8000/",
-    );
-  });
-
-  test("an unparseable base_url is returned untouched, not thrown on", () => {
-    expect(hostFacingUpstreamUrl(cfg("not a url"))).toBe("not a url");
-  });
-});
 
 describe("relayScriptSha256 — what the relay actually executes (S5/S8)", () => {
   test("hashes the real script this checkout would mount", async () => {
