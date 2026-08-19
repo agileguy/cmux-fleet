@@ -4,7 +4,101 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`up` now refuses to start a fleet on a model that cannot emit native tool calls**
+  (SRD §5.9 F39, ISC-53). Whether a model answers a `tools`-bearing request with `tool_calls`
+  or with prose is a property of its chat template, not of oMLX — and a worker on such a
+  model looks perfectly healthy while accomplishing nothing, because its intended actions
+  never become tool calls. `up` sends one probe per distinct resolved model (deduped: six
+  workers on one model is the normal fleet shape, and six real generations to learn one fact
+  would be a tax on every launch) and refuses with exit 2. An oMLX that cannot be reached
+  exits 3 instead — nothing has been learned about the model, so reporting it as a usage
+  error would send the operator to edit a `model:` line that is probably correct.
+  `llm.require_native_tool_calls: false` disables the gate. Exit 2 is reserved for the two
+  cases where something in `fleet.yaml` is genuinely wrong — the model answers in prose, or
+  the server does not serve it. An answer that settles nothing (truncated, filtered, an
+  unknown finish reason) exits 3, because a probe that failed to get an answer is not
+  evidence about the model.
+- **`up` now refuses to start while an MLX training run appears to be active**, unless
+  `--i-know` is passed (ISC-56). §5.9 records concurrent heavy GPU load on this machine
+  turning a process OOM into a kernel watchdog panic, which costs the training run as well as
+  the fleet. Detection is an explicitly documented heuristic over `ps`, and it asks two questions
+  rather than one: is this token a training entry point — `mlx_lm`/`mlx-lm`/`mlx.`/`mlx_vlm`
+  paired with a training verb (`lora`, `train`, `fuse`, `dpo`, `sft`, `grpo`, `orpo`,
+  `finetune`), never `server` or `generate` — and is this token the PROGRAM BEING RUN. The
+  second question is what keeps a filename from counting as a process: matching the name
+  anywhere in the command line refuses `up` on a host merely SERVING a LoRA adapter, or
+  tailing a training log, and the oMLX inference server every fleet requires is exactly the
+  thing that gets hit. An override is recorded both on stderr and in the run ledger
+  (`mlx_training_guard_overridden`), so a run that raced a training run says so in its own
+  record months later.
+- **New criterion ISC-256**: `doctor` should report whether each `models_allowlist` entry is
+  actually served by the configured endpoint. `fleet.example.yaml`'s allowlist names three
+  models the default `base_url` serves none of, and nothing reports that today — the
+  allowlist check is config-vs-config, and the tool-call probe only touches models a worker
+  resolves to. Its wording is adjacent to, not a duplicate of, the criterion added on the
+  sibling branch, and both reconcile when the SRD §5.9/§12 erratum lands — see the ISA entry.
+- **New criterion ISC-260**: the native-tool-call probe should run from INSIDE the egress
+  network the workers use, not from the host. `up` probes from the host today while workers
+  reach oMLX through the internal bridge; both currently resolve to the same box, which masks
+  the asymmetry. If oMLX moves off the Docker host, ISC-53 can pass on the host while every
+  worker is denied — certifying a model no worker can use and pushing the failure to runtime,
+  which is what §5.9 makes the probe mandatory to prevent.
+
 ### Fixed
+- **The MLX training guard refused `up` on a host that was merely SERVING a fine-tune.**
+  Patterns were substring-matched against the whole `ps` command line, so a training entry
+  point's name anywhere in the line counted as a running training run. All three of these
+  were verified matching: an `mlx_lm.server` started with `--adapter-path
+  /Users/dan/out/mlx_lm.lora`, a `tail -f` of an `mlx_lm.lora.log`, and a `grep` for the
+  string. Serving a LoRA adapter out of a directory named for the entry point that produced
+  it is the ordinary way to serve a fine-tune, so the guard refused every `up` on a correctly
+  configured host — the exact failure the design was written to avoid, and which the module's
+  own comment asserted was impossible. Matching now considers only tokens that name the
+  program being run. This also closed four false negatives: the `mlx_lm/lora.py` venv script
+  form, the `grpo`/`orpo`/`finetune` verbs, `mlx_vlm` training, and uppercase spellings.
+- **A model whose answer was cut off got blamed for not supporting tool calls.** `prose` was
+  the fall-through class of the native-tool-call probe, so any 2xx that was not a well-formed
+  tool call became "this model answered with prose", exit 2 — including `finish_reason:
+  "length"` with no tool_calls, which is what a reasoning model returns when its `<think>`
+  preamble outruns the probe's token budget. The budget was 200. `prose` is now identified
+  positively (a completed generation that produced no call), everything inconclusive exits 3,
+  and the budget is 2048.
+- **A slow oMLX was reported as a dead one.** A probe timeout was classified `unreachable`
+  and the operator was told to start a server that was already running and cold-loading their
+  weights, which §5.9 records taking longer than the 60-second budget on this host. Timeouts
+  now carry their own message and advise waiting for the load.
+- **A model the server does not serve was reported as an outage.** Every non-2xx collapsed
+  into "oMLX unreachable", so a 404 for a missing model — a `fleet.yaml` problem — sent the
+  operator to restart a healthy server. Non-2xx response bodies now reach the operator, and a
+  404 that names a model exits 2 as the config error it is. A 404 with no such body stays
+  exit 3, because that is far more likely a wrong URL path than a wrong model.
+- **`hostFacingBaseUrl` corrupted URLs that merely contained the container hostname.** It was
+  a substring `.replace()`, so `https://host.docker.internal.example.com/v1` and
+  `http://proxy:8000/host.docker.internal/v1` were both rewritten into endpoints nobody
+  configured — and the resulting failure read as "oMLX is down". It now parses with `new URL`
+  and swaps the hostname, matching what `security/egress.ts` already does with the same field.
+- **`doctor` reported no oMLX latency at all on the invocation that most needs it.** With no
+  config it probed `models[0]`, and on a server whose model list begins with an embedding
+  model that completion returns HTTP 500 — so `completion_latency_ms` came back `null` and
+  ISC-55's number went unreported on exactly the run someone makes when they have no config
+  yet and are trying to size `max_concurrent`. The no-config fallback now skips models whose
+  ids name themselves as embedding models; a configured `llm.model` is still used verbatim,
+  because second-guessing the operator would report a latency for a model no worker runs.
+- **`tsc --noEmit` failed on the model-probe tests while `bun test` reported them green.**
+  Bun strips types without checking them, so the suite was certifying code the project's own
+  CI gate rejects. `FetchLike` was `typeof fetch`, which under `@types/bun` carries the static
+  `preconnect` property and makes every hand-written test double — the entire point of the
+  type — un-assignable; it is now the call signature the module actually uses. A related
+  `.catch()` returning `void | Error` would additionally have thrown a TypeError instead of an
+  assertion failure had the gate ever failed to refuse.
+- **Adding the ISC-53 gate broke four unrelated `up` integration tests.**
+  `require_native_tool_calls` defaults to true, so the egress-ordering, allowlist-allow,
+  ADC-grant and mount-materialization tests all began sending a real `tools` request to
+  `localhost:8000` for a model no server serves, and failed with exit 3 for a reason having
+  nothing to do with what any of them assert. The fixture now states the gate's absence
+  explicitly (the same convention `models_allowlist` already used there) rather than the gate
+  being weakened; the tests that do exercise it point `base_url` at a stub they own.
 - **The only test proving crash-recoverability of atomic writes was stochastic** — it
   killed a writer process ~150ms into a loop, proving one of five syscall boundaries at
   random and never saying which. Replaced with deterministic per-boundary tests

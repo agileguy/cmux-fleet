@@ -11,6 +11,7 @@ import type { FleetConfig, Toolchain } from "../../config/schema.ts";
 import { imageTag } from "../../container/image.ts";
 import { probeMountVisibility, type MountVisibility } from "../../container/mounts.ts";
 import { EXEC_NOT_FOUND, realExec, type Exec } from "../../container/run.ts";
+import { chatProbeModel, hostFacingBaseUrl } from "../../security/model-probe.ts";
 import { runsRoot } from "../../run/paths.ts";
 
 /**
@@ -547,8 +548,9 @@ interface OmlxReport {
 
 async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
   const configured = loaded?.config.llm.base_url ?? "http://host.docker.internal:8000/v1";
-  // Doctor runs on the host: the container-facing hostname does not resolve here.
-  const baseUrl = configured.replace("host.docker.internal", "localhost");
+  // Doctor runs on the host: the container-facing hostname does not resolve
+  // here. Shared with `up`'s ISC-53 probe rather than spelled twice.
+  const baseUrl = hostFacingBaseUrl(configured);
   const keyEnv = loaded?.config.llm.api_key_env ?? "OMLX_API_KEY";
   const key = process.env[keyEnv] ?? "";
   const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
@@ -577,9 +579,19 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
     return report;
   }
 
-  // Measured single-request latency (ISC-55): one minimal completion against
-  // the configured default model, or the first served model when no config.
-  const model = loaded?.config.llm.model ?? report.models[0] ?? null;
+  /**
+   * Measured single-request latency (ISC-55): one minimal completion against
+   * the configured default model, or — with no config — the first served model
+   * that does not NAME itself an embedding model.
+   *
+   * The filter is not cosmetic. This host currently serves
+   * `Qwen3-Embedding-4B-4bit-DWQ` first, and a chat completion against it
+   * returns HTTP 500 (measured), so the old `report.models[0]` fallback left
+   * `completion_latency_ms` null and ISC-55's whole number unreported on the
+   * default `doctor` invocation — the one someone runs when they have no
+   * config yet, which is precisely when they need it to size `max_concurrent`.
+   */
+  const model = chatProbeModel(loaded?.config.llm.model ?? null, report.models);
   report.model = model;
   if (model !== null) {
     try {
