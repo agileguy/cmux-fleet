@@ -1214,6 +1214,45 @@ Post-run, `pifleet` asserts: no ref outside `fleet/<run-id>/*` moved; `git -C <m
 >
 > **Not re-measured here:** ISC-261's enumerated-reachable-set evidence still describes the pre-amendment topology. Re-taking it against a live LAN upstream is that criterion's work, not this one's.
 
+> **Erratum (2026-08-19, ISC-261) — the GATEWAY term in both errata above is wider than the machine actually is, and the enumeration that found it.**
+>
+> The two set definitions above both read `{every port on the bridge gateway}`. That overstates the exposure. The gateway term is **every HOST-NAMESPACE listener**, which is a strictly smaller set: a **published container port is not reachable from the `--internal` bridge at all**.
+>
+> This was found by replacing the sampled evidence with a complete enumeration, which is what ISC-261 asked for. Both errata above reason from the FORWARD-chain rule correctly but stop one hop early. `docker run -p` is implemented as DNAT in **nat/PREROUTING**, and the isolation DROP lives in **FORWARD**, which is evaluated *after* that rewrite. By the time the packet reaches the DROP its destination is the target container's address — outside the internal bridge's subnet — so it matches `! -d <subnet>` and dies. A host-namespace listener is never forwarded at all: it is delivered locally through INPUT (policy `ACCEPT`), which is why it *is* reachable.
+>
+> Measured 2026-08-19 by `test/integration/relay.test.ts`, scanning all 65535 ports rather than a candidate list, with two beacons planted by the test itself — one in the host namespace (`--network host`), one published (`-p`):
+>
+> ```
+> kernel socket table (--network host, /proc/net/tcp) : 22, 53, 39375, 40375
+> ordinary bridge, full-range scan of its gateway     : 22,     39375, 40375
+> deny-all bridge, full-range scan of its gateway     : 22,            40375
+>                                                                ^^^^^ published: NOT reachable
+> ```
+>
+> Three sources, two **strict** narrowings, so neither relation is a tautology. Port 53 is a real listening socket no bridge reaches (the resolver binds loopback); port 39375 is a live published port reachable from an ordinary bridge and not from the deny-all one. The expected set is deliberately **not** derived from a second probe of the same shape — that is the circularity ISC-253's `decide()` gate had — but from the kernel's own socket table, read without sending a packet.
+>
+> **The sibling term is correct as written, and was checked rather than assumed.** A sibling is in-subnet, so it is reached directly and never meets the DNAT path that defeats a published port. Measured: a stray container planted on the bridge and scanned across the full range from an ordinary worker answered on exactly the one port it served.
+>
+> **The corrected set, superseding both statements above:**
+>
+> ```
+> {relay listen ports} ∪ {every HOST-NAMESPACE listener on the Docker host}
+>                      ∪ {every port on every sibling container on the bridge}
+>                      ∪ {one LAN host:port}          <- ISC-259, bounded
+> ```
+>
+> Still not a fixed set: anything the host binds **in its own namespace**, or a sibling binds at all, joins it with no code change. The narrowing is real but modest — it removes published container ports from the residual, and nothing else.
+>
+> **What this does NOT claim.** The enumeration is now taken against the post-ISC-259 code (all eight relay probes pass against it), but it does not exercise a live LAN upstream: the `{one LAN host:port}` term is asserted by `test/unit/relay.test.ts`'s mutation of the `decide()` gate, not by a packet sent to a LAN peer through a running relay. #20's "not re-measured here" note is therefore only partly discharged — the first three terms are enumerated, the fourth is not. Separately, the probes have NOW been observed on a native-Linux GitHub runner and pass there: `total=79 expected=79`, 73 pass / 6 skip / 0 fail, all six pinned skips matched by name. **That run also falsifies a claim made in the erratum above.** It states that "on native-Linux Docker (where CI runs) the host's listener set is materially larger than Colima's". Measured on the runner, the shape is identical to Colima's — `22, 53` plus the two beacons this test plants, with the published one again unreachable from the deny-all bridge:
+>
+> ```
+> kernel socket table                             : 22, 53, 39440, 40440
+> ordinary bridge (172.19.0.1), full-range scan   : 22,     39440, 40440
+> deny-all bridge (172.18.0.1), full-range scan   : 22,            40440
+> ```
+>
+> So the residual is not materially worse on a runner than on the maintainer's machine; that sentence was reasoning, not measurement, and is corrected here. The enumeration is roughly 2.2x slower there — 154.9s and 153.8s for the two probes against ~70s locally — comfortably inside the 600s per-test budget those timeouts were sized for.
+
 ### 12.9 No AI attribution
 
 The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Generated with", and any mention of AI/LLM in commits, branches, or PR bodies. Enforced by a grep gate in CI.
