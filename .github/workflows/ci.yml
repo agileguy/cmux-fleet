@@ -199,41 +199,57 @@ jobs:
           # Capturing the one real run's output and grading THAT is strictly
           # better: same coverage, roughly half the Docker time, one truth.
           #
-          # TOTAL_EXPECTED is 72 = 20 (image.test.ts: 15 fixed cases + 5
+          # TOTAL_EXPECTED is 77 = 20 (image.test.ts: 15 fixed cases + 5
           # generated from the toolchain-baseline `probes` array — gcloud,
           # kubectl, helm, jq, curl) + 23 (verbgate.test.ts) + 5
           # (egress.test.ts) + 18 (adc.test.ts — up from 12 now that the
           # ISC-44/45/46 mount-shape and credential-absence blocks exist) + 6
           # (relay.test.ts, added here by ISC-257: 2 bridge-denial probes and 4
-          # relay probes, of which the live-oMLX one always skips on a runner).
+          # relay probes, of which the live-oMLX one always skips on a runner)
+          # + 5 (probe-in-network.test.ts, added by ISC-260).
           #
-          # 66 -> 72 is the ONLY arithmetic change, and it was recomputed once
-          # for both ISC-257 and ISC-262 together rather than twice against a
-          # moving target — which is why those two criteria are fixed in one
-          # PR. ISC-262 adds nothing to this number: `model-probe.test.ts` is
+          # 72 -> 77 is the ONLY arithmetic change in this round, and it was
+          # DERIVED by the hand method below rather than by adding 5 to the old
+          # constant. That distinction is the entire reason the method is
+          # written down: incrementing a total is how a miscount survives.
+          #
+          # The ISC-260 file has a different SHAPE from every other file here,
+          # deliberately. Three of its five tests are `skipIf(!PIFLEET_DOCKER)`
+          # and need the daemon; the other TWO are pure argv assertions that
+          # run everywhere, including in the fast `test` job — they pin
+          # `--network` and the flag-injection refusal, which need no daemon
+          # and should not be hostage to one. So the file contributes
+          # 2 pass + 3 skip with the gate CLOSED and 5 pass + 0 skip here with
+          # it OPEN. Either way it contributes 5 to the collection total, which
+          # is precisely why the guard counts pass+skip as one number rather
+          # than counting passes.
+          #
+          # ISC-262 adds nothing to this number: `model-probe.test.ts` is
           # graded by its own step in the fast `test` job, because it needs no
           # Docker and should not be hostage to the image build.
           #
           # DERIVING IT BY HAND, cheaply and exactly. Run the same file list
-          # with PIFLEET_DOCKER UNSET: every gate closes, every test reports as
-          # a skip, and the summary line is the collection total this constant
-          # must equal. Measured 2026-08-19 on bun 1.3.11:
-          #     bun test test/integration/{image,verbgate,egress,adc,relay}.test.ts
-          #     -> 0 pass, 72 skip, 0 fail. Ran 72 tests across 5 files.
-          # No daemon, no image, 53ms. Do this before changing the number.
+          # with PIFLEET_DOCKER UNSET and read the collection total off the
+          # summary line. Measured 2026-08-19 on bun 1.3.11:
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network}.test.ts
+          #     -> 2 pass, 75 skip, 0 fail. Ran 77 tests across 6 files.
+          # No daemon, no image, 52ms. Do this before changing the number.
+          # (It was "0 pass, 72 skip" before ISC-260; the 2 passes are the two
+          # daemon-free argv tests described above, and they count toward the
+          # total exactly as a skip would.)
           #
           # And measured two ways with the gate OPEN, because both matter:
-          #   - On a host WITH a real ADC file and a real oMLX, all 72 run and
-          #     pass: 72 pass, 0 fail, 0 skip.
+          #   - On a host WITH a real ADC file and a real oMLX, all 77 run and
+          #     pass: 77 pass, 0 fail, 0 skip.
           #   - In THIS job, with no real host ADC but PIFLEET_TEST_ADC_FILE
           #     set by the step above, the file-mode mount-shape test RUNS
           #     (that is the whole point of that step) while the four tests
           #     that need a REAL host ADC to mint a live token cannot, and the
           #     one relay probe that needs a real inference server cannot
-          #     either: 67 pass, 5 skip. Same total either way, because the
+          #     either: 72 pass, 5 skip. Same total either way, because the
           #     check treats pass+skip as one number — see probe-guard.sh's
           #     total check for why that pairing, specifically, is correct.
-          TOTAL_EXPECTED: "72"
+          TOTAL_EXPECTED: "77"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -317,7 +333,8 @@ jobs:
               test/integration/verbgate.test.ts \
               test/integration/egress.test.ts \
               test/integration/adc.test.ts \
-              test/integration/relay.test.ts
+              test/integration/relay.test.ts \
+              test/integration/probe-in-network.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every
