@@ -436,6 +436,50 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
  * and "the token was bad" in a single comparison.
  */
 describe.skipIf(!DOCKER)("ISC-255/ISC-41: gcloud in the production container shape", () => {
+  /**
+   * ISC-255's LITERAL claim — `$CLOUDSDK_CONFIG` is writable — with NO
+   * credential involved, and therefore the only part of this block that runs
+   * in CI.
+   *
+   * The differential below is the better evidence about gcloud, but it needs a
+   * real host ADC to mint a live token from and so self-skips on every CI
+   * runner. Resting the whole criterion on that would leave it resting on one
+   * laptop. This probe needs only a Docker daemon and the image: it starts a
+   * container in the production shape and writes where gcloud writes its
+   * config, which is exactly what `--read-only` used to make impossible. It is
+   * deliberately the weaker assertion, because it is the one that can be
+   * re-checked automatically on every push.
+   *
+   * The ownership assertion is not decoration. A tmpfs mounted without
+   * `uid`/`gid` comes up root-owned 0755, and every symptom of that is a
+   * WARNING rather than an error — gcloud exits 0 and caches nothing — so a
+   * bare writability check would pass on the broken configuration if it
+   * happened to run as root. Checking the owning uid is what distinguishes
+   * "writable" from "writable by the uid the worker actually runs as".
+   */
+  test("the gcloud config dir is writable by the worker uid, no credential needed (ISC-255)", async () => {
+    const name = await startContainer();
+    const out = await inContainer(
+      name,
+      `echo "owner=$(stat -c '%u:%g' "$CLOUDSDK_CONFIG")"
+       mkdir -p "$CLOUDSDK_CONFIG/configurations" 2>/dev/null && echo "mkdir=ok" || echo "mkdir=FAILED"
+       echo probe > "$CLOUDSDK_CONFIG/probe" 2>/dev/null && echo "write=ok" || echo "write=FAILED"
+       echo "whoami=$(id -u)"
+       echo "fstype=$(stat -f -c %T "$CLOUDSDK_CONFIG")"`,
+    );
+    // Writable at all — the thing `--read-only` denied, and what `[Errno 30]`
+    // was reporting. `configurations/` by name because that is the exact
+    // subdirectory gcloud crashed creating.
+    expect(out).toContain("mkdir=ok");
+    expect(out).toContain("write=ok");
+    // …by the worker's own uid, not by root.
+    expect(out).toContain(`whoami=${WORKER_UID}`);
+    expect(out).toContain(`owner=${WORKER_UID}:${WORKER_UID}`);
+    // A tmpfs specifically: container-lifetime memory that never touches host
+    // disk, which is why a credential cache landing here is acceptable at all.
+    expect(out).toContain("fstype=tmpfs");
+  }, 60_000);
+
   test.skipIf(!HOST_ADC_PRESENT)(
     "without the production tmpfs, gcloud crashes on the read-only config dir (ISC-255)",
     async () => {
