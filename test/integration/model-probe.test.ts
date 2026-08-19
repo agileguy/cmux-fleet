@@ -276,9 +276,19 @@ describe("doctor reports the live oMLX surface (ISC-54, ISC-55)", () => {
        * non-emptiness, and none of them is "reports the oMLX model list".
        */
       expect([...omlx.models].sort()).toEqual([...served].sort());
-      // The list is the SERVER's, so it is not merely an echo of the config:
-      // this host serves an embedding model no fleet would ever name.
-      expect(omlx.models.length).toBeGreaterThanOrEqual(1);
+      /**
+       * There used to be a `toBeGreaterThanOrEqual(1)` here, claiming to show
+       * the list was not an echo of the config. It showed nothing: it is
+       * strictly weaker than the `toBeGreaterThan(0)` three lines up, and the
+       * set-equality above already carries the entire claim — a list equal to
+       * what an independent `GET /v1/models` returned cannot be a reflection of
+       * `llm.model`, a hardcoded array, or a stale cache. An assertion that
+       * cannot fail when its stated claim is false is worse than no assertion,
+       * because it reads like coverage.
+       *
+       * The stub-backed sibling in `doctor-omlx.test.ts` makes the same point
+       * deterministically, by serving ids no fleet.yaml in that file names.
+       */
     },
     180_000,
   );
