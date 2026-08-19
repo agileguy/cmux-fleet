@@ -195,8 +195,34 @@ describe("the probe guard rejects each thing it exists to catch", () => {
       TOTAL_EXPECTED: "4",
       EXPECTED_SKIPS: `${NAMES.pinnedSkip}\n`,
     });
-    expect(r.out).toContain("expected 4 probes collected (pass+skip), got 2");
+    expect(r.out).toContain("expected 4 probes collected (pass+skip), got only 2");
     expect(r.out).toContain("silently matched nothing");
+    expect(r.code).toBe(1);
+  }, 60_000);
+
+  test("a SURPLUS is caught too, and advises the opposite fix from a shortfall", async () => {
+    /**
+     * The other direction, and it needs its own message rather than sharing
+     * the shortfall one. Found by mutating TOTAL_EXPECTED against a real relay
+     * run: 5 expected against 6 collected printed "a test dropped out of
+     * collection entirely" — shortfall advice, for a surplus, which sends the
+     * reader hunting for a deleted file that was never deleted.
+     *
+     * A live scenario, not a hypothetical, because the arguments are substring
+     * filters: a future file whose name contains a listed one is swept in with
+     * no warning, and this check is the only thing that notices.
+     */
+    const base = await fixtures();
+    const r = await runGuard(base, ["pass.test.ts", "pinned.test.ts"], {
+      LABEL: "surplus",
+      TOTAL_EXPECTED: "3",
+      EXPECTED_SKIPS: `${NAMES.pinnedSkip}\n`,
+    });
+    expect(r.out).toContain("got 4 — MORE, not fewer");
+    expect(r.out).toContain("SUBSTRING filters");
+    // The shortfall advice must NOT appear: acting on it would send the reader
+    // looking for a file that was never removed.
+    expect(r.out).not.toContain("dropped out of collection");
     expect(r.code).toBe(1);
   }, 60_000);
 

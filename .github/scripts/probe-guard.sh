@@ -179,8 +179,19 @@ fi
 # directions land here. (Measured 2026-08-19: `bun test pinned.test.ts` also
 # collects `unpinned.test.ts`; see test/integration/probe-guard.test.ts, where
 # it cost two red fixtures to find.)
-if [ "$total" -ne "$TOTAL_EXPECTED" ]; then
-  echo "::error::[$LABEL] expected $TOTAL_EXPECTED probes collected (pass+skip), got $total. fail=0, todo=0, and the skip set matches the pinned names exactly, so this is not a failure or an identity problem: a test dropped out of collection entirely, most likely because a listed file was renamed or deleted and its filter silently matched nothing. Confirm every file still exists under its exact name before raising TOTAL_EXPECTED to match a lower number."
+#
+# The two directions have DIFFERENT causes and so need different advice, and one
+# message cannot carry both without misdirecting half its readers. Measured
+# while testing this script: a TOTAL_EXPECTED mutated to 5 against a real 6
+# printed "a test dropped out of collection entirely" — shortfall advice, for a
+# surplus. Whichever way it fires the reader was one step from the wrong fix, so
+# the branch is worth four extra lines.
+if [ "$total" -lt "$TOTAL_EXPECTED" ]; then
+  echo "::error::[$LABEL] expected $TOTAL_EXPECTED probes collected (pass+skip), got only $total. fail=0, todo=0, and the skip set matches the pinned names exactly, so this is not a failure or an identity problem: a test dropped out of collection entirely, most likely because a listed file was renamed or deleted and its filter silently matched nothing. Confirm every listed file still exists under its exact name before lowering TOTAL_EXPECTED to match."
+  exit 1
+fi
+if [ "$total" -gt "$TOTAL_EXPECTED" ]; then
+  echo "::error::[$LABEL] expected $TOTAL_EXPECTED probes collected (pass+skip), got $total — MORE, not fewer. Either probes were added to a listed file without updating TOTAL_EXPECTED, or a NEW file was swept in because these arguments are SUBSTRING filters and its name contains a listed one. Re-derive the constant by running the same file list with the gate variable UNSET and reading the resulting skip total."
   exit 1
 fi
 
