@@ -46,6 +46,60 @@ All notable changes to this project are documented here.
   which is what §5.9 makes the probe mandatory to prevent.
 
 ### Fixed
+- **Every `gcloud` call in a worker crashed on a read-only filesystem, with a perfectly
+  good credential in hand.** The image bakes `CLOUDSDK_CONFIG=/home/pi/.config/gcloud` as
+  an ordinary directory on the root filesystem, and SRD §5.6 launches with `--read-only`
+  and only `/tmp` as tmpfs — so gcloud could not write its own config and died with
+  `ERROR: gcloud crashed (OSError): [Errno 30] Read-only file system:
+  '/home/pi/.config/gcloud/configurations'`, exit 1, empty stdout. It read as a broken
+  credential rather than a missing mount. `buildDockerArgv` now mounts the tmpfs §5.2
+  always described. Every option on it is measured rather than copied from `/tmp`'s line:
+  `uid`/`gid` are required (without them the tmpfs is root-owned, gcloud hits EACCES
+  instead of EROFS, *tolerates* it, and exits 0 while warning on every call and caching
+  nothing — the broken version looks like it works), and `size=16m` is roughly 4,000 gcloud
+  invocations of headroom at a measured ~4 KB per call. A separate tmpfs rather than
+  repointing `CLOUDSDK_CONFIG` at `/tmp`, because the injected token lives in `/tmp` and
+  gcloud's unbounded log growth would otherwise eat the space the refresh needs.
+- **The ADC test suite had the same defect, which is how it survived.** Those tests added a
+  `$CLOUDSDK_CONFIG` tmpfs of their own to every container they built, so five
+  already-closed criteria were being probed in a shape `pifleet up` cannot launch. The
+  fake tmpfs shadowed gcloud's real credential store — neutralising the exact vector the
+  `cloud_access: false` criteria exist to disprove — and made the "no refresh_token
+  anywhere on the filesystem" sweep search an empty overlay instead of the directory gcloud
+  actually writes into. Tests now build the production shape from production's own exported
+  flags; deviations are opt-in and default off.
+- **Mounting `$HOME` handed a worker the entire multi-account gcloud auth store, and every
+  assertion passed.** The "host `~/.config/gcloud` is never a mount source" checks asked
+  only whether a source *was* that directory or sat *under* it — never whether it
+  *contained* it. `run.repo` is operator-configurable and is mounted at `/workspace`, so
+  `run.repo: ~` was a supported config that did exactly this. Worse, the unit-level check
+  routed through a helper that drops every `/workspace` mount, so it was structurally blind
+  to the one mount that could cause it. All three relations are now covered by a single
+  production predicate, and `buildDockerArgv` calls it on the argv it is about to launch —
+  so this is enforced at launch rather than asserted about afterwards.
+- **The printed grant line could name an identity the worker was never given.** Identity
+  was resolved from `gcloud config get-value account` (the `gcloud auth login` account),
+  but tokens are minted from ADC and `file` mode hands over
+  `application_default_credentials.json` — separate stores, written by separate commands,
+  which routinely disagree. Resolution now prefers the ADC file's own principal and falls
+  back to the config account only when the file cannot name one. That fallback is
+  load-bearing, not decorative: measured here, `gcloud auth application-default login`
+  wrote `"account": ""`, present and empty.
+- **A live refresh token was mounted into a container with full network egress.** The
+  file-mode test mounted the operator's real ADC — refresh token included — into a
+  container started with no `--network` at all, on the default bridge, in an image that
+  ships `curl`. Containers in that suite now default to `--network none`, which also closes
+  the GCE metadata-server fallback as a credential vector. Measured: every probe passes
+  without a network, because minting happens on the host.
+- **A failing container probe produced a red CI step with no output whatsoever.** `set -eu`
+  around `out="$(bun test ...)"` aborts at the assignment, so the `echo "$out"` on the next
+  line never ran — no test names, no stack, not even the `::error::` lines. The guard also
+  never parsed `fail` or `todo`, and since a failure *shortens* the collected total it
+  reported real failures as "update TOTAL_EXPECTED if probes were added" — advice that
+  papers over the exact regression the job exists to catch. Failures and todos are now
+  checked first and reported as themselves, and the skip set is pinned BY NAME rather than
+  by count, so converting an unrelated probe to `.skip` while un-skipping a credential
+  probe can no longer keep the arithmetic green.
 - **The MLX training guard refused `up` on a host that was merely SERVING a fine-tune.**
   Patterns were substring-matched against the whole `ps` command line, so a training entry
   point's name anywhere in the line counted as a running training run. All three of these
@@ -277,6 +331,19 @@ All notable changes to this project are documented here.
   is now an explicit `detail` note rather than silence; actually computing cross-clone
   conflicts (fetching each sibling's branch into the parent via its existing `worker-<id>`
   remote) is filed as a follow-up, not built in this pass.
+
+### Changed
+- The container suite runs ONCE in CI instead of twice. It had been executed for its own
+  sake and then again inside the guard purely to re-count the summary — doubling real
+  Docker time for no extra coverage, inside a 60-minute budget that also builds
+  google-cloud-cli, and leaving two runs that could disagree with each other.
+- The ADC file-mode mount-shape test is now CI-runnable via `PIFLEET_TEST_ADC_FILE`. It
+  only ever needed *a file* to inspect a mount table, but it was pinned to the operator's
+  real credential and so ran in no automated job at all.
+- ISA criteria now distinguish `[x]` (something reproducible re-checks it) from `[~]`
+  (partly proved, with the local-only half named explicitly). ISC-41, ISC-47 and ISC-48
+  moved to `[~]` — the first two had been marked closed with no evidence of any kind, and
+  the third names a token that nothing in the CLI ever mints.
 
 ### Added
 - **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
