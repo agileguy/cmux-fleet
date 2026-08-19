@@ -22,9 +22,9 @@
  * is why the name is validated against Docker's own grammar first.
  */
 
-/** Docker network-name grammar; also refuses a leading `-` becoming a flag. */
-const NETWORK_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
-const MAX_NETWORK_NAME = 128;
+/** Docker object-name grammar; also refuses a leading `-` becoming a flag. */
+const DOCKER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+const MAX_DOCKER_NAME = 128;
 
 export interface EgressNetworkStatus {
   name: string;
@@ -34,11 +34,25 @@ export interface EgressNetworkStatus {
   id: string | null;
 }
 
-/** Throws on a name that could not have come from a validated config. */
-export function assertNetworkName(name: string): void {
-  if (name.length === 0 || name.length > MAX_NETWORK_NAME || !NETWORK_NAME_RE.test(name)) {
-    throw new Error(`egress: invalid docker network name ${JSON.stringify(name)}`);
+/**
+ * Throws on a name that could not have come from a validated config.
+ *
+ * Networks and containers share one grammar and one bound because they share
+ * the hazard: the only reason this validation exists is that argv arrays stop
+ * QUOTING injection but not FLAG injection, and `--driver=host` reads as an
+ * option wherever it appears. `src/security/relay.ts` derives container and
+ * network names from the configured egress network, so it validates through
+ * this same function rather than carrying a second copy of the regex that
+ * could be relaxed independently.
+ */
+export function assertDockerName(kind: "network" | "container", name: string): void {
+  if (name.length === 0 || name.length > MAX_DOCKER_NAME || !DOCKER_NAME_RE.test(name)) {
+    throw new Error(`egress: invalid docker ${kind} name ${JSON.stringify(name)}`);
   }
+}
+
+export function assertNetworkName(name: string): void {
+  assertDockerName("network", name);
 }
 
 /**
