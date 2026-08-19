@@ -199,19 +199,32 @@ jobs:
           # Capturing the one real run's output and grading THAT is strictly
           # better: same coverage, roughly half the Docker time, one truth.
           #
-          # TOTAL_EXPECTED is 77 = 20 (image.test.ts: 15 fixed cases + 5
+          # TOTAL_EXPECTED is 79 = 20 (image.test.ts: 15 fixed cases + 5
           # generated from the toolchain-baseline `probes` array — gcloud,
           # kubectl, helm, jq, curl) + 23 (verbgate.test.ts) + 5
           # (egress.test.ts) + 18 (adc.test.ts — up from 12 now that the
-          # ISC-44/45/46 mount-shape and credential-absence blocks exist) + 6
-          # (relay.test.ts, added here by ISC-257: 2 bridge-denial probes and 4
-          # relay probes, of which the live-oMLX one always skips on a runner)
+          # ISC-44/45/46 mount-shape and credential-absence blocks exist) + 8
+          # (relay.test.ts: 3 bridge-denial/enumeration probes and 5 relay
+          # probes, of which the TWO live-oMLX ones always skip on a runner)
           # + 5 (probe-in-network.test.ts, added by ISC-260).
           #
-          # 72 -> 77 is the ONLY arithmetic change in this round, and it was
-          # DERIVED by the hand method below rather than by adding 5 to the old
-          # constant. That distinction is the entire reason the method is
-          # written down: incrementing a total is how a miscount survives.
+          # 77 -> 79 comes from ISC-261 and ISC-258 adding one probe each to
+          # relay.test.ts:
+          #   + "the relay opens exactly one port on the bridge, and every
+          #      sibling on the bridge is an expected fleet member" (ISC-261)
+          #   + "a live INFERENCE round-trips through the relay, differentially
+          #      against a host control" (ISC-258, skips here)
+          # ISC-261 also REWROTE the gateway-residual probe in place — from
+          # five guessed candidate ports to a full 65535-port enumeration — but
+          # a rewrite in place changes no count. It did change the probe's
+          # NAME, which matters only if a probe is pinned by name; that one is
+          # not, and the three that are appear below.
+          #
+          # DERIVED by the hand method below, NOT by adding 2 to 77. That
+          # distinction is the entire reason the method is written down:
+          # incrementing a total is how a miscount survives. (It is also why
+          # this constant was re-derived rather than reconciled after ISC-260
+          # landed and moved it 72 -> 77 underneath this branch.)
           #
           # The ISC-260 file has a different SHAPE from every other file here,
           # deliberately. Three of its five tests are `skipIf(!PIFLEET_DOCKER)`
@@ -232,24 +245,30 @@ jobs:
           # with PIFLEET_DOCKER UNSET and read the collection total off the
           # summary line. Measured 2026-08-19 on bun 1.3.11:
           #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network}.test.ts
-          #     -> 2 pass, 75 skip, 0 fail. Ran 77 tests across 6 files.
-          # No daemon, no image, 52ms. Do this before changing the number.
-          # (It was "0 pass, 72 skip" before ISC-260; the 2 passes are the two
-          # daemon-free argv tests described above, and they count toward the
-          # total exactly as a skip would.)
+          #     -> 2 pass, 77 skip, 0 fail. Ran 79 tests across 6 files.
+          # No daemon, no image. Do this before changing the number. The 2
+          # passes are ISC-260's two daemon-free argv tests, and they count
+          # toward the total exactly as a skip would.
+          #
+          # NOTE ON RUNTIME, because ISC-261's probes are not cheap. The two
+          # enumeration probes each scan all 65535 ports two or three times,
+          # at roughly 32s per scan on a host that RSTs closed ports: ~70s and
+          # ~73s respectively, measured. A host that DROPs instead would take
+          # 65535/512 x 1s ~ 128s per scan; the per-test timeouts are 600s to
+          # cover that, and the job budget is 60 minutes.
           #
           # And measured two ways with the gate OPEN, because both matter:
-          #   - On a host WITH a real ADC file and a real oMLX, all 77 run and
-          #     pass: 77 pass, 0 fail, 0 skip.
+          #   - On a host WITH a real ADC file and a real oMLX, all 79 run and
+          #     pass: 79 pass, 0 fail, 0 skip.
           #   - In THIS job, with no real host ADC but PIFLEET_TEST_ADC_FILE
           #     set by the step above, the file-mode mount-shape test RUNS
           #     (that is the whole point of that step) while the four tests
           #     that need a REAL host ADC to mint a live token cannot, and the
-          #     one relay probe that needs a real inference server cannot
-          #     either: 72 pass, 5 skip. Same total either way, because the
+          #     TWO relay probes that need a real inference server cannot
+          #     either: 73 pass, 6 skip. Same total either way, because the
           #     check treats pass+skip as one number — see probe-guard.sh's
           #     total check for why that pairing, specifically, is correct.
-          TOTAL_EXPECTED: "77"
+          TOTAL_EXPECTED: "79"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -279,18 +298,25 @@ jobs:
             with cloud_access and a token, gcloud auth print-access-token succeeds (ISC-41)
             a gcloud call still succeeds after a refresh re-injection (ISC-47)
             injecting a real minted token flips the same command from exit 1 to exit 0
-          # The relay suite's ONE live-oMLX probe, pinned by name for the same
-          # reason and by the same mechanism (ISC-257).
+          # The relay suite's TWO live-oMLX probes, pinned by name for the same
+          # reason and by the same mechanism (ISC-257, and now ISC-258).
           #
           # `relay.test.ts` computes `OMLX_LIVE = PIFLEET_DOCKER=1 AND
           # OMLX_API_KEY is set AND http://localhost:8000/v1/models answers`.
           # A GitHub-hosted runner fails the third condition unconditionally —
           # there is no Apple-silicon inference server behind it and there will
-          # not be — so this probe skips here always. That is NOT a defect and
-          # it is NOT covered elsewhere: it is the only assertion in the repo
-          # that a REAL model list comes back through the relay, and it is
-          # recorded as live-only in ISC-50's ISA close-out rather than papered
-          # over here.
+          # not be — so both probes skip here always. That is NOT a defect and
+          # it is NOT covered elsewhere: they are the only assertions in the
+          # repo that a REAL model list, and a REAL generated completion, come
+          # back through the relay. They are recorded as live-only in ISC-50's
+          # and ISC-258's ISA close-outs rather than papered over here.
+          #
+          # ISC-258's probe is the reason that criterion is graded `[~]` and
+          # not `[x]`: it is a genuinely good local test — a differential
+          # against a host control, with the control re-checked after any
+          # relayed failure — and no CI runner can execute a line of it. Naming
+          # it here is what keeps that honest rather than invisible; an
+          # unpinned skip is how five self-skipping probes went unnoticed.
           #
           # NO SECRET IS WIRED IN, for the reason spelled out on the fast job's
           # live-oMLX step: a key alone would not flip this probe, because the
@@ -307,6 +333,7 @@ jobs:
           # skip allowance and must not be given one.
           EXPECTED_LIVE_OMLX_RELAY_SKIPS: |
             the REAL oMLX model list comes back through the relay, from inside the bridge
+            a live INFERENCE round-trips through the relay, differentially against a host control
         run: |
           set -eu
           # The grading itself lives in .github/scripts/probe-guard.sh, which
