@@ -29,12 +29,15 @@
  * refreshable, and the env-file in the run dir never holds a secret.
  */
 
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   CredentialInjectionSchema,
   type AdcMode,
   type CredentialInjection,
 } from "../contracts.ts";
 import type { Exec } from "../container/run.ts";
+import { WORKER_UID } from "../container/mounts.ts";
 import { isoNow, monotonicMs } from "../util/clock.ts";
 
 // ---------------------------------------------------------------------------
@@ -53,8 +56,217 @@ import { isoNow, monotonicMs } from "../util/clock.ts";
 export const TOKEN_DIR = "/tmp/.pifleet-adc";
 export const TOKEN_FILE = `${TOKEN_DIR}/access-token`;
 
-/** File-mode mount point for the ADC file (§5.8) — bind-mounted at run, ro. */
+/**
+ * File-mode mount point for the ADC file (§5.8) — bind-mounted at run, ro.
+ *
+ * NOTE, load-bearing for how the `file`-mode tests should be read: nothing in
+ * `src/` mounts this today. `buildDockerArgv` emits no `/creds` mount, and
+ * `fileModeMaterials`/`fileModeStartupEnv` have no production caller. The
+ * constant is the agreed destination for when §5.8's `file` mode is actually
+ * wired; tests that exercise it hand-write the `-v` themselves and are
+ * FORWARD-LOOKING shape checks, not evidence about a launch `up` can perform.
+ */
 export const ADC_FILE_PATH = "/creds/adc.json";
+
+/**
+ * The container-side gcloud config directory — the image's baked
+ * `CLOUDSDK_CONFIG` (`docker/Dockerfile`'s `ENV` block).
+ *
+ * Exported rather than retyped at each site because three things must name the
+ * same path or the worker breaks in a way that reads as a credential fault:
+ * the image's `CLOUDSDK_CONFIG`, the tmpfs `buildDockerArgv` mounts over it
+ * (`gcloudConfigTmpfsArgv`, below), and the tests that probe it.
+ */
+export const CONTAINER_GCLOUD_CONFIG_DIR = "/home/pi/.config/gcloud";
+
+/**
+ * The `--tmpfs` that makes `CONTAINER_GCLOUD_CONFIG_DIR` writable, and why
+ * production cannot go without it (ISC-255).
+ *
+ * SRD §5.2 calls that path a "container-local WRITABLE gcloud config so the
+ * CLI can write its token cache", but the image bakes it as an ordinary
+ * directory on the root filesystem and §5.6 makes the root `--read-only` with
+ * only `/tmp` as tmpfs. So as launched before this, it was not writable, and
+ * real gcloud does not degrade — measured on `pifleet/pi-worker:verify` in the
+ * exact shape this function's caller builds, with a VALID minted token present:
+ *
+ *   WARNING: Could not setup log file in /home/pi/.config/gcloud/logs,
+ *   (OSError: [Errno 30] Read-only file system: '.../logs'.
+ *   ERROR: gcloud crashed (OSError): [Errno 30] Read-only file system:
+ *   '/home/pi/.config/gcloud/configurations'
+ *
+ * exit 1, empty stdout. EVERY gcloud call in a worker failed that way — with a
+ * good credential — which is why ISC-41 and ISC-47 could not have been true as
+ * previously written. With this tmpfs, the identical container and the
+ * identical token exit 0 and print the token back. That differential is
+ * ISC-255's close-out and is asserted in `test/integration/adc.test.ts`.
+ *
+ * Each option chosen on measurement rather than by copying `/tmp`'s line:
+ *
+ *  - `uid`/`gid`: REQUIRED, and the failure without them is the sneaky kind. A
+ *    tmpfs with no uid mounts root-owned 0755, so uid 10001 cannot write it.
+ *    gcloud then fails to create `logs/` with EACCES rather than EROFS and —
+ *    measured — tolerates that one, exiting 0 while printing a WARNING on
+ *    every call and caching nothing. The un-owned version LOOKS like it works,
+ *    which is exactly the state that would have got shipped.
+ *  - `size=16m`: measured, not guessed. gcloud writes one ~1.2 KB log per
+ *    invocation; at tmpfs block granularity that is ~4 KB, and 10 calls left
+ *    the directory at 64 KB against a 28 KB baseline. 16 MB is therefore
+ *    roughly 4,000 gcloud calls of headroom in one container lifetime.
+ *  - A SEPARATE tmpfs rather than repointing `CLOUDSDK_CONFIG` at `/tmp`,
+ *    which would have needed no new mount at all. Rejected because the token
+ *    file lives in `/tmp` (`TOKEN_DIR`): one shared filesystem would let
+ *    gcloud's unbounded log growth consume the space `injectToken` needs, and
+ *    a refresh that cannot write is a worker that silently loses cloud access
+ *    an hour in. A separate cap means gcloud can only exhaust its own budget.
+ *  - `noexec,nosuid`: matches `/tmp`. gcloud writes only data here; components
+ *    install into the SDK directory, not the config directory.
+ *
+ * A tmpfs, finally, rather than a bind mount, because it contributes no
+ * `.Mounts` entry — ISC-44's claim is about that table, and the fix for one
+ * criterion must not perturb another.
+ */
+export function gcloudConfigTmpfsArgv(): string[] {
+  return [
+    "--tmpfs",
+    `${CONTAINER_GCLOUD_CONFIG_DIR}:rw,noexec,nosuid,size=16m,uid=${WORKER_UID},gid=${WORKER_UID}`,
+  ];
+}
+
+/**
+ * The host directory that must NEVER cross the container boundary (§5.8,
+ * ISC-44) — `credentials.db`, `legacy_credentials/`, `access_tokens.db`: the
+ * full gcloud auth store for every account the operator has logged in, which
+ * is strictly more powerful than ADC itself. `file` mode mounts exactly one
+ * file OUT of this directory (`hostAdcFile()`, below); `token` mode mounts
+ * nothing here at all. One exported definition so "never mounted" has a single
+ * source every test and every future mount-table change reads from, rather
+ * than each call site re-deriving `~/.config/gcloud` and one of them drifting.
+ *
+ * A FUNCTION, not a `const`, and the difference is not cosmetic. Every other
+ * `homedir()` in this repo is read lazily — `config/load.ts`'s `expandPath`,
+ * `run/paths.ts`'s `runsRoot`, `container/mounts.ts`'s `daemonScratchRoot`,
+ * `doctor.ts`'s cmux probe. A module-level `const` read `homedir()` at IMPORT
+ * time, which is before any test that sets `HOME` for a fixture can run, and
+ * which test file imports first is a property of the runner's file ordering.
+ * That was safe only because nothing mutates `HOME` in-process today; matching
+ * the convention means it stays safe on the day something does.
+ */
+export function hostGcloudConfigDir(): string {
+  return join(homedir(), ".config", "gcloud");
+}
+
+/**
+ * The host ADC file — the one artifact `file` mode is allowed to read out of
+ * `hostGcloudConfigDir()`.
+ *
+ * `GOOGLE_APPLICATION_CREDENTIALS` wins when set, because that is gcloud's own
+ * ADC lookup order: the env var overrides the well-known location, and an
+ * operator who exports it HAS moved their ADC. Reading the well-known path
+ * regardless would have named a file gcloud itself would not use, which is the
+ * same class of mistake as resolving the identity from the wrong store.
+ *
+ * Deliberately NOT applied to `hostGcloudConfigDir()`. That function answers
+ * "which directory must never be mounted", and letting an env var redirect a
+ * security boundary is how the boundary stops meaning anything. The two are
+ * separate questions and only this one follows the env var — with the
+ * consequence, harmless and worth stating, that `hostAdcFile()` need not sit
+ * under `hostGcloudConfigDir()` any more. `classifyHostGcloudExposure` copes:
+ * a file outside the store never reaches the inside-the-store branch where the
+ * exception is applied.
+ */
+export function hostAdcFile(env: Record<string, string | undefined> = process.env): string {
+  const explicit = env["GOOGLE_APPLICATION_CREDENTIALS"];
+  if (explicit !== undefined && explicit !== "") return explicit;
+  return join(hostGcloudConfigDir(), "application_default_credentials.json");
+}
+
+/**
+ * How one bind-mount source exposes the host gcloud auth store, or `null`.
+ *
+ * THREE relations, and the third is the one both the unit and the integration
+ * ISC-44 checks originally missed. They asked only whether a source WAS the
+ * store or sat UNDER it; nothing asked whether a source CONTAINED it. Mounting
+ * `$HOME`, or `$HOME/.config`, hands the worker the entire multi-account auth
+ * store and satisfies "is not, and is not under, `~/.config/gcloud`"
+ * perfectly. That is not hypothetical: `run.repo` is operator-configurable and
+ * `buildDockerArgv` mounts it at `/workspace`, so `run.repo: ~` produces
+ * exactly this mount.
+ *
+ * Comparison is on `resolve()`d paths — lexical, because `buildDockerArgv` is
+ * synchronous and pure by design and `realpath` is I/O. That closes `..` and
+ * trailing-slash spellings; it does NOT close a symlinked source, which is why
+ * the integration-side check (`docker inspect`, already async) `realpath`s
+ * both sides instead.
+ *
+ * Boundaries use an explicit separator. A bare `startsWith(dir)` would also
+ * flag `~/.config/gcloud-backup` — a different directory this criterion says
+ * nothing about — and a false red is how an assertion gets weakened later.
+ */
+export type HostGcloudExposure = "is-the-store" | "inside-the-store" | "contains-the-store";
+
+export function classifyHostGcloudExposure(
+  source: string,
+  opts: { allowAdcFile?: boolean } = {},
+): HostGcloudExposure | null {
+  const store = resolve(hostGcloudConfigDir());
+  const s = resolve(source);
+  if (s === store) return "is-the-store";
+  if (s.startsWith(`${store}/`)) {
+    // The single documented exception: `file` mode may mount exactly one
+    // artifact out of the store, and nothing else in it.
+    if (opts.allowAdcFile === true && s === resolve(hostAdcFile())) return null;
+    return "inside-the-store";
+  }
+  if (store.startsWith(`${s}/`)) return "contains-the-store";
+  return null;
+}
+
+/** A `docker run` argv that would expose the host gcloud auth store. */
+export class HostGcloudMountError extends Error {
+  constructor(source: string, relation: HostGcloudExposure) {
+    const how =
+      relation === "is-the-store"
+        ? "IS the host gcloud auth store"
+        : relation === "inside-the-store"
+          ? "is inside the host gcloud auth store"
+          : "CONTAINS the host gcloud auth store";
+    super(
+      `refusing to launch: bind-mount source ${source} ${how} ` +
+        `(${hostGcloudConfigDir()}) — SRD §5.8 / ISC-44`,
+    );
+    this.name = "HostGcloudMountError";
+  }
+}
+
+/**
+ * ISC-44 as a RUNTIME GUARD on the argv production actually launches.
+ *
+ * This exists because the constants above closed nothing on their own. They
+ * had no importer in `src/` — only two test files read them — so `render.ts`
+ * could have grown a `~/.config/gcloud` mount with every constant keeping its
+ * value, and the criterion would have held only for as long as someone
+ * remembered to keep asserting it. Calling this at the end of
+ * `buildDockerArgv` puts the definition ON the path that builds the mount
+ * table, so the criterion is ENFORCED by production code rather than merely
+ * described by it. It also covers mounts that arrive from config rather than
+ * from a literal in `render.ts` — `run.repo` being the live example.
+ *
+ * `allowAdcFile` is deliberately NOT offered here: no production path mounts
+ * the ADC file today (see `ADC_FILE_PATH`), so the launcher's rule is the
+ * strict one. When `file` mode is wired, that exception becomes a decision
+ * made here, in the open, rather than a default nobody chose.
+ */
+export function assertNoHostGcloudMount(argv: readonly string[]): void {
+  argv.forEach((a, i) => {
+    if (argv[i - 1] !== "-v" && argv[i - 1] !== "--volume") return;
+    const sep = a.indexOf(":");
+    const source = sep === -1 ? a : a.slice(0, sep);
+    if (!source.startsWith("/")) return; // a named volume, not a host path
+    const relation = classifyHostGcloudExposure(source);
+    if (relation !== null) throw new HostGcloudMountError(source, relation);
+  });
+}
 
 /**
  * Measured TTL of a user access token (§5.8: `expires_in: 3599`). Used ONLY
@@ -78,10 +290,33 @@ export function tokenModeStartupEnv(): Record<string, string> {
   return { CLOUDSDK_AUTH_ACCESS_TOKEN_FILE: TOKEN_FILE };
 }
 
-/** Env for a `file`-mode worker: point the client libraries at the ro mount. */
+/**
+ * Env for a `file`-mode worker: point the client libraries at the ro mount.
+ *
+ * No production caller — see `ADC_FILE_PATH`. `up` never emits this env.
+ */
 export function fileModeStartupEnv(): Record<string, string> {
   return { GOOGLE_APPLICATION_CREDENTIALS: ADC_FILE_PATH };
 }
+
+/**
+ * Every env var §5.8 can use to hand a worker a Google credential, in either
+ * mode.
+ *
+ * ISC-45's claim ("a `cloud_access: false` role has no Google credential") is
+ * about the whole SET, not about whichever one the current default happens to
+ * use — otherwise a change of delivery mechanism would make every absence
+ * assertion vacuous while leaving it green. Lives here rather than in a test
+ * file because two suites now assert against it (the unit render check and the
+ * in-container probe) and because it is a statement about what production is
+ * ALLOWED to emit, which makes it production's to define.
+ */
+export const CREDENTIAL_ENV_VARS = [
+  "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+  "CLOUDSDK_AUTH_ACCESS_TOKEN",
+  "GOOGLE_OAUTH_ACCESS_TOKEN",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+] as const;
 
 // ---------------------------------------------------------------------------
 // The credential plan — cloud_access: false must be OBSERVABLE (acceptance 13)
@@ -167,15 +402,74 @@ export function mintArgv(impersonateServiceAccount: string | null): string[] {
 }
 
 /**
- * Resolve the identity label for the injection record: the SA when
- * impersonating (the token really carries the SA's identity — acceptance 15),
- * otherwise the host gcloud account.
+ * The principal an ADC file mints as, read out of the file itself, or `null`.
+ *
+ * `authorized_user` ADC — what `gcloud auth application-default login`
+ * writes — carries an `account` field naming the user it was minted for.
+ * `service_account` ADC carries `client_email`. Either way the FILE knows who
+ * it is, offline, with no network round-trip and no token minting.
+ *
+ * Returns `null` rather than throwing on a missing, unreadable, unparseable or
+ * unrecognised file: the caller has a documented fallback, and a credential
+ * PLAN that cannot be printed must not be the thing that fails `up`.
+ */
+export async function readAdcPrincipal(path: string): Promise<string | null> {
+  try {
+    const raw = await Bun.file(path).text();
+    const d = JSON.parse(raw) as { type?: unknown; account?: unknown; client_email?: unknown };
+    // Service-account ADC: the email IS the principal.
+    if (typeof d.client_email === "string" && d.client_email !== "") return d.client_email;
+    // User ADC: written by `gcloud auth application-default login`. Older
+    // gcloud versions omitted `account`, hence the `null` return and the
+    // fallback at the call site rather than an assumption that it is there.
+    if (typeof d.account === "string" && d.account !== "") return d.account;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the identity label for the injection record.
+ *
+ * THREE sources, in strict order, and the ordering is the whole point:
+ *
+ *  1. The impersonated SA, when impersonating. The token really does carry the
+ *     SA's identity (acceptance 15), so nothing else needs asking.
+ *  2. The ADC FILE's own principal. This is the correction: the label must
+ *     name the identity the worker was actually GRANTED, and in both modes
+ *     that identity comes from ADC — `mintArgv` mints with
+ *     `gcloud auth application-default print-access-token`, and `file` mode
+ *     hands over `application_default_credentials.json` itself.
+ *  3. `gcloud config get-value account`, and ONLY as a fallback, with the
+ *     caveat that it is a DIFFERENT STORE. That is the `gcloud auth login`
+ *     account; ADC is written separately by
+ *     `gcloud auth application-default login`. The two routinely differ — an
+ *     operator who logged in as one account and ran the ADC login as another
+ *     has two perfectly valid, unequal answers on one machine — and this
+ *     function used to return only this one. So the printed grant line could
+ *     name an identity the worker was never given, in either mode, and ISC-49
+ *     and ISC-251 were asserting that wrong line was correct.
+ *
+ *     It is kept because it is right more often than it is wrong (the ADC
+ *     login usually follows the ordinary login, and on a machine where they
+ *     agree it is the same string) and because an older gcloud may not have
+ *     written `account` into the ADC file at all. It is a fallback, not the
+ *     answer.
+ *
+ * `adcFile` is injectable so tests can point at a fixture rather than at the
+ * operator's real credential.
  */
 export async function resolveIdentity(
   exec: Exec,
   impersonateServiceAccount: string | null,
+  opts: { adcFile?: string } = {},
 ): Promise<string> {
   if (impersonateServiceAccount !== null) return impersonateServiceAccount;
+
+  const fromAdc = await readAdcPrincipal(opts.adcFile ?? hostAdcFile());
+  if (fromAdc !== null) return fromAdc;
+
   const r = await exec(["gcloud", "config", "get-value", "account"], { timeoutMs: 15_000 });
   const account = r.stdout.trim();
   if (r.code !== 0 || account === "") {

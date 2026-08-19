@@ -8,7 +8,10 @@
  * being trusted (mutations listed per test).
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Exec, ExecOptions, ExecResult } from "../../src/container/run.ts";
 import {
   ADC_FILE_PATH,
@@ -23,6 +26,7 @@ import {
   mintArgv,
   planCredential,
   proveRefreshTokenAbsent,
+  readAdcPrincipal,
   recordInjection,
   resolveIdentity,
   tokenModeMaterials,
@@ -30,6 +34,12 @@ import {
 } from "../../src/security/adc.ts";
 
 const TOKEN = "ya29.fake-access-token-value-a1b2c3";
+
+/** Temp dirs holding ADC fixtures, reaped together at the end of the file. */
+const adcCleanups: string[] = [];
+afterAll(async () => {
+  for (const dir of adcCleanups) await rm(dir, { recursive: true, force: true });
+});
 
 /** An Exec that records every call and replays canned results. */
 function fakeExec(results: Partial<ExecResult>[] = []): {
@@ -115,6 +125,91 @@ describe("minting is argv arrays against the host ADC", () => {
   test("resolveIdentity falls back to the gcloud account", async () => {
     const { exec } = fakeExec([{ stdout: "dan@example.com\n" }]);
     expect(await resolveIdentity(exec, null)).toBe("dan@example.com");
+  });
+
+  /**
+   * The identity label must come from the store the TOKEN is minted from.
+   *
+   * `mintArgv` mints with `gcloud auth application-default print-access-token`
+   * and `file` mode hands over `application_default_credentials.json`, so in
+   * both modes the granted identity is ADC's. `gcloud config get-value account`
+   * reads the `gcloud auth login` account — a SEPARATE store, written by a
+   * different command, and the two routinely differ on a machine where the
+   * operator logged in as one account and ran the ADC login as another.
+   * Resolving from the config account alone therefore printed, in both modes,
+   * an identity the worker may never have been granted, and ISC-49/ISC-251
+   * asserted that line was correct.
+   *
+   * Each case below is a real ADC file shape, and the third is what makes the
+   * fallback load-bearing rather than theoretical: measured on this host,
+   * `gcloud auth application-default login` wrote `"account": ""` — the field
+   * is present and EMPTY, so the file genuinely cannot name its own principal
+   * and something else has to answer. That is why this is a preference order
+   * and not a replacement.
+   */
+  describe("resolveIdentity prefers the ADC principal over the config account", () => {
+    async function adcFixture(body: unknown): Promise<string> {
+      const dir = await mkdtemp(join(tmpdir(), "pifleet-adc-principal-"));
+      adcCleanups.push(dir);
+      const p = join(dir, "application_default_credentials.json");
+      await writeFile(p, typeof body === "string" ? body : JSON.stringify(body));
+      return p;
+    }
+
+    test("service_account ADC resolves to client_email, not the config account", async () => {
+      const adcFile = await adcFixture({
+        type: "service_account",
+        client_email: "svc@proj.iam.gserviceaccount.com",
+      });
+      const { exec, calls } = fakeExec([{ stdout: "someone-else@example.com\n" }]);
+      expect(await resolveIdentity(exec, null, { adcFile })).toBe(
+        "svc@proj.iam.gserviceaccount.com",
+      );
+      // The config account is not merely outvoted — it is never asked for.
+      expect(calls).toHaveLength(0);
+    });
+
+    test("authorized_user ADC resolves to its account field", async () => {
+      const adcFile = await adcFixture({
+        type: "authorized_user",
+        account: "adc-user@example.com",
+        refresh_token: "1//0xdeadbeef",
+      });
+      const { exec, calls } = fakeExec([{ stdout: "login-user@example.com\n" }]);
+      expect(await resolveIdentity(exec, null, { adcFile })).toBe("adc-user@example.com");
+      expect(calls).toHaveLength(0);
+    });
+
+    test("an EMPTY account field falls back — the real shape on this host", async () => {
+      const adcFile = await adcFixture({
+        type: "authorized_user",
+        account: "",
+        refresh_token: "1//0xdeadbeef",
+      });
+      const { exec, calls } = fakeExec([{ stdout: "login-user@example.com\n" }]);
+      expect(await resolveIdentity(exec, null, { adcFile })).toBe("login-user@example.com");
+      // Exactly one call, and it is the documented different-store fallback.
+      expect(calls.map((c) => c.argv)).toEqual([["gcloud", "config", "get-value", "account"]]);
+    });
+
+    test("a missing or unparseable ADC file falls back rather than throwing", async () => {
+      for (const adcFile of [
+        join(tmpdir(), "pifleet-no-such-adc-file.json"),
+        await adcFixture("{ not json"),
+      ]) {
+        const { exec } = fakeExec([{ stdout: "login-user@example.com\n" }]);
+        expect(await resolveIdentity(exec, null, { adcFile })).toBe("login-user@example.com");
+      }
+    });
+
+    test("readAdcPrincipal returns null for every shape that cannot name one", async () => {
+      expect(await readAdcPrincipal(join(tmpdir(), "definitely-absent.json"))).toBeNull();
+      expect(await readAdcPrincipal(await adcFixture("{ not json"))).toBeNull();
+      // external_account ADC names an impersonation URL, not a principal this
+      // function can read off the file; the fallback answers for it.
+      expect(await readAdcPrincipal(await adcFixture({ type: "external_account" }))).toBeNull();
+      expect(await readAdcPrincipal(await adcFixture({ type: "authorized_user" }))).toBeNull();
+    });
   });
 });
 

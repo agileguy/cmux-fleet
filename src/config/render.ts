@@ -25,6 +25,8 @@
 
 import { join } from "node:path";
 import { imageTag } from "../container/image.ts";
+import { WORKER_UID } from "../container/mounts.ts";
+import { assertNoHostGcloudMount, gcloudConfigTmpfsArgv } from "../security/adc.ts";
 import {
   roleSkillsDir,
   runPaths,
@@ -147,13 +149,29 @@ export function buildDockerArgv(
   const { docker, cloud } = loaded.config;
   const argv: string[] = ["docker", "run", "-i", "--rm"];
   argv.push("--name", `pifleet-${opts.run.runId}-${w.id}`);
-  argv.push("--user", "10001:10001");
+  // `WORKER_UID`, not a literal, because the gcloud tmpfs below must be owned
+  // by exactly this uid to be writable and a drift between the two is silent:
+  // the tmpfs simply mounts root-owned and gcloud degrades to warnings.
+  argv.push("--user", `${WORKER_UID}:${WORKER_UID}`);
   argv.push("--security-opt", "no-new-privileges");
   argv.push("--cap-drop", "ALL");
   if (docker.read_only_root) argv.push("--read-only");
   // noexec /tmp blocks "download a binary and run it" while /workspace and
   // /outbox stay writable (SRD §5.6).
   argv.push("--tmpfs", "/tmp:rw,noexec,nosuid,size=256m");
+  // The image's baked CLOUDSDK_CONFIG is an ordinary directory on the root
+  // filesystem, so `--read-only` above made it unwritable and every gcloud
+  // call in a worker crashed with `[Errno 30] Read-only file system` — with a
+  // VALID credential present (ISC-255). See `gcloudConfigTmpfsArgv` for the
+  // measured evidence and for why each option on it is there.
+  //
+  // Unconditional, NOT gated on `w.cloudAccess`: gcloud is on the PATH of
+  // every worker whatever its credential plan, `USE_GKE_GCLOUD_AUTH_PLUGIN` is
+  // baked for all of them, and a `cloud_access: false` worker that runs
+  // `gcloud version` should get verbgate's refusal or a clean answer — not a
+  // Python traceback about a read-only filesystem, which is a much worse thing
+  // to hand an agent than a 77.
+  argv.push(...gcloudConfigTmpfsArgv());
   argv.push("--pids-limit", String(docker.pids_limit));
   argv.push("--memory", docker.memory);
   argv.push("--cpus", String(docker.cpus));
@@ -161,7 +179,10 @@ export function buildDockerArgv(
   argv.push("--env-file", opts.worker.envFile);
 
   // Mount table (SRD §5.5). Nothing else is mounted — notably not the main
-  // checkout, ~/.ssh, ~/.env, the host ~/.config/gcloud, or the Docker socket.
+  // checkout, ~/.ssh, ~/.env, `hostGcloudConfigDir()`, or the Docker socket.
+  // That directory is named through the constant rather than spelled out in
+  // prose here so the comment cannot go stale against the assertion at the
+  // bottom of this function, which is what actually enforces it.
   //
   // `run.repo` is the one host path in this function that config legitimately
   // names — it is the operator's checkout, not a run-dir path. It is read at
@@ -206,6 +227,17 @@ export function buildDockerArgv(
   // ENTRYPOINT is `tini -- pifleet-entrypoint`, which execs `pi "$@"`, so
   // everything after the image is the Pi flag list (argv[0] excluded).
   argv.push(...opts.piFlags);
+
+  // ISC-44, enforced rather than described. Every mount above is either a
+  // run-dir path or `run.repo`, and `run.repo` is OPERATOR-CONFIGURABLE: a
+  // fleet.yaml naming `~` or `~/.config` mounts a directory that CONTAINS the
+  // host gcloud auth store at /workspace, handing the worker every account the
+  // operator has ever logged in. No literal in this function can be audited to
+  // rule that out, because the offending path arrives from config — so the
+  // check runs on the finished argv, where the value is knowable. Throwing
+  // beats returning a flag: a launcher that ignores a returned warning is the
+  // same launcher that would have shipped the mount.
+  assertNoHostGcloudMount(argv);
   return argv;
 }
 
