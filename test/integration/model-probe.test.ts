@@ -77,9 +77,21 @@ if (!LIVE) {
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 
 /**
- * Where the host reaches oMLX. Overridable because the port is a local choice,
- * not a project constant; the default matches `llm.base_url`'s own default once
- * `hostFacingBaseUrl` has rewritten the container-facing hostname.
+ * Where THE HOST reaches oMLX, stated outright rather than derived.
+ *
+ * This used to be described as `llm.base_url`'s default "once
+ * `hostFacingBaseUrl` has rewritten the container-facing hostname". That
+ * helper is deleted (ISC-260) and nothing rewrites anything any more, so this
+ * is simply a host-reachable URL that this file dials directly.
+ *
+ * The host vantage is the RIGHT one for what this file measures, and the
+ * distinction is worth being explicit about now that the two have come apart.
+ * These probes ask a question about a MODEL — does a real chat model on real
+ * hardware emit a native tool call — and the answer is a property of the
+ * model's chat template, not of the network path used to ask. WHERE the
+ * production gate asks from is a separate claim; it is what ISC-260 is about,
+ * and it is proven separately in `test/integration/probe-in-network.test.ts`
+ * against a real Docker network.
  */
 const BASE_URL = process.env["PIFLEET_OMLX_BASE_URL"] ?? "http://localhost:8000/v1";
 
@@ -244,7 +256,11 @@ describe("the native-tool-call probe against a real oMLX model (ISC-53, positive
       // The selection must not have handed us an embedding model to chat with.
       expect(isEmbeddingModelId(model)).toBe(false);
 
-      const result = await probeNativeToolCalls(BASE_URL, apiKey(), model);
+      // `fetch` passed EXPLICITLY: `probeNativeToolCalls` no longer defaults
+      // it, so that a host-side probe can never be one omitted argument away
+      // in production (ISC-260). Here the host vantage is the intended one —
+      // see BASE_URL.
+      const result = await probeNativeToolCalls(BASE_URL, apiKey(), model, fetch);
 
       // Reported before asserting: when a model IS incompatible this line is
       // the evidence, and a bare `expect(...).toBe(true)` would discard it.

@@ -11,7 +11,7 @@ import type { FleetConfig, Toolchain } from "../../config/schema.ts";
 import { imageTag } from "../../container/image.ts";
 import { probeMountVisibility, type MountVisibility } from "../../container/mounts.ts";
 import { EXEC_NOT_FOUND, realExec, type Exec } from "../../container/run.ts";
-import { chatProbeModel, hostFacingBaseUrl } from "../../security/model-probe.ts";
+import { chatProbeModel } from "../../security/model-probe.ts";
 import { runsRoot } from "../../run/paths.ts";
 
 /**
@@ -534,9 +534,41 @@ async function probeCmux(exec: Exec, env: Record<string, string | undefined>): P
   return report;
 }
 
+/**
+ * The container-facing hostname a worker-facing `llm.base_url` is written
+ * with. Named here so the vantage diagnosis can recognise it.
+ */
+const CONTAINER_HOSTNAME = "host.docker.internal";
+
 interface OmlxReport {
   ok: boolean;
   baseUrl: string;
+  /**
+   * WHERE these numbers were measured from. Always `"host"`, and now STATED
+   * rather than left to be assumed (ISC-260).
+   *
+   * `doctor` runs in this process, so everything below is the host's view of
+   * the endpoint. That used to be quietly untrue: the base URL was pushed
+   * through `hostFacingBaseUrl` first, which rewrote a worker-facing
+   * `host.docker.internal` to `localhost` — so `doctor` measured whatever
+   * answered on the LOCAL machine and presented it as the configured
+   * endpoint's health. On a Docker-host-local oMLX the two coincide and the
+   * substitution is invisible. Off it, the rewrite INVENTS an endpoint nobody
+   * configured, and the latency reported describes a server the fleet does not
+   * use.
+   *
+   * A latency figure whose vantage is ambiguous is the same class of problem
+   * as a criterion whose evidence is ambiguous, so the field is emitted in
+   * `--json` and printed in the text output rather than being documented and
+   * forgotten.
+   *
+   * What the WORKERS can reach is a DIFFERENT question, deliberately not
+   * answered here. `up`'s ISC-53 gate answers it, from inside the egress
+   * network, which is the whole of ISC-260. `doctor` does not duplicate that:
+   * the bridge only exists once `up` has built it, and `doctor` is a read-only
+   * diagnostic that must not create one to measure it.
+   */
+  vantage: "host";
   models: string[];
   /** GET /v1/models round-trip, milliseconds. */
   listLatencyMs: number | null;
@@ -546,17 +578,63 @@ interface OmlxReport {
   detail: string;
 }
 
+/**
+ * Explain a host-vantage failure that is not an outage.
+ *
+ * `llm.base_url` is written for the WORKERS, so the default names
+ * `host.docker.internal` — a name that resolves only on the egress bridge,
+ * where the relay puts it. `doctor` runs on the host and cannot resolve it, so
+ * without this the report reads "oMLX unreachable" on a perfectly healthy
+ * machine and sends the operator to restart a server that is fine.
+ *
+ * `hostFacingBaseUrl` used to prevent that by rewriting the name to
+ * `localhost`. That was the wrong fix: it answered a question nobody asked
+ * (can this host reach SOME oMLX) in place of the one that was asked, and it
+ * silently stopped being even approximately right the moment the server was
+ * not on this box. Saying what happened costs one diagnosis and lies about
+ * nothing.
+ */
+function omlxVantageDiagnosis(report: OmlxReport, network: string | null): Diagnosis | null {
+  if (report.ok) return null;
+  let hostname: string;
+  try {
+    hostname = new URL(report.baseUrl).hostname;
+  } catch {
+    // A base_url that will not parse is a config defect, not a vantage
+    // problem, and the schema's `z.string().url()` already refuses it.
+    return null;
+  }
+  if (hostname !== CONTAINER_HOSTNAME) return null;
+  return {
+    name: "omlx-unreachable-from-host",
+    class: "misconfigured",
+    message:
+      `llm.base_url names ${CONTAINER_HOSTNAME}, which resolves only inside the egress ` +
+      `network${network === null ? "" : ` (${network})`} — where the relay publishes it. ` +
+      `doctor probes from the HOST, so it cannot reach that name and the numbers above are ` +
+      `absent for that reason, not because oMLX is down. This is not a fault to fix: the ` +
+      `field is written for the workers. Whether the workers can actually reach it is ` +
+      `checked by \`up\`'s native-tool-call gate, which probes from inside that network.`,
+  };
+}
+
 async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
-  const configured = loaded?.config.llm.base_url ?? "http://host.docker.internal:8000/v1";
-  // Doctor runs on the host: the container-facing hostname does not resolve
-  // here. Shared with `up`'s ISC-53 probe rather than spelled twice.
-  const baseUrl = hostFacingBaseUrl(configured);
+  /**
+   * VERBATIM — no rewriting of any kind. See `OmlxReport.vantage`.
+   *
+   * The consequence is deliberate: when `llm.base_url` names the
+   * container-facing hostname (the default), this probe cannot resolve it and
+   * says so, and `omlxVantageDiagnosis` turns that into an explanation rather
+   * than leaving it looking like an outage.
+   */
+  const baseUrl = loaded?.config.llm.base_url ?? `http://${CONTAINER_HOSTNAME}:8000/v1`;
   const keyEnv = loaded?.config.llm.api_key_env ?? "OMLX_API_KEY";
   const key = process.env[keyEnv] ?? "";
   const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
   const report: OmlxReport = {
     ok: false,
     baseUrl,
+    vantage: "host",
     models: [],
     listLatencyMs: null,
     completionLatencyMs: null,
@@ -687,6 +765,11 @@ export function register(program: Command): void {
       }
 
       const omlx = await probeOmlx(loaded);
+      // Why the host could not reach a worker-facing URL, when that is what
+      // happened. Pushed here rather than inside `probeOmlx` because that
+      // function reports a measurement and this is an interpretation of one.
+      const vantage = omlxVantageDiagnosis(omlx, loaded?.config.docker.network ?? null);
+      if (vantage !== null) diagnoses.push(vantage);
 
       // docker classified itself above — it is the one probe whose failure has
       // two possible causes and needs a second command to tell them apart.
@@ -767,6 +850,10 @@ export function register(program: Command): void {
               omlx: {
                 ok: omlx.ok,
                 base_url: omlx.baseUrl,
+                // Which vantage the numbers below were measured from
+                // (ISC-260). A consumer that treats them as the fleet's view
+                // of oMLX is now wrong in a way it can detect.
+                vantage: omlx.vantage,
                 models: omlx.models,
                 list_latency_ms: omlx.listLatencyMs,
                 completion_latency_ms: omlx.completionLatencyMs,
@@ -793,7 +880,7 @@ export function register(program: Command): void {
         for (const i of images) console.log(`image ${i.present ? "present" : "ABSENT "}: ${i.tag}`);
         console.log(`mounts: runs dir ${mount.visible ? "visible" : "NOT VISIBLE"} — ${mount.detail}`);
         console.log(
-          `omlx: ${omlx.ok ? "ok" : "FAIL"} ${omlx.detail}` +
+          `omlx (from ${omlx.vantage}): ${omlx.ok ? "ok" : "FAIL"} ${omlx.detail}` +
             (omlx.listLatencyMs !== null ? ` — /models ${omlx.listLatencyMs}ms` : "") +
             (omlx.completionLatencyMs !== null
               ? `, 1-token completion ${omlx.completionLatencyMs}ms (${omlx.model})`
