@@ -881,7 +881,7 @@ export async function inspectRelayContainer(
  * reading `PIFLEET_RELAY_TARGETS` back out of `docker inspect` and deciding
  * whether a mismatch should kill a relay other fleets may be using — a
  * lifecycle decision, not a parsing one, and out of scope for the change that
- * created the need. Tracked as ISC-266.
+ * created the need. Tracked as ISC-265.
  *
  * What makes it DETECTABLE meanwhile is the returned `scriptSha256`/`targets`
  * pair, which `up` writes into the `egress_relay_ready` ledger event on EVERY
