@@ -153,3 +153,45 @@ export async function ensureEgressNetwork(name: string): Promise<EgressNetworkSt
   }
   return after;
 }
+
+/**
+ * The relay's uplink — a plain (non-internal) bridge, dedicated to the
+ * egress-relay container alone (`src/security/relay.ts`; ISC-50/51/57).
+ *
+ * Workers never attach here; only the relay does, and only the relay needs
+ * real connectivity to reach `host.docker.internal` and mint the one
+ * sanctioned forward to oMLX. Sharing `ensureEgressNetwork`'s inspect-then-
+ * create shape rather than reimplementing it: the property that matters here
+ * is the INVERSE of that function's guard — this network must NOT be
+ * internal, or the relay itself could never reach anything to relay.
+ *
+ * A pre-existing network wearing this name that IS internal is refused for
+ * the same reason `ensureEgressNetwork` refuses the opposite mismatch: silent
+ * adoption would report a working relay that can reach nothing, which is
+ * worse than a loud refusal at `up`.
+ */
+export async function ensureUplinkNetwork(name: string): Promise<EgressNetworkStatus> {
+  const before = await inspectEgressNetwork(name);
+  if (before.exists) {
+    if (before.internal) {
+      throw new Error(
+        `egress: uplink network ${JSON.stringify(name)} exists but IS internal — ` +
+          `the egress relay attaches here to reach host.docker.internal and cannot do so on ` +
+          `an internal bridge. Remove or rename it (docker network rm ${name}) and re-run.`,
+      );
+    }
+    return before;
+  }
+  assertNetworkName(name);
+  const created = await docker(["network", "create", name]);
+  if (created.code !== 0) {
+    throw new Error(`egress: 'docker network create ${name}' failed: ${created.stderr.trim()}`);
+  }
+  const after = await inspectEgressNetwork(name);
+  if (!after.exists || after.internal) {
+    throw new Error(
+      `egress: created uplink network ${JSON.stringify(name)} but the daemon reports it internal`,
+    );
+  }
+  return after;
+}
