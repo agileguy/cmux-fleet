@@ -480,6 +480,23 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 
 ## Decisions
 
+- **2026-08-18 — Slice 2 real per-worker git isolation: clone, not `git worktree add`, decided
+  after a security spike produced a confirmed RCE.** SRD §9.2 specified linked worktrees. Two
+  worktree-based designs were built and run against a real container before this decision: one
+  fails outright (a linked worktree's `.git` is a pointer file resolving outside the container's
+  mounts), the other works and is a confirmed container-to-host RCE (a container with write
+  access to the mounted gitdir zeroed the host's `refs/heads/main` and planted an executable
+  post-checkout hook that ran as the operator on their next `git checkout`). Presented to the
+  user with both findings; the user chose `git clone --no-hardlinks` (plus `--single-branch`,
+  origin stripped, a parent-side `worker-<id>` remote for visibility) over abandoning per-worker
+  isolation entirely. `--no-hardlinks` is not a hardening extra — a bare local clone hardlinks
+  object files by default, and the spike that investigated this feature destroyed this
+  repository's own pack file exactly that way before the flag was added; every clone path in
+  both the implementation and the test fixtures now passes it, and `test/integration/
+  worktree.test.ts` pins `nlink=1` and disjoint parent/clone inodes directly rather than trusting
+  clone success as a proxy. SRD §9.2 carries this as an erratum rather than a silent rewrite; see
+  `## Changelog` for the full conjectured/refuted/learned record and the Slice 2 close-out below
+  for verification.
 - **2026-08-18 — `config.run.root` left in the schema, and now read by nothing (ISC-188).**
   Closing ISC-188 meant deciding which of two answers to the runs root is THE answer.
   `run.root` is not a different concept from `runsRoot()` — its schema default is
@@ -721,6 +738,39 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   EVIDENCE; the two had been conflated because ISC-94 only ever exercised the first.
   **criterion now:** ISC-230 caps the verdict when an attempted command returns no answer, while
   ISC-152 still forbids calling it `failed`.
+
+- **conjectured:** SRD §9.2 specified `git worktree add` (linked worktrees, `git worktree prune`,
+  per-repo serialization) as the mechanism behind `isolation: worktree` — a worker gets its own
+  branch and its own tree, and a linked worktree is the obvious way to give it one without a
+  full clone's cost.
+  **refuted by:** a security spike that built and ran two `git worktree add`-based designs against
+  a real container, not merely reasoned about them. Mounting only the linked worktree directory
+  fails outright: a linked worktree's `.git` is a FILE holding a `gitdir:` pointer into the
+  parent's `.git/worktrees/<name>`, a path outside anything the container's mount table can name,
+  so git inside the container answers `fatal: not a git repository` and the worker cannot commit
+  at all. Also mounting the gitdir at its real host path to fix that makes it work — and is a
+  confirmed container-to-host remote code execution: from inside the container the spike zeroed
+  the host's `refs/heads/main` and planted an executable `.git/hooks/post-checkout` that ran as
+  the OPERATOR'S host user on their very next ordinary `git checkout`.
+  **learned:** §9.1's "two nested boundaries" table treats the container and the worktree as
+  independent controls, but they are not independent when the worktree mechanism's own control
+  file (`.git`) is a pointer that must resolve OUTSIDE the container to work at all — mounting
+  what makes it resolve hands the confined party write access to the confining party's hook
+  directory, and the outer boundary dissolves. A design has to be run against a real container to
+  find this; reading `git worktree add --help` does not surface it.
+  **criterion now:** `run/worktree.ts` implements `isolation: worktree` as `git clone
+  --no-hardlinks --single-branch --branch <the operator's checked-out branch>` per worker, with
+  `origin` stripped immediately after (so the host's absolute repository path cannot be read out
+  of a container-readable `.git/config`) and a `worker-<id>` remote registered in the PARENT so
+  an operator can still read a worker's commits (`git -C <repo> fetch worker-<id>`) without
+  leaving their own checkout. `--no-hardlinks` is independently load-bearing: a bare local clone
+  defaults to `--local`, which hardlinks object files into the copy rather than copying them, and
+  a worker container writing through its own "copy" then corrupts the PARENT'S object store
+  through the shared inode — not hypothetical, it is how the spike investigating this feature
+  destroyed this repository's own pack file, recovered via `git fetch origin --refetch` with no
+  data lost. SRD §9.2 now carries this as a full erratum rather than a silent rewrite, and
+  `pifleet worktrees` (new CLI command, §10) replaces the operator-visibility `git worktree list`
+  used to provide, since an independent clone has no entry in the parent's worktree list at all.
 
 ## Verification
 
@@ -1784,3 +1834,114 @@ stays 200/255.
   `assertContained`, the `.DS_Store` case failed with the exact production error; without the
   `.git` guard, materialization SUCCEEDED and `.git/config` — embedded credential and all —
   was readable inside the run's `/skills` bundle.
+
+### Slice 2 close-out — real per-worker git isolation — 2026-08-18
+
+SRD §9.2 specified `git worktree add` per worker. A security spike, run against a real
+container rather than reasoned about, disqualified it outright: mounting only the linked
+worktree directory fails (its `.git` is a `gitdir:` pointer FILE resolving into the parent's
+`.git/worktrees/<name>`, a path outside anything the container's mount table can name, so git
+inside the container answers `fatal: not a git repository`); also mounting the parent's real
+gitdir to fix that works, and is a confirmed **container-to-host remote code execution** — from
+inside such a container the spike zeroed the host's `refs/heads/main` and planted an executable
+`.git/hooks/post-checkout` that ran as the OPERATOR'S host user on their next ordinary
+`git checkout`. Presented to the user with both findings; the user chose **`git clone
+--no-hardlinks`** per worker over dropping per-worker isolation. See `## Decisions` and
+`## Changelog` above for the full conjectured/refuted/learned record, and `Docs/SRD.md` §9.2
+for the erratum in place of a silent rewrite of the original spec.
+
+- **Mechanism.** New `src/run/worktree.ts`. `resolveBaseRef` refuses a detached parent HEAD
+  by name rather than silently cloning the wrong commit (`git clone --branch` accepts a branch
+  or tag, never a SHA). `inspectBaseRef`/`assertBaseRefCloneable` scan the ref BEFORE any clone
+  exists — a submodule clones as an empty directory and LFS-tracked content clones as a pointer
+  stub, both silent-wrong-answer failures a clone cannot recover from after the fact, so both
+  are a named refusal rather than a warning. `createWorkerWorktrees` then, per worker:
+  `git clone --no-hardlinks --single-branch --branch <parent's branch> <repo> <path>`, `git
+  switch -c <branch>`, `git remote remove origin`, and registers a `worker-<id>` remote in the
+  PARENT pointing at the clone — the operator-visibility substitute for what a linked worktree
+  used to give for free, since `git worktree list` against the parent now shows nothing about
+  workers that are independent clones. `pruneWorkerWorktree` (SRD §9.3) defines "dirty" for a
+  clone with no upstream — uncommitted paths OR commits past the recorded `baseSha`, since
+  `origin` is stripped and there is no "it's pushed somewhere" case to fall back on. `up.ts`
+  wires `neutralizeRepoHazards` onto each finished clone (not the operator's own checkout,
+  which is scan-only) — unlike a linked worktree's pointer-file `.git`, which that scanner
+  explicitly declines to follow, a clone's `.git` is a real directory the scanner can act on
+  completely.
+
+- **`branch_prefix` was configured, validated, and silently ignored.** `run.branch_prefix` has
+  sat in the schema since Phase 1 with a `"fleet"` default and zero readers. `createWorker
+  Worktrees` called `workerBranch("fleet", …)` with the literal string hard-coded rather than
+  reading `loaded.config.run.branch_prefix` — the same dead-config-field shape this ISA has
+  already caught twice (`models_allowlist`, `run.root`/ISC-188). An operator who set
+  `branch_prefix: experiment` got a config key that validated, appeared in
+  `fleet.example.yaml`, and changed nothing: every worker still committed on `fleet/<run>/
+  <worker>`. Fixed at the one call site — `workerBranch(loaded.config.run.branch_prefix,
+  run.runId, workerId)` — rather than by adding a second helper, per `run/paths.ts`'s own
+  stated rule that a value derived in two places eventually derives differently in two places.
+  `dispatch.ts`'s envelope builder was already correct on inspection: it reads `branch` back
+  from the `WorkerWorktree` record `up` wrote (`readRunWorktrees`), which is the checkout that
+  actually exists, rather than recomputing the branch name itself — so once the creation-time
+  bug was fixed, dispatch's envelopes were automatically right with no second change. Both
+  `test/integration/worktree.test.ts` (`branch_prefix is honoured end to end`) and
+  `test/integration/down-prune.test.ts` (`dispatch names the checkout that actually exists`)
+  assert the actual git branch a non-default prefix produces, not merely that the config field
+  parses.
+
+- **The `origin`-strip fix was already solid, not merely passing by accident.** Traced the
+  "origin strip" reference in the prior progress note to `createWorkerWorktrees`'s `git remote
+  remove origin` call (worktree.ts) and to a dedicated regression test, `the clone is
+  self-contained > origin is stripped and the host repo path does not survive in the config`
+  (`worktree.test.ts`), which asserts BOTH `git remote` prints nothing AND the literal host
+  repo path is absent from `.git/config` — not just that the command exited 0. Reverting the
+  `remote remove` call makes that test fail on the first assertion; the second guards against a
+  narrower fix (e.g. renaming the remote) that would still leak the host path. Nothing further
+  was needed here.
+
+- **Hardlink safety, re-verified independently of the pinned test.** Per the standing
+  constraint that a prior spike using local-path clones WITHOUT `--no-hardlinks` corrupted this
+  repository's real object store, every clone path — implementation (`run/worktree.ts`) AND
+  every test fixture (`test/fixtures/synthetic-repo.ts`, which never clones anything and only
+  ever `git init`s a fresh temp repo) — was re-audited for the flag before this slice was
+  considered done. Beyond the suite's own `--no-hardlinks` describe block (asserts `nlink=1`
+  and disjoint parent/clone inodes for every object), verified by hand against a disposable
+  synthetic repo under `/tmp` (never `~/repos/cmux-fleet`): `git clone --no-hardlinks
+  --single-branch --branch main <src> <clone>` followed by `stat -f nlink,ino` over every file
+  under `<clone>/.git/objects` showed `nlink=1` uniformly, and the clone's and source's inode
+  sets were disjoint (`comm -12` on the sorted lists: 0 overlapping inodes). The real
+  `~/repos/cmux-fleet` object store was checked read-only afterward — `git fsck --no-progress`
+  exits 0 with no missing/corrupt objects — as a final sanity check that no step of this slice's
+  work (implementation, tests, or manual verification) touched it.
+
+- **New: `pifleet worktrees` (SRD §10), the `git worktree list` replacement.** A worker
+  checkout is now an independent clone with no entry in the parent's `.git/worktrees/`, so
+  `git worktree list` run against the parent answers "one worktree" regardless of how many
+  workers `up` created — an operator reaching for the old habit sees nothing and could
+  reasonably read that as "no workers running," which is wrong while a run is live. The new
+  command reads the same `WorkerWorktree` record `dispatch` and `down --prune` already trust
+  (`readRunWorktrees`) rather than re-deriving anything from git, lists every worker's branch,
+  path, base sha, and remote name, and reports each checkout's state — `clean`, `dirty (N
+  uncommitted path(s), M commit(s) ahead)`, or `MISSING` for one removed from disk by hand or
+  by a prior prune — via `inspectCloneDirt`, the same function `down --prune` gates on. A pure
+  read like `status` and `artifacts`: it exits 0 for any successfully emitted report, because a
+  dirty or missing checkout is exactly the fact an operator runs it to find, not a failure of
+  the command itself. `--run` and `--json` follow the same conventions as every other run-scoped
+  command; `test/unit/cli.test.ts`'s ISC-14 SRD-surface check now names it.
+
+- **Filed, not fixed here (out of this slice's scope, tracked as a follow-up):** `up.ts` now
+  wires `neutralizeRepoHazards(wt.path)` onto every created clone, which structurally removes
+  ISC-249's stated blocking condition ("blocked on ISC-27/ISC-28", both already `[x]`) — but no
+  test in this slice drives `up` end to end against a repo with a real hazard (e.g. a root
+  `AGENTS.md`) and confirms the WORKER'S clone gets quarantined while the operator's checkout
+  stays untouched; `up-wiring.test.ts` only proves the operator-side detect-only half. ISC-249's
+  checkbox is deliberately left as this ISA found it rather than marked closed on inference —
+  the same discipline this ISA's own history (`## Criteria`, ISC-249's own note) exists to
+  enforce after a prior "marked met in error."
+
+- **Verification.** `bun run typecheck` clean. `bun test` → **1296 pass, 53 skip, 0 fail**
+  across 83 files (up from 1260/53/80 at PR #14 — 36 new tests: the `--no-hardlinks`/origin/
+  branch-prefix/prune coverage already in `worktree.test.ts` and `down-prune.test.ts`, plus 8
+  new in `test/integration/worktrees-cli.test.ts` for the new command). Both previously-failing
+  regression tests pass: `branch_prefix is honoured end to end > a non-default prefix names the
+  branch git actually checks out` and `dispatch names the checkout that actually exists >
+  branch_prefix and the recorded path reach the envelope`. Hardlink safety independently
+  re-verified as described above, against synthetic repos only.

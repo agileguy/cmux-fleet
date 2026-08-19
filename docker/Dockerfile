@@ -138,6 +138,27 @@ RUN mkdir -p /workspace /outbox /sessions /skills /creds /policy \
  && chown -R 0:0 /policy \
  && chmod 0555 /policy
 
+# /workspace is a bind-mounted git clone the worker must be able to commit in,
+# and git refuses to operate in a repository it thinks someone else owns:
+# `fatal: detected dubious ownership in repository at '/workspace'`. On this
+# machine's Colima/virtiofs setup that is not hypothetical — it is the default,
+# and it fails in a way that reads as a broken worker rather than a mount
+# property.
+#
+# `--system`, NOT `--global`, and the distinction is the whole reason this is
+# baked into the image. uid 10001's $HOME is /home/pi, which under
+# `--read-only` roots is not writable, so `git config --global` at runtime has
+# nowhere to write and the setting silently does not take. The system file
+# (/etc/gitconfig) is written HERE, as root, at build time, and is readable by
+# every uid afterwards.
+#
+# Baked rather than discovered at runtime for a second reason: the failure is
+# INTERMITTENT to observe. The mountpoint itself reports uid 0 until the first
+# write refreshes virtiofs's attribute cache, after which subsequent commands
+# see uid 10001 — so a probe-and-fix at container start can pass on the very
+# run where the worker's first real `git commit` fails.
+RUN git config --system --add safe.directory /workspace
+
 # Entry wrapper renders ~/.pi/agent/models.json from env before exec'ing pi —
 # Pi reads oMLX provider config from that file, NOT from env (SRD Q9).
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/pifleet-entrypoint

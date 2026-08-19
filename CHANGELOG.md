@@ -67,6 +67,13 @@ All notable changes to this project are documented here.
   diagnosis even when `up --backend tmux` would launch fine against the same binary.
   Diagnoses now carry a `class` (`missing-binary` / `wrong-version` / `absent-daemon` /
   `misconfigured`) so an unreadable banner can no longer masquerade as a real failure.
+- **`run.branch_prefix` validated, defaulted, documented — and read by nothing.** Every
+  worker's checkout branch was hard-coded to `fleet/<run>/<worker>` regardless of what an
+  operator configured, the same dead-config-field shape `models_allowlist` and `run.root`
+  were each caught in. Fixed at the single call site that names the branch
+  (`workerBranch(loaded.config.run.branch_prefix, …)` in `run/worktree.ts`); `dispatch`'s
+  envelope builder was already reading the branch back from what was actually checked out
+  rather than recomputing it, so it needed no change once creation was fixed.
 
 ### Added
 - **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
@@ -127,6 +134,38 @@ All notable changes to this project are documented here.
   unreadable skill source was diagnosed as "no bundle exists", sending the operator to edit a
   config that was already correct; and `fleet.example.yaml` named three skill bundles that
   have no source directory, which the new refusal would have made un-runnable as shipped.
+- **Real per-worker git isolation (SRD §9.1/§9.2), implemented as `git clone --no-hardlinks`
+  rather than the SRD's originally specified `git worktree add`.** A security spike ran two
+  worktree-based designs against a real container before this one shipped: mounting only the
+  linked worktree fails outright (`.git` is a `gitdir:` pointer file resolving outside the
+  container's mounts), and also mounting the gitdir to fix that is a confirmed
+  container-to-host remote code execution (a container with write access to it zeroed the
+  host's `refs/heads/main` and planted an executable `post-checkout` hook that ran as the
+  operator on their next `git checkout`). `run/worktree.ts` instead clones each worker with
+  `--no-hardlinks --single-branch --branch <parent's checked-out branch>`, strips `origin`
+  immediately (so the host's absolute repo path can't be read out of `.git/config`), and
+  registers a `worker-<id>` remote in the parent so an operator can still fetch a worker's
+  commits without leaving their own checkout. `--no-hardlinks` is load-bearing, not hygiene: a
+  bare local clone hardlinks object files into the copy, and a worker container writing
+  through its own "copy" then corrupts the PARENT'S object store through the shared inode —
+  which is how the spike investigating this feature destroyed this repository's own pack file
+  before the flag was added. `Docs/SRD.md` §9.2 carries the full erratum. Preflight
+  (`inspectBaseRef`/`assertBaseRefCloneable`) refuses a ref with submodules or LFS-tracked
+  content before any clone is attempted — both clone as silently-wrong content (empty
+  directories, pointer stubs) rather than failing — and a detached parent HEAD is a named
+  refusal rather than a base silently substituted for the one the operator is sitting on.
+  `down --prune` (SRD §9.3) defines "dirty" for a clone with no upstream: uncommitted paths OR
+  commits past the recorded base sha, since stripping `origin` removes the usual "it's pushed
+  somewhere" escape hatch. `up` also now runs hazard neutralization against each finished
+  clone rather than the operator's own checkout, closing the gap a linked worktree's
+  pointer-file `.git` (which the scanner explicitly declines to follow) would have left open.
+- **`pifleet worktrees [--run r] [--json]` — the `git worktree list` replacement.** A worker
+  checkout is now an independent clone with no entry in the parent's `.git/worktrees/`, so
+  `git worktree list` against the parent shows nothing about workers regardless of how many
+  `up` created, which reads as "no workers running" to an operator who reaches for the old
+  habit. The new command lists every worker's branch, path, base sha and remote name from the
+  same on-disk record `dispatch` and `down --prune` already trust, and reports each checkout
+  as `clean`, `dirty (…)`, or `MISSING` via the same dirt-inspection `down --prune` gates on.
 
 ## [1.0.0] — 2026-07-28 — Phase 6: attended
 

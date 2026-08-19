@@ -33,7 +33,8 @@ import {
 import { describeCredentialPlan, planCredential, resolveIdentity } from "../../security/adc.ts";
 import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
-import { detectRepoHazards } from "../../security/repo-hazards.ts";
+import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
+import { createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
 
 /**
@@ -268,7 +269,24 @@ export function register(program: Command): void {
         }
       }
 
-      await writeJsonAtomic(run.runJson, {
+      /**
+       * ONE document object, written more than once.
+       *
+       * `run.json` has to exist before anything else so a run that refuses
+       * halfway is still a readable run directory — but the per-worker
+       * checkouts below do not exist yet and are recorded AS they are created
+       * (see the `onCreated` callback). Mutating and re-writing this object is
+       * what keeps the two writes from becoming two spellings of the same
+       * document, which is the divergence `run/paths.ts`'s first rule exists
+       * to prevent. Nothing detached is running at either write.
+       *
+       * `worktrees: null` rather than `[]` at this point, and the distinction
+       * is load-bearing for `down --prune`: `[]` is the legitimate final state
+       * of a fleet where no worker uses `worktree` isolation, while `null`
+       * means creation never completed. Only one of those should read as
+       * "there is nothing on disk to reap".
+       */
+      const runDoc: Record<string, unknown> = {
         schema: "pifleet.run/v1",
         run_id: runId,
         created_at: new Date().toISOString(),
@@ -276,7 +294,14 @@ export function register(program: Command): void {
         workers,
         heartbeat_interval_ms: heartbeatIntervalMs,
         harness_patterns: harnessPatterns,
-      });
+        // The parent checkout travels with the run for the same reason the
+        // harness surface does: `down --prune` removes remotes from THIS
+        // repository, and re-resolving `fleet.yaml` months later could point
+        // that at a different one.
+        repo: repoRoot,
+        worktrees: null,
+      };
+      await writeJsonAtomic(run.runJson, runDoc);
       const ledger = new LedgerWriter(run, "cli-up");
       await ledger.append("run_created", { detail: { workers, backend: opts.backend } });
       if (egressNetwork !== null) {
@@ -343,6 +368,86 @@ export function register(program: Command): void {
           // the same failure class: a configured control that could not be
           // established, refusing rather than proceeding without it.
           throw new CliError(`repository hazard scan failed: ${String(err)}`, EXIT.BACKEND_UNAVAILABLE);
+        }
+      }
+
+      /**
+       * One independent checkout per `worktree`-mode worker (SRD §9.1),
+       * created before anything detached exists.
+       *
+       * A CLONE, not `git worktree add` — `run/worktree.ts`'s header records
+       * the three designs that were tested and why the two worktree-based ones
+       * were rejected, one of them as a confirmed container-to-host RCE. The
+       * short version: a clone's `.git` is a real directory inside the mount,
+       * so the container reaches nothing outside `/workspace` and the
+       * operator's repository is untouched by anything a worker does.
+       *
+       * Placed in the same band as materialization below and for the same
+       * reason: after the ledger so refusals are recorded, after config load
+       * so a bad config costs nothing on disk, and BEFORE `launchDetached`,
+       * because everything from there onward survives a thrown `CliError` and
+       * has to be reaped while this does not.
+       *
+       * This is also where hazard NEUTRALIZATION finally belongs (ISC-249).
+       * The detect-only scan above deliberately leaves the operator's own
+       * checkout alone; the clone is disposable, is the tree the worker
+       * actually reads, and — unlike a linked worktree, whose `.git` is a
+       * pointer FILE that `repo-hazards.ts` explicitly declines to follow —
+       * has a real `.git` directory, so that module's config, attributes and
+       * hooks scanners all apply to it completely rather than partially.
+       */
+      const worktrees: WorkerWorktree[] = [];
+      if (loadedConfig !== null && repoRoot !== null) {
+        const repo = repoRoot;
+        await createWorkerWorktrees({
+          loaded: loadedConfig,
+          run,
+          repo,
+          workerIds: workers,
+          onCreated: async (wt, note) => {
+            worktrees.push(wt);
+            // Re-written per worker, not once at the end. A clone is real
+            // state on disk and a failure on worker three leaves workers one
+            // and two behind; a record written afterwards records neither, so
+            // `down --prune` would have nothing to reap them by.
+            runDoc["worktrees"] = worktrees;
+            await writeJsonAtomic(run.runJson, runDoc);
+            await ledger.append("worktree_created", {
+              worker: wt.workerId,
+              detail: {
+                path: wt.path,
+                branch: wt.branch,
+                base_sha: wt.baseSha,
+                remote: wt.remoteName,
+                replaced_stale_remote: note.replacedStaleRemote,
+              },
+            });
+            if (note.replacedStaleRemote && opts.json !== true) {
+              process.stderr.write(
+                `  replaced a stale '${wt.remoteName}' remote in ${repo} (its checkout was gone)\n`,
+              );
+            }
+
+            const hazards = await neutralizeRepoHazards(wt.path);
+            for (const h of hazards) {
+              await ledger.append("repo_hazard", {
+                worker: wt.workerId,
+                detail: { path: h.path, kind: h.kind, neutralized: h.neutralized, detail: h.detail },
+              });
+            }
+            if (hazards.length > 0 && opts.json !== true) {
+              const live = hazards.filter((h) => !h.neutralized).length;
+              process.stdout.write(
+                `  ${wt.workerId}: ${hazards.length} hazard(s) in its checkout, ` +
+                  `${hazards.length - live} neutralized${live > 0 ? `, ${live} STILL LIVE` : ""}\n`,
+              );
+            }
+          },
+        });
+        if (worktrees.length > 0 && opts.json !== true) {
+          for (const wt of worktrees) {
+            process.stdout.write(`  ${wt.workerId}: ${wt.path} on ${wt.branch}\n`);
+          }
         }
       }
 

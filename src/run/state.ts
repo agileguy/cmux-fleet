@@ -36,6 +36,7 @@ import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../config/schema.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import { emptyFence, type FenceSnapshot } from "../rpc/epoch.ts";
 import type { RunPaths, WorkerPaths } from "./paths.ts";
+import type { WorkerWorktree } from "./worktree.ts";
 
 // ---------------------------------------------------------------------------
 // Worker state
@@ -125,6 +126,71 @@ export async function readRunHarnessPatterns(run: RunPaths): Promise<RunHarnessP
     };
   }
   return { patterns: recorded, note: null };
+}
+
+/**
+ * The per-worker checkouts `up` created, keyed by worker id, plus the parent
+ * repository they were cloned from.
+ *
+ * Third reader of `run.json` in this file and the same shape as the two above,
+ * for the same reason: a fact that decides what a later command DOES has to
+ * travel with the run. `dispatch` names a worker's `host_workdir` and `branch`
+ * in every envelope, and `down --prune` deletes directories — resolving either
+ * from today's `fleet.yaml` would let a config edited after `up` send a worker
+ * to a path this run never created, or point `rm -rf` at one.
+ *
+ * Forgiving about ABSENCE for the reason `readRunHarnessPatterns` is: a run
+ * created before this field existed, a hand-assembled test fixture, and a run
+ * whose workers are all `shared-ro` are the same on-disk shape, and all three
+ * must stay dispatchable. An entry that is present but MALFORMED degrades to
+ * "no record" rather than crashing a pure read, but never silently — `note`
+ * carries the reason, and `dispatch` puts it in the ledger.
+ */
+export interface RunWorktrees {
+  /** Empty when the run recorded none; never null, so callers need no branch. */
+  byWorker: ReadonlyMap<string, WorkerWorktree>;
+  /** The parent checkout, or null when the run did not record one. */
+  repo: string | null;
+  /** A degradation the caller must surface, or null when there is nothing to say. */
+  note: string | null;
+}
+
+const RunWorktreeRecordSchema = z.object({
+  workerId: z.string().min(1),
+  path: z.string().min(1),
+  branch: z.string().min(1),
+  baseSha: z.string().min(1),
+  remoteName: z.string().min(1),
+});
+
+export async function readRunWorktrees(run: RunPaths): Promise<RunWorktrees> {
+  const empty = new Map<string, WorkerWorktree>();
+  let doc: { repo?: string | null; worktrees?: unknown } | null;
+  try {
+    doc = await readValidated(run.runJson, (v) =>
+      z.object({ repo: z.string().nullish(), worktrees: z.unknown() }).loose().parse(v),
+    );
+  } catch (err) {
+    return {
+      byWorker: empty,
+      repo: null,
+      note: `run.json could not be read for worker checkouts (${err instanceof Error ? err.message : String(err)})`,
+    };
+  }
+  const raw = doc?.worktrees;
+  if (raw === undefined || raw === null) return { byWorker: empty, repo: doc?.repo ?? null, note: null };
+
+  const parsed = z.array(RunWorktreeRecordSchema).safeParse(raw);
+  if (!parsed.success) {
+    return {
+      byWorker: empty,
+      repo: doc?.repo ?? null,
+      note: `run.json records worker checkouts in a shape this build cannot read (${parsed.error.message}); treating the run as having none`,
+    };
+  }
+  const byWorker = new Map<string, WorkerWorktree>();
+  for (const w of parsed.data) byWorker.set(w.workerId, w);
+  return { byWorker, repo: doc?.repo ?? null, note: null };
 }
 
 export async function writeWorkerState(paths: WorkerPaths, state: WorkerState): Promise<void> {

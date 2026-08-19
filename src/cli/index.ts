@@ -99,6 +99,7 @@ async function main(argv: string[]): Promise<number> {
     import("./commands/up.ts"),
     import("./commands/daemon.ts"),
     import("./commands/status.ts"),
+    import("./commands/worktrees.ts"),
     import("./commands/dispatch.ts"),
     import("./commands/steer.ts"),
     import("./commands/abort.ts"),

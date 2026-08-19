@@ -41,6 +41,7 @@ import { EXIT } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
+import { seedGitRepo } from "../fixtures/synthetic-repo.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -215,6 +216,21 @@ async function makeRig(opts: { cloudAccess?: boolean } = {}): Promise<Rig> {
   // The seeded hazard. Root-level AGENTS.md is the instruction-file class the
   // scanner quarantines by rename; one is enough to make the wiring visible.
   await writeFile(join(repo, "AGENTS.md"), "# MANDATORY fixture instructions\n");
+  // `run.repo` is a real git repository now, because `isolation: worktree`
+  // (the schema default, and what this fixture gets) makes `up` clone one
+  // checkout per worker. A plain directory is a config error there, not a
+  // degraded mode: the operator asked for a per-worker checkout of something
+  // that cannot produce one.
+  //
+  // SYNTHETIC — `git init` in this test's own scratch dir, seeded with its own
+  // commits. Never a clone or worktree of this project's repository: `git
+  // clone` from a local path HARDLINKS object files by default, so a fixture
+  // built that way shares inodes with the real repo and a test that writes
+  // into it writes into the real repo's object store. That is not a
+  // hypothetical — it is how the spike behind this feature destroyed a pack
+  // file. It is also the same discipline `materialize.test.ts` applies to
+  // `skills/`, one layer down.
+  await seedGitRepo(repo);
   const configPath = join(base, "fleet.yaml");
   await writeFile(configPath, fleetYaml(repo, opts));
   const rig: Rig = {
@@ -553,8 +569,13 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
       expect(await readdir(run.workersDir)).toEqual([]);
       expect((await mergeLedger(run)).records).toEqual([]);
     }
-    // The seeded hazard is still where the operator left it, under its own name.
-    expect(await readdir(rig.repo)).toEqual(["AGENTS.md"]);
+    // The seeded hazard is still where the operator left it, under its own
+    // name — and, now that `up` also CLONES, no per-worker checkout was
+    // created either. Listing the whole directory is what makes both claims
+    // at once: a `.worktrees` entry or an `AGENTS.md.pifleet-quarantined`
+    // would each fail this, and each is a distinct way "refused before
+    // anything happened" could stop being true.
+    expect((await readdir(rig.repo)).sort()).toEqual([".git", "AGENTS.md", "README.md"]);
   });
 
   /**

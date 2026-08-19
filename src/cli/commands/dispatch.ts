@@ -18,15 +18,17 @@ import {
   runPaths,
   runsRoot,
   taskRecordPath,
+  workerBranch,
   workerPaths,
   type RunPaths,
 } from "../../run/paths.ts";
+import { DEFAULT_BRANCH_PREFIX } from "../../config/schema.ts";
 import { assertEpochWellFormed } from "../../rpc/epoch.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { composeBrief } from "../../roles/index.ts";
 import { controlCall } from "../../supervisor/launch.ts";
-import { readTaskRecord, readWorkerState } from "../../run/state.ts";
+import { readRunWorktrees, readTaskRecord, readWorkerState } from "../../run/state.ts";
 import { processStartTime, SocketRequestError } from "../../run/registry.ts";
 import { loadTaskList } from "../../orchestrate/tasklist.ts";
 import { runSchedule, type DispatchAnswer, type SchedulerIO } from "../../orchestrate/scheduler.ts";
@@ -119,6 +121,38 @@ export async function sendTaskEnvelope(args: {
 }): Promise<SendOutcome> {
   const { run, worker, taskId, partial, attemptId, requestedEpoch } = args;
 
+  /**
+   * The worker's real checkout, as `up` recorded it (SRD §7.1/§9.1).
+   *
+   * `host_workdir` was the literal string `"unset"` and `branch` was a
+   * hard-coded `fleet/${runId}/${worker}` that ignored `run.branch_prefix`
+   * entirely — so the two fields that tell a worker WHERE it works and WHAT it
+   * commits on were fiction, and an operator who set `branch_prefix: exp` got
+   * envelopes naming a branch no checkout had. Both now come from the record
+   * `run/worktree.ts` wrote when it created the clone, which is also the only
+   * source that can be right: the branch git actually checked out and the
+   * branch the envelope names are the same string or the worker's diff is
+   * graded against a ref that does not exist.
+   *
+   * Read HERE rather than in either caller because this is THE dispatch path:
+   * `--auto` and single-task `dispatch` both come through it, and a second
+   * lookup in one of them is how the two modes start describing the same
+   * worker differently.
+   *
+   * An explicit value in the task file still wins — a hand-written envelope
+   * naming its own workdir is a debugging affordance, not a mistake to
+   * override.
+   */
+  const recorded = await readRunWorktrees(run);
+  if (recorded.note !== null) {
+    await args.ledger.append("worktree_record_degraded", {
+      worker,
+      task_id: taskId,
+      detail: { note: recorded.note },
+    });
+  }
+  const wt = recorded.byWorker.get(worker);
+
   // Fill the envelope; epoch 0 is a placeholder the supervisor replaces
   // with its allocation before anything durable records it.
   let envelope: TaskEnvelope;
@@ -133,11 +167,19 @@ export async function sendTaskEnvelope(args: {
       dispatched_at: new Date().toISOString(),
       title: partial["title"] ?? taskId,
       brief: partial["brief"] ?? "",
-      repo: partial["repo"] ?? "unset",
-      host_workdir: partial["host_workdir"] ?? "unset",
+      repo: partial["repo"] ?? recorded.repo ?? "unset",
+      host_workdir: partial["host_workdir"] ?? wt?.path ?? "unset",
       container_workdir: partial["container_workdir"] ?? "/workspace",
-      branch: partial["branch"] ?? `fleet/${run.runId}/${worker}`,
-      base_ref: partial["base_ref"] ?? "0".repeat(40),
+      // With no record (a `shared-ro` fleet, a hand-assembled run dir, a run
+      // created before checkouts were wired) the name still has to be
+      // DERIVED, not restated: `workerBranch` with the schema's own default
+      // produces the identical string the literal used to, and moves with the
+      // default if it ever changes.
+      branch:
+        partial["branch"] ??
+        wt?.branch ??
+        workerBranch(DEFAULT_BRANCH_PREFIX, run.runId, worker),
+      base_ref: partial["base_ref"] ?? wt?.baseSha ?? "0".repeat(40),
       inputs: partial["inputs"] ?? [],
       acceptance: partial["acceptance"] ?? [],
       constraints: partial["constraints"] ?? [],

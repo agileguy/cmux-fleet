@@ -31,6 +31,7 @@ import {
   runsRoot,
   workerOutboxDir,
   workerPaths,
+  workerWorktree,
   type RunPaths,
   type WorkerPaths,
 } from "../run/paths.ts";
@@ -169,7 +170,12 @@ export function buildDockerArgv(
   const repo = expandPath(loaded.config.run.repo, loaded.dir);
   switch (w.isolation) {
     case "worktree":
-      argv.push("-v", `${join(repo, ".worktrees", w.id)}:/workspace`);
+      // `workerWorktree`, not a `join` of its own: `run/worktree.ts` CREATES
+      // this directory and this line MOUNTS it, and a bind mount does not fail
+      // when the two disagree — Docker creates the missing source and the
+      // worker comes up with an empty `/workspace`. That is ISC-188's failure
+      // shape exactly, which is why the path now has one definition.
+      argv.push("-v", `${workerWorktree(repo, w.id)}:/workspace`);
       break;
     case "shared-ro":
       argv.push("-v", `${repo}:/workspace:ro`);

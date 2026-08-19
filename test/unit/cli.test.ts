@@ -11,6 +11,7 @@ const SRD_COMMANDS = [
   "up",
   "daemon",
   "status",
+  "worktrees",
   "dispatch",
   "steer",
   "abort",

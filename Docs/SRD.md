@@ -916,7 +916,7 @@ pifleet report --run <run-id> --md
 
 | Value | Worktree | Container mounts |
 |---|---|---|
-| `worktree` *(default)* | own worktree + branch | `/workspace` rw |
+| `worktree` *(default)* | own worktree + branch [†see erratum] | `/workspace` rw |
 | `shared-ro` | none of its own | other workers' worktrees mounted **read-only** under `/review/<worker>/` |
 | `none` | none | no repo mount; `/workspace` is an empty tmpfs |
 
@@ -925,6 +925,19 @@ pifleet report --run <run-id> --md
 ### 9.2 Worktree preflight
 
 Before creating any worktree: `git worktree prune`; refuse a branch already checked out elsewhere; **serialize `worktree add` per repo** to avoid `.git/index.lock` contention across concurrent workers; fail fast with a named error when submodules or LFS are present (shared object/cache paths across worktrees are a known hazard).
+
+> **Erratum (2026-08-18, implementation Slice 2) — `git worktree add` was never built; every worker checkout is a `git clone --no-hardlinks` instead.**
+>
+> The paragraph above is kept verbatim as the historical record of what this SRD originally specified; it is not what `run/worktree.ts` implements, and should not be re-derived from by a future reader. Two designs were built and run against a real container before the design in this codebase was chosen, and both were disqualified by evidence rather than by preference:
+>
+> 1. **`git worktree add`, mounting only the linked worktree directory.** Fails outright. A linked worktree's `.git` is a FILE holding a `gitdir:` pointer into the parent's `.git/worktrees/<name>`, a path outside anything the container's mount table can name — so git inside the container answers `fatal: not a git repository` and the worker cannot commit at all.
+> 2. **`git worktree add`, additionally mounting the parent's real gitdir so the pointer resolves.** Works, and is a confirmed **container-to-host remote code execution.** A container with write access to the mounted gitdir can rewrite the host repository's own `refs/heads/main` and plant an executable `.git/hooks/post-checkout` that runs as the OPERATOR'S host user on their very next `git checkout` outside the container — the container boundary is this SRD's primary isolation control (§5, §12), and a mount that hands the confined party write access to the confining party's hook directory dissolves it. This is not a theoretical finding; it was reproduced in the security spike that investigated this feature. **Never build this.**
+>
+> The design actually shipped is **design 3: `git clone --no-hardlinks --single-branch --branch <parent's checked-out branch>` per worker**, with `origin` stripped immediately after (so the host's absolute repository path never survives into a container-readable `.git/config`), and the parent's own git configured with a `worker-<id>` remote pointing AT the clone (`git -C <repo> fetch worker-<id>` is how an operator reads a worker's commits without leaving their own checkout — see `pifleet worktrees`, §10, which replaces `git worktree list` for the same reason this note exists). The clone is self-contained: `.git` is a real directory INSIDE the mount, nothing the container touches resolves outside `/workspace`, and the parent repository is unaffected by anything a worker does to its copy.
+>
+> **`--no-hardlinks` is load-bearing, not hygiene, and its absence is the second finding this spike produced.** `git clone` from a local source path defaults to `--local`, which HARDLINKS the source repository's object files into the clone rather than copying them — one inode, two names. The 0444 mode git sets on a pack file does not stop the owning uid from `chmod +w` first, so a worker container writing through what it believes is its own private copy corrupts the PARENT'S object store. This is exactly how the spike investigating this feature destroyed this repository's own pack file during development, before the feature existed to protect against it (recovered via `git fetch origin --refetch`, verified clean, no data lost). `test/integration/worktree.test.ts` pins both the `nlink=1` property and disjoint-inode identity between every clone object and the parent's, because nothing else in the suite notices the flag going missing — the clone still works, the branch is still right, the worker still commits, and the only symptom is that a worker container can now silently corrupt the operator's real repository.
+>
+> §9.1's `worktree` row is retitled but not otherwise changed by this pivot: a worker still gets its own writable checkout on its own branch, mounted rw at `/workspace`; only the mechanism underneath the word "worktree" changed. `isolation: worktree` stays the config vocabulary for the same reason `run/worktree.ts` keeps its filename — it is what an operator writes in `fleet.yaml`, and renaming the vocabulary to chase the mechanism would just move the drift into `fleet.yaml` instead of fixing it.
 
 ### 9.3 Admission control and merge
 
@@ -951,6 +964,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet up [--config p] [--workers a,b] [--backend k] [--backend-fallback k]` | build run-dir, worktrees, skill bundles, containers, panes |
 | `pifleet daemon [--run r]` | registry/reaper (started by `up`; separately runnable) |
 | `pifleet status [--run r] [--watch]` | fleet snapshot |
+| `pifleet worktrees [--run r]` | list every worker's per-worker checkout — branch, path, clean/dirty; the operator-visibility surface `git worktree list` no longer answers now that each worker is an independent clone rather than a linked worktree (§9.2 erratum) |
 | `pifleet dispatch --worker <id> --task <file\|->` / `--auto --tasks <f>` | send task envelopes |
 | `pifleet steer --worker <id> "msg"` | mid-turn correction |
 | `pifleet abort --worker <id>` | cancel current epoch |
