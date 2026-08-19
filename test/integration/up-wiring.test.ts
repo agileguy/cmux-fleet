@@ -1034,7 +1034,28 @@ function stubOmlx(body: unknown, status = 200): StubOmlx {
     },
   });
   return {
-    baseUrl: `http://127.0.0.1:${server.port}/v1`,
+    /**
+     * Named `host.docker.internal`, NOT `127.0.0.1`, though the stub binds
+     * loopback — because two subsystems read this one field with different
+     * requirements and only this spelling satisfies both.
+     *
+     *  - The ISC-53 gate probes from the HOST, and `hostFacingBaseUrl`
+     *    (`security/model-probe.ts`) rewrites the HOSTNAME ONLY, leaving the
+     *    port alone: `host.docker.internal:<port>` -> `localhost:<port>`,
+     *    which reaches this server.
+     *  - The egress relay (ISC-50/51/57) requires the host to be literally
+     *    `host.docker.internal`, since that is the only name the deny-all
+     *    bridge resolves; `omlxRelayTarget` refuses anything else, and a
+     *    `127.0.0.1` base_url therefore failed `up` with exit 3 once the relay
+     *    landed.
+     *
+     * That is the same rewrite production relies on — the default
+     * `http://host.docker.internal:8000/v1` probes as `localhost:8000` and
+     * relays as `host.docker.internal:8000` — so this fixture now exercises
+     * the real arrangement rather than a loopback-only one that no live fleet
+     * can use.
+     */
+    baseUrl: `http://host.docker.internal:${server.port}/v1`,
     requests,
     stop: async () => {
       await server.stop(true);
