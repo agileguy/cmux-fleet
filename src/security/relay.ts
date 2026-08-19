@@ -3,10 +3,15 @@
  * (SRD §5.6, §5.9, §12.4; ISC-50, ISC-51, ISC-57).
  *
  * `src/security/network.ts` puts every worker on an `--internal` Docker
- * bridge: no default route, no NAT, nothing off the bridge reachable at all.
+ * bridge: no default route, no NAT, nothing OFF THE BRIDGE SUBNET reachable.
  * That is deny-all in hardware, and it denies the fleet's own model server
  * too. This module stands up the single container that re-opens exactly one
  * destination — oMLX on the Docker host — and nothing else.
+ *
+ * Read "nothing off the bridge subnet" literally: it is narrower than the
+ * "no route to anything" this header used to claim, and the difference is a
+ * measured, accepted residual documented under "What the internal bridge does
+ * NOT deny" below and in SRD §12.8.
  *
  * ## The mechanism, and why it is this one
  *
@@ -37,6 +42,39 @@
  * its baked-in `host.docker.internal:8000` resolves to this container, while
  * `1.1.1.1` and `example.com` remain unreachable.
  *
+ * ## What the internal bridge does NOT deny (SRD §12.8; ISC-51, ISC-57)
+ *
+ * `--internal` is NOT "no route off this container". Measured 2026-08-19 on
+ * `pifleet-egress` (172.18.0.0/16), with no relay running:
+ *
+ *     172.18.0.0/16 dev eth0 scope link      <- the container's ONLY route
+ *     (no default route at all)
+ *     nc 172.18.0.1 22  -> SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.13
+ *     nc 1.1.1.1 443 / 192.168.86.49 8000 / 192.168.5.2 22 / 169.254.169.254 80
+ *                       -> every one refused
+ *
+ * Docker implements internal-network isolation as FORWARD-chain rules —
+ * `-A DOCKER-ISOLATION-STAGE-1 ! -d 172.18.0.0/16 -i br-<id> -j DROP` — but
+ * the bridge GATEWAY is on-link and inside that subnet, so gateway-destined
+ * traffic is delivered locally through INPUT (policy ACCEPT) and never meets
+ * those rules. Every port the Docker host listens on is reachable from this
+ * "deny-all" bridge, relay or no relay.
+ *
+ * The honest reachable set is:
+ *
+ *     {relay listen ports} ∪ {every port on the bridge gateway}
+ *                          ∪ {every port on every sibling container}
+ *
+ * It is not a fixed set — anything the VM or a sibling binds later joins it
+ * with no code change — and on native-Linux Docker the host's listener set is
+ * larger than Colima's. This is an ACCEPTED, DOCUMENTED residual (SRD §12.8),
+ * not an oversight: closing it needs host-side iptables outside Docker's
+ * model, or a Docker host whose gateway serves nothing. ISC-51/57 are
+ * therefore worded to what Docker actually guarantees — no route off the
+ * bridge SUBNET — and `test/integration/relay.test.ts` asserts the residual as
+ * a POSITIVE, so that hardening it later surfaces as a failing test rather
+ * than as silent drift between the code and this comment.
+ *
  * ## What this relay does NOT do
  *
  * It forwards the oMLX target and nothing else. `src/security/egress.ts`'s
@@ -58,32 +96,68 @@
  * whatever else is still running.
  */
 
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { realExec, repoRoot, type Exec } from "../container/run.ts";
-import { normalizeHost } from "./egress.ts";
+import {
+  decide,
+  normalizeHost,
+  policyFromConfig,
+  type EgressConfigView,
+  type EgressPolicy,
+} from "./egress.ts";
 import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
 
 /**
- * The one host this relay is built to forward to, on both legs.
+ * The name workers resolve on the INTERNAL bridge — the listen-side alias.
  *
- * On the WORKER side it is the DNS alias that makes the internal bridge answer
- * at all; on the RELAY's own side it is a real name resolved through
- * `--add-host` to the Docker host. Those are different resolutions of the same
- * literal string, and that coincidence is the whole trick: a worker's
- * `models.json` and `llm.base_url` need no rewriting to work inside a
- * containment they know nothing about.
+ * This is the DNS alias attached to the relay's endpoint on the egress bridge
+ * (`relayConnectArgv`). It is what makes a worker's baked-in
+ * `host.docker.internal:8000` resolve to the relay instead of failing to
+ * resolve at all, so `models.json` and `llm.base_url` need no rewriting to
+ * work inside a containment they know nothing about.
  */
-export const RELAY_UPSTREAM_HOST = "host.docker.internal";
+export const RELAY_LISTEN_ALIAS = "host.docker.internal";
 
 /**
- * Plain upstream Node, not the worker image.
+ * The name the relay itself DIALS — the uplink-side target.
+ *
+ * Deliberately a SEPARATE constant that happens to hold the same string.
+ * Today both legs are `host.docker.internal`, and that coincidence is the
+ * trick the listen alias above describes. But they are two different
+ * resolutions of one literal — the listen side is a Docker network alias on
+ * the internal bridge, the dial side is an `--add-host` mapping to the Docker
+ * host on the uplink — and conflating them into one constant is what made
+ * pointing the dial side elsewhere a redesign instead of a rename (ISC-259).
+ * Splitting them now costs nothing and is a prerequisite for that work.
+ */
+export const RELAY_DIAL_HOST = "host.docker.internal";
+
+/**
+ * Plain upstream Node, not the worker image — PINNED BY DIGEST.
  *
  * The relay must not depend on `pifleet image build` having run — `up` would
  * then refuse to start over an unrelated image problem — and it needs nothing
  * the worker image adds. `docker/egress-relay.js` is dependency-free Node for
  * the same reason.
+ *
+ * The digest is not decoration. This is the ONE container bridging the
+ * deny-all bridge to a NAT'd network, it runs `--restart unless-stopped`, and
+ * a floating Docker Hub tag means the code on that boundary can change under
+ * a machine reboot with no commit in this repo. `test/unit/relay.test.ts`
+ * pins the whole argv byte-for-byte, so the digest is pinned by that test for
+ * free and cannot drift silently.
+ *
+ * The digest below is the multi-arch OCI index (`linux/amd64` + `linux/arm64`
+ * both present), so it resolves on CI runners and on Apple silicon alike —
+ * verified with `docker buildx imagetools inspect node:24-bookworm-slim`.
+ *
+ * ROLLED: 2026-08-19. To roll it, re-run that command, paste the index
+ * `Digest:` here, and update the unit test's expected argv.
  */
-export const RELAY_IMAGE = "node:24-bookworm-slim";
+export const RELAY_IMAGE =
+  "node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03";
 
 /** Where the bind-mounted script lands inside the container. */
 export const RELAY_SCRIPT_CONTAINER_PATH = "/relay/egress-relay.js";
@@ -98,12 +172,15 @@ export interface RelayTarget {
 
 /**
  * The slice of `FleetConfig` this module reads — structural, so nothing here
- * imports the config schema. `EgressConfigView` satisfies it, which is what
+ * imports the config schema. Identical to `EgressConfigView`, which is what
  * lets `up` pass one config object to both subsystems.
+ *
+ * It carries the `egress` half — not just `llm` — because `ensureEgressRelay`
+ * now runs every target it is about to forward through `decide()` (ISC-253).
+ * A view narrow enough to build a target but too narrow to build the policy
+ * that judges it is precisely how the two drifted apart.
  */
-export interface RelayConfigView {
-  llm: { base_url: string };
-}
+export type RelayConfigView = EgressConfigView;
 
 export interface RelayContainerStatus {
   name: string;
@@ -117,6 +194,16 @@ export interface RelayStatus {
   name: string;
   /** False when an already-running relay was adopted unchanged. */
   created: boolean;
+  /**
+   * SHA-256 of the relay script THIS checkout would run, and the targets this
+   * config resolves to — recorded whether the relay was created or adopted.
+   *
+   * On an adopted relay these describe what the current checkout WOULD have
+   * started, which is the point: adoption never compares targets, so the
+   * ledger is where a divergence between runs becomes visible at all.
+   */
+  scriptSha256: string;
+  targets: readonly RelayTarget[];
 }
 
 /** `1..65535`; anything else would be a listener no worker could find. */
@@ -184,11 +271,11 @@ export function omlxRelayTarget(cfg: RelayConfigView): RelayTarget {
   // dot or an upper-case spelling cannot read as a different host here while
   // reading as an allowed one there.
   const host = normalizeHost(url.hostname);
-  if (host !== RELAY_UPSTREAM_HOST) {
+  if (host !== RELAY_LISTEN_ALIAS) {
     throw new Error(
-      `relay: llm.base_url host ${JSON.stringify(url.hostname)} is not ${RELAY_UPSTREAM_HOST} — ` +
+      `relay: llm.base_url host ${JSON.stringify(url.hostname)} is not ${RELAY_LISTEN_ALIAS} — ` +
         `the egress relay forwards only the oMLX endpoint on the Docker host (SRD §5.9), and ` +
-        `${RELAY_UPSTREAM_HOST} is the only name resolvable from the internal bridge. ` +
+        `${RELAY_LISTEN_ALIAS} is the only name resolvable from the internal bridge. ` +
         `Point llm.base_url at the Docker host, or run without an egress network.`,
     );
   }
@@ -196,7 +283,82 @@ export function omlxRelayTarget(cfg: RelayConfigView): RelayTarget {
   if (!validPort(port)) {
     throw new Error(`relay: llm.base_url has an invalid port ${JSON.stringify(url.port)}`);
   }
-  return { listenPort: port, host: RELAY_UPSTREAM_HOST, port, name: "omlx" };
+  // Listen side and dial side are separate fields even though both resolve to
+  // the same literal today — see RELAY_DIAL_HOST.
+  return { listenPort: port, host: RELAY_DIAL_HOST, port, name: "omlx" };
+}
+
+/**
+ * Every destination the relay is about to forward must be ALLOWED by the
+ * egress policy (ISC-253).
+ *
+ * ## What this closes
+ *
+ * The relay's target list is derived from config, not fixed: `omlxRelayTarget`
+ * pins the HOST to a constant but reads the PORT straight out of
+ * `llm.base_url`. Nothing previously compared that port to the policy, so the
+ * relay was an independent second derivation of "what may be reached" rather
+ * than an application of the one in `egress.ts`. This makes it an application.
+ *
+ * ## What this does NOT close today, and why it is still worth having
+ *
+ * Be precise about the limit, because the obvious reading of this function is
+ * wrong. `policyFromConfig` derives its `llm` rule from THE SAME
+ * `llm.base_url` this target came from, with the same port rule. So the two
+ * agree BY CONSTRUCTION, and this gate does NOT currently refuse
+ * `llm.base_url: http://host.docker.internal:22/v1` — it builds an allow rule
+ * for port 22 and then passes the target against it. The circularity is real
+ * and is not fixed here.
+ *
+ * What bounds that case today is `omlxRelayTarget`'s host pin: the worst a
+ * bad port can do is expose a port on the Docker host, a machine the operator
+ * already fully controls (and which, per SRD §12.8, is reachable from the
+ * bridge gateway anyway — so the relay adds no reachability the bridge did not
+ * already have).
+ *
+ * That bound disappears the moment the dial side is decoupled from the listen
+ * alias to reach an off-host oMLX (ISC-259). At that point an unchecked,
+ * config-derived target becomes a TCP tunnel from a bridge running untrusted
+ * model output to an arbitrary host:port, established by editing one YAML
+ * string — and this gate is the seam where that gets stopped, PROVIDED the
+ * decoupled dial target is judged against an explicit `egress.allow` entry the
+ * operator wrote rather than against a rule re-derived from the same field.
+ * Landing the seam now makes that a change of input, not a change of design.
+ */
+export function assertTargetsAllowed(
+  targets: readonly RelayTarget[],
+  policy: EgressPolicy,
+): void {
+  for (const t of targets) {
+    const verdict = decide(t.host, t.port, policy);
+    if (!verdict.allowed) {
+      throw new Error(
+        `relay: refusing to forward ${t.name} -> ${t.host}:${t.port} — the egress policy denies ` +
+          `it (rule: ${verdict.rule}). The relay may only carry destinations decide() allows; ` +
+          `add an explicit egress.allow entry for it, or correct llm.base_url.`,
+      );
+    }
+  }
+}
+
+/**
+ * SHA-256 of the relay script this checkout would bind-mount.
+ *
+ * The relay EXECUTES a file from a mutable path in the operator's working
+ * tree, and `--restart unless-stopped` re-execs whatever is at that path after
+ * a reboot. `:ro` stops the container editing it; nothing stops the host. The
+ * bind-mount is still the right call (no image rebuild, no `bun` in the worker
+ * image), so the gap is closed by RECORDING what was executed rather than by
+ * preventing the mount: the hash goes into the `egress_relay_ready` ledger
+ * event, so "which code was this relay actually running" is answerable after
+ * the fact instead of inferred from the current contents of the file.
+ *
+ * It also makes an ADOPTED relay auditable: `ensureEgressRelay` adopts a
+ * running relay without comparing what it forwards, so the ledger is the only
+ * place a target or script change becomes visible across runs.
+ */
+export async function relayScriptSha256(path: string = relayScriptPath()): Promise<string> {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
 }
 
 /**
@@ -229,7 +391,7 @@ export function relayRunArgv(
     "--network",
     uplinkNetwork,
     "--add-host",
-    `${RELAY_UPSTREAM_HOST}:host-gateway`,
+    `${RELAY_DIAL_HOST}:host-gateway`,
     // Durable and shared: it must come back after a daemon or machine restart,
     // because `up` adopts a running relay and several fleets depend on one.
     "--restart",
@@ -241,6 +403,28 @@ export function relayRunArgv(
     "ALL",
     "--security-opt",
     "no-new-privileges",
+    // Routing is not this container's job. The relay is dual-homed — internal
+    // bridge on one side, NAT'd uplink on the other — which is exactly the
+    // shape of a router, and Docker leaves `net.ipv4.ip_forward=1` inside the
+    // netns by default (measured 1 in the running relay before this flag).
+    // `--cap-drop ALL` does NOT turn forwarding off, so the previous posture
+    // relied on a property it neither set nor stated. A pivot through it was
+    // tested end-to-end and did NOT complete — the return path fails because
+    // the host's MASQUERADE matches the uplink subnet, not the internal one —
+    // so this is defence in depth against a NAT change, not a live break.
+    "--sysctl",
+    "net.ipv4.ip_forward=0",
+    // The same limits every worker gets (SRD §5.6). The relay sits on the same
+    // bridge as the workers and OUTLIVES all of them, so exempting it from the
+    // resource posture it shares a network with was an inconsistency, not a
+    // decision. Sized well above what a TCP forwarder needs; the point is that
+    // an unbounded relay cannot become the fleet's memory or PID sink.
+    "--pids-limit",
+    "512",
+    "--memory",
+    "512m",
+    "--cpus",
+    "1",
     // uid 1000, built into the node image. Nothing here needs root: the listen
     // ports are unprivileged and the mounted script is world-readable.
     "--user",
@@ -271,7 +455,7 @@ export function relayRunArgv(
 export function relayConnectArgv(egressNetwork: string, containerName: string): string[] {
   assertDockerName("network", egressNetwork);
   assertDockerName("container", containerName);
-  return ["network", "connect", "--alias", RELAY_UPSTREAM_HOST, egressNetwork, containerName];
+  return ["network", "connect", "--alias", RELAY_LISTEN_ALIAS, egressNetwork, containerName];
 }
 
 export function relayInspectArgv(containerName: string): string[] {
@@ -382,6 +566,14 @@ export async function inspectRelayContainer(
  * loud where it lands — the worker connects to a port nothing is listening on
  * — rather than silently reaching the wrong server, which is why it is
  * documented here instead of being guessed at automatically.
+ *
+ * That limit is FAIR for a port change and becomes UNFAIR the moment the dial
+ * target is configurable (ISC-259): adoption would then silently keep
+ * forwarding to the old destination, which is not loud anywhere. The mitigation
+ * that makes it detectable now and blockable later is the returned
+ * `scriptSha256`/`targets` pair, which `up` writes into the
+ * `egress_relay_ready` ledger event on EVERY run, adopted or created — so two
+ * runs that disagree about what the relay forwards leave a record that says so.
  */
 export async function ensureEgressRelay(
   cfg: RelayConfigView,
@@ -391,12 +583,19 @@ export async function ensureEgressRelay(
   // Config first, Docker second: an unusable `llm.base_url` should fail before
   // this function has created anything at all.
   const target = omlxRelayTarget(cfg);
+  const targets = [target] as const;
+  // …and POLICY before Docker too. The relay may only carry what `decide()`
+  // allows; see `assertTargetsAllowed` for exactly how much that proves today.
+  assertTargetsAllowed(targets, policyFromConfig(cfg));
   const containerName = relayContainerName(egressNetwork);
   const uplink = uplinkNetworkName(egressNetwork);
+  // Hashed from the path that is about to be mounted, before the mount — so
+  // the recorded hash is of the bytes this run actually handed the daemon.
+  const scriptSha256 = await relayScriptSha256();
 
   const existing = await inspectRelayContainer(containerName, exec);
   if (existing.exists && existing.running) {
-    return { name: containerName, created: false };
+    return { name: containerName, created: false, scriptSha256, targets };
   }
 
   await ensureUplinkNetwork(uplink);
@@ -411,7 +610,7 @@ export async function ensureEgressRelay(
     }
   }
 
-  const runArgv = relayRunArgv(containerName, uplink, [target], relayScriptPath());
+  const runArgv = relayRunArgv(containerName, uplink, targets, relayScriptPath());
   const started = await docker(exec, runArgv, 120_000);
   if (started.code !== 0) {
     throw new Error(
@@ -428,9 +627,9 @@ export async function ensureEgressRelay(
   if (connected.code !== 0) {
     await destroy();
     throw new Error(
-      `relay: 'docker network connect --alias ${RELAY_UPSTREAM_HOST} ${egressNetwork} ` +
+      `relay: 'docker network connect --alias ${RELAY_LISTEN_ALIAS} ${egressNetwork} ` +
         `${containerName}' failed: ${connected.stderr.trim() || "(no stderr)"} — without this ` +
-        `alias no worker can resolve ${RELAY_UPSTREAM_HOST}. The half-created relay was removed.`,
+        `alias no worker can resolve ${RELAY_LISTEN_ALIAS}. The half-created relay was removed.`,
     );
   }
 
@@ -449,5 +648,5 @@ export async function ensureEgressRelay(
     );
   }
 
-  return { name: containerName, created: true };
+  return { name: containerName, created: true, scriptSha256, targets };
 }

@@ -33,6 +33,7 @@ import {
   inspectRelayContainer,
   relayContainerName,
   uplinkNetworkName,
+  type RelayTarget,
 } from "../../src/security/relay.ts";
 
 /** Client container image: needs bash + curl, same as the egress suite. */
@@ -76,8 +77,15 @@ function testNetName(): string {
   return `pifleet-relay-it-${process.pid}-${seq}`;
 }
 
-async function docker(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
+async function docker(
+  args: string[],
+  env?: Readonly<Record<string, string>>,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const p = Bun.spawn(["docker", ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    ...(env === undefined ? {} : { env: { ...process.env, ...env } }),
+  });
   const [stdout, stderr] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),
@@ -113,19 +121,60 @@ function registerRelayArtifacts(net: string): void {
  * the least-privileged container this project can produce, because the claim
  * under test is that an ordinary worker needs nothing special.
  */
-async function onInternalNetwork(net: string, script: string): Promise<string> {
-  const r = await docker([
-    "run",
-    "--rm",
-    "--network",
-    net,
-    "--entrypoint",
-    "bash",
-    IMAGE,
-    "-c",
-    script,
-  ]);
+async function onInternalNetwork(
+  net: string,
+  script: string,
+  env: Readonly<Record<string, string>> = {},
+): Promise<string> {
+  // `-e NAME` with NO `=value` tells docker to copy the variable out of its own
+  // environment. The value never appears in argv, so it is not in `ps`, not in
+  // the ephemeral container's `docker inspect`, and not in a CI log that echoes
+  // the command — which is what `-H "Authorization: Bearer <key>"` interpolated
+  // into a shell string used to do with the real oMLX key.
+  const envArgs: string[] = [];
+  for (const name of Object.keys(env)) envArgs.push("-e", name);
+  const r = await docker(
+    ["run", "--rm", ...envArgs, "--network", net, "--entrypoint", "bash", IMAGE, "-c", script],
+    env,
+  );
+  /**
+   * A non-zero `docker run` is a BROKEN PROBE, not a measurement.
+   *
+   * This helper used to return `stdout + stderr` and never look at `r.code`,
+   * which made every `not.toContain(...)` assertion built on it a vacuous
+   * pass: if `docker run` failed outright — image missing, daemon hiccup,
+   * network already gone — the returned string was an error message, and "this
+   * error message does not contain `ip=0`" is true of every error message ever
+   * written. The DENY half of ISC-51/57 rested entirely on assertions of that
+   * shape, with nothing playing the role `toContain(nonce)` plays for the
+   * reach half.
+   *
+   * The probe scripts all end in `echo`, so the container exits 0 even when the
+   * curl inside it fails. A non-zero code here therefore always means the
+   * container did not run — never that the probe observed a denial.
+   */
+  if (r.code !== 0) {
+    throw new Error(
+      `relay test: probe container exited ${r.code} — the probe did not run, so nothing was ` +
+        `measured. stdout=${JSON.stringify(r.stdout)} stderr=${JSON.stringify(r.stderr)}`,
+    );
+  }
   return r.stdout + r.stderr;
+}
+
+/**
+ * A full `RelayConfigView` (= `EgressConfigView`).
+ *
+ * `ensureEgressRelay` now runs each target through `decide()` before it builds
+ * argv (ISC-253), so it needs the `egress` half of the config as well as
+ * `llm`. See `test/unit/relay.test.ts` for exactly how much that gate proves
+ * today — including the documented case it does NOT catch.
+ */
+function cfg(base_url: string) {
+  return {
+    llm: { base_url },
+    egress: { google_hosts: ["oauth2.googleapis.com"], allow: [] as Array<never> },
+  };
 }
 
 /** One curl with a retry loop, printing a parseable `key=...` line. */
@@ -177,11 +226,22 @@ describe.skipIf(!DOCKER)("egress relay", () => {
           net,
           `curl -sS -m 5 ${JSON.stringify(url)} >/dev/null 2>&1; echo "pre=$?"`,
         );
-        expect(before).not.toContain("pre=0");
+        // POSITIVE, not `not.toContain("pre=0")`. The negative form passes on
+        // any string that fails to contain the token — including an error
+        // message from a probe that never ran. This asserts curl actually
+        // reported a NON-ZERO failure code, which is the measurement.
+        expect(before).toMatch(/^pre=[1-9][0-9]*$/m);
 
-        const relay = await ensureEgressRelay({ llm: { base_url: `http://host.docker.internal:${port}/v1` } }, net);
+        const relay = await ensureEgressRelay(cfg(`http://host.docker.internal:${port}/v1`), net);
         expect(relay.created).toBe(true);
         expect(relay.name).toBe(relayContainerName(net));
+        // The relay records WHAT it would run and WHERE it would forward, on
+        // every run, created or adopted — the only cross-run trace of a target
+        // or script change, since adoption never compares them (S5/S8).
+        expect(relay.scriptSha256).toMatch(/^[0-9a-f]{64}$/);
+        expect(relay.targets).toEqual([
+          { listenPort: port, host: "host.docker.internal", port, name: "omlx" } as RelayTarget,
+        ]);
 
         /**
          * AFTER, from a container attached to nothing but the internal bridge:
@@ -199,14 +259,25 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         );
         expect(after).toContain(nonce);
         expect(after).toContain(`"object":"list"`);
-        expect(after).not.toContain("ip=0");
-        expect(after).not.toContain("name=0");
+        // POSITIVE assertions for the DENY half, for the reason in
+        // `onInternalNetwork`'s comment. `toContain(nonce)` already rescued the
+        // REACH half from vacuity; nothing rescued these two, and they are
+        // precisely ISC-51/57's evidence. Asserting a non-zero curl code is
+        // strictly stronger than asserting the absence of `=0`, and still not
+        // hostage to curl's exact error taxonomy (7 vs 6 vs 28).
+        expect(after).toMatch(/^ip=[1-9][0-9]*$/m);
+        expect(after).toMatch(/^name=[1-9][0-9]*$/m);
 
         // Idempotence, the property `up` depends on: a second ensure adopts
         // the running relay rather than rebuilding a shared resource other
         // fleets may be using right now.
-        const again = await ensureEgressRelay({ llm: { base_url: `http://host.docker.internal:${port}/v1` } }, net);
-        expect(again).toEqual({ name: relay.name, created: false });
+        const again = await ensureEgressRelay(cfg(`http://host.docker.internal:${port}/v1`), net);
+        expect(again).toEqual({
+          name: relay.name,
+          created: false,
+          scriptSha256: relay.scriptSha256,
+          targets: relay.targets,
+        });
         const status = await inspectRelayContainer(relay.name);
         expect(status.running).toBe(true);
       } finally {
@@ -235,12 +306,12 @@ describe.skipIf(!DOCKER)("egress relay", () => {
       });
       const base = `http://host.docker.internal:${stub.port}/v1`;
       try {
-        const first = await ensureEgressRelay({ llm: { base_url: base } }, net);
+        const first = await ensureEgressRelay(cfg(base), net);
         expect(first.created).toBe(true);
         const stopped = await docker(["stop", "-t", "1", first.name]);
         expect(stopped.code).toBe(0);
 
-        const second = await ensureEgressRelay({ llm: { base_url: base } }, net);
+        const second = await ensureEgressRelay(cfg(base), net);
         expect(second.created).toBe(true);
         expect((await inspectRelayContainer(second.name)).running).toBe(true);
 
@@ -265,7 +336,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
       registerRelayArtifacts(net);
       await ensureEgressNetwork(net);
       await expect(
-        ensureEgressRelay({ llm: { base_url: "http://10.0.0.5:8000/v1" } }, net),
+        ensureEgressRelay(cfg("http://10.0.0.5:8000/v1"), net),
       ).rejects.toThrow(/host\.docker\.internal/);
       // Nothing was built on the way to that refusal.
       expect((await inspectRelayContainer(relayContainerName(net))).exists).toBe(false);
@@ -301,18 +372,32 @@ describe.skipIf(!DOCKER)("egress relay", () => {
       expect(directIds.length).toBeGreaterThan(0);
 
       const relay = await ensureEgressRelay(
-        { llm: { base_url: "http://host.docker.internal:8000/v1" } },
+        cfg("http://host.docker.internal:8000/v1"),
         net,
       );
       expect(relay.created).toBe(true);
 
+      /**
+       * The key is passed by NAME through docker's env plumbing and expanded
+       * INSIDE the container — never interpolated into the argv.
+       *
+       * The previous form built `-H "Authorization: Bearer <the real key>"`
+       * into a shell string handed to `docker run`, which put the live key in
+       * `ps` output, in the ephemeral container's `docker inspect`, and in any
+       * CI log that echoes commands. No leak had happened yet only because
+       * this test has never run anywhere but the maintainer's machine — it
+       * becomes a live exposure the moment ISC-257 wires this file into CI with
+       * a real secret. `$OMLX_API_KEY` below is expanded by the container's own
+       * bash, not by this process.
+       */
       const out = await onInternalNetwork(
         net,
         curlProbe(
           "models",
           "http://host.docker.internal:8000/v1/models",
-          `Authorization: Bearer ${OMLX_KEY}`,
+          "Authorization: Bearer $OMLX_API_KEY",
         ),
+        { OMLX_API_KEY: OMLX_KEY },
       );
       const line = out.split("\n").find((l) => l.startsWith("models="));
       expect(line).toBeDefined();
