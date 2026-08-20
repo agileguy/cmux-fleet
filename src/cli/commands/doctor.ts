@@ -587,6 +587,39 @@ export interface AllowlistVerdict {
  * `omlx/Qwen3.5-35B-A3B-4bit` that ISC-52 accepts would be reported here as
  * not served.
  *
+ * ## Why the SERVED side is decomposed too, which it was not
+ *
+ * Both sides means both sides, and for one commit it did not: the allowlist
+ * entry was decomposed and the served ids went into the set RAW. The docstring
+ * above already claimed otherwise, so the contradiction it exists to prevent
+ * was live and unstated.
+ *
+ * It is not a corner case, because the decoration lives on the side the
+ * SERVER controls and a server id normally carries it. Measured 2026-08-20
+ * against this function, with allowlist entry `Qwen3.5-35B-A3B-4bit`:
+ *
+ *     served ["mlx-community/Qwen3.5-35B-A3B-4bit"] -> served=false
+ *     served ["Qwen3.5-35B-A3B-4bit:high"]          -> served=false
+ *
+ * `mlx-community/…` is the standard MLX/HuggingFace repo-id form — what the
+ * oMLX this repository develops against actually lists. Measured against
+ * `up`'s own gate in the same run, a worker on
+ * `mlx-community/Qwen3.5-35B-A3B-4bit` is ACCEPTED by `assertModelAllowed`
+ * under that same allowlist. So `doctor` raised `allowlist-model-not-served`
+ * and exited 3 over a config `up` starts, and sent the operator to edit a
+ * correct file. `allowlistChecked` offers no cover: the list was fetched fine.
+ *
+ * `fallbackProvider` is the CONFIG's provider, and on a server-supplied id it
+ * is inert by construction — `decomposeModel` derives `model` from `raw`
+ * alone and the argument only ever reaches `spec.provider`, which this
+ * comparison discards. It is passed for symmetry with the allowlist side and
+ * because `doctor` probes exactly one endpoint, so the configured provider is
+ * the only one an unprefixed served id could belong to. The inertness is
+ * pinned by a test rather than left as a reading of `decomposeModel`: making
+ * this comparison provider-AWARE later would break on precisely these
+ * repo-id-form ids, where the config says `omlx` and the server says
+ * `mlx-community` about the same model.
+ *
  * ## Why the comparison is one-directional
  *
  * The allowlist is a permit list, not a manifest of the server's inventory. A
@@ -599,7 +632,7 @@ export function allowlistVerdicts(
   served: readonly string[],
   fallbackProvider: string,
 ): AllowlistVerdict[] {
-  const servedIds = new Set(served);
+  const servedIds = new Set(served.map((id) => decomposeModel(id, fallbackProvider, undefined).model));
   return allowlist.map((entry) => {
     const { model } = decomposeModel(entry, fallbackProvider, undefined);
     return { entry, model, served: servedIds.has(model) };
@@ -746,8 +779,57 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
       report.detail = `GET /models → HTTP ${res.status}${key ? "" : ` (no ${keyEnv} in environment)`}`;
       return report;
     }
-    const body = (await res.json()) as { data?: { id?: string }[] };
-    report.models = (body.data ?? []).map((m) => m.id ?? "").filter((id) => id.length > 0);
+    /**
+     * "Answered, but not in a shape I can read" is a DIFFERENT fact from "did
+     * not answer", and until now it was reported as the second.
+     *
+     * A body of `null`, or `{"data":"x"}`, or an entry that is not an object,
+     * threw right here — inside the outer try — and landed in the catch that
+     * writes `oMLX unreachable at ${baseUrl}`. The endpoint had just answered
+     * HTTP 200 over a working socket, and the operator was sent to check the
+     * network. So the parse gets its own boundary, and the message says what
+     * actually happened: the server is up, its `/v1/models` payload is wrong.
+     *
+     * Deliberately still a non-`ok` report rather than a Diagnosis of its own
+     * — the failure is the endpoint's, not the fleet's configuration, which is
+     * the same reason an unreachable endpoint is not graded here either.
+     */
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (err) {
+      report.detail =
+        `GET /models → HTTP ${res.status} but the body is not JSON: ${(err as Error).message}` +
+        ` — the endpoint ANSWERED, so this is not a connectivity fault`;
+      return report;
+    }
+    const data = (body as { data?: unknown } | null)?.data;
+    if (!Array.isArray(data)) {
+      report.detail =
+        `GET /models → HTTP ${res.status} but the body has no "data" array ` +
+        `(got ${body === null ? "a null body" : data === undefined ? "no data key" : typeof data})` +
+        ` — the endpoint ANSWERED, so this is not a connectivity fault`;
+      return report;
+    }
+    // Each entry is guarded too: one malformed element must not decide the
+    // whole probe, and `m.id` on a null element threw into the same wrong
+    // catch as the two cases above.
+    report.models = data
+      .map((m) => (m as { id?: unknown } | null)?.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    /**
+     * A list with entries but no usable id in any of them is malformed too,
+     * and must not be allowed to look like the EMPTY list — which is a
+     * legitimate answer from a server with nothing loaded, deliberately
+     * handled by leaving `allowlistChecked` false and saying nothing more.
+     * Guarded on `data.length > 0` so that legitimate case is untouched.
+     */
+    if (data.length > 0 && report.models.length === 0) {
+      report.detail =
+        `GET /models → HTTP ${res.status} listed ${data.length} entr${data.length === 1 ? "y" : "ies"} ` +
+        `with no usable "id" — the endpoint ANSWERED, so this is not a connectivity fault`;
+      return report;
+    }
 
     /**
      * ISC-256, computed HERE rather than in the action, for two reasons: this
@@ -759,14 +841,18 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
      * Gated on a NON-EMPTY served list. A server that answered 200 with no
      * models tells us nothing about any particular model, and grading every
      * allowlist entry "not served" off that would be a confident wrong answer.
+     *
+     * `loaded !== null` is the precondition STATED rather than implied. It was
+     * already guaranteed — `allowlist` comes from `loaded?… ?? []`, so a null
+     * config cannot reach a non-empty list — and the previous
+     * `loaded?.config.llm.provider ?? "omlx"` was a default for a branch that
+     * could not be entered without a config. Narrowing here deletes that dead
+     * fallback instead of leaving a provider invented for a config that does
+     * not exist, which would be a lie the day someone loosened the gate above.
      */
     const allowlist = loaded?.config.llm.models_allowlist ?? [];
-    if (allowlist.length > 0 && report.models.length > 0) {
-      report.allowlist = allowlistVerdicts(
-        allowlist,
-        report.models,
-        loaded?.config.llm.provider ?? "omlx",
-      );
+    if (loaded !== null && allowlist.length > 0 && report.models.length > 0) {
+      report.allowlist = allowlistVerdicts(allowlist, report.models, loaded.config.llm.provider);
       report.allowlistChecked = true;
     }
   } catch (err) {
@@ -900,13 +986,24 @@ export function register(program: Command): void {
        * reported as a bad allowlist.
        */
       const notServed = omlx.allowlist.filter((v) => !v.served);
+      /**
+       * DISTINCT entries, for the human-facing count and list.
+       *
+       * `omlx.allowlist` is deliberately 1:1 with the config's lines, so a
+       * duplicated entry legitimately produces two verdicts — that is asserted,
+       * and it is what makes `n/m served` a ratio over lines. But the diagnosis
+       * says "names N model(s)", which is a claim about MODELS: an allowlist
+       * that repeats one bad name read as `names 2 model(s) … : X, X`, inviting
+       * the operator to hunt for a second model that was never there.
+       */
+      const notServedEntries = [...new Set(notServed.map((v) => v.entry))];
       if (omlx.allowlistChecked && notServed.length > 0) {
         diagnoses.push({
           name: "allowlist-model-not-served",
           class: "misconfigured",
           message:
-            `llm.models_allowlist names ${notServed.length} model(s) the endpoint at ` +
-            `${omlx.baseUrl} does not serve: ${notServed.map((v) => v.entry).join(", ")} — ` +
+            `llm.models_allowlist names ${notServedEntries.length} model(s) the endpoint at ` +
+            `${omlx.baseUrl} does not serve: ${notServedEntries.join(", ")} — ` +
             `it serves [${omlx.models.join(", ")}]. Correct the allowlist, or load those ` +
             `models on the server; a role pointed at one of them would fail at \`up\``,
         });
@@ -1001,10 +1098,13 @@ export function register(program: Command): void {
                 // list, not only the failures, so a consumer can tell a
                 // checked-and-fine entry from one the check never reached.
                 // `allowlist_not_served` is the flagged subset, pre-extracted
-                // because that is the field a caller branches on.
+                // because that is the field a caller branches on — DISTINCT
+                // entries, matching the diagnosis message, so a caller that
+                // counts it counts models rather than repeated config lines.
+                // The 1:1-with-the-config record stays in `allowlist`.
                 allowlist_checked: omlx.allowlistChecked,
                 allowlist: omlx.allowlist,
-                allowlist_not_served: notServed.map((v) => v.entry),
+                allowlist_not_served: notServedEntries,
                 list_latency_ms: omlx.listLatencyMs,
                 completion_latency_ms: omlx.completionLatencyMs,
                 probe_model: omlx.model,
@@ -1049,12 +1149,14 @@ export function register(program: Command): void {
               `omlx allowlist: NOT CHECKED (${declared.length} entries) — the endpoint's model list was unreadable`,
             );
           } else {
+            // The ratio counts CONFIG LINES, so it still reconciles with the
+            // `allowlist` array an operator sees in `--json`; the NOT SERVED
+            // list names distinct entries, so a repeated line is one thing to
+            // go and fix rather than two.
             const served = omlx.allowlist.length - notServed.length;
             console.log(
               `omlx allowlist: ${served}/${omlx.allowlist.length} served` +
-                (notServed.length > 0
-                  ? ` — NOT SERVED: ${notServed.map((v) => v.entry).join(", ")}`
-                  : ""),
+                (notServedEntries.length > 0 ? ` — NOT SERVED: ${notServedEntries.join(", ")}` : ""),
             );
           }
         }

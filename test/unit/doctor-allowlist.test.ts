@@ -29,7 +29,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { stringify } from "yaml";
 import { allowlistVerdicts } from "../../src/cli/commands/doctor.ts";
+import { assertModelAllowed, parseConfig, resolveWorker } from "../../src/config/load.ts";
 
 /** The three ids the oMLX on this host actually served when ISC-256 was written. */
 const LIVE_SERVED = [
@@ -164,4 +166,177 @@ describe("the comparison uses ISC-52's decomposition, not a raw string compare",
     expect(v[0]!.model).toBe("GLM-4.5-Air-MLX-4bit");
     expect(v[0]!.served).toBe(false);
   });
+
+  /**
+   * BOTH sides, which for one commit was only one.
+   *
+   * Every test above this decorates the ALLOWLIST entry and leaves the served
+   * ids bare, so all of them passed against a `new Set(served)` built from raw
+   * server strings — the describe block asserted a property twice as broad as
+   * anything it checked. The half it did not check is the half that MATTERS,
+   * because the decoration lives on the side the SERVER controls and a real
+   * server id normally carries it: `mlx-community/…` is the standard
+   * MLX/HuggingFace repo-id form, and it is what the oMLX this repo develops
+   * against lists. With it unhandled, `doctor` raised
+   * `allowlist-model-not-served` and exited 3 over an allowlist `up` accepts.
+   */
+  test("a provider prefix on the SERVED id is stripped before comparison", () => {
+    const v = allowlistVerdicts(
+      ["Qwen3.5-35B-A3B-4bit"],
+      ["mlx-community/Qwen3.5-35B-A3B-4bit"],
+      "omlx",
+    );
+    expect(v[0]!.served).toBe(true);
+  });
+
+  test("a thinking suffix on the SERVED id is stripped before comparison", () => {
+    const v = allowlistVerdicts(["Qwen3.5-35B-A3B-4bit"], ["Qwen3.5-35B-A3B-4bit:high"], "omlx");
+    expect(v[0]!.served).toBe(true);
+  });
+
+  test("both at once, on the SERVED id", () => {
+    const v = allowlistVerdicts(
+      ["Qwen3.5-35B-A3B-4bit"],
+      ["mlx-community/Qwen3.5-35B-A3B-4bit:low"],
+      "omlx",
+    );
+    expect(v[0]!.served).toBe(true);
+  });
+
+  test("decorated on both sides at once, with different providers", () => {
+    // The `provider/` prefix is a FLAG, not identity, so the config saying
+    // `omlx` and the server saying `mlx-community` about one model is a match
+    // — exactly as `assertModelAllowed` treats it.
+    const v = allowlistVerdicts(
+      ["omlx/Qwen3.5-35B-A3B-4bit:high"],
+      ["mlx-community/Qwen3.5-35B-A3B-4bit"],
+      "omlx",
+    );
+    expect(v[0]!.served).toBe(true);
+  });
+
+  /**
+   * The negative control for the four above. Stripping the served side must
+   * not become "strip until something matches": a near miss stays a miss even
+   * when the served id is decorated, and a colon that is not a thinking level
+   * stays part of the served id just as it stays part of an entry.
+   */
+  test("decorating the served id does not manufacture a match", () => {
+    expect(
+      allowlistVerdicts(["Qwen3.5-35B-A3B-8bit"], ["mlx-community/Qwen3.5-35B-A3B-4bit"], "omlx")[0]!
+        .served,
+    ).toBe(false);
+    expect(
+      allowlistVerdicts(["Qwen3.5-35B-A3B-4bit"], ["Qwen3.5-35B-A3B-4bit:nonsense"], "omlx")[0]!
+        .served,
+    ).toBe(false);
+    // A prefix on the served side is not a licence to prefix-match either.
+    expect(
+      allowlistVerdicts(["Qwen3"], ["mlx-community/Qwen3-Coder-30B"], "omlx")[0]!.served,
+    ).toBe(false);
+  });
+
+  /**
+   * `fallbackProvider` is INERT on the served side, pinned rather than read off
+   * `decomposeModel`.
+   *
+   * It is the CONFIG's provider, and a server-supplied id has no configured
+   * provider at all — so the argument must not be allowed to influence the
+   * verdict. Today it cannot: `decomposeModel` derives `model` from `raw`
+   * alone and the value only ever reaches `spec.provider`, which this
+   * comparison discards. The day someone makes the comparison provider-AWARE,
+   * this test goes red instead of the repo-id form silently going unserved
+   * again — which is precisely the case that would break, since the config
+   * says `omlx` and the server says `mlx-community` about the same model.
+   */
+  test("the fallback provider cannot change a served-side verdict", () => {
+    const served = ["mlx-community/Qwen3.5-35B-A3B-4bit", "Qwen3-Embedding-4B-4bit-DWQ"];
+    const entries = ["Qwen3.5-35B-A3B-4bit", "Qwen3-Embedding-4B-4bit-DWQ", "GLM-4.5-Air-MLX-4bit"];
+    const asOmlx = allowlistVerdicts(entries, served, "omlx");
+    for (const provider of ["mlx-community", "vertex", "anything-at-all"]) {
+      expect(allowlistVerdicts(entries, served, provider)).toEqual(asOmlx);
+    }
+    expect(asOmlx.map((v) => v.served)).toEqual([true, true, false]);
+  });
+});
+
+/**
+ * The property the decomposition exists FOR, checked against the real gate
+ * rather than restated.
+ *
+ * Everything above pins `allowlistVerdicts` against strings this file chose.
+ * That is necessary and not sufficient: the whole reason both sides are
+ * decomposed is that `doctor` must not contradict `up` about one line of one
+ * file, and nothing was comparing the two commands. It went wrong exactly
+ * there — the served side went into the set raw while `assertModelAllowed`
+ * decomposed, so `doctor` exited 3 on a fleet `up` starts.
+ *
+ * So this drives BOTH: `assertModelAllowed` on a worker resolved from a real
+ * parsed config, and `allowlistVerdicts` on a server that lists that same
+ * model, and asserts they agree. A test that agrees by construction would be
+ * worthless, so the pairs below are deliberately decorated asymmetrically —
+ * repo-id form on one side, bare on the other — and two of them must come back
+ * REFUSED, or "they always agree" would be satisfiable by always saying no.
+ */
+describe("doctor's verdict agrees with up's gate on the same config (ISC-256 ↔ ISC-52)", () => {
+  /** Does `up` start a worker on `workerModel` under `allowlist`? */
+  async function upAccepts(allowlist: readonly string[], workerModel: string): Promise<boolean> {
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "allowlist-agreement",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: { model: "DefaultModel", models_allowlist: [...allowlist] },
+        roles: { eng: { model: workerModel } },
+        workers: [{ id: "w1", role: "eng" }],
+      }),
+      "/nonexistent/fleet.yaml",
+    );
+    try {
+      assertModelAllowed(loaded, resolveWorker(loaded, "w1"));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The model id in each row is written the SAME way in `roles.eng.model` and
+   * in the served list, so the two commands are being asked the same question
+   * about the same string. `expected` is what both must answer.
+   */
+  const ROWS: { id: string; expected: boolean; why: string }[] = [
+    {
+      id: "mlx-community/Qwen3.5-35B-A3B-4bit",
+      expected: true,
+      why: "the standard MLX/HuggingFace repo-id form — THE case that was broken",
+    },
+    { id: "Qwen3.5-35B-A3B-4bit:high", expected: true, why: "a thinking suffix is a flag" },
+    { id: "Qwen3.5-35B-A3B-4bit", expected: true, why: "undecorated, the easy case" },
+    {
+      id: "Qwen3.5-35B-A3B-8bit",
+      expected: false,
+      why: "one character off the allowlisted model — both must still say no",
+    },
+    {
+      id: "mlx-community/GLM-4.5-Air-MLX-4bit",
+      expected: false,
+      why: "a repo-id form of a model nobody allowlisted",
+    },
+  ];
+
+  const ALLOWLIST = ["Qwen3.5-35B-A3B-4bit"];
+
+  for (const { id, expected, why } of ROWS) {
+    test(`${id} — ${why}`, async () => {
+      const up = await upAccepts(ALLOWLIST, id);
+      const doctorSaysServed = allowlistVerdicts(ALLOWLIST, [id], "omlx")[0]!.served;
+      expect(
+        doctorSaysServed,
+        `doctor says served=${doctorSaysServed} while up ${up ? "ACCEPTS" : "REFUSES"} the same model`,
+      ).toBe(up);
+      expect(up).toBe(expected);
+    });
+  }
 });
