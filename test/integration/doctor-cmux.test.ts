@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
 import { REQUIRED_COMMANDS } from "../../src/backends/cmux/capabilities.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 
@@ -127,6 +128,24 @@ function parseDoctor(r: { code: number; stdout: string; stderr: string }): Recor
   }
 }
 
+/**
+ * ISC-266: every test below is budgeted by the number of `doctor()` spawns it
+ * performs, not by bun's 5000 ms default.
+ *
+ * Measured standalone on an idle 14-core machine, three runs. The cost here is
+ * almost perfectly linear in the spawn count — one `doctor` invocation costs
+ * 1026-1421 ms, two cost 2088-2345 ms — which is the `cliBudget` model holding
+ * exactly, and it is also why the whole cluster is budgeted rather than only
+ * its slowest member. The two single-spawn tests do the SAME work as each
+ * other; their measured spread (1198 vs 1421 ms on the same run) is run-to-run
+ * noise on one operation, so treating them differently would draw the line on
+ * noise rather than on what the tests do.
+ *
+ * Against the 5000 ms default the two-spawn test had ~2.1x headroom, and the
+ * 2.09x-2.98x inflation measured under load in `test/support/budget.ts` covers
+ * that on its own. Nothing here was observed failing; it is budgeted because
+ * the margin is already inside the range where contention is known to land.
+ */
 describe("doctor reports what cmux can and cannot do", () => {
   /**
    * ISC-133. `respawn-pane` specifically, because that is the command the
@@ -141,7 +160,8 @@ describe("doctor reports what cmux can and cannot do", () => {
     const out = `${r.stdout}${r.stderr}`;
     expect(out).toContain("cmux-required-command-missing");
     expect(out).toContain(missing);
-  });
+    // One `doctor` spawn; 1140-1421 ms idle across three standalone runs.
+  }, cliBudget(1));
 
   test("a cmux with every required command does not fail on that account", async () => {
     const bin = await shimCmux([...REQUIRED_COMMANDS, "read-screen"]);
@@ -151,7 +171,8 @@ describe("doctor reports what cmux can and cannot do", () => {
     // Every CLI command is present; whatever else a shim cannot satisfy (a
     // real socket, say) is a different diagnosis and not this test's subject.
     expect(cmux["missing_commands"]).not.toContain("respawn-pane");
-  });
+    // One `doctor` spawn; 1026-1198 ms idle across three standalone runs.
+  }, cliBudget(1));
 
   /**
    * ISC-132. `read-screen` is diagnostics-only, so its absence must NOT fail
@@ -177,7 +198,8 @@ describe("doctor reports what cmux can and cannot do", () => {
 
     // Reported, never required: losing a diagnostic does not change the verdict.
     expect(withoutRs.code).toBe(withRs.code);
-  });
+    // Two `doctor` spawns — the with/without pair; 2088-2345 ms idle.
+  }, cliBudget(2));
 });
 
 /**

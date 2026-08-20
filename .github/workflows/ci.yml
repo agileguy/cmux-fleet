@@ -83,6 +83,68 @@ jobs:
           EXPECTED_SKIPS="$EXPECTED_LIVE_OMLX_PROBE_SKIPS" \
             .github/scripts/probe-guard.sh test/integration/model-probe.test.ts
 
+  # ISC-266. The criterion says the fix "should be judged by deliberately
+  # running the suite under load, not by re-running it on a quiet box until it
+  # passes." A script in `.github/scripts/` that a developer must remember to
+  # run is not a judgement, it is a suggestion — and a suggestion is exactly
+  # what ISC-266 already had in the form of "just re-run it". This job is what
+  # turns the harness into something that re-checks the criterion whether or
+  # not anyone remembers to.
+  #
+  # WHAT IT PROVES. That the per-test budgets in test/support/budget.ts are
+  # adequate for the work their tests do when the machine is contended, rather
+  # than merely adequate on an idle box. If a budget is too small — or if a
+  # test's spawn count grows and its `cliBudget(N)` is not updated with it —
+  # this job goes red, and it goes red HERE, on a PR, instead of on a
+  # developer's machine at 5pm where it gets dismissed as "the flaky one".
+  # That dismissal is the actual harm ISC-266 describes.
+  #
+  # WHAT IT DOES NOT PROVE, stated because the difference is the whole reason
+  # this criterion exists. A GitHub runner is not a developer workstation:
+  # measured on run 32291463113 it reports TWO cores, against the 14 the
+  # ISC-266 numbers were taken on, and it carries none of the editor, language
+  # server, browser and concurrent agents that produced the load average of
+  # 18.40 recorded in the criterion. This job reproduces the SHAPE of the
+  # defect — CPU contention stretching subprocess spawns past a fixed ceiling —
+  # at a smaller magnitude. It is a floor on the evidence, not a ceiling, and
+  # ISA.md grades ISC-266 with that limitation written into the criterion
+  # rather than left implied.
+  #
+  # IT DOES MEASURABLY APPLY LOAD, which is worth pinning down because a job
+  # that is green having done nothing is the failure mode this repo has spent
+  # a session eliminating. On run 32291463113, the same commit and the same
+  # runner class ran `test/integration` in 124.32s in the `test` job and
+  # 222.78s here — 1.79x, which is the SAME inflation factor measured locally
+  # on 14 cores (167.76s -> 300.87s). Two loops against two cores is genuine
+  # contention: three runnable threads competing for two CPUs.
+  #
+  # Do NOT read the "load average now" line the script prints as the evidence.
+  # It is a one-minute average sampled two seconds after the generators start,
+  # so it always reads low (0.95 on the run above) and says nothing about
+  # whether load was applied. The wall-clock comparison above is the evidence.
+  #
+  # WHY IT IS A SEPARATE JOB. It deliberately makes the machine slow. Hanging
+  # it off `test` would contaminate the clean timings that job exists to
+  # produce, and would make any failure there ambiguous between "the code is
+  # broken" and "the box was busy" — which is precisely the confusion ISC-266
+  # was filed over. Keeping them apart means a red `test` and a red `load` say
+  # different things.
+  #
+  # The script sizes its own load from the runner's core count, so this needs
+  # no tuning per runner; it self-terminates and traps, so it cannot leave the
+  # runner spinning; and it exits with the test run's own status, so this is a
+  # gate rather than a report.
+  load:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - run: bun install --frozen-lockfile || bun install
+      - name: The integration suite, under deliberate CPU contention (ISC-266)
+        run: .github/scripts/test-under-load.sh
+
   # The container suite is a separate job because it builds the worker image
   # (google-cloud-cli, kubectl, helm — many minutes) and must not gate fast
   # feedback. It is NOT optional: without it, every Group C and Group J

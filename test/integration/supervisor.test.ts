@@ -628,6 +628,9 @@ describe("epoch fence durability across a SIGKILL (ISC-143)", () => {
         await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
         await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
       },
+      // ISC-266 audit: stands. Two spawns (the doomed supervisor, then the
+      // restart) derive cliBudget(2) = 22_800 ms, and measured idle is
+      // 2255-2364 ms — this is the larger number, so it is not reduced.
       60_000,
     );
   }
@@ -775,6 +778,12 @@ describe("settle() failure does not kill the supervisor (ISC-212)", () => {
       //
       // The observable event is the epoch leaving the fence: the supervisor
       // settles the task (failing to record it) and returns to idle.
+      // ISC-266 audit: the 45_000 below stands, and this is NOT a spawn-cost
+      // test. It performs a single spawn, so cliBudget(1) would be 11_400 ms —
+      // narrower than the 11_415 ms it measures idle, because its cost is the
+      // deliberate escalation ladder below (1s deadline + 5s ABORT_GRACE_MS +
+      // settle), not process startup. Deriving from the spawn count here would
+      // tighten a passing test, so the hand-picked number is kept.
       const escalated = await waitFor(async () => {
         const s = await readWorkerState(wp);
         return s !== null && s.phase !== "busy";

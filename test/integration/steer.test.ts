@@ -228,6 +228,9 @@ describe("steer — ISC-80: the message lands before the next assistant turn", (
 
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
     },
+    // ISC-266 audit: stands. One `steer` spawn derives cliBudget(1) = 11_400 ms;
+    // measured idle is 5138 ms, dominated by the real prompt/turn round-trip
+    // against fake-pi rather than by startup. Not reduced.
     45_000,
   );
 

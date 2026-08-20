@@ -259,6 +259,9 @@ describe("dispatch --auto failure propagation names the root cause", () => {
       const onDisk = ScheduleJson.parse(JSON.parse(await Bun.file(run.scheduleJson).text()));
       expect(onDisk).toEqual(schedule);
     },
+    // ISC-266 audit: stands. Three spawns (two supervisors, one `dispatch`)
+    // derive cliBudget(3) = 34_200 ms; measured idle is 6428 ms, most of it
+    // A's 1s deadline escalating against an abort-deaf agent. Not reduced.
     120_000,
   );
 });

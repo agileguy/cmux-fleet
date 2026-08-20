@@ -21,6 +21,30 @@ All notable changes to this project are documented here.
   changed in this entry — this records a known gap where it can be counted.
 
 ### Fixed
+- **Integration tests that spawn the CLI were failing on busy developer machines and passing in CI
+  (ISC-266).** They inherited bun's default 5000 ms per-test budget — a number with no relationship
+  to the work they do. Under ten busy loops on 14 cores, three `harvest.test.ts` tests died at
+  exactly 5001-5003 ms (the timeout, not the work) and one reached 9991 ms once the budget was
+  lifted; it failed 3/3 consecutively, so this was consistent under load rather than intermittent,
+  which is why it first read as a genuine breakage. The harm is not the red test — it is that a red
+  test on a busy machine gets dismissed as "the flaky one", which trains people to discount red
+  generally, the same erosion a self-skipping test causes from the other direction.
+  **The ceiling could not be raised repo-wide:** bun 1.3.11 ignores `[test] timeout` in
+  `bunfig.toml` (probed — a deliberately-6s test still died at 5001.03 ms with `timeout = 12345`
+  set), and `--timeout` only covers the invocation that passes it, so neither protects a developer
+  running a bare `bun test`. `test/support/budget.ts` therefore computes
+  `cliBudget(N) = max(5000, N * 1900 * 3 * 2)` from the spawns a test actually performs. `1900` is
+  **not an average**: spawn cost is not uniform — `report` and `artifacts --all` grade a whole run
+  at ~1.3-1.6 s each while `artifacts --task` and `render` cost ~50-200 ms — so it rounds up the
+  worst single expensive spawn measured and charges every spawn at that rate on purpose. The result
+  stays **bounded**: a genuinely hung subprocess still fails, because an unbounded budget trades a
+  flaky test for a hanging suite. Eight budgets were applied where a test was at risk and had none;
+  eleven pre-existing hand-picked budgets were audited and **not one was reduced**. Three slow tests
+  are deliberately left alone because spawn count does not describe them — `supervisor`'s ISC-212
+  test measures 11415 ms against a derived 11400, `acceptance`'s ISC-152 test spawns no CLI at all,
+  and `worktree`'s L443 drives git in-process — and deriving budgets for those would have
+  *tightened* passing tests. Not one assertion was weakened: zero `expect(...)` lines changed.
+
 - **A CI-executable guard test was failing on the clock's precision rather than on the property it
   defends (ISC-267).** `doctor-omlx.test.ts` asserted a measured latency against the delay its stub
   **requested** (`await Bun.sleep(40)`). A sleep is a request to be woken no earlier than N, not a
@@ -38,6 +62,22 @@ All notable changes to this project are documented here.
   is about variation. The probe now runs twice against different delays and requires the figure to
   move, so no constant satisfies both floors. Mutation-verified: `42` fails (it passed before),
   `5000` fails, a clock read twice fails.
+
+### Added
+- **The suite is now judged under deliberate load rather than only on a quiet box (ISC-266).**
+  `.github/scripts/test-under-load.sh` runs a target under `ceil(cores * 0.75)` busy loops and exits
+  with the suite's own status, and a separate `load` job in CI runs it on every PR. A budget that is
+  too small — or a test whose spawn count grows without its `cliBudget(N)` growing with it — now
+  fails a PR instead of a developer's afternoon. Measured: the full integration suite under eleven
+  loops on 14 cores ran 375 pass / 81 skip / 0 fail in 300.87 s against 167.76 s idle, a 1.79x
+  inflation with every budget holding. On CI the job is confirmed to apply real load rather than
+  merely pass: the same commit ran `test/integration` in 124.32 s in the `test` job and 222.78 s in
+  the `load` job — 1.79x, the same factor. **What it does not prove is stated in the job's own
+  comment:** the runner reports two cores against the 14 these numbers came from, and none of the
+  editor, language server, browser and concurrent agents behind the load average of 18.40 ISC-266
+  recorded, so it reproduces the *shape* of the contention at a smaller magnitude — a floor on the
+  evidence, not a ceiling. The harness's cleanup traps a recorded PID list and never `jobs -p`, which is empty in a
+  non-interactive shell and would read as correct while killing nothing.
 
 ### Security
 - **The mandatory native-tool-call gate was certifying a network path no worker uses.** `up`
