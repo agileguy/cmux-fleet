@@ -487,6 +487,13 @@ export function initialWorkerState(args: {
   pid: number;
   pgid: number;
   startedAt: string;
+  /**
+   * The pinned `utc1 …` launch identity from `processStartTime(process.pid)`.
+   * Optional so a caller that genuinely has no reading (the probe failed)
+   * records the empty string rather than inventing one — see
+   * `WorkerStateSchema.proc_started` for why an absent value must stay absent.
+   */
+  procStarted?: string;
 }): WorkerState {
   return WorkerStateSchema.parse({
     schema: "pifleet.state/v1",
@@ -495,6 +502,7 @@ export function initialWorkerState(args: {
     pid: args.pid,
     pgid: args.pgid,
     started_at: args.startedAt,
+    proc_started: args.procStarted ?? "",
     phase: "starting",
     epoch: 0,
   });
