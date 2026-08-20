@@ -17,6 +17,7 @@ import {
   type SentResponse,
 } from "../../src/rpc/client.ts";
 import type { RpcEvent, RpcResponse } from "../../src/contracts.ts";
+import { EpochManager } from "../../src/rpc/epoch.ts";
 import { LineSplitter, LineTooLongError, MAX_LINE_UNITS, TailReader } from "../../src/util/jsonl.ts";
 
 interface Harness {
@@ -153,6 +154,78 @@ describe("RpcClient — correlation", () => {
     );
     expect(h.strays).toHaveLength(1);
     expect(h.strays[0]!.kind).toBe("unknown");
+  });
+});
+
+/**
+ * ISC-141, at the seam rather than in the machine.
+ *
+ * `epoch.test.ts` proves `EpochManager` decides the §7.5 interleaving when it
+ * is HANDED the right offsets. That left the other half unpinned: nothing
+ * asserted the client hands it real ones. Replacing `pending.onAck?.(seq)`
+ * with `pending.onAck?.(0)` — which throws the fence post away and restores
+ * exactly the SRD window rule the erratum exists to correct, since every later
+ * record then compares `> 0` and is "live" — passed `test/unit`, the three
+ * closest `test/integration` files, and the `test/e2e` §7.5 interleave case.
+ * The fence was load-bearing in production and unguarded in CI.
+ *
+ * So this composes the two real objects and asserts the offset itself, with
+ * the straggler and the ack PACKED INTO ONE WRITE. That packing is the case
+ * the client's own `onAck` comment is about: the ack must land on the fence
+ * synchronously, before the next line in the same chunk is dispatched, or the
+ * event after it is attributed to the previous epoch.
+ */
+describe("RpcClient x EpochManager — the ack's offset is the fence post (ISC-141)", () => {
+  test("a straggler packed ahead of the ack is prior; the same bytes after it are live", async () => {
+    const acks: number[] = [];
+    const em = new EpochManager();
+    const attributed: Array<{ type: string; where: string }> = [];
+    const written: string[] = [];
+
+    const client = new RpcClient(
+      { write: (s) => written.push(s) },
+      {
+        onEvent: (event, seq) => attributed.push({ type: event.type, where: em.attribute(seq) }),
+        defaultTimeoutMs: 1_000,
+      },
+    );
+
+    // Epoch 1 ran and was aborted; epoch 2 is dispatched but not yet acked.
+    em.allocate("T-004", "a1", null);
+    em.settle("aborted", "t0");
+    expect(em.allocate("T-005", "a2", null).ok).toBe(true);
+
+    const p = client.send(
+      "prompt",
+      { message: "go" },
+      {
+        onAck: (seq) => {
+          acks.push(seq);
+          em.noteAck(seq);
+        },
+      },
+    );
+    const req = JSON.parse(written[0]!) as { id: string };
+
+    // One write, three records: epoch 1's straggler was already in the pipe
+    // when epoch 2's prompt was acked, and epoch 2's own output follows. The
+    // two `agent_end`s are byte-identical — offset is the ONLY signal.
+    const straggler = '{"type":"agent_end","messages":[],"willRetry":false}\n';
+    client.feedText(
+      straggler +
+        `{"id":${JSON.stringify(req.id)},"type":"response","command":"prompt","success":true,"data":{}}\n` +
+        straggler,
+    );
+    await p;
+
+    // The fence post is the ack's REAL stream position — the second record —
+    // not a constant and not the seq of anything else.
+    expect(acks).toEqual([2]);
+
+    expect(attributed).toEqual([
+      { type: "agent_end", where: "prior" },
+      { type: "agent_end", where: "live" },
+    ]);
   });
 });
 

@@ -898,3 +898,101 @@ describe("settle() failure does not kill the supervisor (ISC-212)", () => {
     45_000,
   );
 });
+
+/**
+ * ISC-116's ABORT conjunct, which nothing else asserted.
+ *
+ * The criterion is a conjunction of three things — "a task exceeding
+ * `deadline_s` is ABORTED and REPORTED `timed_out` with EXIT 4" — and the two
+ * halves after the first were already covered:
+ * `test/integration/dispatch-auto.test.ts` drives a real `dispatch --auto`
+ * against a `deaf-abort` agent and asserts `verdict: "timed_out"` and
+ * `EXIT.TIMEOUT`. What that test cannot show is that an abort was ever SENT,
+ * precisely because its agent is deaf to abort by construction: delete
+ * `client.send("abort")` from the deadline branch and that test still passes,
+ * because the escalation timer settles the task either way.
+ *
+ * So the discriminator has to come from an agent that HONOURS abort.
+ * `aborted.json` does. When the abort request lands, the agent ends its turn
+ * inside the 5s `ABORT_GRACE_MS` window and the task settles through the
+ * normal quiesce path, so `deadline_escalated` is NEVER logged. When the abort
+ * is not sent, the agent keeps working, the escalation fires, and that event
+ * appears. The absence below is therefore the positive evidence that the
+ * deadline path actually asked the agent to stop, rather than merely
+ * outliving it.
+ *
+ * Reading `em.timedOut` over `em.abortRequested` is what keeps the verdict
+ * `timed_out` rather than `aborted` on this path — a deadline abort is a
+ * timeout that happened to be polite, not an operator abort — and asserting
+ * the verdict here pins that precedence at the supervisor, one layer below
+ * where `wait` turns it into exit 4.
+ */
+describe("ISC-116: a deadline aborts the agent, then reports timed_out", () => {
+  test(
+    "the abort lands, the task settles timed_out, and nothing escalates",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("deadline-abort");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        // Honours abort: `cancel_active: true`, then emits `agent_end`.
+        env: { PIFLEET_PI_COMMAND: piCommand("aborted.json") },
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      // 1s against a 30s turn: the deadline is guaranteed to be the thing that
+      // ends this task, not the scenario running out of steps.
+      const envelope = TaskEnvelopeSchema.parse({
+        ...makeEnvelope(runId, "eng-1", "T-DEADLINE-1"),
+        deadline_s: 1,
+      });
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope,
+        attempt_id: "deadline-attempt-1",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      // Budget generously past ABORT_GRACE_MS (5s): a run that needed the
+      // escalation must have TIME to escalate, or the absence asserted below
+      // would just mean "we did not wait long enough".
+      const settled = await waitFor(
+        async () => (await readTaskRecord(taskRecordPath(wp, "T-DEADLINE-1"))) !== null,
+        20_000,
+      );
+      expect(settled).toBe(true);
+
+      const record = await readTaskRecord(taskRecordPath(wp, "T-DEADLINE-1"));
+      // Reported `timed_out` — not `aborted`, though an abort is how it ended.
+      expect(record?.verdict).toBe("timed_out");
+
+      const events = await readEvents(wp.eventsJsonl);
+      // The deadline is what fired, and it fired for THIS task.
+      expect(
+        events.some(
+          (e) => e["type"] === "deadline_exceeded" && e["task_id"] === "T-DEADLINE-1",
+        ),
+      ).toBe(true);
+      // THE assertion of this test: the agent stopped because it was asked to.
+      // Remove `client.send("abort")` from the deadline branch and the deaf
+      // path runs instead — `deadline_escalated` appears here and this fails.
+      expect(events.some((e) => e["type"] === "deadline_escalated")).toBe(false);
+      // Same fact from the settle side: the escalation's reason is a distinct
+      // string, so this cannot pass on an escalated settle either.
+      expect(record?.reason).not.toBe("deadline_exceeded_no_terminal_event");
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    45_000,
+  );
+});
