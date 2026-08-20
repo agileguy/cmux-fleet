@@ -2267,15 +2267,29 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
           expect([...seen].sort()).toEqual(Object.keys(EXPECTED).sort());
 
           /**
-           * The one deliberate exemption. `--env-file` is NOT materialized: an
-           * empty allow list is semantically correct (deny-all for mutating
-           * verbs), while an empty env file is semantically wrong — no
-           * `base_url`, no API key — and would fail obscurely inside the
-           * container instead of loudly at `docker run`.
+           * `--env-file` USED to be the one deliberate exemption, and this
+           * assertion used to require it ABSENT.
+           *
+           * The reasoning then was that an empty allow list is semantically
+           * correct (deny-all for mutating verbs) while an empty env file is
+           * semantically wrong — no `base_url`, no API key — so leaving the
+           * path unwritten made a premature `docker run` fail loudly on a
+           * missing file instead of quietly on a wrong one. That was a
+           * tripwire held until a real writer existed, not a permanent
+           * property, and `run/worker-env.ts` is that writer.
+           *
+           * So the assertion inverts, and is made STRONGER rather than merely
+           * flipped: the file must exist, and it must be 0600. The mode is the
+           * half worth pinning — this is the only materialized input that
+           * carries a secret (the Class 1 oMLX key, SRD §12.4), and it is also
+           * the only one the container never opens, because `--env-file` is
+           * parsed by the docker client on the host. Nothing else in the
+           * `EXPECTED` table above would catch it silently becoming 0644.
            */
           const envFile = r.docker[r.docker.indexOf("--env-file") + 1];
           expect(envFile).toBe(workerPaths(run, worker.id).envFile);
-          expect(await Bun.file(envFile!).exists()).toBe(false);
+          expect(await Bun.file(envFile!).exists()).toBe(true);
+          expect((await stat(envFile!)).mode & 0o777).toBe(0o600);
         }
       } finally {
         if (before === undefined) delete process.env["PIFLEET_RUNS_DIR"];

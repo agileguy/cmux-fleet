@@ -29,6 +29,8 @@ import {
   PresentationSchema,
   VerdictSchema,
   WorkerStateSchema,
+  WorkerLaunchSchema,
+  type WorkerLaunch,
   workerId,
   type BudgetState,
   type Presentation,
@@ -50,6 +52,24 @@ import type { WorkerWorktree } from "./worktree.ts";
 
 export async function readWorkerState(paths: WorkerPaths): Promise<WorkerState | null> {
   return readValidated(paths.stateJson, (v) => WorkerStateSchema.parse(v));
+}
+
+/**
+ * The launch record, or `null` when this worker has none.
+ *
+ * `null` is a real answer and not a degraded one: it means the run was started
+ * against the `PIFLEET_PI_COMMAND` double, which is how the entire e2e and
+ * integration suite runs. The supervisor branches on exactly this, so the
+ * absence has to be cheap and unambiguous.
+ *
+ * Validated rather than cast, on the same reasoning as every other reader
+ * here: the argv in this file is handed STRAIGHT to `Bun.spawn`, so a
+ * truncated or hand-edited record is a malformed command line rather than a
+ * malformed object, and the schema is what stands between a half-written file
+ * and a process launched from a partial argv.
+ */
+export async function readWorkerLaunch(paths: WorkerPaths): Promise<WorkerLaunch | null> {
+  return readValidated(paths.launchJson, (v) => WorkerLaunchSchema.parse(v));
 }
 
 /**
@@ -539,6 +559,16 @@ export function initialWorkerState(args: {
    * `WorkerStateSchema.proc_started` for why an absent value must stay absent.
    */
   procStarted?: string;
+  /**
+   * The container this worker runs in, from its launch record — `null` for a
+   * `PIFLEET_PI_COMMAND` run, which has no container.
+   *
+   * Taken at construction rather than assigned later so the FIRST state.json
+   * write already carries it: `down` removes a container by name, and a
+   * supervisor killed between its first flush and a later assignment would
+   * leave a running container that nothing on disk names.
+   */
+  container?: WorkerState["container"];
 }): WorkerState {
   return WorkerStateSchema.parse({
     schema: "pifleet.state/v1",
@@ -548,6 +578,7 @@ export function initialWorkerState(args: {
     pgid: args.pgid,
     started_at: args.startedAt,
     proc_started: args.procStarted ?? "",
+    container: args.container ?? null,
     phase: "starting",
     epoch: 0,
   });

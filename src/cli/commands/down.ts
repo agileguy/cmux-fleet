@@ -194,8 +194,30 @@ export function register(program: Command): void {
             : stateAnchor,
           { force: forceIdentity },
         );
-        // Nothing holds that pid: genuinely gone, nothing to stop.
+        /**
+         * The container rung, shared by the two paths that are entitled to it.
+         *
+         * Defined here rather than inline at the bottom because the bottom is
+         * not the only exit: a supervisor that is already `gone` `continue`s
+         * past it, and that is the case that needs this MOST. A dead
+         * supervisor is precisely how a container is orphaned — `--rm` is a
+         * client-side action and the client was the supervisor — so skipping
+         * cleanup for "nothing to stop" leaves the container running forever
+         * with nothing on the host pointing at it.
+         */
+        const reapContainer = async (): Promise<void> => {
+          if (state.container === null) return;
+          const removed = await removeContainer(state.container.name);
+          await ledger.append("worker_container_removed", {
+            worker: id,
+            detail: { container: state.container.name, removed },
+          });
+        };
+
+        // Nothing holds that pid: genuinely gone, nothing to stop — but its
+        // container may still be running, which is the orphan case.
         if (anchor.kind === "gone") {
+          await reapContainer();
           report.push({ id, stopped: true, how: "already_gone" });
           continue;
         }
@@ -210,6 +232,15 @@ export function register(program: Command): void {
          * `already_gone` did), a live-but-unverifiable supervisor was classed
          * PRUNABLE and `--prune` deleted the checkout its container was still
          * writing to: the §9.3 corruption, measured end to end.
+         */
+        /*
+         * A refusal deliberately does NOT reap the container either, and the
+         * asymmetry with `gone` above is the point. `refused` means the
+         * supervisor's identity could not be verified, so it may be ALIVE and
+         * mid-task; killing its container out from under it would be doing by
+         * the back door exactly what the refusal declined to do at the front,
+         * and would corrupt the worktree the prune gate below is refusing to
+         * touch for the same reason.
          */
         if (anchor.kind === "refused") {
           report.push({ id, stopped: false, how: anchor.how });
@@ -255,6 +286,24 @@ export function register(program: Command): void {
           worker: id,
           detail: { how, stopped, forced_identity: anchor.forced },
         });
+        /**
+         * The container, and why `--rm` does not already cover this.
+         *
+         * `--rm` is implemented by the docker CLIENT, for a foreground run: it
+         * removes the container after the container EXITS and the client is
+         * still there to do it. The supervisor IS that client, so every rung of
+         * the ladder above except a graceful shutdown kills it — and a killed
+         * client removes nothing, while the container keeps running under
+         * dockerd, which owns it and never noticed. That is the orphan this
+         * removes: a live container holding `--name pifleet-<run>-<worker>`,
+         * still writing to the worktree the `--prune` gate below may be about
+         * to delete, and guaranteeing a name collision on the next `up` of the
+         * same run id.
+         *
+         * Gated on the launch record's own field, so a run started against the
+         * `PIFLEET_PI_COMMAND` double issues no docker call at all.
+         */
+        await reapContainer();
         try {
           await unlink(wp.controlSock);
         } catch {
@@ -708,6 +757,32 @@ async function anchorIdentity(
  * then report this worker as STILL RUNNING, which the identity read after the
  * ladder already does. Throwing out of the loop would skip all of that.
  */
+/**
+ * `docker rm -f <name>`, reported rather than thrown.
+ *
+ * Never fatal to `down`. The overwhelmingly common outcome is "No such
+ * container" — a graceful shutdown let `--rm` do its job — and treating the
+ * absence of a container as a failure would turn the normal path into a
+ * non-zero exit. Equally, a docker daemon that is not running is not a reason
+ * to leave the rest of the teardown undone: the supervisor is already stopped
+ * by the time this runs, which is the part that matters for the prune gate.
+ *
+ * Returns whether the container was actually removed, so the ledger records
+ * what happened instead of that it was attempted.
+ */
+async function removeContainer(name: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(["docker", "rm", "-f", name], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return (await proc.exited) === 0;
+  } catch {
+    // No docker on PATH at all. Same disposition as a dead daemon.
+    return false;
+  }
+}
+
 async function signalGuarded(
   target: ProcId,
   signal: "SIGTERM" | "SIGKILL",

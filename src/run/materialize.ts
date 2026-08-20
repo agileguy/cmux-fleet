@@ -42,17 +42,29 @@
  * NOT materialized here, each for a stated reason:
  *
  *  - `/workspace` — either the operator's own checkout (`shared-ro`) or a
- *    per-worker git worktree that nothing creates yet. Neither is this
- *    module's to write.
+ *    per-worker git worktree, which `run/worktree.ts:createWorkerWorktrees`
+ *    creates from `up` before this runs. Not this module's to write.
  *  - `/sessions` — created and opened by `up` itself, before this runs.
  *  - `pifleet-piagent-<id>` — a named volume; Docker owns it by construction.
- *  - the `--env-file`. Deliberate, and the asymmetry with `cloud-allow` is the
- *    point: an EMPTY allow list is semantically correct (deny-all for mutating
- *    verbs, read verbs unaffected — the right run-time default), while an empty
- *    env file is semantically WRONG. A worker would start with no `base_url`,
- *    no API key and no `CLOUDSDK_*` and fail obscurely deep inside the
- *    container. Leaving the path unwritten makes a premature `docker run` fail
- *    loudly on a MISSING `--env-file` instead of quietly on a wrong one.
+ *
+ * The `--env-file` USED to be on that list, and the reasoning is kept because
+ * it explains the shape of what replaced it. The argument was that the
+ * asymmetry with `cloud-allow` is the point: an EMPTY allow list is
+ * semantically correct (deny-all for mutating verbs, read verbs unaffected —
+ * the right run-time default), while an empty env file is semantically WRONG,
+ * because a worker would start with no `base_url`, no API key and no
+ * `CLOUDSDK_*` and fail obscurely deep inside the container. Leaving the path
+ * unwritten made a premature `docker run` fail LOUDLY on a missing
+ * `--env-file` instead of quietly on a wrong one — a deliberate tripwire held
+ * until a real writer existed.
+ *
+ * `run/worker-env.ts` is that writer, so the tripwire comes out. What it
+ * protected against does not come back: the file is built from
+ * `docker/entrypoint.sh`'s stated contract rather than from a guess at what
+ * Pi wants, an absent oMLX key OMITS the variable rather than writing it
+ * blank (so the entrypoint's `-n` guards see genuinely-unset, not empty), and
+ * a missing key is said on stderr instead of silently producing the
+ * reaches-no-model worker the old comment describes.
  */
 
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
@@ -67,7 +79,12 @@ import {
 } from "../config/load.ts";
 import { renderWorker } from "../config/render.ts";
 import { makeWorkerAccessible, makeWorkerReadable } from "../container/mounts.ts";
-import { EXIT, SESSION_ID_RE } from "../contracts.ts";
+import {
+  EXIT,
+  SESSION_ID_RE,
+  WorkerLaunchSchema,
+  type WorkerLaunch,
+} from "../contracts.ts";
 import { resolvedWithin } from "../harvest/outbox.ts";
 import {
   roleSkillsDir,
@@ -75,7 +92,10 @@ import {
   workerOutboxDir,
   workerPaths,
   type RunPaths,
+  workerContainerName,
 } from "./paths.ts";
+import { writeJsonAtomic } from "../util/jsonl.ts";
+import { buildWorkerEnv, writeWorkerEnvFile } from "./worker-env.ts";
 
 /**
  * Bounds on the skill-tree walk, matching the shape `security/repo-hazards.ts`
@@ -132,6 +152,12 @@ export interface MaterializedWorker {
   kubeconfig: string | null;
   /** The config-named file the kubeconfig was copied FROM; null when none was. */
   kubeconfigSource: string | null;
+  /** The `--env-file` this worker's container is launched with. */
+  envFile: string;
+  /** The launch record holding the exact `docker run` argv; null for a double run. */
+  launchJson: string | null;
+  /** `--name` of the container that argv will create; null for a double run. */
+  container: string | null;
 }
 
 /** Called as each worker finishes, so a failure part-way leaves a record of what exists. */
@@ -601,6 +627,23 @@ export async function materializeWorkerInputs(
   run: RunPaths,
   workerIds: readonly string[],
   onWorker?: MaterializedWorkerSink,
+  opts: {
+    /**
+     * Whether to write the launch record — i.e. whether this run intends to
+     * start CONTAINERS.
+     *
+     * A parameter rather than something inferred here, because the decision
+     * belongs to `up` and must be made ONCE. The supervisor's rule is simply
+     * "a launch record means launch it", so if this module wrote a record
+     * whenever a config existed, then a run driven by the
+     * `PIFLEET_PI_COMMAND` double would carry a record naming a container
+     * nobody meant to start — and the supervisor, correctly following its own
+     * rule, would start it. Deciding in one place keeps the run directory
+     * honest: no record means no container was ever intended, which is also
+     * what stops `down` reaping a name that never existed.
+     */
+    writeLaunchRecord?: boolean;
+  } = {},
 ): Promise<MaterializedWorker[]> {
   const sourceRoot = skillsSourceRoot();
   const { workers, plans } = planRoleBundles(loaded, workerIds);
@@ -812,6 +855,56 @@ export async function materializeWorkerInputs(
       kubeconfigSource = src;
     }
 
+    /**
+     * The `--env-file`, and the launch record that makes `rendered.docker`
+     * something other than a preview.
+     *
+     * Both are written HERE, in the loop that already holds `rendered`, and
+     * that placement is the point. `renderWorker` is called once per worker on
+     * the `up` path and this is that call; a supervisor that re-rendered from
+     * config to get its argv would be a SECOND derivation of the same value,
+     * which is the ISC-188 shape with a wider blast radius — a detached
+     * supervisor does not share the cwd or environment that config resolution
+     * depends on, so its "same" render could differ with nothing looking wrong.
+     * Writing the argv the moment it is produced makes launch-equals-preview a
+     * property of there being one object, not of two computations agreeing.
+     */
+    const envPlan = buildWorkerEnv(loaded, w, process.env);
+    await establishing(`the env file for ${workerId}`, async () => {
+      await refuseSymlinkDestination(paths.envFile);
+      await writeWorkerEnvFile(paths.envFile, envPlan);
+      // Deliberately NOT `makeWorkerReadable`: `--env-file` is parsed by the
+      // docker client on the host and never mounted, so the container never
+      // opens it. See `run/worker-env.ts` on why 0600 costs nothing here.
+    });
+    if (envPlan.missingApiKey) {
+      /*
+       * A note, not a refusal. A keyless oMLX is a legitimate local setup and
+       * `doctor` already owns the "can this fleet reach a model" question with
+       * a live probe; failing `up` here would refuse a run that works. Said
+       * on stderr because the alternative — silence — reproduces the
+       * entrypoint's own worst case, a worker that streams happily and reaches
+       * no model, with nothing on the host having mentioned it.
+       */
+      process.stderr.write(
+        `pifleet: ${envPlan.apiKeyEnvName} is not set in this environment, so ${workerId}'s ` +
+          `env file carries no oMLX key; the worker will only reach a server that needs none\n`,
+      );
+    }
+
+    const launch: WorkerLaunch = {
+      kind: "container",
+      argv: rendered.docker,
+      container: workerContainerName(run.runId, workerId),
+      image: rendered.image,
+    };
+    if (opts.writeLaunchRecord === true) {
+      await establishing(`the launch record for ${workerId}`, async () => {
+        await refuseSymlinkDestination(paths.launchJson);
+        await writeJsonAtomic(paths.launchJson, WorkerLaunchSchema.parse(launch));
+      });
+    }
+
     const materialized: MaterializedWorker = {
       workerId,
       role: w.role,
@@ -822,6 +915,9 @@ export async function materializeWorkerInputs(
       systemAppendMd,
       kubeconfig,
       kubeconfigSource,
+      envFile: paths.envFile,
+      launchJson: opts.writeLaunchRecord === true ? paths.launchJson : null,
+      container: opts.writeLaunchRecord === true ? launch.container : null,
     };
     out.push(materialized);
     // Wrapped like every other fallible step here. The sink is a ledger

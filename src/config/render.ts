@@ -36,6 +36,7 @@ import {
   workerOutboxDir,
   workerPaths,
   workerWorktree,
+  workerContainerName,
   type RunPaths,
   type WorkerPaths,
 } from "../run/paths.ts";
@@ -150,7 +151,7 @@ export function buildDockerArgv(
   // single field this function needs from the section is read at its use site.
   const { docker, cloud } = loaded.config;
   const argv: string[] = ["docker", "run", "-i", "--rm"];
-  argv.push("--name", `pifleet-${opts.run.runId}-${w.id}`);
+  argv.push("--name", workerContainerName(opts.run.runId, w.id));
   // `WORKER_UID`, not a literal, because the gcloud tmpfs below must be owned
   // by exactly this uid to be writable and a drift between the two is silent:
   // the tmpfs simply mounts root-owned and gcloud degrades to warnings.

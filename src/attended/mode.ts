@@ -66,9 +66,8 @@ export class AttendedModeError extends Error {
  * track for run paths, and the integration suite pins the two spellings
  * against each other through a live `up`.
  */
-export function workerContainerName(runId: string, workerId: string): string {
-  return `pifleet-${runId}-${workerId}`;
-}
+export { workerContainerName } from "../run/paths.ts";
+import { workerContainerName } from "../run/paths.ts";
 
 /**
  * What the pane runs while a person owns it: an interactive shell inside the

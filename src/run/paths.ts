@@ -223,12 +223,31 @@ export interface WorkerPaths {
    * not the one `up` uses — so `render`, the command whose entire purpose is to
    * say what `up` will do, described four mounts at paths no run would ever
    * contain (ISC-188). Nothing writes these files yet; naming them now is what
-   * stops the eventual writer from inventing a fifth spelling.
+   * stops the eventual writer from inventing a fifth spelling. `run/materialize.ts`
+   * is now that writer for all four.
    */
   envFile: string;
   systemAppendMd: string;
   cloudAllow: string;
   kubeconfig: string;
+  /**
+   * The LAUNCH RECORD: the exact `docker run` argv this worker's container is
+   * started from, plus the container name and image (`WorkerLaunchSchema`).
+   *
+   * Written by `materializeWorkerInputs`, which is the one place that already
+   * calls `renderWorker` on the `up` path — so the argv that launches is the
+   * SAME object that was rendered, not a second rendering that has to agree
+   * with the first. That is ISC-188's rule applied one layer up: the previous
+   * failure was two `join()`s computing a run dir independently, and a
+   * supervisor that re-rendered from config would be the identical shape with
+   * a wider blast radius, because config resolution depends on cwd and env
+   * that a detached supervisor does not share with the CLI that launched it.
+   *
+   * Absent for a run started against the `PIFLEET_PI_COMMAND` double, and that
+   * absence IS the discriminator the supervisor branches on — see
+   * `supervisor/index.ts`.
+   */
+  launchJson: string;
 }
 
 export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
@@ -248,6 +267,7 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     systemAppendMd: join(dir, "system-append.md"),
     cloudAllow: join(dir, "cloud-allow"),
     kubeconfig: join(dir, "kubeconfig"),
+    launchJson: join(dir, "launch.json"),
   };
 }
 
@@ -307,6 +327,23 @@ export function roleSkillsDir(runRoot: string, role: string): string {
  * that into a loud refusal rather than a silent adoption — see its
  * `StaleWorktreeError`.
  */
+/**
+ * The container `--name` for a worker (SRD §5.6).
+ *
+ * Lives here, with the other path-shaped identities, because four subsystems
+ * now need it and they are in different trees: `config/render.ts` puts it on
+ * the argv, `run/materialize.ts` records it in the launch record,
+ * `attended/mode.ts` builds the `docker exec` a person gets, and
+ * `cli/commands/down.ts` removes it. Three of those four spelled it as their
+ * own template literal — agreeing today, and one rename away from a `down`
+ * that cleans up a container nobody launched. Same rule as `workerWorktree`:
+ * the name has one definition, so disagreement is a compile error rather than
+ * an orphaned container.
+ */
+export function workerContainerName(runId: string, workerId: string): string {
+  return `pifleet-${runId}-${workerId}`;
+}
+
 export function workerWorktree(repo: string, workerId: string): string {
   return join(repo, ".worktrees", workerId);
 }
