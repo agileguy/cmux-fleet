@@ -171,6 +171,17 @@ export interface RunBudgetPolicy {
   maxConcurrent: number;
   /** Up-front hold per admission; 0 when the operator configured none. */
   perTaskReserveTokens: number;
+  /**
+   * The per-worker event-silence window (`timers.event_stall_warn` /
+   * `event_stall_kill`), or `null` when `run.json` records none.
+   *
+   * Carried through `run.json` for the same reason the ceiling is: `dispatch`
+   * does not load `fleet.yaml` — `up` does, and what the scheduler needs has
+   * to travel in the run's own record or it does not travel at all. The two
+   * keys were parsed by the schema and read by no production line precisely
+   * because nothing carried them across this gap.
+   */
+  stall: { warnMs: number; killMs: number } | null;
   /** A degradation the caller must surface, or null when there is nothing to say. */
   note: string | null;
 }
@@ -195,13 +206,21 @@ export interface RunBudgetPolicy {
 export function runBudgetRecord(run: FleetConfig["run"] | null): {
   max_concurrent: number | null;
   budget: { tokens_ceiling: number; per_task_reserve_tokens: number | null } | null;
+  stall: { event_stall_warn_s: number; event_stall_kill_s: number } | null;
 } {
-  if (run === null) return { max_concurrent: null, budget: null };
+  // SECONDS on the wire, matching what the operator wrote in `fleet.yaml` and
+  // what `durationSeconds` parses to; the millisecond conversion happens at
+  // the reader, next to the only consumer that wants milliseconds.
+  if (run === null) return { max_concurrent: null, budget: null, stall: null };
   return {
     max_concurrent: run.max_concurrent,
     budget: {
       tokens_ceiling: run.budget.tokens_ceiling,
       per_task_reserve_tokens: run.budget.per_task_reserve_tokens ?? null,
+    },
+    stall: {
+      event_stall_warn_s: run.timers.event_stall_warn,
+      event_stall_kill_s: run.timers.event_stall_kill,
     },
   };
 }
@@ -247,11 +266,13 @@ export async function readRunBudgetPolicy(run: RunPaths): Promise<RunBudgetPolic
     tokensCeiling: null,
     maxConcurrent: DEFAULT_MAX_CONCURRENT,
     perTaskReserveTokens: 0,
+    stall: null,
     note: null,
   };
   let doc: {
     max_concurrent?: number | null;
     budget?: { tokens_ceiling?: number | null; per_task_reserve_tokens?: number | null } | null;
+    stall?: { event_stall_warn_s?: number | null; event_stall_kill_s?: number | null } | null;
   } | null;
   try {
     doc = await readValidated(run.runJson, (v) =>
@@ -262,6 +283,13 @@ export async function readRunBudgetPolicy(run: RunPaths): Promise<RunBudgetPolic
             .object({
               tokens_ceiling: z.number().nullish(),
               per_task_reserve_tokens: z.number().nullish(),
+            })
+            .loose()
+            .nullish(),
+          stall: z
+            .object({
+              event_stall_warn_s: z.number().nullish(),
+              event_stall_kill_s: z.number().nullish(),
             })
             .loose()
             .nullish(),
@@ -290,10 +318,27 @@ export async function readRunBudgetPolicy(run: RunPaths): Promise<RunBudgetPolic
   }
   const ceiling = doc?.budget?.tokens_ceiling;
   const reserve = doc?.budget?.per_task_reserve_tokens;
+  /**
+   * Both bounds must be present and positive, and `kill` must not precede
+   * `warn`. A half-recorded window is discarded rather than half-applied: a
+   * `killMs` with no `warnMs` would kill without ever warning, and a `killMs`
+   * below `warnMs` makes the warn band unreachable — in both cases the policy
+   * would act on a shape the operator never described.
+   */
+  const warnS = doc?.stall?.event_stall_warn_s;
+  const killS = doc?.stall?.event_stall_kill_s;
+  const stall =
+    typeof warnS === "number" &&
+    typeof killS === "number" &&
+    warnS > 0 &&
+    killS >= warnS
+      ? { warnMs: Math.floor(warnS * 1000), killMs: Math.floor(killS * 1000) }
+      : null;
   return {
     tokensCeiling: typeof ceiling === "number" && ceiling >= 0 ? Math.floor(ceiling) : null,
     maxConcurrent,
     perTaskReserveTokens: typeof reserve === "number" && reserve > 0 ? Math.floor(reserve) : 0,
+    stall,
     note,
   };
 }
