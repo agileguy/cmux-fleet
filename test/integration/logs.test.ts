@@ -306,6 +306,45 @@ describe("logs — follow", () => {
       await rm(f.root, { recursive: true, force: true });
     }
   });
+
+  /**
+   * ISC-269, and the reason the test above is not sufficient on its own.
+   *
+   * The handlers used to be registered AFTER the first drain, so a SIGINT
+   * arriving mid-drain got the default disposition and the process died 130.
+   * The test above never reliably caught that, because with a one-event
+   * backlog the drain is over before the signal can land — measured on the
+   * unfixed code, one event exits 0 five times out of five.
+   *
+   * The window is proportional to the BACKLOG, not to luck, which is the
+   * whole point: a follower attaching to a worker that has been running for a
+   * while has plenty to catch up on. So this test gives it something to catch
+   * up on. Measured on the unfixed code: 50 000 events exits 130 five times
+   * out of five, 20 000 does the same, and 5 000 manages it only four times
+   * out of five. 50 000 is chosen for margin over the smallest size that was
+   * already deterministic, so a slower or faster machine does not turn a
+   * regression test back into a coin flip.
+   *
+   * What it asserts is the user-visible contract and nothing narrower:
+   * pressing Ctrl-C on `pifleet logs --follow` exits 0. It does not reach
+   * into the module to check that a listener is attached, because a test that
+   * asserted registration ORDER would pass against an implementation that
+   * registered early and then dropped the signal anyway.
+   */
+  test("SIGINT during the first drain still ends the follower cleanly", async () => {
+    const backlog = Array.from({ length: 50_000 }, (_, i) =>
+      evt({ type: "event", seq: i + 1, event: { type: "agent_start" } }),
+    );
+    const f = await makeRun(backlog);
+    try {
+      const fw = spawnFollow(f.root, ["--render"]);
+      await until(() => fw.stdout().length > 0, "first output");
+      fw.proc.kill("SIGINT");
+      expect(await fw.proc.exited).toBe(0);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

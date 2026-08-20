@@ -33,6 +33,8 @@ import { readWorkerState } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
 
+import { DEFAULT_POLL_MS } from "../../src/orchestrate/scheduler.ts";
+
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -157,18 +159,39 @@ describe("dispatch --auto against a real fleet (happy chain)", () => {
        *
        * The gap is the direct evidence, and it is strictly stronger. An
        * UNGATED scheduler dispatches both in the same pass, microseconds
-       * apart; a gated one cannot dispatch 'b' until 'a' has settled, which
-       * costs 'a's whole execution. Measured over 6 local runs: 237, 241, 241,
-       * 244, 246, 262 ms — versus ~0-5ms for a same-pass dispatch. 100ms sits
-       * clear of both, and the margin only WIDENS under load, because load
-       * makes 'a' take longer rather than shorter. That is the right direction
-       * for a CI assertion to be wrong in.
+       * apart; a gated one cannot dispatch 'b' until 'a' has settled.
+       *
+       * THE THRESHOLD IS THE SCHEDULER'S POLL INTERVAL, NOT A ROUND NUMBER,
+       * and the difference is not cosmetic — it is why this assertion failed.
+       *
+       * It previously read `toBeGreaterThan(100)`, justified by six local runs
+       * measuring 237-262 ms and the claim that "the margin only WIDENS under
+       * load, because load makes 'a' take longer". The first half is real; the
+       * conclusion does not follow. The gap is QUANTISED by
+       * `DEFAULT_POLL_MS`: the scheduler re-examines readiness once per tick,
+       * so a gated dispatch lands one, two or three ticks later and the
+       * observed gap is a multiple of 100 ms, never a continuum. Those local
+       * runs were 2-3 ticks because 'a' took longer than one tick to settle on
+       * a 14-core machine. The MINIMUM a correctly-gated dispatch can take is
+       * ONE tick, and `> 100` rejects exactly that case — the best one.
+       *
+       * It duly failed on the ISC-266 load job with `Expected: > 100,
+       * Received: 100`: on a two-core runner 'a' settled inside a single tick,
+       * the gap collapsed to the floor, and a strict `>` called correct
+       * behaviour a bug. Load did not widen the margin; it moved the run onto
+       * the boundary the threshold had been placed on.
+       *
+       * So the comparison is now `>=` against the constant itself, imported
+       * rather than duplicated, so the test tracks the scheduler if the
+       * interval ever changes. The discrimination it exists for is untouched:
+       * a same-pass dispatch is ~0-5 ms, two orders of magnitude below one
+       * tick, so nothing about an ungated scheduler passes this.
        *
        * Note this also catches a case the old assertion missed entirely: an
        * ungated scheduler that happened to put 'b' on w1 anyway.
        */
       const gapMs = Date.parse(dispatched[1]!.ts) - Date.parse(dispatched[0]!.ts);
-      expect(gapMs).toBeGreaterThan(100);
+      expect(gapMs).toBeGreaterThanOrEqual(DEFAULT_POLL_MS);
 
       // The durable schedule record (run/paths.ts scheduleJson): what
       // `report` reads must be byte-for-byte the seam stdout carried.

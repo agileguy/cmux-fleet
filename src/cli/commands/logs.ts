@@ -264,9 +264,6 @@ export function register(program: Command): void {
         }
       };
 
-      await pollAll();
-      if (!follow) return;
-
       /**
        * Follow until told to stop. SIGINT/SIGTERM resolve the race below so
        * the sleep is cut short, one final drain picks up lines written just
@@ -281,9 +278,42 @@ export function register(program: Command): void {
         stopped = true;
         wake?.();
       };
-      process.once("SIGINT", stop);
-      process.once("SIGTERM", stop);
+
+      /**
+       * REGISTERED BEFORE THE FIRST DRAIN, not after it (ISC-269).
+       *
+       * The handlers used to go up after `await pollAll()` had already
+       * returned, which left the whole of that first drain unguarded. A
+       * SIGINT arriving in that window got Bun's DEFAULT disposition —
+       * terminate, exit 130 — and the window is exactly as long as the
+       * backlog takes to render, so it is not a narrow one. Measured on the
+       * unfixed code: a worker with 200 000 buffered events exits 130 on
+       * five runs out of five, while a worker with one event exits 0 on five
+       * out of five. The bug was never intermittent; it was proportional to
+       * how much the follower had to catch up on, which is why the test that
+       * caught it (`SIGINT also ends a follower cleanly`) read as flaky
+       * rather than as the real Ctrl-C defect it was.
+       *
+       * Registering first is safe in both directions. A signal during the
+       * drain now sets `stopped`, the drain finishes on its own, and the
+       * loop below is skipped — the same "one final drain, then return
+       * cleanly" behaviour the comment above describes, just applied to the
+       * first drain as well as the last. The `finally` still removes both
+       * listeners on every path, including the `!follow` early return.
+       *
+       * A signal arriving BEFORE this point — during argument parsing or the
+       * `stat` calls above — still exits 130, and that is left alone
+       * deliberately: nothing has been emitted yet, so there is no session to
+       * end cleanly, and widening the guard to cover process startup would
+       * mean catching signals before there is anything to catch them for.
+       */
+      if (follow) {
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+      }
       try {
+        await pollAll();
+        if (!follow) return;
         while (!stopped && !stdoutGone) {
           await Promise.race([
             Bun.sleep(150),

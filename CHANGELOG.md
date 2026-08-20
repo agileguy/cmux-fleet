@@ -21,6 +21,33 @@ All notable changes to this project are documented here.
   changed in this entry — this records a known gap where it can be counted.
 
 ### Fixed
+- **A dependency-gating assertion failed on the scheduler's tick granularity rather than on gating
+  (ISC-267, second instance).** `dispatch-auto.test.ts` asserted `gapMs > 100` between two
+  dependent dispatches, justified by six local runs of 237-262 ms. The **ISC-266 load job caught
+  it** — `Expected: > 100, Received: 100` — and it was the first thing that gate caught. The gap is
+  quantised by `DEFAULT_POLL_MS`: the scheduler re-examines readiness once per 100 ms tick, so a
+  gated dispatch lands a whole number of ticks later, never a continuum. The local runs were 2-3
+  ticks because `a` needed more than one tick to settle on 14 cores; on a two-core runner it settled
+  inside a single tick, the gap fell to its floor, and a strict `>` placed exactly on that floor
+  called the best possible correct behaviour a bug. The comment's claim that "the margin only widens
+  under load" was the error — load changes how many ticks elapse, not the one-tick floor. Now `>=`
+  against the exported constant, so the test tracks the scheduler; the discrimination is untouched,
+  since a same-pass dispatch is ~0-5 ms, two orders of magnitude below one tick.
+
+- **Ctrl-C on `pifleet logs --follow` exited 130 instead of 0 whenever the worker had a backlog
+  (ISC-269).** The SIGINT and SIGTERM handlers were registered *after* the first drain had already
+  returned, leaving that whole drain unguarded, so a signal arriving inside it got Bun's default
+  disposition. **It was not intermittent** — the window is exactly as long as the backlog takes to
+  render, so the failure is proportional to how far behind the follower is. Measured on the unfixed
+  code, killing on first output: 200 000 buffered events exits 130 five times out of five, 20 000
+  the same, 5 000 four times out of five, and a single event exits 0 five times out of five. That
+  gradient is why the existing test read as flaky for a session — it uses a one-event fixture, the
+  fastest-draining case there is. The handlers now go up before the first drain, inside the same
+  `try/finally`, so a signal mid-drain lets the drain finish and returns cleanly. A new test gives
+  the follower 50 000 events and requires exit 0; mutation-verified `Expected: 0, Received: 130`
+  against the unfixed source. A signal arriving before any output still exits 130, deliberately —
+  nothing has been emitted, so there is no session to end cleanly.
+
 - **Integration tests that spawn the CLI were failing on busy developer machines and passing in CI
   (ISC-266).** They inherited bun's default 5000 ms per-test budget — a number with no relationship
   to the work they do. Under ten busy loops on 14 cores, three `harvest.test.ts` tests died at
