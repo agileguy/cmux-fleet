@@ -1,13 +1,14 @@
 import type { Command } from "commander";
 import { readdir, unlink } from "node:fs/promises";
 import { CliError } from "../index.ts";
-import { EXIT } from "../../contracts.ts";
+import { EXIT, type ProcId } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
 import { readPresentation, readRunWorktrees, readWorkerState } from "../../run/state.ts";
 import { pruneWorkerWorktree, type PruneOutcome } from "../../run/worktree.ts";
 import { loadBackend } from "../../backends/registry.ts";
 import type { BackendKind } from "../../backends/types.ts";
-import { processStartTime, registryCall } from "../../run/registry.ts";
+import { processStartTime, readRegistry, registryCall } from "../../run/registry.ts";
+import { realProcessOps, sameIdentity, signalIfSame } from "../../safety/kill.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { Stopwatch } from "../../rpc/client.ts";
@@ -24,12 +25,21 @@ const TERM_WAIT_MS = 2_000;
  * group's leader, so `-pgid` takes the Pi child with it and leaves no orphan
  * (ISC-72/73).
  *
+ * Every rung addresses a `(pid, started)` pair, never a bare pid (ISC-191).
+ * This is the one kill path an operator runs BY HAND, which makes it the one
+ * where the recorded pid is most likely to be stale: a bare `pifleet down`
+ * resolves the LATEST run, and after a reboot the latest run is a dead one
+ * whose pids the machine has long since handed out again. `anchorIdentity`
+ * below is the gate, and it refuses rather than signalling when the recorded
+ * identity and the OS disagree.
+ *
  * `--prune` is the second phase, and only ever reached per worker whose
  * supervisor is CONFIRMED dead. `down` deleting a checkout a container is
  * still writing to is the corruption §9.3 names in as many words, and
- * "confirmed dead" here is the same `processStartTime(pid) === null` the kill
- * ladder above already computed — not a timeout, not an assumption that
- * SIGKILL worked.
+ * "confirmed dead" here is the same identity comparison the kill ladder above
+ * already computed — not a timeout, not an assumption that SIGKILL worked,
+ * and not the bare liveness test it used to be, which called a checkout
+ * unprunable because SOMETHING held the pid.
  *
  * The flag was DECLARED and unread for a whole phase, with a docstring on this
  * very function saying "Worktree pruning is Phase 2; nothing here deletes
@@ -64,11 +74,36 @@ export function register(program: Command): void {
         workerIds = [];
       }
 
+      /**
+       * The launch-time identities, for the rung-0 anchor below.
+       *
+       * `register_worker` records `(pid, pgid, started)` per supervisor — its
+       * own comment says "identity is (pid, start-time) so pid reuse cannot
+       * resurrect us later" — and `readRegistry` reads that off disk without
+       * needing the daemon to still be listening, which is exactly the case
+       * `down` runs in. A missing or unparseable registry is not an error
+       * here: it degrades the anchor, and `anchorIdentity` says what that
+       * costs.
+       */
+      const registry = await readRegistry(run).catch(() => null);
+
       const report: Array<{ id: string; stopped: boolean; how: string }> = [];
       for (const id of workerIds.sort()) {
         const wp = workerPaths(run, id);
         const state = await readWorkerState(wp);
-        if (state === null || (await processStartTime(state.pid)) === null) {
+        if (state === null) {
+          report.push({ id, stopped: true, how: "already_gone" });
+          continue;
+        }
+        const recorded = registry?.workers[id];
+        const target = await anchorIdentity(
+          state.pid,
+          recorded !== undefined && recorded.pid === state.pid ? recorded.started : null,
+        );
+        // Nothing on that pid, or something that is NOT the supervisor we
+        // recorded. Either way there is nothing here to stop, and signalling
+        // is the one thing that must not happen (ISC-191).
+        if (target === null) {
           report.push({ id, stopped: true, how: "already_gone" });
           continue;
         }
@@ -80,18 +115,22 @@ export function register(program: Command): void {
           // Socket dead but process alive — fall through to the ladder.
         }
         let how = "graceful";
-        if (!(await waitGone(state.pid, GRACEFUL_WAIT_MS))) {
+        if (!(await waitGone(target, GRACEFUL_WAIT_MS))) {
           // Phase 2: SIGTERM the process GROUP; the supervisor leads it.
           how = "sigterm";
-          trySignal(-state.pgid, "SIGTERM");
-          if (!(await waitGone(state.pid, TERM_WAIT_MS))) {
+          await signalGuarded(target, "SIGTERM", state.pgid);
+          if (!(await waitGone(target, TERM_WAIT_MS))) {
             // Phase 3: SIGKILL — the group again, no survivors.
             how = "sigkill";
-            trySignal(-state.pgid, "SIGKILL");
-            await waitGone(state.pid, TERM_WAIT_MS);
+            await signalGuarded(target, "SIGKILL", state.pgid);
+            await waitGone(target, TERM_WAIT_MS);
           }
         }
-        const stopped = (await processStartTime(state.pid)) === null;
+        // Identity, not liveness: a pid that was recycled after the ladder
+        // killed the supervisor would read as STILL RUNNING on a bare
+        // `processStartTime`, and `down` would exit WORKER_DIED over a
+        // stranger it never touched.
+        const stopped = !(await sameIdentity(target, realProcessOps));
         report.push({ id, stopped, how });
         await ledger.append("worker_down", { worker: id, detail: { how, stopped } });
         try {
@@ -104,10 +143,22 @@ export function register(program: Command): void {
       // The daemon last: it must outlive the workers it deregisters.
       await registryCall(run, { cmd: "shutdown" }, { optional: true });
       try {
-        const pidFile = JSON.parse(await Bun.file(run.daemonPid).text()) as { pid: number };
-        if (!(await waitGone(pidFile.pid, TERM_WAIT_MS))) {
-          trySignal(pidFile.pid, "SIGTERM");
-          await waitGone(pidFile.pid, TERM_WAIT_MS);
+        // `daemon.pid` records BOTH halves of the identity — `{pid, started}`,
+        // written in one call by `startRegistryDaemon`. This rung read the
+        // file, took the pid and threw the start time away, so a run
+        // directory left behind by a reboot signalled whatever now held the
+        // number. The recorded half is right here; use it.
+        const pidFile = JSON.parse(await Bun.file(run.daemonPid).text()) as {
+          pid: number;
+          started?: unknown;
+        };
+        const target = await anchorIdentity(
+          pidFile.pid,
+          typeof pidFile.started === "string" ? pidFile.started : null,
+        );
+        if (target !== null && !(await waitGone(target, TERM_WAIT_MS))) {
+          await signalGuarded(target, "SIGTERM", null);
+          await waitGone(target, TERM_WAIT_MS);
         }
       } catch {
         // No daemon ever ran (integration setups) — nothing to stop.
@@ -131,8 +182,12 @@ export function register(program: Command): void {
        *  - a supervisor LAUNCHED and confirmed still alive. §9.3's own words:
        *    pruning a checkout whose container is still writing would corrupt
        *    it. The kill ladder above already computed the answer as
-       *    `processStartTime(pid) === null`, so this reuses that fact rather
-       *    than asking a second, differently-shaped question. A worker id
+       *    `!sameIdentity(target)`, so this reuses that fact rather than
+       *    asking a second, differently-shaped question. Identity and not
+       *    liveness, deliberately: the bare `processStartTime(pid) === null`
+       *    this used to read called a checkout unprunable whenever ANY
+       *    process held the recorded number, so a reused pid could pin a
+       *    checkout that nothing had been writing to for days. A worker id
        *    with NO supervisor state at all is NOT this case — nothing was
        *    ever writing into that checkout, so the corruption hazard this
        *    gate exists to enforce does not apply, and it falls through to the
@@ -333,18 +388,67 @@ export function register(program: Command): void {
     });
 }
 
-function trySignal(pidOrGroup: number, signal: NodeJS.Signals): void {
+/**
+ * Resolve the `(pid, started)` pair this ladder is allowed to signal, or null
+ * for "do not signal anything" (ISC-191).
+ *
+ * A pid is not an identity — `safety/kill.ts`'s header argues the general
+ * case. `down` is where it bites hardest, because `down` is the one kill path
+ * an operator runs BY HAND, typically against a run directory whose
+ * supervisors died some time ago. A bare `pifleet down` resolves the latest
+ * run, and after a reboot the latest run is a stale one whose recorded pids
+ * now belong to whatever the machine started since.
+ *
+ * `recorded` is the start time captured when the process was LAUNCHED, if
+ * anything captured one. When it is present and disagrees with the OS, the
+ * process we meant to kill is gone and this pid belongs to a stranger, so the
+ * answer is null and no rung ever runs.
+ *
+ * When `recorded` is null nothing recorded an identity at launch, and the
+ * anchor falls back to whatever holds the pid NOW. That is strictly weaker:
+ * it makes every LATER rung identity-checked — closing the window in which
+ * the target dies inside a grace period and the kernel rehomes its pid before
+ * the next signal — but it cannot tell a supervisor from a stranger at rung
+ * 0, because there is nothing to compare against. `WorkerState` records
+ * `started_at` as an ISO wall-clock string, which is not comparable to
+ * `ps -o lstart=`, so the registry is the only launch-time source for a
+ * worker and a worker missing from it gets the weaker anchor. ISC-270 tracks
+ * closing that.
+ */
+async function anchorIdentity(pid: number, recorded: string | null): Promise<ProcId | null> {
+  const current = await processStartTime(pid);
+  if (current === null) return null;
+  if (recorded !== null && recorded !== "" && recorded !== current) return null;
+  return { pid, started: current };
+}
+
+/**
+ * Signal a re-validated identity, never a bare pid.
+ *
+ * `signalIfSame` re-reads the pair and compares it before every signal, and
+ * swallows the ESRCH of a target that died inside the check-then-signal
+ * window. Anything else — EPERM, most plausibly — is swallowed HERE instead:
+ * `down` must still stop the remaining workers, the daemon and the view, and
+ * then report this worker as STILL RUNNING, which the identity read after the
+ * ladder already does. Throwing out of the loop would skip all of that.
+ */
+async function signalGuarded(
+  target: ProcId,
+  signal: "SIGTERM" | "SIGKILL",
+  pgid: number | null,
+): Promise<void> {
   try {
-    process.kill(pidOrGroup, signal);
+    await signalIfSame(target, signal, { pgid });
   } catch {
-    // Already exited between the check and the signal — the desired state.
+    // Reported as `stopped: false` by the caller's identity read.
   }
 }
 
-async function waitGone(pid: number, budgetMs: number): Promise<boolean> {
+/** True once the recorded identity is gone — dead, or replaced by a stranger. */
+async function waitGone(target: ProcId, budgetMs: number): Promise<boolean> {
   const clock = new Stopwatch();
   for (;;) {
-    if ((await processStartTime(pid)) === null) return true;
+    if (!(await sameIdentity(target, realProcessOps))) return true;
     if (clock.elapsedMs() > budgetMs) return false;
     await new Promise((r) => setTimeout(r, 50));
   }
