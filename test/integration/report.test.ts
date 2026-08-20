@@ -17,6 +17,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT, RunReportSchema } from "../../src/contracts.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
 const RUN_ID = "2026-07-27T00-00-00Z-rint";
@@ -171,7 +172,7 @@ describe("pifleet report --json", () => {
     expect(byWorker.get("w-gone")?.clean).toBe(false);
     expect(byWorker.get("w-gone")?.conflicting_paths).toEqual([]);
     expect(byWorker.get("w-gone")?.detail).toContain("does not resolve");
-  });
+  }, cliBudget(1));
 
   // Would fail if `report` began mutating what it inspects: the repository
   // and the surviving worktrees must be byte-identical after a full run.
@@ -191,13 +192,13 @@ describe("pifleet report --json", () => {
       })),
     );
     expect(after).toEqual(before);
-  });
+  }, cliBudget(5));
 
   test("defaults to the latest run when --run is omitted", async () => {
     const r = await runCli(["report", "--json"]);
     expect(r.code).toBe(EXIT.SUCCESS);
     expect((JSON.parse(r.stdout) as { run_id: string }).run_id).toBe(RUN_ID);
-  });
+  }, cliBudget(1));
 });
 
 describe("pifleet report — human output", () => {
@@ -210,7 +211,7 @@ describe("pifleet report — human output", () => {
     expect(r.stdout).toContain("as of this check");
     expect(r.stdout).toContain("NOT merged");
     expect(r.stdout).toContain("verdict=failed");
-  });
+  }, cliBudget(1));
 });
 
 describe("pifleet report — genuine failure to produce a report", () => {
@@ -223,5 +224,5 @@ describe("pifleet report — genuine failure to produce a report", () => {
     const r = await runCli(["report", "--json"], emptyRoot);
     expect(r.code).toBe(EXIT.USAGE);
     expect(r.stderr).toContain("no runs found");
-  });
+  }, cliBudget(1));
 });

@@ -30,6 +30,7 @@ import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { initialWorkerState, writeWorkerState } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
 import { processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -108,7 +109,7 @@ describe("exec — the inner exit code is a datum, not the ladder", () => {
     const r = await cli(root, ["exec", "--worker", "eng-1", "--run", runId, "--", "echo", "hello-from-exec"]);
     expect(r.code).toBe(EXIT.SUCCESS);
     expect(r.stdout).toContain("hello-from-exec");
-  }, 30_000);
+  }, cliBudget(2));
 
   /**
    * The distinction that matters. `exit 2` from the inner command must NOT
@@ -123,7 +124,7 @@ describe("exec — the inner exit code is a datum, not the ladder", () => {
     const r = await cli(root, ["exec", "--worker", "eng-1", "--run", runId, "--", "sh", "-c", "exit 2"]);
     expect(r.code).toBe(EXIT.PARTIAL);
     expect(r.code).not.toBe(EXIT.USAGE);
-  }, 30_000);
+  }, cliBudget(2));
 
   test("--json reports the inner exit code without it becoming the process's", async () => {
     const root = await freshRoot();
@@ -140,7 +141,7 @@ describe("exec — the inner exit code is a datum, not the ladder", () => {
     expect(parsed["exit_code"]).toBe(7);
     expect(parsed["worker"]).toBe("eng-1");
     expect(parsed["timed_out"]).toBe(false);
-  }, 30_000);
+  }, cliBudget(2));
 });
 
 describe("exec — where the command ran is never implied", () => {
@@ -163,7 +164,7 @@ describe("exec — where the command ran is never implied", () => {
     expect(parsed["ran_in"]).toBe("host");
     // Null, not an invented name: "which container" has no answer here.
     expect(parsed["container"]).toBeNull();
-  }, 30_000);
+  }, cliBudget(3));
 });
 
 describe("exec — worker discipline (requirement 4)", () => {
@@ -175,7 +176,7 @@ describe("exec — worker discipline (requirement 4)", () => {
     const r = await cli(root, ["exec", "--worker", "eng-1", "--run", runId]);
     expect(r.code).toBe(EXIT.USAGE);
     expect(r.stderr).not.toMatch(/\n\s+at /);
-  });
+  }, cliBudget(1));
 
   test("an unknown worker is USAGE, naming the worker and the run", async () => {
     const root = await freshRoot();
@@ -187,7 +188,7 @@ describe("exec — worker discipline (requirement 4)", () => {
     expect(r.stderr).toContain("ghost");
     expect(r.stderr).toContain(runId);
     expect(r.stderr).not.toMatch(/\n\s+at /);
-  });
+  }, cliBudget(1));
 
   /**
    * Liveness is checked BEFORE anything runs. A dead worker's container is
@@ -221,5 +222,5 @@ describe("exec — worker discipline (requirement 4)", () => {
     expect(r.code).toBe(EXIT.WORKER_DIED);
     // The refusal is only meaningful if it precedes the side effect.
     expect(await Bun.file(marker).exists()).toBe(false);
-  });
+  }, cliBudget(3));
 });

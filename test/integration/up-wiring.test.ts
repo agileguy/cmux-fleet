@@ -815,6 +815,8 @@ describe("up wires the security controls, in order (review finding 2)", () => {
       // And the config-gated controls left the would-be repo alone.
       expect(await Bun.file(join(rig.repo, "AGENTS.md")).exists()).toBe(true);
     },
+    // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 327 ms. Not reduced.
     90_000,
   );
 });
@@ -998,7 +1000,7 @@ describe("a config that exists but cannot be loaded refuses to start (review fin
       expect(await readdir(run.workersDir)).toEqual([]);
       expect((await mergeLedger(run)).records).toEqual([]);
     }
-  });
+  }, cliBudget(2));
 
   test("a schema-invalid config named by --config exits 2 with the field error", async () => {
     const rig = await makeRig();
@@ -1017,7 +1019,7 @@ describe("a config that exists but cannot be loaded refuses to start (review fin
     expect(up.code).toBe(EXIT.USAGE);
     expect(up.stderr).toContain("refusing to start");
     expect(up.stderr).toContain("surprise_key");
-  });
+  }, cliBudget(2));
 
   test("an explicit --config that does not exist is a refusal, never a defaults fallthrough", async () => {
     const rig = await makeRig();
@@ -1034,7 +1036,7 @@ describe("a config that exists but cannot be loaded refuses to start (review fin
     expect(up.stderr).toContain("config not found");
     // The fallthrough would have started a fleet and printed a run id.
     expect(up.stdout).not.toContain("run ");
-  });
+  }, cliBudget(2));
 });
 
 /**
@@ -1096,7 +1098,7 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
       expect(await readdir(run.workersDir)).toEqual([]);
       expect((await mergeLedger(run)).records).toEqual([]);
     }
-  });
+  }, cliBudget(2));
 
   test(
     "a model ON the allowlist still starts normally — the gate is a filter, not a wall",
@@ -1127,6 +1129,8 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
       const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
       expect(records.map((r) => r.event)).toContain("supervisor_launched");
     },
+    // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 999 ms. Not reduced.
     90_000,
   );
 
@@ -1195,7 +1199,7 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
     // would each fail this, and each is a distinct way "refused before
     // anything happened" could stop being true.
     expect((await readdir(rig.repo)).sort()).toEqual([".git", "AGENTS.md", "README.md"]);
-  });
+  }, cliBudget(2));
 
   /**
    * …and the skip the bare catch existed to provide is still there. Narrowing
@@ -1228,7 +1232,7 @@ describe("models_allowlist is enforced before any worker starts (ISC-190)", () =
     // `workers:` at all, so the allowlist has nothing to say about it.
     expect(up.stderr).not.toContain("models_allowlist");
     expect(up.stderr).not.toContain("unknown role");
-  });
+  }, cliBudget(2));
 });
 
 /**
@@ -1399,7 +1403,7 @@ describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
     } finally {
       await stub.stop();
     }
-  });
+  }, cliBudget(2));
 
   test(
     "a model that DOES emit a native call still starts — the gate is a filter, not a wall",
@@ -1436,6 +1440,8 @@ describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
         await stub.stop();
       }
     },
+    // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 1052 ms. Not reduced.
     90_000,
   );
 
@@ -1489,7 +1495,7 @@ describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
     // It must say the server could not be reached, NOT that the model is bad.
     expect(up.stderr).toContain("oMLX");
     expect(up.stderr).not.toContain("prose");
-  });
+  }, cliBudget(2));
 
   /**
    * The gate is ON when nobody says otherwise — the shape a real fleet.yaml has.
@@ -1534,7 +1540,7 @@ describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
     } finally {
       await stub.stop();
     }
-  });
+  }, cliBudget(2));
 
   /** §5.9: `require_native_tool_calls: false` "disables both". */
   test("with the gate off, a prose-answering model starts and is never probed", async () => {
@@ -1565,7 +1571,10 @@ describe("the native-tool-call probe gates the launch path (ISC-53)", () => {
     } finally {
       await stub.stop();
     }
-  }, 90_000);
+  },
+  // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+  // measured idle is 1032 ms. Not reduced.
+  90_000);
 });
 
 /**
@@ -1671,7 +1680,7 @@ describe("the MLX training guard gates the launch path (ISC-56)", () => {
     } finally {
       await decoy.stop();
     }
-  });
+  }, cliBudget(3));
 
   test(
     "--i-know proceeds, warns on stderr, and records the override in the ledger",
@@ -1715,6 +1724,8 @@ describe("the MLX training guard gates the launch path (ISC-56)", () => {
         await decoy.stop();
       }
     },
+    // ISC-274 audit: stands. Three `up` spawns derive cliBudget(3) = 34_200 ms;
+    // measured idle is 1146 ms. Not reduced.
     90_000,
   );
 
@@ -1742,7 +1753,10 @@ describe("the MLX training guard gates the launch path (ISC-56)", () => {
     expect(up.stderr).not.toContain("MLX training");
     const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
     expect(records.map((r) => r.event)).not.toContain("mlx_training_guard_overridden");
-  }, 90_000);
+  },
+  // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+  // measured idle is 1050 ms. Not reduced.
+  90_000);
 });
 
 describe("the grant line names the real ADC identity (ISC-251)", () => {
@@ -1801,6 +1815,8 @@ describe("the grant line names the real ADC identity (ISC-251)", () => {
        */
       expect(line).toContain("token mode");
     },
+    // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 1232 ms. Not reduced.
     90_000,
   );
 
@@ -1865,6 +1881,8 @@ describe("the grant line names the real ADC identity (ISC-251)", () => {
       // shape of evidence ISC-48 relies on.
       expect(await readGcloudCalls(rig)).toEqual([]);
     },
+    // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 1070 ms. Not reduced.
     90_000,
   );
 });
@@ -2317,6 +2335,8 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
       expect(materialized!.detail?.["skill_names"]).toEqual(["pifleet-worker"]);
       expect(materialized!.detail?.["kubeconfig_source"]).toBe(kubeconfig);
     },
+    // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 1028 ms. Not reduced.
     90_000,
   );
 });
@@ -2534,6 +2554,17 @@ describe("a run moves no ref outside fleet/<run-id>/* (ISC-123, ISC-124)", () =>
       expect((await git(rig.repo, "status", "--porcelain")).stdout).toBe(statusBefore);
     },
     // ISC-266 audit: one `up` spawn; same reasoning as the ISC-119 test above.
+    // ISC-274 audit: stands, and deliberately NOT raised. Sixteen spawn-reaching
+    // calls sit in this body, so the per-spawn model would derive cliBudget(16) =
+    // 182_400 ms. Counted honestly, exactly ONE is a `bun run <cli>` spawn
+    // (`runCli`); fourteen are direct `git`/`gitOk` fixture calls and the
+    // sixteenth is `makeRig`, which is more of the same. budget.ts calibrates
+    // PER_SPAWN_IDLE_MS to CLI startup at ~1900 ms, and a `git rev-parse` costs
+    // tens of milliseconds. Charging fifteen cheap calls at the expensive rate
+    // would double this ceiling on the strength of a count the model does not
+    // describe — the inverse of the ISC-266 mistake, but a fiction either way.
+    // Measured idle is 1454 ms; 90_000 is 62x that, well past the 3x contention
+    // and 2x safety cliBudget already applies.
     90_000,
   );
 });

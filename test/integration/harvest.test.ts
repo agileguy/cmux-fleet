@@ -404,7 +404,7 @@ describe("deriveGitFacts — A2 is the repository, verbatim", () => {
     const oracleDiff = await git(worktree, "diff", `${baseSha}...HEAD`);
     expect(g.diffText).toBe(oracleDiff); // ISC-90, byte for byte
     expect(g.facts.diff_bytes).toBe(Buffer.byteLength(oracleDiff, "utf8"));
-  });
+  }, cliBudget(4));
 
   // Would fail if runGit ever routed through a shell: `$(touch pwned)` in the
   // tracked filename would execute and leave the marker file behind.
@@ -412,7 +412,7 @@ describe("deriveGitFacts — A2 is the repository, verbatim", () => {
     await deriveGitFacts(worktree, baseSha);
     expect(existsSync(join(worktree, "pwned"))).toBe(false);
     expect(existsSync(join(repo, "pwned"))).toBe(false);
-  });
+  }, cliBudget(1));
 
   // ISC-151. Would fail if the merge-base gate were dropped: git happily
   // diffs against a non-ancestor via the remaining merge-base, producing a
@@ -425,13 +425,13 @@ describe("deriveGitFacts — A2 is the repository, verbatim", () => {
     expect(g.facts.files_changed).toEqual([]);
     expect(g.facts.commits).toEqual([]);
     expect(g.reasons.join(" ")).toContain("ISC-151");
-  });
+  }, cliBudget(1));
 
   test("a directory that is not a repository reports unknown, not a throw", async () => {
     const g = await deriveGitFacts(tmp, baseSha);
     expect(g.ok).toBe(false);
     expect(g.facts.head_ref).toBeNull();
-  });
+  }, cliBudget(1));
 });
 
 describe("pifleet artifacts — the harvest API (§8.4)", () => {
@@ -452,7 +452,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(h.claimed).not.toBeNull();
     expect(h.discrepancies).toEqual([]);
     expect(obj["harvest_status"]).toBe("complete");
-  });
+  }, cliBudget(1));
 
   // ISC-90 at the CLI: --include diff must carry git's diff, not a summary
   // of it. Would fail if the include plumbing dropped or reformatted it.
@@ -462,7 +462,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     const oracleDiff = await git(worktree, "diff", `${baseSha}...HEAD`);
     expect(h.derived.diff).toBe(oracleDiff);
-  });
+  }, cliBudget(2));
 
   // ISC-94. Would fail if a missing envelope were treated as a failure: the
   // verdict must stay in the un-downgraded domain and the harvest must stay
@@ -475,7 +475,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(h.claimed).toBeNull();
     expect(h.verdict).toBe("unknown"); // real diff exists; nothing proves or disproves it
     expect(obj["harvest_status"]).toBe("complete");
-  });
+  }, cliBudget(1));
 
   // The §7.2 primacy rule, verbatim: claimed success over an empty diff and
   // no commits is reported failed. Would fail if adjudication started
@@ -485,7 +485,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(r.code).toBe(0);
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.verdict).toBe("failed");
-  });
+  }, cliBudget(1));
 
   // F5 (§8.2, §13): a self-report contradicted by the diff is a hard failure
   // class. Would fail if the files_changed cross-check were removed — the
@@ -496,7 +496,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.verdict).toBe("failed");
     expect(h.discrepancies.join(" ")).toContain("phantom.ts");
-  });
+  }, cliBudget(1));
 
   /**
    * The other direction of F5, on the live CLI path.
@@ -516,7 +516,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.verdict).toBe("failed");
     expect(h.discrepancies.join(" ")).toContain("src/new.ts");
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-150 on the live CLI path, which is the part that was missing: the cap
@@ -535,7 +535,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     // because the actor could have rewritten the exam.
     expect(h.verdict).not.toBe("success");
     expect(h.reasons.join(" ")).toContain("harness");
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-232 on the live CLI path.
@@ -558,7 +558,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     // exactly as it was before this key existed.
     expect(payload.facts.harness.patterns).toEqual([...DEFAULT_HARNESS_PATTERNS]);
     expect(payload.facts.harness.touched).toEqual([]);
-  });
+  }, cliBudget(1));
 
   test("a config with no harness key is identical to no config at all", async () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--config", cfgDefault, "--json"]);
@@ -566,7 +566,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[]; touched: string[] } } };
     expect(payload.facts.harness.patterns).toEqual([...DEFAULT_HARNESS_PATTERNS]);
     expect(payload.facts.harness.touched).toEqual([]);
-  });
+  }, cliBudget(1));
 
   /**
    * The criterion itself: config decides. `ci/**` is not a default, so a
@@ -587,7 +587,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     // that rewrote its own grader, and ISC-150's cap must refuse to certify it.
     expect(payload.verdict).not.toBe("success");
     expect(payload.reasons.join(" ")).toContain("harness");
-  });
+  }, cliBudget(1));
 
   /**
    * REPLACE, not extend — the half of the semantics that a union
@@ -604,7 +604,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[]; touched: string[] } } };
     expect(payload.facts.harness.patterns).toEqual(["ci/**"]);
     expect(payload.facts.harness.touched).toEqual([]);
-  });
+  }, cliBudget(1));
 
   /**
    * `report` and `artifacts` read the same run through the same adjudicator,
@@ -647,14 +647,14 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "--config", join(tmp, "absent.yaml"), "--json"]);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain("config not found");
-  });
+  }, cliBudget(1));
 
   test("--config has the -c alias every other config-taking command has", async () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "-c", cfgCustom, "--json"]);
     expect(r.code).toBe(0);
     const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[] } } };
     expect(payload.facts.harness.patterns).toEqual(["ci/**"]);
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-232's reproducibility guarantee, end to end and through the real
@@ -696,7 +696,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     // And specifically: neither ambient config was read. The run recorded no
     // surface, so both graded against the built-in defaults.
     expect(a.facts.harness.patterns).toEqual([...DEFAULT_HARNESS_PATTERNS]);
-  });
+  }, cliBudget(2));
 
   /**
    * The in-process hole the YAML schema could not close (ISC-232).
@@ -741,7 +741,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(payload.facts.harness.touched).toEqual([]);
     expect(payload.facts.harness.defaults_missed).toContain("bunfig.toml");
     expect(payload.discrepancies.join(" ")).toContain("would have flagged");
-  });
+  }, cliBudget(1));
 
   // The mirror image: when the configured surface DID fire, there is nothing
   // to warn about — the verdict is capped either way, so a wider default
@@ -755,7 +755,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(payload.facts.harness.touched).toEqual(["ci/grade.sh"]);
     expect(payload.facts.harness.defaults_missed).toEqual([]);
     expect(payload.discrepancies.join(" ")).not.toContain("would have flagged");
-  });
+  }, cliBudget(1));
 
   /**
    * The degradation note has to reach `report --json`'s PAYLOAD, not only
@@ -812,7 +812,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(stderr).toContain("EMPTY");
     // Degraded, not crashed: still valid JSON on stdout.
     expect(JSON.parse(stdout)).toHaveProperty("run_id", "run-empty");
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-153 is "hashed AND recorded". The hash was being computed and dropped,
@@ -840,7 +840,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(b.facts_hash).toBe(a.facts_hash);
     // Different facts, different key — otherwise it detects nothing.
     expect(other.facts_hash).not.toBe(a.facts_hash);
-  });
+  }, cliBudget(4));
 
   /**
    * A supervisor-terminal verdict outranks derived evidence (§7.3). `aborted`
@@ -858,7 +858,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.verdict).toBe("aborted");
     expect(h.reasons.join(" ")).toContain("aborted");
-  });
+  }, cliBudget(1));
 
   /**
    * §8.2: the harvester re-runs the acceptance commands ITSELF, and the
@@ -876,7 +876,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(h.derived.acceptance).toHaveLength(1);
     expect(h.derived.acceptance[0]!.met).toBe(false);
     expect(h.verdict).not.toBe("success");
-  }, 60_000);
+  }, cliBudget(1));
 
   test("a passing acceptance command lets the claimed success stand", async () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-exam-pass", "--run-acceptance", "--json"]);
@@ -884,7 +884,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.derived.acceptance[0]!.met).toBe(true);
     expect(h.verdict).toBe("success");
-  }, 60_000);
+  }, cliBudget(1));
 
   /**
    * The default stays a pure read. Without the flag no clone is made and no
@@ -896,7 +896,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(r.code).toBe(0);
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.derived.acceptance).toEqual([]);
-  });
+  }, cliBudget(1));
 
   // The §8.4 pure-read rule. Would fail if an unknown task became a CliError:
   // a machine consumer must read `harvest_status`, never the exit code, to
@@ -908,7 +908,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     HarvestSchema.parse(obj);
     expect(obj["harvest_status"]).toBe("unavailable");
     expect((obj as { verdict: string }).verdict).toBe("unknown");
-  });
+  }, cliBudget(1));
 
   // Would fail if --all stopped enumerating the inbox or dropped tasks: it is
   // the single end-of-fanout call and must cover every dispatch record.
@@ -971,5 +971,5 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
   test("naming neither --task nor --all is a usage error", async () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--json"]);
     expect(r.code).toBe(2);
-  });
+  }, cliBudget(1));
 });

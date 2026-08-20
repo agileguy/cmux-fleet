@@ -22,6 +22,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -94,7 +95,7 @@ describe("every worker gets a pane that shows what it is doing", () => {
     const r = await tmux(["list-panes", "-t", `=pifleet-${runId}`, "-F", "#{pane_title}"]);
     expect(r.code).toBe(0);
     expect(r.out.split("\n").sort()).toEqual(["eng-1", "eng-2"]);
-  });
+  }, cliBudget(1));
 
   /**
    * The defect in one assertion. `bash` here means the pane was created and
@@ -113,7 +114,7 @@ describe("every worker gets a pane that shows what it is doing", () => {
     for (const c of commands) {
       expect(["bash", "sh", "zsh", "fish"]).not.toContain(c);
     }
-  });
+  }, cliBudget(1));
 
   /**
    * Liveness, which is the half a process check cannot prove. `tail -F` on a
@@ -136,7 +137,7 @@ describe("every worker gets a pane that shows what it is doing", () => {
       screen = (await tmux(["capture-pane", "-p", "-t", paneId])).out;
     }
     expect(screen).toContain(marker);
-  });
+  }, cliBudget(2));
 
   /**
    * The viewer must not be able to steer the worker. A pane is a view, never
@@ -169,7 +170,7 @@ describe("every worker gets a pane that shows what it is doing", () => {
         expect(cmd, `pane viewer runs a writing verb: ${verb}`).not.toContain(verb);
       }
     }
-  });
+  }, cliBudget(1));
 
   /**
    * The pane must resolve the run without inheriting this process's
@@ -183,5 +184,5 @@ describe("every worker gets a pane that shows what it is doing", () => {
       expect(cmd).toContain(`PIFLEET_RUNS_DIR=${rig.root}`);
       expect(cmd).toContain(runId);
     }
-  });
+  }, cliBudget(1));
 });

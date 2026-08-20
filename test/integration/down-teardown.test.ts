@@ -22,6 +22,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 const SOCKET = `pifleet-down-${process.pid.toString(36)}`;
@@ -107,7 +108,7 @@ describe("down destroys the workspace the run opened", () => {
     // the view, and only the JSON was ever checked.
     expect(JSON.parse(r.stdout.trim())).toMatchObject({ clean: true });
     expect((await tmux(["has-session", "-t", `=${session}`])).code).not.toBe(0);
-  });
+  }, cliBudget(4));
 
   test("--keep-panes leaves the session up for post-mortem reading", async () => {
     const session = "pifleet-teardown-b2";
@@ -119,7 +120,7 @@ describe("down destroys the workspace the run opened", () => {
     // shipped destroying panes unconditionally and nothing would have said so.
     expect((await tmux(["has-session", "-t", `=${session}`])).code).toBe(0);
     await tmux(["kill-session", "-t", `=${session}`]);
-  });
+  }, cliBudget(4));
 
   /**
    * A workspace that has already vanished is the normal case after a crash,
@@ -132,7 +133,7 @@ describe("down destroys the workspace the run opened", () => {
     const r = await down(rig);
     expect(r.code).toBe(0);
     expect(JSON.parse(r.stdout.trim())).toMatchObject({ clean: true });
-  });
+  }, cliBudget(1));
 
   test("a headless worker needs no teardown and reports clean", async () => {
     const base = await mkdtemp(join(tmpdir(), "pifleet-down-hl-"));
@@ -158,5 +159,5 @@ describe("down destroys the workspace the run opened", () => {
     );
     const r = await down({ root, runId });
     expect(r.code).toBe(0);
-  });
+  }, cliBudget(1));
 });

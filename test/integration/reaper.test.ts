@@ -38,6 +38,7 @@ import {
   type ReaperOps,
   type ReapTarget,
 } from "../../src/safety/reaper.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const FAST = { termGraceMs: 500, killGraceMs: 500, pollMs: 25 };
 
@@ -94,7 +95,7 @@ describe("reapSupervisor against real processes", () => {
     } finally {
       victim.kill();
     }
-  });
+  }, cliBudget(1));
 
   /**
    * THE ISC-191 probe, on a real kernel. The registry remembers a dead
@@ -121,7 +122,7 @@ describe("reapSupervisor against real processes", () => {
     } finally {
       victim.kill();
     }
-  });
+  }, cliBudget(1));
 
   /**
    * Fails if: reaping the already-dead becomes an error — the daemon's scan
@@ -140,7 +141,7 @@ describe("reapSupervisor against real processes", () => {
     }
     const second = await reapSupervisor(t, { ops, ...FAST });
     expect(second.supervisor).toBe("already_gone");
-  });
+  }, cliBudget(1));
 
   /**
    * Fails if: the SIGKILL rung is removed or gated on SIGTERM having worked
@@ -157,7 +158,7 @@ describe("reapSupervisor against real processes", () => {
     } finally {
       victim.kill();
     }
-  });
+  }, cliBudget(1));
 });
 
 describe("HeartbeatMonitor: staleness is change-detection on a monotonic clock", () => {
@@ -270,7 +271,7 @@ describe("reapStale: one scan over a real registry shape", () => {
     } finally {
       victim.kill();
     }
-  });
+  }, cliBudget(1));
 });
 
 /**
@@ -378,7 +379,7 @@ describe("the daemon reaps and deregisters", () => {
       victim.kill();
       await cleanup();
     }
-  });
+  }, cliBudget(2));
 
   test("a healthy worker survives every cycle", async () => {
     const { run, cleanup } = await scratchRun();
@@ -417,7 +418,7 @@ describe("the daemon reaps and deregisters", () => {
       victim.kill();
       await cleanup();
     }
-  });
+  }, cliBudget(2));
   /**
    * A scan reaps against the worker set it STARTED with. Reaping is slow — the
    * kill ladder waits out two grace periods — and `up` registers workers
@@ -495,5 +496,5 @@ describe("the daemon reaps and deregisters", () => {
       bystander.kill();
       await cleanup();
     }
-  });
+  }, cliBudget(3));
 });

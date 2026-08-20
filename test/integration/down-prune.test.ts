@@ -31,6 +31,7 @@ import { processStartTime } from "../../src/run/registry.ts";
 import { initialWorkerState, writeWorkerState } from "../../src/run/state.ts";
 import { createWorkerWorktrees, type WorkerWorktree } from "../../src/run/worktree.ts";
 import { git, gitOk, pathExists, seedGitRepo } from "../fixtures/synthetic-repo.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 
@@ -212,7 +213,7 @@ describe("down --prune", () => {
     // The remote goes too. Left behind, it makes every later `git fetch --all`
     // in the operator's own repository fail, long after this run is forgotten.
     expect((await git(rig.repo, "remote", "get-url", wt.remoteName)).code).not.toBe(0);
-  });
+  }, cliBudget(4));
 
   test("without --prune, nothing is deleted — the flag is the whole opt-in", async () => {
     const rig = await makeRig();
@@ -222,7 +223,7 @@ describe("down --prune", () => {
     expect(parse(r.stdout)["pruned"]).toBeUndefined();
     expect(await pathExists(wt.path)).toBe(true);
     expect(await gitOk(rig.repo, "remote", "get-url", wt.remoteName)).toBe(wt.path);
-  });
+  }, cliBudget(3));
 
   test("a checkout holding work is KEPT, and the exit code says so", async () => {
     const rig = await makeRig();
@@ -241,7 +242,7 @@ describe("down --prune", () => {
     // The remote survives the refusal: dropping it would make the surviving
     // work unreachable from the parent, which is the opposite of the point.
     expect(await gitOk(rig.repo, "remote", "get-url", wt.remoteName)).toBe(wt.path);
-  });
+  }, cliBudget(3));
 
   test("--force takes it anyway", async () => {
     const rig = await makeRig();
@@ -251,14 +252,14 @@ describe("down --prune", () => {
     const r = await down(rig, ["--prune", "--force"]);
     expect(r.code, `stderr: ${r.stderr.slice(0, 400)}`).toBe(EXIT.SUCCESS);
     expect(await pathExists(wt.path)).toBe(false);
-  });
+  }, cliBudget(2));
 
   test("--force without --prune is a usage error, not a silent no-op", async () => {
     const rig = await makeRig();
     const r = await down(rig, ["--force"]);
     expect(r.code).toBe(EXIT.USAGE);
     expect(r.stderr).toContain("--force has no meaning without --prune");
-  });
+  }, cliBudget(2));
 
   test("a supervisor that is not confirmed dead blocks its own prune", async () => {
     /**
@@ -285,12 +286,22 @@ describe("down --prune", () => {
     expect(kept).toMatchObject({ pruned: false });
     expect(String(kept!["reason"])).toContain("kill ladder");
   },
-  // The only test here that walks the FULL ladder — graceful 5s, then SIGTERM
-  // 2s, then SIGKILL 2s — against a supervisor that never dies. That is ~9s
-  // of deliberate waiting, well past bun's 5s default, and the timeout
-  // presents as an assertion failure on the first `expect` after `down`
-  // rather than as a timeout, which is a long way to travel to find a
-  // missing third argument.
+  // ISC-273 audit: the 30_000 stands, and this is the one test in the file
+  // whose cost is NOT process startup. It walks the FULL ladder — graceful 5s,
+  // then SIGTERM 2s, then SIGKILL 2s — against a supervisor that never dies,
+  // so ~9 s of the wall clock is deliberate waiting rather than spawning. It
+  // performs two spawn-reaching calls (`makeRig`, `down`), and `cliBudget(2)` =
+  // 22_800 ms would nominally cover them, but the derivation that governs here
+  // is the ladder: measured at 9908 ms idle on a 14-core box at load 3.55,
+  // which leaves cliBudget(2) only 2.3x headroom against a fixed cost that the
+  // contention factor does not shrink. 9s x CONTENTION (3) = 27_000, rounded
+  // to 30_000. The other twelve tests in this file ARE spawn-bounded and carry
+  // cliBudget(n) accordingly.
+  //
+  // The failure mode this protects against is worth naming: a ladder timeout
+  // presents as an assertion failure on the first `expect` after `down` rather
+  // than as a timeout, which is a long way to travel to find a missing third
+  // argument.
   30_000);
 
   test("a run that recorded no checkouts prunes nothing and does not invent paths", async () => {
@@ -305,7 +316,7 @@ describe("down --prune", () => {
     const r = await down({ base, root, runId, repo: "", worktrees: [] }, ["--prune"]);
     expect(r.code).toBe(EXIT.SUCCESS);
     expect(parse(r.stdout)).toMatchObject({ pruned: [] });
-  });
+  }, cliBudget(1));
 
   /**
    * THE regression test for the never-launched gate fix. `up` creates the
@@ -354,7 +365,7 @@ describe("down --prune", () => {
     expect(r.code, `stderr: ${r.stderr.slice(0, 400)}`).toBe(EXIT.SUCCESS);
     expect(parse(r.stdout)).toMatchObject({ pruned: [{ workerId: "eng-1", pruned: true }] });
     expect(await pathExists(worktrees[0]!.path)).toBe(false);
-  });
+  }, cliBudget(3));
 
   test("a never-launched checkout that holds work still needs --force, exactly like any other", async () => {
     const base = await mkdtemp(join(tmpdir(), "pifleet-prune-neverlaunched-dirty-"));
@@ -392,7 +403,7 @@ describe("down --prune", () => {
     const forced = await down({ base, root, runId, repo, worktrees }, ["--prune", "--force"]);
     expect(forced.code, `stderr: ${forced.stderr.slice(0, 400)}`).toBe(EXIT.SUCCESS);
     expect(await pathExists(worktrees[0]!.path)).toBe(false);
-  });
+  }, cliBudget(4));
 
   /**
    * THE regression test for the silent-success-on-unreadable-record fix. A
@@ -425,7 +436,7 @@ describe("down --prune", () => {
     const r = await down({ base, root, runId, repo, worktrees: [] }, ["--prune"]);
     expect(r.code).toBe(EXIT.PARTIAL);
     expect(parse(r.stdout)).toMatchObject({ pruned: [] });
-  });
+  }, cliBudget(2));
 
   test("one worker's malformed record does not blind pruning for the others", async () => {
     const rig = await makeRig({ workers: ["eng-1", "eng-2"] });
@@ -444,7 +455,7 @@ describe("down --prune", () => {
     const eng2 = pruned.find((p) => p["workerId"] === "eng-2");
     expect(eng2).toMatchObject({ pruned: false });
     expect(String(eng2!["reason"])).toContain("could not be read");
-  });
+  }, cliBudget(2));
 });
 
 describe("dispatch names the checkout that actually exists", () => {
@@ -524,7 +535,7 @@ describe("dispatch names the checkout that actually exists", () => {
     expect(recorded.repo).toBe(repo);
     // …and that git agrees, which is the half a record-only assertion misses.
     expect(await gitOk(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt.branch);
-  });
+  }, cliBudget(3));
 
   /**
    * THE regression test for the OTHER half of the `branch_prefix` fix.
@@ -608,5 +619,5 @@ describe("dispatch names the checkout that actually exists", () => {
     };
     expect(written.branch).toBe(`experiment/${runId}/rev-1`);
     expect(written.branch).not.toContain("fleet/");
-  });
+  }, cliBudget(1));
 });

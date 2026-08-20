@@ -32,6 +32,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_HAZARDS, detectRepoHazards, neutralizeRepoHazards } from "../../src/security/repo-hazards.ts";
+import { cliBudget } from "../support/budget.ts";
 
 /**
  * Ask git for the effective value, with the MACHINE'S config held out.
@@ -96,7 +97,7 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   test.each(FORMS.map((f) => [f.name, f] as const))(
     "%s stops being honoured after neutralization",
@@ -113,7 +114,7 @@ describe("the .git/config scanner sees every form git honours", () => {
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
-    },
+    }, cliBudget(4),
   );
 
   /**
@@ -147,7 +148,7 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(5));
 
   /**
    * `.git/info/attributes` is the untracked, repository-local twin of
@@ -173,7 +174,7 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   test(".git/info/attributes stops assigning the driver after neutralization", async () => {
     const dir = await repoWithConfig("");
@@ -197,7 +198,7 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(4));
 
   /**
    * The module's docstring claimed `.pi/settings.json` was covered while the
@@ -217,7 +218,7 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   /**
    * Every key in `CONFIG_HAZARDS` that names a program git will execute.
@@ -277,7 +278,7 @@ describe("the .git/config scanner sees every form git honours", () => {
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
-    },
+    }, cliBudget(3),
   );
 
   /**
@@ -320,7 +321,7 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * `.git/config.worktree` is a SECOND honoured config file, switched on by
@@ -342,7 +343,7 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * Two headers on one line. Consuming only the FIRST left the remainder still
@@ -359,7 +360,7 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(3));
 
   /** Re-scanning must not re-flag what is already quarantined (idempotence). */
   test("a second neutralization pass finds nothing left to defuse", async () => {
@@ -371,5 +372,5 @@ describe("the .git/config scanner sees every form git honours", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 });

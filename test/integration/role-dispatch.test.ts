@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { EXIT, TaskEnvelopeSchema } from "../../src/contracts.ts";
 import { runPaths } from "../../src/run/paths.ts";
 import { BRIEFINGS } from "../../src/roles/index.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -99,7 +100,7 @@ describe("a role composes into the brief the worker receives", () => {
     // Independence is the whole point — the verifier briefing must not be the
     // sre's, which would make the check a self-assessment.
     expect(envelope.brief).not.toContain(BRIEFINGS.sre);
-  }, 60_000);
+  }, cliBudget(4));
 
   test("a task with no role is dispatched with exactly the brief its author wrote", async () => {
     const base = await mkdtemp(join(tmpdir(), "pifleet-norole-"));
@@ -149,5 +150,5 @@ describe("a role composes into the brief the worker receives", () => {
     // The positive control for the test above: composition must be opt-in, or
     // every role-less task silently grows a frame its author never wrote.
     expect(envelope.brief).toBe(TASK_BRIEF);
-  }, 60_000);
+  }, cliBudget(4));
 });

@@ -34,6 +34,7 @@ import { processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
 
 import { DEFAULT_POLL_MS } from "../../src/orchestrate/scheduler.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -201,7 +202,7 @@ describe("dispatch --auto against a real fleet (happy chain)", () => {
       // Both envelopes reached the inbox — the durable §7.1 record.
       expect((await readdir(run.inboxDir)).sort()).toEqual(["a.json", "b.json"]);
     },
-    120_000,
+    cliBudget(3),
   );
 });
 
@@ -326,6 +327,6 @@ describe("a cyclic list is refused before anything runs", () => {
       // The workers were never disturbed: still idle, still alive.
       expect((await readWorkerState(workerPaths(run, "w1")))?.phase).toBe("idle");
     },
-    60_000,
+    cliBudget(3),
   );
 });

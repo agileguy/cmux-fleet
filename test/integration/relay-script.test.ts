@@ -22,6 +22,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, connect, type Server, type Socket } from "node:net";
 import { join } from "node:path";
+import { cliBudget } from "../support/budget.ts";
 
 const SCRIPT = join(import.meta.dir, "..", "..", "docker", "egress-relay.cjs");
 
@@ -143,7 +144,7 @@ describe("egress-relay.cjs — forwarding", () => {
     expect(reply.toString()).toBe("ECHO:HELLO");
     expect(up.connections).toBe(1);
     client.destroy();
-  });
+  }, cliBudget(1));
 
   test("the first chunk is not lost when it triggers the dial", async () => {
     // The bytes that cause the upstream to be dialled must arrive at the
@@ -166,7 +167,7 @@ describe("egress-relay.cjs — forwarding", () => {
     await once(client, "data");
     expect(seen.join("")).toContain("FIRST");
     client.destroy();
-  });
+  }, cliBudget(1));
 
   test("data sent after the dial still arrives, in order", async () => {
     const seen: string[] = [];
@@ -186,7 +187,7 @@ describe("egress-relay.cjs — forwarding", () => {
     await once(client, "data");
     expect(seen.join("")).toBe("AB");
     client.destroy();
-  });
+  }, cliBudget(1));
 });
 
 describe("egress-relay.cjs — S1: an idle client costs the upstream nothing", () => {
@@ -223,7 +224,7 @@ describe("egress-relay.cjs — S1: an idle client costs the upstream nothing", (
     expect(up.connections).toBe(1);
 
     for (const s of idle) s.destroy();
-  });
+  }, cliBudget(1));
 
   test("an idle client is reaped by the idle timeout", async () => {
     const up = await startUpstream();
@@ -238,7 +239,7 @@ describe("egress-relay.cjs — S1: an idle client costs the upstream nothing", (
     // No bytes ever sent: the socket must be closed by the relay, not held.
     await once(client, "close", 5_000);
     expect(up.connections).toBe(0);
-  });
+  }, cliBudget(1));
 });
 
 describe("egress-relay.cjs — S10: a client FIN is forwarded, not turned into a kill", () => {
@@ -305,7 +306,7 @@ describe("egress-relay.cjs — S10: a client FIN is forwarded, not turned into a
     while (!events.includes("end") && Date.now() < deadline) await Bun.sleep(25);
     expect(events).toContain("end");
     client.destroy();
-  });
+  }, cliBudget(1));
 });
 
 describe("egress-relay.cjs — S9: ports are range-checked, not just typed", () => {
@@ -324,14 +325,14 @@ describe("egress-relay.cjs — S9: ports are range-checked, not just typed", () 
       const code = await relay.proc.exited;
       expect(code).not.toBe(0);
       expect(await relay.stderr()).toMatch(/listenPort is not a port in 1\.\.65535/);
-    });
+    }, cliBudget(1));
   }
 
   test("refuses an empty host", async () => {
     const relay = await startRelay([{ listenPort: 9, host: "", port: 8000, name: "omlx" }]);
     expect(await relay.proc.exited).not.toBe(0);
     expect(await relay.stderr()).toMatch(/host is empty/);
-  });
+  }, cliBudget(1));
 });
 
 describe("egress-relay.cjs — S2: only a LISTEN failure is fatal", () => {
@@ -353,5 +354,5 @@ describe("egress-relay.cjs — S2: only a LISTEN failure is fatal", () => {
     } finally {
       await new Promise<void>((res) => blocker.close(() => res()));
     }
-  });
+  }, cliBudget(1));
 });

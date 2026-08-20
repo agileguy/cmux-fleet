@@ -12,6 +12,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
 
@@ -28,7 +29,7 @@ describe("exit-code ladder", () => {
   test("a valid config exits 0", async () => {
     const r = await runCli(["config", "validate", "-c", "fleet.example.yaml"]);
     expect(r.code).toBe(EXIT.SUCCESS);
-  });
+  }, cliBudget(1));
 
   // ISC-58
   test("a malformed config exits 2 with field-level errors", async () => {
@@ -42,7 +43,7 @@ describe("exit-code ladder", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   // ISC-59
   test("a role combining bash with read_only exits 2 and names the role", async () => {
@@ -61,7 +62,7 @@ describe("exit-code ladder", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   /**
    * Regression. A missing config threw a `ConfigError`, which the entry point's
@@ -76,13 +77,13 @@ describe("exit-code ladder", () => {
     expect(r.stderr).toContain("config not found");
     expect(r.stderr).not.toContain("at async");
     expect(r.stderr).not.toContain(".ts:");
-  });
+  }, cliBudget(1));
 
   test("an unknown command exits nonzero without a stack trace", async () => {
     const r = await runCli(["no-such-command"]);
     expect(r.code).not.toBe(EXIT.SUCCESS);
     expect(r.stderr).not.toContain("at async");
-  });
+  }, cliBudget(1));
 });
 
 describe("render", () => {
@@ -95,19 +96,19 @@ describe("render", () => {
     const d = JSON.parse(r.stdout);
     expect(d.worker).toBe("sre-1");
     expect(Array.isArray(d.docker)).toBe(true);
-  });
+  }, cliBudget(1));
 
   // ISC-65 — the flag is not repeatable; last would silently win.
   test("passes exactly one --append-system-prompt", async () => {
     const d = JSON.parse((await render()).stdout);
     expect(d.docker.filter((a: string) => a === "--append-system-prompt")).toHaveLength(1);
-  });
+  }, cliBudget(1));
 
   // ISC-66 — Pi has no @ sigil; an @-path is appended as literal text, silently.
   test("emits no @-prefixed argument", async () => {
     const d = JSON.parse((await render()).stdout);
     expect(d.docker.filter((a: string) => a.startsWith("@"))).toEqual([]);
-  });
+  }, cliBudget(1));
 
   // SRD §12.2 — repo content is untrusted, so discovery is denied by default.
   test("denies extension, skill and context-file discovery", async () => {
@@ -115,20 +116,20 @@ describe("render", () => {
     for (const flag of ["--no-extensions", "--no-skills", "--no-context-files"]) {
       expect(d.docker).toContain(flag);
     }
-  });
+  }, cliBudget(1));
 
   // ISC-64 — pifleet-worker is re-injected post-merge and cannot be removed.
   test("always injects the pifleet-worker skill", async () => {
     const d = JSON.parse((await render()).stdout);
     expect(d.docker.join(" ")).toContain("/skills/pifleet-worker");
-  });
+  }, cliBudget(1));
 
   // ISC-30
   test("does not mount the host ~/.pi/agent", async () => {
     const d = JSON.parse((await render()).stdout);
     const mounts = d.docker.join(" ");
     expect(mounts).not.toContain(`${process.env.HOME}/.pi/agent`);
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-62 — two roles differ in brain.
@@ -154,5 +155,5 @@ describe("render", () => {
     );
     const modelOf = (d: { docker: string[] }) => d.docker[d.docker.indexOf("--model") + 1];
     expect(modelOf(sre)).not.toBe(modelOf(rev));
-  });
+  }, cliBudget(2));
 });

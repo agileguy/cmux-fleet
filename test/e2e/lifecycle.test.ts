@@ -18,6 +18,7 @@ import { runPaths, taskRecordPath, workerPaths } from "../../src/run/paths.ts";
 import { readTaskRecord, readWorkerState } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
 import { controlCall } from "../../src/supervisor/launch.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -222,7 +223,7 @@ describe("e2e — the Phase 1 exit criterion", () => {
       expect(json<{ clean: boolean }>(down).clean).toBe(true);
       expect(await processStartTime(supPid)).toBeNull();
     },
-    45_000,
+    cliBudget(8),
   );
 
   test(
@@ -262,7 +263,7 @@ describe("e2e — the Phase 1 exit criterion", () => {
 
       await cli(fleet, ["down", "--run", fleet.runId, "--json"]);
     },
-    45_000,
+    cliBudget(6),
   );
 
   test(
@@ -318,7 +319,7 @@ describe("e2e — the Phase 1 exit criterion", () => {
 
       await cli(fleet, ["down", "--run", fleet.runId, "--json"]);
     },
-    45_000,
+    cliBudget(4),
   );
 
   test(
@@ -386,7 +387,7 @@ describe("e2e — the Phase 1 exit criterion", () => {
 
       await cli(fleet, ["down", "--run", fleet.runId, "--json"]);
     },
-    45_000,
+    cliBudget(6),
   );
 
   test(
@@ -409,7 +410,7 @@ describe("e2e — the Phase 1 exit criterion", () => {
 
       await cli(fleet, ["down", "--run", fleet.runId, "--json"]);
     },
-    45_000,
+    cliBudget(4),
   );
 
   test(
@@ -432,7 +433,7 @@ describe("e2e — the Phase 1 exit criterion", () => {
 
       await cli(fleet, ["down", "--run", fleet.runId, "--json"]);
     },
-    45_000,
+    cliBudget(4),
   );
 
   test(
@@ -450,6 +451,6 @@ describe("e2e — the Phase 1 exit criterion", () => {
 
       await cli(fleet, ["down", "--run", fleet.runId, "--json"]);
     },
-    45_000,
+    cliBudget(4),
   );
 });

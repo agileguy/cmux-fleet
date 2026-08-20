@@ -39,6 +39,7 @@ import {
 } from "../../src/harvest/acceptance.ts";
 import { adjudicate } from "../../src/harvest/adjudicate.ts";
 import type { z } from "zod";
+import { cliBudget } from "../support/budget.ts";
 
 const GIT_ENV = {
   PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
@@ -172,12 +173,13 @@ describe("fresh-clone execution (ISC-149)", () => {
     expect(context.clone_sha).toBe(honestSha);
     expect(context.clone_path.startsWith(resolve(scratch))).toBe(true);
     expect(context.clone_path.startsWith(resolve(repo))).toBe(false);
-  });
+  }, cliBudget(1));
 
   // The env-independence probe. POISON is set in THIS process; the command
   // passes only if the child does not see it. Fails if runAcceptance spreads
   // process.env into the child (the `...process.env` bug ISC-149 forbids).
   test("the child environment is built from scratch, not inherited", async () => {
+    const priorPoison = process.env["POISON"];
     process.env["POISON"] = "leaked";
     try {
       const { runs } = await runAcceptance({
@@ -190,9 +192,13 @@ describe("fresh-clone execution (ISC-149)", () => {
       });
       expect(runs[0]!.outcome).toBe("passed");
     } finally {
-      delete process.env["POISON"];
+      // Conditional restore for the same reason as ISC-278's PIFLEET_* rule:
+      // POISON sits outside the guarded namespace, so nothing would catch this
+      // one going wrong — which is the argument for fixing it, not against.
+      if (priorPoison === undefined) delete process.env["POISON"];
+      else process.env["POISON"] = priorPoison;
     }
-  });
+  }, cliBudget(1));
 
   /**
    * THE regression test for `--no-hardlinks` on THIS scratch clone —
@@ -257,7 +263,7 @@ describe("fresh-clone execution (ISC-149)", () => {
         `${o.rel} shares-worker-inode=false`,
       );
     }
-  });
+  }, cliBudget(1));
 });
 
 describe("base-SHA command resolution (ISC-148)", () => {
@@ -287,7 +293,7 @@ describe("base-SHA command resolution (ISC-148)", () => {
     const facts = await factsFor(cheatSha, runs);
     const verdict = adjudicate(facts, null);
     expect(verdict.verdict).toBe("failed");
-  });
+  }, cliBudget(3));
 
   // Demonstrates the mechanism distinguishes trees — resolution at the cheat
   // head DOES see the doctored file. This is the control that proves the
@@ -295,7 +301,7 @@ describe("base-SHA command resolution (ISC-148)", () => {
   test("resolution at the cheat head sees the doctored exam (the control)", async () => {
     const fromCheat = await resolveFromTree(repo, cheatSha, "ACCEPTANCE");
     expect(fromCheat).toEqual([{ cmd: "test -e .", source: "tree", resolved_from: cheatSha }]);
-  });
+  }, cliBudget(1));
 
   // ISC-151's ground truth on a real repo: base is an ancestor of every
   // branch head here. Fails if the fixture drifts into rewriting history,
@@ -304,7 +310,7 @@ describe("base-SHA command resolution (ISC-148)", () => {
     for (const sha of [honestSha, cheatSha, harnessSha]) {
       await git(repo, "merge-base", "--is-ancestor", baseSha, sha); // throws on nonzero
     }
-  });
+  }, cliBudget(1));
 });
 
 describe("timeouts and budget (ISC-152)", () => {
@@ -327,7 +333,7 @@ describe("timeouts and budget (ISC-152)", () => {
     const verdict = adjudicate(facts, null);
     expect(verdict.verdict).toBe("unknown");
     expect(verdict.verdict).not.toBe("failed"); // ISC-152, stated as itself
-  });
+  }, cliBudget(2));
 
   // Fails if per-command timeouts stop being bounded by the run deadline —
   // an expired run budget must yield not_run without spawning anything.
@@ -342,7 +348,7 @@ describe("timeouts and budget (ISC-152)", () => {
     });
     expect(runs[0]!.outcome).toBe("not_run");
     expect(runs[0]!.excerpt).toContain("budget");
-  });
+  }, cliBudget(1));
 
   /**
    * The ACCUMULATION property, which nothing pinned.
@@ -418,7 +424,7 @@ describe("seeded disagreement and harness edits, end to end", () => {
     const got = adjudicate(facts, lying);
     expect(got.discrepancies.join("\n")).toContain("src/ghost.ts");
     expect(got.verdict).toBe("failed");
-  });
+  }, cliBudget(2));
 
   // ISC-150 end to end: the harness branch does the task (acceptance is
   // genuinely green in the fresh clone) AND edits test/sneaky.test.ts. The
@@ -450,5 +456,5 @@ describe("seeded disagreement and harness edits, end to end", () => {
     const got = adjudicate(seededFacts, null);
     expect(got.verdict).not.toBe("success");
     expect(["blocked", "unknown"]).toContain(got.verdict);
-  });
+  }, cliBudget(5));
 });

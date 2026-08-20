@@ -94,3 +94,88 @@ export function cliBudget(spawns: number): number {
   }
   return Math.max(BUN_DEFAULT_MS, spawns * PER_SPAWN_IDLE_MS * CONTENTION * SAFETY);
 }
+
+// ---------------------------------------------------------------------------
+// Container operations — a DIFFERENT cost with a different distribution
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY A SECOND HELPER AND NOT A BIGGER `spawns` NUMBER (ISC-274).
+ *
+ * `cliBudget` is calibrated to ONE thing: the ~1900 ms it costs to transpile
+ * and run this project's CLI entrypoint. A `docker run` is not that. Reaching
+ * a workable number for a container test by inflating its `spawns` count would
+ * encode a lie as arithmetic — the count would no longer describe the test, and
+ * the next person to add a spawn would have no way to tell which part of the
+ * number was real. `container-env.test.ts` reached this conclusion first and
+ * stated it as "borrowing the number would be a derivation in appearance only";
+ * this helper is that reasoning lifted out of one file so the other Docker-gated
+ * suites stop restating it.
+ *
+ * ## The warm term, measured
+ *
+ * Taken on a 14-core macOS machine at load average 3.55, Docker 28.4.0, daemon
+ * already running and `pifleet/pi-worker:verify` already present:
+ *
+ *   - `docker run --rm <image> true`, ten consecutive samples:
+ *     949, 619, 556, 474, 537, 439, 459, 515, 518, 497 ms. Worst 949.
+ *   - `docker run -d` + two `docker exec` + `docker rm -f`, five samples:
+ *     261, 248, 257, 244, 256 ms.
+ *   - `docker network create --internal` + `inspect` + `rm`, five samples:
+ *     126, 110, 116, 113, 112 ms.
+ *
+ * And the suites themselves, run warm with `PIFLEET_DOCKER=1`: `image.test.ts`
+ * 27-959 ms per test, `egress.test.ts` 14-414 ms, `probe-in-network.test.ts`
+ * 22-187 ms, `adc.test.ts` 125-3493 ms (its slowest four make a real `gcloud`
+ * call, which is network latency rather than container cost — those four keep
+ * their own ceilings and say so inline).
+ *
+ * Worst single warm operation is therefore 949 ms, rounded to 1000 below.
+ *
+ * ## Why the warm term is NOT the budget
+ *
+ * Deriving the `cliBudget` way from that figure — worst op x count x CONTENTION
+ * x SAFETY — gives 1000 x 1 x 3 x 2 = 6000 ms for a one-operation test. That is
+ * barely over bun's default, and it is the argument FOR a floor rather than
+ * against it: it shows the 5 s default only ever looked adequate because the
+ * daemon was warm and the image already pulled.
+ *
+ * The dominant term is the cold one — on CI the first `docker run` follows a
+ * build against a cold daemon and a fresh overlay, where container creation is
+ * orders of magnitude slower than the numbers above. THAT TERM WAS NOT MEASURED
+ * HERE, and it deliberately was not: forcing it would mean stopping the
+ * developer's Docker daemon, which is not this file's business. Picking a tight
+ * ceiling from a warm measurement whose variation is not understood is the
+ * ISC-267 mistake.
+ *
+ * So the floor below is INHERITED, not derived: 60_000 is the value every
+ * Docker-gated suite in this tree already converged on independently
+ * (`container-env.test.ts`, and `adc.test.ts` eight times), chosen by authors
+ * who watched these run on CI. It is recorded as an inheritance rather than
+ * dressed up as a measurement. It remains BOUNDED: a genuinely hung `docker`
+ * still fails, it just fails later than a flat 5 s would let it.
+ */
+export const PER_CONTAINER_OP_MS = 1_000;
+
+/**
+ * The cold-start floor. NOT measured on a developer machine — see above. Raise
+ * it only with a CI measurement, and lower it only with one too.
+ */
+export const CONTAINER_COLD_FLOOR_MS = 60_000;
+
+/**
+ * The budget for a test that performs `ops` container operations — `docker
+ * run`, `docker exec`, `docker network create`, and their teardowns.
+ *
+ * Count what the test performs, exactly as with `cliBudget`. For every op count
+ * these suites actually use, the cold floor dominates and the answer is 60_000;
+ * the per-op term only takes over past thirty operations, which is the point —
+ * a test that grows into a container-heavy one gets a budget that grows with it
+ * instead of silently consuming a floor sized for a smaller version.
+ */
+export function containerBudget(ops: number): number {
+  if (!Number.isInteger(ops) || ops < 1) {
+    throw new TypeError(`containerBudget expects a positive operation count, got ${ops}`);
+  }
+  return Math.max(CONTAINER_COLD_FLOOR_MS, ops * PER_CONTAINER_OP_MS * CONTENTION * SAFETY);
+}

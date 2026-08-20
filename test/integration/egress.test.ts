@@ -53,6 +53,29 @@ afterEach(async () => {
   for (const n of cleanupNetworks.splice(0)) await docker(["network", "rm", n]);
 });
 
+/**
+ * The per-test ceiling for this file, DERIVED and written down (ISC-274).
+ *
+ * Stands at 120_000 and deliberately NOT reduced. These tests perform one to
+ * three container operations each, so `containerBudget(3)` derives 60_000 — its
+ * cold floor, the per-op term not overtaking until thirty operations. That is
+ * the derived number, and it is HALF this one.
+ *
+ * It is not adopted, for the reason `containerBudget` records against its own
+ * floor: the dominant term is a cold daemon, and it was not measured. Warm, with
+ * `PIFLEET_DOCKER=1` on a 14-core box at load 3.55, these five tests take 14,
+ * 155, 161, 297 and 414 ms — the whole file finishes inside half a second of
+ * container time, which tells us nothing about the cold path the ceiling exists
+ * for. Two of the five also reach for the public internet ON PURPOSE (proving a
+ * container CANNOT), so their tail is a DNS-and-connect timeout on someone
+ * else's network rather than anything this repo controls, and that is exactly
+ * the case a floor-width ceiling is there to absorb.
+ *
+ * Halving a ceiling on a warm measurement that exercises neither term is the
+ * ISC-267 mistake. budget.ts says its floor moves only on a CI measurement.
+ */
+const EGRESS_TEST_TIMEOUT_MS = 120_000;
+
 /** Run a bash script in the worker image on `net` and return combined output. */
 async function onNetwork(net: string, script: string): Promise<string> {
   const r = await docker([
@@ -85,7 +108,7 @@ describe.skipIf(!DOCKER)("egress network", () => {
       const again = await ensureEgressNetwork(name);
       expect(again.id).toBe(created.id);
     },
-    120_000,
+    EGRESS_TEST_TIMEOUT_MS,
   );
 
   test(
@@ -99,7 +122,7 @@ describe.skipIf(!DOCKER)("egress network", () => {
         id: null,
       });
     },
-    120_000,
+    EGRESS_TEST_TIMEOUT_MS,
   );
 
   test(
@@ -117,7 +140,7 @@ describe.skipIf(!DOCKER)("egress network", () => {
       expect(after.exists).toBe(true);
       expect(after.internal).toBe(false);
     },
-    120_000,
+    EGRESS_TEST_TIMEOUT_MS,
   );
 
   test(
@@ -138,7 +161,7 @@ describe.skipIf(!DOCKER)("egress network", () => {
       expect(out).not.toContain("ip=0");
       expect(out).not.toContain("name=0");
     },
-    120_000,
+    EGRESS_TEST_TIMEOUT_MS,
   );
 
   test(
@@ -184,6 +207,6 @@ describe.skipIf(!DOCKER)("egress network", () => {
       );
       expect(out).toContain("body=relay-ok");
     },
-    120_000,
+    EGRESS_TEST_TIMEOUT_MS,
   );
 });

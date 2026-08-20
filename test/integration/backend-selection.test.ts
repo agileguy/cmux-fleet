@@ -32,6 +32,7 @@ import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { runPaths } from "../../src/run/paths.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -287,7 +288,7 @@ describe("ISC-131: an unavailable primary with NO fallback refuses, loudly", () 
       });
       expect(await ls.exited).not.toBe(0);
     },
-    90_000,
+    cliBudget(2),
   );
 
   test(
@@ -314,7 +315,7 @@ describe("ISC-131: an unavailable primary with NO fallback refuses, loudly", () 
       expect(up.stderr).toContain("fallback 'tmux' also unavailable");
       expect(up.stdout).not.toContain("run_id");
     },
-    90_000,
+    cliBudget(1),
   );
 });
 
@@ -329,7 +330,7 @@ describe("unknown backend kinds are usage errors, refused before any side effect
     // import-specifier ingredient in the registry — refusing it at the CLI
     // edge is the first fence in front of that.)
     expect(await readdir(rig.root)).toEqual([]);
-  });
+  }, cliBudget(1));
 
   test("unknown --backend-fallback exits 2 even when the primary is valid", async () => {
     const rig = await makeRig();
@@ -349,5 +350,5 @@ describe("unknown backend kinds are usage errors, refused before any side effect
     expect(up.code).toBe(EXIT.USAGE);
     expect(up.stderr).toContain("unknown fallback backend 'screen'");
     expect(await readdir(rig.root)).toEqual([]);
-  });
+  }, cliBudget(1));
 });

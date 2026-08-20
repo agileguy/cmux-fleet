@@ -513,6 +513,12 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
         expect(out).toMatch(new RegExp(`^${key}=[1-9][0-9]*$`, "m"));
       }
     },
+    // ISC-274 audit: stands at 180_000. containerBudget(1) = 60_000 describes the
+    // one container operation; it does not describe the body, which is a set of
+    // deny probes that succeed by TIMING OUT. Each `curlProbe` is a 30-iteration
+    // retry loop at `-m 5` plus a 0.5 s sleep, so a single probe can legitimately
+    // spend ~165 s waiting for the silence that IS the assertion. The ceiling is
+    // sized from that loop, not from container startup.
     180_000,
   );
 
@@ -700,6 +706,14 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
       // makes this a statement about the host rather than about one IP.
       expect(parseKv(fromInternal, "gateway")).not.toBe(parseKv(fromUplink, "gateway"));
     },
+    // ISC-274 audit: stands at 600_000. containerBudget(7) = 60_000 describes the
+    // seven container operations and nothing else. The cost here is the PORT_SCAN
+    // enumeration documented above line 287: 65535 ports at -P 512 with timeout 1,
+    // whose stated worst case is 65535/512 x 1 s ~ 128 s per scan when every port
+    // DROPS. This test runs the scan twice — uplink and ordinary bridge — so ~256 s
+    // of deliberate waiting is in-contract. 600_000 is that worst case with room
+    // for a loaded box; it is the number PORT_SCAN's own docstring says the
+    // generous per-test timeouts are sized for.
     600_000,
   );
 
@@ -836,6 +850,11 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
         stub.stop(true);
       }
     },
+    // ISC-274 audit: stands at 600_000, same derivation as the enumeration test
+    // above: containerBudget(7) = 60_000 covers the container operations, while the
+    // body runs the 65535-port PORT_SCAN whose documented worst case is ~128 s per
+    // scan. Two scans plus the planted beacons put ~256 s of legitimate waiting
+    // inside this test.
     600_000,
   );
 });
@@ -936,6 +955,10 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         stub.stop(true);
       }
     },
+    // ISC-274 audit: stands at 180_000. containerBudget(3) = 60_000 covers the
+    // three container operations; the body then drives a real request through the
+    // relay to oMLX and a set of deny probes, each a 30-iteration curl retry loop
+    // at -m 5. The retry loop, not container startup, is what this is sized for.
     180_000,
   );
 
@@ -978,6 +1001,10 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         stub.stop(true);
       }
     },
+    // ISC-274 audit: stands at 180_000. containerBudget(4) = 60_000 covers the
+    // four container operations; the body deliberately STOPS a relay and waits for
+    // the rebuild to be observed healthy through a curl retry loop, so the cost is
+    // a supervised restart plus polling rather than process startup.
     180_000,
   );
 
@@ -993,6 +1020,11 @@ describe.skipIf(!DOCKER)("egress relay", () => {
       // Nothing was built on the way to that refusal.
       expect((await inspectRelayContainer(relayContainerName(net))).exists).toBe(false);
     },
+    // ISC-274 audit: stands at 120_000. containerBudget(2) = 60_000 is the derived
+    // number and this is not reduced to it: the assertion is that a bad base_url is
+    // refused BEFORE anything is created, and the refusal path can involve a
+    // connect attempt to an unreachable host, whose tail is a network timeout
+    // rather than container time.
     120_000,
   );
 
@@ -1060,6 +1092,12 @@ describe.skipIf(!DOCKER)("egress relay", () => {
       // other listener could still return a well-formed model list.
       expect(throughRelay.some((id) => directIds.includes(id))).toBe(true);
     },
+    // ISC-274 audit: stands at 180_000. containerBudget(2) = 60_000 covers the two
+    // container operations; this test is OMLX_LIVE-gated and its cost is a real
+    // model-list round-trip to a live inference server — someone else's latency,
+    // which no per-op model here describes. Not measured on this machine: the gate
+    // was not satisfied, so the author's number stands rather than being replaced
+    // by one derived from a path that did not run.
     180_000,
   );
 
@@ -1311,6 +1349,13 @@ describe.skipIf(!DOCKER)("egress relay", () => {
           `from inside the deny-all bridge (direct control: ${JSON.stringify(before)}).`,
       );
     },
+    // ISC-274 audit: stands at 900_000, the widest ceiling in the tree, and NOT
+    // reduced. containerBudget(2) = 60_000 covers the container operations and is
+    // irrelevant to the cost: this is a real INFERENCE round-trip — a live model
+    // generating tokens — run differentially against a host control, so the
+    // duration is set by model size and hardware. OMLX_LIVE-gated and unmeasured
+    // here for that reason; a derived container number would be a fiction with a
+    // helper name attached to it.
     900_000,
   );
 });

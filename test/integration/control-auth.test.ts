@@ -29,6 +29,7 @@ import {
   loadControlSecret,
 } from "../../src/security/control-auth.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -100,7 +101,7 @@ describe("daemon socket auth", () => {
     } finally {
       await daemon.stop();
     }
-  });
+  }, cliBudget(1));
 
   test("a missing token is refused with a message an old client can act on", async () => {
     const root = await freshRoot();
@@ -118,7 +119,7 @@ describe("daemon socket auth", () => {
     } finally {
       await daemon.stop();
     }
-  });
+  }, cliBudget(1));
 
   test("the correct secret is accepted and verbs actually execute", async () => {
     const root = await freshRoot();
@@ -134,7 +135,7 @@ describe("daemon socket auth", () => {
     } finally {
       await daemon.stop();
     }
-  });
+  }, cliBudget(1));
 });
 
 describe("supervisor control-socket auth", () => {
@@ -207,6 +208,6 @@ describe("supervisor control-socket auth", () => {
       expect(bye["ok"]).toBe(true);
       expect(await waitFor(async () => (await processStartTime(pid)) === null, 10_000)).toBe(true);
     },
-    40_000,
+    cliBudget(3),
   );
 });

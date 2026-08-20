@@ -37,6 +37,7 @@ import {
 } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -265,7 +266,7 @@ describe("steer — ISC-80: the message lands before the next assistant turn", (
 
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
     },
-    30_000,
+    cliBudget(2),
   );
 });
 
@@ -281,7 +282,7 @@ describe("steer — worker discipline (requirement 4)", () => {
     expect(r.stderr).toContain(runId);
     // "Never a stack trace": frames look like "    at fn (file:line)".
     expect(r.stderr).not.toMatch(/\n\s+at /);
-  });
+  }, cliBudget(1));
 
   test("a dead worker is WORKER_DIED, not USAGE and not a connect-error trace", async () => {
     const root = await freshRoot();
@@ -309,5 +310,5 @@ describe("steer — worker discipline (requirement 4)", () => {
     expect(r.code).toBe(EXIT.WORKER_DIED);
     expect(r.stderr).toContain("eng-1");
     expect(r.stderr).not.toMatch(/\n\s+at /);
-  });
+  }, cliBudget(3));
 });

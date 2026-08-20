@@ -14,6 +14,7 @@ import { mkdir, mkdtemp, rm, writeFile, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
 const LOGS_SRC = new URL("../../src/cli/commands/logs.ts", import.meta.url).pathname;
@@ -102,7 +103,7 @@ describe("logs — one-shot", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("--json passes raw event objects through unchanged", async () => {
     const lines = [evt({ type: "event", seq: 1, event: { type: "agent_start" } }), evt({ type: "stderr_line", line: "x" })];
@@ -116,7 +117,7 @@ describe("logs — one-shot", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("--json skips a malformed complete line instead of corrupting the stream", async () => {
     const good = [evt({ type: "event", seq: 1, event: { type: "a" } }), evt({ type: "event", seq: 2, event: { type: "b" } })];
@@ -129,7 +130,7 @@ describe("logs — one-shot", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("a half-written last line is withheld, not emitted or fatal", async () => {
     const whole = evt({ type: "event", seq: 1, event: { type: "agent_start" } });
@@ -143,7 +144,7 @@ describe("logs — one-shot", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("--render emits legible lines, not raw JSON, and includes the supervisor log", async () => {
     const f = await makeRun([
@@ -162,7 +163,7 @@ describe("logs — one-shot", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("an events file the supervisor has not created yet is empty output, not an error", async () => {
     const f = await makeRun(); // worker dir exists; no events.jsonl
@@ -173,7 +174,7 @@ describe("logs — one-shot", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("an explicit --run is honoured", async () => {
     const line = evt({ type: "event", seq: 1, event: { type: "agent_start" } });
@@ -185,7 +186,7 @@ describe("logs — one-shot", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 });
 
 describe("logs — refusals", () => {
@@ -200,7 +201,7 @@ describe("logs — refusals", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("a run that does not exist is loud", async () => {
     const f = await makeRun();
@@ -211,7 +212,7 @@ describe("logs — refusals", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("an empty runs root is 'no runs found', exit 2", async () => {
     const root = await mkdtemp(join(tmpdir(), "pifleet-logs-empty-"));
@@ -222,7 +223,7 @@ describe("logs — refusals", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("a path-shaped worker id is refused before any path is joined", async () => {
     const f = await makeRun();
@@ -233,7 +234,7 @@ describe("logs — refusals", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("--render with --json is a named refusal, not a silent precedence", async () => {
     const f = await makeRun();
@@ -244,7 +245,7 @@ describe("logs — refusals", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 });
 
 describe("logs — follow", () => {
@@ -269,7 +270,7 @@ describe("logs — follow", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("waits for an events file that does not exist yet instead of dying", async () => {
     const f = await makeRun(); // no events.jsonl at spawn time
@@ -293,7 +294,7 @@ describe("logs — follow", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("SIGINT also ends a follower cleanly", async () => {
     const f = await makeRun([evt({ type: "event", seq: 1, event: { type: "agent_start" } })]);
@@ -305,7 +306,7 @@ describe("logs — follow", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-269, and the reason the test above is not sufficient on its own.
@@ -344,7 +345,7 @@ describe("logs — follow", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 });
 
 /**
@@ -537,7 +538,7 @@ describe("logs is read-only (SRD §3.3)", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("a follower leaves the run directory byte-identical too", async () => {
     const f = await makeRun([evt({ type: "event", seq: 1, event: { type: "agent_start" } })]);
@@ -556,7 +557,7 @@ describe("logs is read-only (SRD §3.3)", () => {
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(1));
 
   test("every import resolves to a known read-only module", async () => {
     const src = await Bun.file(LOGS_SRC).text();
