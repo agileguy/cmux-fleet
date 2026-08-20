@@ -538,6 +538,26 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 | orchestration | `dispatch --auto`, dependencies, `report` + merge pre-check, role briefings, Fleet skill | ISC-67, ISC-85 | all above | no |
 | attended | `tui` pane mode, `steer`, live model switch | ISC-80 | backends | no |
 
+**Completion phases (SRD-PIFLEET-002, `Docs/SRD-COMPLETION.md`).** The eleven phases below
+cover every criterion this ISA has not closed. Ordering is derived from dependency, not from
+the filing groups above — groups A through S record *when a review found a gap*, which carries
+no build information. The SRD holds the argument for the order, the per-criterion probes, and
+the root-cause classification; this table is the index.
+
+| name | description | satisfies | depends_on | parallelizable |
+|---|---|---|---|---|
+| A-decide | Answer three disjunctions (harness surface, relay alias, `adc_mode: file`) | routes ISC-243, 264, 268 | — | no |
+| B-guards | Suite-wide properties that govern how every later phase is graded | ISC-254, 270, 273, 274, 278 | A-decide | no |
+| C-proof-plane | Self-hosted Apple-silicon runner + the bridge-gateway containment its probes expose | ISC-22, 41, 47, 48, 50, 51, 57, 258, 259, 262 | B-guards | no |
+| D-accounting | Budget on the dispatch path; production adapters for the stall policy | ISC-110, 115, 117, 193, 281, 282 | B-guards | yes |
+| E-control-seam | UI-request handler + timer, control-socket path allowlist and peer uid, runtime `no_tool_calls` | ISC-108, 111, 112, 113, 126, 276 | B-guards | yes |
+| F-launch-preflight | `up` preflight (image, backend, mount source, probe target) and launch-recorded kill identity | ISC-32, 61, 189, 191, 271, 272, 291, 292 | B-guards | yes |
+| G-durable-formats | Schema discriminator and pinned read policy for ledger, state and registry | ISC-157, 192 | B-guards | yes |
+| H-evidence | Host-side ledger collector, escape detection, quiesce/harvest tree hashes, fd-based outbox scan | ISC-125, 154, 172, 246 | B-guards | yes |
+| I-acceptance | Daemon-visibility sentinel, then acceptance in a fresh container, then the A-decide arm | ISC-233, 243, 277 | A-decide, F-launch-preflight | no |
+| J-egress | Google CONNECT/SNI path, relay config-drift detection, refresher wiring, the A-decide arms | ISC-248, 263, 264, 265, 268 | A-decide, C-proof-plane | yes |
+| K-end-to-end | The full `up` → container → dispatch → settle → harvest chain and the proofs needing a real run | ISC-74, 119, 141, 147, 290 | C, D, E, F | no |
+
 ## Decisions
 
 - **2026-08-20 — the supervisor's launch identity is recorded in its OWN state file, not only in
@@ -768,6 +788,22 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
   the same build — it says nothing about a run that started under an older build**, which is
   exactly the gap a cross-process persisted format opens and an in-process test cannot see. Full
   findings and fixes are in `## Verification`, "PR #8 review round."
+
+- **2026-08-20 — `Docs/SRD-COMPLETION.md` (SRD-PIFLEET-002) now holds the ORDER for the 54
+  criteria this ISA has not closed; this ISA still holds their state.** The two documents are
+  deliberately not redundant: the SRD restates no criterion text and carries no checkboxes,
+  because a second checklist drifts from the system of record. Precedence is unchanged and
+  now explicit in three directions — SRD-001 wins on design, this ISA wins on whether a
+  criterion is met, and SRD-002 wins only on which unclosed criterion is built next.
+  **The finding that shaped the order:** the 54 have five root causes, and two of those causes
+  are not engineering work. Nine criteria (ISC-22, 41, 47, 48, 50, 258, 259, 262, 290) are
+  mechanisms that already work with no CI runner able to witness them, and three (ISC-243,
+  264, 268) are disjunctions whose arms differ in size by up to 20:1 and which are waiting on
+  an owner's answer. Treating either class as ordinary backlog mis-sizes the remainder by
+  weeks. **The consequence worth recording:** ISC-290, which reads like the last possible
+  item, is blocked by exactly one unbuilt code item — ISC-291's probe target — plus a
+  configuration change that ISC-259's resolution already made legal. It is stated in the SRD
+  as the first claim to falsify rather than as an assumption to build on.
 
 ## Changelog
 
