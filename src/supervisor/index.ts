@@ -50,6 +50,7 @@ import { runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
 import {
   initialWorkerState,
   readFence,
+  readWorkerLaunch,
   writeFence,
   writeTaskRecord,
   writeWorkerState,
@@ -187,6 +188,20 @@ async function main(): Promise<void> {
       .catch(() => {});
   };
 
+  /**
+   * The launch record is read BEFORE state is assembled, not at the spawn.
+   *
+   * `state.container` has to be true from the FIRST state.json write. The
+   * first flush happens well above the spawn, so setting the container down
+   * at the branch left a real window in which state.json existed and said
+   * `container: null` while a container was about to start — and a supervisor
+   * killed inside that window leaves `down` with no name to remove, which is
+   * precisely the orphan `--rm` cannot reap (it is a client-side action that
+   * fires when the container EXITS, and the kill took the client). Reading
+   * here costs one stat on a path that is usually absent.
+   */
+  const launch = await readWorkerLaunch(wp);
+
   // In-memory state, flushed atomically on every transition and heartbeat.
   const state: WorkerState = initialWorkerState({
     worker: argv.workerId,
@@ -198,6 +213,11 @@ async function main(): Promise<void> {
     // too because that call is `{ optional: true }` and a run with no daemon
     // must still be stoppable (ISC-191).
     procStarted: started,
+    // Known from the record, so it is on disk before anything is spawned. The
+    // container ID is deliberately not guessed: it is unknowable until Docker
+    // starts it, and `down` removes by NAME.
+    container:
+      launch === null ? null : { name: launch.container, id: "", image: launch.image },
   });
 
   /**
@@ -243,22 +263,47 @@ async function main(): Promise<void> {
   // Spawn the Pi process (the double, in this phase).
   // -------------------------------------------------------------------------
 
-  const piCommand = process.env["PIFLEET_PI_COMMAND"];
-  if (piCommand === undefined || piCommand.trim() === "") {
-    state.phase = "dead";
-    await flushState();
-    process.stderr.write("supervisor: PIFLEET_PI_COMMAND is required in Phase 1\n");
-    process.exit(3);
+  /**
+   * Two launch paths, and the LAUNCH RECORD is what chooses between them.
+   *
+   * A container's argv is used VERBATIM; the double's is completed here. That
+   * asymmetry is not a style choice, it is the whole reason this branch is
+   * shaped this way. `buildPiArgv` already ends the rendered argv with
+   * `--mode rpc --session-id <id> --session-dir /sessions` — CONTAINER paths,
+   * because the run dir is bind-mounted at `/sessions` inside. The three lines
+   * appended below spell the same flags with HOST paths, which is right for a
+   * double running on this machine and wrong for a container.
+   *
+   * Appending them anyway would not throw. `pi` takes the LAST `--session-dir`,
+   * so the container would write its sessions to a host path that does not
+   * exist inside it, the supervisor would keep answering, tasks would keep
+   * settling, and `harvest` would find nothing — a fleet that looks alive and
+   * produces no transcripts. That is the quiet-wrongness this repo keeps
+   * closing, so the container path adds NOTHING and says so.
+   */
+  let cmd: string[];
+  if (launch !== null) {
+    cmd = launch.argv;
+  } else {
+    const piCommand = process.env["PIFLEET_PI_COMMAND"];
+    if (piCommand === undefined || piCommand.trim() === "") {
+      state.phase = "dead";
+      await flushState();
+      process.stderr.write(
+        "supervisor: no launch record and PIFLEET_PI_COMMAND is unset — nothing to run\n",
+      );
+      process.exit(3);
+    }
+    cmd = [
+      ...piCommand.trim().split(/\s+/),
+      "--mode",
+      "rpc",
+      "--session-dir",
+      run.sessionsDir,
+      "--session-id",
+      argv.workerId,
+    ];
   }
-  const cmd = [
-    ...piCommand.trim().split(/\s+/),
-    "--mode",
-    "rpc",
-    "--session-dir",
-    run.sessionsDir,
-    "--session-id",
-    argv.workerId,
-  ];
 
   const em = new EpochManager(await readFence(wp));
   const tracker = new CompletionTracker();

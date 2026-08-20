@@ -251,6 +251,38 @@ export const WorkerStateSchema = z.object({
 export type WorkerState = z.infer<typeof WorkerStateSchema>;
 
 /**
+ * The launch record: how this worker's process is started (SRD §5.6).
+ *
+ * Written once by `materializeWorkerInputs` and read by the supervisor, which
+ * runs `argv` VERBATIM. That word is the contract and it is load-bearing: the
+ * rendered argv already ends with a complete Pi flag list built for CONTAINER
+ * paths (`--mode rpc --session-dir /sessions --session-id <id>`, from
+ * `buildPiArgv`), while the `PIFLEET_PI_COMMAND` path appends the same three
+ * flags with HOST paths. Appending the host spelling to a container argv would
+ * not fail — `pi` would take the last `--session-dir` and write sessions to a
+ * path that does not exist inside the container, and the run would look alive
+ * while harvesting nothing. So the supervisor appends to one and not the
+ * other, and the presence of this record is what tells it which.
+ */
+export const WorkerLaunchSchema = z
+  .object({
+    /**
+     * `container` today. Named rather than implied by argv[0] so a future
+     * launch mode is a new value here, not a string comparison against
+     * `"docker"` scattered across the supervisor and `down`.
+     */
+    kind: z.literal("container"),
+    /** The complete command line. The supervisor adds nothing to it. */
+    argv: z.array(z.string()).min(1).max(MAX_ITEMS),
+    /** `--name` — how `down` finds the container without parsing argv. */
+    container: shortStr,
+    image: shortStr,
+  })
+  .strict();
+
+export type WorkerLaunch = z.infer<typeof WorkerLaunchSchema>;
+
+/**
  * Presentation identifiers live beside state, never inside it, so a lost cmux
  * cannot invalidate control-plane state (SRD §7.6).
  */

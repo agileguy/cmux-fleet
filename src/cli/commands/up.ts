@@ -127,13 +127,6 @@ export function register(program: Command): void {
           EXIT.USAGE,
         );
       }
-      const piCommand = process.env["PIFLEET_PI_COMMAND"];
-      if (piCommand === undefined || piCommand.trim() === "") {
-        throw new CliError(
-          "PIFLEET_PI_COMMAND is required in Phase 1 (path to the Pi double)",
-          EXIT.USAGE,
-        );
-      }
 
       /**
        * Refuse while an MLX training run is active, unless `--i-know` (ISC-56).
@@ -271,6 +264,34 @@ export function register(program: Command): void {
         }
         // Implicit resolution found nothing; the schema defaults stand.
       }
+      /**
+       * `PIFLEET_PI_COMMAND` is required only when there is NO config.
+       *
+       * It used to be checked at the top of the action, before config
+       * resolution — which was right while the double was the only way to run
+       * anything, and became wrong the moment a config could produce a launch
+       * record. A configured fleet launches containers and never reads this
+       * variable; demanding it anyway would refuse every real run for want of
+       * a test seam.
+       *
+       * The check is not DELETED, because the config-less path is still real:
+       * `up --workers eng-1` with no `fleet.yaml` reachable is how most of
+       * this repo's integration suite runs, and there the double is the only
+       * thing that can be spawned. So the requirement follows the case it
+       * belongs to instead of standing in front of both.
+       */
+      if (configPath === null) {
+        const piCommand = process.env["PIFLEET_PI_COMMAND"];
+        if (piCommand === undefined || piCommand.trim() === "") {
+          throw new CliError(
+            "no fleet.yaml was found and PIFLEET_PI_COMMAND is unset — pifleet has nothing to " +
+              "launch. Point --config at a fleet.yaml to run containers, or set " +
+              "PIFLEET_PI_COMMAND to the Pi double.",
+            EXIT.USAGE,
+          );
+        }
+      }
+
       if (configPath !== null) {
         try {
           loadedConfig = await parseConfig(await Bun.file(configPath).text(), configPath);
@@ -706,6 +727,28 @@ export function register(program: Command): void {
         // worker three leaves worker one's and two's on disk — a batch append
         // after the fact records neither, which is the forensic gap on exactly
         // the failure path this is built to make loud.
+        /**
+         * The one place the fleet decides between containers and the double.
+         *
+         * `PIFLEET_PI_COMMAND` is documented as the path to the Pi DOUBLE, so
+         * setting it is an explicit statement of intent — run this instead of
+         * the real thing — and an explicit override beats a derived default.
+         * That is also what keeps every existing integration and e2e test
+         * working unchanged: they all set it, and none of them has an image.
+         *
+         * Said on stderr rather than assumed, because the failure mode of
+         * getting this wrong is quiet in both directions: a stale
+         * `PIFLEET_PI_COMMAND` in a shell profile would otherwise silently run
+         * doubles for an operator who expected containers, and every artifact
+         * would look like a normal run.
+         */
+        const useDouble = (process.env["PIFLEET_PI_COMMAND"] ?? "").trim() !== "";
+        if (useDouble && opts.json !== true) {
+          process.stderr.write(
+            "pifleet: PIFLEET_PI_COMMAND is set, so workers run as host processes against the " +
+              "Pi double and NO containers are started; unset it to launch containers\n",
+          );
+        }
         await materializeWorkerInputs(loadedConfig, run, workers, async (m) => {
           await ledger.append("worker_inputs_materialized", {
             worker: m.workerId,
@@ -722,7 +765,7 @@ export function register(program: Command): void {
               kubeconfig_source: m.kubeconfigSource,
             },
           });
-        });
+        }, { writeLaunchRecord: !useDouble });
       }
 
       // The daemon: detached like the supervisors, single writer of registry.json.
@@ -823,7 +866,20 @@ export function register(program: Command): void {
           runDir: run.root,
           workerId,
           argv: supervisorArgv({ runsRoot: root, runId, workerId }),
-          env: { PIFLEET_RUNS_DIR: root, PIFLEET_PI_COMMAND: piCommand },
+          /*
+           * `PIFLEET_PI_COMMAND` is forwarded when this process HAS it, and
+           * omitted otherwise. A configured run ignores it — the supervisor
+           * branches on the launch record, not on this variable — but
+           * forwarding it unconditionally as `undefined` would put the literal
+           * string "undefined" into the child's environment, which the
+           * supervisor's own emptiness check does not catch.
+           */
+          env: {
+            PIFLEET_RUNS_DIR: root,
+            ...(process.env["PIFLEET_PI_COMMAND"] !== undefined
+              ? { PIFLEET_PI_COMMAND: process.env["PIFLEET_PI_COMMAND"] }
+              : {}),
+          },
           logPath: wp.supervisorLog,
         });
         launched.push({ id: workerId, pid, pgid });
