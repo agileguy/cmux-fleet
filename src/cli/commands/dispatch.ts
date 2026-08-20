@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { randomUUID } from "node:crypto";
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { CliError } from "../index.ts";
 import {
@@ -634,6 +634,59 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
       return record === null ? null : { verdict: record.verdict, reason: record.reason };
     },
 
+    /**
+     * Milliseconds since `worker` last appended to `events.jsonl`.
+     *
+     * MTIME rather than a parsed last record, deliberately. The file is
+     * append-only and every append moves its mtime, so the mtime IS the last
+     * event's arrival time — and reading it is one `stat` per worker per poll
+     * rather than a tail-and-parse of a file that grows for the whole run.
+     * What the parse would buy is the event's own `ts` field, which is stamped
+     * by the supervisor and would have to be trusted across a clock the
+     * scheduler does not share.
+     *
+     * `null` when the file does not exist: the worker has emitted nothing at
+     * all since launch, so there is no last event to measure from. Reporting a
+     * large silence here would kill workers that are merely still starting,
+     * which inverts the criterion.
+     *
+     * Both readings are taken in THIS function's clock, and only their
+     * difference leaves it — see `SchedulerIO.eventSilenceMs` for why the
+     * scheduler must never subtract an mtime from `io.now()`.
+     */
+    async eventSilenceMs(worker: string): Promise<number | null> {
+      try {
+        const st = await stat(workerPaths(run, worker).eventsJsonl);
+        return Math.max(0, Date.now() - st.mtimeMs);
+      } catch {
+        return null;
+      }
+    },
+
+    /**
+     * End a wedged worker (ISC-117).
+     *
+     * The ADVISORY rung only: an `abort` RPC to the supervisor, which is alive
+     * and answering by construction — that is what makes this case different
+     * from the reaper's. Signalling is deliberately NOT done here. The
+     * identity-anchored ladder in `down` is the one place that decides a
+     * process may be signalled, and duplicating any part of that decision on
+     * the scheduler's path is how the two would come to disagree.
+     *
+     * Best-effort: the scheduler settles the task and marks the worker dead
+     * whether or not this resolves, because the classification — not this
+     * call's success — is the finding.
+     */
+    async killWedged(worker: string, taskId: string): Promise<void> {
+      await ledger.append("worker_stall_kill", {
+        detail: { worker, task_id: taskId, reason: "event_stall_kill" },
+      });
+      await controlCall(run, worker, { cmd: "abort" }, { timeoutMs: 10_000 }).catch(() => {
+        // A wedged agent may have no working RPC; that is consistent with the
+        // diagnosis rather than evidence against it.
+      });
+    },
+
     async taskTokens(worker: string): Promise<number> {
       /**
        * A HIGH-WATER MARK, with both sides of the trade stated.
@@ -817,6 +870,27 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
             // Same filesystem, same likely failure. stderr already carried it.
           });
       },
+    },
+    /**
+     * The per-worker stall window, as `up` recorded it in `run.json`.
+     *
+     * `null` when the run predates the field or `run.json` records a half
+     * window — in which case the policy does not engage and the fleet-wide
+     * `stallTimeoutMs` remains the only stall guard, which is where every run
+     * was before this landed.
+     */
+    ...(policy.stall === null ? {} : { stall: policy.stall }),
+    onStallWarn: async (worker, taskId, silentMs) => {
+      // The warn rung is a REPORT, not an action (SRD §9.3): a worker this
+      // quiet may simply be thinking, and the only thing warranted before
+      // `event_stall_kill` is that somebody can see it.
+      await ledger.append("worker_stall_warn", {
+        detail: { worker, task_id: taskId, silent_ms: silentMs },
+      });
+      process.stderr.write(
+        `pifleet: warning: worker ${worker} has emitted no events for ` +
+          `${Math.round(silentMs / 1000)}s while holding a slot on ${taskId}\n`,
+      );
     },
     // The durable schedule record (run/paths.ts): `report` reads this file
     // to describe what the scheduler decided, and it is updated on every

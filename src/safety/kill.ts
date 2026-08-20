@@ -206,43 +206,26 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
 }
 
 // ---------------------------------------------------------------------------
-// Stall policy (ISC-110, ISC-117) — when to start climbing.
+// Stall policy (ISC-110, ISC-117) — re-exported, defined in ./stall.ts
 // ---------------------------------------------------------------------------
 
-export type StallVerdict = "healthy" | "warn" | "kill";
-
-export interface StallInput {
-  /** Monotonic ms since the worker's last event — a Stopwatch reading. */
-  sinceLastEventMs: number;
-  /**
-   * Whether the worker's current task holds an admission slot
-   * (`BudgetManager.holdsSlot`). This is the discriminator ISC-110 turns on:
-   * a QUEUED worker and a WEDGED one are byte-identical if all you watch is
-   * event silence — neither emits anything — so silence alone must never be
-   * grounds for a kill. A slot holder is generating; its silence is spent
-   * inference time and bounded by `event_stall_kill`. A non-holder is waiting
-   * its turn behind `max_concurrent` (SRD §9.3/F40); its silence is the queue
-   * working as designed.
-   */
-  holdsSlot: boolean;
-  warnMs: number;
-  killMs: number;
-}
-
 /**
- * Classify a worker's event silence.
+ * The policy itself lives in `./stall.ts`, which imports NOTHING.
  *
- * Only a slot holder can reach `kill` (ISC-117: no events, live heartbeat,
- * holding the server — wedged). A queued worker saturates at `warn`, however
- * long it queues: killing it would be executing a worker for standing in the
- * line we put it in. Its supervisor's own liveness is the reaper's job, not
- * the stall policy's.
+ * It was moved there when `scheduler.ts` became its first production caller
+ * and the import tripped the order-dependent initialisation cycle this file
+ * has carried since the reaper landed: `kill.ts` -> `run/registry.ts` -> … ->
+ * `safety/reaper.ts` -> `kill.ts`, which throws `ReferenceError: Cannot access
+ * 'realProcessOps' before initialization` for whichever module happens to
+ * import `kill.ts` first. The ISA records that failure on ISC-110 as a cost
+ * paid to establish; nothing should have to pay it again to ask a pure
+ * question about two integers.
+ *
+ * A dependency-free module cannot participate in a cycle, so the policy is now
+ * importable from anywhere. The re-export keeps `kill.ts` the address every
+ * existing caller and every doc comment already uses.
  */
-export function classifyStall(input: StallInput): StallVerdict {
-  if (input.holdsSlot && input.sinceLastEventMs >= input.killMs) return "kill";
-  if (input.sinceLastEventMs >= input.warnMs) return "warn";
-  return "healthy";
-}
+export { classifyStall, type StallInput, type StallVerdict } from "./stall.ts";
 
 // ---------------------------------------------------------------------------
 // Deadline exhaustion (ISC-116) — the diagnosed form.
