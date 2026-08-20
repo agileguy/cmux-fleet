@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- **Five anti-criteria now have probes that can actually fail (ISC-138, 139, 140, 165, 199).** An
+  `Anti:` criterion asserts an *absence*, which is the one claim a green suite cannot make on its
+  own — each was satisfied by a codebase that had simply not done the forbidden thing yet. Every
+  guard in `test/unit/anti-criteria.test.ts` is **mutation-verified**: seven planted violations,
+  seven reds, baseline green before and after. **ISC-139 changed shape under measurement** — the
+  first draft banned the bare tokens `claude`/`anthropic`/`copilot` and went red on six legitimate
+  sites, because `CLAUDE.md` is a *filename* this tool must know (`repo-hazards.ts` scans
+  repository instruction files). It now matches attribution *constructions*, which have no
+  legitimate use here. Its more useful half is a **capability pin**: the git verbs appearing as
+  argv literals under `src/` are add, branch, checkout, config, diff, log, rev-parse, status,
+  symbolic-ref, worktree — no `commit`, no `push`, no `gh` — so the criterion's commit and PR-body
+  clauses are *vacuous*, and the test pins that fact so they cannot silently go live. **ISC-165**
+  checks per test that a `:ro` write refusal also reads from the mount, since an absent mount
+  refuses writes just as happily as a read-only one. **ISC-140** is split from ISC-21 because the
+  two fail in opposite directions: a test needing egress fails closed and everyone finds out; a
+  test needing provider spend passes and quietly bills someone. **ISC-199** bans hardcoded `ps`
+  output spellings, not `ps` itself. **ISC-138 is a bookkeeping correction** — its guard already
+  existed beside ISC-137's, which had been `[x]` all along; the work was verifying it bites.
+
 - **`adc_mode: file` is now tracked as a criterion rather than a caveat inside a closed one
   (ISC-268).** ISC-44 closed honestly about its `file`-mode probe — it "hand-writes the `-v` itself
   and inspects a shape it authored" — but that admission lived only in the prose of an `[x]`
