@@ -154,6 +154,20 @@ export const BudgetSchema = z
     /** THE ceiling — local models have no price table, so there is no usd one (§5.9). */
     tokens_ceiling: z.number().int().positive(),
     per_task_reserve_tokens: z.number().int().positive().optional(),
+    /**
+     * NOT YET READ BY ANY COMMAND — the third key in this block, and the one
+     * the budget wiring did not close.
+     *
+     * `tokens_ceiling` and `per_task_reserve_tokens` reach `run.json` via
+     * `runBudgetRecord` and are enforced by `BudgetManager`; this one is
+     * parsed here and read nowhere (`grep -rn 'soft_stop_at\|softStop' src/`
+     * returns this line alone). Stated rather than left to be rediscovered,
+     * because a config key with no reader is the exact defect that wiring set
+     * out to eliminate and shipping two of three silently would repeat it.
+     * Tracked as a residual on ISC-235; wiring it needs a criterion of its own
+     * (what a soft stop DOES — refuse new admissions, warn, or something else
+     * — is a product decision, not a missing call site).
+     */
     soft_stop_at: z.number().min(0).max(1).default(0.8),
     per_task_timeout: durationSeconds.prefault("25m"),
     run_timeout: durationSeconds.prefault("2h"),
@@ -211,6 +225,25 @@ export const RunSchema = z
  * neighbours.
  */
 export const DEFAULT_BRANCH_PREFIX: string = RunSchema.shape.branch_prefix.parse(undefined);
+
+/**
+ * The in-flight cap a run gets when no config is reachable.
+ *
+ * Same construction and the same reason as `DEFAULT_BRANCH_PREFIX` above:
+ * `dispatch --auto` has to cap concurrency even for a run directory that `up`
+ * built with no config (or that a test assembled by hand), and a literal `2`
+ * there would be correct today and silently wrong the first time the default
+ * moves. `max_concurrent` sat in this schema with no reader at all until the
+ * budget was wired to the dispatch path — the same dead-field shape
+ * `branch_prefix` and `models_allowlist` were each caught in, and the reason
+ * the default is derived rather than restated.
+ *
+ * Note the asymmetry with `tokens_ceiling`, which deliberately has NO
+ * equivalent: it is a required field with no default, so a run that recorded
+ * none is UNBOUNDED. Inventing a ceiling for it would refuse work no operator
+ * ever budgeted for; inventing a concurrency cap only delays work.
+ */
+export const DEFAULT_MAX_CONCURRENT: number = RunSchema.shape.max_concurrent.parse(undefined);
 
 /**
  * `llm.relay_upstream` is validated HERE, with the predicate the relay itself
