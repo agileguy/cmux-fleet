@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`adc_mode: file` is now tracked as a criterion rather than a caveat inside a closed one
+  (ISC-268).** ISC-44 closed honestly about its `file`-mode probe — it "hand-writes the `-v` itself
+  and inspects a shape it authored" — but that admission lived only in the prose of an `[x]`
+  criterion, where nothing re-reads it. The measured state: `ADC_FILE_PATH`, `fileModeMaterials`
+  and `fileModeStartupEnv` have ZERO callers in `src/` outside `adc.ts`, and `buildDockerArgv`
+  emits no `/creds` mount, so `adc_mode: file` is accepted by the schema and does nothing. A mode
+  that neither works nor fails is worse than an absent one: it surfaces as an unexplained
+  permission error inside the container instead of a refusal at launch. It also leaves ISC-44's
+  mount guard with one carve-out — the single ADC file `file` mode may mount — defending a path
+  nothing takes, so the guard's most delicate branch has no production coverage and would be
+  load-bearing on its first real run. ISC-268 closes on either arm: wire the mode through
+  `buildDockerArgv` and prove it by `docker inspect`ing a container built from production argv, or
+  reject the value in the schema and delete the three symbols and the carve-out together. No code
+  changed in this entry — this records a known gap where it can be counted.
+
 ### Fixed
 - **A CI-executable guard test was failing on the clock's precision rather than on the property it
   defends (ISC-267).** `doctor-omlx.test.ts` asserted a measured latency against the delay its stub
