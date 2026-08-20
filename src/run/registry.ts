@@ -40,19 +40,85 @@ import { readWorkerState } from "./state.ts";
 
 export interface ProcessIdentity {
   pid: number;
-  /** `ps -o lstart=` output, verbatim. Empty string when the pid is gone. */
+  /** A `processStartTime` token. Empty string when nothing captured one. */
   started: string;
 }
 
-/** Start time of a pid, or null if no such process. */
+/**
+ * The rendering `processStartTime` pins, and the tag it stamps on the result.
+ *
+ * `ps -o lstart=` RENDERS a timestamp; it does not report one. The rendering
+ * is read from the calling process's own environment, so the same live pid at
+ * the same instant produces different bytes in different shells — measured on
+ * one pid, one instant, this machine:
+ *
+ *   TZ=UTC               "Thu 20 Aug 06:51:33 2026"
+ *   TZ=America/Halifax   "Thu 20 Aug 03:51:33 2026"
+ *   TZ=Asia/Tokyo        "Thu 20 Aug 15:51:33 2026"
+ *   LC_TIME=de_DE.UTF-8  "Do. 20 Aug. 00:51:33 2026"
+ *
+ * An identity is captured in the LAUNCHER's environment and compared in the
+ * OPERATOR's, and those are routinely different processes: `up` from a local
+ * terminal and `down` over SSH (sshd forwards `LC_TIME` under its default
+ * `AcceptEnv LANG LC_*`), `up` from launchd or cron with no `TZ` at all and
+ * `down` from a shell that sets one, a containerised CLI against a
+ * host-launched daemon. Every one of those made a LIVE supervisor compare
+ * unequal to its own recorded identity — which the whole kill path reads as
+ * "this process is gone". DST is not involved; the offset does not have to
+ * change for the two renderings to differ.
+ *
+ * So the rendering is pinned at the source rather than compensated for at each
+ * comparison. `TZ=UTC` fixes the instant, `LC_ALL=C` fixes the field order and
+ * the month/weekday names; together they make the string a function of the
+ * process alone.
+ *
+ * The tag is the other half, and it is what makes the format change SURVIVABLE
+ * rather than silent. Pinning changes the bytes for every identity already on
+ * disk — even on a machine that was already in UTC, because `LC_ALL=C` also
+ * reorders the fields ("Thu Aug 20 …" against "Thu 20 Aug …"). An untagged
+ * recorded value is therefore not comparable to a tagged one, and it is not a
+ * MISMATCH either: "a stranger holds this pid" would be a false statement
+ * about the world. Callers detect it with `isPinnedIdentity` and refuse
+ * explicitly. See `down`'s `anchorIdentity` for the policy that rests on this.
+ */
+export const IDENTITY_FORMAT = "utc1";
+
+/** Environment that makes `ps -o lstart=` a function of the process alone. */
+const IDENTITY_PS_ENV = { TZ: "UTC", LC_ALL: "C" } as const;
+
+/**
+ * Start time of a pid as a tagged, environment-independent token, or null if
+ * no such process.
+ *
+ * Never returns the empty string: an empty `ps` result is "no such process",
+ * which is `null`. Callers that persist `?? ""` are recording "capture
+ * failed", and `""` must be read as exactly that and never as an identity.
+ */
 export async function processStartTime(pid: number): Promise<string | null> {
   const proc = Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], {
+    // Explicitly, not inherited. This is the whole fix: without it the token
+    // carries the caller's TZ and locale into a value that another process,
+    // in another environment, is going to compare byte-for-byte.
+    env: { ...process.env, ...IDENTITY_PS_ENV },
     stdout: "pipe",
     stderr: "ignore",
   });
   const out = (await new Response(proc.stdout).text()).trim();
   await proc.exited;
-  return proc.exitCode === 0 && out.length > 0 ? out : null;
+  if (proc.exitCode !== 0 || out.length === 0) return null;
+  return `${IDENTITY_FORMAT} ${out}`;
+}
+
+/**
+ * Whether a recorded `started` was written by a build that pinned the
+ * rendering, and can therefore be compared at all.
+ *
+ * False for `""` (capture failed — see `processStartTime`) and for any value
+ * written before the pin existed. No locale renders a weekday as `utc1`, so
+ * the tag cannot collide with a legacy value.
+ */
+export function isPinnedIdentity(recorded: string): boolean {
+  return recorded.startsWith(`${IDENTITY_FORMAT} `);
 }
 
 /** True only if the pid is alive AND is still the same process we recorded. */

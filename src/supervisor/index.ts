@@ -194,6 +194,10 @@ async function main(): Promise<void> {
     pid: process.pid,
     pgid,
     startedAt: new Date().toISOString(),
+    // The same value the `register_worker` call below carries. Recorded here
+    // too because that call is `{ optional: true }` and a run with no daemon
+    // must still be stoppable (ISC-191).
+    procStarted: started,
   });
 
   /**

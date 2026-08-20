@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { parseConfig } from "../../src/config/load.ts";
 import { EXIT } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
+import { processStartTime } from "../../src/run/registry.ts";
 import { initialWorkerState, writeWorkerState } from "../../src/run/state.ts";
 import { createWorkerWorktrees, type WorkerWorktree } from "../../src/run/worktree.ts";
 import { git, gitOk, pathExists, seedGitRepo } from "../fixtures/synthetic-repo.ts";
@@ -58,10 +59,12 @@ interface Rig {
 /**
  * A run directory with real per-worker checkouts and no live supervisors.
  *
- * `livePid` plants a state file naming a process that IS running, which is how
- * the "supervisor not confirmed dead" refusal is exercised without leaving a
- * real supervisor behind: `down`'s liveness test is
- * `processStartTime(pid) === null`, and this test process satisfies it.
+ * `livePid` plants a state file AND a matching registry entry naming a process
+ * that IS running, which is how the "supervisor not confirmed dead" refusal is
+ * exercised without leaving a real supervisor behind. Both files, because
+ * `down`'s gate is IDENTITY and not liveness: a state file alone leaves it
+ * with nothing recorded to compare against, and it refuses at the anchor
+ * instead of climbing the ladder these tests are about.
  */
 async function makeRig(opts: { workers?: string[]; livePid?: string[] } = {}): Promise<Rig> {
   const workers = opts.workers ?? ["eng-1"];
@@ -88,6 +91,26 @@ async function makeRig(opts: { workers?: string[]; livePid?: string[] } = {}): P
   const run = runPaths(runId, root);
   await mkdir(run.workersDir, { recursive: true });
   const worktrees = await createWorkerWorktrees({ loaded, run, repo, workerIds: workers });
+
+  /**
+   * Registry entries for the live-supervisor workers, exactly as
+   * `register_worker` persists them.
+   *
+   * This fixture used to plant a `state.json` and no registry at all, so
+   * `down` had no launch-time identity to compare and — once the anchor
+   * became fail-closed — REFUSED the worker instead of laddering it. The
+   * refusal keeps the checkout too, so the §9.3 assertion below still held,
+   * but by a different mechanism than the test's name claims. A real `up`
+   * always registers its supervisor, so the fixture was modelling a state
+   * production does not produce.
+   *
+   * `started` is captured here with the same `processStartTime` the CLI uses.
+   * That it compares EQUAL inside the `down` subprocess is itself load-bearing:
+   * it only does so because the rendering is pinned to `TZ=UTC LC_ALL=C` at
+   * the source. A test-runner and a CLI subprocess in different locales would
+   * otherwise disagree about a process they can both see.
+   */
+  const registryWorkers: Record<string, unknown> = {};
 
   for (const w of workers) {
     const wp = workerPaths(run, w);
@@ -125,7 +148,28 @@ async function makeRig(opts: { workers?: string[]; livePid?: string[] } = {}): P
           startedAt: new Date().toISOString(),
         }),
       );
+      const started = await processStartTime(child.pid);
+      if (started === null) throw new Error(`fixture pid ${child.pid} was not alive when recorded`);
+      registryWorkers[w] = {
+        worker: w,
+        pid: child.pid,
+        pgid: child.pid,
+        started,
+        registered_at: new Date().toISOString(),
+      };
     }
+  }
+  if (Object.keys(registryWorkers).length > 0) {
+    await writeFile(
+      run.registryJson,
+      JSON.stringify({
+        schema: "pifleet.registry/v1",
+        run_id: runId,
+        daemon: { pid: 0, started: "" },
+        workers: registryWorkers,
+      }),
+      "utf8",
+    );
   }
   await writeFile(
     run.runJson,
