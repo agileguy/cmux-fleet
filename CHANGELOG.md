@@ -38,6 +38,21 @@ All notable changes to this project are documented here.
   `buildDockerArgv` and prove it by `docker inspect`ing a container built from production argv, or
   reject the value in the schema and delete the three symbols and the carve-out together. No code
   changed in this entry — this records a known gap where it can be counted.
+- **The suite is now judged under deliberate load rather than only on a quiet box (ISC-266).**
+  `.github/scripts/test-under-load.sh` runs a target under `ceil(cores * 0.75)` busy loops and exits
+  with the suite's own status, and a separate `load` job in CI runs it on every PR. A budget that is
+  too small — or a test whose spawn count grows without its `cliBudget(N)` growing with it — now
+  fails a PR instead of a developer's afternoon. Measured: the full integration suite under eleven
+  loops on 14 cores ran 375 pass / 81 skip / 0 fail in 300.87 s against 167.76 s idle, a 1.79x
+  inflation with every budget holding. On CI the job is confirmed to apply real load rather than
+  merely pass: the same commit ran `test/integration` in 124.32 s in the `test` job and 222.78 s in
+  the `load` job — 1.79x, the same factor. **What it does not prove is stated in the job's own
+  comment:** the runner reports two cores against the 14 these numbers came from, and none of the
+  editor, language server, browser and concurrent agents behind the load average of 18.40 ISC-266
+  recorded, so it reproduces the *shape* of the contention at a smaller magnitude — a floor on the
+  evidence, not a ceiling. The harness's cleanup traps a recorded PID list and never `jobs -p`, which is empty in a
+  non-interactive shell and would read as correct while killing nothing.
+
 
 ### Fixed
 - **A dependency-gating assertion failed on the scheduler's tick granularity rather than on gating
@@ -108,22 +123,6 @@ All notable changes to this project are documented here.
   is about variation. The probe now runs twice against different delays and requires the figure to
   move, so no constant satisfies both floors. Mutation-verified: `42` fails (it passed before),
   `5000` fails, a clock read twice fails.
-
-### Added
-- **The suite is now judged under deliberate load rather than only on a quiet box (ISC-266).**
-  `.github/scripts/test-under-load.sh` runs a target under `ceil(cores * 0.75)` busy loops and exits
-  with the suite's own status, and a separate `load` job in CI runs it on every PR. A budget that is
-  too small — or a test whose spawn count grows without its `cliBudget(N)` growing with it — now
-  fails a PR instead of a developer's afternoon. Measured: the full integration suite under eleven
-  loops on 14 cores ran 375 pass / 81 skip / 0 fail in 300.87 s against 167.76 s idle, a 1.79x
-  inflation with every budget holding. On CI the job is confirmed to apply real load rather than
-  merely pass: the same commit ran `test/integration` in 124.32 s in the `test` job and 222.78 s in
-  the `load` job — 1.79x, the same factor. **What it does not prove is stated in the job's own
-  comment:** the runner reports two cores against the 14 these numbers came from, and none of the
-  editor, language server, browser and concurrent agents behind the load average of 18.40 ISC-266
-  recorded, so it reproduces the *shape* of the contention at a smaller magnitude — a floor on the
-  evidence, not a ceiling. The harness's cleanup traps a recorded PID list and never `jobs -p`, which is empty in a
-  non-interactive shell and would read as correct while killing nothing.
 
 ### Security
 - **The mandatory native-tool-call gate was certifying a network path no worker uses.** `up`
