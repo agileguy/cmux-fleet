@@ -11,10 +11,14 @@
  */
 
 import type { Command } from "commander";
+import { rename } from "node:fs/promises";
 import { CliError } from "../index.ts";
 import { EXIT, type WorkerState } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot, workerPaths, type RunPaths } from "../../run/paths.ts";
 import { readWorkerState } from "../../run/state.ts";
+import { SocketRequestError } from "../../run/registry.ts";
+import { ControlAuthError } from "../../security/control-auth.ts";
+import { writeTextAtomic } from "../../util/jsonl.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import {
   classifySession,
@@ -231,8 +235,53 @@ export function register(program: Command): void {
 }
 
 /**
+ * How long the CLI waits on the worker's control socket for `export_html`.
+ *
+ * The supervisor's own budget for Pi (`EXPORT_HTML_TIMEOUT_MS` in
+ * `src/supervisor/index.ts`) is deliberately SHORTER, so on a slow render the
+ * side that gives up first is the side holding the diagnosis: the supervisor
+ * answers `ok:false` naming what Pi did, well inside this window, instead of
+ * the CLI learning only that a socket went quiet. Exported so the ordering can
+ * be asserted rather than described — see `test/unit/export-html-race.test.ts`.
+ */
+export const CLI_EXPORT_HTML_TIMEOUT_MS = 10_000;
+
+/**
+ * Why the RPC export did not produce the file, in the vocabulary of the next
+ * thing the reader would do about it.
+ *
+ * `null` means "there is no supervisor to ask", which is the harvest case this
+ * command exists for and therefore not worth a word. Everything else means a
+ * control plane WAS reachable and the export still did not happen — and those
+ * were previously indistinguishable from each other and from silence, which is
+ * how ISC-234's own defect hid: an unknown verb is an RPC failure, the bare
+ * `catch {}` swallowed it, and every export quietly took the fallback. The next
+ * verb-level regression would have hidden in exactly the same place.
+ */
+function rpcExportFailure(err: unknown): string | null {
+  // A run with no auth record has no control plane at all — same class as a
+  // socket nobody is listening on, and routine for a harvested run directory.
+  if (err instanceof ControlAuthError) return null;
+  if (err instanceof SocketRequestError) {
+    // `neverDelivered` is exactly ECONNREFUSED/ENOENT: the request cannot have
+    // been acted on because nothing accepted it. A dead worker, as expected.
+    if (err.neverDelivered) return null;
+    // Reachable but silent — a wedged supervisor, or one whose own budget for
+    // Pi is no longer under this ceiling. Not the same fact as "dead", and
+    // reported differently on purpose so the two cannot be confused again.
+    return `control call failed (${err.failure}): ${err.message}`;
+  }
+  return `control call failed: ${err instanceof Error ? err.message : String(err)}`;
+}
+
+/**
  * A5: Pi's `export_html` via the supervisor when one is alive, local render
  * when not. Returns which path produced the file.
+ *
+ * Every branch still ends in a written file and exit 0 — the fallback is the
+ * point, and a diagnosis on stderr does not make it a failure. What changes is
+ * that a live worker's refusal now says so on stderr instead of looking exactly
+ * like no worker at all.
  */
 async function exportHtml(
   run: RunPaths,
@@ -240,20 +289,58 @@ async function exportHtml(
   sessionPath: string,
   outPath: string,
 ): Promise<"rpc" | "local"> {
+  const note = (reason: string): void => {
+    process.stderr.write(
+      `transcript: worker ${workerId}: ${reason}; wrote the local render instead\n`,
+    );
+  };
   try {
     const reply = await controlCall(
       run,
       workerId,
       { cmd: "export_html", path: outPath },
-      { timeoutMs: 10_000 },
+      { timeoutMs: CLI_EXPORT_HTML_TIMEOUT_MS },
     );
     // Trust the reply only as far as the filesystem confirms it: the file is
     // the deliverable (ISC-101), not the acknowledgement.
-    if (reply["ok"] === true && (await Bun.file(outPath).exists())) return "rpc";
-  } catch {
-    // No live supervisor — the normal harvest case, not an error.
+    //
+    // The reply names a STAGING path Pi rendered into, and this rename is what
+    // publishes it. Doing it here rather than in the supervisor is what closes
+    // the ISC-234 late-write race outright: this process is the only one that
+    // ever names `outPath`, so the losing render has nothing to overwrite and
+    // no ordering between the two sides can put the agent's bytes behind the
+    // word "local". The rename doubles as the existence check it replaced —
+    // a container-namespace path Pi resolved elsewhere fails ENOENT here.
+    if (reply["ok"] === true) {
+      const staged = reply["staged"];
+      if (typeof staged === "string" && staged !== "") {
+        try {
+          await rename(staged, outPath);
+          return "rpc";
+        } catch (err) {
+          note(`the worker's export could not be claimed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        note("the worker reported an export but named no file");
+      }
+    } else {
+      const why = reply["error"];
+      note(`refused export_html: ${typeof why === "string" && why !== "" ? why : "no reason given"}`);
+    }
+  } catch (err) {
+    const failure = rpcExportFailure(err);
+    if (failure !== null) note(failure);
   }
   const reader = await readTranscript(sessionPath);
-  await Bun.write(outPath, renderHtml(reader, { worker: workerId, runId: run.runId, sessionPath }));
+  // Write-and-rename, not `Bun.write`. Two writers can still target this path —
+  // a supervisor from an older build, a second `transcript --html` — and a
+  // plain write lets one land inside the other, leaving a document that is
+  // half each. Atomicity does not decide WHO wins, and is not what closes the
+  // ISC-234 race (aiming Pi at a staging path is); it bounds the damage when
+  // something else races here to "the loser's file is replaced whole".
+  await writeTextAtomic(
+    outPath,
+    renderHtml(reader, { worker: workerId, runId: run.runId, sessionPath }),
+  );
   return "local";
 }

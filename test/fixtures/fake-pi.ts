@@ -61,10 +61,11 @@
  * do this, everyone else does that" instead of an ordering puzzle.
  */
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { LineSplitter, parseLine } from "../../src/util/jsonl.ts";
 import { stepsForSession } from "./scenario-steps.ts";
+import { EXPORT_MARKER } from "./export-marker.ts";
 
 // ---------------------------------------------------------------------------
 // Argument parsing — tolerant of real Pi flags it does not implement.
@@ -449,6 +450,57 @@ async function handle(msg: Record<string, unknown>): Promise<void> {
       if (step?.emit_after_respond !== undefined) {
         void runEmissions(step.emit_after_respond, { cancelled: false });
       }
+      return;
+    }
+
+    /**
+     * Real Pi renders its own session to a standalone file (ISC-234). The
+     * double writes a MARKER document rather than a plausible transcript,
+     * because the whole point of the live path is that it is distinguishable
+     * from the CLI's local re-render — the two agree on exit code and on
+     * "a file exists at the path", and differ only in who wrote the bytes. A
+     * test that could not tell them apart would pass with the live path
+     * deleted.
+     */
+    case "export_html": {
+      const target = typeof msg["path"] === "string" ? msg["path"] : "";
+      if (step?.ack?.success === false) {
+        respond(id, command, false, undefined, step.ack.error ?? "export refused by scenario");
+        return;
+      }
+      if (target === "") {
+        respond(id, command, false, undefined, "export_html requires a path");
+        return;
+      }
+      const writeAndRespond = (): void => {
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(
+          target,
+          "<!doctype html>\n<html><head><meta charset=\"utf-8\">" +
+            `<title>fake-pi export ${args.sessionId}</title></head>` +
+            `<body><p id="${EXPORT_MARKER}">rendered by the agent, not by the CLI</p></body></html>\n`,
+        );
+        respond(id, command, true, { path: target });
+      };
+      // `respond_delay_ms` here models the render that outruns the supervisor's
+      // budget — the case ISC-234's 8s-under-10s ordering exists for, and the
+      // one this case could not express at all: `prompt`, `get_state` and
+      // `get_session_stats` all honoured a delay and `export_html` did not, so
+      // the ordering could be inverted with the whole suite still green.
+      //
+      // Deliberately NOT awaited, unlike the other delay branches. `handle()`
+      // is awaited by the stdin loop, so an awaited sleep stops this process
+      // reading its own input — which models a WEDGED agent, not a slow
+      // export. Real Pi keeps answering while a render is in flight, and the
+      // difference decides whether the supervisor's late `rename` finds the
+      // file or the supervisor concludes the child is gone. It also means the
+      // write lands after the supervisor gave up, which is the whole point:
+      // that late write is the one that used to clobber the operator's file.
+      if (step?.respond_delay_ms !== undefined) {
+        void sleep(step.respond_delay_ms).then(writeAndRespond);
+        return;
+      }
+      writeAndRespond();
       return;
     }
 

@@ -32,7 +32,8 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import {
   TaskEnvelopeSchema,
   type RpcEvent,
@@ -71,6 +72,54 @@ const SHUTDOWN_GRACE_MS = 2_000;
  * and a wedged agent may never honour it.
  */
 const ABORT_GRACE_MS = 5_000;
+/**
+ * How long Pi gets to render its own transcript (ISC-234).
+ *
+ * Deliberately under the CLI's own ceiling — `CLI_EXPORT_HTML_TIMEOUT_MS` in
+ * `src/cli/commands/transcript.ts`: whichever side gives up first, the operator
+ * gets the local render rather than a hang, and losing the race HERE means the
+ * supervisor is the one that says why.
+ *
+ * Exported because that ordering was load-bearing and enforced by nothing. A
+ * comment cannot fail, and raising this number to 60s inverted the documented
+ * relationship with the whole suite still green. `test/unit/export-html-race.
+ * test.ts` now compares the two constants directly, so the flip is red before
+ * any process is spawned.
+ */
+export const EXPORT_HTML_TIMEOUT_MS = 8_000;
+
+/**
+ * How long a Pi that ignored the export deadline gets to finish writing its
+ * staging file before the supervisor deletes it.
+ *
+ * `export_html` has no cancel verb — Pi is told a path and renders to it, and
+ * there is nothing to send that makes it stop. So the abandoned render is not
+ * prevented, it is aimed somewhere harmless and then swept. The window is
+ * generous because a file swept too early is a file swept while Pi is still
+ * writing it, which achieves nothing; an orphan that outlives the sweep is one
+ * stray `.pi-export-*.tmp` beside the operator's file, not a corrupted export.
+ */
+const EXPORT_SWEEP_MS = 30_000;
+
+/**
+ * Reap a staging render.
+ *
+ * `now: false` is the SUCCESS path: the file is real and the CLI is about to
+ * claim it, so an immediate unlink would race the very rename it exists to
+ * enable. Only the delayed pass runs, and it collects the file if the CLI died
+ * before claiming it — an ENOENT once claimed, which is why every failure is
+ * swallowed.
+ *
+ * `now: true` is the give-up path: nothing is coming for this file, so drop it
+ * immediately and again after Pi's write could plausibly have landed.
+ *
+ * The timer is `unref`'d — this must never be the reason the supervisor
+ * outlives its work.
+ */
+function sweepStagedExport(staging: string, opts: { now: boolean }): void {
+  if (opts.now) void unlink(staging).catch(() => {});
+  setTimeout(() => void unlink(staging).catch(() => {}), EXPORT_SWEEP_MS).unref();
+}
 
 interface Argv {
   runsRoot: string;
@@ -652,6 +701,80 @@ async function main(): Promise<void> {
         const message = typeof msg["message"] === "string" ? msg["message"] : "";
         const sent = await client.send("steer", { message });
         return { ok: sent.response.success };
+      }
+
+      /**
+       * A5 (SRD §8.4, ISC-101/ISC-234): Pi exports its OWN session.
+       *
+       * The CLI can always re-render A4 itself, and does — that fallback is
+       * what makes ISC-101 hold for the dead workers harvest exists for. But
+       * a re-render is a SECOND opinion about a file Pi wrote: it knows only
+       * the record types `harvest/transcript.ts` models, and silently flattens
+       * everything else. While a worker is alive, its own renderer is the
+       * authority, and the only way to reach it is through here — a control
+       * socket that answered `unknown cmd: export_html` made the live path
+       * unreachable and left every export, live or dead, on the fallback.
+       *
+       * PI IS NEVER TOLD THE OPERATOR'S PATH, and neither is this process the
+       * one that writes it. Pi renders into a unique staging sibling; the
+       * supervisor reports where; the CLI renames it into place. Exactly ONE
+       * process ever names the operator's file, and it is the process that told
+       * the operator what the file is.
+       *
+       * That is not tidiness, it is the whole correctness argument, because Pi
+       * writes the file itself and the deadline below is advisory — there is no
+       * verb that cancels an export already in flight:
+       *
+       *   t=8s   the send times out; the supervisor answers `ok:false`
+       *   t=8s   the CLI falls back, writes its OWN render, prints `source:
+       *          "local"`, exits 0
+       *   t=13s  Pi finishes
+       *
+       * With the path forwarded verbatim, that last line overwrote the file the
+       * operator had just been told was the CLI's second opinion — the exact
+       * provenance question ISC-234 exists to answer, delivered inverted, and
+       * torn down the middle if the two writes interleaved.
+       *
+       * Renaming HERE, on confirmed success, would still leave a window: Pi
+       * confirming at 7.9s and this rename landing after the CLI's own ceiling
+       * has expired puts the agent's bytes at the operator's path AFTER the CLI
+       * has already written and reported `"local"`. Same inversion, smaller
+       * window. Handing the staging path back instead removes the second writer
+       * rather than making it faster, so there is no window left to size.
+       *
+       * The orphan a lost race leaves is swept by `sweepStagedExport`. A path
+       * Pi resolves inside a container namespace produces no file at the host
+       * staging path, the CLI's rename fails ENOENT, and the export degrades to
+       * the local render instead of reporting a success that wrote nothing.
+       */
+      case "export_html": {
+        const path = msg["path"];
+        if (typeof path !== "string" || path === "") {
+          return { ok: false, error: "export_html requires a non-empty path" };
+        }
+        // A sibling, so the CLI's rename is same-directory and therefore atomic
+        // and never cross-device.
+        const staging = `${path}.pi-export-${randomUUID()}.tmp`;
+        try {
+          const sent = await client.send(
+            "export_html",
+            { path: staging },
+            { timeoutMs: EXPORT_HTML_TIMEOUT_MS },
+          );
+          if (!sent.response.success) {
+            sweepStagedExport(staging, { now: true });
+            return { ok: false, error: sent.response.error ?? "export_html failed" };
+          }
+          // Offer only what Pi confirmed it finished. The delayed sweep is the
+          // backstop for a CLI that dies before claiming it.
+          sweepStagedExport(staging, { now: false });
+          return { ok: true, staged: staging, error: null };
+        } catch (err) {
+          // A wedged or dead child must not take the supervisor down, and the
+          // caller has a working fallback — report the failure and keep serving.
+          sweepStagedExport(staging, { now: true });
+          return { ok: false, error: `export_html: ${String(err)}` };
+        }
       }
 
       case "abort": {

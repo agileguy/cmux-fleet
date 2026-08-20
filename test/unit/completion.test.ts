@@ -363,6 +363,37 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
    * while it streams and no probe is open for it to invalidate.
    */
   "noisy-fleet.json": [1, 2, 3],
+  /**
+   * Both export scenarios settle exactly once, and — the part that had to be
+   * reasoned rather than copied — they settle IDENTICALLY despite scripting
+   * very different exports: 9 s in `slow-export` (inside the CLI's 10 s
+   * ceiling, outside the supervisor's 8 s budget) and 13 s in `late-export`
+   * (outside both). The 8 s timeout those scenarios exist to straddle does not
+   * appear in this table at all.
+   *
+   * That is a claim about semantics, not an accident of the harness. AN EXPORT
+   * IS NOT A TURN. `export_html` emits no events, opens no epoch and is never
+   * observed by the CompletionTracker; the agent turn in both files is the
+   * same six emissions ending in `agent_end{willRetry:false}`, so the same
+   * single settle is the only correct answer for both. Declaring them
+   * separately is what makes that reviewable — had either come back `[]` or
+   * `[1, 2]`, an RPC round-trip would have been holding a worker busy or
+   * fabricating a completion, and either is a defect this entry would have
+   * caught.
+   *
+   * MEASURED, not assumed: both were first declared `[]` and the property test
+   * refuted them with `- [] / + [1]`, the same way `deaf-abort.json` above was
+   * corrected. Recorded rather than quietly edited, because the table is a
+   * reviewed claim and this is what it is for.
+   *
+   * Mechanically the simulator confirms it twice over: it walks only `prompt`
+   * and `get_state` steps, so an `export_html` step is invisible to it, and
+   * `respond_delay_ms` is not in `ScenarioStep` at all — the same treatment
+   * `delay_ms` gets. A delay is not a reason to expect a different settle
+   * count (see `slow-turn.json`).
+   */
+  "late-export.json": [1],
+  "slow-export.json": [1],
 };
 
 function simulate(scenario: ScenarioFile): { settles: number[] } {
