@@ -164,9 +164,25 @@ function expectCleanEnv(what: string, argv: readonly string[], imageIndex: numbe
 }
 
 const cleanups: string[] = [];
+/**
+ * Captured BEFORE anything sets it, and restored rather than deleted.
+ *
+ * The teardown used to `delete process.env["PIFLEET_RUNS_DIR"]` unconditionally
+ * — destroying an ambient value this file never owned. Measured with a value
+ * exported into the environment: `main` preserves it, this file did not. The
+ * only two lines that touch the variable are the fixture's assignment and this
+ * teardown, so nothing else was going to put it back.
+ *
+ * `undefined` and "set to empty" are different states and are restored
+ * differently, because `rootFromEnv` reads `""` as "unset" while
+ * `process.env` would otherwise round-trip it as the literal string. Same
+ * idiom as `render.test.ts`, which had it right.
+ */
+const RUNS_DIR_BEFORE = process.env["PIFLEET_RUNS_DIR"];
 afterAll(async () => {
   for (const d of cleanups) await rm(d, { recursive: true, force: true });
-  delete process.env["PIFLEET_RUNS_DIR"];
+  if (RUNS_DIR_BEFORE === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+  else process.env["PIFLEET_RUNS_DIR"] = RUNS_DIR_BEFORE;
 });
 
 /** A minimal but production-shaped fleet, with cloud access turned ON. */

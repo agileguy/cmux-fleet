@@ -330,16 +330,21 @@ jobs:
           # cover that, and the job budget is 60 minutes.
           #
           # And measured two ways with the gate OPEN, because both matter:
-          #   - On a host WITH a real ADC file and a real oMLX, all 79 run and
-          #     pass: 79 pass, 0 fail, 0 skip.
+          #   - On a host WITH a real ADC file and a real oMLX, all 81 run and
+          #     pass: 81 pass, 0 fail, 0 skip.
           #   - In THIS job, with no real host ADC but PIFLEET_TEST_ADC_FILE
           #     set by the step above, the file-mode mount-shape test RUNS
           #     (that is the whole point of that step) while the four tests
           #     that need a REAL host ADC to mint a live token cannot, and the
           #     TWO relay probes that need a real inference server cannot
-          #     either: 73 pass, 6 skip. Same total either way, because the
+          #     either: 75 pass, 6 skip. Same total either way, because the
           #     check treats pass+skip as one number — see probe-guard.sh's
           #     total check for why that pairing, specifically, is correct.
+          #
+          # These two lines read 79 and 73 while TOTAL_EXPECTED already said
+          # 81 — prose left behind when the total moved. The derivation for
+          # 79 -> 81 lives in ISC-31's close-out and is not repeated here; the
+          # skip count is unchanged, so the pass figure moves with the total.
           TOTAL_EXPECTED: "81"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be

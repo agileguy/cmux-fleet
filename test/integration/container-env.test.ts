@@ -87,12 +87,74 @@ function isSecretShaped(name: string): boolean {
   return /(^|_)(KEY|SECRET|TOKEN|CREDENTIALS?|PASSWORD|PASSWD)$/.test(name);
 }
 
+/**
+ * Per-test budget for the two Docker-gated cases below, which had none.
+ *
+ * This was the only Docker-gated file in the suite running on bun's 5000 ms
+ * default, against a body that does `makeDaemonScratch` + `loadConfig` +
+ * `materializeWorkerInputs` + `renderWorker` + `ensureControlAuth` +
+ * `docker run -d` + `docker inspect`, with a `docker rm -f` in teardown.
+ *
+ * MEASURED on this machine, warm daemon, image already built, load 3.25:
+ * whole file 371-391 ms across three runs; per test 170 ms and 152 ms;
+ * `docker inspect` 20-50 ms; `docker run -d` plus `docker rm -f` 200-230 ms.
+ * Three docker spawns per test, worst single ~250 ms rounded up.
+ *
+ * Deriving from those numbers the way ISC-266 derives `cliBudget` — worst
+ * spawn x count x 3 (load inflation) x 2 (headroom) — gives 250 x 3 x 3 x 2 =
+ * 4500 ms, which is UNDER bun's default. That result is the argument for this
+ * constant rather than against it: it shows the 5 s default only looks
+ * adequate because the daemon here is warm and the image already present,
+ * which is the exact shape ISC-266 records — a budget that fits an idle
+ * machine and fails elsewhere.
+ *
+ * The dominant term is not measurable on this box: on CI the first
+ * `docker run` follows a build step against a cold daemon and a fresh overlay,
+ * where container creation is orders of magnitude slower than 200 ms. Picking
+ * a tight number from a warm measurement whose variation is not understood is
+ * the ISC-267 mistake, so this matches the value every sibling Docker-gated
+ * file already uses (`adc.test.ts`, eight times). It is still BOUNDED on
+ * purpose: a genuinely hung `docker` fails, it just fails later.
+ *
+ * Deliberately NOT `cliBudget(N)`. That helper is calibrated to pifleet CLI
+ * startup at 1900 ms per spawn; these tests spawn `docker`, which is a
+ * different cost with a different distribution, so borrowing the number would
+ * be a derivation in appearance only.
+ */
+const DOCKER_TEST_TIMEOUT_MS = 60_000;
+
 const containers: string[] = [];
 const scratches: string[] = [];
+/**
+ * Captured BEFORE the fixture sets it, and restored in the SAME hook that
+ * deletes the directory it points at.
+ *
+ * `startRenderedWorker` assigns `PIFLEET_RUNS_DIR` to a `makeDaemonScratch`
+ * directory and nothing put it back, while `afterEach` below `rm -rf`s that
+ * directory — so this file finished holding the environment variable that
+ * every run path in the codebase derives from, pointed at a path that no
+ * longer exists.
+ *
+ * That leak is not theoretical and it is not confined to this file. bun does
+ * NOT execute test files in argument order — measured, passing `zzz aaa mmm`
+ * and `aaa mmm zzz` both ran `zzz, mmm, aaa` — it uses `readdir()` order,
+ * which differs between APFS and a fresh Linux clone. The container job's real
+ * order puts this file SECOND of seven, so five Docker-gated files ran after
+ * it inheriting the dangling value. No argument of the form "this file sorts
+ * last" can be relied on, which is exactly why the fix is to not leak rather
+ * than to be positioned safely.
+ *
+ * Restored in `afterEach` rather than `afterAll` deliberately: the scratch is
+ * destroyed per test, so anything later than that leaves a window in which the
+ * variable names a deleted directory even within this file.
+ */
+const RUNS_DIR_BEFORE = process.env["PIFLEET_RUNS_DIR"];
 afterEach(async () => {
   // Only containers THIS file started, by the exact name it chose.
   await Promise.all(containers.splice(0).map((n) => realExec(["docker", "rm", "-f", n])));
   for (const d of scratches.splice(0)) await rm(d, { recursive: true, force: true });
+  if (RUNS_DIR_BEFORE === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+  else process.env["PIFLEET_RUNS_DIR"] = RUNS_DIR_BEFORE;
 });
 
 interface Started {
@@ -258,7 +320,7 @@ describe.skipIf(!DOCKER)("docker inspect on a rendered worker (ISC-31, ISC-127)"
       .map((e) => e.slice(0, Math.max(e.indexOf("="), 0)))
       .filter((n) => /(^|_)KEY$/.test(n));
     for (const n of keyNames) expect(n).toBe(PERMITTED_KEY);
-  });
+  }, DOCKER_TEST_TIMEOUT_MS);
 
   /**
    * ISC-127's literal instrument: the run-dir is not in `.Mounts`.
@@ -335,5 +397,5 @@ describe.skipIf(!DOCKER)("docker inspect on a rendered worker (ISC-31, ISC-127)"
         `${secret} under ${s}: false`,
       );
     }
-  });
+  }, DOCKER_TEST_TIMEOUT_MS);
 });
