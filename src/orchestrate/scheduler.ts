@@ -88,7 +88,17 @@ export interface ScheduleOutcome {
   exit: ExitCode;
 }
 
-const DEFAULT_POLL_MS = 100;
+/**
+ * How often the scheduler re-examines readiness.
+ *
+ * Exported because it is not merely an implementation detail: it QUANTISES the
+ * observable gap between two dependent dispatches. A correctly-gated task
+ * cannot follow its dependency by less than one full tick, so a test asserting
+ * "these were not dispatched in the same pass" has to be written against this
+ * number rather than against a hand-picked one that happens to sit on it. See
+ * `test/integration/dispatch-auto.test.ts`.
+ */
+export const DEFAULT_POLL_MS = 100;
 
 /**
  * How long the schedule may sit with nothing changing before it is refused.
