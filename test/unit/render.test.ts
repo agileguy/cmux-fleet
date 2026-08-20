@@ -43,6 +43,7 @@ import {
 } from "../../src/security/adc.ts";
 import { WORKER_UID } from "../../src/container/mounts.ts";
 import {
+  classifyRunDirExposure,
   roleSkillsDir,
   runPaths,
   runsRoot,
@@ -100,7 +101,22 @@ async function fixture(mutate?: (doc: Record<string, unknown>) => void): Promise
 }> {
   const dir = await mkdtemp(join(tmpdir(), "pifleet-render-"));
   cleanups.push(dir);
-  const runsDir = join(dir, "runs");
+  /**
+   * The runs root is a SIBLING of the checkout, never a child of it (ISC-127).
+   *
+   * It used to be `join(dir, "runs")`, i.e. inside the directory this fixture
+   * also hands to `run.repo` — so `rev-1`, the `shared-ro` worker, mounted a
+   * `/workspace` whose source CONTAINED the live run directory, and with it
+   * `control-auth.json`, the ledger, the inbox and every other worker's state.
+   * That is exactly the layout `assertNoRunDirMount` now refuses, and the
+   * fixture was modelling it. A fixture is a claim about a supported shape;
+   * this one is now a safe shape, and the unsafe one is asserted against
+   * deliberately and by name in the ISC-127 block instead of arriving here by
+   * accident. Same `mkdtemp`-sibling form the ISC-188 "moved" case already
+   * used two hundred lines below.
+   */
+  const runsDir = await mkdtemp(join(tmpdir(), "pifleet-render-runs-"));
+  cleanups.push(runsDir);
   process.env["PIFLEET_RUNS_DIR"] = runsDir;
   await mkdir(join(dir, "roles"), { recursive: true });
   await writeFile(join(dir, "roles", "common.md"), "Common fleet briefing.\n");
@@ -535,6 +551,111 @@ describe("docker argv (SRD §5.6)", () => {
       expect(err).not.toBeNull();
       expect(err?.name).toBe("HostGcloudMountError");
       expect(err?.message).toContain("CONTAINS the host gcloud auth store");
+    }
+  });
+
+  /**
+   * ISC-127 — the RUN DIRECTORY is not mounted in any container.
+   *
+   * Read literally, and the literal reading is the only workable one. Several
+   * mounts in §5.5's table are paths INSIDE the run dir on purpose —
+   * `<run>/outbox/<id>`, `<run>/sessions`, `<run>/skills/<role>`,
+   * `<run>/workers/<id>/cloud-allow`, the briefing — so "no mount is under the
+   * run dir" would be a criterion production must violate to function. What
+   * must never be mounted is the run dir ITSELF, because the run root also
+   * holds everything §5.5 deliberately left out of that table:
+   * `control-auth.json` (the 0600 control-socket secret whose whole threat
+   * model is that a worker cannot read it), `registry.json`, `ledger/`,
+   * `inbox/`, `run.json`, and every OTHER worker's state and events.
+   *
+   * The assertion is therefore stated as reachability of a named file rather
+   * than as a string comparison on a directory: `control-auth.json` must not
+   * be inside any mounted subtree. That phrasing survives a future mount being
+   * added to the table and cannot be satisfied by a mount source that merely
+   * spells the run dir differently.
+   *
+   * All three `isolation` modes, because `/workspace` is the only mount whose
+   * source an operator controls and each mode derives it differently.
+   *
+   * Mutation check: adding `argv.push("-v", `${opts.run.root}:/rundir`)` to
+   * `buildDockerArgv` turns this red — see the ISA close-out for the run.
+   */
+  test("no rendered docker argv ever mounts the run directory (ISC-127)", async () => {
+    for (const isolation of ["worktree", "shared-ro", "none"] as const) {
+      const { runsDir, loaded } = await fixture((doc) => {
+        doc["cloud"] = { adc: true, kubeconfig: "./kube/filtered.yaml" };
+        const roles = doc["roles"] as Record<string, Record<string, unknown>>;
+        roles["eng"]!["cloud_access"] = true;
+        roles["eng"]!["isolation"] = isolation;
+      });
+      const run = runPaths("dry", runsDir);
+      const r = await renderWorker(loaded, "eng-1");
+      const sources = allBindMountSources(r.docker);
+
+      // Not vacuous: this worker really does get run-dir CHILDREN mounted, so
+      // a renderer that emitted no mounts at all could not pass this block.
+      expect(sources).toContain(workerOutboxDir(run.root, "eng-1"));
+      expect(sources).toContain(run.sessionsDir);
+
+      // The criterion itself, both relations. `classifyRunDirExposure` is
+      // production's own predicate, so this and the launcher's guard cannot
+      // disagree about what counts.
+      for (const s of sources) {
+        expect(`${s} -> ${classifyRunDirExposure(s, run.root) ?? "clean"}`).toBe(`${s} -> clean`);
+      }
+
+      // What the two relations exist to protect, named directly: the control
+      // secret must not sit inside any mounted subtree.
+      for (const s of sources) {
+        expect(run.controlAuthJson.startsWith(`${s}/`)).toBe(false);
+      }
+    }
+  });
+
+  /**
+   * The ancestor direction, and the reason ISC-127 needed a runtime guard
+   * rather than an assertion.
+   *
+   * `run.repo` is operator-settable and the runs root moves independently via
+   * `PIFLEET_RUNS_DIR`. An operator who keeps runs inside the checkout —
+   * `run.repo: ~/proj` with `PIFLEET_RUNS_DIR=~/proj/runs`, an ordinary thing
+   * to want — mounts the live run directory at `/workspace`, control secret
+   * and all, and NOTHING in `render.ts`'s mount table looks wrong: every
+   * literal in it is still a run-dir child. Measured on this codebase before
+   * the guard existed, via `renderWorker` on exactly this config: the
+   * `/workspace` source came back an ancestor of `<run>/control-auth.json`.
+   *
+   * Unlike ISC-44's equivalent this is NOT caught incidentally by the gcloud
+   * guard: a project checkout under `/tmp` or `~/proj` contains no
+   * `~/.config/gcloud`, so `assertNoHostGcloudMount` passes it happily.
+   *
+   * Driven through `renderWorker`, not by calling the predicate: the claim is
+   * that PRODUCTION refuses this. A test of the predicate alone would pass
+   * with nobody calling it, which is the state ISC-44 records its constants
+   * having been in.
+   */
+  test("a run.repo that CONTAINS the run directory is refused, not rendered (ISC-127)", async () => {
+    const { dir, loaded } = await fixture((doc) => {
+      (doc["roles"] as Record<string, Record<string, unknown>>)["rev"]!["isolation"] = "shared-ro";
+    });
+    // Point the runs root INSIDE the checkout the fixture already renders from.
+    const inside = join(dir, "runs");
+    process.env["PIFLEET_RUNS_DIR"] = inside;
+    try {
+      const err = await renderWorker(loaded, "rev-1").then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err).not.toBeNull();
+      expect(err?.name).toBe("RunDirMountError");
+      expect(err?.message).toContain("CONTAINS the run directory");
+      // The refusal says WHY, so an operator can move the runs root rather
+      // than guess which of two settable paths to change.
+      expect(err?.message).toContain("control-auth.json");
+    } finally {
+      // `fixture()` owns this variable; the next call resets it, but an
+      // in-file reader should not have to know that.
+      delete process.env["PIFLEET_RUNS_DIR"];
     }
   });
 

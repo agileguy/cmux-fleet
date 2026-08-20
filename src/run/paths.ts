@@ -315,6 +315,96 @@ export function taskRecordPath(worker: WorkerPaths, taskId: string): string {
 }
 
 /**
+ * How one bind-mount source exposes the RUN DIRECTORY, or `null` (ISC-127).
+ *
+ * TWO relations, and the asymmetry with `classifyHostGcloudExposure` is the
+ * whole content of this function. That one has three, because NOTHING inside
+ * the gcloud store may be mounted. Here, everything a worker legitimately gets
+ * IS inside the run dir — `<run>/outbox/<id>`, `<run>/sessions`,
+ * `<run>/skills/<role>`, `<run>/workers/<id>/cloud-allow`, the briefing, the
+ * kubeconfig — so an "inside-the-run-dir" relation would flag the entire §5.5
+ * mount table and could only ever be satisfied by weakening it. The criterion
+ * says the run DIR is not mounted, and mounting a named child of it is not
+ * mounting it.
+ *
+ * What the two relations actually protect is everything in the run root that
+ * is deliberately NOT in that table: `control-auth.json` — the 0600 per-run
+ * control-socket secret whose entire threat model (`security/control-auth.ts`)
+ * is that a worker cannot read it — plus `registry.json`, `ledger/`, `inbox/`
+ * (full task envelopes), `run.json`, and every OTHER worker's `state.json`,
+ * `events.jsonl` and outbox. Handing a worker the run root hands it all of
+ * that, and hands it the key to the socket that commands its own supervisor.
+ *
+ * The CONTAINS direction is not hypothetical, and it is the one a mount table
+ * built from literals cannot rule out. `run.repo` is operator-settable and is
+ * mounted verbatim at `/workspace` under `isolation: shared-ro`; the runs root
+ * moves independently via `PIFLEET_RUNS_DIR`. An operator who keeps runs
+ * inside the checkout — `run.repo: ~/proj`, `PIFLEET_RUNS_DIR=~/proj/runs`, an
+ * ordinary thing to want — mounts the live run directory into the container
+ * with no flag anywhere in `render.ts` looking wrong. Measured on this
+ * codebase before the guard below existed: the `/workspace` source was an
+ * ancestor of `<run>/control-auth.json` and every ISC-127 assertion of the day
+ * (there were none) would have stayed green.
+ *
+ * Comparison is on `resolve()`d paths — lexical, for the reason
+ * `classifyHostGcloudExposure` gives: `buildDockerArgv` is synchronous and
+ * pure by design and `realpath` is I/O. That closes `..` and trailing-slash
+ * spellings and not symlinks; the integration side `realpath`s both ends.
+ *
+ * Boundaries use an explicit separator, so a sibling runs root named
+ * `<run>-backup` is not flagged for a criterion that says nothing about it.
+ */
+export type RunDirExposure = "is-the-run-dir" | "contains-the-run-dir";
+
+export function classifyRunDirExposure(source: string, runDir: string): RunDirExposure | null {
+  const dir = resolve(runDir);
+  const s = resolve(source);
+  if (s === dir) return "is-the-run-dir";
+  if (dir.startsWith(`${s}/`)) return "contains-the-run-dir";
+  return null;
+}
+
+/** A `docker run` argv that would mount the run directory into a container. */
+export class RunDirMountError extends Error {
+  constructor(source: string, runDir: string, relation: RunDirExposure) {
+    const how =
+      relation === "is-the-run-dir" ? "IS the run directory" : "CONTAINS the run directory";
+    super(
+      `refusing to launch: bind-mount source ${source} ${how} (${runDir}) — the run ` +
+        `directory holds control-auth.json, the ledger, the inbox and every other ` +
+        `worker's state, none of which is a worker's to read — SRD §5.5 / ISC-127`,
+    );
+    this.name = "RunDirMountError";
+  }
+}
+
+/**
+ * ISC-127 as a RUNTIME GUARD on the argv production actually launches.
+ *
+ * Deliberately shaped like `assertNoHostGcloudMount`, and for the reason that
+ * one records: a predicate with no importer in `src/` closes nothing. It
+ * documents an intention that holds exactly as long as someone remembers to
+ * keep asserting it, and the offending path here does not come from a literal
+ * in `render.ts` at all — it arrives from `run.repo` and `PIFLEET_RUNS_DIR`,
+ * two operator-settable values whose relationship no reviewer reading the
+ * mount table can see. Checking the FINISHED argv is the only altitude at
+ * which that relationship is knowable.
+ *
+ * Throwing beats returning a flag: a launcher that ignores a returned warning
+ * is the same launcher that would have shipped the mount.
+ */
+export function assertNoRunDirMount(argv: readonly string[], runDir: string): void {
+  argv.forEach((a, i) => {
+    if (argv[i - 1] !== "-v" && argv[i - 1] !== "--volume") return;
+    const sep = a.indexOf(":");
+    const source = sep === -1 ? a : a.slice(0, sep);
+    if (!source.startsWith("/")) return; // a named volume, not a host path
+    const relation = classifyRunDirExposure(source, runDir);
+    if (relation !== null) throw new RunDirMountError(source, runDir, relation);
+  });
+}
+
+/**
  * Short, deterministic unix-socket path for a worker's control socket (or the
  * daemon's, keyed `@daemon`). Hashed rather than named so the total path stays
  * far below the 104-byte `sun_path` cap regardless of run id or worker id

@@ -28,6 +28,7 @@ import { imageTag } from "../container/image.ts";
 import { WORKER_UID } from "../container/mounts.ts";
 import { assertNoHostGcloudMount, gcloudConfigTmpfsArgv } from "../security/adc.ts";
 import {
+  assertNoRunDirMount,
   roleSkillsDir,
   runPaths,
   runsRoot,
@@ -238,6 +239,17 @@ export function buildDockerArgv(
   // beats returning a flag: a launcher that ignores a returned warning is the
   // same launcher that would have shipped the mount.
   assertNoHostGcloudMount(argv);
+  // ISC-127, enforced on the same argv and for the same reason. The mount
+  // table above deliberately names several paths INSIDE the run directory —
+  // /outbox, /sessions, /skills, /policy/cloud-allow, the briefing — and
+  // deliberately never names the run directory itself, which also holds
+  // `control-auth.json`, the ledger, the inbox and every other worker's state.
+  // No literal here can rule out the ancestor case: `run.repo` is
+  // operator-settable and the runs root moves independently via
+  // `PIFLEET_RUNS_DIR`, so a checkout that CONTAINS the runs root mounts the
+  // live run directory at /workspace with nothing in this function looking
+  // wrong. See `classifyRunDirExposure` for the measured shape of that.
+  assertNoRunDirMount(argv, opts.run.root);
   return argv;
 }
 

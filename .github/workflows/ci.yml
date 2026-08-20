@@ -261,14 +261,24 @@ jobs:
           # Capturing the one real run's output and grading THAT is strictly
           # better: same coverage, roughly half the Docker time, one truth.
           #
-          # TOTAL_EXPECTED is 79 = 20 (image.test.ts: 15 fixed cases + 5
+          # TOTAL_EXPECTED is 81 = 20 (image.test.ts: 15 fixed cases + 5
           # generated from the toolchain-baseline `probes` array — gcloud,
           # kubectl, helm, jq, curl) + 23 (verbgate.test.ts) + 5
           # (egress.test.ts) + 18 (adc.test.ts — up from 12 now that the
           # ISC-44/45/46 mount-shape and credential-absence blocks exist) + 8
           # (relay.test.ts: 3 bridge-denial/enumeration probes and 5 relay
           # probes, of which the TWO live-oMLX ones always skip on a runner)
-          # + 5 (probe-in-network.test.ts, added by ISC-260).
+          # + 5 (probe-in-network.test.ts, added by ISC-260)
+          # + 2 (container-env.test.ts, added by ISC-31/ISC-127).
+          #
+          # 79 -> 81 is container-env.test.ts, which reads ISC-31 and ISC-127
+          # back out of `docker inspect` on a container started from the argv
+          # `renderWorker` actually produced. Both probes need ONLY a daemon
+          # and the worker image — no host Google credential, no inference
+          # server — so both RUN in this job and neither is pinned below. That
+          # is the whole reason the file was added here rather than left to a
+          # developer's machine: before it, ISC-31's `docker inspect` wording
+          # and ISC-127's mount-table wording had no automated reader at all.
           #
           # 77 -> 79 comes from ISC-261 and ISC-258 adding one probe each to
           # relay.test.ts:
@@ -306,8 +316,8 @@ jobs:
           # DERIVING IT BY HAND, cheaply and exactly. Run the same file list
           # with PIFLEET_DOCKER UNSET and read the collection total off the
           # summary line. Measured 2026-08-19 on bun 1.3.11:
-          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network}.test.ts
-          #     -> 2 pass, 77 skip, 0 fail. Ran 79 tests across 6 files.
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env}.test.ts
+          #     -> 2 pass, 79 skip, 0 fail. Ran 81 tests across 7 files.
           # No daemon, no image. Do this before changing the number. The 2
           # passes are ISC-260's two daemon-free argv tests, and they count
           # toward the total exactly as a skip would.
@@ -330,7 +340,7 @@ jobs:
           #     either: 73 pass, 6 skip. Same total either way, because the
           #     check treats pass+skip as one number — see probe-guard.sh's
           #     total check for why that pairing, specifically, is correct.
-          TOTAL_EXPECTED: "79"
+          TOTAL_EXPECTED: "81"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -423,7 +433,8 @@ jobs:
               test/integration/egress.test.ts \
               test/integration/adc.test.ts \
               test/integration/relay.test.ts \
-              test/integration/probe-in-network.test.ts
+              test/integration/probe-in-network.test.ts \
+              test/integration/container-env.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every
