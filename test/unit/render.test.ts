@@ -1060,6 +1060,38 @@ describe("docker argv (SRD §5.6)", () => {
   });
 
   /**
+   * The gcloud guard's own spelling coverage, asserted directly (ISC-44).
+   *
+   * Both guards now route through one `bindMountSources`, so fixing the parser
+   * fixed both at once — and that is exactly why this test exists separately
+   * rather than being left implicit. Shared code means ISC-44's spelling
+   * coverage would otherwise be pinned only by a test NAMED for ISC-127:
+   * someone narrowing the parser would see one red test about the run
+   * directory and could reasonably conclude the gcloud store was unaffected.
+   * The criterion that depends on a behaviour should be the one that goes red
+   * when the behaviour is removed.
+   *
+   * Same three spellings that bypassed both guards before the shared parser:
+   * `--volume=`, glued `-v`, and `--mount`.
+   */
+  test("every docker bind-mount spelling reaches the gcloud guard (ISC-44)", () => {
+    const store = hostGcloudConfigDir();
+    const spellings: [string, string[]][] = [
+      ["two-element -v", ["-v", `${store}:/gcloud`]],
+      ["two-element --volume", ["--volume", `${store}:/gcloud`]],
+      ["glued --volume=", [`--volume=${store}:/gcloud`]],
+      ["glued -v", [`-v${store}:/gcloud`]],
+      ["--mount source=", ["--mount", `type=bind,source=${store},target=/gcloud`]],
+      ["--mount src= alias", ["--mount", `type=bind,src=${store},dst=/gcloud`]],
+      ["glued --mount=", [`--mount=type=bind,source=${store},target=/gcloud`]],
+    ];
+    for (const [name, flags] of spellings) {
+      const err = catchError(() => assertNoHostGcloudMount(["docker", "run", ...flags, "image"]));
+      expect(`${name} -> ${err?.name ?? "ALLOWED"}`).toBe(`${name} -> HostGcloudMountError`);
+    }
+  });
+
+  /**
    * The symlink half, closed on `renderWorker`'s async path (ISC-127).
    *
    * `buildDockerArgv`'s guard is lexical because that function is synchronous
