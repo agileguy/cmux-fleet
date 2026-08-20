@@ -322,12 +322,26 @@ describe("a ceiling crossed mid-run halts dispatch and exits 5, artifacts intact
       expect(waitPayload.budget?.halted_at).not.toBeNull();
     },
     /**
-     * FIVE subprocess spawns, counted from the body rather than estimated:
-     * two supervisors (`launchDetached`) plus `dispatch --auto`, `harvest`,
-     * `artifacts --all` and `wait` — six. `artifacts --all` and `wait` are
-     * both whole-run graders, which is exactly the expensive class
-     * `PER_SPAWN_IDLE_MS` is measured on, so no spawn here is being charged
-     * the cheap rate by accident.
+     * SIX subprocess spawns, counted from the body rather than estimated: two
+     * supervisors (`launchDetached`) plus `dispatch --auto`, `harvest`,
+     * `artifacts --all` and `wait`. `artifacts --all` and `wait` are both
+     * whole-run graders, exactly the expensive class `PER_SPAWN_IDLE_MS` is
+     * measured on, so nothing here is charged the cheap rate by accident.
+     *
+     * MEASURED, not assumed. Idle: the whole file runs in ~1.9 s. Under
+     * `.github/scripts/test-under-load.sh` at `LOAD_PROCS=32` on 14 cores —
+     * 2.3 busy loops per core, HARSHER than the CI load job's ceil(cores *
+     * 0.75) = 1 per core — this test took 46.45 s against the 68.4 s
+     * `cliBudget(6)` derives, and passed at `LOAD_PROCS=40` too. That is a
+     * ~38x inflation, well past the 2.5-3x the helper's CONTENTION figure was
+     * calibrated on, and it is absorbed by SAFETY rather than by luck: the
+     * cost is dominated by CLI spawns (four here), each of which transpiles
+     * the entrypoint before doing any work.
+     *
+     * The number is DERIVED and the measurement is a check on it, never the
+     * other way round. If this test grows a spawn, the count in the call
+     * changes and the budget follows; fitting a constant to the 46 s observed
+     * above is the defect ISC-266 exists to prevent.
      */
     cliBudget(6),
   );
@@ -417,11 +431,23 @@ describe("ISC-109: six live workers, max_concurrent 2", () => {
     },
     /**
      * SEVEN spawns, counted: six supervisors (`launchDetached`) plus one
-     * `dispatch --auto`. The supervisors are cheap relative to
-     * `PER_SPAWN_IDLE_MS` and `dispatch --auto` here drives six real tasks
-     * serialised two at a time, which is the slowest single command in this
-     * file — charging all seven at the expensive rate is the conservative
-     * direction the helper is built for.
+     * `dispatch --auto`. Charging all seven at `PER_SPAWN_IDLE_MS` is
+     * conservative — six of them are detached supervisors, which are cheaper
+     * than the whole-run graders that rate was measured on — and conservative
+     * is the direction the helper is built for.
+     *
+     * MEASURED at 1.33 s under `LOAD_PROCS=32` against the 79.8 s
+     * `cliBudget(7)` derives, i.e. enormous headroom, because this test makes
+     * only ONE CLI spawn and spawn cost is what load inflates. Its sibling
+     * above, with four CLI spawns, took 46 s in the same run.
+     *
+     * Worth stating plainly, since this is the test that samples over time:
+     * NEITHER assertion here can be broken by a slow machine. The cap is
+     * enforced logically rather than by timing, so contention can only lower
+     * observed overlap, never raise it above 2; and the non-vacuity assertion
+     * is a LOWER bound on elapsed span, which load only widens. A concurrency
+     * test that held solely on an idle box would be worth nothing, which is
+     * why it is written to fail in only one direction.
      */
     cliBudget(7),
   );
