@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { AttendedRecordSchema, EXIT, RunReportSchema } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { workerContainerName } from "../../src/attended/mode.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -109,7 +110,7 @@ describe("one attended session, end to end", () => {
     expect(r.stderr).toMatch(/does not have a pane handed to a person/);
     const file = workerPaths(runPaths(runId, rig.root), "eng-1").attendedJson;
     expect(await Bun.file(file).exists()).toBe(false);
-  });
+  }, cliBudget(1));
 
   test("tui hands the pane an in-container shell and records the run as attended", async () => {
     const before = await paneCommand("eng-1");
@@ -137,7 +138,7 @@ describe("one attended session, end to end", () => {
     const disk = AttendedRecordSchema.parse(JSON.parse(await Bun.file(file).text()) as unknown);
     expect(disk.worker).toBe("eng-1");
     expect(disk.left_at).toBeNull();
-  });
+  }, cliBudget(4));
 
   /**
    * The person about to type is the one who needs the voided table, at the
@@ -151,7 +152,7 @@ describe("one attended session, end to end", () => {
     // ISC-106, not ISC-136: entering tui adds no readScreen call, but it does
     // put a human's cloud verbs through the verbgate wearing the agent's row.
     expect(r.stdout).toContain("ISC-106");
-  });
+  }, cliBudget(1));
 
   test("report names the attended worker while a person is driving", async () => {
     const md = await cli(["report", "--run", runId]);
@@ -168,7 +169,7 @@ describe("one attended session, end to end", () => {
     RunReportSchema.parse(doc);
     expect(doc.attended).toHaveLength(1);
     expect(AttendedRecordSchema.parse(doc.attended![0]).worker).toBe("eng-1");
-  });
+  }, cliBudget(2));
 
   test("--leave restores the viewer and the record SURVIVES", async () => {
     const r = await cli(["tui", "--worker", "eng-1", "--run", runId, "--leave", "--json"]);
@@ -191,7 +192,7 @@ describe("one attended session, end to end", () => {
     const disk = AttendedRecordSchema.parse(JSON.parse(await Bun.file(file).text()) as unknown);
     expect(disk.mode).toBe("viewer");
     expect(disk.left_at).not.toBeNull();
-  });
+  }, cliBudget(2));
 
   test("report still marks the run attended after the person left", async () => {
     const md = await cli(["report", "--run", runId]);
@@ -199,7 +200,7 @@ describe("one attended session, end to end", () => {
     // The run was touched; that fact must outlive the session that touched it.
     expect(md.stdout).toMatch(/ATTENDED — a person drove worker eng-1/);
     expect(md.stdout).toMatch(/until/);
-  });
+  }, cliBudget(1));
 });
 
 describe("workers with no pane", () => {
@@ -247,5 +248,5 @@ describe("workers with no pane", () => {
     } finally {
       await rm(base, { recursive: true, force: true }).catch(() => {});
     }
-  });
+  }, cliBudget(1));
 });

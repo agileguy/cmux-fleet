@@ -321,7 +321,7 @@ describe("doctor reports the oMLX model list (ISC-54, stub-backed)", () => {
         await stub.stop();
       }
     },
-    30_000,
+    cliBudget(1),
   );
 });
 
@@ -454,7 +454,7 @@ describe("doctor reports a measured completion latency (ISC-55, stub-backed)", (
         await stub.stop();
       }
     },
-    30_000,
+    cliBudget(1),
   );
 });
 

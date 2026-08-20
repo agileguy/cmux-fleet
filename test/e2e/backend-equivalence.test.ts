@@ -58,6 +58,29 @@ const SCENARIOS = join(ROOT_URL, "test/fixtures/scenarios");
 
 const WORKERS = ["eng-1", "eng-2"] as const;
 
+/**
+ * The per-test ceiling, DERIVED rather than inherited (ISC-274).
+ *
+ * Every test here runs the same fleet TWICE — once headless, once on tmux —
+ * and compares the artifacts, so the two spawn-reaching calls in each body
+ * (`runFleet` per backend) would derive `cliBudget(2)` = 22_800 ms.
+ *
+ * That number is NARROWER than the work. Measured idle on a 14-core machine at
+ * load 3.55: 3923 ms, 23_415 ms and 3528 ms. The middle one — the FAILING-run
+ * comparison — already exceeds `cliBudget(2)`, because its cost is not process
+ * startup at all: it is a scripted `fake-pi` agent playing out a failing turn
+ * on each backend, plus tmux session setup and capture-pane settling, none of
+ * which the per-spawn model describes. Charging that to spawn count would be a
+ * derivation in appearance only, and would make the one test in this file with
+ * genuinely different timing the one most likely to go red.
+ *
+ * So the ceiling is derived from the SLOWEST measured run instead: 23_415 ms
+ * x CONTENTION (3) = ~70 s, rounded up to 120_000 for the machine ISC-266
+ * describes at load 18.40. Still bounded — a wedged backend fails, it just
+ * fails later than a flat 5 s would let it.
+ */
+const BACKEND_EQUIVALENCE_TIMEOUT_MS = 120_000;
+
 /** Private `-L` socket for the direct-backend ISC-135 control, per test run. */
 const CONTROL_SOCKET = `pifleet-eq-ctl-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const CONTROL_CTX = { socketName: CONTROL_SOCKET, configFile: "/dev/null" };
@@ -326,7 +349,7 @@ describe("ISC-134/128: tmux and headless produce the same acceptance results", (
       stash.set("happy-headless", headless);
       stash.set("happy-tmux", tmux);
     },
-    120_000,
+    BACKEND_EQUIVALENCE_TIMEOUT_MS,
   );
 
   test(
@@ -348,7 +371,7 @@ describe("ISC-134/128: tmux and headless produce the same acceptance results", (
       }
       expect(tmux).toEqual(headless);
     },
-    120_000,
+    BACKEND_EQUIVALENCE_TIMEOUT_MS,
   );
 });
 
@@ -419,6 +442,6 @@ describe("ISC-135 (anti): readScreen is diagnostics only — losing it changes N
 
       await rm(bin, { recursive: true, force: true });
     },
-    120_000,
+    BACKEND_EQUIVALENCE_TIMEOUT_MS,
   );
 });

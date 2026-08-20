@@ -23,6 +23,7 @@ import { runPaths } from "../../src/run/paths.ts";
 import { createWorkerWorktrees, type WorkerWorktree } from "../../src/run/worktree.ts";
 import { parseConfig } from "../../src/config/load.ts";
 import { gitOk, seedGitRepo } from "../fixtures/synthetic-repo.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 
@@ -125,7 +126,7 @@ describe("pifleet worktrees", () => {
     expect(plain.stdout).toContain(wt.branch);
     expect(plain.stdout).toContain(wt.path);
     expect(plain.stdout).toContain("clean");
-  });
+  }, cliBudget(3));
 
   test("an uncommitted edit is reported dirty, with counts", async () => {
     const rig = await makeRig();
@@ -140,7 +141,7 @@ describe("pifleet worktrees", () => {
     const plain = await worktreesList(rig);
     expect(plain.stdout).toContain("dirty");
     expect(plain.stdout).toContain("1 uncommitted path(s)");
-  });
+  }, cliBudget(3));
 
   test("a commit past baseSha is dirty via commits_ahead, even with a clean working tree", async () => {
     const rig = await makeRig();
@@ -152,7 +153,7 @@ describe("pifleet worktrees", () => {
     const r = await worktreesList(rig, ["--json"]);
     const rows = parse(r.stdout)["worktrees"] as Array<Record<string, unknown>>;
     expect(rows[0]).toMatchObject({ present: true, dirty: true, status_lines: 0, commits_ahead: 1 });
-  });
+  }, cliBudget(4));
 
   test("a checkout removed from disk (e.g. by hand, or a prior --prune) is MISSING, not silently absent", async () => {
     const rig = await makeRig();
@@ -166,14 +167,14 @@ describe("pifleet worktrees", () => {
 
     const plain = await worktreesList(rig);
     expect(plain.stdout).toContain("MISSING");
-  });
+  }, cliBudget(3));
 
   test("multiple workers are listed sorted by worker id, independent of creation order", async () => {
     const rig = await makeRig({ workers: ["eng-2", "eng-1"] });
     const r = await worktreesList(rig, ["--json"]);
     const rows = parse(r.stdout)["worktrees"] as Array<Record<string, unknown>>;
     expect(rows.map((row) => row["worker_id"])).toEqual(["eng-1", "eng-2"]);
-  });
+  }, cliBudget(2));
 
   test("a run that recorded no checkouts reports an empty list, not an error", async () => {
     const base = await mkdtemp(join(tmpdir(), "pifleet-worktrees-cli-none-"));
@@ -190,7 +191,7 @@ describe("pifleet worktrees", () => {
 
     const plain = await worktreesList({ root, runId });
     expect(plain.stdout).toContain("no per-worker checkouts recorded");
-  });
+  }, cliBudget(2));
 
   test("no runs at all is a usage error, like every other run-scoped command", async () => {
     const base = await mkdtemp(join(tmpdir(), "pifleet-worktrees-cli-empty-"));
@@ -201,12 +202,12 @@ describe("pifleet worktrees", () => {
     const r = await worktreesList({ root });
     expect(r.code).toBe(EXIT.USAGE);
     expect(r.stderr).toContain("no runs found");
-  });
+  }, cliBudget(1));
 
   test("with no --run, resolves the latest run id — the same default every other command uses", async () => {
     const rig = await makeRig();
     const r = await worktreesList({ root: rig.root }, ["--json"]);
     expect(r.code).toBe(EXIT.SUCCESS);
     expect(parse(r.stdout)["run_id"]).toBe(rig.runId);
-  });
+  }, cliBudget(2));
 });

@@ -25,6 +25,7 @@ import {
   parsePaneList,
   tmuxArgv,
 } from "../../src/backends/tmux/argv.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const SOCKET = `pifleet-it-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const CTX = { socketName: SOCKET, configFile: "/dev/null" };
@@ -59,7 +60,7 @@ describe("workspace and pane bring-up", () => {
     expect(panes.map((p) => p.title).sort()).toEqual(["eng-1", "eng-2", "eng-3", "eng-4"]);
     // One window: the claimed initial pane plus three splits, no stray shell.
     expect(new Set(panes.map((p) => p.windowId)).size).toBe(1);
-  });
+  }, cliBudget(1));
 
   test("a session name tmux would silently rewrite is sanitized before tmux sees it", async () => {
     const b = backend();
@@ -71,14 +72,14 @@ describe("workspace and pane bring-up", () => {
     const r = await realExec(hasSessionArgv(CTX, w.id ?? ""));
     expect(r.code).toBe(0);
     await b.destroy(w, { keepPanes: false });
-  });
+  }, cliBudget(1));
 
   test("ensureWorkspace is idempotent and adoption does not disturb existing panes", async () => {
     const b = backend();
     const w = await b.ensureWorkspace("it-fleet-a");
     expect(w.id).toBe("it-fleet-a");
     expect(await panesOf("it-fleet-a")).toHaveLength(4);
-  });
+  }, cliBudget(1));
 
   test("an 8-worker fleet fits: tiled relayout keeps splits from running out of space", async () => {
     const b = backend();
@@ -88,7 +89,7 @@ describe("workspace and pane bring-up", () => {
     }
     expect(await panesOf("it-fleet-big")).toHaveLength(8);
     await b.destroy(w, { keepPanes: false });
-  });
+  }, cliBudget(1));
 });
 
 describe("viewers", () => {
@@ -118,7 +119,7 @@ describe("viewers", () => {
     // information destroyed, and the operator's only clue a viewer died.
     expect(await panesOf("it-crash")).toHaveLength(2);
     await b.destroy(w, { keepPanes: false });
-  });
+  }, cliBudget(1));
 });
 
 describe("teardown", () => {
@@ -131,7 +132,7 @@ describe("teardown", () => {
     // The view is already gone; a second destroy has nothing to do and no
     // reason to fail the caller doing final cleanup.
     await b.destroy(w, { keepPanes: false });
-  });
+  }, cliBudget(1));
 
   test("keepPanes leaves the session for post-mortem reading", async () => {
     const b = backend();
@@ -141,5 +142,5 @@ describe("teardown", () => {
     const r = await realExec(hasSessionArgv(CTX, "it-keep"));
     expect(r.code).toBe(0);
     await b.destroy(w, { keepPanes: false });
-  });
+  }, cliBudget(1));
 });

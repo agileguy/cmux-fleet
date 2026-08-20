@@ -224,7 +224,7 @@ describe("detached supervisor — process tree (ISC-77/78)", () => {
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
       await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
     },
-    30_000,
+    cliBudget(5),
   );
 
   test(
@@ -311,7 +311,7 @@ describe("detached supervisor — process tree (ISC-77/78)", () => {
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
       await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
     },
-    40_000,
+    cliBudget(7),
   );
 });
 
@@ -667,7 +667,7 @@ describe("lease identity (ISC-144)", () => {
     expect(
       await identityAlive({ pid: process.pid, started: "Thu Jan  1 00:00:00 1970" }),
     ).toBe(false);
-  });
+  }, cliBudget(3));
 
   test("a dead pid is dead regardless of the recorded start time", async () => {
     // Spawn-and-reap a child so we hold a pid known to be free.
@@ -675,7 +675,7 @@ describe("lease identity (ISC-144)", () => {
     await child.exited;
     expect(await processStartTime(child.pid)).toBeNull();
     expect(await identityAlive({ pid: child.pid, started: "whenever" })).toBe(false);
-  });
+  }, cliBudget(3));
 });
 
 describe("fake-pi worker-side epoch fence", () => {
@@ -722,7 +722,7 @@ describe("fake-pi worker-side epoch fence", () => {
       fake.stdin.end();
       await fake.exited;
     },
-    15_000,
+    cliBudget(1),
   );
 });
 
@@ -1240,7 +1240,7 @@ describe("settle() failure does not kill the supervisor (ISC-212)", () => {
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
       await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
     },
-    45_000,
+    cliBudget(4),
   );
 });
 
@@ -1338,7 +1338,7 @@ describe("ISC-116: a deadline aborts the agent, then reports timed_out", () => {
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
       await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
     },
-    45_000,
+    cliBudget(3),
   );
 });
 

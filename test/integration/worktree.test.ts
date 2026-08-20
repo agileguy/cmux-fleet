@@ -42,6 +42,7 @@ import {
   type WorkerWorktree,
 } from "../../src/run/worktree.ts";
 import { git, gitOk, pathExists, seedGitRepo } from "../fixtures/synthetic-repo.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -125,7 +126,7 @@ describe("clone placement and base ref", () => {
     expect(wt!.baseSha).toBe(parentHead);
     expect(await gitOk(wt!.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt!.branch);
     expect(wt!.branch).toBe(workerBranch("fleet", "run-abc", "eng-1"));
-  });
+  }, cliBudget(5));
 
   test("clones the parent's CHECKED-OUT branch, not merely its default", async () => {
     // A repo whose HEAD is on `feature`, with `main` sitting at an older
@@ -142,7 +143,7 @@ describe("clone placement and base ref", () => {
     const [wt] = await create(rig, ["eng-1"]);
     expect(wt!.baseSha).toBe(featureHead);
     expect(await pathExists(join(wt!.path, "only-on-feature.txt"))).toBe(true);
-  });
+  }, cliBudget(6));
 
   test("a detached parent HEAD is a named refusal, not a silently substituted base", async () => {
     const rig = await makeRig();
@@ -151,14 +152,14 @@ describe("clone placement and base ref", () => {
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/DETACHED HEAD/);
     // Nothing was created behind the refusal.
     expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
-  });
+  }, cliBudget(4));
 
   test("render mounts exactly the directory that was created", async () => {
     const rig = await makeRig();
     const [wt] = await create(rig, ["eng-1"]);
     const rendered = await renderWorker(rig.loaded, "eng-1", { runId: rig.run.runId });
     expect(rendered.docker).toContain(`${wt!.path}:/workspace`);
-  });
+  }, cliBudget(2));
 });
 
 // ---------------------------------------------------------------------------
@@ -198,7 +199,7 @@ describe("--no-hardlinks", () => {
         `${o.rel} shares-parent-inode=false`,
       );
     }
-  });
+  }, cliBudget(2));
 
   test("writing in the clone cannot reach the parent's object store", async () => {
     // The property the flag buys, stated as behaviour. With hardlinked
@@ -216,7 +217,7 @@ describe("--no-hardlinks", () => {
     expect(after.map((o) => o.rel).sort()).toEqual(before.map((o) => o.rel).sort());
     // The parent's own integrity check, which is what a corrupted pack fails.
     expect((await git(rig.repo, "fsck", "--no-progress")).code).toBe(0);
-  });
+  }, cliBudget(5));
 });
 
 interface ObjectFile {
@@ -296,7 +297,7 @@ describe("the clone is self-contained", () => {
     await writeFile(join(wt!.path, "x.txt"), "x\n");
     await gitOk(wt!.path, "add", "-A");
     expect((await git(wt!.path, "commit", "-q", "-m", "still works")).code).toBe(0);
-  });
+  }, cliBudget(5));
 
   test("a stale leftover directory is refused, never adopted", async () => {
     const rig = await makeRig();
@@ -309,7 +310,7 @@ describe("the clone is self-contained", () => {
     // Untouched: a refusal that had already clobbered the directory would be
     // strictly worse than a silent adoption.
     expect(await Bun.file(join(path, "someone-elses-work.txt")).text()).toContain("do not delete");
-  });
+  }, cliBudget(3));
 });
 
 // ---------------------------------------------------------------------------
@@ -333,7 +334,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
     await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreePreflightError);
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/submodules at vendor\/inner/);
     expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
-  });
+  }, cliBudget(8));
 
   test("LFS-tracked content is refused, including from a NESTED .gitattributes", async () => {
     // Nested rather than root-level on purpose: git honours a `.gitattributes`
@@ -348,7 +349,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
 
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/LFS-tracked content/);
     expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
-  });
+  }, cliBudget(3));
 
   test("an ordinary .gitattributes with no lfs filter is not refused", async () => {
     // The detector that flags everything is as useless as the one that flags
@@ -359,7 +360,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
     const findings = await inspectBaseRef(rig.repo, "main");
     expect(findings.lfs).toEqual([]);
     expect((await create(rig, ["eng-1"])).length).toBe(1);
-  });
+  }, cliBudget(3));
 
   test("preflight refuses before the FIRST clone, not partway through the fleet", async () => {
     const rig = await makeRig({
@@ -370,7 +371,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
     // Not "eng-3 was refused" — NOTHING was created. A per-worker gate would
     // leave two clones and a remote apiece behind the refusal.
     expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
-  });
+  }, cliBudget(2));
 
   /**
    * `BaseRefFindings.unscanned`'s own doc comment says "Never silent". This
@@ -407,7 +408,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
     expect(() => assertBaseRefCloneable(rig.repo, "main", findings)).toThrow(/could not be fully scanned/);
     await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreePreflightError);
     expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
-  });
+  }, cliBudget(6));
 });
 
 // ---------------------------------------------------------------------------
@@ -421,7 +422,7 @@ describe("branch_prefix is honoured end to end", () => {
     // The literal it replaced, asserted as absent so a reverted `dispatch.ts`
     // cannot pass this by coincidence.
     expect(wt!.branch).not.toContain("fleet/");
-  });
+  }, cliBudget(3));
 
   test("workers not in worktree isolation get no checkout", async () => {
     for (const isolation of ["shared-ro", "none"]) {
@@ -429,7 +430,7 @@ describe("branch_prefix is honoured end to end", () => {
       expect(await create(rig, ["eng-1"])).toEqual([]);
       expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
     }
-  });
+  }, cliBudget(2));
 
   /**
    * `SESSION_ID_RE` (worker ids) permits both a literal `..` and a trailing
@@ -448,13 +449,13 @@ describe("branch_prefix is honoured end to end", () => {
       await expect(create(rig, ["eng-1"])).rejects.toThrow(/refuses as a ref name/);
       expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
     }
-  });
+  }, cliBudget(3));
 
   test("with multiple workers, one bad branch_prefix refuses the whole batch before worker one clones", async () => {
     const rig = await makeRig({ workers: ["eng-1", "eng-2"], branchPrefix: "a..b" });
     await expect(create(rig, ["eng-1", "eng-2"])).rejects.toThrow(WorktreePreflightError);
     expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
-  });
+  }, cliBudget(2));
 });
 
 // ---------------------------------------------------------------------------
@@ -484,7 +485,7 @@ describe("a failure after the clone exists is rolled back, not left as an orphan
     expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
     // Nor does a dangling remote in the parent — the same rollback covers it.
     expect((await git(rig.repo, "remote", "get-url", workerRemoteName("eng-1"))).code).not.toBe(0);
-  });
+  }, cliBudget(4));
 });
 
 // ---------------------------------------------------------------------------
@@ -531,7 +532,7 @@ describe("operator visibility via a named remote", () => {
      * checkout than that is.
      */
     expect(await gitOk(rig.repo, "status", "--porcelain")).toBe("");
-  });
+  }, cliBudget(11));
 
   test("a stale same-named remote from a dead run is replaced, not fatal", async () => {
     const rig = await makeRig();
@@ -550,7 +551,7 @@ describe("operator visibility via a named remote", () => {
     });
     expect(created[0]?.replacedStaleRemote).toBe(true);
     expect(await gitOk(rig.repo, "remote", "get-url", wt!.remoteName)).toBe(wt!.path);
-  });
+  }, cliBudget(4));
 
   /**
    * THE regression test for `.git/info/exclude`. Mutation-proved: commenting
@@ -577,7 +578,7 @@ describe("operator visibility via a named remote", () => {
     const findings = await inspectBaseRef(rig.repo, "main");
     expect(findings.gitlinks).toEqual([]);
     expect(() => assertBaseRefCloneable(rig.repo, "main", findings)).not.toThrow();
-  });
+  }, cliBudget(6));
 
   test("excludeWorktreesDir is idempotent across repeated `up`s and preserves an operator's existing entries", async () => {
     const rig = await makeRig();
@@ -598,7 +599,7 @@ describe("operator visibility via a named remote", () => {
     // is broken.
     expect(twice.split("/.worktrees/").length - 1).toBe(1);
     expect(twice).toContain("*.local");
-  });
+  }, cliBudget(4));
 });
 
 // ---------------------------------------------------------------------------
@@ -612,7 +613,7 @@ describe("pruning (SRD §9.3)", () => {
     expect(outcome.pruned).toBe(true);
     expect(await pathExists(wt!.path)).toBe(false);
     expect((await git(rig.repo, "remote", "get-url", wt!.remoteName)).code).not.toBe(0);
-  });
+  }, cliBudget(4));
 
   test("uncommitted work refuses without --force, and --force takes it", async () => {
     const rig = await makeRig();
@@ -636,7 +637,7 @@ describe("pruning (SRD §9.3)", () => {
     const forced = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: true });
     expect(forced.pruned).toBe(true);
     expect(await pathExists(wt!.path)).toBe(false);
-  });
+  }, cliBudget(6));
 
   test("COMMITTED work refuses too — there is no upstream that already has it", async () => {
     // The half a bare `status --porcelain` test would miss. `origin` was
@@ -655,7 +656,7 @@ describe("pruning (SRD §9.3)", () => {
     const refused = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: false });
     expect(refused.pruned).toBe(false);
     expect(refused.reason).toContain("1 commit(s) past");
-  });
+  }, cliBudget(7));
 
   test("pruning is re-runnable: an already-gone checkout is success, not an error", async () => {
     const rig = await makeRig();
@@ -664,7 +665,7 @@ describe("pruning (SRD §9.3)", () => {
     const second = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: false });
     expect(second.pruned).toBe(true);
     expect(second.reason).toContain("already absent");
-  });
+  }, cliBudget(4));
 
   /**
    * `baseSha` that no longer resolves at all — not merely a rewritten but
@@ -689,7 +690,7 @@ describe("pruning (SRD §9.3)", () => {
     const refused = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt, force: false });
     expect(refused.pruned).toBe(false);
     expect(refused.reason).toContain("no longer in this history");
-  });
+  }, cliBudget(4));
 });
 
 // ---------------------------------------------------------------------------
@@ -718,5 +719,5 @@ describe("pruneWorkerWorktree refuses a recursive delete outside .worktrees/", (
     expect(outcome.pruned).toBe(false);
     expect(outcome.reason).toContain("outside");
     expect(await pathExists(join(outside, "do-not-delete.txt"))).toBe(true);
-  });
+  }, cliBudget(3));
 });

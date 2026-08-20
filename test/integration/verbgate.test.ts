@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { makeDaemonScratch, makeWorkerAccessible } from "../../src/container/mounts.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const IMAGE = process.env.PIFLEET_TEST_IMAGE ?? "pifleet/pi-worker:verify";
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -87,14 +88,14 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].decision).toBe("allow_read");
     expect(rows[0].verb).toBe("version");
-  });
+  }, cliBudget(1));
 
   // ISC-104
   test("a mutating verb absent from cloud_allow exits 77", async () => {
     const sb = await makeSandbox();
     const out = await inImage(`${PRELUDE}\nkubectl delete deployment web >/dev/null 2>&1; echo "rc=$?"`, sb.mounts);
     expect(out).toContain("rc=77");
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-105 — a non-77 code means the gate handed off; the real binary then
@@ -117,7 +118,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     expect(out).not.toContain("allowed=77");
     expect(out).toContain("other=77");
     expect(out).toContain("scale=77");
-  });
+  }, cliBudget(1));
 
   // Matching on verb tokens rather than the whole command line is what makes
   // this pointless; a substring match would be defeated by the reordering.
@@ -125,7 +126,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     const sb = await makeSandbox();
     const out = await inImage(`${PRELUDE}\nkubectl --namespace prod delete deployment web >/dev/null 2>&1; echo "rc=$?"`, sb.mounts);
     expect(out).toContain("rc=77");
-  });
+  }, cliBudget(1));
 
   test("helm and gcloud are gated on the same rules as kubectl", async () => {
     const sb = await makeSandbox();
@@ -136,7 +137,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     expect(out).toContain("helm=77");
     expect(out).not.toContain("helm_read=77");
     expect(out).toContain("gcloud=77");
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-107 regression.
@@ -159,7 +160,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
        helm uninstall api >/dev/null 2>&1
        wc -l < /outbox/ledger/verbgate.jsonl`, sb.mounts);
     expect(Number(out.trim())).toBe(5);
-  });
+  }, cliBudget(1));
 
   // ISC-106
   test("a permitted mutating verb is recorded with task id and argv", async () => {
@@ -172,7 +173,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     expect(row.epoch).toBe(1);
     expect(row.verb).toBe("rollout restart deployment/web");
     expect(row.argv).toContain("--timeout=30s");
-  });
+  }, cliBudget(1));
 
   /**
    * Adversarial regressions. Each of the three below was a reproduced bypass
@@ -215,7 +216,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       // The decision the gate actually made, not the one the worker injected.
       expect(rows[0]!.decision).toBe("refuse");
       expect(rows[0]!.forged).toBeUndefined();
-    });
+    }, cliBudget(1));
 
     test("a forged epoch cannot break the row or inject a key", async () => {
       const sb = await makeSandbox();
@@ -233,7 +234,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       expect(rows[0]!.decision).toBe("refuse");
       expect(rows[0]!.epoch).toBe(0); // digits-only, never the injected text
       expect(rows[0]!.forged).toBeUndefined();
-    });
+    }, cliBudget(1));
 
     /**
      * `gcloud auth print-access-token` matched the `print-*` read glob and was
@@ -254,7 +255,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       expect(out).toContain("access=77");
       expect(out).toContain("identity=77");
       expect(out).toContain("creds=77");
-    });
+    }, cliBudget(1));
 
     /**
      * The negative half: the narrowing must not have swallowed genuine reads,
@@ -276,7 +277,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
         .filter(Boolean)
         .map((l) => JSON.parse(l) as { decision: string });
       expect(rows.every((r) => r.decision === "allow_read")).toBe(true);
-    });
+    }, cliBudget(1));
   });
 
   describe("bypasses", () => {
@@ -296,7 +297,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       expect(out).toContain("positional=77");
       // The control: a genuine read still passes, so the fix is not "refuse everything".
       expect(out).not.toContain("describe=77");
-    });
+    }, cliBudget(1));
 
     /**
      * The classifier iterated an unquoted expansion, so an argument of `*`
@@ -312,7 +313,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
         sb.mounts,
       );
       expect(out).toContain("glob=77");
-    });
+    }, cliBudget(1));
 
     /**
      * gsutil and bq ship with google-cloud-cli, share its credentials, and are
@@ -331,7 +332,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       expect(out).toContain("gsutil_rm=77");
       expect(out).toContain("bq_rm=77");
       expect(out).not.toContain("gsutil_ls=77");
-    });
+    }, cliBudget(1));
 
     /**
      * The policy is the worker's own constraint, so a worker that can rewrite
@@ -347,7 +348,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       );
       expect(out).not.toContain("tamper=0");
       expect(out).toContain("after=77");
-    });
+    }, cliBudget(1));
 
     /**
      * ISC-219 — the test above attempts the path the FIX uses. It never
@@ -396,7 +397,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       // …while the read-only policy the gate actually reads still admits its
       // own verb, so the refusal above is discrimination, not breakage.
       expect(out).not.toContain("allowed=77");
-    });
+    }, cliBudget(1));
 
     /**
      * And if the policy IS writable — a misconfigured mount — the gate refuses
@@ -417,7 +418,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
         ["-v", `${join(host, "outbox")}:/outbox`, "-v", `${join(host, "policy")}:/policy`],
       );
       expect(out).toContain("rc=78");
-    });
+    }, cliBudget(1));
 
     /**
      * Second-order availability defect: `kubectl -n <ns> get …` is the most
@@ -440,7 +441,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       expect(out).not.toContain("eq=77");
       // Skipping global flags must not skip the gate.
       expect(out).toContain("mutate=77");
-    });
+    }, cliBudget(1));
 
     /**
      * The printf fallback interpolated raw argv into a JSON string. jq fails on
@@ -463,7 +464,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
         expect(() => JSON.parse(line)).not.toThrow();
       }
       expect(raw).not.toContain('"forged":true');
-    });
+    }, cliBudget(1));
   });
 
   test("refusal names the verb and the task so the block is actionable", async () => {
@@ -477,7 +478,7 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     expect(err).toContain("not authorized");
     expect(err).toContain("T-004");
     expect(err).toContain("cloud_allow");
-  });
+  }, cliBudget(1));
 });
 
 describe.skipIf(!DOCKER)("worker image toolchain", () => {
@@ -491,14 +492,14 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
     );
     expect(out).not.toContain("FAIL:");
     expect(out.match(/ok:/g)).toHaveLength(5);
-  });
+  }, cliBudget(1));
 
   test("the relocated real binaries are not dangling symlinks", async () => {
     const out = await inImage(
       `for f in /usr/local/libexec/*.real; do test -e "$f" || echo "DANGLING:$f"; done; echo done`,
     );
     expect(out).not.toContain("DANGLING:");
-  });
+  }, cliBudget(1));
 
   /**
    * ISC-25, ISC-38. `readlink -f` prints its argument and exits 0 for a path
@@ -511,5 +512,5 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
     );
     expect(out).toContain("10001");
     expect(out).toContain("tini=executable");
-  });
+  }, cliBudget(1));
 });

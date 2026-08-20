@@ -32,6 +32,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cliBudget } from "../support/budget.ts";
 
 const GUARD = join(new URL("../../", import.meta.url).pathname, ".github/scripts/probe-guard.sh");
 
@@ -155,7 +156,7 @@ describe("the probe guard accepts a clean run", () => {
     expect(r.out).toContain("parsed[clean]: pass=3 fail=0 skip=1 todo=0 total=4");
     expect(r.out).toContain("ok[clean]: 4 probes accounted for");
     expect(r.code).toBe(0);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("blank lines in a pinned list are ignored, so a YAML block scalar pastes in", async () => {
     // The workflow supplies these as `EXPECTED_...: |` block scalars, which
@@ -171,7 +172,7 @@ describe("the probe guard accepts a clean run", () => {
     });
     expect(r.out).toContain("matches all 1 pinned names exactly");
     expect(r.code).toBe(0);
-  }, 60_000);
+  }, cliBudget(1));
 });
 
 describe("the probe guard rejects each thing it exists to catch", () => {
@@ -198,7 +199,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     expect(r.out).toContain("expected 4 probes collected (pass+skip), got only 2");
     expect(r.out).toContain("silently matched nothing");
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("a SURPLUS is caught too, and advises the opposite fix from a shortfall", async () => {
     /**
@@ -224,7 +225,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     // looking for a file that was never removed.
     expect(r.out).not.toContain("dropped out of collection");
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("a pinned name that no longer exists is caught by identity, not by count", async () => {
     // Renaming a test while leaving the pin behind keeps the skip COUNT
@@ -237,7 +238,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     });
     expect(r.out).toContain('expected skip "a pinned name nobody ever wrote" does not appear');
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("a pinned test that RAN instead of skipping is caught", async () => {
     // The case where a precondition the runner is not supposed to satisfy
@@ -252,7 +253,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     });
     expect(r.out).toContain(`expected skip "${NAMES.passA}" RAN instead of skipping`);
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("an UNPINNED test that skips is caught even though the total still matches", async () => {
     /**
@@ -270,7 +271,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     expect(r.out).toContain("2 probes skipped, but exactly 1 are pinned by name");
     expect(r.out).toContain("an UNPINNED probe skipped too");
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("an empty pin list permits no skips at all", async () => {
     /**
@@ -288,7 +289,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     });
     expect(r.out).toContain("1 probes skipped, but exactly 0 are pinned by name");
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("a real failure is reported as a failure, never as total drift", async () => {
     /**
@@ -309,7 +310,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     expect(r.out).toContain("do not raise TOTAL_EXPECTED");
     expect(r.out).not.toContain("probes collected (pass+skip)");
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("a test.todo() is a gap, not an accepted skip", async () => {
     const base = await fixtures();
@@ -320,7 +321,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     });
     expect(r.out).toContain("1 unwritten probe(s) are test.todo()");
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("being given no files at all is refused, not graded as a pass", async () => {
     // An empty run has 0 failures and 0 skips. Without this check the guard
@@ -334,7 +335,7 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     });
     expect(r.out).toContain("was given no test files to run");
     expect(r.code).toBe(1);
-  }, 60_000);
+  }, cliBudget(1));
 
   test("a missing required variable fails loudly rather than defaulting", async () => {
     // `TOTAL_EXPECTED` unset must not read as 0 and grade an empty collection
@@ -354,5 +355,5 @@ describe("the probe guard rejects each thing it exists to catch", () => {
     const code = await p.exited;
     expect(stdout + stderr).toContain("TOTAL_EXPECTED");
     expect(code).not.toBe(0);
-  }, 60_000);
+  }, cliBudget(1));
 });

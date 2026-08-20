@@ -306,6 +306,16 @@ describe("doctor reports the live oMLX surface (ISC-54, ISC-55)", () => {
        * deterministically, by serving ids no fleet.yaml in that file names.
        */
     },
+      /*
+       * Ceiling audit (ISC-274). `cliBudget(1) = 11_400 ms` is the derived
+       * budget for this test's one CLI spawn, and it does NOT govern here:
+       * the spawn is the cheap half. `doctor` blocks on a LIVE completion from
+       * the oMLX server, and a cold model load there is measured in minutes on
+       * a first request — a cost paid by the model server, not by process
+       * startup, so the number `cliBudget` derives is unrelated to what bounds
+       * this test. 180_000 is the value all four probes in this file converged
+       * on; it is recorded as an inheritance from them, not as a measurement.
+       */
     180_000,
   );
 
@@ -339,6 +349,16 @@ describe("doctor reports the live oMLX surface (ISC-54, ISC-55)", () => {
       expect(omlx.list_latency_ms).not.toBeNull();
       expect(omlx.list_latency_ms!).toBeGreaterThanOrEqual(0);
     },
+      /*
+       * Ceiling audit (ISC-274). `cliBudget(1) = 11_400 ms` is the derived
+       * budget for this test's one CLI spawn, and it does NOT govern here:
+       * the spawn is the cheap half. `doctor` blocks on a LIVE completion from
+       * the oMLX server, and a cold model load there is measured in minutes on
+       * a first request — a cost paid by the model server, not by process
+       * startup, so the number `cliBudget` derives is unrelated to what bounds
+       * this test. 180_000 is the value all four probes in this file converged
+       * on; it is recorded as an inheritance from them, not as a measurement.
+       */
     180_000,
   );
 

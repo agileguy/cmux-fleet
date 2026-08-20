@@ -38,6 +38,7 @@ import {
   detectRepoHazards,
   neutralizeRepoHazards,
 } from "../../src/security/repo-hazards.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const seeded: string[] = [];
 afterEach(async () => {
@@ -63,7 +64,7 @@ describe("control — the fixture is genuinely armed", () => {
     const s = await seed();
     await checkout(s.dir, "probe");
     expect(await Bun.file(s.markers.hooksPath).exists()).toBe(true);
-  });
+  }, cliBudget(2));
 
   test(".git/hooks/post-checkout fires once hooksPath is out of the way", async () => {
     const s = await seed();
@@ -75,7 +76,7 @@ describe("control — the fixture is genuinely armed", () => {
     await writeFile(cfg, text.replace(/\n\thooksPath = \.githooks/, ""));
     await checkout(s.dir, "probe");
     expect(await Bun.file(s.markers.gitHooks).exists()).toBe(true);
-  });
+  }, cliBudget(2));
 });
 
 describe("detection sees every hazard class in the seeded repo", () => {
@@ -95,7 +96,7 @@ describe("detection sees every hazard class in the seeded repo", () => {
     // And a detect-only pass leaves the payloads exactly where they were.
     expect(await firedMarkers(s.markerDir)).toEqual([]);
     expect(await Bun.file(join(s.dir, "AGENTS.md")).exists()).toBe(true);
-  });
+  }, cliBudget(1));
 });
 
 describe("neutralized, the hostile repo changes nothing", () => {
@@ -110,7 +111,7 @@ describe("neutralized, the hostile repo changes nothing", () => {
     // markers: a payload added to the fixture later and forgotten here would
     // slip past a per-name check, and this is the assertion that catches it.
     expect(await firedMarkers(s.markerDir)).toEqual([]);
-  });
+  }, cliBudget(2));
 
   test("a full status/diff/add cycle fires nothing either", async () => {
     const s = await seed();
@@ -122,7 +123,7 @@ describe("neutralized, the hostile repo changes nothing", () => {
     await rawGit(s.dir, ["add", "-A"]);
     await rawGit(s.dir, ["diff", "HEAD"]);
     expect(await firedMarkers(s.markerDir)).toEqual([]);
-  });
+  }, cliBudget(4));
 
   test("the extension and instruction files are gone from the paths Pi reads", async () => {
     const s = await seed();
@@ -137,7 +138,7 @@ describe("neutralized, the hostile repo changes nothing", () => {
     ]) {
       await expect(lstat(join(s.dir, rel))).rejects.toThrow();
     }
-  });
+  }, cliBudget(1));
 
   test("nothing is deleted — every hazard is renamed aside with content intact", async () => {
     const s = await seed();
@@ -161,13 +162,13 @@ describe("neutralized, the hostile repo changes nothing", () => {
     const cfg = await readFile(join(s.dir, ".git", "config"), "utf8");
     expect(cfg).toContain("; pifleet-quarantined");
     expect(cfg).toContain("hooksPath");
-  });
+  }, cliBudget(1));
 
   test("the neutralized tree is clean on a second scan", async () => {
     const s = await seed();
     await neutralizeRepoHazards(s.dir);
     expect(await detectRepoHazards(s.dir)).toEqual([]);
-  });
+  }, cliBudget(1));
 
   test("git still works — hardening that broke the harvest would wear this as a disguise", async () => {
     const s = await seed();
@@ -177,7 +178,7 @@ describe("neutralized, the hostile repo changes nothing", () => {
     const log = await runGit(s.dir, ["log", "--oneline"]);
     expect(log.code).toBe(0);
     expect(log.stdout).toContain("initial");
-  });
+  }, cliBudget(3));
 });
 
 describe("the layered defence, each layer proven separately", () => {
@@ -192,7 +193,7 @@ describe("the layered defence, each layer proven separately", () => {
     await runGit(s.dir, ["status", "--porcelain"]);
     await runGit(s.dir, ["diff", "HEAD"]);
     expect(await firedMarkers(s.markerDir)).toEqual([]);
-  });
+  }, cliBudget(4));
 
   test("in-tree quarantine is reversible by the worker — stated, not assumed", async () => {
     const s = await seed();
@@ -205,7 +206,7 @@ describe("the layered defence, each layer proven separately", () => {
     // the limitation cannot quietly stop being true.
     await rawGit(s.dir, ["checkout", "--", "AGENTS.md"]);
     expect(await Bun.file(join(s.dir, "AGENTS.md")).exists()).toBe(true);
-  });
+  }, cliBudget(2));
 });
 
 describe("Pi is launched with discovery denied", () => {

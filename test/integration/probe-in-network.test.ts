@@ -49,6 +49,7 @@ import { probeNativeToolCalls } from "../../src/security/model-probe.ts";
 import { ensureEgressNetwork } from "../../src/security/network.ts";
 import { RELAY_IMAGE } from "../../src/security/relay.ts";
 import { realExec } from "../../src/container/run.ts";
+import { containerBudget } from "../support/budget.ts";
 
 const DOCKER = process.env["PIFLEET_DOCKER"] === "1";
 if (!DOCKER) {
@@ -232,7 +233,7 @@ describe("the native-tool-call probe is issued from inside the egress network (I
     expect(last).toContain("POST /v1/chat/completions");
     expect(last).toContain("auth=yes");
     expect(last).toContain("tools=yes");
-  }, 60_000);
+  }, containerBudget(1));
 
   /**
    * `--network` is the security property, so it is pinned in the argv rather

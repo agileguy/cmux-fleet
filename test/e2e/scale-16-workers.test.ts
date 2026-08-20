@@ -846,6 +846,17 @@ describe("ISC-158: sixteen live workers, two of them flooding a pipe", () => {
       // is the same shape as the bug it exists to close; a second `down` on an
       // already-down run costs a second and reaps anything this one missed.
     },
+      /*
+       * Ceiling audit (ISC-274). `cliBudget(6) = 68_400 ms` is the derived
+       * budget for the six CLI spawns this test performs, and it does NOT
+       * govern: this run's cost is dominated by the fixture's SCRIPTED turn
+       * delays across sixteen workers, not by process startup. The flooder
+       * emits on a cadence the scenario file sets, and the quiet workers'
+       * latency floor is asserted against that same cadence, so the wall clock
+       * is a property of the scenario rather than of spawning. 180_000 is kept
+       * as the inherited value; raise it only with a scenario change that
+       * lengthens those delays.
+       */
     180_000,
   );
 });

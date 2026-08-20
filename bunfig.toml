@@ -8,6 +8,21 @@
 # behind `bun run test:coverage`; the keys below configure it for when you do.
 
 [test]
+# The `PIFLEET_*` environment guard (ISC-278). It has to be a PRELOAD and it has
+# to be here rather than on a command line: the property it asserts — that no
+# test file leaves a PIFLEET_* variable different at process exit from what it
+# was at process load — is not observable from inside any test file, because by
+# the time it can be judged no test file is running. Only an observer armed
+# before the first file loads and checked after the last one finishes can see
+# it, and the leak that motivated this was found by a human reading code, not by
+# any command anyone runs on purpose. So it must cover a bare `bun test`.
+#
+# `[test] preload` IS honoured on bun 1.3.11 — probed, unlike `[test] timeout`,
+# which is ignored (see test/support/budget.ts). The path is relative to this
+# file. See test/support/env-hygiene.ts for what it checks and why an
+# `afterAll` rather than a `process.on("exit")` handler.
+preload = ["./test/support/env-hygiene-preload.ts"]
+
 # The report answers "how much of src/ is exercised", and a test file's own
 # 100% is not evidence of anything.
 coverageSkipTestFiles = true

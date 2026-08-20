@@ -226,5 +226,5 @@ describe("readScreen stays out of the control plane (ISC-136)", () => {
       const text = await Bun.file(join(root, rel)).text();
       expect(/\breadScreen\s*\(/.test(text), `${rel} calls readScreen`).toBe(false);
     }
-  });
+  }, cliBudget(1));
 });

@@ -17,6 +17,7 @@ import { initialWorkerState, writeWorkerState } from "../../src/run/state.ts";
 import { writeJsonAtomic } from "../../src/util/jsonl.ts";
 import { TranscriptReader } from "../../src/harvest/transcript.ts";
 import { EXIT, type WorkerState } from "../../src/contracts.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
 
@@ -121,7 +122,7 @@ describe("pifleet transcript", () => {
     // Byte-equality, not shape-equality: fails if the command starts
     // re-serializing parsed records, which is a second opinion, not A4.
     expect(r.stdout).toBe(raw);
-  });
+  }, cliBudget(1));
 
   test("--json parses the transcript through the harvest reader", async () => {
     const fx = await makeRun();
@@ -144,7 +145,7 @@ describe("pifleet transcript", () => {
     expect(d.entry_count).toBe(2);
     expect(d.entries).toHaveLength(2);
     expect(d.usage.input_tokens).toBe(200);
-  });
+  }, cliBudget(1));
 
   // ISC-101
   test("--html writes an openable, escaped file with no live supervisor", async () => {
@@ -180,7 +181,7 @@ describe("pifleet transcript", () => {
     // escaping — the worker's <script> would land in the page executable.
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).not.toContain("<script>alert(1)</script>");
-  });
+  }, cliBudget(1));
 
   test("a worker id that names nothing exits 2, never 0", async () => {
     const fx = await makeRun();
@@ -191,13 +192,13 @@ describe("pifleet transcript", () => {
     expect(r.code).toBe(EXIT.USAGE);
     expect(r.stderr).toContain("ghost");
     expect(r.stderr).not.toContain("at async"); // diagnosis, not a stack trace
-  });
+  }, cliBudget(1));
 
   test("transcript without --worker is a usage error", async () => {
     const fx = await makeRun();
     const r = await runCli(fx.root, ["transcript", "--run", fx.runId]);
     expect(r.code).toBe(EXIT.USAGE);
-  });
+  }, cliBudget(1));
 });
 
 // --- the live-file scenario ------------------------------------------------
@@ -291,7 +292,7 @@ describe("pifleet harvest --reconstruct", () => {
     expect(d.usage.output_tokens).toBe(120);
     expect(d["tokens_total"]).toBe(1_120);
     expect(d.usage.priced).toBe(false);
-  });
+  }, cliBudget(1));
 
   test("an aborted transcript reconstructs as aborted through the CLI", async () => {
     const fx = await makeRun();
@@ -307,7 +308,7 @@ describe("pifleet harvest --reconstruct", () => {
     // Pins the CLI to the production reconstruct(): fails if the command
     // stops consulting stopReason and reports every transcript as unknown.
     expect(JSON.parse(r.stdout)).toMatchObject({ verdict: "aborted" });
-  });
+  }, cliBudget(1));
 
   // ISC-96 — the two absent cases must be DIFFERENT facts in the payload.
   test("died-before-first-message and wrong-path are distinguishable", async () => {
@@ -333,7 +334,7 @@ describe("pifleet harvest --reconstruct", () => {
     expect(dNever.reasons.join(" ")).toContain("died_before_first_assistant_message");
     expect(dWrong.reasons.join(" ")).toContain("missing_at_recorded_path");
     expect(dNever.harvest_status).toBe("unavailable");
-  });
+  }, cliBudget(2));
 
   test("harvest without --reconstruct is a usage error", async () => {
     const fx = await makeRun();
@@ -341,5 +342,5 @@ describe("pifleet harvest --reconstruct", () => {
     const r = await runCli(fx.root, ["harvest", "--worker", "eng-1", "--run", fx.runId]);
     expect(r.code).toBe(EXIT.USAGE);
     expect(r.stderr).toContain("--reconstruct");
-  });
+  }, cliBudget(1));
 });

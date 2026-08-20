@@ -78,6 +78,7 @@ import {
   resolveIdentity,
   tokenModeStartupEnv,
 } from "../../src/security/adc.ts";
+import { cliBudget, containerBudget } from "../support/budget.ts";
 
 const IMAGE = process.env.PIFLEET_TEST_IMAGE ?? "pifleet/pi-worker:verify";
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -343,7 +344,7 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
     );
     expect(out).toContain("file=absent");
     expect(out).not.toContain("CLOUDSDK_AUTH_ACCESS_TOKEN=");
-  });
+  }, cliBudget(2));
 
   test("injection lands in tmpfs under a read-only root, mode 0600", async () => {
     const name = await startContainer();
@@ -354,7 +355,7 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
     );
     expect(out).toContain(FAKE_TOKEN);
     expect(out).toContain("mode=600");
-  });
+  }, cliBudget(2));
 
   /**
    * Acceptance 14's mechanics: a SECOND injection into the same still-running
@@ -373,7 +374,7 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
       `test -f ${TOKEN_FILE}.tmp && echo "tmp=present" || echo "tmp=absent"`,
     );
     expect(tmp).toContain("tmp=absent");
-  });
+  }, cliBudget(3));
 
   /**
    * Acceptance 11 / ISC-43: no `refresh_token` string anywhere in the
@@ -405,7 +406,7 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
     // var so a future image that stopped baking it turns this red rather than
     // silently degrading the third grep to `/nonexistent`.
     expect(out).toContain(`cloudsdk_config=${CONTAINER_GCLOUD_CONFIG_DIR}`);
-  });
+  }, cliBudget(2));
 
   /** The env file's contract, observed live: pointer only, no token value. */
   test("the container environment holds the pointer, never the token", async () => {
@@ -414,7 +415,7 @@ describe.skipIf(!DOCKER)("adc token injection", () => {
     const out = await inContainer(name, `env; tr "\\0" "\\n" < /proc/1/environ`);
     expect(out).toContain(`CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=${TOKEN_FILE}`);
     expect(out).not.toContain(FAKE_TOKEN);
-  });
+  }, cliBudget(2));
 });
 
 /**
@@ -478,7 +479,7 @@ describe.skipIf(!DOCKER)("ISC-255/ISC-41: gcloud in the production container sha
     // A tmpfs specifically: container-lifetime memory that never touches host
     // disk, which is why a credential cache landing here is acceptable at all.
     expect(out).toContain("fstype=tmpfs");
-  }, 60_000);
+  }, containerBudget(2));
 
   test.skipIf(!HOST_ADC_PRESENT)(
     "without the production tmpfs, gcloud crashes on the read-only config dir (ISC-255)",
@@ -497,6 +498,15 @@ describe.skipIf(!DOCKER)("ISC-255/ISC-41: gcloud in the production container sha
       expect(r.stderr).toMatch(/Read-only file system/i);
       expect(r.stderr).toContain(CONTAINER_GCLOUD_CONFIG_DIR);
     },
+    // ISC-274 audit: stands at 120_000, NOT reduced to the derived number. Two
+    // container operations derive containerBudget(2) = 60_000 (its cold floor).
+    // What that model does not describe is the real `gcloud` invocation inside
+    // the container: it resolves and contacts Google endpoints, so the tail is
+    // network latency on someone else's service, not container startup. Measured
+    // warm at 2240 ms on a 14-core box at load 3.55, against a warm per-op term
+    // of ~2 x 1000 ms — so very nearly the whole excess is gcloud, not Docker.
+    // The slowest four tests in this file are exactly the four that shell out to
+    // real gcloud, which is the evidence for sizing them above the floor.
     120_000,
   );
 
@@ -519,6 +529,10 @@ describe.skipIf(!DOCKER)("ISC-255/ISC-41: gcloud in the production container sha
       // near-miss.
       expect(r.stderr.trim()).toBe("");
     },
+    // ISC-274 audit: stands at 120_000, same derivation as the ISC-255 test
+    // above: containerBudget(2) = 60_000 describes the container operations, not
+    // the real `gcloud auth print-access-token` round-trip this asserts on.
+    // Measured warm 1780 ms; the ceiling covers a slow or retrying token endpoint.
     120_000,
   );
 
@@ -557,6 +571,13 @@ describe.skipIf(!DOCKER)("ISC-255/ISC-41: gcloud in the production container sha
       expect(after.stderr.trim()).toBe("");
       expect(digest(after.stdout.trim())).toBe(digest(second));
     },
+    // ISC-274 audit: stands at 180_000, the widest in this file and NOT reduced.
+    // containerBudget(3) = 60_000 covers the container work; this test then makes
+    // TWO real gcloud calls either side of a refresh re-injection, so it carries
+    // two network round-trips rather than one. Measured warm 3493 ms — the
+    // slowest test in the file, and the ordering (3493 > 2240 > 2031 > 1780) tracks
+    // the number of gcloud calls exactly, which is the evidence that network and
+    // not container time is what these ceilings are sized against.
     180_000,
   );
 });
@@ -577,7 +598,7 @@ describe.skipIf(!DOCKER)("ISC-44: the host gcloud config dir is never a mount so
   test("cloud_access: false — nothing is mounted from the host gcloud store", async () => {
     const name = await startContainer({ env: NO_CLOUD_ENV });
     await expectNoHostGcloudConfigMount(await mountsOf(name), { allowAdcFile: false });
-  }, 60_000);
+  }, containerBudget(2));
 
   test("token mode, after a real injection — still nothing", async () => {
     const name = await startContainer();
@@ -587,7 +608,7 @@ describe.skipIf(!DOCKER)("ISC-44: the host gcloud config dir is never a mount so
     // `docker exec` — proving that is the point.
     await injectToken(realExec, name, FAKE_TOKEN);
     await expectNoHostGcloudConfigMount(await mountsOf(name), { allowAdcFile: false });
-  }, 60_000);
+  }, containerBudget(2));
 
   /**
    * `file` mode. FORWARD-LOOKING, and that qualifier is not modesty.
@@ -663,7 +684,7 @@ describe.skipIf(!DOCKER)("ISC-44: the host gcloud config dir is never a mount so
       );
       expect(rw).toContain("read-only");
     },
-    60_000,
+    containerBudget(3),
   );
 });
 
@@ -726,7 +747,7 @@ describe.skipIf(!DOCKER)("ISC-45: cloud_access: false has no Google credential",
     // require it TWICE, once per source, so both are proven non-empty.
     const baked = out.split("PIFLEET_CONTAINER=1").length - 1;
     expect(baked).toBe(2);
-  }, 60_000);
+  }, containerBudget(2));
 
   /**
    * The contrast, on the same probe: with `cloud_access: true` and an
@@ -754,7 +775,7 @@ describe.skipIf(!DOCKER)("ISC-45: cloud_access: false has no Google credential",
     for (const v of CREDENTIAL_ENV_VARS.filter((n) => n !== "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE")) {
       expect(out).not.toContain(`${v}=`);
     }
-  }, 60_000);
+  }, containerBudget(2));
 
   /**
    * The kubeconfig vector, which the four-env-var set does not cover.
@@ -780,7 +801,7 @@ describe.skipIf(!DOCKER)("ISC-45: cloud_access: false has no Google credential",
     expect(out).toContain("dir=present");
     expect(out).toContain("kube_entries=0");
     expect(out).toContain("config=absent");
-  }, 60_000);
+  }, containerBudget(2));
 });
 
 /**
@@ -817,7 +838,7 @@ describe.skipIf(!DOCKER)("ISC-46: gcloud fails without a credential, succeeds wi
     // (missing) or a verbgate 77 (gated) matches neither.
     expect(r.stderr).toMatch(/gcloud\.auth\.print-access-token/);
     expect(r.stderr).toMatch(/do not currently have an active account/i);
-  }, 60_000);
+  }, containerBudget(2));
 
   /**
    * The criterion's LITERAL command, through PATH, where a real worker meets
@@ -843,7 +864,7 @@ describe.skipIf(!DOCKER)("ISC-46: gcloud fails without a credential, succeeds wi
     expect(r.stderr).toContain("not authorized for task");
     // Not gcloud's credential message — this never reached gcloud at all.
     expect(r.stderr).not.toMatch(/do not currently have an active account/i);
-  }, 60_000);
+  }, containerBudget(2));
 
   /**
    * The differential, live. One container, one variable.
@@ -882,6 +903,10 @@ describe.skipIf(!DOCKER)("ISC-46: gcloud fails without a credential, succeeds wi
       expect(digest(printed)).toBe(digest(token));
       expect(printed === token).toBe(true);
     },
+    // ISC-274 audit: stands at 120_000. containerBudget(3) = 60_000 describes the
+    // container operations; the assertion is that a freshly minted token flips a
+    // real gcloud call from exit 1 to exit 0, so a live token endpoint is in the
+    // path. Measured warm 2031 ms.
     120_000,
   );
 });

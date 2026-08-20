@@ -35,6 +35,7 @@ import {
   detectActiveMlxTraining,
   listHostProcesses,
 } from "../../src/safety/mlx-training-guard.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const bases: string[] = [];
 const running: { kill: () => void; exited: Promise<number> }[] = [];
@@ -125,7 +126,7 @@ describe("the guard reads the real host process list (ISC-56)", () => {
       expect(mine!.command).toContain("mlx_lm.lora");
       expect(mine!.command).toContain("--train");
     },
-    30_000,
+    cliBudget(1),
   );
 
   test(
@@ -145,7 +146,7 @@ describe("the guard reads the real host process list (ISC-56)", () => {
       const hits = detectActiveMlxTraining(listed);
       expect(hits.find((h) => h.pid === server.pid)).toBeUndefined();
     },
-    30_000,
+    cliBudget(1),
   );
 
   /**
@@ -184,7 +185,7 @@ describe("the guard reads the real host process list (ISC-56)", () => {
 
       expect(detectActiveMlxTraining(listed).find((h) => h.pid === server.pid)).toBeUndefined();
     },
-    30_000,
+    cliBudget(1),
   );
 
   /**

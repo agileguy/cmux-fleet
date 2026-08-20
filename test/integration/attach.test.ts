@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 
@@ -88,14 +89,14 @@ describe("attach focuses the pane the run recorded", () => {
     const r = await attach(rig, []);
     expect(r.code).toBe(EXIT.USAGE);
     expect(`${r.stdout}${r.stderr}`).toMatch(/--worker/);
-  });
+  }, cliBudget(1));
 
   test("a worker with no presentation record is a usage error, not a crash", async () => {
     const rig = await makeRun("tmux", "%1");
     const r = await attach(rig, ["--worker", "nope", "--run", rig.runId]);
     expect(r.code).toBe(EXIT.USAGE);
     expect(`${r.stdout}${r.stderr}`).toMatch(/no presentation record/);
-  });
+  }, cliBudget(1));
 
   /**
    * `headless` has no panes, and that is a normal configuration — but silently
@@ -107,7 +108,7 @@ describe("attach focuses the pane the run recorded", () => {
     const r = await attach(rig, ["--worker", "eng-1", "--run", rig.runId]);
     expect(r.code).toBe(EXIT.BACKEND_UNAVAILABLE);
     expect(`${r.stdout}${r.stderr}`).toMatch(/no pane to focus/);
-  });
+  }, cliBudget(1));
 
   /**
    * The real path, against a real tmux server. The pane id in
@@ -159,5 +160,5 @@ describe("attach focuses the pane the run recorded", () => {
         stderr: "ignore",
       }).exited;
     }
-  });
+  }, cliBudget(9));
 });

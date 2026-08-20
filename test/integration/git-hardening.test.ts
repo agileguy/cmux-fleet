@@ -25,6 +25,7 @@ import { runGit } from "../../src/harvest/git.ts";
 import { deriveGitFacts } from "../../src/harvest/git.ts";
 import { resolveFromEnvelope, resolveFromTree, runAcceptance } from "../../src/harvest/acceptance.ts";
 import { Deadline } from "../../src/util/clock.ts";
+import { cliBudget } from "../support/budget.ts";
 
 /**
  * A repo whose second commit weaponizes `git diff` against its reader.
@@ -78,7 +79,7 @@ describe("runGit refuses to execute what the repository tells it to", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * `textconv` is the other half of the primitive, and it is the half that
@@ -94,7 +95,7 @@ describe("runGit refuses to execute what the repository tells it to", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * The regression that motivated `--no-textconv`: with BOTH drivers defined,
@@ -112,7 +113,7 @@ describe("runGit refuses to execute what the repository tells it to", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * `diff` is not the only subcommand that renders content through a driver;
@@ -128,7 +129,7 @@ describe("runGit refuses to execute what the repository tells it to", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * The driver-suppression flags are diff-family only. If one ever migrates
@@ -148,7 +149,7 @@ describe("runGit refuses to execute what the repository tells it to", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * The production path, not just the primitive: `pifleet artifacts` reaches
@@ -170,7 +171,7 @@ describe("runGit refuses to execute what the repository tells it to", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * The harvester's environment must not cross into a subprocess working on a
@@ -180,6 +181,12 @@ describe("runGit refuses to execute what the repository tells it to", () => {
    */
   test("the harvester's environment is not inherited by git", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pifleet-env-"));
+    // Captured, not assumed absent (ISC-278). An unconditional `delete` in the
+    // `finally` is harmless when the variable was unset — the usual case, which
+    // is why it survives review — and destructive when it was not: it clears an
+    // operator's real value and leaves the process environment different at
+    // exit from what it was at load.
+    const priorSecret = process.env["PIFLEET_PROBE_SECRET"];
     try {
       process.env["PIFLEET_PROBE_SECRET"] = "leaked";
       await runGit(dir, ["init", "-q", "-b", "main"]);
@@ -194,10 +201,11 @@ describe("runGit refuses to execute what the repository tells it to", () => {
       const env = await runGit(dir, ["var", "GIT_EDITOR"]);
       expect(env.stdout).not.toContain("leaked");
     } finally {
-      delete process.env["PIFLEET_PROBE_SECRET"];
+      if (priorSecret === undefined) delete process.env["PIFLEET_PROBE_SECRET"];
+      else process.env["PIFLEET_PROBE_SECRET"] = priorSecret;
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(3));
 });
 
 /**
@@ -271,7 +279,7 @@ describe("the global attributes file is not a way in (finding 1)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 
   /**
    * The same repository through `acceptance.ts`'s own entry point. This is the
@@ -287,7 +295,7 @@ describe("the global attributes file is not a way in (finding 1)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(2));
 });
 
 /**
@@ -359,7 +367,7 @@ describe("every git spawn in acceptance.ts is hardened (finding 1)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(7));
 
   test("runAcceptance's `git clone` and `git checkout` are hardened", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pifleet-acc-clone-"));
@@ -402,5 +410,5 @@ describe("every git spawn in acceptance.ts is hardened (finding 1)", () => {
       await rm(dir, { recursive: true, force: true });
       await rm(scratch, { recursive: true, force: true });
     }
-  });
+  }, cliBudget(7));
 });

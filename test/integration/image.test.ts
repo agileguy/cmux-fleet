@@ -15,6 +15,7 @@ import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
 import { buildImage, imageTag, verifyImage } from "../../src/container/image.ts";
 import { makeDaemonScratch, makeWorkerAccessible } from "../../src/container/mounts.ts";
 import { realExec } from "../../src/container/run.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
 if (!DOCKER) {
@@ -25,7 +26,26 @@ if (!DOCKER) {
 
 const it = test.skipIf(!DOCKER);
 
-/** Generous: `docker run` probes cold-start a VM path on macOS. */
+/**
+ * Generous: `docker run` probes cold-start a VM path on macOS.
+ *
+ * ISC-274 audit: stands at 180_000, deliberately NOT reduced. Every test here
+ * performs exactly ONE container operation (`runInImage`), so `containerBudget(1)`
+ * derives 60_000 — its cold floor, since the per-op term only overtakes past
+ * thirty operations. That is the DERIVED number, and it is narrower than this one.
+ *
+ * It is not adopted because the term this constant exists for is the one
+ * `containerBudget` documents as unmeasured: the first `docker run` against a
+ * cold macOS VM. Measured warm on a 14-core box at load 3.55, daemon up and image
+ * already built, these thirteen tests take 27-959 ms — 60x inside even the 60_000
+ * floor, which is exactly why the warm number cannot decide this. Lowering a
+ * ceiling on the strength of a measurement that does not exercise the path the
+ * ceiling exists for is the ISC-267 mistake, and budget.ts says its floor moves
+ * only on a CI measurement, in either direction.
+ *
+ * `BUILD_TIMEOUT` below is separate and unaffected: the build runs in `beforeAll`
+ * under its own budget, so no per-test ceiling here ever has to cover it.
+ */
 const PROBE_TIMEOUT = 180_000;
 /** The image build installs google-cloud-cli; the first build takes many minutes. */
 const BUILD_TIMEOUT = 2_400_000;
@@ -118,7 +138,7 @@ describe("container posture", () => {
     expect(r.code).toBe(0);
     const entrypoint = JSON.parse(r.stdout.trim()) as string[];
     expect(entrypoint[0]).toBe("/usr/bin/tini");
-  });
+  }, cliBudget(1));
 
   // ISC-27/28: /workspace write-through, both directions.
   it("/workspace writes are visible on the host and vice versa", async () => {

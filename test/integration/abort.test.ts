@@ -30,6 +30,7 @@ import {
 } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -180,7 +181,7 @@ describe("abort — ISC-81: busy to idle within 10s, on a real clock", () => {
 
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
     },
-    45_000,
+    cliBudget(2),
   );
 
   test(
@@ -205,7 +206,7 @@ describe("abort — ISC-81: busy to idle within 10s, on a real clock", () => {
 
       await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
     },
-    30_000,
+    cliBudget(2),
   );
 });
 
@@ -220,7 +221,7 @@ describe("abort — worker discipline (requirement 4)", () => {
     expect(r.stderr).toContain("ghost");
     expect(r.stderr).toContain(runId);
     expect(r.stderr).not.toMatch(/\n\s+at /);
-  });
+  }, cliBudget(1));
 
   test("a dead worker is WORKER_DIED, not USAGE", async () => {
     const root = await freshRoot();
@@ -246,5 +247,5 @@ describe("abort — worker discipline (requirement 4)", () => {
     expect(r.code).toBe(EXIT.WORKER_DIED);
     expect(r.stderr).toContain("eng-1");
     expect(r.stderr).not.toMatch(/\n\s+at /);
-  });
+  }, cliBudget(3));
 });

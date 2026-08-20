@@ -21,6 +21,7 @@ import type { FleetBackend } from "../../src/backends/types.ts";
 import { HeadlessBackend } from "../../src/backends/headless/index.ts";
 import { TmuxBackend } from "../../src/backends/tmux/index.ts";
 import { listPanesArgv, parsePaneList, tmuxArgv } from "../../src/backends/tmux/argv.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const SOCKET = `pifleet-eq-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const CTX = { socketName: SOCKET, configFile: "/dev/null" };
@@ -99,7 +100,7 @@ describe("ISC-134: tmux and headless are interchangeable to the control plane", 
     const panes = parsePaneList(r.stdout);
     expect(panes).toHaveLength(WORKERS.length);
     expect(panes.map((p) => p.title).sort()).toEqual([...WORKERS].sort());
-  });
+  }, cliBudget(1));
 
   test("refs differ only where the interface says they may: backend-native ids", async () => {
     const h = new HeadlessBackend();

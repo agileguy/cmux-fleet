@@ -23,6 +23,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 
@@ -176,7 +177,7 @@ describe("a missing binary is diagnosed as one (ISC-159)", () => {
     // Actionable: what to do, not merely what was observed.
     expect(d.message).toContain("install git");
     expect(r.json.diagnosis_classes).toContain("missing-binary");
-  });
+  }, cliBudget(1));
 
   /**
    * The discrimination ISC-159 turns on. Absent docker and stopped docker
@@ -190,7 +191,7 @@ describe("a missing binary is diagnosed as one (ISC-159)", () => {
     expect(r.code).toBe(EXIT.BACKEND_UNAVAILABLE);
     expect(findDiagnosis(r, "docker-not-installed").class).toBe("missing-binary");
     expect(r.json.diagnosis_classes).not.toContain("absent-daemon");
-  });
+  }, cliBudget(1));
 });
 
 describe("an absent daemon is diagnosed as one (ISC-159)", () => {
@@ -207,7 +208,7 @@ describe("an absent daemon is diagnosed as one (ISC-159)", () => {
     expect(d.message).toContain("start");
     // …and must not send them to an install they have already done.
     expect(r.json.diagnosis_classes).not.toContain("missing-binary");
-  });
+  }, cliBudget(1));
 });
 
 describe("a version below the floor is diagnosed as one (ISC-159)", () => {
@@ -233,7 +234,7 @@ describe("a version below the floor is diagnosed as one (ISC-159)", () => {
     expect(d.message).toContain("2.32.0"); // what is required
     // Not conflated with absence: the binary is right there.
     expect(r.json.diagnosis_classes).not.toContain("missing-binary");
-  });
+  }, cliBudget(1));
 
   test("a docker below its floor is caught the same way", async () => {
     const bin = await shimBin({ docker: healthyDocker("20.10.24"), git: HEALTHY_GIT });
@@ -243,7 +244,7 @@ describe("a version below the floor is diagnosed as one (ISC-159)", () => {
     const d = findDiagnosis(r, "docker-version-below-minimum");
     expect(d.class).toBe("wrong-version");
     expect(d.message).toContain("23.0.0");
-  });
+  }, cliBudget(1));
 
   /**
    * A banner `doctor` cannot parse is not evidence of health. Reporting it as
@@ -271,7 +272,7 @@ describe("a version below the floor is diagnosed as one (ISC-159)", () => {
     // banner must not appear anywhere in the "upgrade something" bucket.
     expect(r.json.diagnosis_classes).toContain("misconfigured");
     expect(r.json.diagnosis_classes).not.toContain("wrong-version");
-  });
+  }, cliBudget(1));
 
   test("a required binary at or above its floor produces no diagnosis", async () => {
     const bin = await shimBin({ docker: healthyDocker("23.0.0"), git: script('echo "git version 2.32.0"') });
@@ -281,7 +282,7 @@ describe("a version below the floor is diagnosed as one (ISC-159)", () => {
     expect(r.json.diagnoses).toEqual([]);
     const docker = r.json.probes.find((p) => p.name === "docker");
     expect(docker?.floor).toEqual({ min: "23.0.0", status: "ok" });
-  });
+  }, cliBudget(1));
 });
 
 /**
@@ -319,7 +320,7 @@ describe("the three classes are distinguishable without being separate exit code
     // would otherwise let slide.
     const messages = new Set(runs.map((r) => r.json.diagnoses.map((d) => d.message).join("|")));
     expect(messages.size).toBe(3);
-  });
+  }, cliBudget(1));
 
   /**
    * The human branch of `register` is a separate code path from `--json` and
@@ -333,7 +334,7 @@ describe("the three classes are distinguishable without being separate exit code
     expect(out[0]).toContain("DIAGNOSIS [missing-binary]");
     expect(out[1]).toContain("DIAGNOSIS [absent-daemon]");
     expect(out[2]).toContain("DIAGNOSIS [wrong-version]");
-  });
+  }, cliBudget(1));
 
   /**
    * `diagnosis_classes` is an ARRAY because one run can trip several classes
@@ -355,7 +356,7 @@ describe("the three classes are distinguishable without being separate exit code
     expect(findDiagnosis(r, "docker-daemon-unreachable").class).toBe("absent-daemon");
     expect(findDiagnosis(r, "git-version-below-minimum").class).toBe("wrong-version");
     expect(r.json.diagnosis_classes).toEqual(["absent-daemon", "wrong-version"]);
-  });
+  }, cliBudget(1));
 
   /**
    * The same shape with `misconfigured` in it — the class that had no coverage
@@ -374,7 +375,7 @@ describe("the three classes are distinguishable without being separate exit code
     expect(r.json.diagnoses).toHaveLength(2);
     expect(r.json.diagnosis_classes).toEqual(["absent-daemon", "misconfigured"]);
     expect(findDiagnosis(r, "git-version-unreadable").class).toBe("misconfigured");
-  });
+  }, cliBudget(1));
 });
 
 /**
@@ -401,7 +402,7 @@ describe("an optional tool's floor is reported, not enforced", () => {
     expect(tmux?.floor).toEqual({ min: "2.4.0", status: "below" });
     // Still reported, or the operator cannot tell why the backend vanished.
     expect(tmux?.detail).toContain("2.4.0");
-  });
+  }, cliBudget(1));
 
   test("a current tmux keeps the backend", async () => {
     const bin = await shimBin({
@@ -413,7 +414,7 @@ describe("an optional tool's floor is reported, not enforced", () => {
 
     expect(r.code).toBe(EXIT.SUCCESS);
     expect(r.json.backends["tmux"]).toBe(true);
-  });
+  }, cliBudget(1));
 
   /**
    * A tmux that is present and working must not disappear from the report.
@@ -454,7 +455,7 @@ describe("an optional tool's floor is reported, not enforced", () => {
     // No verdict may be reached without a sentence for it. The verdict here is
     // "keep the backend", so the correct report is an empty one.
     expect(r.json.diagnoses).toEqual([]);
-  });
+  }, cliBudget(1));
 
   /**
    * The two non-`ok` floor statuses, side by side, reaching OPPOSITE verdicts.
@@ -492,5 +493,5 @@ describe("an optional tool's floor is reported, not enforced", () => {
     expect(below.code).toBe(EXIT.SUCCESS);
     expect(unreadable.json.diagnoses).toEqual([]);
     expect(below.json.diagnoses).toEqual([]);
-  });
+  }, cliBudget(2));
 });
