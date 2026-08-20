@@ -314,11 +314,52 @@ export class TailReader {
 }
 
 /**
+ * fsync a directory, reporting nothing when it cannot be done (ISC-218).
+ *
+ * This runs AFTER the rename has landed, so by the time it is called the new
+ * contents are already visible to every reader — only the durability of the
+ * directory ENTRY across a power loss is still in question. Downgrading that
+ * one guarantee is a strictly better outcome than telling the caller the write
+ * failed, because a caller told "failed" retries, reports a broken worker, or
+ * unwinds a state machine over a file that is sitting on disk, correct.
+ *
+ * Every step is swallowed, not just the `sync()`. The original only guarded
+ * the sync, which read as complete and was not: `open(dir, "r")` needs READ
+ * permission on the directory, while writing and renaming inside it need only
+ * write+search. A `0o300` run directory — a hardened umask, a deliberately
+ * locked-down runs root — therefore let the tmp file be written, fsynced and
+ * renamed into place and THEN threw `EACCES` out of `writeJsonAtomic`. The
+ * `close()` is inside the guard for the same reason: on some filesystems a
+ * deferred error surfaces there, which would escape a `finally` untouched.
+ *
+ * Exported so the guarantee can be tested against a directory that cannot be
+ * opened at all, rather than only inferred from the code shape.
+ */
+export async function fsyncDirBestEffort(dir: string): Promise<void> {
+  const { open } = await import("node:fs/promises");
+  let dh: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    dh = await open(dir, "r");
+    await dh.sync();
+  } catch {
+    // Directory fsync is unsupported on some filesystems and unavailable on
+    // an unreadable directory; the rename still landed either way.
+  } finally {
+    // Optional chaining short-circuits the whole chain, so a null handle skips
+    // the `.catch` too rather than throwing on it.
+    await dh?.close().catch(() => {});
+  }
+}
+
+/**
  * Atomic JSON write: tmp + fsync + rename + **directory fsync**.
  *
  * The rename is atomic on APFS but the directory entry's durability is not
  * guaranteed without the final fsync, which is why state files and result
  * envelopes both go through here (SRD §7.6).
+ *
+ * The directory fsync is best-effort and CANNOT fail the call: once the rename
+ * returns, the write is done (ISC-218). See `fsyncDirBestEffort`.
  */
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   const { open, rename, mkdir, unlink } = await import("node:fs/promises");
@@ -353,14 +394,7 @@ export async function writeJsonAtomic(path: string, value: unknown): Promise<voi
     throw err;
   }
 
-  const dh = await open(dir, "r");
-  try {
-    await dh.sync();
-  } catch {
-    // Directory fsync is unsupported on some filesystems; the rename still landed.
-  } finally {
-    await dh.close();
-  }
+  await fsyncDirBestEffort(dir);
 }
 
 /** Append one record to a sharded ledger file, bounded in line length. */
