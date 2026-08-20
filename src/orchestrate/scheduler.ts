@@ -106,6 +106,18 @@ export interface ScheduleOutcome {
   schedule: ScheduledTask[];
   /** §10 severity ladder over every task's terminal state. */
   exit: ExitCode;
+  /**
+   * Why the BUDGET ended this run with tasks still un-offered, or null.
+   *
+   * Distinct from a halt, which lives in `BudgetState.halted_at` and is a
+   * crossed ceiling. This is the un-halted refusal — `would_exceed`, the
+   * shipped-config shape where `tokens_spent + per_task_reserve_tokens`
+   * overruns the ceiling before any task has actually crossed it — and it
+   * exists so the CLI can name WHICH refusal stopped the run instead of
+   * reporting the generic non-success-terminal-states message for a run whose
+   * every task succeeded.
+   */
+  budgetRefusal: string | null;
 }
 
 /**
@@ -135,6 +147,23 @@ export interface ScheduleBudget {
   reserveTokens: number;
   /** Persist a snapshot. Awaited BEFORE the envelope it authorises goes out. */
   onChange?: (snapshot: BudgetState) => Promise<void>;
+  /**
+   * Report a failed `onChange`. Called instead of propagating it.
+   *
+   * `onChange` is a real filesystem write and can fail for reasons that have
+   * nothing to do with the run — ENOSPC, EROFS, a revoked mount. Letting it
+   * throw would defeat the invariant a non-throwing `settle` exists to
+   * guarantee (see `budget.ts`): the settle pass calls `settle` and then
+   * persists, so a throwing persist escapes BEFORE the schedule snapshot is
+   * written, discarding the record of every task that settled in that pass and
+   * killing `dispatch --auto` with nothing on stdout. Accounting durability
+   * must not outrank the record of what ran.
+   *
+   * So the write is best-effort and the FAILURE is loud instead. Optional only
+   * because `onChange` is; a caller that persists must also be told when the
+   * persist did not happen, or this trades a crash for a silent one.
+   */
+  onPersistError?: (err: unknown) => void;
 }
 
 /**
@@ -207,8 +236,33 @@ export async function runSchedule(
   const stallTimeoutMs = opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
   const onChange = opts.onChange ?? (() => Promise.resolve());
   const budget = opts.budget;
+  /**
+   * Persist the budget, LOG-AND-CONTINUE on failure (see `onPersistError`).
+   *
+   * The one thing this must never do is throw: it is called from inside the
+   * settle pass, before `onChange(graph.snapshot())` has written the schedule
+   * record for that pass, and an escape there costs the run the record of
+   * every task that just settled.
+   */
   const persistBudget = async (): Promise<void> => {
-    if (budget?.onChange !== undefined) await budget.onChange(budget.manager.snapshot());
+    if (budget?.onChange === undefined) return;
+    try {
+      await budget.onChange(budget.manager.snapshot());
+    } catch (err) {
+      budget.onPersistError?.(err);
+    }
+  };
+  /**
+   * Give a hold back for a dispatch that PROVABLY never happened.
+   *
+   * NOT `settleBudget`. See `BudgetManager.release`: settling books actuals
+   * and can trip the ceiling, and the `unreachable` task is re-offered — so
+   * routing it through settle booked the dead worker's residual delta against
+   * a task that never ran on it, once per retry.
+   */
+  const releaseHold = async (taskId: string): Promise<void> => {
+    if (budget === undefined) return;
+    if (budget.manager.release(taskId)) await persistBudget();
   };
   /**
    * Book a terminal task's spend and release its admission slot.
@@ -256,6 +310,8 @@ export async function runSchedule(
   const dead = new Set<string>();
   /** Task id -> settle reason, for the exit ladder (worker_died vs verdict). */
   const reasons = new Map<string, string>();
+  /** Set when a budget refusal — not a task outcome — is what ended the loop. */
+  let endedOnBudgetRefusal: string | null = null;
 
   // The initial snapshot goes out before the first dispatch: a schedule
   // record that appears only once something ran cannot distinguish "waiting
@@ -268,8 +324,15 @@ export async function runSchedule(
 
   while (!graph.allTerminal()) {
     let progressed = false;
-    /** Ready tasks the budget refused this pass, for the drain check below. */
-    let budgetRefused = false;
+    /**
+     * The last budget refusal of this pass (`reason: detail`), or null.
+     *
+     * A string rather than a flag because it is the run's DIAGNOSIS when the
+     * refusal is what ends the schedule: "projected 5600001 tokens > ceiling
+     * 6000000" is the sentence the operator needs, and reconstructing it after
+     * the loop is impossible — the decision that produced it is gone.
+     */
+    let budgetRefused: string | null = null;
 
     // -- Settle pass: harvest terminal facts for everything in flight. ------
     for (const [taskId, worker] of inflight) {
@@ -387,13 +450,16 @@ export async function runSchedule(
         maxConcurrent: budget.maxConcurrent,
       });
       if (decision !== undefined && !decision.ok) {
-        budgetRefused = true;
+        budgetRefused = `${decision.reason}: ${decision.detail}`;
         continue;
       }
       if (decision !== undefined) {
-        // Durable BEFORE the envelope, per budget.ts: a crash between the
-        // decision and the dispatch must not leak an unaccounted slot that a
-        // restart would double-admit against.
+        // Durable BEFORE the envelope, per `admit`'s docstring — for the
+        // CONCURRENT READER, not for a restart. `resumeBudget` rule 3 drops
+        // reservations, so a hold that never reached disk costs a restart
+        // nothing; what it costs is `wait`/`report` reading this file during
+        // the window where the run has committed a slot, which they cannot
+        // learn from anywhere else.
         await persistBudget();
       }
 
@@ -401,7 +467,22 @@ export async function runSchedule(
       // within the list (tasklist.ts) and a stable name makes the attempt id
       // deterministic, which is what lets a re-run of the same list replay
       // completed tasks instead of re-executing them (ISC-85).
-      const answer = await io.dispatch(spec, target, spec.id);
+      /**
+       * A hold outlives the dispatch it authorised only if the dispatch
+       * RETURNS. `io.dispatch` re-throws anything that is not a diagnosed
+       * worker failure (see `dispatch.ts`), and an escape from here leaves the
+       * reservation on disk with nothing that will ever settle it — `wait` and
+       * `report` then show a phantom in-flight slot for a task that was never
+       * accepted. A restart heals it (rule 3 drops reservations), but the
+       * readers that run MEANWHILE are exactly who the snapshot is for.
+       */
+      let answer: DispatchAnswer;
+      try {
+        answer = await io.dispatch(spec, target, spec.id);
+      } catch (err) {
+        await releaseHold(spec.id);
+        throw err;
+      }
       progressed = true;
       dispatchedAny = true;
       switch (answer.kind) {
@@ -463,7 +544,12 @@ export async function runSchedule(
           // to the dead worker is fatal, and the top of the loop's dispatch
           // pass reports that with the named diagnosis.
           dead.add(target);
-          await settleBudget(spec.id, target);
+          // RELEASE, not settle — this is the one answer in this switch that
+          // is NOT terminal, and it is the only one that must not book. The
+          // task will be offered again, so settling here booked spend for it
+          // once per attempt, off a worker it never ran on, against a ceiling
+          // that could then halt the run for a dispatch nobody made.
+          await releaseHold(spec.id);
           available.splice(available.indexOf(target), 1);
           break;
       }
@@ -480,10 +566,27 @@ export async function runSchedule(
      * poll a fleet of idle workers for the full stall timeout and then report
      * a TIMEOUT — a ceiling crossing misfiled as a wedge.
      *
-     * The tasks stay `ready`, which is what the fold at the bottom turns into
-     * 5 rather than into a fabricated failure for work nobody ever ran.
+     * THE TASKS STAY `ready`, AND `ready` IS NOT 5. This comment used to claim
+     * "the fold at the bottom turns [them] into 5", and for `would_exceed`
+     * that was false in three steps: `budgetExitCode` returns SUCCESS unless
+     * `halted_at` is set, only `settle` halts, and `exitFor` on a `ready` task
+     * has verdict `null` and falls to `EXIT.PARTIAL`. So the operator got the
+     * generic "non-success terminal states" at 7 for a run the BUDGET ended —
+     * and with `fleet.example.yaml` as shipped (`tokens_ceiling: 6000000`,
+     * `per_task_reserve_tokens: 400000`) that is the NORMAL ending, since
+     * admission fails on `would_exceed` from 5,600,001 spent onward and the
+     * last reserve-worth of every budget is unreachable by construction.
+     *
+     * Recording the refusal is what makes the fold below honest: a run the
+     * budget stopped reports 5 whether or not a ceiling was actually crossed,
+     * because in both cases the budget — not a task outcome — is why the run
+     * ended. The two remain distinguishable in the diagnosis and in
+     * `budget.json`: a halt sets `halted_at`, a refusal does not.
      */
-    if (budgetRefused && !dispatchedAny && inflight.size === 0) break;
+    if (budgetRefused !== null && !dispatchedAny && inflight.size === 0) {
+      endedOnBudgetRefusal = budgetRefused;
+      break;
+    }
 
     if (!graph.allTerminal() && inflight.size === 0 && !progressed) {
       // Nothing running, nothing dispatched, tasks remain. With a validated
@@ -545,7 +648,21 @@ export async function runSchedule(
    */
   const codes = schedule.map((t) => exitFor(t, reasons.get(t.id) ?? ""));
   if (budget !== undefined) codes.push(budgetExitCode(budget.manager.snapshot()));
-  return { schedule, exit: worstExit(codes) };
+  /**
+   * The un-halted refusal's contribution — the other half of the same fold.
+   *
+   * `budgetExitCode` above covers a CROSSED ceiling. This covers the ceiling
+   * that was never crossed because admission refused first, which is the
+   * shipped-config shape and which `budgetExitCode` cannot see: `halted_at` is
+   * null, every task that ran succeeded, and `worstExit` over the schedule
+   * alone yields `EXIT.PARTIAL` from the `ready` tasks. `EXIT.BUDGET` outranks
+   * `EXIT.PARTIAL` in `EXIT_SEVERITY`, so this is what the run reports — and,
+   * unlike the halted path, NOTHING ELSE produces it. `dispatch --auto` raises
+   * `BudgetCeilingError` for a halt before it ever consults `exit`, so on a
+   * refusal this fold is the sole source of the run's integer.
+   */
+  if (endedOnBudgetRefusal !== null) codes.push(EXIT.BUDGET);
+  return { schedule, exit: worstExit(codes), budgetRefusal: endedOnBudgetRefusal };
 }
 
 /**

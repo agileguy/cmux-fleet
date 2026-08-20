@@ -13,6 +13,10 @@
  *    produced is still harvestable afterwards. The exit code alone would not
  *    prove it: a halt that killed the run would also exit 5.
  *  - `max_concurrent` bounds in-flight generations across six live workers.
+ *  - A run the budget REFUSED — `would_exceed`, the shipped-config shape,
+ *    where nothing is ever crossed and nothing halts — also exits 5, with a
+ *    diagnosis naming the refusal rather than the generic ladder message.
+ *  - A resumed run whose observation DEGRADED does not get its spend refunded.
  *
  * The rig launches supervisors directly (the `supervisor.test.ts` /
  * `dispatch-auto.test.ts` pattern) and writes `run.json` by hand rather than
@@ -21,10 +25,18 @@
  * is precisely what is under test here — `readRunBudgetPolicy` reads the
  * budget off the RUN, so writing it directly is the shortest statement of
  * what the policy is.
+ *
+ * WHAT WRITING `run.json` BY HAND COSTS, stated because it went uncosted for a
+ * round: every claim in this file holds identically whether or not `up` can
+ * produce that document. Deleting the budget writer from `up.ts` left this
+ * entire file green. That seam is pinned in
+ * `test/integration/up-wiring.test.ts` ("up records the budget policy the run
+ * is dispatched against"), which starts from a config file and a real `up`;
+ * this file deliberately does not, and must not be read as covering it.
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -63,11 +75,18 @@ const TOKENS_CEILING = 300;
 
 const cleanups: Array<() => Promise<void>> = [];
 /**
- * EIGHT supervisors to shut down (two rigs), each a control-socket round trip
- * plus a process-group kill — so this hook must not inherit bun's 5000 ms
- * default any more than a test may. Derived from the work it does rather than
- * picked: `cliBudget` charges the eight processes it reaps at the same
- * per-spawn rate a test pays for spawning them.
+ * ELEVEN supervisors to shut down (four rigs: 2 + 6 + 2 + 1), each a
+ * control-socket round trip plus a process-group kill — so this hook must not
+ * inherit bun's 5000 ms default any more than a test may. Derived from the work
+ * it does rather than picked: `cliBudget` charges the eleven processes it reaps
+ * at the same per-spawn rate a test pays for spawning them.
+ *
+ * RE-COUNTED from 8 when the MUST FIX B (`would_exceed`, 2 workers) and MUST
+ * FIX C (resume-refund, 1 worker) rigs were added. Counted by summing the
+ * `workers` arrays at the four `makeRig` call sites, not adjusted by memory —
+ * a hook budget that silently stops matching the work is the exact ISC-266
+ * failure, and this hook's own job is to stop detached supervisors leaking
+ * onto the developer's machine when it runs out of time.
  *
  * NOT justified by a measurement. A 5162 ms timeout was observed here once
  * during mutation testing, but the machine's 1-minute load average was in the
@@ -80,7 +99,7 @@ const cleanups: Array<() => Promise<void>> = [];
  */
 afterAll(async () => {
   for (const fn of cleanups.reverse()) await fn().catch(() => {});
-}, cliBudget(8));
+}, cliBudget(11));
 
 // Control sockets hash (run_id, worker) into the SHARED os tmpdir, so a
 // hardcoded run id would let two concurrent test processes reach each other's
@@ -105,11 +124,26 @@ async function makeRig(opts: {
   maxConcurrent: number;
   tokensCeiling: number | null;
   tokensPerMessage?: number;
+  /**
+   * `per_task_reserve_tokens`, the key the SHIPPED config sets and this rig
+   * used to omit entirely.
+   *
+   * That omission is why `would_exceed` had no end-to-end coverage at all:
+   * with no reserve, `reserveTokens` resolves to 0, admission's projection is
+   * `spent + 0` and a task can only ever be refused AFTER a settle has already
+   * halted the run. The one refusal reachable here was `budget_halted`, so the
+   * only end-to-end budget test in the repo exercised the one path where the
+   * defect cannot appear. `grep -rn would_exceed test/` returned a single hit,
+   * on the manager's own unit test.
+   */
+  perTaskReserveTokens?: number;
+  /** Distinguishes rigs that would otherwise collide on the worker count. */
+  tag?: string;
 }): Promise<Rig> {
   const base = await mkdtemp(join(tmpdir(), "pifleet-budget-"));
   cleanups.push(() => rm(base, { recursive: true, force: true }));
   const root = join(base, "runs");
-  const runId = `budget-${RUN_TAG}-${opts.workers.length}`;
+  const runId = `budget-${RUN_TAG}-${opts.tag ?? ""}${opts.workers.length}`;
   const run = runPaths(runId, root);
 
   await writeJsonAtomic(run.runJson, {
@@ -119,7 +153,15 @@ async function makeRig(opts: {
     backend: "headless",
     workers: opts.workers,
     max_concurrent: opts.maxConcurrent,
-    budget: opts.tokensCeiling === null ? null : { tokens_ceiling: opts.tokensCeiling },
+    budget:
+      opts.tokensCeiling === null
+        ? null
+        : {
+            tokens_ceiling: opts.tokensCeiling,
+            ...(opts.perTaskReserveTokens === undefined
+              ? {}
+              : { per_task_reserve_tokens: opts.perTaskReserveTokens }),
+          },
     worktrees: [],
   });
 
@@ -226,9 +268,25 @@ describe("a ceiling crossed mid-run halts dispatch and exits 5, artifacts intact
         "--json",
       ]);
 
-      // ISC-114 / ISC-193: the run's integer is 5. No VERDICT in this
-      // schedule can produce it — every task that ran, succeeded — so this
-      // number can only have come from folding the budget into the ladder.
+      /**
+       * ISC-114 / ISC-193: the run's integer is 5, and every task that ran
+       * SUCCEEDED — so no verdict in this schedule produced it.
+       *
+       * BE PRECISE ABOUT WHERE IT CAME FROM. An earlier version of this
+       * comment claimed the 5 "can only have come from folding the budget into
+       * the ladder", and this assertion cannot make that attribution:
+       * `dispatch --auto` raises `BudgetCeilingError` — which carries its own
+       * `exitCode` — BEFORE it ever consults the scheduler's `exit`, so
+       * deleting the fold entirely leaves this line green. What this proves is
+       * that the run reports 5 rather than 0 or 7, which is the criterion; it
+       * does not prove which producer supplied it.
+       *
+       * The fold is pinned where it is actually load-bearing: the
+       * `would_exceed` describe below, where nothing halts and no coded error
+       * is thrown, so the fold is the sole source of the run's integer — and
+       * in `budget-wiring.test.ts`, which asserts `exit` directly with every
+       * task successful.
+       */
       expect(auto.code).toBe(EXIT.BUDGET);
       expect(auto.stderr).toContain("budget ceiling crossed");
       expect(auto.stderr).toContain("tokens_ceiling");
@@ -344,6 +402,209 @@ describe("a ceiling crossed mid-run halts dispatch and exits 5, artifacts intact
      * above is the defect ISC-266 exists to prevent.
      */
     cliBudget(6),
+  );
+});
+
+/**
+ * MUST FIX B — the SHIPPED config's ending, which no test covered.
+ *
+ * `fleet.example.yaml` ships `tokens_ceiling: 6000000` with
+ * `per_task_reserve_tokens: 400000`, and that pairing makes `would_exceed` the
+ * NORMAL way a run that uses its budget ends: admission refuses from 5,600,001
+ * spent onward, so the last reserve-worth of every ceiling is unreachable by
+ * construction and the run finishes on the un-halted path.
+ *
+ * The rig above wrote `budget: { tokens_ceiling: N }` with no reserve, so
+ * `reserveTokens` was 0 and `would_exceed` could not fire in the only
+ * end-to-end budget test there was. This covers the shape the product actually
+ * ships, at 1/6000th scale: 1000 : 700 against 400-token messages, holding the
+ * property that matters — the reserve exceeds what remains after one task.
+ */
+describe("MUST FIX B: a budget-REFUSED run exits 5 with a diagnosis, not 7 with boilerplate", () => {
+  test(
+    "the ceiling is never crossed, nothing halts, and the operator is told why the run stopped",
+    async () => {
+      // 700 reserve against a 1000 ceiling: the first task is admitted
+      // (0 + 700 <= 1000) and burns 400; every later one is refused
+      // (400 + 700 = 1100 > 1000). Two idle workers and max_concurrent 2, so
+      // the binding constraint is demonstrably the BUDGET and not the cap.
+      const rig = await makeRig({
+        workers: ["w1", "w2"],
+        maxConcurrent: 2,
+        tokensCeiling: 1_000,
+        perTaskReserveTokens: 700,
+        tokensPerMessage: TOKENS_PER_MESSAGE,
+        tag: "refuse",
+      });
+
+      const auto = await cli(rig, [
+        "dispatch",
+        "--auto",
+        "--tasks",
+        join(TASKLISTS, "fan.json"),
+        "--run",
+        rig.run.runId,
+        "--json",
+      ]);
+
+      /**
+       * THE assertion, and the one that pins the FOLD.
+       *
+       * This is the only end-to-end path on which `runSchedule`'s
+       * `budgetExitCode`/refusal fold is load-bearing. On the halted path
+       * `dispatch --auto` raises `BudgetCeilingError` — which carries its own
+       * `exitCode` — BEFORE it ever consults `exit`, so deleting the fold
+       * leaves the halted test at 5 and green. Here nothing halts, nothing
+       * throws a coded error, and the run's integer can only have come from
+       * the fold: without it these tasks are `ready`, `exitFor` maps them to
+       * `EXIT.PARTIAL`, and the run reports 7.
+       */
+      expect(auto.code).toBe(EXIT.BUDGET);
+
+      // A REFUSAL, not a crossing — the wording matters, because "ceiling
+      // crossed" sends an operator looking for spend that does not exist.
+      expect(auto.stderr).toContain("budget refused admission");
+      expect(auto.stderr).toContain("would_exceed");
+      expect(auto.stderr).not.toContain("budget ceiling crossed");
+      // …and NOT the generic ladder message this used to produce for a run
+      // whose every task succeeded.
+      expect(auto.stderr).not.toContain("non-success terminal states");
+
+      const schedule = ScheduleJson.parse(JSON.parse(auto.stdout.trim()));
+      const ran = schedule.filter((t) => t.state === "done");
+      // Exactly one task fit inside the budget, and it SUCCEEDED. That is what
+      // makes the exit code attributable: no verdict here can yield 5.
+      expect(ran).toHaveLength(1);
+      expect(ran[0]!.verdict).toBe("success");
+      const held = schedule.filter((t) => t.state === "ready");
+      expect(held).toHaveLength(5);
+      for (const t of held) expect(t.verdict).toBeNull();
+
+      // The budget record proves the ceiling was never crossed: this run
+      // stopped because admission refused, with tokens still on the table.
+      const budget = BudgetStateSchema.parse(
+        JSON.parse(await Bun.file(rig.run.budgetJson).text()),
+      );
+      expect(budget.halted_at).toBeNull();
+      expect(budget.halted_reason).toBeNull();
+      expect(budget.tokens_spent).toBe(TOKENS_PER_MESSAGE);
+      expect(budget.tokens_spent).toBeLessThan(budget.tokens_ceiling!);
+      // Every hold released; the refusal is not a leaked slot.
+      expect(budget.reserved).toEqual({});
+    },
+    /**
+     * THREE spawns, counted from the body: two supervisors
+     * (`launchDetached`) plus one `dispatch --auto`. Charging the two detached
+     * supervisors at the whole-run `PER_SPAWN_IDLE_MS` rate is conservative in
+     * the direction the helper is built for.
+     *
+     * MEASURED idle (1-minute load average 2.9 on 14 cores, i.e. a quiet box —
+     * labelled because a number taken under load is a fact about the machine,
+     * not about the test): the pair of tests in this describe adds ~2.5 s to
+     * the file. NOT measured under `test-under-load.sh`, which was out of
+     * scope for this round; the budget is DERIVED and stands on the derivation
+     * rather than on that measurement, exactly as ISC-266 requires.
+     */
+    cliBudget(3),
+  );
+});
+
+/**
+ * MUST FIX C — a degraded observation must not refund the run's spend.
+ *
+ * `resumeBudget` rule 1 recomputes spend from observation and had no failure
+ * mode: `cumulativeTokens` returned 0 on all three degradations, and the
+ * merge's other input is inert because nothing writes `state.usage`. So a
+ * failed observation and an idle worker produced the same number, and an
+ * un-halted run at 95% of its ceiling that could not re-read its transcripts
+ * resumed with a fresh full one — n restarts, n × `tokens_ceiling`.
+ *
+ * This drives the real thing rather than the pure decision (which
+ * `budget-wiring.test.ts` covers directly): a real run spends, its transcript
+ * is then moved out from under it — the literal `session_path` case, since the
+ * path is recorded VERBATIM from Pi's `get_state` and a resume on another
+ * machine or mount layout hits exactly this — and the run is resumed.
+ */
+describe("MUST FIX C: a resumed run whose observation degraded does not get its budget back", () => {
+  test(
+    "the opening balance is floored at the published spend, and the operator is told",
+    async () => {
+      const rig = await makeRig({
+        workers: ["w1"],
+        maxConcurrent: 1,
+        tokensCeiling: 10_000,
+        tokensPerMessage: TOKENS_PER_MESSAGE,
+        tag: "resume",
+      });
+      // One task, so the first run settles and publishes a budget without
+      // coming anywhere near the ceiling.
+      const tasks = join(rig.root, "one.json");
+      await writeJsonAtomic(tasks, {
+        schema: "pifleet.tasklist/v1",
+        tasks: [{ id: "t1", title: "one", brief: "spend some tokens" }],
+      });
+
+      const first = await cli(rig, [
+        "dispatch",
+        "--auto",
+        "--tasks",
+        tasks,
+        "--run",
+        rig.run.runId,
+        "--json",
+      ]);
+      expect(first.code).toBe(EXIT.SUCCESS);
+      const published = BudgetStateSchema.parse(
+        JSON.parse(await Bun.file(rig.run.budgetJson).text()),
+      );
+      // Non-vacuous: there is real spend for the resume to lose.
+      expect(published.tokens_spent).toBe(TOKENS_PER_MESSAGE);
+
+      /**
+       * Break the observation the way production breaks it.
+       *
+       * Not by corrupting `budget.json` — that would test the wrong seam.
+       * `state.session_path` stays exactly as the supervisor recorded it and
+       * the transcript is moved aside, which is precisely what a resume on a
+       * different machine, under a different mount layout, or after a session
+       * switch presents: a well-formed state file naming a file that is not
+       * there.
+       */
+      const state = await readWorkerState(workerPaths(rig.run, "w1"));
+      expect(state?.session_path).not.toBeNull();
+      await rename(state!.session_path as string, `${state!.session_path as string}.moved`);
+
+      const resumed = await cli(rig, [
+        "dispatch",
+        "--auto",
+        "--tasks",
+        tasks,
+        "--run",
+        rig.run.runId,
+        "--json",
+      ]);
+
+      const after = BudgetStateSchema.parse(
+        JSON.parse(await Bun.file(rig.run.budgetJson).text()),
+      );
+      // THE assertion: the resumed run did NOT go back to zero. Without the
+      // floor this is 0 and the run has its whole ceiling available again.
+      expect(after.tokens_spent).toBeGreaterThanOrEqual(TOKENS_PER_MESSAGE);
+
+      // And the degradation is VISIBLE. A ceiling silently riding on a floor
+      // instead of a measurement is the same silent-fallback defect one level
+      // down, so it has to reach the operator, not just the ledger.
+      expect(resumed.stderr).toContain("budget observation degraded");
+      expect(resumed.stderr).toContain("floored");
+
+      // The ledger carries it too, for the human debugging this months later.
+      const { records } = await mergeLedger(rig.run);
+      const events = records.map((r) => r.event);
+      expect(events).toContain("budget_observation_degraded");
+      expect(events).toContain("budget_opening_floored");
+    },
+    // THREE spawns, counted: one supervisor plus two `dispatch --auto` runs.
+    cliBudget(3),
   );
 });
 

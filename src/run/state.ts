@@ -155,7 +155,15 @@ export async function readRunHarnessPatterns(run: RunPaths): Promise<RunHarnessP
  *
  * Not forgiving about a value that is WRONG: a non-positive cap would admit
  * nothing at all and deadlock the run, so it degrades to the default with a
- * `note` the caller puts in the ledger rather than silently.
+ * `note` the caller puts in the ledger AND on stderr, rather than silently.
+ *
+ * And not forgiving at all about a `run.json` that is PRESENT but unreadable —
+ * see `RunPolicyUnreadableError`. Absence means nobody budgeted anything and
+ * unbounded is the honest answer; an unparseable file means the budget is
+ * UNKNOWN, and answering an unknown ceiling with "no ceiling" is the one
+ * failure mode that spends real tokens. #36 refuses on ambiguity; this reader
+ * used to proceed, and that split across one review round is the reason it
+ * now refuses too.
  */
 export interface RunBudgetPolicy {
   /** null = unbounded. */
@@ -198,6 +206,42 @@ export function runBudgetRecord(run: FleetConfig["run"] | null): {
   };
 }
 
+/**
+ * `run.json` exists and cannot be read — so the ceiling is UNKNOWABLE.
+ *
+ * The distinction this class exists to draw: ABSENT and UNPARSEABLE are not
+ * the same fact, and the reader used to answer both with "unbounded". Absent
+ * is a real and legitimate state (a run dir written before these fields
+ * existed, or assembled by hand in a test) and unbounded is the honest answer
+ * to it — nobody budgeted anything. Unparseable is the opposite: an operator
+ * who set `tokens_ceiling: 300` and whose `run.json` got truncated has budgeted
+ * something, and answering that with an UNBOUNDED run plus a log line spends
+ * their tokens on the strength of a file we could not read.
+ *
+ * So this refuses instead, and it refuses with the same code
+ * `StateReadError` and `ForeignBudgetError` use — corrupt control-plane state
+ * is an environment failure, not a usage error. Note the asymmetry with the
+ * rest of this module and that it is deliberate: `readRunHarnessPatterns` and
+ * its neighbours DEGRADE on an unreadable `run.json` because a wrong harness
+ * surface costs a grade, while a wrong ceiling costs money that cannot be
+ * refunded.
+ */
+export class RunPolicyUnreadableError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+
+  constructor(path: string, cause: unknown) {
+    super(
+      `${path} exists but its budget policy cannot be read ` +
+        `(${cause instanceof Error ? cause.message : String(cause)}); ` +
+        `refusing to dispatch UNBOUNDED against a ceiling this run may have set`,
+    );
+    this.name = "RunPolicyUnreadableError";
+  }
+}
+
+/**
+ * @throws {RunPolicyUnreadableError} when `run.json` is present but unreadable.
+ */
 export async function readRunBudgetPolicy(run: RunPaths): Promise<RunBudgetPolicy> {
   const fallback: RunBudgetPolicy = {
     tokensCeiling: null,
@@ -226,12 +270,12 @@ export async function readRunBudgetPolicy(run: RunPaths): Promise<RunBudgetPolic
         .parse(v),
     );
   } catch (err) {
-    return {
-      ...fallback,
-      note:
-        `run.json does not record a readable budget policy (${err instanceof Error ? err.message : String(err)}); ` +
-        `dispatching unbounded at max_concurrent ${DEFAULT_MAX_CONCURRENT}`,
-    };
+    // PRESENT and unreadable. `readValidated` returns null for a file that is
+    // not there and throws only for one that is, so reaching this catch means
+    // the operator has a `run.json` whose contents we could not parse — and
+    // whatever ceiling it names, "unbounded" is the one answer that is
+    // certainly wrong. Fail CLOSED (see `RunPolicyUnreadableError`).
+    throw new RunPolicyUnreadableError(run.runJson, err);
   }
   const cap = doc?.max_concurrent;
   let maxConcurrent = fallback.maxConcurrent;

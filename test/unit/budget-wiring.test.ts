@@ -18,16 +18,18 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   EXIT,
   TaskSpecSchema,
   type BudgetState,
+  type ScheduledTask,
   type TaskSpec,
   type Verdict,
 } from "../../src/contracts.ts";
+import { openingBalance, type WorkerObservation } from "../../src/cli/commands/dispatch.ts";
 import {
   BudgetManager,
   emptyBudget,
@@ -41,7 +43,12 @@ import {
   type WorkerHealth,
 } from "../../src/orchestrate/scheduler.ts";
 import { runPaths } from "../../src/run/paths.ts";
-import { readBudgetState, readRunBudgetPolicy, runBudgetRecord } from "../../src/run/state.ts";
+import {
+  readBudgetState,
+  readRunBudgetPolicy,
+  runBudgetRecord,
+  RunPolicyUnreadableError,
+} from "../../src/run/state.ts";
 import { writeJsonAtomic } from "../../src/util/jsonl.ts";
 import { DEFAULT_MAX_CONCURRENT, FleetConfigSchema } from "../../src/config/schema.ts";
 
@@ -52,10 +59,21 @@ function spec(id: string, deps: string[] = [], extra: Record<string, unknown> = 
 interface FleetOpts {
   /** Polls each task spends in flight before its record appears. */
   settleDelayPolls?: number;
-  /** Tokens each task reports having burned, by task id (default 0). */
+  /**
+   * Tokens each task reports having burned, by task id (default 0).
+   *
+   * A PER-TASK CONSTANT, and that is exactly why this fake can see the
+   * `unreachable` double-book while production cannot. The real `taskTokens`
+   * is a per-worker monotone delta (`if (now <= seen) return 0`), so a second
+   * booking for the same task answers 0 and the arithmetic silently cancels;
+   * here the second booking is another full 100. A fake that reproduced the
+   * delta would reproduce the masking with it and certify the bug.
+   */
   tokens?: Record<string, number>;
   /** Scripted dispatch answers per task, consumed in order. */
   answers?: Record<string, DispatchAnswer[]>;
+  /** Task ids whose dispatch THROWS instead of answering. */
+  throwOnDispatch?: Set<string>;
 }
 
 /**
@@ -111,6 +129,11 @@ class SamplingFleet implements SchedulerIO {
   dispatch(specArg: TaskSpec, worker: string, taskId: string): Promise<DispatchAnswer> {
     const scripted = this.#opts.answers?.[specArg.id]?.shift();
     this.log.push(`dispatch:${specArg.id}->${worker}`);
+    if (this.#opts.throwOnDispatch?.has(specArg.id) === true) {
+      // The reachable shape: `dispatch.ts`'s `io.dispatch` re-throws anything
+      // that is not a diagnosed `WorkerUnreachableError`.
+      return Promise.reject(new Error(`dispatch blew up for ${specArg.id}`));
+    }
     if (scripted !== undefined) {
       this.#sample();
       return Promise.resolve(scripted);
@@ -152,6 +175,51 @@ class SamplingFleet implements SchedulerIO {
   now(): number {
     return this.clockMs;
   }
+}
+
+/**
+ * A `BudgetManager` that RECORDS the calls made against it.
+ *
+ * The double-book below has to be asserted as a COUNT OF SETTLES for one task,
+ * not as a resulting `tokens_spent`. A total is hostage to the fake's token
+ * model: `FleetOpts.tokens` is a per-task constant today, and the day it
+ * becomes a per-worker delta (production's shape) a second settle books 0 and
+ * a total-based assertion goes green with the defect fully intact — which is
+ * precisely how this bug survived the existing suite in the first place.
+ *
+ * Subclassed rather than proxied so the object handed to `runSchedule` IS a
+ * `BudgetManager` and the real accounting runs underneath; the overrides only
+ * observe.
+ */
+class RecordingBudget extends BudgetManager {
+  constructor(
+    restored: BudgetState,
+    readonly trace: string[],
+  ) {
+    super(restored);
+  }
+
+  override admit(taskId: string, opts: { reserveTokens: number; maxConcurrent: number }) {
+    const d = super.admit(taskId, opts);
+    this.trace.push(d.ok ? `admit:${taskId}:ok` : `admit:${taskId}:refused:${d.reason}`);
+    return d;
+  }
+
+  override settle(taskId: string, actual: { tokens: number; usd?: number }) {
+    this.trace.push(`settle:${taskId}:${actual.tokens}`);
+    return super.settle(taskId, actual);
+  }
+
+  override release(taskId: string): boolean {
+    const released = super.release(taskId);
+    this.trace.push(`release:${taskId}:${released}`);
+    return released;
+  }
+}
+
+/** How many times `settle` was booked for one task id. */
+function settleCount(trace: readonly string[], taskId: string): number {
+  return trace.filter((t) => t.startsWith(`settle:${taskId}:`)).length;
 }
 
 /** A budget wired the way `dispatch --auto` wires one, with a capture hook. */
@@ -289,6 +357,175 @@ describe("ISC-235: admit is called on the dispatch path", () => {
   });
 });
 
+describe("an unreachable dispatch releases its hold; it does NOT settle", () => {
+  /**
+   * `unreachable` is the ONE answer in the dispatch switch that is not
+   * terminal — the task stays `ready` and is re-offered — and it was routed
+   * through `settleBudget` like the four that are.
+   *
+   * Two consequences, and the second is the serious one. The task is booked
+   * once per ATTEMPT, and the tokens booked come from the worker the dispatch
+   * never reached, so a task that ran once on `w2` is charged `w1`'s residual
+   * delta as well. And `settle` can TRIP THE CEILING, so a run can halt — and
+   * exit 5 — on spend attributed to a dispatch nobody made.
+   *
+   * WHY THE EXISTING SUITE COULD NOT SEE IT. Production's `taskTokens` is a
+   * per-worker monotone delta (`if (now <= seen) return 0`), so the second
+   * booking answers 0 and the arithmetic cancels. Only a per-task token model
+   * — this fake's — makes the double-book observable at all, which is why the
+   * load-bearing assertion here is the SETTLE COUNT rather than the total: the
+   * count survives any future change to the fake's token model, and a
+   * total-based assertion would silently retire the day the fake grew a delta.
+   */
+  test("one task, two dispatch attempts, exactly ONE settle and one task's spend", async () => {
+    const trace: string[] = [];
+    // w1 refuses to take the envelope; w2 takes it. `a` therefore reaches a
+    // terminal state exactly once, on w2, having burned 100 tokens there.
+    const fleet = new SamplingFleet(["w1", "w2"], {
+      settleDelayPolls: 0,
+      tokens: { a: 100 },
+      answers: { a: [{ kind: "unreachable", detail: "control socket refused connect" }] },
+    });
+    const manager = new RecordingBudget(
+      emptyBudget("run-under-test", { tokensCeiling: 150 }),
+      trace,
+    );
+    const snapshots: BudgetState[] = [];
+    const { schedule, exit } = await runSchedule([spec("a")], fleet, {
+      budget: {
+        manager,
+        maxConcurrent: 1,
+        reserveTokens: 5,
+        onChange: (s) => {
+          trace.push(`persist:${JSON.stringify(s.reserved)}`);
+          snapshots.push(s);
+          return Promise.resolve();
+        },
+      },
+    });
+
+    // THE assertion. Independent of the token model: `a` reached a terminal
+    // state once, so it is booked once. The bug settles it twice.
+    expect(settleCount(trace, "a")).toBe(1);
+    // …and the settle that DID happen was the real one, on the worker that
+    // actually ran it.
+    expect(trace.filter((t) => t.startsWith("settle:"))).toEqual(["settle:a:100"]);
+    // The first attempt gave its slot back through `release`, which books
+    // nothing — the distinction the fix turns on.
+    expect(trace).toContain("release:a:true");
+    // Both dispatch attempts really happened, so this is not passing by the
+    // retry never occurring.
+    expect(fleet.log).toEqual(["dispatch:a->w1", "dispatch:a->w2", "settled:a"]);
+
+    // The consequence, asserted directly: real spend is 100 against a ceiling
+    // of 150, so the run must NOT halt. Booking twice yields 200 > 150 and the
+    // run halts and exits 5 for a dispatch that never occurred.
+    const last = snapshots[snapshots.length - 1]!;
+    expect(last.tokens_spent).toBe(100);
+    expect(last.halted_at).toBeNull();
+    expect(exit).toBe(EXIT.SUCCESS);
+    expect(last.reserved).toEqual({});
+    expect(schedule[0]).toMatchObject({ state: "done", verdict: "success", worker: "w2" });
+  });
+
+  test("a dispatch that THROWS does not strand its hold", async () => {
+    // `io.dispatch` re-throws anything that is not a diagnosed worker failure,
+    // and an escape from the dispatch pass used to leave the reservation on
+    // disk with nothing that would ever settle it — a phantom in-flight slot
+    // for a task no worker ever accepted, shown to every concurrent `wait`
+    // and `report` until a restart happened to drop it.
+    const trace: string[] = [];
+    const fleet = new SamplingFleet(["w1"], {
+      settleDelayPolls: 0,
+      throwOnDispatch: new Set(["a"]),
+    });
+    const manager = new RecordingBudget(
+      emptyBudget("run-under-test", { tokensCeiling: null }),
+      trace,
+    );
+    const snapshots: BudgetState[] = [];
+    await expect(
+      runSchedule([spec("a")], fleet, {
+        budget: {
+          manager,
+          maxConcurrent: 1,
+          reserveTokens: 9,
+          onChange: (s) => {
+            snapshots.push(s);
+            return Promise.resolve();
+          },
+        },
+      }),
+    ).rejects.toThrow("dispatch blew up for a");
+
+    // The hold was taken (so this is not vacuous) and then given back.
+    expect(trace).toContain("admit:a:ok");
+    expect(trace).toContain("release:a:true");
+    expect(snapshots[snapshots.length - 1]!.reserved).toEqual({});
+    // Released, not settled: nothing ran, so nothing may be booked.
+    expect(trace.filter((t) => t.startsWith("settle:"))).toEqual([]);
+  });
+});
+
+describe("MUST FIX B: a run the BUDGET refused reports 5, not 7", () => {
+  /**
+   * `would_exceed` does not halt — only `settle` does — so `budgetExitCode`
+   * returns SUCCESS, the un-offered tasks stay `ready`, `exitFor` maps `ready`
+   * to `EXIT.PARTIAL`, and the operator got "dispatch --auto finished with
+   * non-success terminal states" at 7 for a run whose every task SUCCEEDED and
+   * which the budget alone ended.
+   *
+   * This is the shipped-config shape, not an edge case: with
+   * `per_task_reserve_tokens` set, the final reserve-worth of every ceiling is
+   * unreachable by construction, so a run that uses its budget ends here.
+   */
+  test("the ceiling is never crossed, nothing halts, and the exit is still BUDGET", async () => {
+    // reserve 60 against a ceiling of 100: `a` is admitted (0 + 60 <= 100) and
+    // books 50; `b` is then refused (50 + 60 = 110 > 100). Spend never
+    // exceeds the ceiling, so nothing halts.
+    const fleet = new SamplingFleet(["w1", "w2"], { settleDelayPolls: 0, tokens: { a: 50 } });
+    const snapshots: BudgetState[] = [];
+    const { schedule, exit, budgetRefusal } = await runSchedule([spec("a"), spec("b")], fleet, {
+      budget: budgetFor({ tokensCeiling: 100, maxConcurrent: 2, reserveTokens: 60 }, snapshots),
+    });
+
+    const byId = Object.fromEntries(schedule.map((t) => [t.id, t]));
+    expect(byId["a"]).toMatchObject({ state: "done", verdict: "success" });
+    // `b` was never offered to anyone — not failed, not blocked.
+    expect(byId["b"]).toMatchObject({ state: "ready", worker: null, verdict: null });
+    expect(fleet.log.filter((l) => l.startsWith("dispatch:b"))).toEqual([]);
+
+    // THE assertion: 5, not 7. Nothing else can produce it here — no verdict
+    // yields BUDGET and `budgetExitCode` is SUCCESS, so this comes from the
+    // refusal fold alone.
+    expect(exit).toBe(EXIT.BUDGET);
+
+    // And it is a REFUSAL, not a crossing. The distinction has to survive into
+    // the record, or the operator goes looking for spend that never happened.
+    const last = snapshots[snapshots.length - 1]!;
+    expect(last.halted_at).toBeNull();
+    expect(last.halted_reason).toBeNull();
+    expect(last.tokens_spent).toBe(50);
+    expect(last.tokens_spent).toBeLessThanOrEqual(last.tokens_ceiling!);
+
+    // The diagnosis names which refusal and the arithmetic behind it.
+    expect(budgetRefusal).toContain("would_exceed");
+    expect(budgetRefusal).toContain("110");
+    expect(budgetRefusal).toContain("100");
+  });
+
+  test("a run that finishes inside its budget still reports 0 and no refusal", async () => {
+    // The control. Without it the assertion above is satisfied by a scheduler
+    // that reports BUDGET for every run there is.
+    const fleet = new SamplingFleet(["w1"], { settleDelayPolls: 0, tokens: { a: 10 } });
+    const { exit, budgetRefusal } = await runSchedule([spec("a")], fleet, {
+      budget: budgetFor({ tokensCeiling: 1_000, maxConcurrent: 1, reserveTokens: 60 }),
+    });
+    expect(exit).toBe(EXIT.SUCCESS);
+    expect(budgetRefusal).toBeNull();
+  });
+});
+
 describe("ISC-114 / ISC-115: crossing the ceiling halts dispatch without destroying the run", () => {
   test("undispatched tasks stay ready, in-flight tasks still settle, exit is BUDGET", async () => {
     const fleet = new SamplingFleet(["w1", "w2"], {
@@ -356,6 +593,205 @@ describe("ISC-114 / ISC-115: crossing the ceiling halts dispatch without destroy
     expect(fleet.log).toEqual([]);
     expect(schedule[0]).toMatchObject({ state: "ready" });
     expect(exit).toBe(EXIT.BUDGET);
+  });
+});
+
+describe("MUST FIX C: a DEGRADED observation must not refund spend", () => {
+  /**
+   * `resumeBudget` rule 1 recomputes spend from observation, and rule 1 had no
+   * failure mode: every way of failing to observe returns 0, which is
+   * indistinguishable from a worker that genuinely burned nothing. The other
+   * input to the merge is inert — nothing writes `state.usage` — so
+   * `combineUsage(state.usage, ZERO)` is 0.
+   *
+   * The un-halted case is the common one and rule 2 does not cover it: a run
+   * at 95% of its ceiling crashes, resumes at `openingTokens = 0`, and gets a
+   * fresh full ceiling. Across n restarts it can spend n × `tokens_ceiling`.
+   */
+  const clean = (tokens: number): WorkerObservation => ({ tokens, degraded: null });
+  const broken = (why: string): WorkerObservation => ({ tokens: 0, degraded: why });
+  const persistedAt = (spent: number): BudgetState => {
+    const s = emptyBudget("r1", { tokensCeiling: 1_000 });
+    s.tokens_spent = spent;
+    return s;
+  };
+
+  test("a degraded observation floors the opening balance at the published spend", () => {
+    const out = openingBalance({
+      observations: new Map([["w1", broken("session transcript is absent at /gone.jsonl")]]),
+      persisted: persistedAt(950),
+    });
+    // THE assertion: 950, not 0. Without the floor this run resumes with its
+    // entire ceiling available for the second time.
+    expect(out.openingTokens).toBe(950);
+    expect(out.floored).toBe(true);
+    expect(out.degradations).toEqual(["w1: session transcript is absent at /gone.jsonl"]);
+  });
+
+  test("a CLEAN observation stays authoritative even when it is lower", () => {
+    // The half that must NOT change. Re-observing is the whole point of rule
+    // 1: a rotated transcript legitimately reports less than the snapshot, and
+    // flooring that would carry `tokens_spent` forward by the back door and
+    // double-count every resumed worker — the hole rule 1 exists to avoid.
+    const out = openingBalance({
+      observations: new Map([["w1", clean(120)]]),
+      persisted: persistedAt(950),
+    });
+    expect(out.openingTokens).toBe(120);
+    expect(out.floored).toBe(false);
+    expect(out.degradations).toEqual([]);
+  });
+
+  test("a degraded observation never INFLATES a balance that already exceeds the snapshot", () => {
+    // One worker unreadable, another healthy and well past the last snapshot.
+    // The floor is a lower bound, not a replacement.
+    const out = openingBalance({
+      observations: new Map([
+        ["w1", broken("worker state is missing or unreadable")],
+        ["w2", clean(2_000)],
+      ]),
+      persisted: persistedAt(950),
+    });
+    expect(out.openingTokens).toBe(2_000);
+    expect(out.floored).toBe(false);
+    // Still reported, because the ceiling is now blind to whatever w1 spent.
+    expect(out.degradations).toHaveLength(1);
+  });
+
+  test("a fresh run with no snapshot has nothing to floor at and starts at 0", () => {
+    const out = openingBalance({
+      observations: new Map([["w1", broken("no session_path recorded")]]),
+      persisted: null,
+    });
+    expect(out.openingTokens).toBe(0);
+    expect(out.floored).toBe(false);
+  });
+
+  test("the floored balance is what resumeBudget then halts on, if it is past the ceiling", () => {
+    // End to end through the real decision: a degraded resume of a run that
+    // had already blown its ceiling must stay halted, not be handed a fresh
+    // one. This is rules 1 and 2 agreeing rather than rule 2 carrying alone.
+    const persisted = persistedAt(1_500);
+    const out = openingBalance({
+      observations: new Map([["w1", broken("session transcript will not parse (bad json)")]]),
+      persisted,
+    });
+    const resumed = resumeBudget({
+      runId: "r1",
+      tokensCeiling: 1_000,
+      openingTokens: out.openingTokens,
+      persisted: null, // No carried halt — the floor alone must produce it.
+    });
+    expect(resumed.tokens_spent).toBe(1_500);
+    expect(resumed.halted_at).not.toBeNull();
+    expect(resumed.halted_reason).toContain("tokens_ceiling");
+  });
+});
+
+describe("SHOULD FIX D: a failed budget persist must not discard the schedule record", () => {
+  test("onChange throwing is reported and the run completes", async () => {
+    /**
+     * `settleBudget` calls the deliberately non-throwing `manager.settle` and
+     * then `persistBudget`, which is a real filesystem write and CAN throw
+     * (ENOSPC, EROFS, EPERM). It throws from inside the settle pass — before
+     * `if (progressed) await onChange(graph.snapshot())` — so it discarded the
+     * schedule record of every task that settled in that pass and killed
+     * `dispatch --auto` with nothing on stdout. That defeats precisely the
+     * invariant a non-throwing `settle` was built to guarantee.
+     */
+    const fleet = new SamplingFleet(["w1"], { settleDelayPolls: 0, tokens: { a: 10 } });
+    const manager = new BudgetManager(emptyBudget("run-under-test", { tokensCeiling: null }));
+    const schedules: ScheduledTask[][] = [];
+    const persistErrors: unknown[] = [];
+
+    const { schedule, exit } = await runSchedule([spec("a")], fleet, {
+      onChange: (s) => {
+        schedules.push(s);
+        return Promise.resolve();
+      },
+      budget: {
+        manager,
+        maxConcurrent: 1,
+        reserveTokens: 0,
+        onChange: () => Promise.reject(new Error("ENOSPC: no space left on device")),
+        onPersistError: (err) => persistErrors.push(err),
+      },
+    });
+
+    // The run finished rather than dying inside the settle pass.
+    expect(exit).toBe(EXIT.SUCCESS);
+    expect(schedule[0]).toMatchObject({ state: "done", verdict: "success" });
+    // The record of what ran REACHED the caller — the thing the throw destroyed.
+    expect(schedules.length).toBeGreaterThan(0);
+    expect(schedules[schedules.length - 1]![0]).toMatchObject({ state: "done" });
+    // And the failure was loud, not swallowed: best-effort in silence would be
+    // the same defect class from the other side.
+    expect(persistErrors.length).toBeGreaterThan(0);
+    expect(String(persistErrors[0])).toContain("ENOSPC");
+    // Accounting kept working in memory through the failed writes.
+    expect(manager.snapshot().tokens_spent).toBe(10);
+  });
+});
+
+describe("SHOULD FIX E: an unreadable run.json must not read as UNBOUNDED", () => {
+  test("a truncated run.json is refused, not defaulted to no ceiling", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pifleet-budget-policy-"));
+    try {
+      const run = runPaths("r6", base);
+      await mkdir(dirname(run.runJson), { recursive: true });
+      // A real truncation: valid JSON prefix, cut mid-token. Exactly what an
+      // operator who set `tokens_ceiling: 300` and lost a disk sees.
+      await writeFile(run.runJson, '{"schema":"pifleet.run/v1","budget":{"tokens_ceil');
+      const err = await readRunBudgetPolicy(run).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(RunPolicyUnreadableError);
+      // The ladder code for corrupt control-plane state, same as StateReadError.
+      expect((err as RunPolicyUnreadableError).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+      // Actionable: names the file and says what it is refusing to do.
+      expect(String(err)).toContain(run.runJson);
+      expect(String(err)).toContain("UNBOUNDED");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("an ABSENT run.json is still unbounded, with nothing to report", async () => {
+    // The distinction the refusal above turns on, pinned from the other side.
+    // Absence is a legitimate state — a run dir written before these fields
+    // existed, or assembled by hand — and refusing it would be a regression.
+    const base = await mkdtemp(join(tmpdir(), "pifleet-budget-policy-"));
+    try {
+      const policy = await readRunBudgetPolicy(runPaths("r7", base));
+      expect(policy.tokensCeiling).toBeNull();
+      expect(policy.maxConcurrent).toBe(DEFAULT_MAX_CONCURRENT);
+      expect(policy.note).toBeNull();
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("a run.json that PARSES but records a nonsense cap degrades with a note", async () => {
+    // Unchanged behaviour, asserted so the refusal above cannot creep into it:
+    // a readable document with a bad value is a degradation the caller
+    // surfaces, not a refusal.
+    const base = await mkdtemp(join(tmpdir(), "pifleet-budget-policy-"));
+    try {
+      const run = runPaths("r8", base);
+      await writeJsonAtomic(run.runJson, {
+        schema: "pifleet.run/v1",
+        run_id: "r8",
+        max_concurrent: 0,
+        budget: { tokens_ceiling: 500 },
+      });
+      const policy = await readRunBudgetPolicy(run);
+      expect(policy.maxConcurrent).toBe(DEFAULT_MAX_CONCURRENT);
+      expect(policy.tokensCeiling).toBe(500);
+      expect(policy.note).toContain("max_concurrent");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });
 

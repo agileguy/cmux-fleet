@@ -154,6 +154,20 @@ export const BudgetSchema = z
     /** THE ceiling — local models have no price table, so there is no usd one (§5.9). */
     tokens_ceiling: z.number().int().positive(),
     per_task_reserve_tokens: z.number().int().positive().optional(),
+    /**
+     * NOT YET READ BY ANY COMMAND — the third key in this block, and the one
+     * the budget wiring did not close.
+     *
+     * `tokens_ceiling` and `per_task_reserve_tokens` reach `run.json` via
+     * `runBudgetRecord` and are enforced by `BudgetManager`; this one is
+     * parsed here and read nowhere (`grep -rn 'soft_stop_at\|softStop' src/`
+     * returns this line alone). Stated rather than left to be rediscovered,
+     * because a config key with no reader is the exact defect that wiring set
+     * out to eliminate and shipping two of three silently would repeat it.
+     * Tracked as a residual on ISC-235; wiring it needs a criterion of its own
+     * (what a soft stop DOES — refuse new admissions, warn, or something else
+     * — is a product decision, not a missing call site).
+     */
     soft_stop_at: z.number().min(0).max(1).default(0.8),
     per_task_timeout: durationSeconds.prefault("25m"),
     run_timeout: durationSeconds.prefault("2h"),

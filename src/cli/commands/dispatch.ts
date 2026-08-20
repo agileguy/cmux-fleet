@@ -7,6 +7,7 @@ import {
   EXIT,
   VerdictSchema,
   TaskEnvelopeSchema,
+  type BudgetState,
   type ScheduledTask,
   type TaskEnvelope,
   type TaskSpec,
@@ -69,6 +70,55 @@ export function requestedEpochFrom(raw: unknown): number | null {
   if (typeof raw !== "number") return null;
   assertEpochWellFormed(raw);
   return raw > 0 ? raw : null;
+}
+
+/**
+ * One worker's observed spend, and whether observing it actually worked.
+ *
+ * `degraded` carries the REASON rather than a boolean because it ends up in a
+ * ledger row and on stderr, and "the budget was floored" is unactionable
+ * without which worker and which of the four ways it failed.
+ */
+export interface WorkerObservation {
+  tokens: number;
+  /** Null when the observation succeeded; the failure otherwise. */
+  degraded: string | null;
+}
+
+/**
+ * The run's opening balance — `resumeBudget` rule 1's failure mode, handled.
+ *
+ * Exported and pure so the decision can be mutation-tested directly rather
+ * than through a fleet. The rule it implements: a CLEAN observation is
+ * authoritative even when it is lower than the last published snapshot (that
+ * is rotation, and re-observing is the entire point of rule 1), but a
+ * DEGRADED one may not lower the balance below what the run last published
+ * about itself. Zero is what every degradation observes, and zero from a
+ * failed read is a refund of real spend.
+ *
+ * The floor is the run TOTAL, not per-worker, because `BudgetState` carries no
+ * per-worker breakdown to floor against — see the residual recorded on
+ * ISC-235. It is therefore a lower bound and not a reconstruction: a run where
+ * one worker degraded and another genuinely spent more since the snapshot gets
+ * `max(sum, persisted)`, which under-counts the healthy worker's growth. Under
+ * -counting toward the CEILING is the safe direction here only because the
+ * alternative — believing the zero — is unbounded.
+ */
+export function openingBalance(args: {
+  observations: ReadonlyMap<string, WorkerObservation>;
+  persisted: BudgetState | null;
+}): { openingTokens: number; floored: boolean; degradations: string[] } {
+  const degradations: string[] = [];
+  let sum = 0;
+  for (const [worker, obs] of args.observations) {
+    sum += obs.tokens;
+    if (obs.degraded !== null) degradations.push(`${worker}: ${obs.degraded}`);
+  }
+  const published = args.persisted?.tokens_spent ?? 0;
+  if (degradations.length > 0 && published > sum) {
+    return { openingTokens: published, floored: true, degradations };
+  }
+  return { openingTokens: sum, floored: false, degradations };
 }
 
 /** The supervisor's answer to one dispatch, before any exit-code policy. */
@@ -434,22 +484,92 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
    * run cost, and the ceiling and the report would drift apart.
    */
   const observed = new Map<string, number>();
-  const cumulativeTokens = async (worker: string): Promise<number> => {
+  /** `worker:reason` pairs already reported, so a poll loop cannot spam. */
+  const reportedDegradations = new Set<string>();
+  /**
+   * One worker's cumulative spend, WITH whether the observation actually
+   * succeeded.
+   *
+   * The `degraded` half is the whole point and it is not decoration. Every
+   * failure below used to return a bare `0`, which is indistinguishable from a
+   * worker that genuinely burned nothing — and the other input to the merge is
+   * inert, because NOTHING in `src/supervisor/` ever writes `state.usage`
+   * (established in this same review round; `grep -rn get_session_stats
+   * src/supervisor/` is empty). So `combineUsage(state.usage, ZERO)` is 0, and
+   * a failed observation and an idle worker produced the same number.
+   *
+   * That is a REFUND. At resume time the sum of these becomes the run's
+   * opening balance, so a run at 95% of its ceiling that crashes and cannot
+   * re-read its transcripts resumes at 0 with a fresh full ceiling — n
+   * restarts, n × `tokens_ceiling`. `session_path` is recorded verbatim from
+   * Pi's `get_state`, so a different machine, a different mount layout, or a
+   * session switch reaches this routinely rather than exotically.
+   *
+   * Degrading still SCHEDULES — refusing to run because a session file is
+   * malformed converts a reporting problem into an outage. What changes is
+   * that the caller is told, and `openingBalance` refuses to let a failed
+   * observation lower the run's opening balance.
+   */
+  const cumulativeTokens = async (worker: string): Promise<WorkerObservation> => {
     const state = await readWorkerState(workerPaths(run, worker)).catch(() => null);
-    if (state === null) return 0;
-    let transcript: UsageTotals = ZERO_USAGE;
+    if (state === null) {
+      return { tokens: 0, degraded: "worker state is missing or unreadable" };
+    }
     const path = state.session_path;
     if (path !== null && existsSync(path)) {
       try {
-        transcript = reconstruct(await readTranscript(path)).usage;
-      } catch {
-        // An unreadable transcript degrades to the supervisor's own numbers.
-        // Refusing to schedule because a session file is malformed would
-        // convert a reporting problem into an outage; the merge below still
-        // takes whatever `state.usage` knows.
+        const transcript = reconstruct(await readTranscript(path)).usage;
+        return { tokens: tokensTotal(combineUsage(state.usage, transcript)), degraded: null };
+      } catch (err) {
+        return {
+          tokens: 0,
+          degraded: `session transcript will not parse (${err instanceof Error ? err.message : String(err)})`,
+        };
       }
     }
-    return tokensTotal(combineUsage(state.usage, transcript));
+    /**
+     * No readable transcript. It is NOT knowable here whether that is a worker
+     * which never spoke or a transcript that vanished.
+     *
+     * `session_present` looks like the answer — `run/state.ts` and
+     * `classifySession` both document it as the ISC-96 discriminator between
+     * `never_created` and `missing_after_present` — AND IT LAGS.
+     *
+     * `recordSessionPath` sets it from `existsSync` at the instant `get_state`
+     * first reports the path, which is BEFORE the file is created lazily, so
+     * it starts `false`. The correction is made by the heartbeat in
+     * `supervisor/index.ts` (`HEARTBEAT_MS = 250`), which also flushes state —
+     * so the flag trails the transcript's appearance by up to one tick.
+     *
+     * MEASURED, because the mechanism matters more than the guess: at the
+     * instant `dispatch --auto` exits, a worker that ran a task to completion
+     * and whose transcript holds 400 tokens still reads `session_present:
+     * false` on disk; it flips true ~400 ms later. Any consumer reading state
+     * inside that window — a resumed `dispatch --auto` started straight after
+     * the previous one, exactly the case this function serves — sees `false`
+     * for a worker that has genuinely spent. A classifier resting on it calls
+     * a real degradation innocent, which is this finding arriving by a new
+     * door. (An earlier draft of this comment blamed a "5s heartbeat"; the
+     * heartbeat is 250 ms and does flush. The lag is the defect, not the
+     * period.)
+     *
+     * The classification is therefore left AMBIGUOUS on purpose and the
+     * ambiguity is resolved where the information actually exists: the caller
+     * knows whether this run has spend to lose. See `openingBalance` for the
+     * opening decision and `taskTokens` for the mid-run one. An ambiguous
+     * signal reported as certain is worse than one reported as ambiguous.
+     */
+    return {
+      tokens: 0,
+      degraded:
+        path === null
+          ? "no session_path recorded"
+          : // The headline case, indistinguishable here from a lazy file that
+            // was never created: the path is recorded verbatim from Pi's
+            // `get_state`, so a resume on a different machine or mount layout
+            // finds a well-formed state file naming a transcript that is gone.
+            `session transcript is absent at ${path}`,
+    };
   };
 
   const io: SchedulerIO = {
@@ -515,10 +635,51 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
     },
 
     async taskTokens(worker: string): Promise<number> {
-      // Monotone by construction: a transcript that shrank (a session switch,
-      // a rotation) books 0 rather than a negative, which would REFUND spend
-      // that really happened and lift a ceiling the run had already crossed.
-      const now = await cumulativeTokens(worker);
+      /**
+       * A HIGH-WATER MARK, with both sides of the trade stated.
+       *
+       * The benefit: a transcript that shrank (a session switch, a rotation,
+       * or any of the four degradations `cumulativeTokens` names) books 0
+       * rather than a negative, so it can never REFUND spend that really
+       * happened or lift a ceiling the run had already crossed.
+       *
+       * The COST, which this comment used to omit: after a mid-run session
+       * switch the ceiling is BLIND until the new transcript grows past the
+       * old mark. Everything the new session burns below that line books 0, so
+       * the run under-counts — the exact direction `combineUsage`'s
+       * element-wise max exists to prevent, arriving by the other door. It is
+       * accepted rather than fixed because the alternative is unbounded in the
+       * dangerous direction: an under-count delays a halt, a refund abolishes
+       * it. Per-worker per-session baselines would close it; see the residual
+       * on ISC-235.
+       *
+       * A degradation mid-run is reported once per worker per kind — bounded,
+       * and the only evidence that the ceiling went blind rather than the
+       * fleet going quiet.
+       */
+      const obs = await cumulativeTokens(worker);
+      /**
+       * Same gate as the opening balance, on the same reasoning: a worker this
+       * run has NEVER observed tokens from is simply quiet — the transcript is
+       * created lazily, so "absent" is its ordinary state. A worker we HAVE
+       * read tokens from and can no longer read is an unambiguous regression
+       * in observability, and it is the mid-run session-switch case that
+       * leaves the ceiling blind behind the high-water mark.
+       */
+      if (obs.degraded !== null && (observed.get(worker) ?? 0) > 0) {
+        const key = `${worker}:${obs.degraded}`;
+        if (!reportedDegradations.has(key)) {
+          reportedDegradations.add(key);
+          await ledger.append("budget_observation_degraded", {
+            worker,
+            detail: { note: obs.degraded, phase: "mid_run" },
+          });
+          process.stderr.write(
+            `pifleet: warning: budget observation degraded — ${worker}: ${obs.degraded}\n`,
+          );
+        }
+      }
+      const now = obs.tokens;
       const seen = observed.get(worker) ?? 0;
       if (now <= seen) return 0;
       observed.set(worker, now);
@@ -560,23 +721,74 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
     // capped at the default because `run.json` was unreadable is a fact a
     // human debugging its throughput will want.
     await ledger.append("budget_policy_degraded", { detail: { note: policy.note } });
+    // …and the trail cannot be ONLY in the ledger. An operator whose ceiling
+    // silently stopped applying gets a log line they have no reason to go
+    // read; the run is degraded, so it says so where they are looking.
+    process.stderr.write(`pifleet: warning: ${policy.note}\n`);
   }
-  let openingTokens = 0;
+  const observations = new Map<string, WorkerObservation>();
   for (const worker of await io.listWorkers()) {
-    const spent = await cumulativeTokens(worker);
-    observed.set(worker, spent);
-    openingTokens += spent;
+    const obs = await cumulativeTokens(worker);
+    observations.set(worker, obs);
+    observed.set(worker, obs.tokens);
+  }
+  const persisted = await readBudgetState(run);
+  const opening = openingBalance({ observations, persisted });
+  /**
+   * Report a degraded observation only when there is SPEND AT RISK.
+   *
+   * `cumulativeTokens` cannot tell a vanished transcript from one that was
+   * never created, so on a fresh fleet every idle worker observes as
+   * "degraded" — the file is created lazily on the first assistant message.
+   * Warning about all of them would fire on every run of every fleet, and the
+   * six-worker ISC-109 test asserts empty stderr precisely because that noise
+   * is a defect in itself: a warning nobody can act on buries the one that
+   * matters.
+   *
+   * A run with nothing published has nothing a degraded observation could
+   * refund, so the ambiguity is genuinely harmless there. Once `budget.json`
+   * records spend, the same ambiguity is exactly the hole — so that is when it
+   * is worth saying. The FLOOR is applied on the same terms by
+   * `openingBalance`, which needs `published > sum` before it can bite.
+   */
+  const spendAtRisk = (persisted?.tokens_spent ?? 0) > 0;
+  if (spendAtRisk) {
+    for (const note of opening.degradations) {
+      await ledger.append("budget_observation_degraded", {
+        detail: { note, floored: opening.floored },
+      });
+      process.stderr.write(`pifleet: warning: budget observation degraded — ${note}\n`);
+    }
+  }
+  if (opening.floored) {
+    /**
+     * The refund that did not happen, said out loud.
+     *
+     * This is the ONE place a human can learn that the run's opening balance
+     * is a floor rather than a measurement, and it matters for the next
+     * decision they make: the ceiling is now being enforced against the last
+     * number the run published, so spend between that snapshot and the crash
+     * is unaccounted and the true balance is at least this.
+     */
+    const note =
+      `opening balance floored at the last published tokens_spent ` +
+      `(${opening.openingTokens}) because ${opening.degradations.length} worker ` +
+      `observation(s) degraded; spend since that snapshot is unaccounted`;
+    await ledger.append("budget_opening_floored", {
+      detail: { opening_tokens: opening.openingTokens, degradations: opening.degradations },
+    });
+    process.stderr.write(`pifleet: warning: ${note}\n`);
   }
   const budget = new BudgetManager(
     resumeBudget({
       runId: run.runId,
       tokensCeiling: policy.tokensCeiling,
-      openingTokens,
-      persisted: await readBudgetState(run),
+      openingTokens: opening.openingTokens,
+      persisted,
     }),
   );
 
-  const { schedule, exit } = await runSchedule(list.tasks, io, {
+  const { schedule, exit, budgetRefusal } = await runSchedule(list.tasks, io, {
     budget: {
       manager: budget,
       maxConcurrent: policy.maxConcurrent,
@@ -585,6 +797,26 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
       // `report` can read this file WHILE the scheduler writes it, and a torn
       // read must yield the previous snapshot rather than half of this one.
       onChange: (snapshot) => writeJsonAtomic(run.budgetJson, snapshot),
+      /**
+       * A failed budget write is REPORTED, never thrown (see `ScheduleBudget`).
+       *
+       * Best-effort is the right call — the run's own record of what ran must
+       * outrank the durability of its accounting — but best-effort in silence
+       * is the defect this whole audit exists to remove. The ledger append is
+       * itself a write to the same filesystem and may well fail for the same
+       * reason, so stderr is the primary channel and the row is the bonus.
+       */
+      onPersistError: (err) => {
+        process.stderr.write(
+          `pifleet: warning: could not persist ${run.budgetJson}: ${String(err)}; ` +
+            `the run continues and its accounting stays live in memory\n`,
+        );
+        void ledger
+          .append("budget_persist_failed", { detail: { path: run.budgetJson, error: String(err) } })
+          .catch(() => {
+            // Same filesystem, same likely failure. stderr already carried it.
+          });
+      },
     },
     // The durable schedule record (run/paths.ts): `report` reads this file
     // to describe what the scheduler decided, and it is updated on every
@@ -621,6 +853,34 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
   const spent = budget.snapshot();
   if (spent.halted_at !== null) {
     throw new BudgetCeilingError(spent.halted_reason ?? "ceiling crossed");
+  }
+  /**
+   * The budget ended the run WITHOUT crossing the ceiling.
+   *
+   * `would_exceed`: admission refused because spend plus the outstanding holds
+   * plus this task's reserve would overrun, so nothing ever crossed anything
+   * and `halted_at` is null. With `fleet.example.yaml` as shipped this is the
+   * ordinary ending rather than an edge — the final `per_task_reserve_tokens`
+   * worth of every budget is unreachable by construction — and it used to
+   * report the generic ladder message at 7 for a run whose every task
+   * succeeded.
+   *
+   * The CODE comes from the scheduler's fold, deliberately: `exit` is already
+   * `EXIT.BUDGET` here and this line only supplies the sentence. That keeps
+   * the fold load-bearing on this path, which matters because the HALTED path
+   * cannot pin it — `BudgetCeilingError` above throws before `exit` is ever
+   * consulted, so deleting the fold leaves the halted tests green.
+   *
+   * `ceiling crossed` is deliberately NOT the wording. Nothing was crossed;
+   * saying so would send an operator looking for spend that does not exist.
+   */
+  if (budgetRefusal !== null) {
+    throw new CliError(
+      `budget refused admission: ${budgetRefusal}; ` +
+        `${schedule.filter((t) => t.state === "ready").length} task(s) were never dispatched ` +
+        `(spent ${spent.tokens_spent} of ${spent.tokens_ceiling ?? "unbounded"} tokens)`,
+      exit,
+    );
   }
   if (exit !== EXIT.SUCCESS) {
     throw new CliError("dispatch --auto finished with non-success terminal states", exit);

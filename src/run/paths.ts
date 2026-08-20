@@ -146,8 +146,17 @@ export interface RunPaths {
    *
    * A control-plane file like every other member here: it lives under the run
    * dir, beside `control-auth.json`, and is NEVER mounted into a container.
-   * Nothing a worker can read needs the fleet's spend, and the run dir is not
-   * a mount source (see the run-dir exposure rules).
+   * Nothing a worker can read needs the fleet's spend.
+   *
+   * What holds that up TODAY is an absence, and it is worth naming as one
+   * rather than as a guard: no mount spec in `container/mounts.ts` names the
+   * run dir, so nothing puts this file in front of a worker. That is a
+   * property of the current mount set, not an assertion anything enforces —
+   * `grep -rn assertNoRunDirMount src/` finds nothing on this branch. An
+   * earlier draft of this comment cited "the run-dir exposure rules" as
+   * though they existed here; they do not, they arrive with the run-dir
+   * exposure work, and a docstring citing a guard its own tree does not
+   * contain is exactly the defect the sibling review round exists to remove.
    *
    * Absence is normal and means the same thing `scheduleJson`'s does: no
    * scheduled run has happened yet.

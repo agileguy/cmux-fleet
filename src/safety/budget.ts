@@ -118,10 +118,11 @@ export class ForeignBudgetError extends Error implements ExitCoded {
  * Three rules, each with a different answer to "is the persisted value
  * authoritative?", because the three fields are three different kinds of fact.
  *
- * 1. **Spend is RECOMPUTED, never carried.** `openingTokens` is what the
- *    caller has just OBSERVED the run's workers to have burned — the sum over
- *    workers of the A6 usage in their transcripts and state files, the same
- *    quantity the live loop books deltas against as tasks settle. The
+ * 1. **Spend is RECOMPUTED, never carried — but never BELOW the last
+ *    published snapshot when the observation degraded.** `openingTokens` is
+ *    what the caller has just OBSERVED the run's workers to have burned — the
+ *    sum over workers of the A6 usage in their transcripts and state files,
+ *    the same quantity the live loop books deltas against as tasks settle. The
  *    transcripts are the durable evidence of what was actually spent;
  *    `tokens_spent` in `budget.json` is a published snapshot of a derived
  *    quantity, not an independent accumulator. Carrying it forward AND
@@ -130,6 +131,27 @@ export class ForeignBudgetError extends Error implements ExitCoded {
  *    whatever was spent between the last snapshot write and the crash. One
  *    observation point feeding both the total and the caller's per-worker
  *    baselines is the only arrangement with neither hole.
+ *
+ *    The hole that reasoning left is that RECOMPUTATION HAS A FAILURE MODE
+ *    AND ZERO IS NOT DISTINGUISHABLE FROM IT. A worker whose state file is
+ *    unreadable, whose `session_path` is null, whose transcript is missing at
+ *    the recorded path, or whose transcript will not parse observes as 0 —
+ *    identical to a worker that genuinely burned nothing. `session_path` is
+ *    recorded verbatim from Pi's `get_state` (see `run/state.ts`), so a resume
+ *    on a different machine, under a different mount layout, or after a
+ *    session switch lands there routinely. The prose defending this used to
+ *    cover only the HALTED case (rule 2), and the common case is un-halted: a
+ *    run at 95% of its ceiling crashes, resumes at `openingTokens = 0`, and
+ *    gets a fresh full ceiling. Across n restarts it can spend n ×
+ *    `tokens_ceiling`.
+ *
+ *    So the caller reports whether any worker's observation DEGRADED, and a
+ *    degraded observation floors the opening balance at the persisted
+ *    `tokens_spent` (`openingBalance` in `cli/commands/dispatch.ts`). A clean
+ *    observation is still authoritative and may legitimately be lower than the
+ *    snapshot — that is rotation, and re-observing is the whole point. Only an
+ *    observation that FAILED falls back on the last thing the run published
+ *    about itself.
  *
  * 2. **The halt IS carried.** A crossed ceiling is a run-level VERDICT, set
  *    once (see `#halt`), not an arithmetic result to be re-litigated. A
@@ -231,12 +253,26 @@ export class BudgetManager {
 
   /**
    * Decide an admission. Pure state transition — on `ok` the reservation is
-   * recorded and the caller must persist the snapshot before dispatching, so
-   * a crash between decision and dispatch cannot leak an unaccounted slot the
-   * restart would double-admit against.
+   * recorded and the caller persists the snapshot before dispatching.
    *
-   * Order matters: a halted run refuses everything, even a task that would
-   * fit — the halt is a run-level verdict, not a per-task arithmetic check.
+   * WHY THAT ORDER, restated. It used to be justified as "a crash between the
+   * decision and the dispatch must not leak an unaccounted slot that a restart
+   * would double-admit against". That reason does not survive `resumeBudget`
+   * rule 3: a restart DROPS every reservation and re-observes spend, so a
+   * dispatch that never happened has nothing to double-admit against and a
+   * hold that never reached disk costs the resumed run nothing at all.
+   *
+   * The live reason is a CONCURRENT reader, not a restart. `wait` and `report`
+   * read `budget.json` while the scheduler is still writing it, and between
+   * the decision and the dispatch the run has genuinely committed a slot. A
+   * snapshot written after the envelope goes out reports that window as
+   * uncommitted, which is the one direction that misleads: it under-states
+   * in-flight commitment to the only observers that cannot ask the scheduler.
+   * Writing first can only ever over-state it, and by at most one dispatch.
+   *
+   * Order within this method matters too: a halted run refuses everything,
+   * even a task that would fit — the halt is a run-level verdict, not a
+   * per-task arithmetic check.
    */
   admit(taskId: string, opts: AdmitOptions): AdmissionDecision {
     if (this.#s.halted_at !== null) {
@@ -279,6 +315,37 @@ export class BudgetManager {
 
     this.#s.reserved = { ...this.#s.reserved, [taskId]: opts.reserveTokens };
     return { ok: true, reserved: opts.reserveTokens };
+  }
+
+  /**
+   * Give back an admission slot for a dispatch that PROVABLY never happened.
+   *
+   * Deliberately not `settle`, and the distinction is not cosmetic. `settle`
+   * is a claim that the task reached a TERMINAL state, so it books actuals and
+   * may trip the ceiling. `unreachable` is the opposite claim: the envelope
+   * never reached a supervisor, the task is untouched, and it stays `ready` to
+   * be offered to another worker.
+   *
+   * Routing that case through `settle` was a live double-book, not a
+   * hypothetical one. The task is re-offered, so it is admitted and "settled"
+   * again on every retry — one task, one dispatch's worth of tokens, booked n
+   * times — and the tokens booked were the DEAD WORKER's residual delta,
+   * charged to a task that never ran on it. Worst of all, `settle` can trip
+   * the ceiling: a run could halt, and exit 5, on spend attributed to a
+   * dispatch nobody made. Production masked the arithmetic because
+   * `taskTokens` is a per-worker monotone delta that answers 0 the second
+   * time, which is why the fake in `budget-wiring.test.ts` — a per-task
+   * constant — is the thing that can see it.
+   *
+   * Returns whether a hold was actually released, so the caller can persist on
+   * real movement only and keep writes off the polling path.
+   */
+  release(taskId: string): boolean {
+    if (!(taskId in this.#s.reserved)) return false;
+    const reserved = { ...this.#s.reserved };
+    delete reserved[taskId];
+    this.#s.reserved = reserved;
+    return true;
   }
 
   /**
