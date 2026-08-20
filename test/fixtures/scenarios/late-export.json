@@ -1,0 +1,20 @@
+{
+  "scenario": "late-export",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "delay_ms": 200 },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    },
+    {
+      "on": "export_html",
+      "respond_delay_ms": 13000
+    }
+  ]
+}

@@ -472,14 +472,35 @@ async function handle(msg: Record<string, unknown>): Promise<void> {
         respond(id, command, false, undefined, "export_html requires a path");
         return;
       }
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(
-        target,
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\">" +
-          `<title>fake-pi export ${args.sessionId}</title></head>` +
-          `<body><p id="${EXPORT_MARKER}">rendered by the agent, not by the CLI</p></body></html>\n`,
-      );
-      respond(id, command, true, { path: target });
+      const writeAndRespond = (): void => {
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(
+          target,
+          "<!doctype html>\n<html><head><meta charset=\"utf-8\">" +
+            `<title>fake-pi export ${args.sessionId}</title></head>` +
+            `<body><p id="${EXPORT_MARKER}">rendered by the agent, not by the CLI</p></body></html>\n`,
+        );
+        respond(id, command, true, { path: target });
+      };
+      // `respond_delay_ms` here models the render that outruns the supervisor's
+      // budget — the case ISC-234's 8s-under-10s ordering exists for, and the
+      // one this case could not express at all: `prompt`, `get_state` and
+      // `get_session_stats` all honoured a delay and `export_html` did not, so
+      // the ordering could be inverted with the whole suite still green.
+      //
+      // Deliberately NOT awaited, unlike the other delay branches. `handle()`
+      // is awaited by the stdin loop, so an awaited sleep stops this process
+      // reading its own input — which models a WEDGED agent, not a slow
+      // export. Real Pi keeps answering while a render is in flight, and the
+      // difference decides whether the supervisor's late `rename` finds the
+      // file or the supervisor concludes the child is gone. It also means the
+      // write lands after the supervisor gave up, which is the whole point:
+      // that late write is the one that used to clobber the operator's file.
+      if (step?.respond_delay_ms !== undefined) {
+        void sleep(step.respond_delay_ms).then(writeAndRespond);
+        return;
+      }
+      writeAndRespond();
       return;
     }
 

@@ -1038,6 +1038,52 @@ describe("ISC-116: a deadline aborts the agent, then reports timed_out", () => {
  * re-pins the ISC-101 fallback that ISC-234 must not break — the dead worker is
  * the one harvest exists for.
  */
+/**
+ * A detached supervisor over `scenario`, idle, with a completed turn behind it.
+ *
+ * A transcript has to EXIST before `--html` exports anything: `classifySession`
+ * gates on the recorded session file, and fake-pi creates it lazily on the
+ * first assistant message exactly as real Pi does (SRD §4.2). Every export test
+ * below needs that same preamble, and three copies of it is three places for
+ * the gate to be silently dropped from one.
+ */
+async function workerWithTranscript(
+  scenario: string,
+  tag: string,
+): Promise<{ root: string; runId: string; run: ReturnType<typeof runPaths>; pid: number }> {
+  const root = await freshRoot();
+  const runId = testRunId(tag);
+  const { pid, pgid } = await processLauncher.launchDetached({
+    runId,
+    runDir: join(root, runId),
+    workerId: "eng-1",
+    argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+    env: { PIFLEET_PI_COMMAND: piCommand(scenario) },
+    logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+  });
+  cleanups.push(() => killSupervisor(pid, pgid));
+
+  const run = runPaths(runId, root);
+  const wp = workerPaths(run, "eng-1");
+  expect(await waitForIdle(wp, pid)).toBe(true);
+
+  const reply = await controlCall(run, "eng-1", {
+    cmd: "dispatch",
+    envelope: makeEnvelope(runId, "eng-1", `T-${tag.toUpperCase()}`),
+    attempt_id: `int-attempt-${tag}`,
+    requested_epoch: null,
+  });
+  expect(reply["accepted"]).toBe(true);
+
+  const present = await waitFor(async () => {
+    const s = await readWorkerState(wp);
+    return s?.session_path != null && (await Bun.file(s.session_path).exists());
+  }, 20_000);
+  expect(present).toBe(true);
+
+  return { root, runId, run, pid };
+}
+
 describe("export_html over the control socket (ISC-234)", () => {
   test(
     "a live worker exports through Pi; the same run falls back to the local render once it is gone",
@@ -1114,5 +1160,185 @@ describe("export_html over the control socket (ISC-234)", () => {
     // Two CLI spawns; the supervisor launch, a full turn and a shutdown sit
     // outside that model, so the larger of the two numbers wins.
     Math.max(cliBudget(2), 60_000),
+  );
+
+  /**
+   * The late-write race, from the operator's side.
+   *
+   * Pi writes the export file ITSELF, at whatever path it is given, and there
+   * is no verb that cancels a render already in flight. So the supervisor's
+   * deadline stops the supervisor WAITING; it does not stop Pi WRITING. With
+   * the requested path forwarded verbatim that produced:
+   *
+   *   t=8s   supervisor gives up, answers `ok:false`
+   *   t=8s   CLI writes its own render, prints `source:"local"`, exits 0
+   *   t=13s  Pi finishes and overwrites the operator's file
+   *
+   * — the file on disk is the agent's while the operator has been told it is
+   * the CLI's second opinion. Inverted provenance, which is the one question
+   * ISC-234 exists to answer, and a torn document if the writes interleave.
+   *
+   * The fix aims Pi at a staging sibling and renames only on confirmed success,
+   * so the loser of the race cannot reach the contested name at all.
+   *
+   * ANTI-VACUITY. The wait is on the marker appearing SOMEWHERE beside the
+   * output, not on the staging file specifically. A test that waited for the
+   * staging path would assert the mechanism and pass trivially against a Pi
+   * that never rendered at all; waiting for the marker proves the late render
+   * really happened under BOTH the fixed and the unfixed code, and leaves the
+   * next line — where it landed — as the only thing in dispute.
+   */
+  test(
+    "a render that finishes after the supervisor gave up cannot overwrite the operator's file",
+    async () => {
+      // 13s render vs the supervisor's 8s budget and the CLI's 10s ceiling:
+      // Pi loses to both, so the fallback is certain regardless of which side
+      // times out first. Nothing here depends on that ordering — the ordering
+      // is the next test's subject.
+      const ctx = await workerWithTranscript("late-export.json", "exportrace");
+      const outDir = join(ctx.root, "export-race");
+      const outPath = join(outDir, "out.html");
+
+      const r = await cli(ctx.root, [
+        "transcript", "--worker", "eng-1", "--run", ctx.runId, "--html", outPath, "--json",
+      ]);
+      expect(r.code).toBe(0);
+      expect(JSON.parse(r.stdout.trim())).toMatchObject({ html: outPath, source: "local" });
+
+      // What the operator was handed, byte for byte, at the moment they were
+      // told it was the local render.
+      const asPromised = await Bun.file(outPath).text();
+      expect(asPromised).not.toContain(EXPORT_MARKER);
+      expect(asPromised.startsWith("<!doctype html>")).toBe(true);
+
+      // Pi's render lands ~5s after the CLI already returned. Poll for it
+      // rather than sleeping a guessed interval: on a loaded box the write is
+      // later, never earlier, so a fixed sleep would be the flaky half.
+      const landed = await waitFor(async () => {
+        for (const name of await readdir(outDir)) {
+          const text = await Bun.file(join(outDir, name))
+            .text()
+            .catch(() => "");
+          if (text.includes(EXPORT_MARKER)) return true;
+        }
+        return false;
+      }, 30_000);
+      expect(landed).toBe(true); // the abandoned render DID happen — not a no-op
+
+      // THE assertion. Before the fix this file was the agent's document and
+      // this line read `expect(received).not.toContain("pi-export-html-marker")`
+      // against a page whose body is exactly that marker.
+      const afterwards = await Bun.file(outPath).text();
+      expect(afterwards).not.toContain(EXPORT_MARKER);
+      // And not merely "not the marker" — untouched. A partial overwrite would
+      // also drop the marker while destroying the document.
+      expect(afterwards).toBe(asPromised);
+    },
+    // One CLI spawn. The 13s render, the supervisor launch and a full turn sit
+    // outside the spawn model entirely, so the floor is the wall clock this
+    // test genuinely needs: ~13s of deliberate delay plus a 30s poll ceiling.
+    Math.max(cliBudget(1), 90_000),
+  );
+
+  /**
+   * Why the race above has no residual window, asserted structurally.
+   *
+   * The timing test proves the CLOBBER is gone for a render that loses by five
+   * seconds. It cannot prove the general case, because the dangerous ordering
+   * is not reproducible on demand: had the supervisor kept the rename, a Pi
+   * confirming at 7.9s and a reply delayed past the CLI's 10s ceiling would put
+   * the agent's bytes at the operator's path AFTER the CLI wrote and reported
+   * `"local"` — the same inversion through a window too narrow to schedule.
+   *
+   * So the property is pinned where it actually lives, in the construction: a
+   * CONFIRMED, SUCCESSFUL export leaves the requested path untouched, because
+   * the supervisor is not a writer of it at all. No timing, no delay, no race
+   * to lose — if this passes, there is no ordering that can produce the
+   * inversion, because there is only one writer.
+   */
+  test(
+    "a successful export leaves the requested path untouched until the CLI claims it",
+    async () => {
+      const ctx = await workerWithTranscript("happy.json", "exportstage");
+      const outDir = join(ctx.root, "export-stage");
+      const outPath = join(outDir, "out.html");
+
+      const reply = await controlCall(
+        ctx.run,
+        "eng-1",
+        { cmd: "export_html", path: outPath },
+        { timeoutMs: 15_000 },
+      );
+      // A real success — not a refusal that would satisfy the assertions below
+      // vacuously by never rendering anything.
+      expect(reply["ok"]).toBe(true);
+
+      // The reply names a file, and it is NOT the one that was asked for.
+      const staged = reply["staged"];
+      expect(typeof staged).toBe("string");
+      expect(staged).not.toBe(outPath);
+
+      // THE assertion. Pi has finished, the supervisor has confirmed it, and
+      // the operator's path still does not exist. MUTATION: move the rename
+      // back into the supervisor and this reads `expect(true).toBe(false)`.
+      expect(await Bun.file(outPath).exists()).toBe(false);
+
+      // And the render is genuinely there, under the staged name — otherwise
+      // "untouched" would be proving only that nothing happened.
+      expect(await Bun.file(staged as string).text()).toContain(EXPORT_MARKER);
+    },
+    // ZERO CLI spawns: this drives the control socket directly, so the spawn
+    // model has nothing to price. `cliBudget(1)` is carried as the floor for
+    // the one supervisor launch and turn the helper performs, and the
+    // wall-clock floor beside it is what actually applies.
+    Math.max(cliBudget(1), 60_000),
+  );
+
+  /**
+   * The 8s-under-10s ordering, asserted through its consequence.
+   *
+   * `EXPORT_HTML_TIMEOUT_MS` is under `CLI_EXPORT_HTML_TIMEOUT_MS` so that the
+   * side which gives up first is the side holding the diagnosis. Pi renders in
+   * 9s here — inside the CLI's window, outside the supervisor's — which is the
+   * only interval where the two possible orderings produce different observable
+   * outcomes:
+   *
+   *   8s budget (correct):  supervisor gives up at 8s and says why; `"local"`
+   *   60s budget (mutated): supervisor is still waiting, Pi succeeds at 9s, the
+   *                         supervisor renames and answers `ok:true` at 9s, and
+   *                         the CLI — still listening until 10s — reports
+   *                         `"rpc"` with nothing on stderr
+   *
+   * `test/unit/export-html-race.test.ts` guards the same invariant with no
+   * clock at all; this one is why the ordering is worth having.
+   */
+  test(
+    "a render inside the CLI's window but outside the supervisor's: the supervisor is the side that reports",
+    async () => {
+      const ctx = await workerWithTranscript("slow-export.json", "exportorder");
+      const outPath = join(ctx.root, "export-order", "out.html");
+
+      const r = await cli(ctx.root, [
+        "transcript", "--worker", "eng-1", "--run", ctx.runId, "--html", outPath, "--json",
+      ]);
+      expect(r.code).toBe(0);
+      // MUTATION (EXPORT_HTML_TIMEOUT_MS = 60_000): `"rpc"`, because the
+      // supervisor no longer loses the race it was written to lose.
+      expect(JSON.parse(r.stdout.trim())).toMatchObject({ html: outPath, source: "local" });
+
+      // The supervisor ANSWERED, inside the CLI's window, and its answer names
+      // what Pi did. This is also the ISC-234 blindfold coming off: before it,
+      // `transcript.ts` caught every RPC outcome into one silent fallback, so a
+      // live worker refusing was byte-identical to no worker at all.
+      expect(r.stderr).toContain("refused export_html");
+      // And specifically NOT the other diagnosis. `control call failed` is what
+      // the CLI prints when IT is the side that timed out — the exact state the
+      // ordering exists to prevent, and what the mutation would produce if Pi
+      // were slower than both budgets instead of just one.
+      expect(r.stderr).not.toContain("control call failed");
+    },
+    // One CLI spawn; the 9s render plus supervisor launch and a full turn are
+    // outside the spawn model, so the wall-clock floor wins.
+    Math.max(cliBudget(1), 60_000),
   );
 });

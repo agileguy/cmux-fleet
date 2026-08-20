@@ -380,6 +380,24 @@ export async function fsyncDirBestEffort(dir: string): Promise<void> {
  * returns, the write is done (ISC-218). See `fsyncDirBestEffort`.
  */
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+  await writeTextAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/**
+ * The same five-step protocol for a payload that is not JSON.
+ *
+ * It exists because the A5 HTML export needs exactly what `writeJsonAtomic`
+ * already provides and nothing about the guarantee is JSON-shaped: a reader
+ * opening the path sees either the whole previous document or the whole new
+ * one, never a prefix of one wearing the tail of the other. The alternative
+ * was a second hand-rolled tmp-and-rename beside a protocol that is already
+ * pinned at every syscall boundary by `test/unit/jsonl.test.ts` (ISC-156) —
+ * two implementations of one invariant, only one of them tested.
+ *
+ * `writeJsonAtomic` is now a serializer in front of this; the SIGKILL cases
+ * exercise this body through it unchanged.
+ */
+export async function writeTextAtomic(path: string, body: string): Promise<void> {
   const { open, rename, mkdir, unlink } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
   const { randomUUID } = await import("node:crypto");
@@ -394,7 +412,6 @@ export async function writeJsonAtomic(path: string, value: unknown): Promise<voi
   // already noticed and works around it with a per-file write chain; every
   // other caller was still exposed.
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  const body = `${JSON.stringify(value, null, 2)}\n`;
 
   try {
     const fh = await open(tmp, "w");
