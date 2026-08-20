@@ -86,10 +86,20 @@ export const TUI_VOIDED: readonly VoidedRequirement[] = [
  * criteria by id all over its Decisions and Verification sections, and a
  * mention is not a definition. A voided entry pointing at an id that is only
  * ever mentioned would be exactly the rot this check exists to catch.
+ *
+ * ALL THREE grades count as definitions, `[~]` included. The class was
+ * `[ x]` and a grading audit walked straight into it: marking ISC-141 partial
+ * — a grade this ISA has used since ISC-47/48 — made the extractor stop
+ * seeing a criterion that is defined three lines above the ones it does see,
+ * and the cross-check reported the operator-facing table as pointing at a
+ * nonexistent id. That is a FALSE POSITIVE of exactly the failure this
+ * function exists to detect, which is the worst kind: it teaches a reader to
+ * discount the check. A criterion's grade says how well it is EVIDENCED and
+ * has nothing to do with whether the ISA defines it.
  */
 export function definedIscIds(isaText: string): Set<string> {
   const ids = new Set<string>();
-  const re = /^- \[[ x]\] (ISC-\d+[a-z]?):/gm;
+  const re = /^- \[[ x~]\] (ISC-\d+[a-z]?):/gm;
   for (const m of isaText.matchAll(re)) ids.add(m[1]!);
   return ids;
 }
