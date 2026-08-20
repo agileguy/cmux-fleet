@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+- **Five anti-criteria now have probes that can actually fail (ISC-138, 139, 140, 165, 199).** An
+  `Anti:` criterion asserts an *absence*, which is the one claim a green suite cannot make on its
+  own — each was satisfied by a codebase that had simply not done the forbidden thing yet. Every
+  guard in `test/unit/anti-criteria.test.ts` is **mutation-verified**: seven planted violations,
+  seven reds, baseline green before and after. **ISC-139 changed shape under measurement** — the
+  first draft banned the bare tokens `claude`/`anthropic`/`copilot` and went red on six legitimate
+  sites, because `CLAUDE.md` is a *filename* this tool must know (`repo-hazards.ts` scans
+  repository instruction files). It now matches attribution *constructions*, which have no
+  legitimate use here. Its more useful half is a **capability pin**: the git verbs appearing as
+  argv literals under `src/` are add, branch, checkout, config, diff, log, rev-parse, status,
+  symbolic-ref, worktree — no `commit`, no `push`, no `gh` — so the criterion's commit and PR-body
+  clauses are *vacuous*, and the test pins that fact so they cannot silently go live. **ISC-165**
+  checks per test that a `:ro` write refusal also reads from the mount, since an absent mount
+  refuses writes just as happily as a read-only one. **ISC-140** is split from ISC-21 because the
+  two fail in opposite directions: a test needing egress fails closed and everyone finds out; a
+  test needing provider spend passes and quietly bills someone. **ISC-199** bans hardcoded `ps`
+  output spellings, not `ps` itself. **ISC-138 is a bookkeeping correction** — its guard already
+  existed beside ISC-137's, which had been `[x]` all along; the work was verifying it bites.
+
 - **`adc_mode: file` is now tracked as a criterion rather than a caveat inside a closed one
   (ISC-268).** ISC-44 closed honestly about its `file`-mode probe — it "hand-writes the `-v` itself
   and inspects a shape it authored" — but that admission lived only in the prose of an `[x]`
@@ -19,6 +38,21 @@ All notable changes to this project are documented here.
   `buildDockerArgv` and prove it by `docker inspect`ing a container built from production argv, or
   reject the value in the schema and delete the three symbols and the carve-out together. No code
   changed in this entry — this records a known gap where it can be counted.
+- **The suite is now judged under deliberate load rather than only on a quiet box (ISC-266).**
+  `.github/scripts/test-under-load.sh` runs a target under `ceil(cores * 0.75)` busy loops and exits
+  with the suite's own status, and a separate `load` job in CI runs it on every PR. A budget that is
+  too small — or a test whose spawn count grows without its `cliBudget(N)` growing with it — now
+  fails a PR instead of a developer's afternoon. Measured: the full integration suite under eleven
+  loops on 14 cores ran 375 pass / 81 skip / 0 fail in 300.87 s against 167.76 s idle, a 1.79x
+  inflation with every budget holding. On CI the job is confirmed to apply real load rather than
+  merely pass: the same commit ran `test/integration` in 124.32 s in the `test` job and 222.78 s in
+  the `load` job — 1.79x, the same factor. **What it does not prove is stated in the job's own
+  comment:** the runner reports two cores against the 14 these numbers came from, and none of the
+  editor, language server, browser and concurrent agents behind the load average of 18.40 ISC-266
+  recorded, so it reproduces the *shape* of the contention at a smaller magnitude — a floor on the
+  evidence, not a ceiling. The harness's cleanup traps a recorded PID list and never `jobs -p`, which is empty in a
+  non-interactive shell and would read as correct while killing nothing.
+
 
 ### Fixed
 - **A dependency-gating assertion failed on the scheduler's tick granularity rather than on gating
@@ -89,22 +123,6 @@ All notable changes to this project are documented here.
   is about variation. The probe now runs twice against different delays and requires the figure to
   move, so no constant satisfies both floors. Mutation-verified: `42` fails (it passed before),
   `5000` fails, a clock read twice fails.
-
-### Added
-- **The suite is now judged under deliberate load rather than only on a quiet box (ISC-266).**
-  `.github/scripts/test-under-load.sh` runs a target under `ceil(cores * 0.75)` busy loops and exits
-  with the suite's own status, and a separate `load` job in CI runs it on every PR. A budget that is
-  too small — or a test whose spawn count grows without its `cliBudget(N)` growing with it — now
-  fails a PR instead of a developer's afternoon. Measured: the full integration suite under eleven
-  loops on 14 cores ran 375 pass / 81 skip / 0 fail in 300.87 s against 167.76 s idle, a 1.79x
-  inflation with every budget holding. On CI the job is confirmed to apply real load rather than
-  merely pass: the same commit ran `test/integration` in 124.32 s in the `test` job and 222.78 s in
-  the `load` job — 1.79x, the same factor. **What it does not prove is stated in the job's own
-  comment:** the runner reports two cores against the 14 these numbers came from, and none of the
-  editor, language server, browser and concurrent agents behind the load average of 18.40 ISC-266
-  recorded, so it reproduces the *shape* of the contention at a smaller magnitude — a floor on the
-  evidence, not a ceiling. The harness's cleanup traps a recorded PID list and never `jobs -p`, which is empty in a
-  non-interactive shell and would read as correct while killing nothing.
 
 ### Security
 - **The mandatory native-tool-call gate was certifying a network path no worker uses.** `up`
