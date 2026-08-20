@@ -1,0 +1,11 @@
+{
+  "schema": "pifleet.tasklist/v1",
+  "tasks": [
+    { "id": "t1", "title": "fan 1", "brief": "independent work 1" },
+    { "id": "t2", "title": "fan 2", "brief": "independent work 2" },
+    { "id": "t3", "title": "fan 3", "brief": "independent work 3" },
+    { "id": "t4", "title": "fan 4", "brief": "independent work 4" },
+    { "id": "t5", "title": "fan 5", "brief": "independent work 5" },
+    { "id": "t6", "title": "fan 6", "brief": "independent work 6" }
+  ]
+}

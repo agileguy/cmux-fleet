@@ -75,24 +75,42 @@ interface Args {
   scenario: string;
   sessionDir: string;
   sessionId: string;
+  /**
+   * Output tokens to stamp on every assistant transcript entry's `usage`
+   * (A4), or 0 for none.
+   *
+   * OPT-IN, and the default of 0 is the point: with this absent no `usage`
+   * key is written at all, so every scenario that existed before this flag
+   * produces byte-identical transcripts. Real Pi always carries usage;
+   * emitting it unconditionally here would change the fixture every
+   * transcript test in the repo already asserts against, to serve one test
+   * that needs a ceiling to trip.
+   *
+   * Tokens are what a budget can actually watch locally — `cost` stays 0
+   * because local models have no price table (SRD §5.9), which is the
+   * inversion ISC-115 pins.
+   */
+  tokensPerMessage: number;
 }
 
 function parseArgs(argv: string[]): Args {
   let scenario = process.env["PIFLEET_FAKE_SCENARIO"] ?? "";
   let sessionDir = ".";
   let sessionId = "fake";
+  let tokensPerMessage = 0;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--scenario") scenario = argv[++i] ?? "";
     else if (a === "--session-dir") sessionDir = argv[++i] ?? ".";
     else if (a === "--session-id") sessionId = argv[++i] ?? "fake";
+    else if (a === "--tokens-per-message") tokensPerMessage = Number(argv[++i] ?? 0);
     else if (a === "--mode" || a === "--provider" || a === "--model") i++; // real-Pi flags, ignored
   }
   if (scenario === "") {
     process.stderr.write("fake-pi: --scenario <file> is required\n");
     process.exit(2);
   }
-  return { scenario, sessionDir, sessionId };
+  return { scenario, sessionDir, sessionId, tokensPerMessage };
 }
 
 interface EmitDelay {
@@ -203,12 +221,24 @@ let entrySeq = 0;
 
 function transcriptEntry(role: "user" | "assistant", text: string, kind = "message"): void {
   const id = `e${++entrySeq}`;
+  const message: Record<string, unknown> = { role, content: [{ type: "text", text }] };
+  if (role === "assistant" && args.tokensPerMessage > 0) {
+    // The A4 shape `usageFromAssistantMessage` parses: input/output counts and
+    // an unpriced cost. Split so the total is exactly `tokensPerMessage`,
+    // which is what lets a test name a ceiling in whole messages.
+    const output = Math.ceil(args.tokensPerMessage / 2);
+    message["usage"] = {
+      input: args.tokensPerMessage - output,
+      output,
+      cost: { total: 0 },
+    };
+  }
   const entry = {
     type: kind,
     id,
     parentId: entrySeq > 1 ? `e${entrySeq - 1}` : null,
     timestamp: new Date().toISOString(),
-    message: { role, content: [{ type: "text", text }] },
+    message,
   };
   if (role === "assistant") lastAssistantText = text;
   if (!sessionCreated) {
