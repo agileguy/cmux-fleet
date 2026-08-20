@@ -154,21 +154,25 @@ export const BudgetSchema = z
     /** THE ceiling — local models have no price table, so there is no usd one (§5.9). */
     tokens_ceiling: z.number().int().positive(),
     per_task_reserve_tokens: z.number().int().positive().optional(),
-    /**
-     * NOT YET READ BY ANY COMMAND — the third key in this block, and the one
-     * the budget wiring did not close.
+    /*
+     * `soft_stop_at` was REMOVED here, deliberately — see ISC-280.
      *
-     * `tokens_ceiling` and `per_task_reserve_tokens` reach `run.json` via
-     * `runBudgetRecord` and are enforced by `BudgetManager`; this one is
-     * parsed here and read nowhere (`grep -rn 'soft_stop_at\|softStop' src/`
-     * returns this line alone). Stated rather than left to be rediscovered,
-     * because a config key with no reader is the exact defect that wiring set
-     * out to eliminate and shipping two of three silently would repeat it.
-     * Tracked as a residual on ISC-235; wiring it needs a criterion of its own
-     * (what a soft stop DOES — refuse new admissions, warn, or something else
-     * — is a product decision, not a missing call site).
+     * It was the last key in this block still in the shape `max_concurrent`
+     * was in before ISC-235: it shipped in `fleet.example.yaml`, it validated,
+     * and it was read by nothing. The criterion was a disjunction — give it a
+     * production reader, or delete it from the schema and the example config
+     * together — and deleting is the arm that was taken, because what a soft
+     * stop DOES (refuse new admissions, warn once, warn per admission, shrink
+     * `max_concurrent`) is a product decision, and inventing one to close a
+     * criterion buys a reader that does the wrong thing INVISIBLY. That is
+     * strictly worse than no reader.
+     *
+     * This schema is `.strict()`, so an existing config carrying the key is
+     * now a hard validation error rather than a silently ignored line. That is
+     * the intended behaviour and `REMOVED_KEYS` in `load.ts` gives it a
+     * message that says so, instead of a bare "unrecognized key" that reads
+     * like a typo.
      */
-    soft_stop_at: z.number().min(0).max(1).default(0.8),
     per_task_timeout: durationSeconds.prefault("25m"),
     run_timeout: durationSeconds.prefault("2h"),
   })

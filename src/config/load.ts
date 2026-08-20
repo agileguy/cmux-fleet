@@ -107,6 +107,26 @@ export async function resolveConfigPath(
 }
 
 /** Parse and validate YAML text. Separated from file IO so tests feed strings. */
+/**
+ * Keys this config format USED to accept, and what to say when one turns up.
+ *
+ * A removed key is indistinguishable from a typo to a `.strict()` schema, and
+ * the two want opposite reactions from a reader: a typo should be corrected, a
+ * removal should be deleted. A bare "unrecognized key" tells someone who
+ * copied a previous `fleet.example.yaml` that they made a mistake, which is
+ * both wrong and a dead end — the key WAS valid, and the fix is to delete the
+ * line rather than to hunt for the right spelling.
+ *
+ * Keyed by the dotted path the unroll in `parseConfig` produces, so a
+ * same-named key under a different parent is unaffected.
+ */
+const REMOVED_KEYS: Record<string, string> = {
+  "run.budget.soft_stop_at":
+    "removed — it was parsed and never read by any command, so it advertised a soft stop " +
+    "the product does not implement (ISC-280). Delete this line; nothing changes, because " +
+    "no behaviour was ever attached to it.",
+};
+
 export async function parseConfig(text: string, path: string): Promise<LoadedConfig> {
   const { parse } = await import("yaml");
   let doc: unknown;
@@ -123,10 +143,10 @@ export async function parseConfig(text: string, path: string): Promise<LoadedCon
       // zod reports a stray key at the PARENT's path with a `keys` list; the
       // useful diagnostic names the key itself, so unroll it.
       if (i.code === "unrecognized_keys") {
-        return (i as unknown as { keys: string[] }).keys.map((k) => ({
-          path: [...i.path.map(String), k].join("."),
-          message: "unrecognized key",
-        }));
+        return (i as unknown as { keys: string[] }).keys.map((k) => {
+          const at = [...i.path.map(String), k].join(".");
+          return { path: at, message: REMOVED_KEYS[at] ?? "unrecognized key" };
+        });
       }
       return [{ path: i.path.map(String).join("."), message: i.message }];
     });
