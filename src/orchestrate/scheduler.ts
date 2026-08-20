@@ -25,6 +25,7 @@ import {
   type Verdict,
 } from "../contracts.ts";
 import { budgetExitCode, type BudgetManager } from "../safety/budget.ts";
+import { classifyStall } from "../safety/stall.ts";
 import { TaskGraph } from "./graph.ts";
 
 /** What the scheduler can observe about one worker, reduced to what it needs. */
@@ -79,6 +80,32 @@ export interface SchedulerIO {
    * trips, which is the same position a run with no ceiling is in.
    */
   taskTokens?(worker: string, taskId: string): Promise<number>;
+  /**
+   * Milliseconds since `worker` last appended an event, or `null` when that
+   * cannot be known (no events file yet — the worker has emitted nothing at
+   * all since launch).
+   *
+   * A DURATION rather than a timestamp, deliberately. `io.now()` is an
+   * injected monotonic-ish reading and an events file's mtime is wall-clock;
+   * subtracting one from the other mixes two clocks and silently produces
+   * nonsense under an injected clock, which is every test in this file. The
+   * adapter takes both readings in ITS OWN domain and hands back the
+   * difference, so nothing here has to know which clock answered.
+   *
+   * Optional for the reason `taskTokens` is: a fleet that cannot report event
+   * silence is not a fleet that should stop scheduling. Absent, no worker is
+   * ever classified and the stall policy simply does not engage — the
+   * position every run was in before this seam existed.
+   */
+  eventSilenceMs?(worker: string): Promise<number | null>;
+  /**
+   * Stop a worker whose agent is wedged (ISC-117), by whatever means the
+   * caller's runtime has. The scheduler settles the task and marks the worker
+   * dead whether or not this resolves: the point of the classification is that
+   * the agent is not coming back, and a kill that cannot be confirmed must not
+   * leave the run polling a task that will never settle.
+   */
+  killWedged?(worker: string, taskId: string): Promise<void>;
   sleep(ms: number): Promise<void>;
   /**
    * Monotonic-ish milliseconds, injected rather than read from the clock so
@@ -230,6 +257,23 @@ export async function runSchedule(
      * supplies one.
      */
     budget?: ScheduleBudget;
+    /**
+     * The per-worker event-silence window (`timers.event_stall_warn` /
+     * `timers.event_stall_kill`), which is NOT the same thing as
+     * `stallTimeoutMs` above and the two are worth telling apart.
+     *
+     * `stallTimeoutMs` is fleet-wide and asks "has this whole run stopped
+     * making progress" — it refuses the run at EXIT.TIMEOUT and kills nobody.
+     * This asks, per worker, "has this AGENT stopped emitting while holding
+     * the slot" and ends that one worker (SRD §9.3, ISC-110/ISC-117). A run
+     * whose workers take turns can be perfectly healthy on the first measure
+     * while one of its agents is wedged on the second.
+     *
+     * Absent, the policy does not engage; see `SchedulerIO.eventSilenceMs`.
+     */
+    stall?: { warnMs: number; killMs: number };
+    /** Called once per worker when its silence first crosses `warnMs`. */
+    onStallWarn?: (worker: string, taskId: string, silentMs: number) => Promise<void>;
   } = {},
 ): Promise<ScheduleOutcome> {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
@@ -305,6 +349,51 @@ export async function runSchedule(
 
   const graph = new TaskGraph(tasks);
   /** Task id -> assigned worker, insertion-ordered — the settle-poll order. */
+  /** Workers already warned, so `onStallWarn` fires once per (worker, task). */
+  const warned = new Set<string>();
+
+  /**
+   * The per-worker stall verdict, or `"healthy"` when the policy cannot or
+   * should not engage.
+   *
+   * Three separate reasons to answer `"healthy"` without consulting the
+   * policy, and they are NOT the same reason wearing three hats:
+   *
+   *  - No `stall` window configured, or no `eventSilenceMs` on the IO. The
+   *    seam is optional; absent, this is the behaviour every run had before
+   *    it existed.
+   *  - `eventSilenceMs` answered `null` — the worker has emitted NOTHING since
+   *    launch, so there is no last event to measure from. Treating "no events
+   *    file" as "infinitely silent" would kill every worker that is still
+   *    starting up, which is the opposite of the criterion.
+   *  - No budget, so `holdsSlot` is unknowable. Without the slot discriminator
+   *    the policy cannot tell a queued worker from a wedged one, and
+   *    `classifyStall` would see `holdsSlot: false` and saturate at `warn`
+   *    anyway. Not consulting it is the honest form of the same answer.
+   */
+  const classifyWorkerStall = async (
+    worker: string,
+    taskId: string,
+  ): Promise<"healthy" | "warn" | "kill"> => {
+    const window = opts.stall;
+    if (window === undefined || io.eventSilenceMs === undefined) return "healthy";
+    if (budget === undefined) return "healthy";
+    const silentMs = await io.eventSilenceMs(worker);
+    if (silentMs === null) return "healthy";
+    const verdict = classifyStall({
+      sinceLastEventMs: silentMs,
+      holdsSlot: budget.manager.holdsSlot(taskId),
+      warnMs: window.warnMs,
+      killMs: window.killMs,
+    });
+    const key = `${worker}\u0000${taskId}`;
+    if (verdict === "warn" && !warned.has(key)) {
+      warned.add(key);
+      await opts.onStallWarn?.(worker, taskId, silentMs);
+    }
+    return verdict;
+  };
+
   const inflight = new Map<string, string>();
   /** Workers observed dead. Never dispatched to again; pins to them refuse. */
   const dead = new Set<string>();
@@ -362,6 +451,39 @@ export async function runSchedule(
         // still spent — the transcript is the one artifact that survives a
         // SIGKILL. Dropping them here is how a ceiling gets overshot by a
         // whole worker's session, silently.
+        await settleBudget(taskId, worker);
+        progressed = true;
+        continue;
+      }
+
+      /**
+       * ALIVE, and not settling. The reaper cannot help here and that is the
+       * whole point of this block: the reaper (ISC-118) acts on a stale
+       * HEARTBEAT, and this supervisor's heartbeat is fine. What has stopped
+       * is the AGENT inside it, which holds the oMLX slot while emitting
+       * nothing — so without this the slot is held indefinitely and the run
+       * waits out its fleet-wide `stallTimeoutMs` and reports a TIMEOUT that
+       * names the whole run rather than the one worker that wedged.
+       *
+       * `holdsSlot` is the discriminator, and it is the reason this could not
+       * be wired before the budget was: until admission was on the dispatch
+       * path there was no queue, every worker ran at once, and "silent because
+       * queued" was not a state any worker could be in. Now it is, and killing
+       * one for it would be executing a worker for standing in the line we put
+       * it in — so `classifyStall` saturates a non-holder at `warn` however
+       * long it waits.
+       */
+      const stallVerdict = await classifyWorkerStall(worker, taskId);
+      if (stallVerdict === "kill") {
+        // Best-effort: the classification says this agent is not coming back,
+        // so the task must not stay in flight even if the kill cannot be
+        // confirmed. Leaving it would re-create the indefinite wait this
+        // block exists to end.
+        await io.killWedged?.(worker, taskId).catch(() => {});
+        graph.markSettled(taskId, "unknown");
+        reasons.set(taskId, "event_stall_kill");
+        inflight.delete(taskId);
+        dead.add(worker);
         await settleBudget(taskId, worker);
         progressed = true;
       }

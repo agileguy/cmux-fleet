@@ -160,8 +160,16 @@ describe("runAcceptance spec guards (ISC-149)", () => {
  * irrelevant: the sabotage arrived as ordinary committed source.
  *
  * These are regression pins for that class. A denylist cannot fully express
- * "files the command resolves through" — recorded as ISC-237 — so each entry
+ * "files the command resolves through" — recorded as ISC-243 — so each entry
  * here is a known bypass that has been closed, not a claim of completeness.
+ *
+ * The id was ISC-237 here until 2026-08-20 and that was simply wrong: ISC-237
+ * is the `runGit` diff-driver hardening and is CLOSED. This comment is the
+ * only pointer at the incompleteness problem anywhere in the source tree, so
+ * pointing it at a solved, unrelated criterion actively told a reader the
+ * question had been settled. It has not been; ISC-243 is open, and the audit
+ * behind that grade measured 40 of 40 probed resolution-surface paths as
+ * MISSED by the list below.
  */
 describe("harnessSurface covers runner configuration, not just test files", () => {
   const bypasses = [
