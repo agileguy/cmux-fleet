@@ -33,11 +33,14 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   CredentialInjectionSchema,
+  EXIT,
   type AdcMode,
   type CredentialInjection,
 } from "../contracts.ts";
 import type { Exec } from "../container/run.ts";
+import { bindMountSources } from "../container/docker-argv.ts";
 import { WORKER_UID } from "../container/mounts.ts";
+import { isPathUnder, pathsEqual } from "../run/paths.ts";
 import { isoNow, monotonicMs } from "../util/clock.ts";
 
 // ---------------------------------------------------------------------------
@@ -202,6 +205,16 @@ export function hostAdcFile(env: Record<string, string | undefined> = process.en
  * Boundaries use an explicit separator. A bare `startsWith(dir)` would also
  * flag `~/.config/gcloud-backup` — a different directory this criterion says
  * nothing about — and a false red is how an assertion gets weakened later.
+ *
+ * That separator is now applied through `isPathUnder` rather than by an inline
+ * `` `${dir}/` `` prefix, and the change is a FIX and not a tidy-up. `"/"` is
+ * the one directory whose children are not spelled `${dir}/…`, so the inline
+ * form tested `startsWith("//")` and `-v /:/host` — the whole host filesystem,
+ * gcloud store included — passed this function. The run-dir guard in
+ * `run/paths.ts` had the identical bug independently, which is the argument
+ * for one shared definition: two copies of a boundary cannot check each other.
+ * `isPathUnder` also case-folds; see `classifyRunDirExposure` for why that is
+ * unconditional rather than per-platform.
  */
 export type HostGcloudExposure = "is-the-store" | "inside-the-store" | "contains-the-store";
 
@@ -211,19 +224,28 @@ export function classifyHostGcloudExposure(
 ): HostGcloudExposure | null {
   const store = resolve(hostGcloudConfigDir());
   const s = resolve(source);
-  if (s === store) return "is-the-store";
-  if (s.startsWith(`${store}/`)) {
+  if (pathsEqual(s, store)) return "is-the-store";
+  if (isPathUnder(s, store)) {
     // The single documented exception: `file` mode may mount exactly one
     // artifact out of the store, and nothing else in it.
-    if (opts.allowAdcFile === true && s === resolve(hostAdcFile())) return null;
+    if (opts.allowAdcFile === true && pathsEqual(s, hostAdcFile())) return null;
     return "inside-the-store";
   }
-  if (store.startsWith(`${s}/`)) return "contains-the-store";
+  if (isPathUnder(store, s)) return "contains-the-store";
   return null;
 }
 
 /** A `docker run` argv that would expose the host gcloud auth store. */
 export class HostGcloudMountError extends Error {
+  /**
+   * A misconfigured `run.repo` is a USAGE failure, not a crash. Graded here
+   * for the reason `RunDirMountError` records at length and on the same
+   * decision: these two are deliberately shaped alike, an operator cannot tell
+   * them apart from the outside, and grading one as a config refusal while the
+   * other reports `internal error` would be the confusing half of both.
+   */
+  readonly exitCode = EXIT.USAGE;
+
   constructor(source: string, relation: HostGcloudExposure) {
     const how =
       relation === "is-the-store"
@@ -258,14 +280,14 @@ export class HostGcloudMountError extends Error {
  * made here, in the open, rather than a default nobody chose.
  */
 export function assertNoHostGcloudMount(argv: readonly string[]): void {
-  argv.forEach((a, i) => {
-    if (argv[i - 1] !== "-v" && argv[i - 1] !== "--volume") return;
-    const sep = a.indexOf(":");
-    const source = sep === -1 ? a : a.slice(0, sep);
-    if (!source.startsWith("/")) return; // a named volume, not a host path
+  // `bindMountSources` rather than an inline `-v` scan: the inline copy read
+  // exactly one of Docker's four bind-mount spellings, so `--volume=<src>:<dst>`,
+  // `-v<src>:<dst>` and `--mount type=bind,source=…` all walked past this
+  // guard. See that function's header for the measured table.
+  for (const source of bindMountSources(argv)) {
     const relation = classifyHostGcloudExposure(source);
     if (relation !== null) throw new HostGcloudMountError(source, relation);
-  });
+  }
 }
 
 /**
