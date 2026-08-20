@@ -308,6 +308,16 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
   "happy.json": [1],
   "will-retry.json": [1],
   "no-tool-calls.json": [1],
+  /**
+   * Settles once, like `happy.json`. The five fire-and-forget
+   * `extension_ui_request` records are not activity events — nothing is
+   * waiting on them and the agent does not pause for them — so they neither
+   * open nor invalidate a probe, and the turn ends on its own `agent_end`.
+   * Had a DIALOG method been in here the expectation would not be `[1]`: a
+   * dialog blocks the agent until answered, and nothing answers one today
+   * (ISC-111/112).
+   */
+  "ui-fire-and-forget.json": [1],
   "duplicate-end.json": [1], // one settle; the duplicate end is prior, never a second
   "aborted.json": [1], // the harness never aborts, so the turn ends naturally
   // Like aborted.json: the simulator replays the emitted sequence and does not
