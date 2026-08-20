@@ -71,6 +71,14 @@ const SHUTDOWN_GRACE_MS = 2_000;
  * and a wedged agent may never honour it.
  */
 const ABORT_GRACE_MS = 5_000;
+/**
+ * How long Pi gets to render its own transcript (ISC-234).
+ *
+ * Deliberately under the CLI's own 10s ceiling in `transcript.ts`: whichever
+ * side gives up first, the operator gets the local render rather than a hang,
+ * and losing the race HERE means the supervisor is the one that says why.
+ */
+const EXPORT_HTML_TIMEOUT_MS = 8_000;
 
 interface Argv {
   runsRoot: string;
@@ -652,6 +660,43 @@ async function main(): Promise<void> {
         const message = typeof msg["message"] === "string" ? msg["message"] : "";
         const sent = await client.send("steer", { message });
         return { ok: sent.response.success };
+      }
+
+      /**
+       * A5 (SRD §8.4, ISC-101/ISC-234): Pi exports its OWN session.
+       *
+       * The CLI can always re-render A4 itself, and does — that fallback is
+       * what makes ISC-101 hold for the dead workers harvest exists for. But
+       * a re-render is a SECOND opinion about a file Pi wrote: it knows only
+       * the record types `harvest/transcript.ts` models, and silently flattens
+       * everything else. While a worker is alive, its own renderer is the
+       * authority, and the only way to reach it is through here — a control
+       * socket that answered `unknown cmd: export_html` made the live path
+       * unreachable and left every export, live or dead, on the fallback.
+       *
+       * `path` is passed to Pi VERBATIM and the CLI re-checks the filesystem
+       * before believing the reply (`transcript.ts`). That check is what keeps
+       * this safe once Pi runs in a container: a path Pi resolves inside the
+       * container namespace produces no file at the host path the operator
+       * asked for, the `exists()` guard fails, and the export degrades to the
+       * local render instead of reporting a success that wrote nothing.
+       */
+      case "export_html": {
+        const path = msg["path"];
+        if (typeof path !== "string" || path === "") {
+          return { ok: false, error: "export_html requires a non-empty path" };
+        }
+        try {
+          const sent = await client.send("export_html", { path }, { timeoutMs: EXPORT_HTML_TIMEOUT_MS });
+          return {
+            ok: sent.response.success,
+            error: sent.response.success ? null : (sent.response.error ?? "export_html failed"),
+          };
+        } catch (err) {
+          // A wedged or dead child must not take the supervisor down, and the
+          // caller has a working fallback — report the failure and keep serving.
+          return { ok: false, error: `export_html: ${String(err)}` };
+        }
       }
 
       case "abort": {

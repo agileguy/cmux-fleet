@@ -61,10 +61,11 @@
  * do this, everyone else does that" instead of an ordering puzzle.
  */
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { LineSplitter, parseLine } from "../../src/util/jsonl.ts";
 import { stepsForSession } from "./scenario-steps.ts";
+import { EXPORT_MARKER } from "./export-marker.ts";
 
 // ---------------------------------------------------------------------------
 // Argument parsing — tolerant of real Pi flags it does not implement.
@@ -449,6 +450,36 @@ async function handle(msg: Record<string, unknown>): Promise<void> {
       if (step?.emit_after_respond !== undefined) {
         void runEmissions(step.emit_after_respond, { cancelled: false });
       }
+      return;
+    }
+
+    /**
+     * Real Pi renders its own session to a standalone file (ISC-234). The
+     * double writes a MARKER document rather than a plausible transcript,
+     * because the whole point of the live path is that it is distinguishable
+     * from the CLI's local re-render — the two agree on exit code and on
+     * "a file exists at the path", and differ only in who wrote the bytes. A
+     * test that could not tell them apart would pass with the live path
+     * deleted.
+     */
+    case "export_html": {
+      const target = typeof msg["path"] === "string" ? msg["path"] : "";
+      if (step?.ack?.success === false) {
+        respond(id, command, false, undefined, step.ack.error ?? "export refused by scenario");
+        return;
+      }
+      if (target === "") {
+        respond(id, command, false, undefined, "export_html requires a path");
+        return;
+      }
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(
+        target,
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\">" +
+          `<title>fake-pi export ${args.sessionId}</title></head>` +
+          `<body><p id="${EXPORT_MARKER}">rendered by the agent, not by the CLI</p></body></html>\n`,
+      );
+      respond(id, command, true, { path: target });
       return;
     }
 

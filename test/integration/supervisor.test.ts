@@ -37,11 +37,14 @@ import type { FenceSnapshot } from "../../src/rpc/epoch.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { identityAlive, processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
+import { EXPORT_MARKER } from "../fixtures/export-marker.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
 const SCENARIOS = join(ROOT_URL, "test/fixtures/scenarios");
 const LAUNCH_TS = join(ROOT_URL, "src/supervisor/launch.ts");
+const CLI = join(ROOT_URL, "src/cli/index.ts");
 
 const cleanups: Array<() => Promise<void>> = [];
 afterAll(async () => {
@@ -152,6 +155,23 @@ function makeEnvelope(runId: string, worker: string, taskId: string): TaskEnvelo
     outbox: `/outbox/${taskId}`,
     deadline_s: 300,
   });
+}
+
+/** Drive the real CLI, the layer an operator actually invokes. */
+async function cli(
+  root: string,
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn([process.execPath, CLI, ...args], {
+    env: { ...process.env, PIFLEET_RUNS_DIR: root },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  return { code: await proc.exited, stdout, stderr };
 }
 
 async function killSupervisor(pid: number, pgid: number): Promise<void> {
@@ -994,5 +1014,105 @@ describe("ISC-116: a deadline aborts the agent, then reports timed_out", () => {
       await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
     },
     45_000,
+  );
+});
+
+/**
+ * ISC-234: the control socket answers `export_html`, so a LIVE worker's
+ * `transcript --html` goes through Pi rather than the CLI's local renderer.
+ *
+ * The two paths are near-indistinguishable by construction — same exit code,
+ * same reported path, a real HTML document either way — which is exactly why
+ * this criterion could sit unimplemented behind a green suite. `transcript.ts`
+ * catches every RPC failure and falls back silently, and an unknown verb IS a
+ * failure, so before the supervisor learned this verb the live path was
+ * unreachable and nothing anywhere noticed.
+ *
+ * Both directions are asserted, in one test, against the SAME run:
+ *   - supervisor alive -> `source: "rpc"`   and the marker IS present
+ *   - supervisor gone  -> `source: "local"` and the marker is NOT present
+ *
+ * The second half is what makes the first half mean something. Alone, a marker
+ * assertion proves only that some file contains a string; paired, the marker is
+ * shown to DISCRIMINATE between the two renderers on identical input. It also
+ * re-pins the ISC-101 fallback that ISC-234 must not break — the dead worker is
+ * the one harvest exists for.
+ */
+describe("export_html over the control socket (ISC-234)", () => {
+  test(
+    "a live worker exports through Pi; the same run falls back to the local render once it is gone",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("exporthtml");
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("happy.json") },
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      // A transcript has to EXIST before `--html` exports anything:
+      // `classifySession` gates on the recorded session file, and fake-pi
+      // creates it lazily on the first assistant message exactly as real Pi
+      // does (SRD §4.2). So the export needs a completed turn behind it.
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-EXPORT-1"),
+        attempt_id: "int-attempt-export",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      const present = await waitFor(async () => {
+        const s = await readWorkerState(wp);
+        return s?.session_path != null && (await Bun.file(s.session_path).exists());
+      }, 20_000);
+      expect(present).toBe(true);
+
+      // --- live: Pi renders its own session --------------------------------
+      const liveOut = join(root, "live.html");
+      const live = await cli(root, [
+        "transcript", "--worker", "eng-1", "--run", runId, "--html", liveOut, "--json",
+      ]);
+      expect(live.stderr).toBe("");
+      expect(live.code).toBe(0);
+      // THE assertion. Fails if the supervisor stops answering `export_html`:
+      // the CLI's catch-and-fall-back turns an unknown verb into `"local"`,
+      // silently, which is the exact state ISC-234 was filed over.
+      expect(JSON.parse(live.stdout.trim())).toMatchObject({ html: liveOut, source: "rpc" });
+      const liveHtml = await Bun.file(liveOut).text();
+      // Not merely "a file was written" — the bytes are the AGENT's, not a
+      // second opinion reconstructed from A4 by the CLI.
+      expect(liveHtml).toContain(EXPORT_MARKER);
+
+      // --- dead: the ISC-101 fallback, unbroken ----------------------------
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      expect(await waitFor(async () => (await processStartTime(pid)) === null, 10_000)).toBe(true);
+
+      const deadOut = join(root, "dead.html");
+      const dead = await cli(root, [
+        "transcript", "--worker", "eng-1", "--run", runId, "--html", deadOut, "--json",
+      ]);
+      expect(dead.stderr).toBe("");
+      expect(dead.code).toBe(0);
+      expect(JSON.parse(dead.stdout.trim())).toMatchObject({ html: deadOut, source: "local" });
+      const deadHtml = await Bun.file(deadOut).text();
+      // The marker DISCRIMINATES: the local renderer must never emit it, or
+      // the assertion above would pass for a reason unrelated to ISC-234.
+      expect(deadHtml).not.toContain(EXPORT_MARKER);
+      // Still a real, openable document — ISC-101 is not collateral damage.
+      expect(deadHtml.startsWith("<!doctype html>")).toBe(true);
+      expect(deadHtml).toContain("</html>");
+    },
+    // Two CLI spawns; the supervisor launch, a full turn and a shutdown sit
+    // outside that model, so the larger of the two numbers wins.
+    Math.max(cliBudget(2), 60_000),
   );
 });
