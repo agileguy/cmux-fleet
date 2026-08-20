@@ -32,13 +32,14 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
+import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
 import { EXIT, type LedgerRecord } from "../../src/contracts.ts";
-import { runPaths, workerPaths } from "../../src/run/paths.ts";
+import { runPaths, workerBranch, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { readRunWorktrees } from "../../src/run/state.ts";
 import { inspectCloneDirt } from "../../src/run/worktree.ts";
@@ -47,7 +48,8 @@ import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
 // scan `up` runs, rather than sleeping a hopeful interval — see
 // `startDecoyTrainingRun`.
 import { checkMlxTrainingGuard } from "../../src/safety/mlx-training-guard.ts";
-import { seedGitRepo } from "../fixtures/synthetic-repo.ts";
+import { git, gitOk, seedGitRepo } from "../fixtures/synthetic-repo.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -110,7 +112,23 @@ afterAll(async () => {
     }
     await rm(r.base, { recursive: true, force: true }).catch(() => {});
   }
-}, 120_000);
+  // ISC-266 audit: this hook was the one timeout in the file carrying a flat
+  // hand-written number (120_000) instead of a derived one, and it had gone
+  // UNDER-budgeted. It spawns one `down` per run directory per rig, and every
+  // `makeRig` registers a rig (single `rigs.push`, in `makeRig` itself), so the
+  // counted upper bound is the number of `makeRig` CALLS — 26 in this file, not
+  // estimated. cliBudget(26) = 296_400 ms; the old flat 120_000 was already
+  // exceeded by cliBudget(15) = 171_000. Counting rather than estimating is the
+  // criterion's own instruction, and this is the case it was written for: the
+  // budget silently stopped matching the work as the file grew.
+  //
+  // Charging every `down` the expensive per-spawn rate is deliberately
+  // conservative — rigs whose test never reached `up` contribute zero spawns —
+  // because the failure mode here is not a slow suite, it is the one this
+  // hook's own docstring above exists to prevent: a timed-out `afterAll`
+  // truncates the loop mid-way and leaks detached supervisors onto the
+  // developer's machine, which this project has already paid for.
+}, cliBudget(26));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -2106,6 +2124,223 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
       expect(materialized!.detail?.["skill_names"]).toEqual(["pifleet-worker"]);
       expect(materialized!.detail?.["kubeconfig_source"]).toBe(kubeconfig);
     },
+    90_000,
+  );
+});
+
+/**
+ * ISC-119 — a hostile repository changes nothing about the run.
+ *
+ * `test/integration/hostile-repo.test.ts` proves the SCANNER: hand it a seeded
+ * tree and every payload class is detected, quarantined, and demonstrably does
+ * not fire. What it cannot prove is that the thing a WORKER actually opens has
+ * been through that scanner, because it never creates one — it calls
+ * `neutralizeRepoHazards` directly on the seeded tree, and no run exists in
+ * that file at all (its own header says so).
+ *
+ * That gap was not theoretical. A worker mounts `<repo>/.worktrees/<id>` at
+ * `/workspace`, which is a CLONE — so it carries the TRACKED hazards
+ * (`AGENTS.md`, `.pi/extensions/`) and none of the untracked ones
+ * (`.git/config` keys, `.git/hooks/`), an entirely different hazard profile
+ * from the tree the scanner suite exercises. Before this test the only
+ * clone-side assertion anywhere was that `AGENTS.md.pifleet-quarantined`
+ * exists (in the egress/ordering test above). `.pi/extensions/` — the
+ * in-process-EXECUTION class, the highest-consequence one, and the one ISC-119
+ * names FIRST — was never checked in the clone at all.
+ *
+ * `.pi/extensions/hostile.ts` is the criterion's own filename, deliberately.
+ */
+describe("a hostile repo changes nothing about the run (ISC-119)", () => {
+  test(
+    "a committed .pi/extensions and AGENTS.md never reach the worker's workspace",
+    async () => {
+      const rig = await makeRig();
+      // `makeRig` already seeds and commits the root AGENTS.md; this arms the
+      // other half of the criterion's sentence and commits it, so the clone
+      // carries it the way a real hostile repository would.
+      await mkdir(join(rig.repo, ".pi", "extensions"), { recursive: true });
+      await writeFile(
+        join(rig.repo, ".pi", "extensions", "hostile.ts"),
+        "// FIXTURE PAYLOAD — Pi executes this in-process if it is discovered.\nexport const activate = (): void => {};\n",
+      );
+      await gitOk(rig.repo, "add", "-A");
+      await gitOk(rig.repo, "commit", "-q", "-m", "arm the repository");
+
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      const wt = (await readRunWorktrees(runPaths(rig.runId, rig.root))).byWorker.get("eng-1");
+      expect(wt).toBeDefined();
+
+      // Control: the clone is genuinely the tree the payloads were committed
+      // into. Without this, every absence below is equally consistent with
+      // "neutralized" and "this test is looking at the wrong directory".
+      expect(await Bun.file(join(wt!.path, "README.md")).exists()).toBe(true);
+
+      // THE assertion. `<repo>/.worktrees/<id>` is mounted at `/workspace` and
+      // Pi discovers context files and extensions from its cwd — so these two
+      // paths ARE the run's exposure, and both are gone from it.
+      for (const rel of ["AGENTS.md", join(".pi", "extensions")]) {
+        await expect(lstat(join(wt!.path, rel))).rejects.toThrow();
+      }
+
+      // Renamed aside, not deleted: a worker whose legitimate file vanished
+      // with no record gets debugged as a mystery (repo-hazards.ts's own rule).
+      //
+      // BOTH halves need this, not just `.pi/extensions`. The absence loop
+      // above is `rejects.toThrow()` with no matcher, so on its own it passes
+      // on ANY rejection — including the one a fixture that never committed
+      // the file would produce. The quarantine assertion is what separates
+      // "the scanner neutralized it" from "it was never there", and until now
+      // only `.pi/extensions` had one; `AGENTS.md` was resting on the vacuous
+      // half alone. Mirrors the same pairing in the hazard-ordering test above.
+      expect(await Bun.file(join(wt!.path, `AGENTS.md${QUARANTINE_SUFFIX}`)).exists()).toBe(true);
+      expect(
+        await Bun.file(join(wt!.path, ".pi", `extensions${QUARANTINE_SUFFIX}`, "hostile.ts")).text(),
+      ).toContain("FIXTURE PAYLOAD");
+
+      // "Changes nothing about the run" in the one place it is measurable
+      // without a container: the run's own dirty accounting. Quarantine is a
+      // rename of tracked files, so without `captureWorktreeBaseline` running
+      // after it, an armed repository would make every worker read as holding
+      // work before it had done any — and `down --prune` would refuse it.
+      expect(await inspectCloneDirt(wt!)).toMatchObject({ dirty: false, statusLines: 0 });
+
+      // And the operator's own checkout keeps both files, unrenamed (SRD
+      // §12.8): `up` DETECTS there and neutralizes only in the clone.
+      expect(await Bun.file(join(rig.repo, ".pi", "extensions", "hostile.ts")).exists()).toBe(true);
+      expect(await Bun.file(join(rig.repo, "AGENTS.md")).exists()).toBe(true);
+    },
+    // ISC-266 audit: one `up` spawn, so cliBudget(1) = 11_400 ms is the derived
+    // floor. Held at this file's 90_000 convention because an `up` spawn is not
+    // the "grade a run and exit" shape PER_SPAWN_IDLE_MS was measured on — it
+    // launches a supervisor and then waits on an idle gate, which the budget
+    // model does not attempt to cost. Not reduced.
+    90_000,
+  );
+});
+
+/**
+ * ISC-123 and ISC-124 — a run moves no ref outside `fleet/<run-id>/*`, and
+ * leaves the operator's `git status --porcelain` unchanged.
+ *
+ * Both are properties of a RUN, so this drives the real CLI rather than
+ * `createWorkerWorktrees` in isolation: the ref surface a run touches is the
+ * union of the clone, the parent-side remote registration, and the
+ * `.git/info/exclude` write, and only an actual `up` exercises all three in
+ * the order that matters.
+ *
+ * THE FIXTURE IS DELIBERATELY NOT PRISTINE. ISC-124 says "unchanged", not
+ * "empty" — an assertion that porcelain is `""` afterwards would pass equally
+ * for a run that discarded the operator's uncommitted work, which is the
+ * failure the criterion exists to forbid. So the checkout carries a modified
+ * tracked file, a staged addition and an untracked file before `up` starts,
+ * and the comparison is byte-for-byte against what was there.
+ *
+ * Likewise the repository carries more than one ref (a second branch and a
+ * tag) so that "no ref moved" is a statement about a SET rather than about
+ * `main` alone.
+ */
+describe("a run moves no ref outside fleet/<run-id>/* (ISC-123, ISC-124)", () => {
+  /** `<sha> <ref>` lines → a map, so a diff names the ref that moved. */
+  function parseRefs(showRef: string): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const line of showRef.split("\n")) {
+      const sp = line.indexOf(" ");
+      if (sp < 0) continue;
+      out.set(line.slice(sp + 1), line.slice(0, sp));
+    }
+    return out;
+  }
+
+  test(
+    "the operator's refs and porcelain are byte-identical across a run, and only the worker's own branch moves",
+    async () => {
+      const rig = await makeRig();
+
+      await writeFile(join(rig.repo, "README.md"), "# edited by the operator, uncommitted\n");
+      await writeFile(join(rig.repo, "operator-scratch.txt"), "untracked operator work\n");
+      await writeFile(join(rig.repo, "staged.txt"), "staged operator work\n");
+      await gitOk(rig.repo, "add", "staged.txt");
+      await gitOk(rig.repo, "branch", "side");
+      await gitOk(rig.repo, "tag", "v1");
+
+      const refsBefore = await gitOk(rig.repo, "show-ref");
+      const headBefore = await gitOk(rig.repo, "symbolic-ref", "HEAD");
+      const statusBefore = (await git(rig.repo, "status", "--porcelain")).stdout;
+      // The fixture is genuinely dirty and genuinely multi-ref, so neither
+      // assertion below can pass by comparing nothing to nothing.
+      expect(statusBefore).not.toBe("");
+      expect(parseRefs(refsBefore).size).toBeGreaterThan(1);
+
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      // ISC-124. Byte-for-byte, including the staged/untracked/modified mix.
+      // The `.worktrees/<id>` clone `up` just created inside this checkout is
+      // suppressed by the `.git/info/exclude` entry `excludeWorktreesDir`
+      // writes; without it this reads `?? .worktrees/` and goes red here.
+      expect((await git(rig.repo, "status", "--porcelain")).stdout).toBe(statusBefore);
+
+      // ISC-123, operator side — and stronger than the criterion asks: not one
+      // ref moved, appeared or vanished. `up` registers a `worker-<id>` REMOTE
+      // in this repository; a remote is config, and fetching through it would
+      // create `refs/remotes/worker-eng-1/*`, which is exactly the kind of ref
+      // this forbids.
+      expect(await gitOk(rig.repo, "show-ref")).toBe(refsBefore);
+      expect(await gitOk(rig.repo, "symbolic-ref", "HEAD")).toBe(headBefore);
+
+      // ISC-123, worker side. The clone is where the run is ALLOWED to move a
+      // ref, and `fleet/<run-id>/<worker>` is the only one.
+      const wt = (await readRunWorktrees(runPaths(rig.runId, rig.root))).byWorker.get("eng-1");
+      expect(wt).toBeDefined();
+      const workerRef = `refs/heads/${workerBranch(DEFAULT_BRANCH_PREFIX, rig.runId, "eng-1")}`;
+      const cloneBefore = parseRefs(await gitOk(wt!.path, "show-ref"));
+      expect(cloneBefore.has(workerRef)).toBe(true);
+
+      // A worker committing on its branch is the whole point of the checkout;
+      // doing it here is what makes the loop below a real measurement rather
+      // than an observation that nothing happened at all.
+      await gitOk(wt!.path, "commit", "--allow-empty", "-q", "-m", "the worker's own commit");
+      const cloneAfter = parseRefs(await gitOk(wt!.path, "show-ref"));
+
+      for (const [ref, sha] of cloneAfter) {
+        if (ref.startsWith(`refs/heads/${DEFAULT_BRANCH_PREFIX}/${rig.runId}/`)) continue;
+        // Compared as an object so a failure NAMES the ref that moved rather
+        // than printing two bare shas. The `??` covers a ref that did not
+        // exist before at all, which must read as a change, not as undefined.
+        expect({ ref, sha }).toEqual({ ref, sha: cloneBefore.get(ref) ?? "<absent before>" });
+      }
+      expect([...cloneBefore.keys()].sort()).toEqual([...cloneAfter.keys()].sort());
+      // The CONTROL for that loop: the one ref the run may move, moved.
+      expect(cloneAfter.get(workerRef)).not.toBe(cloneBefore.get(workerRef));
+
+      // …and the operator's checkout is still untouched after the worker
+      // committed, which is the half a snapshot taken at `up` cannot show.
+      expect(await gitOk(rig.repo, "show-ref")).toBe(refsBefore);
+      expect((await git(rig.repo, "status", "--porcelain")).stdout).toBe(statusBefore);
+    },
+    // ISC-266 audit: one `up` spawn; same reasoning as the ISC-119 test above.
     90_000,
   );
 });
