@@ -1,0 +1,46 @@
+{
+  "scenario": "ui-fire-and-forget",
+  "_comment": "All five fire-and-forget extension_ui_request methods (SRD §4.2's vocabulary table: notify, setStatus, setWidget, setTitle, set_editor_text) arrive mid-turn, each carrying an id an answer could be addressed to. Nothing is waiting on them, so the double never blocks: the turn ends on its own agent_end. ISC-113 is the pair of facts this exercises — the supervisor must LOG each one and must send NOTHING back for any of them. The dialog class (select/confirm/input/editor) is deliberately absent: those block until answered and belong to ISC-111/112, which no code satisfies yet.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-notify",
+          "method": "notify",
+          "params": { "message": "worker is thinking" }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-setstatus",
+          "method": "setStatus",
+          "params": { "status": "running acceptance" }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-setwidget",
+          "method": "setWidget",
+          "params": { "widget": "progress", "value": 0.5 }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-settitle",
+          "method": "setTitle",
+          "params": { "title": "pifleet worker" }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-seteditortext",
+          "method": "set_editor_text",
+          "params": { "text": "draft" }
+        },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}

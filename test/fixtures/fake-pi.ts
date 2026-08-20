@@ -481,6 +481,39 @@ async function handle(msg: Record<string, unknown>): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Inbound request log — the only way to assert a NEGATIVE about the supervisor
+// ---------------------------------------------------------------------------
+
+/**
+ * Every line the supervisor writes to this process's stdin, appended verbatim
+ * when `PIFLEET_FAKE_REQUEST_LOG` names a path.
+ *
+ * It exists for the assertions no other artifact can carry: "the supervisor did
+ * NOT send anything for that request". `events.jsonl` records what the
+ * supervisor RECEIVED, and a message it never sent leaves no trace anywhere on
+ * the run directory — so a test asserting silence has to observe the wire from
+ * the far end. That is what ISC-113's fire-and-forget half needs, and asserting
+ * it from the supervisor side would only prove that the code we already read
+ * does what we already read.
+ *
+ * Off unless the variable is set, and raw lines rather than a parse, so a
+ * malformed write is evidence rather than a swallowed exception. No existing
+ * scenario changes behaviour: the double writes nothing extra and reads
+ * nothing extra when the variable is absent.
+ */
+const REQUEST_LOG = process.env["PIFLEET_FAKE_REQUEST_LOG"] ?? "";
+
+function logRequest(line: string): void {
+  if (REQUEST_LOG === "") return;
+  try {
+    appendFileSync(REQUEST_LOG, `${line}\n`);
+  } catch {
+    // A log that cannot be written must not change what the double does; the
+    // test asserting against it fails on the missing file instead.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
 
@@ -491,6 +524,7 @@ process.stderr.write(`fake-pi: scenario '${scenario.scenario}' loaded; model id 
 const splitter = new LineSplitter();
 for await (const chunk of Bun.stdin.stream()) {
   for (const line of splitter.push(chunk as Uint8Array)) {
+    logRequest(line);
     let msg: Record<string, unknown> | undefined;
     try {
       msg = parseLine<Record<string, unknown>>(line);
