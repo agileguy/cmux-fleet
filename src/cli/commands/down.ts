@@ -7,7 +7,13 @@ import { readPresentation, readRunWorktrees, readWorkerState } from "../../run/s
 import { pruneWorkerWorktree, type PruneOutcome } from "../../run/worktree.ts";
 import { loadBackend } from "../../backends/registry.ts";
 import type { BackendKind } from "../../backends/types.ts";
-import { processStartTime, readRegistry, registryCall } from "../../run/registry.ts";
+import {
+  IDENTITY_FORMAT,
+  isPinnedIdentity,
+  processStartTime,
+  readRegistry,
+  registryCall,
+} from "../../run/registry.ts";
 import { realProcessOps, sameIdentity, signalIfSame } from "../../safety/kill.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
@@ -31,7 +37,45 @@ const TERM_WAIT_MS = 2_000;
  * resolves the LATEST run, and after a reboot the latest run is a dead one
  * whose pids the machine has long since handed out again. `anchorIdentity`
  * below is the gate, and it refuses rather than signalling when the recorded
- * identity and the OS disagree.
+ * identity is missing, unreadable, or disagrees with the OS.
+ *
+ * MIGRATION POLICY for the pinned identity rendering (ISC-192's territory,
+ * decided here rather than discovered by an operator).
+ *
+ * `registry.ts` now pins `ps` to `TZ=UTC LC_ALL=C` and tags the result
+ * `utc1 …`. That CHANGES THE BYTES of every `started` already on disk — not
+ * only on a machine whose timezone differed, but on one that was already in
+ * UTC, because `LC_ALL=C` also reorders the fields ("Thu Aug 20 …" against
+ * "Thu 20 Aug …"). So on the first `down` after this upgrade, every identity
+ * recorded by the previous build fails to compare.
+ *
+ * The policy is TAG, REFUSE, AND NAME THE HATCH:
+ *
+ *  - Values this build writes carry the `utc1 ` tag, so they are recognisable
+ *    as comparable. No locale renders a weekday as `utc1`, so the tag cannot
+ *    collide with a legacy value.
+ *  - An UNTAGGED recorded value is reported `identity_legacy_format` — its
+ *    own answer, distinct from `identity_mismatch`. Reporting it as a
+ *    mismatch would assert something false about the world ("a stranger holds
+ *    this pid") and would train an operator to reach for the override
+ *    reflexively, which is precisely the reflex that must not be trained on
+ *    the one flag that re-opens the fail-open.
+ *  - `--force-identity` completes such a run using the pre-fix weak anchor.
+ *
+ * REJECTED: silently auto-upgrading a legacy value by rewriting it from the
+ * pid as it reads NOW. That value is derived from the present, not from
+ * launch, so it would launder an unverified anchor into a verified-LOOKING
+ * one — the fail-open being removed, wearing the fix's clothes. Nothing on
+ * disk can convert a legacy rendering into the pinned one, because the legacy
+ * string does not record which timezone or locale produced it.
+ *
+ * REJECTED: accepting a match under either rendering. The legacy value was
+ * rendered in the LAUNCHER's environment, and `down` can only re-render in
+ * the OPERATOR's, so "try both" does not reconstruct the launcher's string —
+ * it just re-admits the ambiguity the pin exists to remove.
+ *
+ * BLAST RADIUS: a run started before the upgrade and stopped after it. New
+ * runs are unaffected; a run started and stopped on one build is unaffected.
  *
  * `--prune` is the second phase, and only ever reached per worker whose
  * supervisor is CONFIRMED dead. `down` deleting a checkout a container is
@@ -56,11 +100,29 @@ export function register(program: Command): void {
     .option("--keep-panes", "leave panes open")
     .option("--prune", "remove worktrees and branches")
     .option("--force", "prune a checkout that still holds work")
+    .option(
+      "--force-identity",
+      "signal a process whose recorded launch identity is missing, unreadable or disagrees",
+    )
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { run?: string; json?: boolean; keepPanes?: boolean; prune?: boolean; force?: boolean }) => {
+    .action(async (opts: {
+      run?: string;
+      json?: boolean;
+      keepPanes?: boolean;
+      prune?: boolean;
+      force?: boolean;
+      forceIdentity?: boolean;
+    }) => {
       if (opts.force === true && opts.prune !== true) {
         throw new CliError("--force has no meaning without --prune", EXIT.USAGE);
       }
+      /**
+       * `--force-identity` is deliberately NOT gated on `--prune`, unlike
+       * `--force`. It changes what gets SIGNALLED, not what gets deleted, so
+       * it has a meaning on its own: an operator whose run predates the
+       * pinned identity rendering needs it to stop the run at all.
+       */
+      const forceIdentity = opts.forceIdentity === true;
       const root = runsRoot();
       const runId = opts.run ?? (await latestRunId(root));
       if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
@@ -87,7 +149,7 @@ export function register(program: Command): void {
        */
       const registry = await readRegistry(run).catch(() => null);
 
-      const report: Array<{ id: string; stopped: boolean; how: string }> = [];
+      const report: Array<{ id: string; stopped: boolean; how: string; forced_identity?: true }> = [];
       for (const id of workerIds.sort()) {
         const wp = workerPaths(run, id);
         const state = await readWorkerState(wp);
@@ -96,17 +158,48 @@ export function register(program: Command): void {
           continue;
         }
         const recorded = registry?.workers[id];
-        const target = await anchorIdentity(
+        const anchor = await anchorIdentity(
           state.pid,
+          // A registry entry for a DIFFERENT pid than `state.json` names is
+          // not this supervisor's identity — supervisor relaunched, or one of
+          // the two files is stale — so it is not offered as one. It reaches
+          // `anchorIdentity` as `null` and refuses like any other unrecorded
+          // worker rather than silently taking the weak anchor (ISC-272).
           recorded !== undefined && recorded.pid === state.pid ? recorded.started : null,
+          { force: forceIdentity },
         );
-        // Nothing on that pid, or something that is NOT the supervisor we
-        // recorded. Either way there is nothing here to stop, and signalling
-        // is the one thing that must not happen (ISC-191).
-        if (target === null) {
+        // Nothing holds that pid: genuinely gone, nothing to stop.
+        if (anchor.kind === "gone") {
           report.push({ id, stopped: true, how: "already_gone" });
           continue;
         }
+        /**
+         * A REFUSAL, reported as one.
+         *
+         * `stopped: false` is the load-bearing half. It makes the refusal
+         * visible in `--json`, non-zero at exit, and — the reason this is a
+         * data-loss fix rather than a reporting nicety — it makes the prune
+         * gate below refuse the checkout, because that gate acts only on
+         * `stopped`. Reported as `stopped: true` (which is what
+         * `already_gone` did), a live-but-unverifiable supervisor was classed
+         * PRUNABLE and `--prune` deleted the checkout its container was still
+         * writing to: the §9.3 corruption, measured end to end.
+         */
+        if (anchor.kind === "refused") {
+          report.push({ id, stopped: false, how: anchor.how });
+          await ledger.append("worker_down_refused", {
+            worker: id,
+            detail: { how: anchor.how, reason: anchor.detail, pid: state.pid },
+          });
+          if (opts.json !== true) {
+            process.stderr.write(
+              `  ${id}: refused to signal pid ${state.pid} — ${anchor.detail}; ` +
+                `re-run with --force-identity to signal it anyway\n`,
+            );
+          }
+          continue;
+        }
+        const target = anchor.target;
 
         // Phase 1: graceful, via the control socket.
         try {
@@ -131,8 +224,11 @@ export function register(program: Command): void {
         // `processStartTime`, and `down` would exit WORKER_DIED over a
         // stranger it never touched.
         const stopped = !(await sameIdentity(target, realProcessOps));
-        report.push({ id, stopped, how });
-        await ledger.append("worker_down", { worker: id, detail: { how, stopped } });
+        report.push({ id, stopped, how, ...(anchor.forced ? { forced_identity: true } : {}) });
+        await ledger.append("worker_down", {
+          worker: id,
+          detail: { how, stopped, forced_identity: anchor.forced },
+        });
         try {
           await unlink(wp.controlSock);
         } catch {
@@ -142,23 +238,60 @@ export function register(program: Command): void {
 
       // The daemon last: it must outlive the workers it deregisters.
       await registryCall(run, { cmd: "shutdown" }, { optional: true });
+      /**
+       * The daemon rung, and the one place a BARE pid was still reachable.
+       *
+       * `daemon.pid` records BOTH halves of the identity — `{pid, started}`,
+       * written in one call by `startRegistryDaemon`. This rung read the file,
+       * took the pid and threw the start time away, so a run directory left
+       * behind by a reboot signalled whatever now held the number. The
+       * recorded half is right here; use it.
+       *
+       * This rung passes `pgid: null`, so `signalIfSame` addresses
+       * `target.pid` directly. That makes the anchor the ONLY thing standing
+       * between a stale `daemon.pid` and `kill(<some stranger's pid>)` — no
+       * group indirection to raise ESRCH by luck, which is how the empty-string
+       * hole stayed invisible while a group-addressed worker rung looked safe.
+       *
+       * A refusal here is recorded and printed but does NOT fail the command.
+       * The daemon holds no checkout, so no `--prune` decision rests on it and
+       * there is no data-loss path to close; a run whose registry daemon is
+       * unidentifiable is a run whose workers were already reported on their
+       * own terms above.
+       */
+      let daemonReport: { stopped: boolean; how: string } | null = null;
       try {
-        // `daemon.pid` records BOTH halves of the identity — `{pid, started}`,
-        // written in one call by `startRegistryDaemon`. This rung read the
-        // file, took the pid and threw the start time away, so a run
-        // directory left behind by a reboot signalled whatever now held the
-        // number. The recorded half is right here; use it.
         const pidFile = JSON.parse(await Bun.file(run.daemonPid).text()) as {
           pid: number;
           started?: unknown;
         };
-        const target = await anchorIdentity(
+        const anchor = await anchorIdentity(
           pidFile.pid,
           typeof pidFile.started === "string" ? pidFile.started : null,
+          { force: forceIdentity },
         );
-        if (target !== null && !(await waitGone(target, TERM_WAIT_MS))) {
-          await signalGuarded(target, "SIGTERM", null);
-          await waitGone(target, TERM_WAIT_MS);
+        if (anchor.kind === "refused") {
+          daemonReport = { stopped: false, how: anchor.how };
+          await ledger.append("daemon_down_refused", {
+            detail: { how: anchor.how, reason: anchor.detail, pid: pidFile.pid },
+          });
+          if (opts.json !== true) {
+            process.stderr.write(
+              `  daemon: refused to signal pid ${pidFile.pid} — ${anchor.detail}; ` +
+                `re-run with --force-identity to signal it anyway\n`,
+            );
+          }
+        } else if (anchor.kind === "gone") {
+          daemonReport = { stopped: true, how: "already_gone" };
+        } else {
+          const target = anchor.target;
+          let how = "graceful";
+          if (!(await waitGone(target, TERM_WAIT_MS))) {
+            how = "sigterm";
+            await signalGuarded(target, "SIGTERM", null);
+            await waitGone(target, TERM_WAIT_MS);
+          }
+          daemonReport = { stopped: !(await sameIdentity(target, realProcessOps)), how };
         }
       } catch {
         // No daemon ever ran (integration setups) — nothing to stop.
@@ -226,7 +359,7 @@ export function register(program: Command): void {
           });
           pruneRefusals++;
         }
-        const stopped = new Map(report.map((r) => [r.id, r.stopped]));
+        const workerOutcome = new Map(report.map((r) => [r.id, r]));
         const byWorkerSorted = [...recorded.byWorker.entries()].sort(([a], [b]) => a.localeCompare(b));
         for (const [id, wt] of byWorkerSorted) {
           if (recorded.repo === null) {
@@ -248,12 +381,23 @@ export function register(program: Command): void {
           // the same fact and must not be treated as it: nothing was ever
           // writing into the checkout, so it is exactly as prunable as one
           // whose supervisor exited cleanly, subject to the same dirt check.
-          if (stopped.has(id) && stopped.get(id) !== true) {
+          const row = workerOutcome.get(id);
+          if (row !== undefined && !row.stopped) {
             pruned.push({
               workerId: id,
               path: wt.path,
               pruned: false,
-              reason: "its supervisor survived the kill ladder; a live container writing here would be corrupted by a delete",
+              // An anchor refusal is a DIFFERENT refusal from surviving the
+              // ladder, and saying "survived the kill ladder" for it would be
+              // a plain falsehood — no ladder ran. Both refuse, for the same
+              // §9.3 reason, but only one of them has a `--force-identity`
+              // answer, and an operator cannot pick it if the message hides
+              // which case they are in.
+              reason: isAnchorRefusal(row.how)
+                ? `its supervisor could not be identified (${row.how}), so 'down' refused to signal it ` +
+                  `and cannot show it is not still writing here; a live container writing here would be ` +
+                  `corrupted by a delete (--force-identity anchors on whatever holds the pid)`
+                : "its supervisor survived the kill ladder; a live container writing here would be corrupted by a delete",
             });
             pruneRefusals++;
             continue;
@@ -346,26 +490,56 @@ export function register(program: Command): void {
       await ledger.append("run_down", {});
 
       const allStopped = report.every((r) => r.stopped);
+      const refused = report.filter((r) => isAnchorRefusal(r.how));
       if (opts.json === true) {
         process.stdout.write(
           `${JSON.stringify({
             run_id: runId,
             workers: report,
             clean: allStopped,
+            // Additive, and non-fatal by design — see the daemon rung above.
+            // Present so `--json` carries the fact at all: a refusal there
+            // used to be indistinguishable from a daemon that was never running.
+            ...(daemonReport !== null ? { daemon: daemonReport } : {}),
             ...(opts.prune === true ? { pruned } : {}),
           })}\n`,
         );
       } else {
         process.stdout.write(`run ${runId} down\n`);
         for (const r of report) {
-          process.stdout.write(`  ${r.id}: ${r.stopped ? "stopped" : "STILL RUNNING"} (${r.how})\n`);
+          // REFUSED reads differently from STILL RUNNING on purpose. "Still
+          // running" says a ladder was climbed and lost; a refusal says no
+          // signal was ever sent, which is a different thing to do next.
+          const verdict = r.stopped ? "stopped" : isAnchorRefusal(r.how) ? "REFUSED" : "STILL RUNNING";
+          process.stdout.write(`  ${r.id}: ${verdict} (${r.how})\n`);
+        }
+        if (daemonReport !== null && !daemonReport.stopped) {
+          process.stdout.write(`  daemon: REFUSED (${daemonReport.how})\n`);
         }
         for (const p of pruned) {
           process.stdout.write(`  ${p.workerId}: ${p.pruned ? "pruned" : "KEPT"} — ${p.reason}\n`);
         }
       }
+      /**
+       * Not stopped is not stopped, whichever way it got there — but the two
+       * ways need different words, because they need different next actions.
+       * A survivor was signalled and outlived it; a refusal was never
+       * signalled at all, and `--force-identity` is the answer to exactly one
+       * of those. The old single sentence claimed a ladder had been climbed
+       * for both.
+       */
       if (!allStopped) {
-        throw new CliError("some supervisors survived the kill ladder", EXIT.WORKER_DIED);
+        const survivors = report.filter((r) => !r.stopped && !isAnchorRefusal(r.how));
+        const parts: string[] = [];
+        if (survivors.length > 0) parts.push(`${survivors.length} supervisor(s) survived the kill ladder`);
+        if (refused.length > 0) {
+          parts.push(
+            `${refused.length} were never signalled because their recorded launch identity ` +
+              `could not be confirmed (${[...new Set(refused.map((r) => r.how))].sort().join(", ")}); ` +
+              `--force-identity signals them anyway`,
+          );
+        }
+        throw new CliError(parts.join("; "), EXIT.WORKER_DIED);
       }
       /**
        * A refused prune is a non-zero exit, and deliberately so.
@@ -389,8 +563,36 @@ export function register(program: Command): void {
 }
 
 /**
- * Resolve the `(pid, started)` pair this ladder is allowed to signal, or null
- * for "do not signal anything" (ISC-191).
+ * Why an anchor declined to hand out a target.
+ *
+ * Three DIFFERENT facts about the world, kept apart deliberately. They were
+ * all reported as `already_gone, stopped: true` — the same words used for
+ * "nothing holds this pid" — and that collapse is what let a LIVE supervisor
+ * be reported as stopped, exit 0, and then have its checkout deleted by
+ * `--prune`, because the prune gate refuses only when `stopped` is false.
+ * Only "nothing holds this pid" is a success; the rest are refusals to act,
+ * and an operator who is not told the difference cannot act on it either.
+ */
+export type AnchorRefusal = "identity_mismatch" | "identity_unrecorded" | "identity_legacy_format";
+
+const ANCHOR_REFUSALS = new Set<string>([
+  "identity_mismatch",
+  "identity_unrecorded",
+  "identity_legacy_format",
+]);
+
+/** True for a `how` produced by an anchor refusal rather than by a ladder. */
+function isAnchorRefusal(how: string): boolean {
+  return ANCHOR_REFUSALS.has(how);
+}
+
+type Anchor =
+  | { kind: "gone" }
+  | { kind: "target"; target: ProcId; forced: boolean }
+  | { kind: "refused"; how: AnchorRefusal; detail: string };
+
+/**
+ * Resolve the `(pid, started)` pair this ladder is allowed to signal (ISC-191).
  *
  * A pid is not an identity — `safety/kill.ts`'s header argues the general
  * case. `down` is where it bites hardest, because `down` is the one kill path
@@ -399,27 +601,75 @@ export function register(program: Command): void {
  * run, and after a reboot the latest run is a stale one whose recorded pids
  * now belong to whatever the machine started since.
  *
- * `recorded` is the start time captured when the process was LAUNCHED, if
- * anything captured one. When it is present and disagrees with the OS, the
- * process we meant to kill is gone and this pid belongs to a stranger, so the
- * answer is null and no rung ever runs.
+ * FAIL-CLOSED, in all three refusal directions:
  *
- * When `recorded` is null nothing recorded an identity at launch, and the
- * anchor falls back to whatever holds the pid NOW. That is strictly weaker:
- * it makes every LATER rung identity-checked — closing the window in which
- * the target dies inside a grace period and the kernel rehomes its pid before
- * the next signal — but it cannot tell a supervisor from a stranger at rung
- * 0, because there is nothing to compare against. `WorkerState` records
- * `started_at` as an ISO wall-clock string, which is not comparable to
- * `ps -o lstart=`, so the registry is the only launch-time source for a
- * worker and a worker missing from it gets the weaker anchor. ISC-272 tracks
- * closing that.
+ *  - `identity_mismatch` — a comparable launch-time identity exists and
+ *    disagrees with the OS. The process we meant to kill is gone and this pid
+ *    belongs to a stranger.
+ *  - `identity_unrecorded` — nothing comparable was recorded. This covers
+ *    `null` (no registry entry, or one whose pid disagrees with `state.json`)
+ *    AND the empty string, which is NOT a neutral value: `""` is precisely
+ *    what both writers persist when their own capture failed
+ *    (`(await processStartTime(process.pid)) ?? ""` in `startRegistryDaemon`
+ *    and in `supervisor/index.ts`), and `RegistryWorkerSchema.started` is a
+ *    bare `z.string()` so a truncated or hand-edited file yields it too —
+ *    and stale files of unknown provenance are the entire premise of `down`.
+ *    Treating `""` as "no constraint" made a failed capture DOWNGRADE to the
+ *    rung-0 self-anchor, which on the daemon rung means `signalGuarded(…,
+ *    null)` and therefore `signalIfSame` addressing `target.pid`: a bare pid,
+ *    the literal thing ISC-191 forbids. Measured before this change, with a
+ *    live `sleep` recorded as `{"pid":N,"started":""}`: `down` exited 0 with
+ *    `clean: true` and the process was dead afterwards. Identical result with
+ *    the field absent entirely.
+ *  - `identity_legacy_format` — something was recorded, but before the
+ *    rendering was pinned (`registry.ts`'s `IDENTITY_FORMAT`), so it is not
+ *    comparable to anything this build can read off the OS. See the migration
+ *    note in `register` for why this is its own answer and not a mismatch.
+ *
+ * `force` is `--force-identity`: it restores the pre-fix weak anchor for the
+ * cases above — whatever holds the pid NOW becomes the target, every LATER
+ * rung is still identity-checked, but rung 0 cannot tell a supervisor from a
+ * stranger. It exists so a refusal is never a dead end, and it is a flag
+ * rather than a default because typing it is the operator asserting the run
+ * directory is theirs.
  */
-async function anchorIdentity(pid: number, recorded: string | null): Promise<ProcId | null> {
+async function anchorIdentity(
+  pid: number,
+  recorded: string | null,
+  opts: { force: boolean },
+): Promise<Anchor> {
   const current = await processStartTime(pid);
-  if (current === null) return null;
-  if (recorded !== null && recorded !== "" && recorded !== current) return null;
-  return { pid, started: current };
+  // Nothing holds the pid. The one genuine success among these answers, and
+  // the only one that may report `stopped: true`.
+  if (current === null) return { kind: "gone" };
+
+  const have = recorded !== null && recorded !== "" ? recorded : null;
+  let refusal: { how: AnchorRefusal; detail: string } | null = null;
+  if (have === null) {
+    refusal = {
+      how: "identity_unrecorded",
+      detail:
+        `nothing recorded a launch-time identity for pid ${pid}, so whatever holds that pid now ` +
+        `cannot be shown to be the process this run launched`,
+    };
+  } else if (!isPinnedIdentity(have)) {
+    refusal = {
+      how: "identity_legacy_format",
+      detail:
+        `the identity recorded for pid ${pid} predates the pinned '${IDENTITY_FORMAT}' rendering, ` +
+        `so it was written in whatever timezone and locale the launcher happened to have and is ` +
+        `not comparable to what this build reads from the OS`,
+    };
+  } else if (have !== current) {
+    refusal = {
+      how: "identity_mismatch",
+      detail: `pid ${pid} is held by a different process than the one this run recorded`,
+    };
+  }
+
+  if (refusal === null) return { kind: "target", target: { pid, started: current }, forced: false };
+  if (opts.force) return { kind: "target", target: { pid, started: current }, forced: true };
+  return { kind: "refused", ...refusal };
 }
 
 /**
