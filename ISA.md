@@ -805,6 +805,27 @@ the root-cause classification; this table is the index.
   configuration change that ISC-259's resolution already made legal. It is stated in the SRD
   as the first claim to falsify rather than as an assumption to build on.
 
+- **2026-08-20 — Phase A of SRD-PIFLEET-002: two of three disjunctions answered by the owner.**
+  **ISC-264 — arm 2, accept the overload.** `RELAY_LISTEN_ALIAS` stays `host.docker.internal`;
+  the criterion closes with a test pinning the documented name rather than with a rename. SRD
+  §5.9 already argued the acceptance on two checkable grounds and a rename would break every
+  existing config for a semantic improvement.
+  **ISC-268 — arm 1, WIRE it.** `adc_mode: file` is to be mounted through `buildDockerArgv`
+  and proved by an integration test that `docker inspect`s a container built from
+  `buildDockerArgv`'s own output, not from hand-written `-v` flags. This is the larger arm and
+  was chosen over removal deliberately: it keeps a service-account-key-file path that an
+  unattended host or CI runner may need instead of token mode. Consequence to carry forward —
+  ISC-44's three-relation mount guard has exactly one carve-out, the single ADC file this mode
+  mounts, and that branch has never executed against real argv; wiring the mode makes it
+  load-bearing on its first run, so its test must exercise the carve-out and not only the mount.
+  **ISC-243 — arm 1, close the measured holes and restate the anti-criterion.** The denylist
+  stays the mechanism; the 44-path probe becomes a regression test, the 40 measured misses
+  become patterns, the verdict cap widens, and the anti-criterion is restated as an accepted
+  documented residual. Chosen over building the graded allowlist because a PARTIAL allowlist is
+  strictly worse than a known-partial denylist: `harness.patterns` REPLACES rather than extends,
+  so the first over-cap is answered by narrowing the surface — the silent disable ISC-232
+  exists to prevent.
+
 ## Changelog
 
 
