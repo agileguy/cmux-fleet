@@ -49,6 +49,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cliBudget } from "../support/budget.ts";
 
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 
@@ -135,7 +136,22 @@ async function delayAtLeast(ms: number): Promise<number> {
  * developer's own oMLX, or with a second checkout, and the resulting failure
  * looks like a bug in `doctor` rather than in the harness.
  */
-function stubOmlx(opts: { completionStatus?: number; completionDelayMs?: number } = {}): StubOmlx {
+function stubOmlx(
+  opts: {
+    completionStatus?: number;
+    completionDelayMs?: number;
+    /** What `GET /v1/models` lists. Defaults to `SERVED`. */
+    models?: readonly string[];
+    /**
+     * A whole `/v1/models` payload, replacing the well-formed one — for the
+     * cases where the point is that the body is NOT the shape `doctor` expects.
+     * Takes precedence over `models`.
+     */
+    modelsBody?: unknown;
+    /** A `/v1/models` body that is not JSON at all, served as HTTP 200. */
+    modelsRawText?: string;
+  } = {},
+): StubOmlx {
   const requests: string[] = [];
   let observedDelayMs: number | null = null;
   const server = Bun.serve({
@@ -145,7 +161,14 @@ function stubOmlx(opts: { completionStatus?: number; completionDelayMs?: number 
       const url = new URL(req.url);
       requests.push(url.pathname);
       if (url.pathname.endsWith("/models")) {
-        return Response.json({ object: "list", data: SERVED.map((id) => ({ id, object: "model" })) });
+        if (opts.modelsRawText !== undefined) {
+          return new Response(opts.modelsRawText, {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if ("modelsBody" in opts) return Response.json(opts.modelsBody);
+        const ids = opts.models ?? SERVED;
+        return Response.json({ object: "list", data: ids.map((id) => ({ id, object: "model" })) });
       }
       if (url.pathname.endsWith("/chat/completions")) {
         const status = opts.completionStatus ?? 200;
@@ -174,8 +197,13 @@ function stubOmlx(opts: { completionStatus?: number; completionDelayMs?: number 
   };
 }
 
-/** A minimal valid fleet.yaml whose job is to name `llm.model` and `llm.base_url`. */
-async function configNaming(baseUrl: string): Promise<string> {
+/**
+ * A minimal valid fleet.yaml whose job is to name `llm.model` and `llm.base_url`.
+ *
+ * `allowlist` is optional and OMITS the key entirely when absent, so every
+ * pre-ISC-256 caller writes exactly the config it wrote before.
+ */
+async function configNaming(baseUrl: string, allowlist?: readonly string[]): Promise<string> {
   const base = await mkdtemp(join(tmpdir(), "pifleet-doctor-omlx-"));
   bases.push(base);
   const path = join(base, "fleet.yaml");
@@ -193,6 +221,9 @@ async function configNaming(baseUrl: string): Promise<string> {
       "llm:",
       `  model: ${CONFIGURED}`,
       `  base_url: ${baseUrl}`,
+      ...(allowlist === undefined
+        ? []
+        : ["  models_allowlist:", ...allowlist.map((m) => `    - ${m}`)]),
       "roles:",
       "  engineer: {}",
       "workers:",
@@ -203,6 +234,12 @@ async function configNaming(baseUrl: string): Promise<string> {
   return path;
 }
 
+interface AllowlistJson {
+  entry: string;
+  model: string;
+  served: boolean;
+}
+
 interface OmlxJson {
   ok: boolean;
   base_url: string;
@@ -211,9 +248,25 @@ interface OmlxJson {
   completion_latency_ms: number | null;
   probe_model: string | null;
   detail: string;
+  /** ISC-256. */
+  allowlist_checked: boolean;
+  allowlist: AllowlistJson[];
+  allowlist_not_served: string[];
 }
 
-async function doctorOmlx(configPath: string): Promise<OmlxJson> {
+interface DiagnosisJson {
+  name: string;
+  class: string;
+  message: string;
+}
+
+interface DoctorJson {
+  omlx: OmlxJson;
+  diagnoses: DiagnosisJson[];
+  diagnosis_classes: string[];
+}
+
+async function doctorJson(configPath: string): Promise<DoctorJson> {
   const p = Bun.spawn([process.execPath, CLI, "doctor", "--json", "-c", configPath], {
     env: {
       ...process.env,
@@ -234,7 +287,12 @@ async function doctorOmlx(configPath: string): Promise<OmlxJson> {
   const [stdout] = await Promise.all([new Response(p.stdout).text(), p.exited]);
   const start = stdout.indexOf("{");
   if (start < 0) throw new Error(`doctor --json emitted no JSON object:\n${stdout}`);
-  return (JSON.parse(stdout.slice(start)) as Record<string, unknown>)["omlx"] as OmlxJson;
+  return JSON.parse(stdout.slice(start)) as DoctorJson;
+}
+
+/** The `omlx` block alone — what ISC-54/55 assert against. */
+async function doctorOmlx(configPath: string): Promise<OmlxJson> {
+  return (await doctorJson(configPath)).omlx;
 }
 
 describe("doctor reports the oMLX model list (ISC-54, stub-backed)", () => {
@@ -398,4 +456,276 @@ describe("doctor reports a measured completion latency (ISC-55, stub-backed)", (
     },
     30_000,
   );
+});
+
+/**
+ * ISC-256: `doctor` reports, for EVERY model in `models_allowlist`, whether the
+ * endpoint actually serves it — and flags the ones it does not.
+ *
+ * Same rig and same vantage as the ISC-54/55 tests above, deliberately: this
+ * check reads the model list that ISC-54 already fetches, so it is provable by
+ * exactly the stub that proves ISC-54, in CI, with no oMLX anywhere.
+ *
+ * The semantics of the comparison live in `test/unit/doctor-allowlist.test.ts`.
+ * What is asserted HERE is the wiring an operator actually meets: that the
+ * verdicts reach `doctor --json`, that a missing model becomes a named
+ * diagnosis, and — the half that is easy to get wrong — that neither a healthy
+ * allowlist nor an unreachable endpoint produces one.
+ */
+describe("doctor checks models_allowlist against what is served (ISC-256)", () => {
+  /** Served by the stub, so it must come back `served: true`. */
+  const SERVED_ENTRY = CONFIGURED;
+  /** Named by no stub anywhere in this file. */
+  const MISSING_A = "Qwen3-Coder-30B-A3B-Instruct-4bit";
+  const MISSING_B = "GLM-4.5-Air-MLX-4bit";
+
+  test(
+    "an allowlisted model the endpoint does not serve is reported and flagged",
+    async () => {
+      const stub = stubOmlx();
+      try {
+        const doc = await doctorJson(
+          await configNaming(stub.baseUrl, [SERVED_ENTRY, MISSING_A, MISSING_B]),
+        );
+
+        // The comparison ran against a list actually fetched from the server.
+        expect(doc.omlx.allowlist_checked).toBe(true);
+
+        // "for EVERY model in models_allowlist" — the whole list is reported,
+        // not merely the failures, so a checked-and-fine entry is visible as
+        // such rather than being indistinguishable from one never checked.
+        expect(doc.omlx.allowlist.map((a) => a.entry)).toEqual([
+          SERVED_ENTRY,
+          MISSING_A,
+          MISSING_B,
+        ]);
+        expect(doc.omlx.allowlist.find((a) => a.entry === SERVED_ENTRY)!.served).toBe(true);
+        expect(doc.omlx.allowlist.find((a) => a.entry === MISSING_A)!.served).toBe(false);
+        expect(doc.omlx.allowlist.find((a) => a.entry === MISSING_B)!.served).toBe(false);
+
+        // "and flags any that it does not" — the pre-extracted subset, exactly
+        // the two, and NOT the served one.
+        expect([...doc.omlx.allowlist_not_served].sort()).toEqual([MISSING_A, MISSING_B].sort());
+        expect(doc.omlx.allowlist_not_served).not.toContain(SERVED_ENTRY);
+
+        /**
+         * A field in `--json` that nothing grades is a report an operator can
+         * run past without noticing, which is the exact failure mode ISC-256
+         * describes: today the mistake is silent until `up` dies at exit 3.
+         * So it has to be a DIAGNOSIS, with a name and a class.
+         */
+        const d = doc.diagnoses.find((x) => x.name === "allowlist-model-not-served");
+        expect(d, `no allowlist diagnosis in ${JSON.stringify(doc.diagnoses)}`).toBeDefined();
+        expect(d!.class).toBe("misconfigured");
+        expect(doc.diagnosis_classes).toContain("misconfigured");
+        // The message names the offending entries, so the operator does not
+        // have to cross-reference a second field to know what to change.
+        expect(d!.message).toContain(MISSING_A);
+        expect(d!.message).toContain(MISSING_B);
+      } finally {
+        await stub.stop();
+      }
+    },
+    cliBudget(1),
+  );
+
+  /**
+   * THE discriminator, and the reason the test above is not sufficient on its
+   * own: a check hardwired to report everything missing, or to raise the
+   * diagnosis unconditionally, passes it. A healthy allowlist has to come back
+   * clean IN THE SAME SHAPE.
+   */
+  test(
+    "an allowlist the endpoint fully serves raises nothing",
+    async () => {
+      const stub = stubOmlx();
+      try {
+        const doc = await doctorJson(await configNaming(stub.baseUrl, SERVED));
+
+        expect(doc.omlx.allowlist_checked).toBe(true);
+        expect(doc.omlx.allowlist).toHaveLength(SERVED.length);
+        expect(doc.omlx.allowlist.every((a) => a.served)).toBe(true);
+        expect(doc.omlx.allowlist_not_served).toEqual([]);
+        expect(doc.diagnoses.map((x) => x.name)).not.toContain("allowlist-model-not-served");
+      } finally {
+        await stub.stop();
+      }
+    },
+    cliBudget(1),
+  );
+
+  /**
+   * The false positive that would have made this check worse than useless.
+   *
+   * An unreachable endpoint serves no models, so a check that did not gate on
+   * having actually READ a model list would report every allowlisted model as
+   * missing and send the operator to edit a correct allowlist. On the DEFAULT
+   * config that is not an edge case — `llm.base_url` names
+   * `host.docker.internal`, which does not resolve from the host `doctor` runs
+   * on, so it would fire on every developer machine on every run.
+   *
+   * It is also the shape that already went wrong here once: the file header
+   * records a vantage NOTE that was briefly a `Diagnosis` and "turned eight
+   * green runs red" on healthy machines. Same trap, so the same guard, and it
+   * is asserted rather than merely intended.
+   */
+  test(
+    "an unreachable endpoint is NOT reported as a bad allowlist",
+    async () => {
+      // Port 1 — privileged, nothing listening, refuses immediately.
+      const doc = await doctorJson(
+        await configNaming("http://127.0.0.1:1/v1", [SERVED_ENTRY, MISSING_A]),
+      );
+
+      expect(doc.omlx.ok).toBe(false);
+      // The check did not run, and says so — which is a different fact from
+      // "every entry is fine" and must not be reported as one.
+      expect(doc.omlx.allowlist_checked).toBe(false);
+      expect(doc.omlx.allowlist).toEqual([]);
+      expect(doc.omlx.allowlist_not_served).toEqual([]);
+      expect(doc.diagnoses.map((x) => x.name)).not.toContain("allowlist-model-not-served");
+    },
+    cliBudget(1),
+  );
+
+  /**
+   * The contradiction, end to end through the real CLI.
+   *
+   * `test/unit/doctor-allowlist.test.ts` pins the comparison; what is asserted
+   * HERE is that a REAL server listing repo-id-form ids does not make `doctor`
+   * raise a diagnosis over an allowlist `up` accepts. `mlx-community/…` is the
+   * standard MLX/HuggingFace form and what the oMLX this repo develops against
+   * actually lists, so the previous behaviour — served ids compared raw —
+   * meant `doctor` exited 3 on the ordinary case and told the operator to edit
+   * a correct file.
+   */
+  test(
+    "a server listing repo-id-form ids does not make a correct allowlist a finding",
+    async () => {
+      const stub = stubOmlx({
+        models: [`mlx-community/${CONFIGURED}`, "mlx-community/stub-other-model"],
+      });
+      try {
+        const doc = await doctorJson(
+          await configNaming(stub.baseUrl, [SERVED_ENTRY, MISSING_A]),
+        );
+
+        expect(doc.omlx.allowlist_checked).toBe(true);
+        // The allowlisted bare name IS served by the prefixed id.
+        expect(doc.omlx.allowlist.find((a) => a.entry === SERVED_ENTRY)!.served).toBe(true);
+        // And the decomposition is not a licence to match anything: a model
+        // the server genuinely does not list is still flagged, so this test
+        // cannot be passed by a function that answers "served" to everything.
+        expect(doc.omlx.allowlist.find((a) => a.entry === MISSING_A)!.served).toBe(false);
+        expect(doc.omlx.allowlist_not_served).toEqual([MISSING_A]);
+        const d = doc.diagnoses.find((x) => x.name === "allowlist-model-not-served");
+        expect(d, `no allowlist diagnosis in ${JSON.stringify(doc.diagnoses)}`).toBeDefined();
+        expect(d!.message).toContain("names 1 model(s)");
+        // Scoped to the accusation, not the whole message: the trailing
+        // "it serves [...]" clause names the served ids on purpose, and
+        // `mlx-community/stub-chat-model` contains `stub-chat-model`.
+        const accused = d!.message.slice(
+          d!.message.indexOf("does not serve: "),
+          d!.message.indexOf(" — it serves"),
+        );
+        expect(accused).toContain(MISSING_A);
+        expect(accused).not.toContain(SERVED_ENTRY);
+
+        // Decomposition is a COMPARISON concern only. `omlx.models` is ISC-54's
+        // report of what the server said and must stay verbatim — stripping the
+        // prefix there would have `doctor` printing a model list no server
+        // serves under that name.
+        expect(doc.omlx.models).toEqual([
+          `mlx-community/${CONFIGURED}`,
+          "mlx-community/stub-other-model",
+        ]);
+      } finally {
+        await stub.stop();
+      }
+    },
+    cliBudget(1),
+  );
+
+  /**
+   * A repeated bad line is ONE model to go and fix.
+   *
+   * The verdict list stays 1:1 with the config — that is what makes `n/m
+   * served` a ratio over lines, and it is asserted below. But the diagnosis
+   * says "names N model(s)", a claim about models, and it used to count
+   * verdicts: a duplicated entry read `names 2 model(s) … : X, X`, sending the
+   * operator to look for a second model that never existed. The existing
+   * duplicate test uses a SERVED duplicate, so it never reaches this message.
+   */
+  test(
+    "a duplicated missing entry is counted and named once in the diagnosis",
+    async () => {
+      const stub = stubOmlx();
+      try {
+        const doc = await doctorJson(await configNaming(stub.baseUrl, [MISSING_A, MISSING_A]));
+
+        // The full record still has one verdict per config line.
+        expect(doc.omlx.allowlist.map((a) => a.entry)).toEqual([MISSING_A, MISSING_A]);
+        // The flagged subset, and the message, speak in models.
+        expect(doc.omlx.allowlist_not_served).toEqual([MISSING_A]);
+        const d = doc.diagnoses.find((x) => x.name === "allowlist-model-not-served");
+        expect(d, `no allowlist diagnosis in ${JSON.stringify(doc.diagnoses)}`).toBeDefined();
+        expect(d!.message).toContain("names 1 model(s)");
+        expect(d!.message.split(MISSING_A).length - 1).toBe(1);
+      } finally {
+        await stub.stop();
+      }
+    },
+    cliBudget(1),
+  );
+});
+
+/**
+ * "Answered, but unreadable" is not "did not answer".
+ *
+ * A `/v1/models` body of `null`, or `{"data":"x"}`, or a list with a null
+ * element, threw inside the same try that catches connection failures — so a
+ * server that had just returned HTTP 200 over a working socket was reported as
+ * `oMLX unreachable at <url>` and the operator was sent to check the network.
+ * The fix is a separate boundary around the parse, and these assert the
+ * distinction rather than merely that something went wrong.
+ */
+describe("a malformed /v1/models is not misreported as unreachable", () => {
+  const CASES: { label: string; opts: Parameters<typeof stubOmlx>[0] }[] = [
+    { label: "a null body", opts: { modelsBody: null } },
+    { label: "data is not an array", opts: { modelsBody: { data: "x" } } },
+    { label: "no data key at all", opts: { modelsBody: { object: "list" } } },
+    { label: "an element that is not an object", opts: { modelsBody: { data: [null] } } },
+    { label: "a body that is not JSON", opts: { modelsRawText: "<html>proxy error</html>" } },
+  ];
+
+  for (const { label, opts } of CASES) {
+    test(
+      label,
+      async () => {
+        const stub = stubOmlx(opts);
+        try {
+          const doc = await doctorJson(await configNaming(stub.baseUrl, [CONFIGURED]));
+
+          expect(doc.omlx.ok).toBe(false);
+          expect(doc.omlx.models).toEqual([]);
+          // THE point: the endpoint answered, and the report says so instead
+          // of blaming the network.
+          expect(
+            doc.omlx.detail,
+            `detail still blames connectivity: ${doc.omlx.detail}`,
+          ).not.toContain("unreachable");
+          expect(doc.omlx.detail).toContain("ANSWERED");
+
+          // An unreadable list is not evidence about any allowlist entry, for
+          // the same reason an unreachable endpoint is not.
+          expect(doc.omlx.allowlist_checked).toBe(false);
+          expect(doc.omlx.allowlist_not_served).toEqual([]);
+          expect(doc.diagnoses.map((x) => x.name)).not.toContain("allowlist-model-not-served");
+        } finally {
+          await stub.stop();
+        }
+      },
+      cliBudget(1),
+    );
+  }
 });
