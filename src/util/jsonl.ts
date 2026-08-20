@@ -328,9 +328,27 @@ export class TailReader {
  * permission on the directory, while writing and renaming inside it need only
  * write+search. A `0o300` run directory — a hardened umask, a deliberately
  * locked-down runs root — therefore let the tmp file be written, fsynced and
- * renamed into place and THEN threw `EACCES` out of `writeJsonAtomic`. The
- * `close()` is inside the guard for the same reason: on some filesystems a
- * deferred error surfaces there, which would escape a `finally` untouched.
+ * renamed into place and THEN threw `EACCES` out of `writeJsonAtomic`.
+ *
+ * The `close()` is guarded too, but for a WEAKER reason than the rest, and the
+ * distinction is worth keeping straight. An earlier revision of this comment
+ * justified it with deferred-writeback error reporting — NFS close-to-open, the
+ * Linux `errseq_t` mechanism that surfaces a lost async writeback at `close()`.
+ * That cannot happen here: those errors are reported to descriptors that had
+ * WRITES issued through them, and this handle is `open(dir, "r")` — read-only,
+ * on a directory, with nothing ever written through it. There is no dirty page
+ * for a deferred error to be owed to.
+ *
+ * What `close()` can actually return here is EBADF or EINTR, neither of which
+ * the caller can act on any more than the `sync()` failure above. So the guard
+ * stays as defence in depth and for consistency — every step of a best-effort
+ * helper swallowing, rather than one step left able to fail the call the whole
+ * function exists to protect — and not as a mechanism that could fire.
+ *
+ * Contrast `fh` in `writeJsonAtomic`: opened "w", written, synced, and its
+ * `close()` deliberately NOT guarded. That is the descriptor the deferred-error
+ * mechanism genuinely applies to, and a failure there happens BEFORE the
+ * rename, so it means the write did not land and the caller must hear about it.
  *
  * Exported so the guarantee can be tested against a directory that cannot be
  * opened at all, rather than only inferred from the code shape.
