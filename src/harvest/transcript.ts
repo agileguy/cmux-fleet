@@ -524,5 +524,8 @@ function combineUsageAdd(total: UsageTotals, usage: unknown): UsageTotals {
 
 // combineUsage is re-exported for callers that merge this module's totals with
 // the supervisor's `get_session_stats` numbers (A6) — see harvest/usage.ts for
-// why the merge is element-wise max.
+// why the merge is element-wise max, and for why those numbers do not yet
+// exist. Nothing imports it from HERE either: the one caller
+// (cli/commands/harvest.ts) takes it straight from harvest/usage.ts, so this
+// re-export is currently a convenience with no user.
 export { combineUsage };

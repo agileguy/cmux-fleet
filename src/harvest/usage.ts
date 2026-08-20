@@ -1,18 +1,39 @@
 /**
  * A6 — cost and usage (SRD §8.1).
  *
- * Two sources, both consulted:
+ * Two sources are DESIGNED for. Exactly one is consulted:
  *
- * 1. `get_session_stats` — `data.tokens` and `data.cost`, as persisted by the
- *    supervisor into `state.json`'s `usage` field.
- * 2. `AssistantMessage.usage` in the A4 transcript, folded per message.
+ * 1. `get_session_stats` — `data.tokens` and `data.cost`, intended to be
+ *    persisted by the supervisor into `state.json`'s `usage` field. NOT
+ *    WIRED. Nothing in `src/` sends that RPC: every occurrence of the verb
+ *    outside a comment is absent, every command name at an
+ *    `rpc/client.ts#send` call site is a string literal, and the only
+ *    executable `get_session_stats` in the repository is the RESPONDER in
+ *    the test double. `WorkerState.usage` is consequently never written by
+ *    anything — it materializes at its schema default and stays
+ *    `{0, 0, 0, false}` for the life of a run. `usageFromSessionStats`
+ *    below parses the payload shape and has no production caller; its unit
+ *    tests are what keep it honest until one exists.
+ * 2. `AssistantMessage.usage` in the A4 transcript, folded per message. This
+ *    is the source that actually runs, and in production it is the only
+ *    contributor to any total this module returns.
+ *
+ * Stated plainly because the sentence this replaces asserted both sources
+ * were live and left a reader no way to notice otherwise: `combineUsage` is
+ * an identity function on the transcript total today. Its other argument is
+ * always zero, so the element-wise `max` below reduces to `max(0, x)` on
+ * every axis. The under-count that source 1 exists to correct — a transcript
+ * rewritten or branch-pruned on session switch — is therefore uncorrected.
+ * Wiring source 1 is deliberately NOT done here: it belongs with the budget
+ * work that would read the number, and ISC-114 records that `safety/budget.ts`
+ * has no production importer either.
  *
  * The load-bearing fact: **local models are unpriced**. oMLX has no price
  * table, so `cost` is 0 on every response no matter how many tokens burned
  * (SRD §5.9). A ceiling that watches dollars therefore never trips locally —
  * ISC-115 requires the run to halt while reported cost is 0 throughout — so
  * `usd` is advisory, `priced` records whether it means anything, and tokens
- * are the axis budget code must read.
+ * are the axis budget code must read when budget code reaches a run.
  *
  * The output shape mirrors `WorkerStateSchema.usage` in contracts.ts exactly,
  * so a total computed here can be written into a state file without
@@ -111,6 +132,15 @@ export function usageFromAssistantMessage(usage: unknown): UsageTotals | null {
  * the exact failure ISC-115 exists to prevent — so the merge takes the larger
  * claim on every axis. Over-counting trips a budget early, which is loud and
  * cheap; under-counting blows through it silently.
+ *
+ * The max is the RIGHT rule and is currently a no-op: source 1 is unwired
+ * (see the module header), so at the one production call site the `a` side is
+ * always the zero default and this returns `b` unchanged. Both null branches
+ * below are likewise unreachable from production — that call site passes a
+ * schema-defaulted `state.usage` and a `?? ZERO_USAGE` fallback. What keeps
+ * the max semantics from rotting is `test/unit/harvest-usage.test.ts` plus
+ * one integration fixture that hand-writes a non-zero `state.usage`; delete
+ * those and nothing observes this function's actual rule.
  */
 export function combineUsage(a: UsageTotals | null, b: UsageTotals | null): UsageTotals {
   if (a === null) return b ?? ZERO_USAGE;

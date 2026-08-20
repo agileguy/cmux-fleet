@@ -15,9 +15,29 @@
  * The ladder is: abort → await dead → SIGTERM → grace → SIGKILL, signalling
  * the process GROUP where the caller says one exists. The supervisor already
  * has a 5-second `ABORT_GRACE_MS` escalation hard-wired to the deadline case;
- * this is the general one, used by `down`'s quiesce (SRD §9.3), the wedged-
- * agent path (ISC-117), and — minus the abort rung, which a wedged supervisor
- * cannot answer — the reaper (safety/reaper.ts).
+ * this is the general one.
+ *
+ * WHO CALLS WHAT, written down because the version of this comment that
+ * stood here until 2026-08-19 named a caller it did not have and the
+ * criterion resting on it was graded from the claim rather than the code:
+ *
+ *  - `runKillLadder` has exactly ONE production caller — the reaper
+ *    (safety/reaper.ts), minus the abort rung, which a wedged supervisor
+ *    cannot answer.
+ *  - `down`'s quiesce (SRD §9.3) does NOT run this ladder. Its rungs are
+ *    shaped differently — a control-socket `shutdown` where this has an
+ *    abort RPC, and its own `how` vocabulary to report — so it climbs its
+ *    own sequence inline. It does so on `signalIfSame`/`sameIdentity` below,
+ *    which is what makes the identity discipline shared even though the
+ *    sequence is not. That is recent: `down` signalled a BARE pid with no
+ *    re-read at any rung until ISC-191 was re-graded, and the fixture in
+ *    `down-prune.test.ts` still carries the note from the day that ladder
+ *    SIGTERMed the test runner's own process group.
+ *  - `classifyStall` has no production caller at all — ISC-110 and ISC-117
+ *    are both open on exactly that, so the stall policy below is a written
+ *    rule nothing consults. `TaskDeadlineError` has no constructor call
+ *    outside its own test either; ISC-116 rests on the exit-code protocol it
+ *    satisfies, not on a caller.
  *
  * A task exceeding `deadline_s` settles `timed_out`, which `wait` already
  * maps to exit 4 (ISC-116); `TaskDeadlineError` is the diagnosed form for a
