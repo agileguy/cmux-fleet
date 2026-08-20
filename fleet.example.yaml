@@ -31,8 +31,13 @@ run:
   max_concurrent: 2          # bounded by oMLX throughput, not pane count (§5.9)
   budget:
     tokens_ceiling: 6000000  # THE ceiling — local models have no price table
+    # Held up front per admission and reconciled at settle. NOTE the shape this
+    # gives a run: admission refuses once spent + reserve would overrun, so the
+    # last `per_task_reserve_tokens` of the ceiling is unreachable and a run
+    # that uses its whole budget ends on that refusal (exit 5, "budget refused
+    # admission"), not on a crossed ceiling.
     per_task_reserve_tokens: 400000
-    soft_stop_at: 0.80
+    soft_stop_at: 0.80       # PARSED BUT NOT YET READ by any command — see config/schema.ts
     per_task_timeout: 25m
     run_timeout: 2h
   timers:

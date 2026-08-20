@@ -6,7 +6,7 @@ import { EXIT } from "../../contracts.ts";
 import { Stopwatch } from "../../rpc/client.ts";
 import { newRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
 import { materializeWorkerInputs } from "../../run/materialize.ts";
-import { readWorkerState, writePresentation } from "../../run/state.ts";
+import { readWorkerState, runBudgetRecord, writePresentation } from "../../run/state.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import {
   identityAlive,
@@ -435,6 +435,23 @@ export function register(program: Command): void {
         // `fleet.yaml` says today.
         repo: repoRoot,
         branch_prefix: loadedConfig?.config.run.branch_prefix ?? null,
+        /**
+         * What the run may SPEND, recorded for the same reason as everything
+         * above it: `dispatch --auto` caps concurrency and halts on the
+         * ceiling using these numbers, and re-resolving `fleet.yaml` at
+         * dispatch time would budget a months-old run against whatever config
+         * sits in today's cwd.
+         *
+         * `max_concurrent` had NO reader anywhere before the budget reached
+         * the dispatch path — a config key that validated, documented itself
+         * in `fleet.example.yaml`, and changed nothing, exactly like
+         * `branch_prefix` one line above. Null here means "no config was
+         * reachable", which `readRunBudgetPolicy` answers with the schema's
+         * own default for the cap and with UNBOUNDED for the ceiling; the two
+         * defaults differ on purpose, because a cap only delays work while an
+         * invented ceiling would refuse work nobody budgeted for.
+         */
+        ...runBudgetRecord(loadedConfig?.config.run ?? null),
         worktrees: null,
       };
       await writeJsonAtomic(run.runJson, runDoc);

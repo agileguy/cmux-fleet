@@ -132,6 +132,36 @@ export interface RunPaths {
    * schedule, and `report` must still describe it.
    */
   scheduleJson: string;
+  /**
+   * The run's budget accounting (`BudgetState`), written by the scheduler.
+   *
+   * Named here for the same reason `scheduleJson` is: two subsystems meet on
+   * it. `dispatch --auto` writes it on every admission and settle, and `wait`
+   * reads it to fold `budgetExitCode` into its own ladder — so a
+   * dispatch-then-wait pipeline reports the same integer as `--auto` did. The
+   * module `budget.ts` described this file in a comment for an entire phase
+   * while nothing created it and no path named it, which is exactly how the
+   * reporter and the scheduler once ended up with two spellings of
+   * `schedule.json`.
+   *
+   * A control-plane file like every other member here: it lives under the run
+   * dir, beside `control-auth.json`, and is NEVER mounted into a container.
+   * Nothing a worker can read needs the fleet's spend.
+   *
+   * What holds that up TODAY is an absence, and it is worth naming as one
+   * rather than as a guard: no mount spec in `container/mounts.ts` names the
+   * run dir, so nothing puts this file in front of a worker. That is a
+   * property of the current mount set, not an assertion anything enforces —
+   * `grep -rn assertNoRunDirMount src/` finds nothing on this branch. An
+   * earlier draft of this comment cited "the run-dir exposure rules" as
+   * though they existed here; they do not, they arrive with the run-dir
+   * exposure work, and a docstring citing a guard its own tree does not
+   * contain is exactly the defect the sibling review round exists to remove.
+   *
+   * Absence is normal and means the same thing `scheduleJson`'s does: no
+   * scheduled run has happened yet.
+   */
+  budgetJson: string;
 }
 
 export function runPaths(runId: string, root: string = runsRoot()): RunPaths {
@@ -150,6 +180,7 @@ export function runPaths(runId: string, root: string = runsRoot()): RunPaths {
     sessionsDir: join(base, "sessions"),
     workersDir: join(base, "workers"),
     scheduleJson: join(base, "schedule.json"),
+    budgetJson: join(base, "budget.json"),
   };
 }
 
