@@ -622,7 +622,6 @@ run:
   budget:
     tokens_ceiling: 6000000  # THE ceiling — local models have no price table
     per_task_reserve_tokens: 400000
-    soft_stop_at: 0.80
     per_task_timeout: 25m
     run_timeout: 2h
   timers:
@@ -1274,7 +1273,7 @@ The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Gen
 | F9 | `read-screen` absent or fails after display sleep | probe | irrelevant by design |
 | F10 | cmux/Pi version drift | pinned versions in ledger | `doctor` exits 3 on delta |
 | F11 | Context overflow / compaction thrash | `compaction_*` frequency | pre-emptive `compact`; smaller briefs; report flag |
-| F12 | Cost runaway | 60s `get_session_stats` | reservation + 80% soft-stop + ceiling halt |
+| F12 | Cost runaway | 60s `get_session_stats` | reservation + ceiling halt (**the 80% soft-stop was never implemented and its config key was removed — ISC-280**) |
 | F13 | Provider rate-limit / transient error | `auto_retry_*` | backoff; excess retries → `blocked` |
 | F14 | Session file rewritten, not appended | inode/size change | `(dev,ino,size,offset)` tracking (§8.3) |
 | F15 | Pane closed by Dan | surface missing | supervisor is detached — unaffected (**rpc mode only**) |
@@ -1286,7 +1285,7 @@ The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Gen
 | F21 | Torn read / multi-byte split | — | `StringDecoder` across polls; whole-line watermark (§8.3) |
 | F22 | `result.json` half-written | schema/epoch check | atomic write + dir fsync |
 | F23 | `.git/config` lock contention (concurrent operators registering a `worker-<id>` remote in the same parent — §9.2 erratum retired the `index.lock`/`worktree add` contention this row originally named); branch name git refuses; submodules/LFS | bounded retry-with-backoff on the config lock; `check-ref-format --branch` preflight; ref-scoped LFS/submodule scan | named fail-fast before any clone exists; no orphan left behind on a later failure |
-| F24 | Budget overshoot between polls | ledger reconciliation | per-task reservation + soft-stop band |
+| F24 | Budget overshoot between polls | ledger reconciliation | per-task reservation (**the soft-stop band was never implemented — ISC-280**) |
 | F25 | Pane closed → orphaned worker | registry orphan scan | supervisors detached; reaper (§13.1) |
 | F26 | **Stale epoch attributes one task's success to the next** | epoch not quiesced | correlated `get_state` fence (§7.5) |
 | F27 | ~~Unpriced model → `usd_ceiling` never trips~~ | — | **Retired.** Local models are always unpriced; `tokens_ceiling` is the only ceiling (§5.9) |

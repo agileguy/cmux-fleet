@@ -488,6 +488,41 @@ describe("validation rejections", () => {
     await expectIssue(doc, "budgets");
   });
 
+  /**
+   * ISC-280: `soft_stop_at` was removed, and the removal is enforced here.
+   *
+   * Deleting a key from a `.strict()` schema is a behaviour change for every
+   * config that carries it — including any copied from the `fleet.example.yaml`
+   * that shipped it — so it wants a test rather than a diff. Without this, the
+   * key could be re-added by a merge that looks like a restoration and nothing
+   * would notice it had no reader again.
+   */
+  test("run.budget.soft_stop_at is refused, and the message says removed, not typo", async () => {
+    const doc = baseDoc();
+    (doc["run"] as Record<string, unknown>)["budget"] = {
+      tokens_ceiling: 1_000_000,
+      soft_stop_at: 0.8,
+    };
+    // The path, so a same-named key under another parent is not what is caught.
+    await expectIssue(doc, "run.budget.soft_stop_at", "removed");
+    // And the reason, so the diagnosis survives someone rewording the map.
+    await expectIssue(doc, "run.budget.soft_stop_at", "ISC-280");
+  });
+
+  /**
+   * The generic path still behaves generically — a real typo must NOT inherit
+   * the removed-key wording, which would send someone to delete a line they
+   * meant to spell correctly.
+   */
+  test("a genuine typo in the same block is still a plain unrecognized key", async () => {
+    const doc = baseDoc();
+    (doc["run"] as Record<string, unknown>)["budget"] = {
+      tokens_ceiling: 1_000_000,
+      tokens_celing: 5,
+    };
+    await expectIssue(doc, "run.budget.tokens_celing", "unrecognized key");
+  });
+
   test("duplicate worker ids are rejected", async () => {
     const doc = baseDoc();
     doc["workers"] = [

@@ -37,7 +37,6 @@ run:
     # that uses its whole budget ends on that refusal (exit 5, "budget refused
     # admission"), not on a crossed ceiling.
     per_task_reserve_tokens: 400000
-    soft_stop_at: 0.80       # PARSED BUT NOT YET READ by any command — see config/schema.ts
     per_task_timeout: 25m
     run_timeout: 2h
   timers:
