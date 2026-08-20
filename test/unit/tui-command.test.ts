@@ -52,8 +52,48 @@ import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { register } from "../../src/cli/commands/tui.ts";
 
 const bases: string[] = [];
+
+/**
+ * `PIFLEET_RUNS_DIR` as it was BEFORE this file touched it, captured at module
+ * load — which is the only moment it is still the ambient value, since
+ * `beforeEach` below overwrites it for every test in the file.
+ *
+ * Without the restore in `afterAll`, this file ends with the variable pointing
+ * at a temp directory that `afterAll` has just DELETED, and leaves it that way
+ * for the rest of the process. Measured: `undefined` at module load,
+ * `…/pifleet-tui-unit-itcRr8/runs [DANGLING]` afterwards.
+ *
+ * ## Why "the other callers set it first" is not a defence
+ *
+ * It looked safe on the reasoning that every other `runsRoot()` caller sets the
+ * variable itself before reading it, and that this file sorts after them
+ * anyway. Both halves are wrong. **bun ignores CLI argument order** — measured,
+ * `zzz aaa mmm` and `aaa mmm zzz` both execute `zzz, mmm, aaa` — so file order
+ * is `readdir()` order, which is neither alphabetical nor argument order and
+ * differs between APFS and a fresh Linux CI clone. This file runs 38th of 55
+ * locally, with seventeen files downstream of it.
+ *
+ * ## The part that makes it survive
+ *
+ * `test/unit/render.test.ts` runs 51st and does the RIGHT thing: it captures
+ * `PIFLEET_RUNS_DIR` at its own module load and restores that value in its
+ * `afterAll`. But at position 51 the value it captures is already this file's
+ * dangling path, so a correct save/restore idiom faithfully launders the
+ * corruption forward. The leak persists precisely BECAUSE a neighbouring file
+ * handles the variable properly — which is why fixing it at the source is the
+ * only fix, and why a downstream assertion would not have caught it.
+ *
+ * Idiom copied deliberately from `render.test.ts` rather than invented, so the
+ * suite has one shape for this and not two.
+ */
+const RUNS_DIR_BEFORE = process.env["PIFLEET_RUNS_DIR"];
+
 afterAll(async () => {
   for (const b of bases) await rm(b, { recursive: true, force: true }).catch(() => {});
+  // Restored AFTER the directories are gone: the variable must never be
+  // observable pointing at a path this file has deleted.
+  if (RUNS_DIR_BEFORE === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+  else process.env["PIFLEET_RUNS_DIR"] = RUNS_DIR_BEFORE;
 });
 
 async function tempRunsRoot(): Promise<string> {
