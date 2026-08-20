@@ -525,6 +525,28 @@ the real thing, not by asserting on a mock. Mocks are permitted only inside `tes
 
 ## Decisions
 
+- **2026-08-20 — the supervisor's launch identity is recorded in its OWN state file, not only in
+  the registry, because registration is deliberately optional.** The identity-anchored kill ladder
+  on this branch is correct and closed a real hazard (a bare `down` SIGTERMed an unrelated live
+  process), but it anchored solely on `registry.json`. `supervisor/index.ts` registers with
+  `{ optional: true }` and its own comment states why — "The supervisor must also work alone
+  (integration tests, daemon crash)" — so for every daemon-less run the anchor was absent, `down`
+  answered `identity_unrecorded`, and the supervisors stayed up. That is not hypothetical: it is
+  `test/e2e/lifecycle.test.ts`'s happy path, which asserts `down` exits 0 and observed
+  `EXIT.WORKER_DIED` (6) on CI, together with the tmux/headless parity, `readScreen` anti and
+  sixteen-worker cases that all end in a `down`. **The identity was never unknown** — the
+  supervisor reads it at launch to send to the registry — it merely had nowhere
+  daemon-independent to live. `WorkerState.proc_started` is that place, written by the process it
+  describes from the same `processStartTime(process.pid)` reading the registry call carries, so
+  the two agree by construction. REJECTED: relaxing the anchor to liveness when the registry is
+  absent, which is the pre-fix fail-open this branch exists to remove. The fail-closed property is
+  preserved intact — `proc_started` is compared, not trusted, and a state file from an older build
+  carries `""`, which `isPinnedIdentity` rejects, so it refuses exactly as an absent registry entry
+  does. Pinned by two probes in `test/integration/down-identity.test.ts` that both fail against the
+  registry-only anchor: one proves the ladder is ENTERED for a daemon-less run (`how: "sigkill"`,
+  no `forced_identity`), the other proves a self-recorded identity naming the wrong process is
+  still refused `identity_mismatch`.
+
 - **2026-08-18 — Slice 2 real per-worker git isolation: clone, not `git worktree add`, decided
   after a security spike produced a confirmed RCE.** SRD §9.2 specified linked worktrees. Two
   worktree-based designs were built and run against a real container before this decision: one
