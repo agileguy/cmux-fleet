@@ -412,7 +412,7 @@ export function register(program: Command): void {
  * 0, because there is nothing to compare against. `WorkerState` records
  * `started_at` as an ISO wall-clock string, which is not comparable to
  * `ps -o lstart=`, so the registry is the only launch-time source for a
- * worker and a worker missing from it gets the weaker anchor. ISC-270 tracks
+ * worker and a worker missing from it gets the weaker anchor. ISC-272 tracks
  * closing that.
  */
 async function anchorIdentity(pid: number, recorded: string | null): Promise<ProcId | null> {

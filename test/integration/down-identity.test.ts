@@ -1,7 +1,7 @@
 /**
  * `down` signals a RECORDED identity, never a bare pid (ISC-191).
  *
- * These two probes are what ISC-191 rests on for the `down` path. ISC-270 is
+ * These two probes are what ISC-191 rests on for the `down` path. ISC-272 is
  * the part they deliberately do NOT cover — a worker with no registry entry,
  * which has no launch-time identity to compare against — and it stays open.
  *
