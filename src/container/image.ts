@@ -5,9 +5,27 @@
  * exactly the inputs that change the image — pi_version, toolchain,
  * apt_packages, and the content of every file in `BUILD_CONTEXT_ASSETS` (the
  * Dockerfile plus everything it `COPY`s) — so two configs that build the same
- * bytes share a tag and any edit that matters forces a new one. `up` refuses
- * to run against an image that is absent or fails `verify` — a run must never
- * silently use a stale image (SRD §5.7).
+ * bytes share a tag and any edit that matters forces a new one.
+ *
+ * WHAT `up` DOES WITH ANY OF THIS TODAY: NOTHING. This docstring used to state
+ * that "`up` refuses to run against an image that is absent or fails `verify`"
+ * — which is ISC-189's sentence verbatim, and it was never true. `up.ts` does
+ * not contain the string "image" at all; `verifyImage` has exactly one caller
+ * in the tree (`cli/commands/image.ts`, the `image verify` subcommand); and the
+ * only `docker image inspect` in `src/` is `doctor.ts`'s `imageStatus`, which
+ * REPORTS and is not on `up`'s path. `config/render.ts` calls `imageTag` solely
+ * to place the tag in the `docker run` argv.
+ *
+ * So an absent image is discovered by the DAEMON, after `up` has already
+ * created the run directory, cloned a checkout per worker, registered a remote
+ * per worker in the operator's repository, materialized every input and
+ * launched every supervisor — surfacing as `worker <id> died during startup`
+ * (EXIT.WORKER_DIED) from the idle gate at the end of `up`, not as a refusal.
+ * A stale-but-present image is not detected at all.
+ *
+ * SRD §5.7 asks for the refusal; ISC-32 and ISC-189 track it and are graded
+ * open in ISA.md with this stated. A comment is not a control — do not let this
+ * one read as coverage again.
  */
 
 import { createHash } from "node:crypto";
@@ -116,8 +134,12 @@ export interface ImageInputs {
    * base image, the tini and gcloud installs, the uid 10001 user, the
    * entrypoint and the verbgate COPYs all live in the Dockerfile, and while
    * they were outside the hash an edit to any of them left the tag unchanged —
-   * so `up`, which only refuses an image that is ABSENT, found the stale one
-   * present and ran the fleet on it with nothing reporting the reuse.
+   * so a run found the stale image present under the expected tag and used it
+   * with nothing reporting the reuse. (This clause used to say "so `up`, which
+   * only refuses an image that is ABSENT, found the stale one" — `up` refuses
+   * neither case; see the module header. The hash is what makes the tag move,
+   * and today it is the ONLY thing standing between an edited build context and
+   * a silently-reused image.)
    *
    * Hashing the Dockerfile alone closed only part of that. The Dockerfile
    * `COPY`s two files it does not contain: `docker/verbgate`, which IS the

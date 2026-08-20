@@ -15,8 +15,13 @@ import { dockerAvailable } from "../../container/run.ts";
 /**
  * Register `pifleet image` (SRD §5.7, §10): build | list | verify | gc.
  *
- * `verify` failing is load-bearing: `up` refuses to start on it, so a run
- * never silently uses an image whose Pi differs from the §4.2 protocol pin.
+ * `verify` is OPERATOR-DRIVEN and nothing else consults it. This used to claim
+ * "`up` refuses to start on it, so a run never silently uses an image whose Pi
+ * differs from the §4.2 protocol pin" — `up` has no image gate of any kind, and
+ * `verifyImage` has no caller outside this file. Running `image verify` is
+ * currently the only thing that checks an image, and only when a human asks.
+ * See `container/image.ts`'s header for the measured detail, and ISC-32 /
+ * ISC-189, which track the missing refusal and are graded open.
  */
 export function register(program: Command): void {
   program
