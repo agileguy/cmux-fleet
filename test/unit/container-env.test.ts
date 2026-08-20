@@ -60,6 +60,7 @@ import {
   type RelayTarget,
 } from "../../src/security/relay.ts";
 import { containerProbeArgv } from "../../src/security/probe-transport.ts";
+import { bareEnvPassThroughs } from "../support/env-sweep.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -271,28 +272,78 @@ describe("no cloud provider key reaches a container environment (ISC-31)", () =>
   });
 
   /**
+   * The sweep can actually SEE an offence — asserted before it is trusted.
+   *
+   * This test exists because its subject did not have this property. The
+   * sweep below used to carry an inline regex that matched a quoted
+   * SCREAMING_CASE literal directly after a quoted `-e`, a sequence that
+   * appears nowhere in this repository — not in `relay.ts`, which passes a
+   * template literal, and not in `probe-transport.ts`, which passes a bare
+   * identifier. It collected into an empty array and compared it against an
+   * empty array, on every commit, and could not have done otherwise. An
+   * assertion whose red state has never been observed is not evidence, which
+   * is the principle the ISA already applies to self-skipping tests and to the
+   * mutation convention; a sweep with no demonstrated sensitivity is the same
+   * failure reached through a regex.
+   *
+   * Every hazardous spelling is exercised, because "matches SOME offence" is
+   * not the property wanted — the pass-through can be written five ways and a
+   * sweep that catches one of them is four-fifths decoration. Both safe forms
+   * are exercised too, since a pattern that flags everything is as useless as
+   * one that flags nothing and fails in the more annoying direction.
+   */
+  test("the bare -e sweep flags every pass-through spelling and no safe one", () => {
+    const hazardous: [string, string][] = [
+      ['"-e", "AWS_SECRET_ACCESS_KEY"', "quoted literal"],
+      ['"-e",\n      "AWS_SECRET_ACCESS_KEY"', "quoted literal, wrapped"],
+      ['"-e", `AWS_SECRET_ACCESS_KEY`', "template literal, no interpolation"],
+      ['"-e", `${credName}`', "template literal, interpolated"],
+      ['"-e", credName', "bare identifier"],
+      ['"--env", "AWS_SECRET_ACCESS_KEY"', "the --env long form"],
+      ['"-eAWS_SECRET_ACCESS_KEY"', "glued short form"],
+      ['"--env=AWS_SECRET_ACCESS_KEY"', "glued long form"],
+    ];
+    for (const [source, what] of hazardous) {
+      expect(`${what}: ${bareEnvPassThroughs(source).length}`).toBe(`${what}: 1`);
+    }
+
+    const safe: [string, string][] = [
+      ['"-e", "PIFLEET_RELAY_TARGETS=[]"', "NAME=VALUE, quoted"],
+      ['"-e", `PIFLEET_RELAY_TARGETS=${JSON.stringify(targets)}`', "NAME=VALUE, template"],
+      ['image, "node", "-e", PROBE_SCRIPT', "node's own eval flag"],
+      ['"bun", "-e", script', "bun's own eval flag"],
+    ];
+    for (const [source, what] of safe) {
+      expect(`${what}: ${bareEnvPassThroughs(source).join(",")}`).toBe(`${what}: `);
+    }
+  });
+
+  /**
    * The producers that build argv inline, swept at the source level.
    *
    * `container/image.ts` and `container/mounts.ts` `docker run` from array
    * literals rather than exported builders, so there is no value to inspect —
-   * only the text. A source sweep is a weak instrument and is used here only
-   * because it is the sole one available; it is scoped to the bare
-   * pass-through form, which is a distinctive token sequence rather than a
-   * general property, and which is the form that would let a host credential
-   * into a container without any name appearing in this repo at all.
+   * only the text. A source sweep is the weakest instrument in this file and
+   * is used here only because it is the sole one available; `expectCleanEnv`
+   * on real argv is the strong one and covers every producer that exports a
+   * builder.
+   *
+   * Its sensitivity is established by the test above rather than assumed, and
+   * the two are a pair: this one can only ever report "no offence found", so
+   * on its own it cannot distinguish a clean tree from a broken detector.
    */
   test("no source file in src/ passes a host variable through with a bare -e", async () => {
     const files = new Bun.Glob("**/*.ts").scan({ cwd: join(REPO_ROOT, "src") });
     const offenders: string[] = [];
+    let scanned = 0;
     for await (const rel of files) {
+      scanned += 1;
       const text = await Bun.file(join(REPO_ROOT, "src", rel)).text();
-      // `"-e",` followed by a string literal with no `=` in it, i.e. the
-      // pass-through form. `node -e` and `bun -e` take a script as the next
-      // element and are excluded by requiring a bare NAME-shaped token.
-      for (const m of text.matchAll(/"-e",\s*\n?\s*"([A-Z][A-Z0-9_]*)"/g)) {
-        offenders.push(`${rel}: -e ${m[1]}`);
-      }
+      for (const hit of bareEnvPassThroughs(text)) offenders.push(`${rel}: ${hit}`);
     }
+    // Not vacuous in the other direction either: an empty or mis-rooted glob
+    // would also produce zero offenders.
+    expect(scanned).toBeGreaterThan(20);
     expect(offenders).toEqual([]);
   });
 });

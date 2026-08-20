@@ -10,9 +10,9 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { stringify } from "yaml";
 import { exitCodeForError } from "../../src/cli/index.ts";
 import { imageStatus } from "../../src/cli/commands/doctor.ts";
@@ -37,12 +37,14 @@ import type { Exec } from "../../src/container/run.ts";
 import {
   CONTAINER_GCLOUD_CONFIG_DIR,
   CREDENTIAL_ENV_VARS,
+  assertNoHostGcloudMount,
   classifyHostGcloudExposure,
   gcloudConfigTmpfsArgv,
   hostGcloudConfigDir,
 } from "../../src/security/adc.ts";
 import { WORKER_UID } from "../../src/container/mounts.ts";
 import {
+  assertNoRunDirMount,
   classifyRunDirExposure,
   roleSkillsDir,
   runPaths,
@@ -50,6 +52,23 @@ import {
   workerOutboxDir,
   workerPaths,
 } from "../../src/run/paths.ts";
+
+/**
+ * Run `fn` and hand back what it threw, or `null` if it did not throw.
+ *
+ * Used by the ISC-127 guard cases so each spelling under test can be asserted
+ * on BY NAME in the expectation — `expect(`${name} -> ${err?.name}`)` reports
+ * which of seven docker spellings walked past the guard, where a bare
+ * `expect(() => …).toThrow()` inside a loop reports only that one of them did.
+ */
+function catchError(fn: () => unknown): Error | null {
+  try {
+    fn();
+    return null;
+  } catch (e) {
+    return e as Error;
+  }
+}
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -604,10 +623,24 @@ describe("docker argv (SRD §5.6)", () => {
         expect(`${s} -> ${classifyRunDirExposure(s, run.root) ?? "clean"}`).toBe(`${s} -> clean`);
       }
 
-      // What the two relations exist to protect, named directly: the control
+      // What the relations exist to protect, named directly: the control
       // secret must not sit inside any mounted subtree.
+      //
+      // The prefix is root-aware, and that is a BUG FIX rather than a
+      // refinement. This line read `startsWith(`${s}/`)` and was written as a
+      // deliberately independent backstop to `classifyRunDirExposure` — but it
+      // reproduced that function's bug exactly: when `s` is `/` the template
+      // yields `"//"`, which prefixes no path in existence, so a `-v /:/host`
+      // mount satisfied both the predicate AND the check meant to catch the
+      // predicate being wrong. An independent backstop that shares the
+      // predicate's bug is not independent; it is the same mistake typed
+      // twice, and it cost this criterion its one cross-check. Kept as a
+      // string comparison rather than switched to `isPathUnder` for the reason
+      // it exists — importing production's helper here would make the two
+      // agree by construction, which is precisely the property that failed.
       for (const s of sources) {
-        expect(run.controlAuthJson.startsWith(`${s}/`)).toBe(false);
+        const prefix = s === "/" ? "/" : `${s}/`;
+        expect(run.controlAuthJson.startsWith(prefix)).toBe(false);
       }
     }
   });
@@ -655,6 +688,443 @@ describe("docker argv (SRD §5.6)", () => {
     } finally {
       // `fixture()` owns this variable; the next call resets it, but an
       // in-file reader should not have to know that.
+      delete process.env["PIFLEET_RUNS_DIR"];
+    }
+  });
+
+  /**
+   * The EXACT relation, driven through `renderWorker` — the missing
+   * counterpart to the ancestor case above (ISC-127).
+   *
+   * Why this test exists is a mutation result rather than a hunch. Killing
+   * only the exact-match relation — `if (false) return "is-the-run-dir";` —
+   * left the whole ISC-127 set GREEN. The literal statement of the criterion,
+   * the sentence "the source IS the run dir", could be deleted outright and
+   * nothing anywhere noticed. The ancestor relation was properly pinned by the
+   * test above; its twin was pinned by nothing.
+   *
+   * The reason the gap survived review is worth recording, because it is a
+   * class rather than an oversight. The ISA's stated mutation for this
+   * criterion adds `-v ${opts.run.root}:/rundir` to `buildDockerArgv`, which
+   * DOES go red — but it goes red by making the RENDERER emit a bad mount, and
+   * a renderer that emits no such mount is exactly the state production is in.
+   * That mutation therefore tests that the guard is wired up, not that the
+   * guard can see. Blinding the predicate and leaving the renderer honest is
+   * the mutation that separates the two, and it is the one that passed.
+   *
+   * Driven through `renderWorker` on supported config rather than by calling
+   * the predicate, for the reason the ancestor case gives. Every value used
+   * here is operator-settable: `run.repo` takes an absolute path
+   * (`expandPath`), the runs root moves via `PIFLEET_RUNS_DIR`, and the run id
+   * is a real flag — `pifleet render --worker rev-1 --run-id <id>`. An
+   * operator who points `run.repo` at a directory that the runs root and run
+   * id together also name gets the run directory itself at `/workspace`,
+   * control secret and all.
+   */
+  test("a run.repo that IS the run directory is refused, not rendered (ISC-127)", async () => {
+    // Created BEFORE the fixture so the config can name it absolutely; the
+    // fixture's own `mutate` hook runs before `runsDir` is knowable.
+    const runsDir = await mkdtemp(join(tmpdir(), "pifleet-render-exact-"));
+    cleanups.push(runsDir);
+    const runId = "exact";
+    const repoIsRunDir = join(runsDir, runId);
+    await mkdir(repoIsRunDir, { recursive: true });
+
+    const { loaded } = await fixture((doc) => {
+      const run = doc["run"] as Record<string, unknown>;
+      run["repo"] = repoIsRunDir;
+      (doc["roles"] as Record<string, Record<string, unknown>>)["rev"]!["isolation"] = "shared-ro";
+    });
+    process.env["PIFLEET_RUNS_DIR"] = runsDir;
+    try {
+      const err = await renderWorker(loaded, "rev-1", { runId }).then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err).not.toBeNull();
+      expect(err?.name).toBe("RunDirMountError");
+      // The relation BY NAME. `toContain("run directory")` would also pass on
+      // the ancestor message, and this test exists precisely because the two
+      // relations are separable.
+      expect(err?.message).toContain("IS the run directory");
+      expect(err?.message).toContain("control-auth.json");
+    } finally {
+      delete process.env["PIFLEET_RUNS_DIR"];
+    }
+  });
+
+  /**
+   * `-v /:/host` — the maximal violation this criterion exists to refuse, and
+   * the one it allowed (ISC-127).
+   *
+   * `dir.startsWith(`${s}/`)` builds `"//"` when `s` is `/`, and no path in
+   * existence starts with `"//"`. So the entire host filesystem — every run
+   * directory, every user's ssh keys, the docker socket — was `null`, i.e.
+   * ALLOWED, by the function whose whole job is to refuse the run directory.
+   * A guard that passes its own worst case is the shape of bug that survives
+   * because nobody writes the trivial test.
+   *
+   * Asserted at both altitudes it can fail at: the predicate's verdict, and
+   * the launcher actually throwing. Nothing here needs a rendered worker —
+   * production emits no `/` mount and the point is what the guard DOES with
+   * one, not whether the renderer produces one.
+   */
+  test("the filesystem root is refused as a mount source (ISC-127)", () => {
+    const runDir = "/Users/op/proj/runs/r-1";
+    // Spelled three ways, all of which `resolve()` to `/`, because the bug was
+    // in a string prefix and a fix that only handled the literal "/" would
+    // leave `//` and `/.` open.
+    for (const root of ["/", "//", "/."]) {
+      expect(`${root} -> ${classifyRunDirExposure(root, runDir)}`).toBe(
+        `${root} -> contains-the-run-dir`,
+      );
+      const err = catchError(() => assertNoRunDirMount(["-v", `${root}:/host`], runDir));
+      expect(`${root} -> ${err?.name}`).toBe(`${root} -> RunDirMountError`);
+    }
+  });
+
+  /**
+   * Case-variant spellings of the run directory (ISC-127).
+   *
+   * `resolve()` does not case-fold, so on the case-INSENSITIVE filesystem this
+   * repo is developed on (`darwin`, default APFS) two spellings of one
+   * directory compared unequal and the variant was a bypass. Measured against
+   * the real function before the fix, with `runDir = /Users/op/proj/runs/r-1`:
+   * `/Users/op/proj/Runs` -> `null` and `/USERS/OP/PROJ/RUNS/R-1` -> `null`.
+   * Docker Desktop mounts both.
+   *
+   * This test is NOT platform-conditional, and that is the whole reason the
+   * fold in `classifyRunDirExposure` is not either — a `process.platform`
+   * branch would make this case skip on Linux CI, leaving the darwin
+   * behaviour proved only by whoever last ran the suite on a Mac. See that
+   * function's header for the full argument.
+   */
+  test("a case-variant spelling of the run directory is refused (ISC-127)", () => {
+    const runDir = "/Users/op/proj/runs/r-1";
+    const variants: [string, string][] = [
+      ["/USERS/OP/PROJ/RUNS/R-1", "is-the-run-dir"],
+      ["/users/op/proj/runs/r-1", "is-the-run-dir"],
+      ["/Users/Op/Proj/Runs/R-1", "is-the-run-dir"],
+      ["/Users/op/proj/Runs", "contains-the-run-dir"],
+      ["/USERS", "contains-the-run-dir"],
+    ];
+    for (const [source, relation] of variants) {
+      expect(`${source} -> ${classifyRunDirExposure(source, runDir)}`).toBe(
+        `${source} -> ${relation}`,
+      );
+    }
+    // The fold must not swallow the legitimate mounts: a run-dir CHILD is
+    // still clean however it is spelled, or the fix would have closed the
+    // criterion by refusing the entire §5.5 mount table.
+    for (const child of ["/Users/op/proj/runs/r-1/outbox", "/USERS/OP/PROJ/RUNS/R-1/sessions"]) {
+      expect(`${child} -> ${classifyRunDirExposure(child, runDir) ?? "clean"}`).toBe(
+        `${child} -> clean`,
+      );
+    }
+  });
+
+  /**
+   * Another RUN's directory, under the same runs root (ISC-127).
+   *
+   * The same bug one directory over. The guard is scoped to the CURRENT run,
+   * so `<runsRoot>/<otherRunId>` is neither this run dir nor an ancestor of it
+   * and classified clean — while holding THAT run's `control-auth.json`, its
+   * ledger, its inbox and every one of its workers' state. Concurrent runs
+   * under one root are the normal way this tool is used, so the exposure is
+   * not exotic; it is one `run.repo` typo away in a fleet that has ever run
+   * twice.
+   *
+   * The criterion's sentence is "the run-dir is not mounted in any container",
+   * and a concurrent run's directory is a run dir. Graded under ISC-127 rather
+   * than filed as a new criterion for that reason.
+   */
+  test("another run's directory under the same runs root is refused (ISC-127)", () => {
+    const runsRootPath = "/Users/op/proj/runs";
+    const runDir = join(runsRootPath, "r-1");
+    for (const source of [
+      join(runsRootPath, "r-2"),
+      join(runsRootPath, "r-2", "outbox", "eng-1"),
+      join(runsRootPath, "R-2"), // case-folded, same reasoning as above
+    ]) {
+      expect(`${source} -> ${classifyRunDirExposure(source, runDir)}`).toBe(
+        `${source} -> is-another-run-dir`,
+      );
+    }
+    // This run's own children stay clean — the relation must not swallow the
+    // §5.5 mount table, which is entirely made of them.
+    for (const source of [join(runDir, "outbox"), join(runDir, "sessions")]) {
+      expect(`${source} -> ${classifyRunDirExposure(source, runDir) ?? "clean"}`).toBe(
+        `${source} -> clean`,
+      );
+    }
+    // And the refusal names the relation, so an operator reading it knows the
+    // offending path belongs to a different run rather than to this one.
+    const err = catchError(() =>
+      assertNoRunDirMount(["-v", `${join(runsRootPath, "r-2")}:/other`], runDir),
+    );
+    expect(err?.message).toContain("ANOTHER RUN's directory");
+  });
+
+  /**
+   * The separator defence, pinned (ISC-127).
+   *
+   * `run/paths.ts` uses an explicit `/` on every boundary comparison
+   * specifically so a sibling directory whose name merely starts with the same
+   * characters is not treated as a relation. The defence WORKS — probing
+   * confirms `runs-backup` and the `r-1`/`r-10` pair are both classified
+   * correctly — but before this test, dropping the separator
+   * (`startsWith(`${s}/`)` -> `startsWith(s)`) left 50 pass / 0 fail. A
+   * working defence that nothing pins is a defence with a deletion date.
+   *
+   * Both boundary directions are covered, because the separator appears in
+   * both and a mutation to either is independently survivable:
+   *
+   *  - CONTAINS: a source that is a string prefix of the run dir but not a
+   *    path ancestor of it. `<base>/run` prefixes `<base>/runs/r-1` without
+   *    being any part of its path.
+   *  - ANOTHER-RUN: `<runsRoot>-backup`, a sibling of the runs root, which a
+   *    bare prefix test reads as living inside it.
+   *
+   * All of these are FALSE REDS under the mutation — legitimate mounts the
+   * guard would start refusing — which is the failure mode the explicit
+   * separator exists to prevent and the reason a false red matters: an
+   * assertion that fires on correct behaviour is an assertion someone
+   * eventually weakens.
+   */
+  test("a sibling whose name merely prefixes the run dir is not flagged (ISC-127)", () => {
+    const base = "/Users/op/proj";
+    const runsRootPath = join(base, "runs");
+    const runDir = join(runsRootPath, "r-1");
+    const clean = [
+      join(base, "run"), // prefixes "/Users/op/proj/runs/r-1" at a non-boundary
+      join(base, "runs-backup"), // sibling of the runs root
+      join(base, "runs-backup", "r-1"), // and its contents
+    ];
+    for (const source of clean) {
+      expect(`${source} -> ${classifyRunDirExposure(source, runDir) ?? "clean"}`).toBe(
+        `${source} -> clean`,
+      );
+    }
+    /**
+     * Every entry above is OUTSIDE the runs root, and that is load-bearing
+     * rather than incidental — it is where the separator is the ONLY thing
+     * doing the work.
+     *
+     * A sibling-prefix INSIDE the runs root is a different question with a
+     * different answer, and the two fixes on this branch meet here. `r-10` and
+     * `r-1-backup` are both sibling-prefixes of `r-1`, so the separator
+     * correctly keeps them out of the CHILD and ANCESTOR relations — and both
+     * are then refused anyway by `is-another-run-dir`, because both sit in the
+     * runs root and a directory in the runs root holds a run's control secret,
+     * ledger and inbox. `r-1-backup` is the clearer of the two: a backup COPY
+     * of this very run is exactly the thing whose `control-auth.json` must not
+     * reach a worker.
+     *
+     * Worth stating plainly because the original framing of the separator
+     * finding said `r-10` "must be allowed". That was right about the relation
+     * it was describing and wrong as a verdict on the source, and asserting
+     * the verdict would have pinned the cross-run hole OPEN.
+     */
+    for (const source of [join(runsRootPath, "r-10"), `${runDir}-backup`]) {
+      expect(`${source} -> ${classifyRunDirExposure(source, runDir)}`).toBe(
+        `${source} -> is-another-run-dir`,
+      );
+    }
+  });
+
+  /**
+   * Every spelling Docker accepts for a bind mount (ISC-127).
+   *
+   * The guard scanned for a two-element `-v`/`--volume` only, so three valid
+   * spellings of the identical mount walked past it. Measured before the fix:
+   *
+   *   REFUSED  ["-v", "<src>:<dst>"]
+   *   REFUSED  ["--volume", "<src>:<dst>"]
+   *   ALLOWED  ["--volume=<src>:<dst>"]
+   *   ALLOWED  ["-v<src>:<dst>"]
+   *   ALLOWED  ["--mount", "type=bind,source=<src>,target=<dst>"]
+   *
+   * This was LATENT — `render.ts` emits only the first form — and latency is
+   * the argument FOR closing it, not against. The entire stated justification
+   * for checking the finished argv is that the literals upstream cannot be
+   * trusted to stay as they are; a guard that then depends on upstream
+   * continuing to pick one spelling has re-imported the assumption it was
+   * built to remove. The next person to add a mount is under no obligation to
+   * pick the parseable spelling, and nothing would have told them.
+   */
+  test("every docker bind-mount spelling reaches the guard (ISC-127)", () => {
+    const runDir = "/Users/op/proj/runs/r-1";
+    const spellings: [string, string[]][] = [
+      ["two-element -v", ["-v", `${runDir}:/rundir`]],
+      ["two-element --volume", ["--volume", `${runDir}:/rundir`]],
+      ["glued --volume=", [`--volume=${runDir}:/rundir`]],
+      ["glued -v", [`-v${runDir}:/rundir`]],
+      ["--mount source=", ["--mount", `type=bind,source=${runDir},target=/rundir`]],
+      ["--mount src= alias", ["--mount", `type=bind,src=${runDir},dst=/rundir`]],
+      ["glued --mount=", [`--mount=type=bind,source=${runDir},target=/rundir`]],
+    ];
+    for (const [name, flags] of spellings) {
+      const err = catchError(() =>
+        assertNoRunDirMount(["docker", "run", ...flags, "image"], runDir),
+      );
+      expect(`${name} -> ${err?.name ?? "ALLOWED"}`).toBe(`${name} -> RunDirMountError`);
+    }
+    // A named volume is still not a host path and must NOT be refused, or the
+    // widened parser would break `-v pifleet-piagent-<id>:/home/pi/.pi/agent`,
+    // which `render.ts` emits for every worker.
+    expect(
+      catchError(() => assertNoRunDirMount(["-v", "pifleet-piagent-eng-1:/home/pi"], runDir)),
+    ).toBeNull();
+  });
+
+  /**
+   * A relative `-v` source is a host path, and is now treated as one (ISC-127).
+   *
+   * Both guards dropped any source without a leading `/`, commented "a named
+   * volume, not a host path". `./runs/r-1` is a host path; so is `runs/r-1`.
+   * Docker resolves a relative source against the client's working directory
+   * and mounts it. The comment described the common case and the code enforced
+   * it as though it were the only one.
+   *
+   * Resolving against `process.cwd()` is correct rather than merely
+   * convenient: these guards run in the same process that spawns `docker`, so
+   * this IS the directory Docker would resolve against. The distinction now
+   * drawn is Docker's own — a bare NAME with no separator is a volume,
+   * anything else is a path.
+   */
+  test("a relative -v source is classified as the host path it is (ISC-127)", () => {
+    const cwd = process.cwd();
+    const runDir = join(cwd, "runs", "r-1");
+    for (const rel of ["./runs/r-1", "runs/r-1", "./runs/r-1/"]) {
+      const err = catchError(() => assertNoRunDirMount(["-v", `${rel}:/rundir`], runDir));
+      expect(`${rel} -> ${err?.name ?? "ALLOWED"}`).toBe(`${rel} -> RunDirMountError`);
+    }
+    // `..` too, since that is the spelling `resolve()` exists to close.
+    const sibling = join(cwd, "..", basename(cwd), "runs", "r-1");
+    expect(catchError(() => assertNoRunDirMount(["-v", `${sibling}:/x`], runDir))).not.toBeNull();
+    // A bare name remains a named volume, which is the case the original
+    // comment was actually about.
+    expect(catchError(() => assertNoRunDirMount(["-v", "somevolume:/x"], runDir))).toBeNull();
+  });
+
+  /**
+   * A refusal an operator can act on, not a crash report (ISC-127).
+   *
+   * `RunDirMountError` carried no `exitCode`, so it satisfied neither branch
+   * of `isExitCoded` and `exitCodeForError` fell through to `EXIT.INTERNAL` —
+   * the CLI printed `pifleet: internal error: refusing to launch: …`. That
+   * defeats the message's own stated purpose. The text exists so an operator
+   * can move the runs root rather than guess which of two settable paths to
+   * change, and "internal error" tells them the tool is broken and there is
+   * nothing for them to fix. It also mislabels a config mistake over the only
+   * channel a machine caller has, which is the confusion ISC-216 records
+   * `EXIT.USAGE`-for-crashes producing in the other direction.
+   *
+   * `HostGcloudMountError` is asserted here too, and deliberately in the same
+   * test: the two guards are built to be indistinguishable from the outside,
+   * so grading one as a config refusal while the other reports an internal
+   * error would be the confusing half of both.
+   */
+  test("a refused mount exits USAGE, not INTERNAL (ISC-127, ISC-44)", () => {
+    const runDir = "/Users/op/proj/runs/r-1";
+    const mountErr = catchError(() => assertNoRunDirMount(["-v", `${runDir}:/rundir`], runDir));
+    expect(mountErr).not.toBeNull();
+    expect(isExitCoded(mountErr)).toBe(true);
+    expect(exitCodeForError(mountErr)).toBe(EXIT.USAGE);
+
+    const gcloudErr = catchError(() =>
+      assertNoHostGcloudMount(["-v", `${hostGcloudConfigDir()}:/gcloud`]),
+    );
+    expect(gcloudErr).not.toBeNull();
+    expect(isExitCoded(gcloudErr)).toBe(true);
+    expect(exitCodeForError(gcloudErr)).toBe(EXIT.USAGE);
+  });
+
+  /**
+   * The gcloud guard had the identical root hole, independently (ISC-44).
+   *
+   * Recorded here rather than in the ADC file because the fact worth keeping
+   * is the RELATIONSHIP: two guards deliberately shaped alike each grew their
+   * own copy of the boundary comparison, and each copy had the same
+   * `startsWith(`${dir}/`)` bug — so `-v /:/host` handed a worker the host
+   * gcloud auth store as well as the run directory, and neither guard could
+   * catch the other's mistake because neither shared a line with it. They now
+   * share `isPathUnder`. This test is what stops them drifting apart again.
+   */
+  test("the filesystem root is refused by the gcloud guard too (ISC-44)", () => {
+    for (const root of ["/", "//", "/."]) {
+      expect(`${root} -> ${classifyHostGcloudExposure(root)}`).toBe(`${root} -> contains-the-store`);
+      const err = catchError(() => assertNoHostGcloudMount(["-v", `${root}:/host`]));
+      expect(`${root} -> ${err?.name}`).toBe(`${root} -> HostGcloudMountError`);
+    }
+  });
+
+  /**
+   * The symlink half, closed on `renderWorker`'s async path (ISC-127).
+   *
+   * `buildDockerArgv`'s guard is lexical because that function is synchronous
+   * and pure by design, and every note about it says so. What none of them
+   * said is that the criterion was therefore only half-checked in production:
+   * nothing reproducibly re-checked the symlinked case at all, because the
+   * exposing unit fixture used a plain `join(dir, "runs")` and the integration
+   * fixture is a safe sibling by construction.
+   *
+   * The gap is ROUTINE, not adversarial, and this fixture is built to look
+   * like the routine instance rather than an attack. `~/repos` is a symlink to
+   * a second volume — an everyday arrangement on a Mac with a small internal
+   * SSD. `fleet.yaml` names `run.repo` through the symlink because that is
+   * what the operator types. `PIFLEET_RUNS_DIR` holds the PHYSICAL path
+   * because the launcher that set it ran `pwd -P`. Neither value is unusual,
+   * neither is hostile, and lexically the two share no prefix whatsoever — so
+   * the repo mounted at `/workspace` contains the live run directory and the
+   * lexical guard reports clean.
+   *
+   * Note the run directory does not exist when this runs: `renderWorker` is
+   * called before `materializeWorkerInputs` creates anything, which is why the
+   * resolution walks up to the deepest existing ancestor instead of giving up
+   * on `ENOENT`. A `realpath(p).catch(() => p)` would return the unresolved
+   * path here and the comparison would read clean again — the exact vacuity
+   * this criterion's integration half was found to have.
+   */
+  test("a run.repo reached through a symlink is refused (ISC-127)", async () => {
+    const physical = await mkdtemp(join(tmpdir(), "pifleet-render-phys-"));
+    cleanups.push(physical);
+    const links = await mkdtemp(join(tmpdir(), "pifleet-render-link-"));
+    cleanups.push(links);
+
+    // `<physical>/proj` is the real checkout; `<links>/repos` -> `<physical>`
+    // is the convenience symlink the operator actually types through.
+    const projPhysical = join(physical, "proj");
+    await mkdir(join(projPhysical, "runs"), { recursive: true });
+    await symlink(physical, join(links, "repos"), "dir");
+    const projViaLink = join(links, "repos", "proj");
+
+    const { loaded } = await fixture((doc) => {
+      const run = doc["run"] as Record<string, unknown>;
+      run["repo"] = projViaLink; // the symlinked spelling
+      (doc["roles"] as Record<string, Record<string, unknown>>)["rev"]!["isolation"] = "shared-ro";
+    });
+    // The physical spelling, as `pwd -P` would report it.
+    process.env["PIFLEET_RUNS_DIR"] = join(projPhysical, "runs");
+    try {
+      // Not vacuous: the two spellings really do share no lexical prefix, so
+      // the sync guard genuinely cannot see this and the async one must.
+      expect(projViaLink.startsWith(projPhysical)).toBe(false);
+      expect(classifyRunDirExposure(projViaLink, join(projPhysical, "runs", "dry"))).toBeNull();
+
+      const err = await renderWorker(loaded, "rev-1").then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err).not.toBeNull();
+      expect(err?.name).toBe("RunDirMountError");
+      expect(err?.message).toContain("CONTAINS the run directory");
+      // The operator's own spelling leads, with the resolved form appended —
+      // otherwise the refusal names a path that appears nowhere in their
+      // config and they have to work out why.
+      expect(err?.message).toContain(projViaLink);
+      expect(err?.message).toContain("resolves to");
+    } finally {
       delete process.env["PIFLEET_RUNS_DIR"];
     }
   });

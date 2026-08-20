@@ -29,6 +29,7 @@ import { WORKER_UID } from "../container/mounts.ts";
 import { assertNoHostGcloudMount, gcloudConfigTmpfsArgv } from "../security/adc.ts";
 import {
   assertNoRunDirMount,
+  assertNoRunDirMountResolved,
   roleSkillsDir,
   runPaths,
   runsRoot,
@@ -324,6 +325,17 @@ export async function renderWorker(
     }),
     `docker argv for ${w.id}`,
   );
+
+  // ISC-127's symlink half, which `buildDockerArgv` structurally cannot do:
+  // it is synchronous and pure by design, and `realpath` is I/O. This function
+  // is `async`, is the only production path that produces a worker argv, and
+  // `materializeWorkerInputs` awaits it per worker BEFORE creating anything —
+  // so the pre-flight costs nothing architecturally and runs early enough to
+  // refuse before any host path exists. The lexical guard above still runs and
+  // is not redundant: it is the one that holds for any future synchronous
+  // caller of `buildDockerArgv`. See `assertNoRunDirMountResolved` for the
+  // routine (`~/repos` -> `/Volumes/...`) shape of what it catches.
+  await assertNoRunDirMountResolved(docker, run.root, runsRoot());
 
   return {
     workerId: w.id,

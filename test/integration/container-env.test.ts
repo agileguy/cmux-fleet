@@ -64,6 +64,7 @@ import { makeDaemonScratch } from "../../src/container/mounts.ts";
 import { loadConfig } from "../../src/config/load.ts";
 import { renderWorker } from "../../src/config/render.ts";
 import { materializeWorkerInputs } from "../../src/run/materialize.ts";
+import { ensureControlAuth } from "../../src/security/control-auth.ts";
 import { CREDENTIAL_ENV_VARS } from "../../src/security/adc.ts";
 import { classifyRunDirExposure, runPaths } from "../../src/run/paths.ts";
 
@@ -150,6 +151,11 @@ async function startRenderedWorker(): Promise<Started> {
   const loaded = await loadConfig(join(repo, "fleet.yaml"));
   const run = runPaths("envtest", runsDir);
   await materializeWorkerInputs(loaded, run, ["eng-1"]);
+  // The 0600 per-run control secret, minted through production's own path.
+  // ISC-127's whole subject: without it the containment check below has no
+  // file to be about and passes on an `ENOENT` fallback instead. See that
+  // assertion for the measurement.
+  await ensureControlAuth(run);
   const rendered = await renderWorker(loaded, "eng-1", { runId: "envtest" });
 
   // The one input production deliberately leaves unwritten. Empty, so it
@@ -292,11 +298,42 @@ describe.skipIf(!DOCKER)("docker inspect on a rendered worker (ISC-31, ISC-127)"
       expect(`${s} -> ${classifyRunDirExposure(s, runDirReal) ?? "clean"}`).toBe(`${s} -> clean`);
     }
 
-    // What the criterion protects, named directly: the per-run control-socket
-    // secret must not be reachable through any mount.
-    const secret = await norm(join(runDir, "control-auth.json"));
+    /**
+     * What the criterion protects, named directly: the per-run control-socket
+     * secret must not be reachable through any mount.
+     *
+     * This block was CONDITIONALLY VACUOUS and the condition was "macOS", i.e.
+     * the platform it was written on. `control-auth.json` is minted by the
+     * supervisor and `startRenderedWorker` never started one, so the file did
+     * not exist, so `realpath` threw `ENOENT` and `norm`'s `.catch(() => p)`
+     * handed back the UNRESOLVED path — while `runDirReal` beside it was
+     * resolved. On this machine the scratch root is under `/var/folders/...`,
+     * which is reached through the `/var -> /private/var` symlink, so the two
+     * strings shared no prefix at all and every comparison below passed on the
+     * mismatch rather than on the property. The mount table was never actually
+     * consulted.
+     *
+     * Two changes, and the first is the one that matters: the secret is now
+     * really minted, through `ensureControlAuth` — production's own path, not
+     * a hand-written stand-in — so `realpath` resolves it and the check is
+     * about the run directory that exists. It is also derived from
+     * `runDirReal` rather than re-normalised independently, because a resolved
+     * path compared against an unresolved one is exactly the failure being
+     * fixed and re-deriving it invites the same drift back.
+     *
+     * `expect(exists)` first, because an assertion that the secret is not
+     * inside any mount is worthless if the secret is not anywhere.
+     */
+    const secret = join(runDirReal, "control-auth.json");
+    expect(await Bun.file(secret).exists()).toBe(true);
     for (const s of sources) {
-      expect(`${secret} under ${s}`).not.toBe(`${secret} under ${secret.slice(0, s.length)}`);
+      // Root-aware, for the reason `render.test.ts`'s equivalent records: when
+      // `s` is `/` the naive `${s}/` builds `"//"` and prefixes nothing, so the
+      // one mount that exposes everything would read clean.
+      const prefix = s === "/" ? "/" : `${s}/`;
+      expect(`${secret} under ${s}: ${secret.startsWith(prefix)}`).toBe(
+        `${secret} under ${s}: false`,
+      );
     }
   });
 });
