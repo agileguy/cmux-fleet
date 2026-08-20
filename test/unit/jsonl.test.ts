@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   appendJsonl,
+  fsyncDirBestEffort,
   LineSplitter,
   LineTooLongError,
   MAX_LINE_UNITS,
@@ -9,7 +10,7 @@ import {
   writeJsonAtomic,
   TailReader,
 } from "../../src/util/jsonl.ts";
-import { mkdtemp, readdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -90,6 +91,74 @@ describe("writeJsonAtomic", () => {
       expect((await readdir(join(dir, "nested"))).filter((f) => f.includes(".tmp-"))).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * ISC-218: the directory fsync runs AFTER the rename, so its failure must not
+ * be reported as the write having failed.
+ *
+ * This was a live defect, not a hypothetical. Only `dh.sync()` was guarded;
+ * `open(dir, "r")` was not, and that call needs READ permission on the
+ * directory while writing and renaming inside it need only write+search. So a
+ * `0o300` directory let every durable step succeed — tmp written, fsynced,
+ * renamed into place — and then threw `EACCES: permission denied, open
+ * '<dir>'` out of `writeJsonAtomic`, with the correct file sitting on disk.
+ * Callers of a "failed" durable write retry it, mark a worker broken, or
+ * unwind a state machine; every one of those is worse than losing the
+ * directory entry's crash-durability, which is all that is actually at risk
+ * once the rename has returned.
+ */
+describe("writeJsonAtomic reports a landed write as landed (ISC-218)", () => {
+  /**
+   * The `open` failure, isolated and reachable on any uid.
+   *
+   * A directory that does not exist cannot be opened by root either, so this
+   * probe does not depend on the permission model the end-to-end case below
+   * does. It fails the moment the helper stops swallowing — which is the whole
+   * guarantee, stated as one call.
+   */
+  test("fsyncDirBestEffort resolves when the directory cannot be opened at all", async () => {
+    const gone = join(tmpdir(), `pifleet-absent-${process.pid.toString(36)}-${Date.now().toString(36)}`);
+    expect(await Bun.file(join(gone, "x")).exists()).toBe(false);
+    // Resolving is the assertion. `.resolves` rather than a bare await so a
+    // rejection is reported as this expectation failing, not as the test
+    // throwing from an unrelated line.
+    await expect(fsyncDirBestEffort(gone)).resolves.toBeUndefined();
+  });
+
+  /**
+   * The end-to-end case, through the real code path a caller uses.
+   *
+   * Requires a non-root uid to be meaningful, and says so rather than skipping:
+   * a `0o300` directory does not stop root from reading it, so under uid 0 the
+   * precondition below fails loudly instead of the probe passing having proved
+   * nothing. CI's `test` job runs as the unprivileged `runner` account.
+   */
+  test("an unreadable containing directory does not fail the write", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pifleet-nordir-"));
+    const dir = join(base, "run");
+    try {
+      await mkdir(dir, { recursive: true });
+      // write + search, deliberately NOT read: enough to create, fsync and
+      // rename the temp file, not enough to open the directory itself.
+      await chmod(dir, 0o300);
+      await expect(readdir(dir)).rejects.toThrow(/EACCES/);
+
+      const p = join(dir, "state.json");
+      await expect(
+        writeJsonAtomic(p, { schema: "pifleet.state/v1", worker: "eng-1" }),
+      ).resolves.toBeUndefined();
+
+      // And the write it reported as succeeding really did: the durable steps
+      // all ran, which is why reporting failure was wrong in the first place.
+      await chmod(dir, 0o700);
+      expect(JSON.parse(await readFile(p, "utf8")).worker).toBe("eng-1");
+      expect((await readdir(dir)).filter((f) => f.includes(".tmp-"))).toEqual([]);
+    } finally {
+      await chmod(dir, 0o700).catch(() => {});
+      await rm(base, { recursive: true, force: true });
     }
   });
 });
