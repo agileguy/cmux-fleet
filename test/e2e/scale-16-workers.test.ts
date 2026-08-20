@@ -68,10 +68,14 @@
  * `events.jsonl` when it binds `agent_start` to the live epoch, and `settledAt`
  * is the `settled_at` field the supervisor writes into the task record inside
  * `settle()`. Both come from one process's clock, on the far side of the
- * control socket, and neither can be moved by how busy this test runner is.
- * `expect(min(quiet)).toBeGreaterThanOrEqual(50)` is kept as a cheap backstop:
- * it is the arithmetic floor the scenario guarantees, and it FAILED on the
- * measurement this replaces.
+ * control socket, so neither can be moved by how busy this test RUNNER is.
+ *
+ * They CAN be moved by how busy the SUPERVISOR is, which is a different thing
+ * and is not a flaw in the choice of endpoints — it is the residual error that
+ * `QUIET_SKEW_MS` below exists to absorb. See the comment on that constant.
+ * A floor on `min(quiet)` is kept as a cheap backstop: it is close to the
+ * arithmetic floor the scenario guarantees, and it FAILED on the measurement
+ * this replaces.
  *
  * Two guards keep that from passing vacuously. The floods are verified to have
  * actually happened — the drained bytes are counted out of `events.jsonl`, so
@@ -141,6 +145,49 @@ const QUIET_DEADLINE_MS = 10_000;
  * comes in under it is measuring something other than the interval it names.
  */
 const QUIET_TURN_DELAY_MS = 50;
+
+/**
+ * Processing-time skew allowed under the floor, and why the floor is not 50.
+ *
+ * The scripted 50 ms sleep happens in the CHILD, between writing `agent_start`
+ * and writing `agent_end`. Both ends of the measured interval are stamped when
+ * the SUPERVISOR processes those events, not when the child emitted them, so
+ * the measurement is the child's 50 ms plus (or minus) however differently the
+ * supervisor was delayed reaching each end.
+ *
+ * That difference is not symmetric here, and this test is what makes it so: at
+ * the moment a quiet turn starts, the supervisor is draining ~1.6 MB from two
+ * flooding workers, so it can reach `agent_start` LATE; by the time
+ * `agent_end` lands 50 ms later it may have caught up and reach that one
+ * promptly. A late start and a prompt end shorten the interval, and the
+ * measurement comes in a few milliseconds UNDER the sleep that really happened.
+ *
+ * This is not hypothetical and was not found by reasoning: CI measured
+ * **47 ms** against a floor of 50 and failed, on a run whose only new content
+ * was an unrelated test file. Nothing was wrong with the fleet — the turn slept
+ * its 50 ms, and the assertion was reading the clock at two moments the
+ * scenario deliberately loads.
+ *
+ * 10 ms is chosen to be far wider than that skew and still tight enough to keep
+ * the backstop's job. State the cost plainly rather than round it off: the
+ * measurement this file replaced reported 35 ms, 35 ms and 49 ms, and a 40 ms
+ * floor catches the first two where a 50 ms floor caught all three. The floor
+ * is therefore genuinely WEAKER against a near-miss understatement, and that is
+ * the price of not reporting this test's own load as a product failure.
+ *
+ * It is an acceptable price here only because the floor is a backstop and not
+ * the measurement: the defect those three numbers came from was stamping the
+ * start AFTER the dispatch subprocess had exited, and that spelling is gone —
+ * both endpoints are now supervisor-side and cannot include a CLI's teardown at
+ * all. The floor guards against a future regression re-introducing a shortened
+ * window, and two of the three known samples still trip it. If a 49 ms-class
+ * regression is ever a live worry, the fix is a tighter measurement, not a
+ * floor tuned so finely that runner load decides whether main is green.
+ */
+const QUIET_SKEW_MS = 10;
+
+/** The floor an honest quiet latency clears even at worst-case stamping skew. */
+const QUIET_LATENCY_FLOOR_MS = QUIET_TURN_DELAY_MS - QUIET_SKEW_MS;
 
 /** Budget for the flooded `events.jsonl` to finish draining before it is counted. */
 const DRAIN_BUDGET_MS = 30_000;
@@ -740,14 +787,17 @@ describe("ISC-158: sixteen live workers, two of them flooding a pipe", () => {
        *
        * A quiet turn contains a scripted 50ms sleep before its `agent_end`, and
        * settling costs two further `get_state` round trips, so no honest quiet
-       * latency can be below 50ms. This assertion is not decorative: on the
+       * latency can be meaningfully below 50ms — less `QUIET_SKEW_MS` for the
+       * supervisor-side stamping error that this test's own floods induce, for
+       * which see that constant. This assertion is not decorative: on the
        * measurement it replaces it FAILED, reporting 35ms — which is how the
-       * old timing was shown to be wrong rather than merely fragile.
+       * old timing was shown to be wrong rather than merely fragile, and which
+       * still fails at this floor.
        */
       for (const worker of QUIET) {
-        expect(latency(worker)).toBeGreaterThanOrEqual(QUIET_TURN_DELAY_MS);
+        expect(latency(worker)).toBeGreaterThanOrEqual(QUIET_LATENCY_FLOOR_MS);
       }
-      expect(Math.min(...quiet)).toBeGreaterThanOrEqual(QUIET_TURN_DELAY_MS);
+      expect(Math.min(...quiet)).toBeGreaterThanOrEqual(QUIET_LATENCY_FLOOR_MS);
 
       // The flooders were genuinely still flooding. Without this, the ordering
       // below could be satisfied by two workers that emitted nothing and
