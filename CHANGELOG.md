@@ -21,6 +21,20 @@ All notable changes to this project are documented here.
   changed in this entry — this records a known gap where it can be counted.
 
 ### Fixed
+- **Ctrl-C on `pifleet logs --follow` exited 130 instead of 0 whenever the worker had a backlog
+  (ISC-269).** The SIGINT and SIGTERM handlers were registered *after* the first drain had already
+  returned, leaving that whole drain unguarded, so a signal arriving inside it got Bun's default
+  disposition. **It was not intermittent** — the window is exactly as long as the backlog takes to
+  render, so the failure is proportional to how far behind the follower is. Measured on the unfixed
+  code, killing on first output: 200 000 buffered events exits 130 five times out of five, 20 000
+  the same, 5 000 four times out of five, and a single event exits 0 five times out of five. That
+  gradient is why the existing test read as flaky for a session — it uses a one-event fixture, the
+  fastest-draining case there is. The handlers now go up before the first drain, inside the same
+  `try/finally`, so a signal mid-drain lets the drain finish and returns cleanly. A new test gives
+  the follower 50 000 events and requires exit 0; mutation-verified `Expected: 0, Received: 130`
+  against the unfixed source. A signal arriving before any output still exits 130, deliberately —
+  nothing has been emitted, so there is no session to end cleanly.
+
 - **Integration tests that spawn the CLI were failing on busy developer machines and passing in CI
   (ISC-266).** They inherited bun's default 5000 ms per-test budget — a number with no relationship
   to the work they do. Under ten busy loops on 14 cores, three `harvest.test.ts` tests died at
