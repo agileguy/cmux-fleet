@@ -49,6 +49,7 @@ import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
 // `startDecoyTrainingRun`.
 import { checkMlxTrainingGuard } from "../../src/safety/mlx-training-guard.ts";
 import { git, gitOk, seedGitRepo } from "../fixtures/synthetic-repo.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -111,7 +112,23 @@ afterAll(async () => {
     }
     await rm(r.base, { recursive: true, force: true }).catch(() => {});
   }
-}, 120_000);
+  // ISC-266 audit: this hook was the one timeout in the file carrying a flat
+  // hand-written number (120_000) instead of a derived one, and it had gone
+  // UNDER-budgeted. It spawns one `down` per run directory per rig, and every
+  // `makeRig` registers a rig (single `rigs.push`, in `makeRig` itself), so the
+  // counted upper bound is the number of `makeRig` CALLS — 26 in this file, not
+  // estimated. cliBudget(26) = 296_400 ms; the old flat 120_000 was already
+  // exceeded by cliBudget(15) = 171_000. Counting rather than estimating is the
+  // criterion's own instruction, and this is the case it was written for: the
+  // budget silently stopped matching the work as the file grew.
+  //
+  // Charging every `down` the expensive per-spawn rate is deliberately
+  // conservative — rigs whose test never reached `up` contribute zero spawns —
+  // because the failure mode here is not a slow suite, it is the one this
+  // hook's own docstring above exists to prevent: a timed-out `afterAll`
+  // truncates the loop mid-way and leaks detached supervisors onto the
+  // developer's machine, which this project has already paid for.
+}, cliBudget(26));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -2179,6 +2196,15 @@ describe("a hostile repo changes nothing about the run (ISC-119)", () => {
 
       // Renamed aside, not deleted: a worker whose legitimate file vanished
       // with no record gets debugged as a mystery (repo-hazards.ts's own rule).
+      //
+      // BOTH halves need this, not just `.pi/extensions`. The absence loop
+      // above is `rejects.toThrow()` with no matcher, so on its own it passes
+      // on ANY rejection — including the one a fixture that never committed
+      // the file would produce. The quarantine assertion is what separates
+      // "the scanner neutralized it" from "it was never there", and until now
+      // only `.pi/extensions` had one; `AGENTS.md` was resting on the vacuous
+      // half alone. Mirrors the same pairing in the hazard-ordering test above.
+      expect(await Bun.file(join(wt!.path, `AGENTS.md${QUARANTINE_SUFFIX}`)).exists()).toBe(true);
       expect(
         await Bun.file(join(wt!.path, ".pi", `extensions${QUARANTINE_SUFFIX}`, "hostile.ts")).text(),
       ).toContain("FIXTURE PAYLOAD");

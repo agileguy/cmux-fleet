@@ -11,10 +11,14 @@
  * that "`up` refuses to run against an image that is absent or fails `verify`"
  * — which is ISC-189's sentence verbatim, and it was never true. `up.ts` does
  * not contain the string "image" at all; `verifyImage` has exactly one caller
- * in the tree (`cli/commands/image.ts`, the `image verify` subcommand); and the
- * only `docker image inspect` in `src/` is `doctor.ts`'s `imageStatus`, which
- * REPORTS and is not on `up`'s path. `config/render.ts` calls `imageTag` solely
- * to place the tag in the `docker run` argv.
+ * in the tree (`cli/commands/image.ts`, the `image verify` subcommand); and
+ * NONE of the three `docker image inspect` calls in `src/` is on `up`'s path —
+ * `doctor.ts`'s `imageStatus` REPORTS, for `doctor` alone, and the other two
+ * are the ones below in this module, reached only from the operator-driven
+ * `image` subcommands (`listImages` from `image list` and, via `gcImages`,
+ * `image gc`; `verifyImage` from `image verify`). `config/render.ts` calls
+ * `imageTag` solely to place the tag in the `docker run` argv — and `imageTag`
+ * only hashes, it never shells out.
  *
  * So an absent image is discovered by the DAEMON, after `up` has already
  * created the run directory, cloned a checkout per worker, registered a remote
