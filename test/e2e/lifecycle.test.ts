@@ -328,14 +328,30 @@ describe("e2e — the Phase 1 exit criterion", () => {
       const run = runPaths(fleet.runId, fleet.root);
       const wp = workerPaths(run, "eng-1");
 
-      // Epoch 1: dispatch, then abort BEFORE the turn's natural completion at
-      // +150ms — the scenario's abort lands nowhere (emits nothing), so the
-      // natural agent_end arrives after the abort was requested: the SRD §7.5
+      // Epoch 1: dispatch, then abort BEFORE the turn's natural completion —
+      // the scenario's abort lands nowhere (emits nothing), so the natural
+      // agent_end arrives after the abort was requested: the SRD §7.5
       // interleaving.
       const t4 = await writeTask(fleet, "T-004");
       const d4 = await cli(fleet, ["dispatch", "--worker", "eng-1", "--task", t4, "--json"]);
       expect(json<{ accepted: boolean; epoch: number }>(d4).epoch).toBe(1);
-      await new Promise((r) => setTimeout(r, 30));
+
+      /**
+       * Anchor on the turn having STARTED rather than sleeping a fixed 30ms.
+       *
+       * The abort has to land inside the fixture's gap between `agent_start`
+       * and the natural `agent_end`, and a bare sleep spends that budget
+       * blind: it cannot tell "the turn is underway" from "the dispatch
+       * subprocess is still starting up". Waiting for the event the fixture
+       * actually emits starts the clock where the window does.
+       */
+      const turnStarted = await waitUntil(async () => {
+        const text = await Bun.file(wp.eventsJsonl)
+          .text()
+          .catch(() => "");
+        return text.includes('"agent_start"');
+      }, 10_000);
+      expect(turnStarted).toBe(true);
       await controlCall(run, "eng-1", { cmd: "abort" });
 
       const w4 = await cli(fleet, ["wait", "--task", "T-004", "--timeout", "10s", "--json"]);
@@ -349,8 +365,10 @@ describe("e2e — the Phase 1 exit criterion", () => {
       const d5 = await cli(fleet, ["dispatch", "--worker", "eng-1", "--task", t5, "--json"]);
       expect(json<{ accepted: boolean; epoch: number }>(d5).epoch).toBe(2);
 
-      // Outlive the straggler (at +550ms from epoch 1's prompt) generously.
-      await new Promise((r) => setTimeout(r, 900));
+      // Outlive the straggler (the fixture's second agent_end, 1000ms after
+      // the first) generously. If this were shortened to race it, a pass would
+      // only mean the straggler had not arrived yet.
+      await new Promise((r) => setTimeout(r, 2500));
 
       // ISC-84: T-005 must NOT be settled — not by the straggler, not by
       // anything. T-004 keeps its own epoch and verdict.

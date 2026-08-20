@@ -38,6 +38,7 @@ import { mergeLedger } from "../../src/run/ledger.ts";
 import { identityAlive, processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
 import { EXPORT_MARKER } from "../fixtures/export-marker.ts";
+import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -722,6 +723,331 @@ describe("fake-pi worker-side epoch fence", () => {
       await fake.exited;
     },
     15_000,
+  );
+});
+
+/**
+ * The REAL worker's fence, which is a different claim from the block above.
+ *
+ * The `fake-pi` block asserts that the DOUBLE refuses a stale epoch. That is a
+ * fact about `test/fixtures/fake-pi.ts` and about nothing in `src/` — its
+ * high-water-mark is an in-memory `let` that dies with the process, and the
+ * real Pi, a third-party binary, makes no such promise. ISC-142 is about the
+ * other fence: the `last_accepted_epoch` the SUPERVISOR persists in
+ * `fence.json`, which is the only one that survives a restart and the only one
+ * whose refusal is pifleet's own code.
+ *
+ * The distinction is the whole criterion. "Not merely bookkept by the
+ * allocator" means the refusal has to come from the side that OWNS the
+ * resource, so these tests never go through `sendTaskEnvelope` — they speak
+ * the control socket directly, which is exactly the shape of the hazard the
+ * design note describes: "a detached supervisor plus a CLI relaunch is two
+ * allocators". A second allocator that never heard of epoch 3 sends a dispatch
+ * at epoch 3, and the worker has to be the thing that says no.
+ *
+ * Nothing about the seeded fence is known to the running process. It is
+ * written to disk BEFORE the supervisor is launched, so a supervisor that did
+ * not read `fence.json` would answer every one of these differently.
+ */
+describe("the worker's persisted fence refuses stale dispatch (ISC-142)", () => {
+  /**
+   * `attemptKey` from rpc/epoch.ts, which is private to that module.
+   *
+   * Spelled with `String.fromCharCode` rather than an escape for the reason
+   * the ISC-143 block gives: a literal NUL in the source makes `grep` treat
+   * the whole test suite as binary.
+   */
+  const attemptKeyOf = (taskId: string, attemptId: string): string =>
+    `${taskId}${String.fromCharCode(0)}${attemptId}`;
+
+  /**
+   * A fence a previous incarnation left behind: three epochs handed out, of
+   * which epoch 1 settled and epochs 2 and 3 did not (burned by a restart, as
+   * the ISC-143 block shows happens). Nothing is live.
+   *
+   * Two DIFFERENT refusals live in this shape and the criterion covers both:
+   * epoch 1 is `<=` the high-water-mark AND in `completed`, so it comes back
+   * `already_completed` with its verdict; epoch 2 is `<=` the high-water-mark
+   * and in nothing, so it comes back `stale_epoch`. A test that pinned only
+   * one branch would leave the other free to start accepting.
+   */
+  const seededFence = (): FenceSnapshot => ({
+    last_accepted_epoch: 3,
+    ack_seq: null,
+    last_seq: 12,
+    live: null,
+    completed: [
+      {
+        task_id: "T-STALE-DONE",
+        attempt_id: "a-done",
+        epoch: 1,
+        verdict: "success",
+        settled_at: "2026-08-19T00:00:00.000Z",
+      },
+    ],
+    attempts: { [attemptKeyOf("T-STALE-DONE", "a-done")]: 1 },
+  });
+
+  test(
+    "a dispatch at or below the persisted high-water-mark is refused, and the fence does not move",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("stale-fence");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      await mkdir(wp.tasksDir, { recursive: true });
+      await mkdir(run.sessionsDir, { recursive: true });
+
+      // On disk BEFORE the process exists. This is the "persisted" in the
+      // criterion — the supervisor learns about epoch 3 by reading it.
+      await writeFence(wp, "eng-1", seededFence());
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("happy.json") },
+        logPath: wp.supervisorLog,
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      // (1) epoch EQUAL to the high-water-mark. The `<=` boundary itself.
+      const equal = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-STALE-EQ"),
+        attempt_id: "a-eq",
+        requested_epoch: 3,
+      });
+      expect(equal["accepted"]).toBe(false);
+      expect(equal["reason"]).toBe("stale_epoch");
+      // The refusal names both numbers, so an operator reading it can tell
+      // "you are behind" from "you skipped ahead" without a second lookup.
+      expect(equal["requested"]).toBe(3);
+      expect(equal["next"]).toBe(4);
+
+      // (2) strictly BELOW it, naming an epoch that never settled.
+      const below = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-STALE-LT"),
+        attempt_id: "a-lt",
+        requested_epoch: 2,
+      });
+      expect(below["accepted"]).toBe(false);
+      expect(below["reason"]).toBe("stale_epoch");
+
+      // (3) strictly below it, naming an epoch that DID settle. Still refused,
+      // and refused with the recorded verdict rather than a bare no.
+      const settled = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-STALE-SETTLED"),
+        attempt_id: "a-settled",
+        requested_epoch: 1,
+      });
+      expect(settled["accepted"]).toBe(false);
+      expect(settled["reason"]).toBe("already_completed");
+      expect(settled["verdict"]).toBe("success");
+
+      /**
+       * THE assertion, and the one that separates refusal from bookkeeping.
+       *
+       * A worker that merely NOTED the stale request and allocated a fresh
+       * epoch anyway would answer `accepted: true` above and would have
+       * advanced `last_accepted_epoch` to 4 by the time it replied — the
+       * dispatch path awaits `persistFence()` before it sends the prompt, so
+       * an accepted dispatch is durable before its reply is written. The fence
+       * standing exactly where it was seeded is therefore proof that three
+       * dispatches were refused rather than absorbed.
+       */
+      const afterRefusals = await readFence(wp);
+      expect(afterRefusals.last_accepted_epoch).toBe(3);
+      expect(afterRefusals.live).toBeNull();
+
+      // And none of the three ever became a task: refused, not run.
+      for (const id of ["T-STALE-EQ", "T-STALE-LT", "T-STALE-SETTLED"]) {
+        expect(await readTaskRecord(taskRecordPath(wp, id))).toBeNull();
+      }
+
+      // The WORKER recorded the refusals — the rows are its own, written
+      // before it answered, so this is the worker's account and not the
+      // caller's interpretation of a reply.
+      const { records, errors } = await mergeLedger(run);
+      expect(errors).toEqual([]);
+      const refused = records
+        .filter((r) => r.event === "dispatch_rejected")
+        .map((r) => r.task_id);
+      expect(refused).toEqual(["T-STALE-EQ", "T-STALE-LT", "T-STALE-SETTLED"]);
+
+      /**
+       * The positive control, without which every assertion above is also
+       * satisfied by a worker that refuses everything.
+       *
+       * `next` — one above the persisted high-water-mark — is accepted, and
+       * the fence then moves. The fence is a high-water-mark, not a lock.
+       */
+      const fresh = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-STALE-NEXT"),
+        attempt_id: "a-next",
+        requested_epoch: 4,
+      });
+      expect(fresh["accepted"]).toBe(true);
+      expect(fresh["epoch"]).toBe(4);
+      expect((await readFence(wp)).last_accepted_epoch).toBe(4);
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    /**
+     * DERIVED from a counted spawn count, not fitted to a run that passed.
+     *
+     * Two processes, counted in the body rather than estimated: one
+     * `processLauncher.launchDetached`, and the single `fake-pi` child that
+     * supervisor starts from `PIFLEET_PI_COMMAND`. No CLI is invoked at all —
+     * the four dispatches and the shutdown go down the control socket from
+     * this process. So `cliBudget(2)` = 2 * 1900 * 3 * 2 = 22_800 ms, and the
+     * CONTENTION and SAFETY factors in that product are what cover a loaded
+     * machine. The number would be the same had every run come in at 10 s.
+     *
+     * The observation below is a sanity check on the derivation, NOT its
+     * source, and it is reported with the conditions it was taken under
+     * because this box is shared and was never quiet while this was written.
+     * 2.26/2.26/2.28 s at 1-minute load averages of 60.40/56.04/56.04 on 14
+     * cores, and 2.35 s on a re-take at load 188.27 — 13x oversubscribed,
+     * with another engineer's CPU-load harness running. NO IDLE NUMBER IS
+     * CLAIMED HERE because none was taken. The 13x figure is the useful one:
+     * it is four times the 2.09-2.98x inflation ISC-266 measured, and the
+     * test still finishes in a tenth of its budget.
+     *
+     * Roughly 2 s of that is SHUTDOWN_GRACE_MS and is deliberate: the
+     * positive control leaves epoch 4 live, so `shutdown` has a running task
+     * to wind down.
+     */
+    cliBudget(2),
+  );
+});
+
+/**
+ * ISC-145 at the worker, which is the layer the criterion's contrast lives on.
+ *
+ * `test/unit/epoch.test.ts` proves the DECISION — `allocate` looks the attempt
+ * up before it looks at `completed`, so a settled task's own attempt replays
+ * instead of coming back `already_completed`. What it cannot prove is that the
+ * worker HONOURS that decision, and the two failure modes are different
+ * things: the decision going wrong returns the bare `already_completed` the
+ * criterion names, while the worker ignoring `replayed` re-sends the prompt
+ * and runs the task a second time. Both are ISC-145 failures and only one of
+ * them is visible in `epoch.ts`.
+ *
+ * The retry here is the real one. `dispatch --auto` derives `auto:<task id>`
+ * deterministically per (run, task), and a hand-written task file may carry
+ * its own `attempt_id`, so an identical `(task_id, attempt_id)` reaching a
+ * worker twice is the ordinary consequence of a lost ack — not a contrived
+ * input.
+ */
+describe("a retried (task_id, attempt_id) replays the stored answer (ISC-145)", () => {
+  test(
+    "the same attempt after settlement gets the original epoch back, not already_completed",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("replay");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      await mkdir(wp.tasksDir, { recursive: true });
+      await mkdir(run.sessionsDir, { recursive: true });
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("happy.json") },
+        logPath: wp.supervisorLog,
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      const dispatch = (attemptId: string): Promise<Record<string, unknown>> =>
+        controlCall(run, "eng-1", {
+          cmd: "dispatch",
+          envelope: makeEnvelope(runId, "eng-1", "T-REPLAY"),
+          attempt_id: attemptId,
+          requested_epoch: null,
+        });
+
+      const first = await dispatch("a-replay");
+      expect(first["accepted"]).toBe(true);
+      expect(first["replayed"]).toBe(false);
+      const epoch = first["epoch"] as number;
+
+      // Let it finish. The interesting retry is the one that arrives AFTER
+      // settlement, because that is when `completed` holds an answer and the
+      // bare `already_completed` becomes available to return.
+      const done = await waitFor(
+        async () => (await readTaskRecord(taskRecordPath(wp, "T-REPLAY"))) !== null,
+        10_000,
+      );
+      expect(done).toBe(true);
+      expect((await readTaskRecord(taskRecordPath(wp, "T-REPLAY")))?.verdict).toBe("success");
+
+      /**
+       * THE assertion, in the criterion's own terms.
+       *
+       * Same task, same attempt, task long since settled. The answer is the
+       * STORED one — accepted, the same epoch, flagged as a replay — and it is
+       * NOT a refusal. The caller lost the ack, not the dispatch, and a bare
+       * `already_completed` would leave it unable to tell "I did this and lost
+       * the reply" from "somebody else did this", which is the distinction the
+       * whole attempt-id mechanism exists to preserve.
+       */
+      const retry = await dispatch("a-replay");
+      expect(retry["accepted"]).toBe(true);
+      expect(retry["replayed"]).toBe(true);
+      expect(retry["epoch"]).toBe(epoch);
+      expect(retry["reason"]).toBeUndefined();
+
+      // And the replay cost nothing: no epoch burned, nothing re-run, the
+      // recorded outcome untouched.
+      expect((await readFence(wp)).last_accepted_epoch).toBe(epoch);
+      const record = await readTaskRecord(taskRecordPath(wp, "T-REPLAY"));
+      expect(record?.verdict).toBe("success");
+      expect(record?.epoch).toBe(epoch);
+      const events = await readEvents(wp.eventsJsonl);
+      expect(events.filter((e) => e["type"] === "epoch_started")).toHaveLength(1);
+
+      /**
+       * The negative control, and the other half of the sentence.
+       *
+       * A DIFFERENT attempt against the same settled task is a different
+       * claim — nobody is re-asking a question they already got an answer to,
+       * they are asking a new one about work that is done — and it correctly
+       * gets the bare `already_completed`. Without this the test above is
+       * satisfied by a worker that replays everything, which would resurrect
+       * ISC-85.
+       */
+      const other = await dispatch("a-different");
+      expect(other["accepted"]).toBe(false);
+      expect(other["reason"]).toBe("already_completed");
+      expect(other["verdict"]).toBe("success");
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    /**
+     * DERIVED from a counted spawn count, on the same basis as the ISC-142
+     * test above: one `launchDetached` plus the one `fake-pi` child it starts,
+     * counted in the body, no CLI invocation — three dispatches and a shutdown
+     * over the control socket. `cliBudget(2)` = 22_800 ms.
+     *
+     * Sanity check, with conditions, not the source of the number:
+     * 530/540/534 ms at a 1-minute load average of 44.40 on 14 cores, and
+     * 531 ms on a re-take at load 188.27 — 13x oversubscribed, another
+     * engineer's load harness running. No idle number is claimed; none was
+     * taken. It is faster than the ISC-142 test because its task has already
+     * settled before `shutdown`, so it pays no SHUTDOWN_GRACE_MS.
+     */
+    cliBudget(2),
   );
 });
 
