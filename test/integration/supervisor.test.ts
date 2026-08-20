@@ -38,7 +38,6 @@ import { mergeLedger } from "../../src/run/ledger.ts";
 import { identityAlive, processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
 import { EXPORT_MARKER } from "../fixtures/export-marker.ts";
-import { cliBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -1157,9 +1156,16 @@ describe("export_html over the control socket (ISC-234)", () => {
       expect(deadHtml.startsWith("<!doctype html>")).toBe(true);
       expect(deadHtml).toContain("</html>");
     },
-    // Two CLI spawns; the supervisor launch, a full turn and a shutdown sit
-    // outside that model, so the larger of the two numbers wins.
-    Math.max(cliBudget(2), 60_000),
+    // ISC-266 audit: NOT a spawn-cost test, so the hand-picked number stands
+    // BARE rather than behind a `Math.max` whose derived term can never win.
+    // Two CLI spawns derive cliBudget(2) = 22_800 ms, which 60_000 dominates
+    // unconditionally — the `max` was dead, and a dead term reads as derived
+    // while being hand-picked. What sets this ceiling is the supervisor
+    // launch, a full turn and a shutdown, none of which the spawn model
+    // prices. Inflating the spawn count until the derivation cleared 60_000
+    // would be estimating, which `budget.ts` explicitly forbids.
+    // Measured 0.54 s idle at load average 3.1-3.6 on a 14-core box.
+    60_000,
   );
 
   /**
@@ -1234,10 +1240,14 @@ describe("export_html over the control socket (ISC-234)", () => {
       // also drop the marker while destroying the document.
       expect(afterwards).toBe(asPromised);
     },
-    // One CLI spawn. The 13s render, the supervisor launch and a full turn sit
-    // outside the spawn model entirely, so the floor is the wall clock this
-    // test genuinely needs: ~13s of deliberate delay plus a 30s poll ceiling.
-    Math.max(cliBudget(1), 90_000),
+    // ISC-266 audit: NOT a spawn-cost test. One CLI spawn derives
+    // cliBudget(1) = 11_400 ms against a body whose cost is ~13 s of scripted
+    // render delay plus a 30 s poll ceiling — the spawn model prices none of
+    // it and the derived term could never win, so it is not carried. The 13 s
+    // is a fixed sleep and does not inflate under load; only the launch, turn
+    // and single spawn do. Measured 13.5 s at load average 3.1-3.6 on a
+    // 14-core box, so 90_000 is ~6.7x headroom and still bounds a real hang.
+    90_000,
   );
 
   /**
@@ -1287,11 +1297,15 @@ describe("export_html over the control socket (ISC-234)", () => {
       // "untouched" would be proving only that nothing happened.
       expect(await Bun.file(staged as string).text()).toContain(EXPORT_MARKER);
     },
-    // ZERO CLI spawns: this drives the control socket directly, so the spawn
-    // model has nothing to price. `cliBudget(1)` is carried as the floor for
-    // the one supervisor launch and turn the helper performs, and the
-    // wall-clock floor beside it is what actually applies.
-    Math.max(cliBudget(1), 60_000),
+    // ISC-266 audit: ZERO CLI spawns — this drives the control socket
+    // directly, so `cliBudget` cannot express it at all (it throws below 1)
+    // and carrying cliBudget(1) was doubly dead: wrong count, losing term.
+    // The cost is one supervisor launch and one turn, with no deliberate
+    // delay anywhere. Measured 0.44 s at load average 3.1-3.6 on a 14-core
+    // box; 30_000 is ~68x headroom, deliberately TIGHTER than the 60_000 its
+    // neighbours need because this test sleeps for nothing and a hang here
+    // should surface fast.
+    30_000,
   );
 
   /**
@@ -1337,8 +1351,11 @@ describe("export_html over the control socket (ISC-234)", () => {
       // were slower than both budgets instead of just one.
       expect(r.stderr).not.toContain("control call failed");
     },
-    // One CLI spawn; the 9s render plus supervisor launch and a full turn are
-    // outside the spawn model, so the wall-clock floor wins.
-    Math.max(cliBudget(1), 60_000),
+    // ISC-266 audit: NOT a spawn-cost test. One CLI spawn derives
+    // cliBudget(1) = 11_400 ms, dominated unconditionally by the floor, so the
+    // derived term is dropped rather than left dead. The cost is the 8 s
+    // supervisor budget this test exists to observe, plus launch and a turn.
+    // Measured 8.5 s at load average 3.1-3.6 on a 14-core box.
+    60_000,
   );
 });

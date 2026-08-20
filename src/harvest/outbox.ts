@@ -508,15 +508,28 @@ export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileSc
         // outbox to be canonicalized — not merely the ones that announce
         // themselves as links.
         //
-        // NOTE: no test pins this particular check, and that is not an
-        // oversight to be fixed by writing one. Every case a test can build
-        // is already stopped by the root check or the symlink branch, so a
-        // test aimed here would pass with this code deleted. What it defends
-        // against is the case those two cannot see — a bind mount, or a
-        // filesystem where a plain entry resolves elsewhere — which a unit
-        // test cannot create without root. Deliberate defence in depth,
-        // recorded as such so a future reader does not mistake the silence
-        // for coverage.
+        // NOTE, and mind its SCOPE — an earlier revision of this paragraph
+        // did not state one, and was read as covering the `nlink` check too,
+        // which it must not. It applies ONLY to the `realpath` containment
+        // immediately below.
+        //
+        // No test pins that realpath check, and that is not an oversight to be
+        // fixed by writing one: deleting it leaves `harvest-outbox.test.ts` at
+        // 40/40 green (measured, not assumed), because every case a unit test
+        // can build is already stopped by the root check or the symlink
+        // branch. What it defends against is what those two cannot see — a
+        // bind mount, or a filesystem where a plain entry resolves elsewhere —
+        // which a unit test cannot create without root. Deliberate defence in
+        // depth, recorded so a future reader does not mistake silence for
+        // coverage.
+        //
+        // The `nlink` check further down is the OPPOSITE case in every
+        // respect, and the claim is left checkable rather than asserted:
+        // `harvest-outbox.test.ts` > "a hard link to a file outside the outbox
+        // is refused" builds it with an ordinary unprivileged `link(2)` — no
+        // root required — and deleting the check turns that test red with the
+        // linked private key sitting in `safe`. Nothing above is licence to
+        // remove it.
         let real: string;
         try {
           real = await realpath(p);
