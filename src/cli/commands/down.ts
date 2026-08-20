@@ -158,14 +158,40 @@ export function register(program: Command): void {
           continue;
         }
         const recorded = registry?.workers[id];
+        /**
+         * TWO launch-time sources, checked in that order, and the second is
+         * why a daemon-less run is stoppable at all.
+         *
+         * Registration is `{ optional: true }` by design — the supervisor's
+         * own comment says it "must also work alone (integration tests, daemon
+         * crash)" — so `registry.json` is absent for a whole class of ordinary
+         * runs. Anchoring only on it made every one of those refuse
+         * `identity_unrecorded` and leave its workers running: `down` reported
+         * a refusal for a supervisor whose identity was recorded at launch and
+         * merely had nowhere daemon-independent to be written down.
+         *
+         * `state.proc_started` is that place, written by the supervisor from
+         * the SAME `processStartTime(process.pid)` reading the registry call
+         * carries, so the two agree by construction rather than by luck.
+         *
+         * This does NOT re-open the fail-open. Both sources hold a pinned
+         * `utc1 …` rendering and both are compared by `anchorIdentity`
+         * identically; a state file from an older build carries `""`, which
+         * `isPinnedIdentity` rejects, so it refuses exactly as an absent
+         * registry entry does. The weak `processStartTime(state.pid) !== null`
+         * liveness gate this function replaced is not reachable from here.
+         */
+        const stateAnchor = state.proc_started !== "" ? state.proc_started : null;
         const anchor = await anchorIdentity(
           state.pid,
           // A registry entry for a DIFFERENT pid than `state.json` names is
           // not this supervisor's identity — supervisor relaunched, or one of
-          // the two files is stale — so it is not offered as one. It reaches
-          // `anchorIdentity` as `null` and refuses like any other unrecorded
-          // worker rather than silently taking the weak anchor (ISC-272).
-          recorded !== undefined && recorded.pid === state.pid ? recorded.started : null,
+          // the two files is stale — so it is not offered as one. It falls
+          // through to the state file's own record, and refuses like any other
+          // unrecorded worker if that is absent too (ISC-272).
+          recorded !== undefined && recorded.pid === state.pid
+            ? recorded.started
+            : stateAnchor,
           { force: forceIdentity },
         );
         // Nothing holds that pid: genuinely gone, nothing to stop.

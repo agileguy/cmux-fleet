@@ -156,12 +156,24 @@ async function plantWorker(
   runId: string,
   id: string,
   pid: number,
+  procStarted?: string,
 ): Promise<void> {
   const wp = workerPaths(run, id);
   await mkdir(wp.dir, { recursive: true });
   await writeWorkerState(
     wp,
-    initialWorkerState({ worker: id, runId, pid, pgid: pid, startedAt: new Date().toISOString() }),
+    initialWorkerState({
+      worker: id,
+      runId,
+      pid,
+      pgid: pid,
+      startedAt: new Date().toISOString(),
+      // Omitted by default, which is the pre-`proc_started` state file every
+      // refusal test in this file depends on: absent records as `""`, and
+      // `isPinnedIdentity("")` is false, so those tests keep asserting a
+      // refusal for the reason they always did.
+      ...(procStarted === undefined ? {} : { procStarted }),
+    }),
   );
 }
 
@@ -462,6 +474,78 @@ describe("an unverifiable identity refuses rather than relaxes", () => {
    *
    * Fails if: a pid-disagreeing registry entry relaxes to the self-anchor.
    */
+  /**
+   * The daemon-less run, which is the case the registry-only anchor could not
+   * serve and the one that made this branch red.
+   *
+   * `supervisor/index.ts` registers `{ optional: true }` and says why in its
+   * own comment — "The supervisor must also work alone (integration tests,
+   * daemon crash)". So `registry.json` is legitimately absent for a whole
+   * class of runs, and anchoring only on it meant `down` answered
+   * `identity_unrecorded` and left every one of those supervisors running.
+   * That is not a hypothetical: it is `test/e2e/lifecycle.test.ts`'s happy
+   * path, which asserts `down` exits 0 and observed EXIT.WORKER_DIED (6).
+   *
+   * The identity was never actually unknown. The supervisor reads it at launch
+   * to send to the registry; it simply had nowhere daemon-independent to write
+   * it down. `state.proc_started` is that place, and this test is the probe
+   * that it is consulted.
+   *
+   * Fails if: the state file's self-recorded identity is ignored, or if it is
+   * accepted without being compared (plant a foreign value and the sibling
+   * test below still has to refuse).
+   */
+  test("a daemon-less run whose supervisor recorded its own identity is stopped", async () => {
+    const { root, runId, run } = await rig();
+    const victim = bystander();
+    // Exactly what a live supervisor writes: its OWN reading, in the pinned
+    // rendering, for the pid its state file names.
+    const self = await processStartTime(victim.pid);
+    expect(self).not.toBeNull();
+    await plantWorker(run, runId, "eng-1", victim.pid, self!);
+    // Still no registry.json — that is the whole point.
+
+    const r = await down(root, runId);
+    /**
+     * The assertion is on the VERDICT, for the reason the `--force-identity`
+     * test states: this bystander is spawned as a non-group-leader so a stray
+     * `kill(-pid, …)` raises ESRCH, and it therefore SURVIVES the ladder by
+     * construction. `how` reaching "sigkill" is the whole claim — it means the
+     * anchor RESOLVED and the ladder was entered, which is exactly what
+     * `identity_unrecorded` prevented before `proc_started` existed.
+     *
+     * `forced_identity` must be absent: this climbed on a real recorded
+     * identity, not on the override.
+     */
+    const report = parse(r.stdout) as { workers: Array<Record<string, unknown>> };
+    expect(report.workers[0]).toMatchObject({ id: "eng-1", how: "sigkill" });
+    expect(report.workers[0]).not.toHaveProperty("forced_identity");
+    expect(report.workers[0]).not.toMatchObject({ how: "identity_unrecorded" });
+  }, cliBudget(2) + LADDER_FIXED_WAIT_MS);
+
+  /**
+   * The guard on the test above: a self-recorded identity is still COMPARED,
+   * so a state file naming a pid it does not describe refuses exactly as an
+   * unrecorded one does. Without this, "consult `proc_started`" could be
+   * satisfied by trusting it, which is the fail-open wearing the fix's
+   * clothes.
+   *
+   * Fails if: `proc_started` is treated as permission to signal rather than as
+   * an anchor to check.
+   */
+  test("a self-recorded identity that does not match the pid is refused", async () => {
+    const { root, runId, run } = await rig();
+    const victim = bystander();
+    await plantWorker(run, runId, "eng-1", victim.pid, `${IDENTITY_FORMAT} Thu Jan  1 00:00:00 1970`);
+
+    const r = await down(root, runId);
+    expect(r.code).toBe(EXIT.WORKER_DIED);
+    expect(parse(r.stdout)).toMatchObject({
+      workers: [{ id: "eng-1", stopped: false, how: "identity_mismatch" }],
+    });
+    expect(await processStartTime(victim.pid)).not.toBeNull();
+  }, cliBudget(2));
+
   test("a registry entry whose pid disagrees with state.json is refused too", async () => {
     const { root, runId, run } = await rig();
     const victim = bystander();
