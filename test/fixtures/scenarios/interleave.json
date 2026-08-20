@@ -1,15 +1,16 @@
 {
   "scenario": "interleave",
+  "_comment_timing": "The 3000ms gap is the window the test must land an abort inside. It is deliberately far wider than the abort needs: on a loaded CI runner a `dispatch` subprocess plus a control-socket round trip took over 150ms, the previous gap, and the natural agent_end settled the epoch `success` before the abort was even requested — which measures runner load, not epoch attribution. Widening costs the suite three seconds and removes the race entirely.",
   "_comment": "SRD 7.5: abort issued, but the turn completes naturally before the abort lands. The abort step emits nothing and cancels nothing; a straggler duplicate terminal event follows later. The second prompt (T-005) emits nothing at all - it must never be reported complete off the back of epoch N's events.",
   "steps": [
     {
       "on": "prompt",
       "emit": [
         { "type": "agent_start" },
-        { "delay_ms": 150 },
+        { "delay_ms": 3000 },
         { "type": "agent_end", "messages": [], "willRetry": false },
         { "type": "queue_update", "steering": [], "followUp": [] },
-        { "delay_ms": 400 },
+        { "delay_ms": 1000 },
         { "type": "agent_end", "messages": [], "willRetry": false }
       ]
     },
