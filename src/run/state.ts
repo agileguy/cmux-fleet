@@ -24,15 +24,21 @@
 
 import { z } from "zod";
 import {
+  BudgetStateSchema,
   EXIT,
   PresentationSchema,
   VerdictSchema,
   WorkerStateSchema,
   workerId,
+  type BudgetState,
   type Presentation,
   type WorkerState,
 } from "../contracts.ts";
-import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../config/schema.ts";
+import {
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_MAX_CONCURRENT,
+  type FleetConfig,
+} from "../config/schema.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import { emptyFence, type FenceSnapshot } from "../rpc/epoch.ts";
 import type { RunPaths, WorkerPaths } from "./paths.ts";
@@ -126,6 +132,139 @@ export async function readRunHarnessPatterns(run: RunPaths): Promise<RunHarnessP
     };
   }
   return { patterns: recorded, note: null };
+}
+
+/**
+ * What the run was launched to SPEND, as `up` recorded it (ISC-109/114/115).
+ *
+ * Fourth reader of `run.json` in this file and the same shape as the three
+ * above, for the same reason: a value that decides what a later command DOES
+ * has to travel with the run. `dispatch --auto` caps concurrency and halts on
+ * a ceiling using these numbers, and re-resolving `fleet.yaml` at dispatch
+ * time would budget a run against whatever config happens to sit in today's
+ * cwd — the same task admitted today and refused tomorrow with no change to
+ * the run at all.
+ *
+ * Forgiving about ABSENCE, like its neighbours: a run directory written
+ * before these fields existed, or assembled by hand in a test, must still be
+ * dispatchable. The two axes then default DIFFERENTLY, and the asymmetry is
+ * deliberate (see `DEFAULT_MAX_CONCURRENT`): a missing cap falls back to the
+ * schema's own default, because a cap only delays work; a missing ceiling
+ * means UNBOUNDED, because `tokens_ceiling` is a required field with no
+ * default and inventing one would refuse work nobody budgeted for.
+ *
+ * Not forgiving about a value that is WRONG: a non-positive cap would admit
+ * nothing at all and deadlock the run, so it degrades to the default with a
+ * `note` the caller puts in the ledger rather than silently.
+ */
+export interface RunBudgetPolicy {
+  /** null = unbounded. */
+  tokensCeiling: number | null;
+  maxConcurrent: number;
+  /** Up-front hold per admission; 0 when the operator configured none. */
+  perTaskReserveTokens: number;
+  /** A degradation the caller must surface, or null when there is nothing to say. */
+  note: string | null;
+}
+
+/**
+ * The budget half of `run.json`, as `up` writes it — the WRITER of the
+ * document `readRunBudgetPolicy` below reads.
+ *
+ * Both halves live in this module on purpose, and it is the same rule
+ * `run/paths.ts` opens with: a value spelled in two places will eventually be
+ * spelled differently in two places. Here the two places would be the object
+ * literal `up` builds and the zod shape `dispatch` parses it with, and a
+ * divergence between them does not throw — a renamed key simply reads as
+ * absent, so the run silently falls back to "unbounded, cap 2" and an
+ * operator's configured ceiling stops existing. That is precisely how
+ * `max_concurrent` came to be a config key with no reader at all.
+ *
+ * `null` for "no config was reachable", which is a real state (`up` with no
+ * `fleet.yaml`) and not an error: the reader answers it with the schema's own
+ * default cap and an unbounded ceiling.
+ */
+export function runBudgetRecord(run: FleetConfig["run"] | null): {
+  max_concurrent: number | null;
+  budget: { tokens_ceiling: number; per_task_reserve_tokens: number | null } | null;
+} {
+  if (run === null) return { max_concurrent: null, budget: null };
+  return {
+    max_concurrent: run.max_concurrent,
+    budget: {
+      tokens_ceiling: run.budget.tokens_ceiling,
+      per_task_reserve_tokens: run.budget.per_task_reserve_tokens ?? null,
+    },
+  };
+}
+
+export async function readRunBudgetPolicy(run: RunPaths): Promise<RunBudgetPolicy> {
+  const fallback: RunBudgetPolicy = {
+    tokensCeiling: null,
+    maxConcurrent: DEFAULT_MAX_CONCURRENT,
+    perTaskReserveTokens: 0,
+    note: null,
+  };
+  let doc: {
+    max_concurrent?: number | null;
+    budget?: { tokens_ceiling?: number | null; per_task_reserve_tokens?: number | null } | null;
+  } | null;
+  try {
+    doc = await readValidated(run.runJson, (v) =>
+      z
+        .object({
+          max_concurrent: z.number().nullish(),
+          budget: z
+            .object({
+              tokens_ceiling: z.number().nullish(),
+              per_task_reserve_tokens: z.number().nullish(),
+            })
+            .loose()
+            .nullish(),
+        })
+        .loose()
+        .parse(v),
+    );
+  } catch (err) {
+    return {
+      ...fallback,
+      note:
+        `run.json does not record a readable budget policy (${err instanceof Error ? err.message : String(err)}); ` +
+        `dispatching unbounded at max_concurrent ${DEFAULT_MAX_CONCURRENT}`,
+    };
+  }
+  const cap = doc?.max_concurrent;
+  let maxConcurrent = fallback.maxConcurrent;
+  let note: string | null = null;
+  if (typeof cap === "number") {
+    if (Number.isInteger(cap) && cap > 0) maxConcurrent = cap;
+    else {
+      note =
+        `run.json records max_concurrent ${cap}, which would admit nothing; ` +
+        `dispatching at the default ${DEFAULT_MAX_CONCURRENT}`;
+    }
+  }
+  const ceiling = doc?.budget?.tokens_ceiling;
+  const reserve = doc?.budget?.per_task_reserve_tokens;
+  return {
+    tokensCeiling: typeof ceiling === "number" && ceiling >= 0 ? Math.floor(ceiling) : null,
+    maxConcurrent,
+    perTaskReserveTokens: typeof reserve === "number" && reserve > 0 ? Math.floor(reserve) : 0,
+    note,
+  };
+}
+
+/**
+ * The run's budget accounting as the last scheduler pass left it.
+ *
+ * `wait` reads this to fold `budgetExitCode` into its own ladder, so a
+ * dispatch-then-wait pipeline reports the same integer `--auto` did; a
+ * resumed `--auto` reads it for the halt verdict alone (see `resumeBudget`).
+ * Null means no scheduled run has happened yet, which is the normal state of
+ * a run driven by manual `dispatch` calls — not a degradation.
+ */
+export async function readBudgetState(run: RunPaths): Promise<BudgetState | null> {
+  return readValidated(run.budgetJson, (v) => BudgetStateSchema.parse(v));
 }
 
 /**

@@ -22,13 +22,22 @@ import {
   workerPaths,
   type RunPaths,
 } from "../../run/paths.ts";
+import { BudgetCeilingError, BudgetManager, resumeBudget } from "../../safety/budget.ts";
+import { readTranscript, reconstruct } from "../../harvest/transcript.ts";
+import { combineUsage, tokensTotal, ZERO_USAGE, type UsageTotals } from "../../harvest/usage.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../config/schema.ts";
 import { assertEpochWellFormed } from "../../rpc/epoch.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { composeBrief } from "../../roles/index.ts";
 import { controlCall } from "../../supervisor/launch.ts";
-import { readRunWorktrees, readTaskRecord, readWorkerState } from "../../run/state.ts";
+import {
+  readBudgetState,
+  readRunBudgetPolicy,
+  readRunWorktrees,
+  readTaskRecord,
+  readWorkerState,
+} from "../../run/state.ts";
 import { processStartTime, SocketRequestError } from "../../run/registry.ts";
 import { loadTaskList } from "../../orchestrate/tasklist.ts";
 import { runSchedule, type DispatchAnswer, type SchedulerIO } from "../../orchestrate/scheduler.ts";
@@ -408,6 +417,41 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
   const run = await resolveRun(opts.run);
   const ledger = new LedgerWriter(run, `cli-dispatch-${process.pid}`);
 
+  /**
+   * What each worker has spent so far, as last OBSERVED — the baseline the
+   * budget books deltas against.
+   *
+   * There is no per-task usage anywhere in the system to read: `state.usage`
+   * (the supervisor's `get_session_stats` numbers) and the transcript's
+   * per-message usage are both cumulative for the SESSION, and A6 merges them
+   * element-wise max because either can under-count (harvest/usage.ts). So
+   * the task that just settled is charged the DIFFERENCE since the last look,
+   * which makes the run's total exact even though no single task's share is
+   * independently knowable.
+   *
+   * The merge is the same one `harvest --reconstruct` performs, deliberately:
+   * a second way to total a worker's tokens is a second answer to how much a
+   * run cost, and the ceiling and the report would drift apart.
+   */
+  const observed = new Map<string, number>();
+  const cumulativeTokens = async (worker: string): Promise<number> => {
+    const state = await readWorkerState(workerPaths(run, worker)).catch(() => null);
+    if (state === null) return 0;
+    let transcript: UsageTotals = ZERO_USAGE;
+    const path = state.session_path;
+    if (path !== null && existsSync(path)) {
+      try {
+        transcript = reconstruct(await readTranscript(path)).usage;
+      } catch {
+        // An unreadable transcript degrades to the supervisor's own numbers.
+        // Refusing to schedule because a session file is malformed would
+        // convert a reporting problem into an outage; the merge below still
+        // takes whatever `state.usage` knows.
+      }
+    }
+    return tokensTotal(combineUsage(state.usage, transcript));
+  };
+
   const io: SchedulerIO = {
     async listWorkers(): Promise<string[]> {
       try {
@@ -470,6 +514,17 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
       return record === null ? null : { verdict: record.verdict, reason: record.reason };
     },
 
+    async taskTokens(worker: string): Promise<number> {
+      // Monotone by construction: a transcript that shrank (a session switch,
+      // a rotation) books 0 rather than a negative, which would REFUND spend
+      // that really happened and lift a ceiling the run had already crossed.
+      const now = await cumulativeTokens(worker);
+      const seen = observed.get(worker) ?? 0;
+      if (now <= seen) return 0;
+      observed.set(worker, now);
+      return now - seen;
+    },
+
     sleep(ms: number): Promise<void> {
       return new Promise((r) => setTimeout(r, ms));
     },
@@ -479,7 +534,58 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
     },
   };
 
+  /**
+   * THE run's budget — one manager, constructed here because this is the one
+   * place that owns both the run directory and the loop that dispatches
+   * (ISC-235).
+   *
+   * The policy travels with the RUN (`run.json`), not with today's cwd, for
+   * the reason `readRunBudgetPolicy` states: a run outlives the config that
+   * produced it, and a ceiling re-resolved from `./fleet.yaml` would admit a
+   * task today and refuse it tomorrow with nothing about the run having
+   * changed.
+   *
+   * The opening balance is OBSERVED, not restored. `resumeBudget` holds the
+   * whole restart decision and the reasoning for it; what this loop has to
+   * supply is the observation both halves of that decision are built on — the
+   * same per-worker totals `observed` will book deltas against, taken at the
+   * same instant as the total they sum to. Seeding the baselines from a
+   * different look than the total came from is the one arrangement that
+   * either double-counts a resumed worker or loses the spend since the last
+   * snapshot.
+   */
+  const policy = await readRunBudgetPolicy(run);
+  if (policy.note !== null) {
+    // A degraded policy still schedules, but it must leave a trail: a run
+    // capped at the default because `run.json` was unreadable is a fact a
+    // human debugging its throughput will want.
+    await ledger.append("budget_policy_degraded", { detail: { note: policy.note } });
+  }
+  let openingTokens = 0;
+  for (const worker of await io.listWorkers()) {
+    const spent = await cumulativeTokens(worker);
+    observed.set(worker, spent);
+    openingTokens += spent;
+  }
+  const budget = new BudgetManager(
+    resumeBudget({
+      runId: run.runId,
+      tokensCeiling: policy.tokensCeiling,
+      openingTokens,
+      persisted: await readBudgetState(run),
+    }),
+  );
+
   const { schedule, exit } = await runSchedule(list.tasks, io, {
+    budget: {
+      manager: budget,
+      maxConcurrent: policy.maxConcurrent,
+      reserveTokens: policy.perTaskReserveTokens,
+      // Atomic for the same reason the schedule record is: `wait` and
+      // `report` can read this file WHILE the scheduler writes it, and a torn
+      // read must yield the previous snapshot rather than half of this one.
+      onChange: (snapshot) => writeJsonAtomic(run.budgetJson, snapshot),
+    },
     // The durable schedule record (run/paths.ts): `report` reads this file
     // to describe what the scheduler decided, and it is updated on every
     // state transition — atomically, because the reporter can run WHILE the
@@ -495,6 +601,26 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
     process.stdout.write(`${JSON.stringify(schedule)}\n`);
   } else {
     process.stdout.write(renderScheduleTable(schedule));
+  }
+  /**
+   * The ceiling is raised as a diagnosis AFTER the record is complete.
+   *
+   * Everything durable has already been written by this point — every task
+   * record read, the schedule snapshot on disk, the budget snapshot beside
+   * it, and the whole seam emitted on stdout — so the throw cannot cost the
+   * run a single artifact (ISC-114's "with artifacts still harvested"). That
+   * ordering is the reason `settle` never throws on the trip and this does:
+   * accounting has to keep working through a halt, and only the CLI, at the
+   * end, turns the halt into an exit code.
+   *
+   * `exit` from the scheduler is already `EXIT.BUDGET` here — the fold at the
+   * end of `runSchedule` put it there. The named error is what makes the
+   * message say which ceiling and how far past it, instead of "non-success
+   * terminal states" for a run whose tasks all succeeded.
+   */
+  const spent = budget.snapshot();
+  if (spent.halted_at !== null) {
+    throw new BudgetCeilingError(spent.halted_reason ?? "ceiling crossed");
   }
   if (exit !== EXIT.SUCCESS) {
     throw new CliError("dispatch --auto finished with non-success terminal states", exit);

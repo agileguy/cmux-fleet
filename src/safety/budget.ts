@@ -45,6 +45,7 @@ import {
   EXIT,
   type AdmissionDecision,
   type BudgetState,
+  type ExitCode,
   type ExitCoded,
 } from "../contracts.ts";
 import { isoNow } from "../util/clock.ts";
@@ -81,9 +82,97 @@ export class BudgetCeilingError extends Error implements ExitCoded {
   }
 }
 
-/** `EXIT.BUDGET` when the run halted on a ceiling; `EXIT.SUCCESS` otherwise. */
-export function budgetExitCode(state: BudgetState): number {
+/**
+ * `EXIT.BUDGET` when the run halted on a ceiling; `EXIT.SUCCESS` otherwise.
+ *
+ * Typed `ExitCode` rather than `number` so it composes with `worstExit`
+ * directly — the fold at the end of `runSchedule` and the one in `wait` are
+ * the callers this exists for, and a plain `number` made the seam that gives
+ * `EXIT.BUDGET` its producer a cast site.
+ */
+export function budgetExitCode(state: BudgetState): ExitCode {
   return state.halted_at !== null ? EXIT.BUDGET : EXIT.SUCCESS;
+}
+
+/**
+ * A `budget.json` belonging to a different run — never adopted, always loud.
+ *
+ * Silently taking another run's spend would either refuse a fresh run for
+ * tokens it never burned or, worse, hand it a `halted_at` it never earned.
+ * The only way this file reaches a run directory is a copy or a hand edit, so
+ * it is a corrupt-state diagnosis (`EXIT.BACKEND_UNAVAILABLE`, the same code
+ * `StateReadError` uses for an unreadable state file), not a usage error.
+ */
+export class ForeignBudgetError extends Error implements ExitCoded {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+
+  constructor(expected: string, found: string) {
+    super(`budget.json belongs to run '${found}', not '${expected}'; refusing to adopt its spend`);
+    this.name = "ForeignBudgetError";
+  }
+}
+
+/**
+ * The budget a run resumes with — THE restart decision, in one place.
+ *
+ * Three rules, each with a different answer to "is the persisted value
+ * authoritative?", because the three fields are three different kinds of fact.
+ *
+ * 1. **Spend is RECOMPUTED, never carried.** `openingTokens` is what the
+ *    caller has just OBSERVED the run's workers to have burned — the sum over
+ *    workers of the A6 usage in their transcripts and state files, the same
+ *    quantity the live loop books deltas against as tasks settle. The
+ *    transcripts are the durable evidence of what was actually spent;
+ *    `tokens_spent` in `budget.json` is a published snapshot of a derived
+ *    quantity, not an independent accumulator. Carrying it forward AND
+ *    booking deltas against a fresh observation would double-count every
+ *    resumed worker; carrying it and skipping the re-observation would lose
+ *    whatever was spent between the last snapshot write and the crash. One
+ *    observation point feeding both the total and the caller's per-worker
+ *    baselines is the only arrangement with neither hole.
+ *
+ * 2. **The halt IS carried.** A crossed ceiling is a run-level VERDICT, set
+ *    once (see `#halt`), not an arithmetic result to be re-litigated. A
+ *    transcript that was rotated, truncated, or lost would otherwise silently
+ *    un-halt a run that had already blown its budget — turning the one fact
+ *    the operator most needs to survive a restart into the one most easily
+ *    erased.
+ *
+ * 3. **Reservations are DROPPED.** A hold is an admission slot owned by the
+ *    process that took it. That process is gone; nothing will ever settle
+ *    those task ids in this one, so carrying them would permanently consume
+ *    `max_concurrent` slots and deadlock the resumed run. The tasks
+ *    themselves are not lost — they are re-offered, and the supervisor's own
+ *    attempt dedup replays anything that already completed (ISC-85).
+ *
+ * Opening spend already past the ceiling halts HERE rather than waiting for a
+ * settle that may never come: without it a resumed over-budget run refuses
+ * every admission on `would_exceed`, dispatches nothing, and exits 7 — a
+ * ceiling crossing reported as a generic partial failure, which is exactly
+ * the ISC-114 outcome inverted.
+ */
+export function resumeBudget(args: {
+  runId: string;
+  tokensCeiling: number | null;
+  /** Tokens this run's workers are OBSERVED to have already burned. */
+  openingTokens: number;
+  /** The last snapshot on disk, or null for a run with no budget yet. */
+  persisted: BudgetState | null;
+}): BudgetState {
+  const { runId, tokensCeiling, openingTokens, persisted } = args;
+  if (persisted !== null && persisted.run_id !== runId) {
+    throw new ForeignBudgetError(runId, persisted.run_id);
+  }
+  const state = emptyBudget(runId, { tokensCeiling });
+  state.tokens_spent = Math.max(0, Math.floor(openingTokens));
+  if (persisted !== null && persisted.halted_at !== null) {
+    state.halted_at = persisted.halted_at;
+    state.halted_reason = persisted.halted_reason;
+  } else if (tokensCeiling !== null && state.tokens_spent > tokensCeiling) {
+    state.halted_at = isoNow();
+    state.halted_reason = `tokens_ceiling: resumed spend ${state.tokens_spent} > ${tokensCeiling}`;
+  }
+  return BudgetStateSchema.parse(state);
 }
 
 /** A fresh budget for a run. Ceilings are nullable: null means unbounded. */

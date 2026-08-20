@@ -213,6 +213,25 @@ export const RunSchema = z
 export const DEFAULT_BRANCH_PREFIX: string = RunSchema.shape.branch_prefix.parse(undefined);
 
 /**
+ * The in-flight cap a run gets when no config is reachable.
+ *
+ * Same construction and the same reason as `DEFAULT_BRANCH_PREFIX` above:
+ * `dispatch --auto` has to cap concurrency even for a run directory that `up`
+ * built with no config (or that a test assembled by hand), and a literal `2`
+ * there would be correct today and silently wrong the first time the default
+ * moves. `max_concurrent` sat in this schema with no reader at all until the
+ * budget was wired to the dispatch path — the same dead-field shape
+ * `branch_prefix` and `models_allowlist` were each caught in, and the reason
+ * the default is derived rather than restated.
+ *
+ * Note the asymmetry with `tokens_ceiling`, which deliberately has NO
+ * equivalent: it is a required field with no default, so a run that recorded
+ * none is UNBOUNDED. Inventing a ceiling for it would refuse work no operator
+ * ever budgeted for; inventing a concurrency cap only delays work.
+ */
+export const DEFAULT_MAX_CONCURRENT: number = RunSchema.shape.max_concurrent.parse(undefined);
+
+/**
  * `llm.relay_upstream` is validated HERE, with the predicate the relay itself
  * uses, for the same reason `egressRuleHost` below is: a value the relay will
  * refuse must be a field-level `config validate` error, not a throw from inside
