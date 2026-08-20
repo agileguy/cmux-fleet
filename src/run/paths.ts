@@ -18,8 +18,11 @@
  */
 
 import { createHash } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { bindMountSources } from "../container/docker-argv.ts";
+import { EXIT } from "../contracts.ts";
 
 /**
  * Root under which every run directory lives.
@@ -132,6 +135,36 @@ export interface RunPaths {
    * schedule, and `report` must still describe it.
    */
   scheduleJson: string;
+  /**
+   * The run's budget accounting (`BudgetState`), written by the scheduler.
+   *
+   * Named here for the same reason `scheduleJson` is: two subsystems meet on
+   * it. `dispatch --auto` writes it on every admission and settle, and `wait`
+   * reads it to fold `budgetExitCode` into its own ladder — so a
+   * dispatch-then-wait pipeline reports the same integer as `--auto` did. The
+   * module `budget.ts` described this file in a comment for an entire phase
+   * while nothing created it and no path named it, which is exactly how the
+   * reporter and the scheduler once ended up with two spellings of
+   * `schedule.json`.
+   *
+   * A control-plane file like every other member here: it lives under the run
+   * dir, beside `control-auth.json`, and is NEVER mounted into a container.
+   * Nothing a worker can read needs the fleet's spend.
+   *
+   * What holds that up TODAY is an absence, and it is worth naming as one
+   * rather than as a guard: no mount spec in `container/mounts.ts` names the
+   * run dir, so nothing puts this file in front of a worker. That is a
+   * property of the current mount set, not an assertion anything enforces —
+   * `grep -rn assertNoRunDirMount src/` finds nothing on this branch. An
+   * earlier draft of this comment cited "the run-dir exposure rules" as
+   * though they existed here; they do not, they arrive with the run-dir
+   * exposure work, and a docstring citing a guard its own tree does not
+   * contain is exactly the defect the sibling review round exists to remove.
+   *
+   * Absence is normal and means the same thing `scheduleJson`'s does: no
+   * scheduled run has happened yet.
+   */
+  budgetJson: string;
 }
 
 export function runPaths(runId: string, root: string = runsRoot()): RunPaths {
@@ -150,6 +183,7 @@ export function runPaths(runId: string, root: string = runsRoot()): RunPaths {
     sessionsDir: join(base, "sessions"),
     workersDir: join(base, "workers"),
     scheduleJson: join(base, "schedule.json"),
+    budgetJson: join(base, "budget.json"),
   };
 }
 
@@ -312,6 +346,294 @@ export function inboxTaskPath(run: RunPaths, taskId: string): string {
 /** Terminal per-task record written by the supervisor at settle. */
 export function taskRecordPath(worker: WorkerPaths, taskId: string): string {
   return join(worker.tasksDir, `${taskId}.json`);
+}
+
+/**
+ * How one bind-mount source exposes the RUN DIRECTORY, or `null` (ISC-127).
+ *
+ * THREE relations, and the asymmetry with `classifyHostGcloudExposure` is the
+ * whole content of this function. That one also has three, but a DIFFERENT
+ * three, because NOTHING inside the gcloud store may be mounted. Here,
+ * everything a worker legitimately gets
+ * IS inside THIS run's dir — `<run>/outbox/<id>`, `<run>/sessions`,
+ * `<run>/skills/<role>`, `<run>/workers/<id>/cloud-allow`, the briefing, the
+ * kubeconfig — so an "inside-the-run-dir" relation would flag the entire §5.5
+ * mount table and could only ever be satisfied by weakening it. The criterion
+ * says the run DIR is not mounted, and mounting a named child of it is not
+ * mounting it.
+ *
+ * What the two relations actually protect is everything in the run root that
+ * is deliberately NOT in that table: `control-auth.json` — the 0600 per-run
+ * control-socket secret whose entire threat model (`security/control-auth.ts`)
+ * is that a worker cannot read it — plus `registry.json`, `ledger/`, `inbox/`
+ * (full task envelopes), `run.json`, and every OTHER worker's `state.json`,
+ * `events.jsonl` and outbox. Handing a worker the run root hands it all of
+ * that, and hands it the key to the socket that commands its own supervisor.
+ *
+ * The CONTAINS direction is not hypothetical, and it is the one a mount table
+ * built from literals cannot rule out. `run.repo` is operator-settable and is
+ * mounted verbatim at `/workspace` under `isolation: shared-ro`; the runs root
+ * moves independently via `PIFLEET_RUNS_DIR`. An operator who keeps runs
+ * inside the checkout — `run.repo: ~/proj`, `PIFLEET_RUNS_DIR=~/proj/runs`, an
+ * ordinary thing to want — mounts the live run directory into the container
+ * with no flag anywhere in `render.ts` looking wrong. Measured on this
+ * codebase before the guard below existed: the `/workspace` source was an
+ * ancestor of `<run>/control-auth.json` and every ISC-127 assertion of the day
+ * (there were none) would have stayed green.
+ *
+ * Comparison is on `resolve()`d paths — lexical, for the reason
+ * `classifyHostGcloudExposure` gives: `buildDockerArgv` is synchronous and
+ * pure by design and `realpath` is I/O. That closes `..` and trailing-slash
+ * spellings and not symlinks. The symlink half is closed one level up, by
+ * `assertNoRunDirMountResolved` on `renderWorker`'s async path; see its header
+ * for why that gap is routine rather than adversarial.
+ *
+ * Boundaries use an explicit separator, so a sibling runs root named
+ * `<run>-backup` is not flagged for a criterion that says nothing about it.
+ * The separator is applied through `isUnder`, which special-cases the
+ * filesystem root: `"/"` is the one directory whose children are NOT spelled
+ * `${dir}/…`, and a bare `` `${s}/` `` prefix therefore tests `startsWith("//")`
+ * and is false for every path in existence. That is how `-v /:/host` — the
+ * MAXIMAL violation of this criterion, the entire host filesystem handed to a
+ * worker — passed this function as shipped.
+ *
+ * ## Case, and why the fold is unconditional
+ *
+ * `resolve()` does not case-fold, so on a case-INSENSITIVE filesystem two
+ * spellings of one directory compared unequal and the variant spelling was a
+ * bypass. Measured against this function with `runDir = /Users/op/proj/runs/r-1`:
+ * `/Users/op/proj/Runs` and `/USERS/OP/PROJ/RUNS/R-1` both returned `null`.
+ * Those are the SAME directory on default APFS and Docker Desktop mounts them.
+ *
+ * The fold is applied on EVERY platform rather than behind
+ * `process.platform === "darwin"`, and the reasoning is worth keeping because
+ * the per-platform version is the obvious first answer:
+ *
+ *  1. `process.platform` is a PROXY for a filesystem's case behaviour, not the
+ *     truth. APFS can be formatted case-sensitive and Linux routinely mounts
+ *     case-insensitive volumes (exFAT, NTFS, a `+F` ext4 directory). A
+ *     platform branch is wrong in both directions, just less often — and the
+ *     direction it is wrong in on Linux is the one that lets a mount through.
+ *  2. The two errors are not symmetric. A false RED is a refusal that names
+ *     the offending source and the run dir, which an operator acts on in one
+ *     move. A false GREEN hands a worker `control-auth.json` and with it the
+ *     key to the socket that commands its own supervisor.
+ *  3. The false-red cost that justified the explicit separator does not
+ *     transfer. `<run>-backup` is an ordinary directory an operator really
+ *     keeps; a case-twin of the runs root — `/data/Runs` beside `/data/runs`,
+ *     both live, both distinct — is not an ordinary thing to have.
+ *  4. Decisive: a per-platform predicate makes the case-variant TEST
+ *     platform-conditional, so it would skip on this project's Linux CI and
+ *     the only evidence for the darwin behaviour would be a run on the
+ *     maintainer's laptop. This ISA does not count self-skipping evidence
+ *     (ISC-266 reaches the same conclusion from the load direction), so the
+ *     platform branch buys a marginally tighter predicate at the price of
+ *     having no CI-executable proof that it works.
+ *
+ * The fold is for COMPARISON only. `RunDirMountError` echoes the operator's
+ * own spelling, because a refusal that renames their path is a refusal they
+ * have to decode.
+ *
+ * ## The third relation: another run's directory
+ *
+ * `is-another-run-dir` is the same bug one directory over. The guard is scoped
+ * to the CURRENT run, so `<runsRoot>/<otherRunId>` is neither this run dir nor
+ * an ancestor of it and passed cleanly — while holding THAT run's
+ * `control-auth.json`, ledger, inbox and every worker state. The criterion
+ * says the run dir is not mounted; a concurrent run's directory is a run dir.
+ *
+ * `runsRoot` defaults to `dirname(runDir)`, which is exact rather than a
+ * guess: `runPaths` constructs every run root as `join(root, runId)`, so the
+ * parent of a run dir IS the runs root by construction.
+ */
+export type RunDirExposure = "is-the-run-dir" | "contains-the-run-dir" | "is-another-run-dir";
+
+export function classifyRunDirExposure(
+  source: string,
+  runDir: string,
+  runsRoot: string = dirname(resolve(runDir)),
+): RunDirExposure | null {
+  const dir = resolve(runDir);
+  const s = resolve(source);
+  const root = resolve(runsRoot);
+  if (pathsEqual(s, dir)) return "is-the-run-dir";
+  if (isPathUnder(dir, s)) return "contains-the-run-dir";
+  if (isPathUnder(s, root) && !isPathUnder(s, dir)) return "is-another-run-dir";
+  return null;
+}
+
+/**
+ * Case-fold for comparison. Not a normaliser: it is never applied to a path
+ * that gets reported, stored or passed to the filesystem.
+ */
+function fold(p: string): string {
+  return p.toLowerCase();
+}
+
+/**
+ * Do these two paths name the same directory? Case-folded; see
+ * `classifyRunDirExposure` for why the fold is unconditional.
+ *
+ * Exported so `classifyHostGcloudExposure` shares ONE definition of the
+ * boundary with this module rather than keeping its own copy. Two copies is
+ * how the two guards came to disagree: both had the root bug and both had it
+ * independently, so neither could catch the other's.
+ */
+export function pathsEqual(a: string, b: string): boolean {
+  return fold(resolve(a)) === fold(resolve(b));
+}
+
+/**
+ * Is `child` strictly inside `ancestor`, comparing whole path SEGMENTS?
+ *
+ * The separator is what keeps `<run>-backup` and the `r-1`/`r-10` sibling pair
+ * out of the relations. The root special-case is what keeps `/` IN them: `"/"`
+ * is the one directory whose children are not spelled `${ancestor}/…`, so the
+ * bare `` `${ancestor}/` `` prefix every caller had written tests
+ * `startsWith("//")` and is false for every path that exists.
+ */
+export function isPathUnder(child: string, ancestor: string): boolean {
+  const a = resolve(ancestor);
+  const prefix = a === "/" ? "/" : `${a}/`;
+  return fold(resolve(child)).startsWith(fold(prefix));
+}
+
+/** A `docker run` argv that would mount the run directory into a container. */
+export class RunDirMountError extends Error {
+  /**
+   * A misconfigured `run.repo` or `PIFLEET_RUNS_DIR` is a USAGE failure, not a
+   * crash — the same grade `ConfigError` carries, and for the same reason.
+   *
+   * Without it this class satisfies neither branch of `isExitCoded`, so
+   * `exitCodeForError` fell through to `EXIT.INTERNAL` and the CLI printed
+   * `pifleet: internal error: refusing to launch: …`. That directly defeats
+   * the message's own purpose: the text exists so an operator can move the
+   * runs root rather than guess, and "internal error" tells them the tool is
+   * broken and there is nothing for them to fix. It also mislabels the failure
+   * over the only channel a machine caller has, which is the confusion
+   * ISC-216 records `EXIT.USAGE`-for-crashes causing in the other direction.
+   */
+  readonly exitCode = EXIT.USAGE;
+
+  constructor(source: string, runDir: string, relation: RunDirExposure, resolvedAs?: string) {
+    const how =
+      relation === "is-the-run-dir"
+        ? "IS the run directory"
+        : relation === "contains-the-run-dir"
+          ? "CONTAINS the run directory"
+          : "IS ANOTHER RUN's directory under the same runs root as";
+    // The operator's own spelling leads, because that is the string they will
+    // search their config for. The resolved form is appended only when it
+    // DIFFERS — i.e. when a symlink is the reason this is a refusal — because
+    // otherwise it is the same path printed twice.
+    const via =
+      resolvedAs !== undefined && resolvedAs !== source ? ` (resolves to ${resolvedAs})` : "";
+    super(
+      `refusing to launch: bind-mount source ${source}${via} ${how} (${runDir}) — the run ` +
+        `directory holds control-auth.json, the ledger, the inbox and every other ` +
+        `worker's state, none of which is a worker's to read — SRD §5.5 / ISC-127`,
+    );
+    this.name = "RunDirMountError";
+  }
+}
+
+/**
+ * ISC-127 as a RUNTIME GUARD on the argv production actually launches.
+ *
+ * Deliberately shaped like `assertNoHostGcloudMount`, and for the reason that
+ * one records: a predicate with no importer in `src/` closes nothing. It
+ * documents an intention that holds exactly as long as someone remembers to
+ * keep asserting it, and the offending path here does not come from a literal
+ * in `render.ts` at all — it arrives from `run.repo` and `PIFLEET_RUNS_DIR`,
+ * two operator-settable values whose relationship no reviewer reading the
+ * mount table can see. Checking the FINISHED argv is the only altitude at
+ * which that relationship is knowable.
+ *
+ * Throwing beats returning a flag: a launcher that ignores a returned warning
+ * is the same launcher that would have shipped the mount.
+ */
+export function assertNoRunDirMount(
+  argv: readonly string[],
+  runDir: string,
+  runsRoot?: string,
+): void {
+  for (const source of bindMountSources(argv)) {
+    const relation = classifyRunDirExposure(source, runDir, runsRoot);
+    if (relation !== null) throw new RunDirMountError(source, runDir, relation);
+  }
+}
+
+/**
+ * The same criterion with SYMLINKS closed, on the async path (ISC-127).
+ *
+ * `assertNoRunDirMount` above is lexical because `buildDockerArgv` is
+ * synchronous and pure by design. That is a real constraint on THAT function
+ * and it is not a constraint on the criterion: `renderWorker` is already
+ * `async`, is the only production entry point that produces a worker argv, and
+ * `materializeWorkerInputs` awaits it per worker BEFORE creating anything. A
+ * `realpath` pre-flight there costs nothing architecturally and closes the one
+ * evasion the lexical compare cannot see.
+ *
+ * ## The gap is routine, not adversarial
+ *
+ * This is worth stating because "a lexical compare does not close symlinks"
+ * reads like a note about an attacker, and the live case is a tidy laptop.
+ * Evasion needs `run.repo` and `PIFLEET_RUNS_DIR` spelled through different
+ * symlink STATES, which different tools set at different times as a matter of
+ * course. The routine instance: `~/repos` is a symlink to `/Volumes/Work/repos`
+ * on a Mac with a small internal SSD, `fleet.yaml` says `run.repo: ~/repos/proj`
+ * because that is what the operator types, and `PIFLEET_RUNS_DIR` comes from a
+ * launcher that ran `pwd -P` and so holds `/Volumes/Work/repos/proj/runs`.
+ * Neither value is unusual, neither is hostile, and lexically they share no
+ * prefix at all — so the repo mounted at `/workspace` contains the live run
+ * directory and the lexical guard reports clean.
+ *
+ * Both ends are resolved, not just the sources: resolving one side and
+ * comparing it against an unresolved other side is the mistake ISC-127's
+ * integration half already records, and it reads clean for every relation.
+ *
+ * Sources and run dirs that do not exist yet are normal here — `renderWorker`
+ * runs before `materializeWorkerInputs` creates anything — so `realpathish`
+ * resolves the deepest ancestor that DOES exist and re-appends the rest,
+ * rather than giving up on `ENOENT` and falling back to the lexical spelling.
+ * Giving up is what makes an assertion silently vacuous; the ISA records that
+ * exact failure in this criterion's own integration test.
+ */
+export async function assertNoRunDirMountResolved(
+  argv: readonly string[],
+  runDir: string,
+  runsRoot?: string,
+): Promise<void> {
+  const dirReal = await realpathish(runDir);
+  const rootReal = await realpathish(runsRoot ?? dirname(resolve(runDir)));
+  for (const source of bindMountSources(argv)) {
+    const sourceReal = await realpathish(source);
+    const relation = classifyRunDirExposure(sourceReal, dirReal, rootReal);
+    if (relation !== null) throw new RunDirMountError(source, runDir, relation, sourceReal);
+  }
+}
+
+/**
+ * `realpath`, but defined for a path that does not exist yet.
+ *
+ * Resolves the deepest existing ancestor and re-appends the missing tail, so a
+ * run directory under a symlinked root normalises correctly before anything
+ * has created it. Plain `realpath(p).catch(() => p)` cannot do that: it
+ * returns the UNRESOLVED path, which then compares unequal to every resolved
+ * one and turns the comparison into a no-op precisely when a symlink is
+ * present — the one condition the resolution existed to handle.
+ */
+async function realpathish(p: string): Promise<string> {
+  const abs = resolve(p);
+  try {
+    return await realpath(abs);
+  } catch {
+    const parent = dirname(abs);
+    // `dirname("/") === "/"`: the recursion's floor, and the only path that is
+    // its own parent.
+    if (parent === abs) return abs;
+    return join(await realpathish(parent), basename(abs));
+  }
 }
 
 /**

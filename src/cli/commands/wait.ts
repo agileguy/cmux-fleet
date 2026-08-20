@@ -11,7 +11,13 @@ import {
   taskRecordPath,
   workerPaths,
 } from "../../run/paths.ts";
-import { readTaskRecord, readWorkerState, type TaskRecord } from "../../run/state.ts";
+import {
+  readBudgetState,
+  readTaskRecord,
+  readWorkerState,
+  type TaskRecord,
+} from "../../run/state.ts";
+import { budgetExitCode } from "../../safety/budget.ts";
 import { processStartTime } from "../../run/registry.ts";
 import { Stopwatch } from "../../rpc/client.ts";
 
@@ -168,13 +174,50 @@ export function register(program: Command): void {
       const tasks = [...results.values()];
       const codes: ExitCode[] = tasks.map((t) => exitFor(t));
       if (timedOutWaiting) codes.push(EXIT.TIMEOUT);
+      /**
+       * The run's budget verdict joins the ladder here (ISC-193, ISC-235).
+       *
+       * `wait` is file-driven and knows nothing about who dispatched, so
+       * without this a `dispatch --auto` that halted on its ceiling would
+       * report 5 while a `dispatch` + `wait` pipeline over the SAME run
+       * reported 0 — the two spellings of a run disagreeing about what it
+       * cost, which is exactly the divergence `exitFor`'s header says the
+       * shared mapping exists to prevent.
+       *
+       * Null is the normal state of a run nobody scheduled, and contributes
+       * nothing: a manual dispatch has no budget.json and no ceiling to
+       * cross.
+       */
+      const budget = await readBudgetState(run);
+      if (budget !== null) codes.push(budgetExitCode(budget));
       const exit = worstExit(codes);
 
       if (opts.json === true) {
-        process.stdout.write(`${JSON.stringify({ run_id: runId, exit, tasks })}\n`);
+        process.stdout.write(
+          `${JSON.stringify({
+            run_id: runId,
+            exit,
+            tasks,
+            // Additive: a consumer that switched on the integer alone could
+            // not tell 5-because-budget from any other 5 without re-reading
+            // the run directory itself.
+            budget:
+              budget === null
+                ? null
+                : {
+                    halted_at: budget.halted_at,
+                    halted_reason: budget.halted_reason,
+                    tokens_spent: budget.tokens_spent,
+                    tokens_ceiling: budget.tokens_ceiling,
+                  },
+          })}\n`,
+        );
       } else {
         for (const t of tasks) {
           process.stdout.write(`${t.task_id}: ${t.verdict}${t.reason ? ` (${t.reason})` : ""}\n`);
+        }
+        if (budget !== null && budget.halted_at !== null) {
+          process.stdout.write(`budget: halted (${budget.halted_reason ?? "ceiling crossed"})\n`);
         }
       }
       if (exit !== EXIT.SUCCESS) {

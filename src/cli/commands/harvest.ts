@@ -54,8 +54,10 @@ export function register(program: Command): void {
         truncated = reader.truncated;
       }
 
-      // A6 merges both sources: the supervisor's persisted get_session_stats
-      // numbers (state.usage) and the transcript's per-message usage.
+      // A6 merges the two sources it is DESIGNED for, but only one of them
+      // exists: `state.usage` is never written — nothing sends
+      // `get_session_stats` — so it is always the zero default here and this
+      // merge returns the transcript total unchanged. See harvest/usage.ts.
       const transcriptUsage: UsageTotals = rec?.usage ?? ZERO_USAGE;
       const usage = combineUsage(state.usage, transcriptUsage);
 

@@ -183,6 +183,31 @@ export const WorkerStateSchema = z.object({
   pid: z.number().int().nonnegative(),
   pgid: z.number().int().nonnegative(),
   started_at: z.string(),
+  /**
+   * The supervisor's LAUNCH-TIME process identity, in the pinned `utc1 …`
+   * rendering `registry.ts` produces (`IDENTITY_FORMAT`).
+   *
+   * Distinct from `started_at`, and the distinction is the whole point:
+   * `started_at` is `new Date().toISOString()`, a wall-clock stamp of when the
+   * supervisor got around to writing its state, which is not comparable to
+   * `ps -o lstart=` and never could anchor an identity check.
+   *
+   * It exists because registry registration is deliberately BEST-EFFORT
+   * (`supervisor/index.ts`: "The supervisor must also work alone (integration
+   * tests, daemon crash)"). Anchoring `down` solely on the registry therefore
+   * made every daemon-less run unstoppable — the kill ladder refused
+   * `identity_unrecorded` for a supervisor whose identity was known at launch
+   * and simply had nowhere daemon-independent to live. This field is that
+   * place: written once by the process it describes, from the same value the
+   * registry call carries.
+   *
+   * Empty string means "not recorded" — a state file written by a build
+   * before this field existed. It is NOT a weak anchor: `isPinnedIdentity("")`
+   * is false, so `down` refuses exactly as it does for an absent registry
+   * entry. Fail-closed is preserved; what changes is how often the closed case
+   * is reached for a run whose identity was never actually in doubt.
+   */
+  proc_started: z.string().default(""),
   container: z
     .object({ name: shortStr, id: shortStr, image: shortStr })
     .nullable()

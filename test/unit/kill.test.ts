@@ -66,6 +66,32 @@ describe("signalIfSame (ISC-191 primitive)", () => {
   });
 
   /**
+   * The half the group test above does NOT cover, and which nothing asserted
+   * until now: identity is validated on the LEADER, and delivery is to the
+   * GROUP. Those are different pids, and only one of them is checked.
+   *
+   * That asymmetry is a deliberate, narrow residual rather than a bug —
+   * `launchDetached` records `pgid = pgidOf(pid) ?? -1`, and `signalIfSame`'s
+   * `pgid > 0` guard makes the `-1` sentinel degrade to the validated pid —
+   * but "the leader's identity vouches for the group" was an assumption with
+   * no test behind it. What must hold is that a FAILED leader check spares
+   * the group as well: a mismatched leader means no signal at all, not a
+   * signal to `-pgid` on the theory that the group is still ours.
+   *
+   * Fails if: the pgid path is ever allowed to bypass the identity check —
+   * an unvalidated process group is a far wider blast radius than an
+   * unvalidated pid, since it reaches every process in it.
+   */
+  test("a mismatched leader spares the GROUP too, not just the pid", async () => {
+    const h = harness();
+    h.table.set(100, "some OTHER process's start time");
+    const sent = await signalIfSame(TARGET, "SIGKILL", { pgid: 200, ops: h.ops });
+    expect(sent).toBe(false);
+    // Neither 100 nor -200. The negative assertion is the load-bearing one.
+    expect(h.signals).toEqual([]);
+  });
+
+  /**
    * Fails if: the check-then-signal race stops being tolerated. A process
    * dying inside that window surfaces as ESRCH — the same fact arriving
    * late, not an error.
