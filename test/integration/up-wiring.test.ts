@@ -38,10 +38,10 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
-import { EXIT, type LedgerRecord } from "../../src/contracts.ts";
+import { BudgetStateSchema, EXIT, type LedgerRecord } from "../../src/contracts.ts";
 import { runPaths, workerBranch, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
-import { readRunWorktrees } from "../../src/run/state.ts";
+import { readRunBudgetPolicy, readRunWorktrees } from "../../src/run/state.ts";
 import { inspectCloneDirt } from "../../src/run/worktree.ts";
 import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
 // The ISC-56 decoy waits for its own process to become visible to the very
@@ -116,11 +116,17 @@ afterAll(async () => {
   // hand-written number (120_000) instead of a derived one, and it had gone
   // UNDER-budgeted. It spawns one `down` per run directory per rig, and every
   // `makeRig` registers a rig (single `rigs.push`, in `makeRig` itself), so the
-  // counted upper bound is the number of `makeRig` CALLS — 26 in this file, not
-  // estimated. cliBudget(26) = 296_400 ms; the old flat 120_000 was already
+  // counted upper bound is the number of `makeRig` CALLS — 28 in this file, not
+  // estimated. cliBudget(28) = 319_200 ms; the old flat 120_000 was already
   // exceeded by cliBudget(15) = 171_000. Counting rather than estimating is the
   // criterion's own instruction, and this is the case it was written for: the
   // budget silently stopped matching the work as the file grew.
+  //
+  // RE-COUNTED at 28 (was 26) when the MUST FIX A budget-writer tests added two
+  // `makeRig` calls. Recounted with `grep -c 'await makeRig('` rather than
+  // adjusted by memory — the criterion's whole complaint is that this number
+  // stops matching the work silently, and a hand-incremented count is the same
+  // failure one step later.
   //
   // Charging every `down` the expensive per-spawn rate is deliberately
   // conservative — rigs whose test never reached `up` contribute zero spawns —
@@ -128,7 +134,7 @@ afterAll(async () => {
   // hook's own docstring above exists to prevent: a timed-out `afterAll`
   // truncates the loop mid-way and leaks detached supervisors onto the
   // developer's machine, which this project has already paid for.
-}, cliBudget(26));
+}, cliBudget(28));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -433,6 +439,27 @@ interface FleetOptions {
    * token is minted from.
    */
   adcAccount?: string;
+  /**
+   * `run.max_concurrent`. Omitted leaves the schema default, which is what
+   * every pre-existing test in this file gets.
+   *
+   * Present so the budget round-trip below can name a value that is NOT the
+   * default: `readRunBudgetPolicy` answers a missing cap with
+   * `DEFAULT_MAX_CONCURRENT`, so asserting the default proves nothing about
+   * whether `up` wrote anything at all.
+   */
+  maxConcurrent?: number;
+  /** `run.budget.tokens_ceiling`. Defaults to the inert 1000000 boilerplate. */
+  tokensCeiling?: number;
+  /** `run.budget.per_task_reserve_tokens`; omitted leaves the key absent. */
+  perTaskReserveTokens?: number;
+  /**
+   * Tokens the fake agent stamps on each assistant message (A4 `usage`).
+   *
+   * Opt-in, because the default of 0 writes no `usage` key at all and every
+   * other test in this file depends on that transcript shape.
+   */
+  tokensPerMessage?: number;
 }
 
 /** Minimal valid fleet.yaml naming the shimmed network and the seeded repo. */
@@ -467,8 +494,12 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
     `  network: ${NETWORK}`,
     "run:",
     `  repo: ${repo}`,
+    ...(opts.maxConcurrent === undefined ? [] : [`  max_concurrent: ${opts.maxConcurrent}`]),
     "  budget:",
-    "    tokens_ceiling: 1000000",
+    `    tokens_ceiling: ${opts.tokensCeiling ?? 1000000}`,
+    ...(opts.perTaskReserveTokens === undefined
+      ? []
+      : [`    per_task_reserve_tokens: ${opts.perTaskReserveTokens}`]),
     ...(cloudFields.length === 0 ? [] : ["cloud:", ...cloudFields]),
     "llm:",
     "  model: wiring-test-model",
@@ -594,7 +625,11 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
     runId: "",
     env: {
       PIFLEET_RUNS_DIR: root,
-      PIFLEET_PI_COMMAND: `${process.execPath} ${FAKE_PI} --scenario ${join(SCENARIOS, "happy.json")}`,
+      PIFLEET_PI_COMMAND:
+        `${process.execPath} ${FAKE_PI} --scenario ${join(SCENARIOS, "happy.json")}` +
+        (opts.tokensPerMessage === undefined
+          ? ""
+          : ` --tokens-per-message ${opts.tokensPerMessage}`),
       // The shim shadows the real docker for the CLI and everything it spawns.
       PATH: `${bin}:${process.env["PATH"] ?? ""}`,
       // Pins whose ADC `resolveIdentity` reads. See `Rig.adcFile`.
@@ -781,6 +816,150 @@ describe("up wires the security controls, in order (review finding 2)", () => {
       expect(await Bun.file(join(rig.repo, "AGENTS.md")).exists()).toBe(true);
     },
     90_000,
+  );
+});
+
+/**
+ * MUST FIX A — `up` actually WRITES the budget policy into `run.json`.
+ *
+ * THE MUTATION THIS FILE EXISTS FOR, in its newest instance. Deleting
+ * `...runBudgetRecord(loadedConfig?.config.run ?? null),` from `up.ts` left the
+ * ENTIRE suite green. `runBudgetRecord` had exactly one production call site —
+ * that line — and appeared in tests only in `budget-wiring.test.ts`, twice,
+ * both calling it DIRECTLY into a hand-built `run.json`. `budget-halt.test.ts`
+ * writes `run.json` by hand and says so in its own header. Every `runJson`
+ * reference under `test/` was a fixture; nothing read back what `up` wrote.
+ *
+ * The production effect of that deletion is not subtle and it is silent: every
+ * run gets `tokensCeiling: null` — UNBOUNDED — and the default
+ * `max_concurrent`. `tokens_ceiling` becomes a config key with no reader
+ * AGAIN, which is the exact defect ISC-235's own docstring cites
+ * `max_concurrent` for, reintroduced one line above the docstring that names
+ * it. And nothing complains: `readRunBudgetPolicy` treats absence as normal,
+ * `note` is null, there is no ledger row and nothing on stderr.
+ *
+ * The reader end of that seam was closed (round-trip tested in
+ * `budget-wiring.test.ts`); the WRITER end was left unproved. These two tests
+ * close it from both directions — the policy `up` records, and the ceiling
+ * that policy actually enforces.
+ */
+describe("up records the budget policy the run is dispatched against (MUST FIX A)", () => {
+  test(
+    "the configured ceiling, cap and reserve survive into run.json and read back exactly",
+    async () => {
+      /**
+       * Every number here is deliberately NOT a default.
+       *
+       * `readRunBudgetPolicy` answers a missing cap with
+       * `DEFAULT_MAX_CONCURRENT` (2), a missing ceiling with null and a
+       * missing reserve with 0 — so a fixture using any of those would be
+       * satisfied by a `run.json` with no budget block at all, which is
+       * precisely the mutated state. 3/4242/11 can only come from the config.
+       */
+      const rig = await makeRig({
+        maxConcurrent: 3,
+        tokensCeiling: 4_242,
+        perTaskReserveTokens: 11,
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+      const run = runPaths(rig.runId, rig.root);
+
+      // Read back through the SAME reader `dispatch --auto` uses, not through
+      // a second parse of the file. A test that re-implemented the read would
+      // assert only that its own copy is self-consistent.
+      const policy = await readRunBudgetPolicy(run);
+      expect(policy).toMatchObject({
+        tokensCeiling: 4_242,
+        maxConcurrent: 3,
+        perTaskReserveTokens: 11,
+        note: null,
+      });
+
+      // And the raw document carries the keys, so a reader-side default can
+      // never be what makes the assertion above pass.
+      const doc = JSON.parse(await Bun.file(run.runJson).text()) as {
+        max_concurrent: unknown;
+        budget: { tokens_ceiling: unknown; per_task_reserve_tokens: unknown } | null;
+      };
+      expect(doc.max_concurrent).toBe(3);
+      expect(doc.budget).toMatchObject({ tokens_ceiling: 4_242, per_task_reserve_tokens: 11 });
+    },
+    // ONE spawn, counted from the body: a single `up`. The `down` this rig
+    // needs is charged to the afterAll hook, which budgets per `makeRig` call.
+    cliBudget(1),
+  );
+
+  test(
+    "a run created by `up` actually HALTS on the ceiling `up` recorded",
+    async () => {
+      /**
+       * The behavioural half, and the one that makes the seam load-bearing
+       * rather than merely round-tripped.
+       *
+       * `budget-halt.test.ts` proves a ceiling halts a run, but it writes
+       * `run.json` BY HAND — so it holds identically whether or not `up` can
+       * produce that document. This is the same claim starting from a config
+       * file and a real `up`: the operator's `tokens_ceiling` reaches the
+       * dispatcher and stops the run.
+       *
+       * 300 against 400 tokens per assistant message, so the FIRST task to
+       * settle crosses it — the same reasoning, and the same numbers, as
+       * `budget-halt.test.ts`'s `TOKENS_CEILING`.
+       */
+      const rig = await makeRig({ tokensCeiling: 300, tokensPerMessage: 400 });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      const auto = await runCli(rig, [
+        "dispatch",
+        "--auto",
+        "--tasks",
+        join(ROOT_URL, "test/fixtures/tasklists/fan.json"),
+        "--run",
+        rig.runId,
+        "--json",
+      ]);
+
+      // THE assertion. With the writer deleted the run is unbounded, every
+      // task succeeds and this is 0.
+      expect(auto.code).toBe(EXIT.BUDGET);
+      expect(auto.stderr).toContain("budget ceiling crossed");
+      expect(auto.stderr).toContain("tokens_ceiling");
+
+      // Non-vacuous in the other direction too: the halt came from THIS run's
+      // recorded ceiling, not from some unrelated refusal that also exits 5.
+      const budget = BudgetStateSchema.parse(
+        JSON.parse(await Bun.file(runPaths(rig.runId, rig.root).budgetJson).text()),
+      );
+      expect(budget.tokens_ceiling).toBe(300);
+      expect(budget.tokens_spent).toBeGreaterThan(300);
+      expect(budget.halted_at).not.toBeNull();
+    },
+    // TWO spawns, counted: `up` and `dispatch --auto`. `dispatch --auto` is a
+    // whole-run driver, the expensive class `PER_SPAWN_IDLE_MS` is measured
+    // on, so neither is charged the cheap rate by accident.
+    cliBudget(2),
   );
 });
 
