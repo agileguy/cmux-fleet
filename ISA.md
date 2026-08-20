@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 222/272
+progress: 224/274
 mode: build
 started: 2026-07-27
 updated: 2026-08-19
