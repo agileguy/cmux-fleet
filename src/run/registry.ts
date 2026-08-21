@@ -17,7 +17,7 @@
  */
 
 import { z } from "zod";
-import type { WorkerState } from "../contracts.ts";
+import { EXIT, type WorkerState } from "../contracts.ts";
 import {
   AUTH_FIELD,
   checkAuth,
@@ -144,18 +144,212 @@ export const RegistryWorkerSchema = z.object({
   registered_at: z.string(),
 });
 
+/**
+ * The registry stamp THIS build reads, named once so the reader can quote it
+ * back to an operator rather than restating the string in a message.
+ *
+ * Every write of `registry.json` in this tree goes through
+ * `RegistrySchema.parse` before it reaches `writeJsonAtomic` (see `persist`
+ * and the reaper's deregistration write below), so every registry file this
+ * project has ever produced carries a stamp. That is what makes an ABSENT
+ * stamp diagnostically different from a WRONG one — see `readRegistry`.
+ */
+export const REGISTRY_SCHEMA = "pifleet.registry/v1";
+
 export const RegistrySchema = z.object({
-  schema: z.literal("pifleet.registry/v1"),
+  schema: z.literal(REGISTRY_SCHEMA),
   run_id: z.string(),
   daemon: z.object({ pid: z.number().int().nonnegative(), started: z.string() }),
   workers: z.record(z.string(), RegistryWorkerSchema),
 });
 export type Registry = z.infer<typeof RegistrySchema>;
 
+/**
+ * `registry.json` carries a schema stamp this build does not read (ISC-192).
+ *
+ * THE POLICY IS REFUSAL BY DESIGN, and this class is the refusal being NAMED.
+ * It is the same shape `down`'s `identity_legacy_format` already established
+ * one channel over, and it is chosen for the same reason: an unrecognised
+ * stamp is a fact about the world that an operator can act on, and reporting
+ * it as a generic parse failure destroys the only information that makes it
+ * actionable — which build wrote this file.
+ *
+ * REJECTED: accept-and-upgrade. A migration ladder (`v0 -> v1` upgraders)
+ * would mean this build writing its own guesses into a file another build owns,
+ * on no evidence beyond the stamp being lower. `registry.json` names live
+ * supervisor pids and their launch identities; an upgrader that guessed a field
+ * wrong would hand `down` a target it invented. The registry is also
+ * SINGLE-WRITER by construction (see this module's header), and a reader that
+ * rewrites the file is a second writer wearing a reader's name.
+ *
+ * REJECTED: degrading to `null` — "no registry". That is the conflation this
+ * whole phase exists to remove, and here it is not merely misleading, it is
+ * DESTRUCTIVE: `startRegistryDaemon` does `(await readRegistry(run)) ?? {…
+ * workers: {} }` and then persists that, so a `null` for an unreadable file
+ * would make the daemon OVERWRITE a foreign-stamped registry with an empty
+ * one of its own — every worker it named forgotten in a single atomic write,
+ * with nothing left on disk to say they ever existed.
+ *
+ * THE HATCH IS NAMED IN THE MESSAGE, because a refusal with no way forward is
+ * how an operator learns to reach for whatever flag silences it. There are
+ * exactly two honest ways out and both are stated: stop the run with the build
+ * that wrote the file, or remove the run directory.
+ */
+export class RegistrySchemaError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+
+  constructor(
+    readonly path: string,
+    readonly found: string,
+  ) {
+    super(
+      `${path} is stamped ${JSON.stringify(found)}, and this build reads ` +
+        `${JSON.stringify(REGISTRY_SCHEMA)}. The file was written by a different build of pifleet, ` +
+        `so nothing here can vouch for what its fields mean; refusing to read it rather than ` +
+        `guessing. Stop this run with the build that wrote it, or remove the run directory ` +
+        `${JSON.stringify(path)} if the run is over.`,
+    );
+    this.name = "RegistrySchemaError";
+  }
+}
+
+/**
+ * `registry.json` is present and cannot be read — and the stamp is NOT why.
+ *
+ * A SECOND ERROR RATHER THAN A DETAIL FIELD ON THE FIRST, because the two
+ * diagnoses send an operator to different places. "Written by another build"
+ * says there IS a build that understands this file and names the two ways back
+ * to it. "Corrupt" says there is not: bad JSON, or valid JSON whose shape this
+ * build's own stamp promised and did not deliver. Collapsing them would make
+ * the message advise finding a build for a file no build ever wrote.
+ *
+ * Covers three inputs, all of which reached callers as raw library errors
+ * before this existed — measured on this machine, matching what ISC-192
+ * recorded: a truncated file threw a bare `SyntaxError`
+ * ("JSON Parse error: Unexpected EOF"), and valid JSON of the wrong shape
+ * threw a bare `ZodError` whose message begins with a lone `[`. Neither
+ * carried an `exitCode`, so both left the CLI as a stack trace on exit 1 —
+ * not a code on the SRD §10 ladder — from `status`, which is a command an
+ * operator reaches for PRECISELY when a run is in a bad state.
+ *
+ * A registry with NO stamp at all lands here rather than in
+ * `RegistrySchemaError`, and that is deliberate. Every write in this tree goes
+ * through `RegistrySchema.parse` (see `REGISTRY_SCHEMA`), so no build of
+ * pifleet has ever written a stampless registry; a file missing the key is
+ * therefore hand-edited or damaged, and there is no build to send the operator
+ * back to.
+ */
+export class RegistryReadError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+
+  constructor(
+    readonly path: string,
+    cause: unknown,
+  ) {
+    super(`unreadable registry file ${path}: ${parseFailureDetail(cause)}`);
+    this.name = "RegistryReadError";
+  }
+}
+
+/**
+ * A `ZodError`'s `message` is a pretty-printed JSON array, so its first line is
+ * a bare `[` — useless as a diagnosis. Summarise the issues instead; the field
+ * path is the whole diagnostic value.
+ *
+ * DELIBERATE DUPLICATION of the rendering inside `state.ts`'s `StateReadError`.
+ * Sharing it means exporting a helper from `state.ts`, which is outside this
+ * change's file set; the two errors describe different files and say different
+ * things, and only this one rule is common to them. Worth folding together the
+ * next time `state.ts` is open — recorded here so it is a known duplicate
+ * rather than a rediscovered one.
+ */
+function parseFailureDetail(cause: unknown): string {
+  const issues =
+    typeof cause === "object" && cause !== null
+      ? (cause as { issues?: Array<{ path: unknown[]; message: string }> }).issues
+      : undefined;
+  if (Array.isArray(issues)) {
+    return issues.map((i) => `${i.path.map(String).join(".") || "<root>"}: ${i.message}`).join("; ");
+  }
+  if (cause instanceof Error) return cause.message.split("\n")[0] ?? cause.message;
+  return String(cause);
+}
+
+/**
+ * The stamp a document carries when it is not the one this build reads, or
+ * `null` when the stamp is absent, unreadable, or already correct.
+ *
+ * Reads the RAW parsed document rather than anything schema-validated, which
+ * it must: the schema check is exactly what failed, so there is no validated
+ * object to ask. Best-effort by construction, and typed to say so.
+ */
+function foreignStamp(doc: unknown): string | null {
+  if (typeof doc !== "object" || doc === null) return null;
+  const stamp = (doc as { schema?: unknown }).schema;
+  if (typeof stamp !== "string" || stamp === REGISTRY_SCHEMA) return null;
+  return stamp;
+}
+
+/**
+ * The run's registry, or `null` when the run has never had one.
+ *
+ * ABSENT STAYS `null`; UNREADABLE THROWS. The asymmetry is the whole point of
+ * this function's contract, and it is not the tidier of the two options — it
+ * is the one that keeps two different facts apart.
+ *
+ * Absence is a REAL and legitimate state rather than a degraded one, and the
+ * proof is in this module: `startRegistryDaemon` calls this before it has ever
+ * written the file, so `null` is the answer on the very first line of every
+ * run's life. It also covers a run directory assembled by hand in a test.
+ * Answering it with an empty registry is correct, because an empty registry is
+ * what is true.
+ *
+ * Unreadable is the opposite fact and must never borrow that answer. A file
+ * EXISTS, something wrote it, and it names supervisors this process cannot
+ * enumerate. `startRegistryDaemon`'s `?? { … workers: {} }` would take a `null`
+ * from here and persist a fresh empty registry straight over it, so widening
+ * the `null` to cover unreadable would turn a diagnosable file into a silent
+ * erasure of every worker the run is actually running — and `down` and
+ * `status` read this file to find out what to stop. That is the same
+ * conflation `processStartTime` carries below and `StateReadError` was written
+ * to remove; it is not repeated here.
+ *
+ * @throws {RegistrySchemaError} the file is stamped by a build this one does
+ *   not read. Its own answer, never a generic parse failure, because "written
+ *   by another build" and "corrupt" call for different actions.
+ * @throws {RegistryReadError} the file is malformed — bad JSON, or valid JSON
+ *   failing the schema for a reason OTHER than the stamp.
+ */
 export async function readRegistry(run: RunPaths): Promise<Registry | null> {
   const file = Bun.file(run.registryJson);
   if (!(await file.exists())) return null;
-  return RegistrySchema.parse(JSON.parse(await file.text()));
+
+  const text = await file.text();
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    // Carry the bytes, for the reason `state.ts`'s reader carries them: this
+    // file is written tmp + fsync + rename, so a reader should see either the
+    // whole previous file or the whole next one, and "Unexpected EOF" alone
+    // says nothing about how that premise came to be wrong.
+    throw new RegistryReadError(
+      run.registryJson,
+      `${String(err)} — ${text.length} bytes on disk, starting ${JSON.stringify(text.slice(0, 120))}`,
+    );
+  }
+
+  const parsed = RegistrySchema.safeParse(doc);
+  if (parsed.success) return parsed.data;
+
+  // The stamp is asked about FIRST, because it is the one failure that names a
+  // build. A wrong stamp also makes every other field's complaint meaningless:
+  // those fields were described by a schema this build does not own, so
+  // reporting `workers.w-1.pgid: expected number` about them would be a
+  // sentence about the wrong document.
+  const stamp = foreignStamp(doc);
+  if (stamp !== null) throw new RegistrySchemaError(run.registryJson, stamp);
+  throw new RegistryReadError(run.registryJson, parsed.error);
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +631,7 @@ export async function startRegistryDaemon(
 ): Promise<RegistryDaemon> {
   const started = (await processStartTime(process.pid)) ?? "";
   let registry: Registry = (await readRegistry(run)) ?? {
-    schema: "pifleet.registry/v1",
+    schema: REGISTRY_SCHEMA,
     run_id: run.runId,
     daemon: { pid: process.pid, started },
     workers: {},
