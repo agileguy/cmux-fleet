@@ -337,9 +337,29 @@ export async function confirmGroup(
     return { ok: false, why: "read_failed" };
   }
   if (live === null) {
-    return (await sameIdentity(target, ops))
-      ? { ok: false, why: "read_failed" }
-      : { ok: false, why: "gone" };
+    /*
+     * The identity re-check CAN THROW, and that is newer than the branch it
+     * sits in. `processStartTime` used to report a failed `ps` as an absent
+     * process and now refuses instead (ISC-192's identity half), so
+     * `ops.startTime` — and therefore `sameIdentity` — raises where it once
+     * returned. Outside a `try`, that exception leaves `confirmGroup` past
+     * every verdict it exists to produce: `signalIfSame` does not catch, so a
+     * broken `ps` on ONE worker aborts the whole `down` instead of refusing
+     * that worker and stopping the rest.
+     *
+     * A throw is one more failed read, so it lands on `read_failed` exactly as
+     * the group read's own failure does. Note both arms of the ternary that
+     * survive: an identity that still holds means the group read lied
+     * (`read_failed`), and only an identity that is affirmatively gone earns
+     * `gone` — the one verdict that lets a caller report a stop.
+     */
+    let stillThere: boolean;
+    try {
+      stillThere = await sameIdentity(target, ops);
+    } catch {
+      return { ok: false, why: "read_failed" };
+    }
+    return stillThere ? { ok: false, why: "read_failed" } : { ok: false, why: "gone" };
   }
   if (live !== recorded) return { ok: false, why: "mismatch" };
   if (live !== target.pid) return { ok: false, why: "not_led" };
@@ -362,7 +382,11 @@ export async function confirmGroup(
  * `gone`, because `gone` is the one answer a caller is allowed to act
  * destructively on.
  */
-export type SignalOutcome = "signalled" | "gone" | "group_unconfirmed";
+export type SignalOutcome =
+  | "signalled"
+  | "gone"
+  | "group_unconfirmed"
+  | "identity_unconfirmed";
 
 /**
  * Re-validate identity AND group, then signal — the ISC-191/272 primitive.
@@ -432,7 +456,22 @@ export async function signalIfSame(
   opts: { pgid?: number | null; ops?: ProcessOps } = {},
 ): Promise<SignalOutcome> {
   const ops = opts.ops ?? realProcessOps;
-  if (!(await sameIdentity(target, ops))) return "gone";
+  /*
+   * A THROWN identity read is its own answer, and it is emphatically not
+   * `gone`. `processStartTime` refuses a `ps` it cannot read rather than
+   * reporting the process absent (ISC-192's identity half), so this call
+   * raises where it used to return false. Letting it escape would abort the
+   * caller's entire teardown over ONE unreadable pid; mapping it to `gone`
+   * would be far worse, because `gone` is the verdict a caller may report as a
+   * stop and act on by removing a container.
+   */
+  let same: boolean;
+  try {
+    same = await sameIdentity(target, ops);
+  } catch {
+    return "identity_unconfirmed";
+  }
+  if (!same) return "gone";
   let addr = target.pid;
   if (opts.pgid != null) {
     const group = await confirmGroup(target, opts.pgid, ops);
@@ -443,7 +482,13 @@ export async function signalIfSame(
     // and this rung is about to widen its own blast radius from one pid to a
     // whole group. See the header above for why the re-read goes here rather
     // than the group check being reordered ahead of the first one.
-    if (!(await sameIdentity(target, ops))) return "gone";
+    let still: boolean;
+    try {
+      still = await sameIdentity(target, ops);
+    } catch {
+      return "identity_unconfirmed";
+    }
+    if (!still) return "gone";
   }
   try {
     ops.signal(addr, sig);
@@ -464,6 +509,13 @@ export async function signalIfSame(
  * signalled because the recorded identity no longer existed — reaping the dead
  * is a no-op, not an error (ISC-118).
  *
+ * `identity_unconfirmed` is the ISC-192 answer and is NOT a stop either: the
+ * identity read itself FAILED, so nothing is known about the target at all —
+ * not that it is alive, not that it is gone — and nothing was signalled. It is
+ * kept distinct from `group_unconfirmed` because the two send an operator to
+ * different places: one means the recorded group could not be vouched for, the
+ * other means `ps` could not be read.
+ *
  * `group_unconfirmed` is the ISC-272 answer and it is NOT a stop: the target
  * is alive, a group signal was asked for, and the recorded group could not be
  * shown to be the target's own. Distinct from `unconfirmed`, which means the
@@ -475,7 +527,8 @@ export type KillOutcome =
   | "killed"
   | "already_gone"
   | "unconfirmed"
-  | "group_unconfirmed";
+  | "group_unconfirmed"
+  | "identity_unconfirmed";
 
 export interface KillLadderOpts {
   /** The recorded identity to kill. Never a bare pid. */
@@ -578,6 +631,7 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
   // and was deliberately spared, which is its own outcome and never a stop.
   const term = await signalIfSame(target, "SIGTERM", { pgid: opts.pgid, ops });
   if (term === "group_unconfirmed") return "group_unconfirmed";
+  if (term === "identity_unconfirmed") return "identity_unconfirmed";
   if (term === "gone") return opts.abort != null ? "aborted" : "already_gone";
   if (await awaitDead(dead, opts.termGraceMs ?? DEFAULT_TERM_GRACE_MS, pollMs, now, sleep)) {
     return "terminated";
@@ -589,6 +643,7 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
   // so the caller gets a confirmed answer rather than a hopeful one.
   const kill = await signalIfSame(target, "SIGKILL", { pgid: opts.pgid, ops });
   if (kill === "group_unconfirmed") return "group_unconfirmed";
+  if (kill === "identity_unconfirmed") return "identity_unconfirmed";
   if (kill === "gone") return "terminated";
   if (await awaitDead(dead, opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS, pollMs, now, sleep)) {
     return "killed";

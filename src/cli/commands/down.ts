@@ -374,8 +374,20 @@ export function register(program: Command): void {
            * final error names `--force-identity` — which really is the answer
            * here, exactly as it is for a group refused at the anchor.
            */
-          if ((await signalGuarded(target, "SIGTERM", anchor.group)) === "group_unconfirmed") {
+          const termOutcome = await signalGuarded(target, "SIGTERM", anchor.group);
+          if (termOutcome === "group_unconfirmed") {
             how = LADDER_GROUP_UNCONFIRMED;
+          } else if (termOutcome === "identity_unconfirmed") {
+            /*
+             * The identity read FAILED at the rung — `ps` could not be read at
+             * all, so nothing is known about the target and nothing was sent.
+             * Kept apart from the group refusal above because the two send an
+             * operator somewhere different: one says the recorded group could
+             * not be vouched for, this one says the measuring instrument is
+             * broken. Collapsing them would tell somebody to edit a record
+             * that is fine.
+             */
+            how = LADDER_IDENTITY_UNCONFIRMED;
           } else if (!(await waitGone(target, TERM_WAIT_MS))) {
             // Phase 3: SIGKILL — the same confirmed group, no survivors.
             how = "sigkill";
@@ -388,8 +400,13 @@ export function register(program: Command): void {
              * "group_unconfirmed") return "group_unconfirmed"`), applied to the
              * ladder `down` runs by hand.
              */
-            if ((await signalGuarded(target, "SIGKILL", anchor.group)) === "group_unconfirmed") {
+            const killOutcome = await signalGuarded(target, "SIGKILL", anchor.group);
+            if (killOutcome === "group_unconfirmed") {
               how = LADDER_GROUP_UNCONFIRMED;
+            } else if (killOutcome === "identity_unconfirmed") {
+              // Same reasoning as the SIGTERM rung, and the same stop: a `ps`
+              // that cannot be read at SIGTERM will not read at SIGKILL.
+              how = LADDER_IDENTITY_UNCONFIRMED;
             } else {
               await waitGone(target, TERM_WAIT_MS);
             }
@@ -892,10 +909,28 @@ export type AnchorRefusal =
    */
   | "group_read_failed";
 
+/**
+ * The ladder's OWN identity refusal, the twin of `LADDER_GROUP_UNCONFIRMED`.
+ *
+ * `signalIfSame` re-reads the identity before every signal, and since ISC-192
+ * that read can FAIL rather than answer: `processStartTime` refuses a `ps` it
+ * cannot read instead of reporting the process absent. A rung that meets that
+ * failure sends nothing and says so here.
+ *
+ * It is an IDENTITY refusal, not a group one, and the distinction is the whole
+ * point of having two sets: `--force-identity` is the right pointer for a
+ * group that cannot be confirmed, and the WRONG one here — forcing past a
+ * broken `ps` would anchor on whatever holds the pid, measured with the same
+ * instrument that just failed. Kept out of `AnchorRefusal` for the reason
+ * `LADDER_GROUP_UNCONFIRMED` is: no anchor can produce it.
+ */
+const LADDER_IDENTITY_UNCONFIRMED = "identity_read_failed";
+
 const IDENTITY_REFUSALS = new Set<string>([
   "identity_mismatch",
   "identity_unrecorded",
   "identity_legacy_format",
+  LADDER_IDENTITY_UNCONFIRMED,
 ]);
 
 /**

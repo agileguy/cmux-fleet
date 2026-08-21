@@ -187,6 +187,40 @@ describe("confirmGroup: a group is addressable only when it is the target's own"
   });
 
   /**
+   * A THROWING identity re-check must not escape as an exception.
+   *
+   * This branch is newer than it looks. `confirmGroup` re-reads the identity
+   * when the group read comes back `null`, to tell "the group read lied" from
+   * "the process is affirmatively gone" — and `ops.startTime` could only
+   * RETURN back then. Since ISC-192's identity half, `processStartTime`
+   * REFUSES a `ps` it cannot read rather than reporting the process absent, so
+   * the re-check raises where it used to answer.
+   *
+   * Fails if: the re-check is moved back outside a `try`. Nothing in
+   * `signalIfSame` catches, so the exception leaves `confirmGroup` past every
+   * verdict it exists to produce and aborts the WHOLE `down` — one worker with
+   * a broken `ps` taking the teardown of every other worker with it. The
+   * assertion on `h.signals` is the half that matters: a refusal that still
+   * signalled would be no refusal at all.
+   */
+  test("an identity re-check that throws is a failed read, not an escaping exception", async () => {
+    const h = harness();
+    // The group read answers `null` — nothing is in the table — which is the
+    // only branch that re-reads the identity at all.
+    h.ops.startTime = () => Promise.reject(new Error("ps: illegal option -- q"));
+    expect(await confirmGroup(TARGET, 42, h.ops)).toEqual({ ok: false, why: "read_failed" });
+    // `identity_unconfirmed`, NOT `group_unconfirmed`: the group was never the
+    // problem. `signalIfSame` meets the same broken `ps` at its own leading
+    // identity check, before `confirmGroup` is reached at all.
+    expect(await signalIfSame(TARGET, "SIGKILL", { pgid: 42, ops: h.ops })).toBe(
+      "identity_unconfirmed",
+    );
+    // And with NO group asked for, so the only read that can fail is this one.
+    expect(await signalIfSame(TARGET, "SIGTERM", { ops: h.ops })).toBe("identity_unconfirmed");
+    expect(h.signals).toEqual([]);
+  });
+
+  /**
    * The capture-failed sentinels. `supervisor/index.ts` records `0` when `ps`
    * could not tell it its own group and `launchDetached` returns `-1`; neither
    * is a group.

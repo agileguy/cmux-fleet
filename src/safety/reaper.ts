@@ -185,6 +185,7 @@ function supervisorStopped(outcome: KillOutcome): boolean {
       return true;
     case "unconfirmed":
     case "group_unconfirmed":
+    case "identity_unconfirmed":
       return false;
     default: {
       const unhandled: never = outcome;

@@ -52,6 +52,7 @@ function reapEventName(outcome: KillOutcome): string {
       return "worker_reaped";
     case "unconfirmed":
     case "group_unconfirmed":
+    case "identity_unconfirmed":
       return "worker_reap_refused";
     default: {
       const unhandled: never = outcome;
