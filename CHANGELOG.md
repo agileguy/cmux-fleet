@@ -54,7 +54,38 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
-- **A supervisor that refused the kill ladder could be destroyed by the reaper while still alive
+- **`pifleet down` could kill an unrelated live process on the operator's machine (#36, ISC-191).**
+  `down` did not use `safety/kill.ts` at all — it ran its own inline ladder whose gate was
+  `processStartTime(state.pid) !== null`, which is **liveness, not identity**. `started` was compared
+  at no rung, and the daemon rung signalled a bare pid even though `daemon.pid` stores `{pid, started}`
+  written in one call. A bare `pifleet down` resolves the *latest* run, so after a reboot it climbs a
+  ladder against pids the OS has since reissued. **This was not hypothetical**: reproduced directly,
+  a pre-fix `down` SIGTERMed and killed a live unrelated `sleep`. It had also already fired once in
+  the repo's own history — `down-prune.test.ts`'s fixture comment records that an early revision used
+  `process.pid` and `down` killed the test runner's own process group five seconds in; the fixture was
+  then changed to route *around* the hazard rather than remove it. `down` now resolves a `ProcId` and
+  climbs every rung on `signalIfSame`/`sameIdentity`.
+
+- **A durable write that landed could be reported to the caller as failed (#29, ISC-218).** Only
+  `dh.sync()` was guarded in `writeJsonAtomic`; the `open(dir, "r")` in front of it was not. Opening a
+  directory needs **read** permission while writing and renaming inside it need only **write+search**,
+  so against a `0o300` directory every durable step ran — tmp written, fsynced, renamed into place —
+  and then the call threw `EACCES` at the caller with the correct file sitting on disk. Verified before
+  fixing. A caller told "failed" retries, reports a broken worker, or unwinds a state machine over a
+  file that is present and correct; downgrading the durability of a directory *entry* across power
+  loss is strictly better than that. `fsyncDirBestEffort` now swallows the open, the sync **and** the
+  close — the close because on some filesystems a deferred error surfaces there.
+
+- **`up` would have died on its first real container launch (#43).** `render.ts` pushed
+  `--env-file <run>/workers/<id>/env` unconditionally and nothing wrote that path — confirmed:
+  `docker: open …/env: no such file or directory`. The omission was **deliberate**, a tripwire so a
+  premature launch failed loudly rather than quietly. `src/run/worker-env.ts` is the writer it was
+  waiting for, at mode 0600 because it carries the oMLX key, and the variable names come from
+  `docker/entrypoint.sh` because that is the code which consumes them — getting them wrong doesn't
+  crash, it produces that script's own stated worst case, a worker that "streams tokens happily and
+  can reach no model at all".
+
+ by the reaper while still alive
   (Phase F, found by review, not by grading).** Adding `group_unconfirmed` to `KillOutcome` was
   invisible to `tsc` for consumers that only *stored* the value: `reaper.ts` gated `docker rm -f` on
   the container merely being present, `registry.ts` deregistered every report it was handed, and
@@ -76,6 +107,19 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- **`soft_stop_at` is removed from `BudgetSchema` and `fleet.example.yaml` (#42, ISC-280).**
+  **This is a behaviour change, not a tidy-up:** the schema is `.strict()`, so an existing
+  `fleet.yaml` carrying the key now **fails validation** — including any config copied from the
+  `fleet.example.yaml` that shipped it, which is the likely case. That is intended, but a bare
+  `unrecognized key` describes it as a typo, and a typo and a removal want opposite reactions from
+  a reader: one should be corrected, the other deleted. `REMOVED_KEYS` in `config/load.ts` gives the
+  dotted path a message saying it was removed, why, and that deleting the line changes nothing. It
+  was never implemented, and the SRD's risk rows **F12** (cost runaway) and **F24** (budget overshoot
+  between polls) both named an "80% soft-stop" among their mitigations — so both overstated the
+  product's protection against the two risks the budget machinery exists for. Both rows are now
+  annotated rather than rewritten, because whether they need a replacement mitigation is an owner's
+  call about risk.
+
 - **`backend.kind` no longer defaults to `cmux` at the schema (Phase F, ISC-271).** It is
   `.optional()`, so `up` can distinguish an absent backend block from one explicitly set — without
   which every headless run silently became `cmux`. `up` now honours `config.backend.kind` when
@@ -88,6 +132,43 @@ All notable changes to this project are documented here.
   as `utc1`, so the tag cannot collide with a legacy value. `--force-identity` is the named hatch.
   Reporting such a value as a mismatch would assert something false about the world and train the
   operator to reach reflexively for the one flag that re-opens the fail-open.
+
+### Added
+
+- **The run's budget is enforced on the dispatch path; five criteria closed from one call site
+  (#37, ISC-235/114/115/193/109).** `src/safety/budget.ts` was finished, correct, thoroughly
+  unit-tested — and imported by nothing. The audits that produced this are worth stating: a probe
+  drove the real `runSchedule` with 6 workers against `max_concurrent: 2` and measured **peak
+  in-flight = 6**; `EXIT.BUDGET` had **no runtime producer**, so no run could exit 5 for any reason;
+  and `budget.json` had no path and no writer. `runSchedule` now calls `admit` before every dispatch,
+  `settle`s on every terminal transition, drains in-flight work after a halt, and folds
+  `budgetExitCode` into `worstExit`.
+
+- **A wedged agent is now actually acted on (#40, ISC-110, ISC-117).** `classifyStall` distinguishes
+  a QUEUED worker from a WEDGED one and had **no production caller**, so no worker was ever killed as
+  wedged nor spared as queued by any code path; `event_stall_warn`/`event_stall_kill` were parsed by
+  the schema and read by no production line. This could not have been wired before #37 — a worker can
+  only be *queued* once admission is on the dispatch path. The policy moved to `src/safety/stall.ts`,
+  which imports **nothing**, because `scheduler.ts` importing it from `kill.ts` tripped a module cycle
+  (`ReferenceError: Cannot access 'realProcessOps' before initialization`); a module with no imports
+  cannot be in a cycle, and `kill.ts` re-exports it so every existing caller keeps its address.
+
+- **`doctor` reports whether the oMLX endpoint serves every `models_allowlist` entry (#35,
+  ISC-256).** Both sides decompose per §6.1 first, matching `assertModelAllowed` — a raw compare
+  would have `doctor` calling `omlx/X:high` unserved while `up` accepts it. **The check runs only
+  against a list actually fetched**, and that gate is asserted rather than assumed: an unreachable
+  endpoint serves nothing, so an ungated check would report every entry missing and send an operator
+  off to edit a *correct* allowlist — on the default config that would fire on every machine, every
+  run. Live evidence for the motivating finding: `fleet.example.yaml`'s three allowlist names give
+  **0/3 served, exit 3**, including `Qwen3.5-35B-A3B-8bit` missing the served `-4bit` by a single
+  character.
+
+- **The control socket answers `export_html` (#32, ISC-234).** Forwarded to Pi's RPC at 8s, under
+  the CLI's 10s fallback, with both directions proved on one run: `source: "rpc"` while the worker
+  lives, `source: "local"` once it is gone. **Limit recorded on the criterion:** proved for a
+  host-process Pi only — a containerised Pi resolves the path in the container namespace and degrades
+  to the local render.
+
 - **Five anti-criteria now have probes that can actually fail (ISC-138, 139, 140, 165, 199).** An
   `Anti:` criterion asserts an *absence*, which is the one claim a green suite cannot make on its
   own — each was satisfied by a codebase that had simply not done the forbidden thing yet. Every
@@ -208,6 +289,24 @@ All notable changes to this project are documented here.
   `5000` fails, a clock read twice fails.
 
 ### Security
+
+- **The run dir — holding the 0600 control-socket secret — could be mounted into a worker container
+  (#34, ISC-127).** Measured before fixing: with `run.repo` set to a checkout containing the runs root,
+  the rendered `/workspace` mount was an **ancestor of `<run-dir>/control-auth.json`**, along with the
+  ledger, the inbox and every other worker's state. This defeats the control-auth design directly —
+  `security/control-auth.ts` states its threat model is "a worker that escaped its container", and the
+  mount handed that worker the secret **without any escape at all**. `classifyRunDirExposure` /
+  `assertNoRunDirMount` now refuse it from `buildDockerArgv`; two relations are refused and not three,
+  because SRD §5.5 mounts run-dir *children* deliberately. **Framed honestly: this was latent
+  hardening, not an active breach** — `rendered.docker` reached no `exec` at the time. **Known limit,
+  recorded on the criterion:** the launch-time guard is lexical (`resolve`, not `realpath`), so a
+  symlinked `run.repo` could evade it at launch.
+
+- **No cloud provider key can reach any container's environment, enforced structurally (#34,
+  ISC-31).** The guard enumerates **every** `docker run` argv builder in `src/` and applies two rules:
+  no cloud credential by name — importing `adc.ts`'s own `CREDENTIAL_ENV_VARS` rather than a copy —
+  and **no bare `-e NAME`** host pass-through. The second rule is what catches a key nobody thought to
+  list: a planted bare `-e FOOCLOUD_API_KEY`, in no enumerated list anywhere, fails on secret shape.
 - **The mandatory native-tool-call gate was certifying a network path no worker uses.** `up`
   probed oMLX from the HOST, through a helper (`hostFacingBaseUrl`) whose only job was rewriting
   the worker-facing `host.docker.internal` into `localhost` so the host could reach it — while

@@ -23,7 +23,7 @@
     "F-launch-preflight",
     "G-durable-formats"
   ],
-  "status": "phase_g_merged_awaiting_next_phase_start",
+  "status": "changelog_backlog_cleared_awaiting_next_phase",
   "version_file": "package.json",
   "isa_progress_at_start": "239/293",
   "criteria_remaining_at_start": 54,
@@ -160,8 +160,10 @@
   "open_process_gap": "CHANGELOG.md last updated at PR #27; PRs #28-#46 (incl. Phase B and Phase F) are not recorded there. ProjectManager step 2.8 has been skipped. Backfill is ~19 PRs - raise with owner rather than doing silently.",
   "process_risk_flagged_by_engineer": "Both Phase G engineers worked in the SAME checkout, not separate worktrees. One engineers live mutation broke the others tsc mid-run; a git commit -a from either would have swept up the others in-progress mutation. Use isolation:worktree for future parallel phases.",
   "changelog_backlog": {
-    "last_recorded_pr": 27,
-    "written_2026_08_21": "Phase F (#46) and Phase G (#47)",
-    "still_unrecorded": "PRs #28-#45 \u2014 mostly ISA grading work, but #29/#34/#36/#37/#40/#42/#43 changed behaviour"
+    "last_recorded_pr_before": 27,
+    "cleared_2026_08_21": "PRs #28-#47 \u2014 all eleven that touched src/ or docker/ are now recorded (#28,29,30,32,34,35,36,37,40,42,43) plus Phase F (#46) and Phase G (#47)",
+    "deliberately_not_written": "#31, #33, #38, #39, #41, #44, #45 \u2014 ISA grading and planning only, no production code changed",
+    "correction": "the earlier note said seven behaviour-changing PRs; the actual count measured from gh pr view --json files is eleven",
+    "status": "clear"
   }
 }
