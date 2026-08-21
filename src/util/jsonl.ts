@@ -214,6 +214,35 @@ async function headHash(path: string, n: number): Promise<string | null> {
   }
 }
 
+/**
+ * Which signal proved the file is no longer the one this offset refers to.
+ *
+ * All three are reported when all three fire, in this fixed order, because
+ * they are not alternative spellings of one event: `shrank` alone is an
+ * in-place empty, `replaced` alone is an unlink-and-recreate, and
+ * `head_rewritten` alone is an in-place rewrite that preserved the length. A
+ * collector recording "a truncation happened" wants to know WHICH, and
+ * collapsing them to a single winner throws that away at the only moment it
+ * can be observed.
+ */
+export type TailRestartReason = "shrank" | "replaced" | "head_rewritten";
+
+/** One observed restart. See `TailReader.lastRestart`. */
+export interface TailRestart {
+  /** Every signal that fired, in the fixed order of `TailRestartReason`. */
+  reasons: readonly TailRestartReason[];
+  /**
+   * The offset already consumed when the restart was detected — the
+   * high-water mark, i.e. how much of the old file had been read.
+   *
+   * NOT "bytes lost"; see `TailReader.lastRestart` for why no such number can
+   * exist on this side.
+   */
+  abandonedOffset: number;
+  /** The file's size at detection — what is about to be re-read from 0. */
+  sizeAtDetection: number;
+}
+
 export class TailReader {
   #offset = 0;
   /** `dev:ino:birthtime` of the file this reader's offset refers to. */
@@ -222,11 +251,51 @@ export class TailReader {
   #headLen = 0;
   #headHash: string | null = null;
   #splitter = new LineSplitter();
+  #restarts = 0;
+  #lastRestart: TailRestart | null = null;
 
   constructor(readonly path: string) {}
 
   get offset(): number {
     return this.#offset;
+  }
+
+  /**
+   * How many restarts this reader has observed. MONOTONIC — never reset.
+   *
+   * Restarting is RECOVERY, and it has always worked. REPORTING it is a
+   * separate obligation and did not exist (ISC-172). The distinction only
+   * matters to a caller for whom the restart is itself the event: an audit
+   * collector's entire claim is that a truncation leaves a mark, and a reader
+   * that silently resumes leaves it nothing to mark — the copy just grows, and
+   * the one event the criterion exists to expose becomes indistinguishable
+   * from a quiet period. Every other consumer of this class
+   * (`cli/commands/logs.ts`, `harvest/transcript.ts`) is following a transcript
+   * across a routine rotation and correctly ignores all of this.
+   *
+   * A COUNTER rather than a flag, so a second truncation cannot hide the
+   * first: a caller polling less often than the writer truncates would read
+   * one boolean and record one event for any number of them. At most one
+   * restart is detected per `poll()` — the check runs once, at the top — so a
+   * caller comparing this value across a poll learns exactly whether THAT poll
+   * restarted, and `lastRestart` then describes that restart and no other.
+   */
+  get restarts(): number {
+    return this.#restarts;
+  }
+
+  /**
+   * The most recent restart, or `null` if there has been none.
+   *
+   * There is deliberately no "bytes lost" field. A tailer's knowledge ends at
+   * its own offset: rows the writer appended AND destroyed between two polls
+   * were never read by anything on this side, so their count is not merely
+   * unrecorded, it is unknowable from here. Reporting `abandonedOffset` — what
+   * WAS collected — and `sizeAtDetection` — what remains — states the bound
+   * honestly rather than inventing a number that would read as a measurement.
+   */
+  get lastRestart(): TailRestart | null {
+    return this.#lastRestart;
   }
 
   /** Read everything appended since the last poll. */
@@ -267,9 +336,32 @@ export class TailReader {
     const anchored = this.#headLen > 0 && this.#headHash !== null;
     const head = anchored ? await headHash(this.path, this.#headLen) : null;
     const headChanged = anchored && head !== null && head !== this.#headHash;
-    const replaced =
-      this.#identity !== null && (identity !== this.#identity || size < this.#offset || headChanged);
-    if (replaced) {
+    /*
+     * Every signal that fired, not the first one that did.
+     *
+     * This was a single `replaced` boolean, which is all the RECOVERY needs —
+     * the three responses are identical. It is not all the REPORTING needs
+     * (ISC-172): an audit collector records which of the three happened, and
+     * an OR collapses "the worker emptied its ledger in place" and "the ledger
+     * was rotated" into one indistinguishable fact at the only moment the
+     * difference is observable. Order is fixed so the list is deterministic.
+     *
+     * `this.#identity === null` is the first poll of a file this reader has
+     * never seen. There is no previous identity for anything to differ from,
+     * so it is not a restart — counting it would have every collector report a
+     * truncation on the first row it ever collected.
+     */
+    const reasons: TailRestartReason[] = [];
+    if (this.#identity !== null) {
+      if (size < this.#offset) reasons.push("shrank");
+      if (identity !== this.#identity) reasons.push("replaced");
+      if (headChanged) reasons.push("head_rewritten");
+    }
+    if (reasons.length > 0) {
+      // Recorded BEFORE the reset, because the reset is what destroys the
+      // evidence: `#offset` is the high-water mark and is about to become 0.
+      this.#restarts += 1;
+      this.#lastRestart = { reasons, abandonedOffset: this.#offset, sizeAtDetection: size };
       this.#offset = 0;
       this.#headLen = 0;
       this.#headHash = null;
