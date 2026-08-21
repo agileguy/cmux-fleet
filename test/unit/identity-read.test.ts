@@ -17,17 +17,29 @@
  * ## What makes the cases below reachable
  *
  * `processStartTime` hard-codes its argv, so a test cannot hand it an illegal
- * flag. It CAN hand it a pid, and a pid above the kernel's ceiling produces the
- * exact shape the fix turns on — exit 1, empty stdout, and a diagnostic on
- * stderr. Measured on this machine (Darwin 25.5, base-system `ps`, `-o
- * lstart=`, two consecutive runs, both identical):
+ * flag — but it resolves `ps` through PATH, so a test CAN hand it a different
+ * `ps`. The unreadable case below is produced by a shim, and that is a
+ * correction rather than a convenience.
+ *
+ * THE FIRST VERSION OF THIS SUITE USED A PID ABOVE THE KERNEL CEILING and was
+ * measured only on Darwin, where it produces exactly the shape the fix turns
+ * on:
  *
  *   a live pid                         exit 0  stdout "Fri Aug 21 04:14:42 2026"  stderr ""
  *   a pid that exited and was reaped   exit 1  stdout ""                          stderr ""
  *   pid 999999999, above the ceiling   exit 1  stdout ""                          stderr "ps: process id too large: 999999999"
  *
- * The first two rows are the reason exit status alone cannot decide this, and
- * the third is the row the old code answered with `null`.
+ * On `ubuntu-latest` the third row does not hold: procps answers an
+ * out-of-range pid the same way it answers an absent one — exit 1, silence on
+ * both channels — which is a legitimate reading, not a refusal. Four tests
+ * passed on the author's machine and failed in CI, which is the exact
+ * local-only-evidence trap this project grades `[~]` for.
+ *
+ * The shim removes the dependency on either kernel's opinion and tests the
+ * DISCRIMINATOR ITSELF: a `ps` that exits non-zero with something on stderr is
+ * a failed read on every platform, and that — not the pid ceiling — is what
+ * the production rule keys off. The first two rows above still come from the
+ * real `ps` and still carry their point: exit status alone cannot decide this.
  *
  * ## Budget
  *
@@ -42,7 +54,10 @@
  * inline.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
 import {
   IDENTITY_FORMAT,
@@ -53,11 +68,52 @@ import {
 } from "../../src/run/registry.ts";
 
 /**
- * Above the kernel's pid ceiling, so `ps` refuses with a diagnostic rather than
- * reporting an absence. NOT merely "a pid that is probably unused" — that would
- * be the affirmatively-gone case and would prove the opposite of what is wanted.
+ * A pid the shimmed `ps` refuses to read. The NUMBER is irrelevant — the shim
+ * refuses whatever it is handed — and that is the point: the refusal is a
+ * property of the reading, not of the pid, so nothing here depends on a
+ * kernel's out-of-range behaviour.
  */
-const PID_ABOVE_CEILING = 999_999_999;
+const UNREADABLE_PID = 424_242;
+
+/** The stderr line the shim emits, asserted on so the diagnostic is carried. */
+const SHIM_DIAGNOSTIC = "ps: cannot read process table (test shim)";
+
+/**
+ * Run `fn` with a `ps` on PATH that FAILS THE WAY A BROKEN ps FAILS: exit 1,
+ * nothing on stdout, a diagnostic on stderr.
+ *
+ * PATH is restored in a `finally`, and the shim directory is created once per
+ * call under the OS temp dir. `processStartTime` builds its env from
+ * `process.env`, so mutating PATH here is what the child sees. Tests in one
+ * bun file run sequentially, so the mutation cannot leak into a sibling.
+ */
+let shimDir: string | null = null;
+
+beforeAll(async () => {
+  // Built ONCE for the file rather than per call. Four mkdtemp+write cycles
+  // cost ~1.4 s against ~40 ms for the whole suite otherwise, and a suite that
+  // spends its budget on its own fixtures is the shape `budget.ts` exists to
+  // argue against.
+  shimDir = await mkdtemp(join(tmpdir(), "pifleet-ps-shim-"));
+  await writeFile(join(shimDir, "ps"), `#!/bin/sh\necho "${SHIM_DIAGNOSTIC}" >&2\nexit 1\n`, {
+    encoding: "utf8",
+    mode: 0o755,
+  });
+});
+
+afterAll(async () => {
+  if (shimDir !== null) await rm(shimDir, { recursive: true, force: true });
+});
+
+async function withBrokenPs<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.PATH;
+  process.env.PATH = `${shimDir!}:${saved ?? ""}`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
 
 /** A pid that has exited AND been reaped — the affirmatively-gone case. */
 async function reapedPid(): Promise<number> {
@@ -87,21 +143,23 @@ describe("processStartTime distinguishes gone from unreadable", () => {
 
   test("a pid `ps` REFUSES to read throws instead of reporting absence", async () => {
     let caught: unknown;
-    try {
-      await processStartTime(PID_ABOVE_CEILING);
-    } catch (err) {
-      caught = err;
-    }
+    await withBrokenPs(async () => {
+      try {
+        await processStartTime(UNREADABLE_PID);
+      } catch (err) {
+        caught = err;
+      }
+    });
 
     // The assertion the whole criterion rests on. Before the fix this call
     // returned `null`, which `down` reads as "nothing holds this pid".
     expect(caught).toBeInstanceOf(IdentityReadError);
-    expect((caught as IdentityReadError).pid).toBe(PID_ABOVE_CEILING);
+    expect((caught as IdentityReadError).pid).toBe(UNREADABLE_PID);
 
     const msg = (caught as Error).message;
     // `ps`'s own words are carried, not swallowed: "could not be read" with no
     // reason sends an operator to inspect a process that is fine.
-    expect(msg).toContain("process id too large");
+    expect(msg).toContain(SHIM_DIAGNOSTIC);
     // And the message must say what this is NOT, because the failure mode is a
     // reader concluding "gone" from a refusal.
     expect(msg).toContain("NOT the process being gone");
@@ -111,7 +169,9 @@ describe("processStartTime distinguishes gone from unreadable", () => {
     // Unlike `GroupReadError`, this one has callers that do not catch it, so it
     // reaches the CLI. Without an `exitCode` the entry point reports
     // `EXIT.INTERNAL` — "a bug in pifleet itself" — for a broken `ps`.
-    const err = await processStartTime(PID_ABOVE_CEILING).catch((e: unknown) => e);
+    const err = await withBrokenPs(() =>
+      processStartTime(UNREADABLE_PID).catch((e: unknown) => e),
+    );
     expect((err as { exitCode?: number }).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
     expect((err as { exitCode?: number }).exitCode).not.toBe(EXIT.INTERNAL);
   });
@@ -119,8 +179,12 @@ describe("processStartTime distinguishes gone from unreadable", () => {
   test("the two failing reads are told apart, not merged", async () => {
     // Both are exit 1 with empty stdout. If a future edit reaches for the exit
     // code as the discriminator, one of these two flips and this fails.
+    // `gone` uses the REAL `ps` — the whole comparison is worthless if both
+    // sides come from the shim.
     const gone = await processStartTime(await reapedPid());
-    const unreadable = await processStartTime(PID_ABOVE_CEILING).catch((e: unknown) => e);
+    const unreadable = await withBrokenPs(() =>
+      processStartTime(UNREADABLE_PID).catch((e: unknown) => e),
+    );
     expect(gone).toBeNull();
     expect(unreadable).toBeInstanceOf(IdentityReadError);
   });
@@ -142,8 +206,8 @@ describe("identityAlive propagates the refusal", () => {
     // `false` here would mean "the supervisor we recorded is not there", which
     // is what `status` prints and what `up`'s post-launch check acts on. It has
     // not been established, so it must not be asserted.
-    const err = await identityAlive({ pid: PID_ABOVE_CEILING, started: "utc1 whenever" }).catch(
-      (e: unknown) => e,
+    const err = await withBrokenPs(() =>
+      identityAlive({ pid: UNREADABLE_PID, started: "utc1 whenever" }).catch((e: unknown) => e),
     );
     expect(err).toBeInstanceOf(IdentityReadError);
   });
