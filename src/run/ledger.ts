@@ -56,6 +56,29 @@ export class LedgerWriter {
  * Merge every shard, sorted by (ts, actor, seq). Unparseable lines are
  * returned in `errors` rather than thrown: at report time a corrupt shard is
  * a finding to surface, not a reason to lose the other writers' history.
+ *
+ * THE TOLERANCE IS PER-RECORD, and the placement of the `try` below is the
+ * whole of it. A bad line costs exactly that line: the rest of its shard still
+ * merges, and so does every other shard. Hoist that `try` out one level and a
+ * single bad record silently truncates its writer's history from that point on;
+ * hoist it out two and the first bad record in the run discards every shard
+ * sorted after it. Neither regression throws, neither shows up in `errors`
+ * differently, and neither is visible to a test that puts its malformed record
+ * LAST — there is no tail left to lose. `test/unit/ledger-merge.test.ts` places
+ * one first, last, and mid-shard for exactly that reason, and mutation-proves
+ * all three.
+ *
+ * WHAT THIS IS NOT, recorded here because ISC-157 asks for something adjacent
+ * and a reader will otherwise assume this answers it. This is SHAPE-tolerance,
+ * not a version policy. `LedgerRecordSchema` (`../contracts.ts`) carries no
+ * `schema` discriminator — only `seq`, `ts`, `actor`, `run_id`, `event` and
+ * three optionals — so nothing stamps a version on a ledger record and no
+ * record can be from an older one. Stamping one was CONSIDERED AND NOT CHOSEN.
+ * The consequence is precise and worth stating: a record that fails today's
+ * schema is DISCARDED rather than read, and this merge cannot tell "written by
+ * an older writer" from "corrupt shard" — both arrive as a shape that fails,
+ * both are dropped, both are reported in the same words. That distinction is
+ * exactly what a version stamp would buy, and it has not been bought.
  */
 export async function mergeLedger(
   run: RunPaths,
