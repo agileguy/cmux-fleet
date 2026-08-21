@@ -4,6 +4,10 @@ import { EXIT } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot } from "../../run/paths.ts";
 import { startRegistryDaemon } from "../../run/registry.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
+// TYPE-ONLY for the same reason `registry.ts` imports it that way: `kill.ts`
+// reaches back into `run/registry.ts`, so a value import would close the
+// documented module cycle from another direction. `import type` is erased.
+import type { KillOutcome } from "../../safety/kill.ts";
 import { readRunHeartbeatIntervalMs } from "../../run/state.ts";
 
 /**
@@ -14,6 +18,48 @@ import { readRunHeartbeatIntervalMs } from "../../run/state.ts";
  * so one crash cannot take the fleet. It is the SINGLE writer of
  * `registry.json`; every mutation arrives as a socket RPC.
  */
+
+/**
+ * What to CALL a reap attempt in the permanent record.
+ *
+ * `worker_reaped` is a claim that something was cleaned up, and for two
+ * outcomes it is false: `group_unconfirmed` (the supervisor is alive and was
+ * deliberately not signalled) and `unconfirmed` (it outlived the whole climb).
+ * The reaper now spares both — container, registry entry and staleness clock
+ * all survive — so writing `worker_reaped` would record the opposite of what
+ * happened, on the row an operator reads when a worker will not die.
+ *
+ * It would also be UNBOUNDED. Sparing a refused worker is what lets the next
+ * scan try again, so a supervisor that keeps refusing produces a report every
+ * interval for as long as it lives. That repetition is deliberate — a live
+ * supervisor nothing in this run can prove it owns is an incident, and the
+ * ledger is where an incident belongs — but it must not accumulate under a
+ * name that says the problem was solved each time.
+ *
+ * A THIRD exhaustive switch, and the third is not redundant with
+ * `reaper.ts`'s `supervisorStopped` or `registry.ts`'s `deregisterOnReap`.
+ * Those two answer "may this be destroyed" and "may this name be forgotten";
+ * this one answers "what is the true name of what just happened". The three
+ * agree today. A seventh `KillOutcome` has to be answered for all three by
+ * someone looking at all three, which the `never` default is what forces.
+ */
+function reapEventName(outcome: KillOutcome): string {
+  switch (outcome) {
+    case "aborted":
+    case "terminated":
+    case "killed":
+    case "already_gone":
+      return "worker_reaped";
+    case "unconfirmed":
+    case "group_unconfirmed":
+      return "worker_reap_refused";
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`unhandled KillOutcome: ${String(unhandled)}`);
+    }
+  }
+}
+
 export function register(program: Command): void {
   program
     .command("daemon")
@@ -52,7 +98,7 @@ export function register(program: Command): void {
             // but a swallowed rejection here would be an invisible reap.
             for (const r of reports) {
               void ledger
-                .append("worker_reaped", {
+                .append(reapEventName(r.supervisor), {
                   worker: r.worker,
                   detail: { supervisor: r.supervisor, container: r.container },
                 })

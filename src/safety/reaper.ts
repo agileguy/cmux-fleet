@@ -27,6 +27,29 @@
  * Idempotent by construction: reaping something already gone is `already_gone`
  * and a no-op — the daemon's scan loop will routinely race supervisors' own
  * clean exits, and losing that race must not be an error (ISC-118).
+ *
+ * A REAP THAT STOPPED NOTHING REMOVES NOTHING, and that rule is newer than the
+ * rest of this file. The ladder has two outcomes that mean the supervisor is
+ * STILL RUNNING: `group_unconfirmed` (it is alive and was deliberately not
+ * signalled, because the group it recorded could not be shown to be its own —
+ * ISC-272) and `unconfirmed` (it outlived the whole climb). Neither is a stop,
+ * so neither may be followed by `docker rm -f`. `down` already stated the rule
+ * for its own refusals — "killing its container out from under it would be
+ * doing by the back door exactly what the refusal declined to do at the front"
+ * — and `contracts.ts` states it as universal; it was true in `down` and false
+ * here. The measured consequence: a supervisor that is not its own group leader
+ * goes stale while alive, `confirmGroup` returns `not_led`, NOTHING is
+ * signalled, and the reaper then removed its live container mid-write, the
+ * daemon deleted its registry entry and `monitor.forget` dropped its staleness
+ * clock. It survived as an orphan holding a worktree no process on the host
+ * still named, and the ledger recorded it as reaped.
+ *
+ * So an un-stopped supervisor keeps its container, keeps its registry entry
+ * (see `registry.ts`'s `deregisterOnReap`) and keeps its clock, which is what
+ * makes the NEXT scan try again instead of losing sight of it forever.
+ * `already_gone` is deliberately on the other side of that line: it means the
+ * recorded identity is not there, so the container it left behind is exactly
+ * F25's orphan and removing it is the whole point.
  */
 
 import type { WorkerState } from "../contracts.ts";
@@ -125,7 +148,49 @@ export const realReaperOps: ReaperOps = {
 export interface ReapReport {
   worker: string;
   supervisor: KillOutcome;
-  container: "removed" | "absent" | "failed" | "none";
+  /**
+   * What became of the worker's container.
+   *
+   * `none` and `spared` are different facts and must not be collapsed: `none`
+   * means the worker had no container to remove, `spared` means it had one and
+   * the reaper deliberately left it running because the supervisor was not
+   * stopped. Reporting the second as the first would describe the exact case
+   * this module now refuses as if no container had ever existed.
+   */
+  container: "removed" | "absent" | "failed" | "none" | "spared";
+}
+
+/**
+ * Whether a ladder outcome means the supervisor is no longer running.
+ *
+ * EXHAUSTIVE ON PURPOSE, with a `never`-typed default. The defect this replaces
+ * was not a wrong branch, it was an ABSENT one: `group_unconfirmed` was added
+ * to `KillOutcome` and every consumer that merely STORES the value kept
+ * compiling, so the reaper went on removing containers on an outcome that means
+ * "still alive, deliberately not signalled". A union member is invisible to
+ * `tsc` for a consumer that does not switch on it. Switching on it here means a
+ * seventh member breaks the build at the decision point instead of falling into
+ * the destructive branch in silence.
+ *
+ * `already_gone` is TRUE. It is not a stop the reaper performed, but it is the
+ * fact the caller needs: nothing holds the recorded identity, so whatever the
+ * supervisor left behind is an orphan and cleaning it up is safe.
+ */
+function supervisorStopped(outcome: KillOutcome): boolean {
+  switch (outcome) {
+    case "aborted":
+    case "terminated":
+    case "killed":
+    case "already_gone":
+      return true;
+    case "unconfirmed":
+    case "group_unconfirmed":
+      return false;
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`unhandled KillOutcome: ${String(unhandled)}`);
+    }
+  }
 }
 
 export interface ReapOptions {
@@ -138,12 +203,22 @@ export interface ReapOptions {
 }
 
 /**
- * SIGTERM the group ⇒ grace ⇒ SIGKILL ⇒ remove the container.
+ * SIGTERM the group ⇒ grace ⇒ SIGKILL ⇒ remove the container, IF the ladder
+ * stopped the supervisor.
  *
  * The container is removed even when the supervisor was `already_gone`: F25's
  * orphan is exactly a dead supervisor with a live container still burning
  * tokens, and skipping removal because the easier half of the cleanup was
  * done for us would leave the expensive half running.
+ *
+ * It is NOT removed when the ladder refused or failed to stop anything —
+ * `group_unconfirmed` and `unconfirmed`. Both mean the supervisor is still
+ * running, and it is running WITH that container: it holds the worktree, it is
+ * mid-write, and `docker rm -f` would take it away from a live process. The
+ * refusal declined to signal that supervisor precisely because it could not be
+ * shown to be ours; destroying its container instead would be the same act
+ * committed by another route. The gate is `supervisorStopped`, so a seventh
+ * `KillOutcome` cannot land on the destructive side by omission.
  */
 export async function reapSupervisor(
   target: ReapTarget,
@@ -165,7 +240,9 @@ export async function reapSupervisor(
 
   let container: ReapReport["container"] = "none";
   if (target.container !== null) {
-    container = await ops.removeContainer(target.container);
+    container = supervisorStopped(supervisor)
+      ? await ops.removeContainer(target.container)
+      : "spared";
   }
   return { worker: target.worker, supervisor, container };
 }
@@ -185,11 +262,22 @@ export interface ReapCycleOpts extends ReapOptions {
 /**
  * Observe every registered worker's heartbeat and reap the stale ones.
  *
- * Returns only the reaps performed; observation is the side effect that arms
- * the next cycle. Deregistration is deliberately NOT done here — the registry
- * has a single writer and mutations go through its RPC verbs, so the daemon
- * loop deregisters from the reports this returns rather than this module
- * growing a second write path to registry.json.
+ * Returns every reap ATTEMPTED, including the ones that refused to stop
+ * anything; observation is the side effect that arms the next cycle.
+ * Deregistration is deliberately NOT done here — the registry has a single
+ * writer and mutations go through its RPC verbs, so the daemon loop
+ * deregisters from the reports this returns rather than this module growing a
+ * second write path to registry.json. It deregisters a SUBSET of them, for the
+ * reason `registry.ts`'s `deregisterOnReap` gives.
+ *
+ * THE CLOCK IS FORGOTTEN ONLY FOR A SUPERVISOR THAT IS ACTUALLY GONE.
+ * `monitor.forget` exists so a reaped worker's stopwatch cannot leak, and for a
+ * worker that really stopped there is nothing left to watch. A worker the
+ * ladder REFUSED to stop is the opposite case: it is alive, it is still
+ * registered, and dropping its stopwatch would reset its staleness to zero on
+ * the next scan — so it would have to go stale all over again before anything
+ * looked at it, every cycle, forever. Keeping the clock is what makes the
+ * refusal a retry rather than an amnesia.
  */
 export async function reapStale(opts: ReapCycleOpts): Promise<ReapReport[]> {
   const reports: ReapReport[] = [];
@@ -207,7 +295,7 @@ export async function reapStale(opts: ReapCycleOpts): Promise<ReapReport[]> {
       },
       opts,
     );
-    opts.monitor.forget(name);
+    if (supervisorStopped(report.supervisor)) opts.monitor.forget(name);
     reports.push(report);
   }
   return reports;

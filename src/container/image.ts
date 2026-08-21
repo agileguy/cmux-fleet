@@ -7,29 +7,42 @@
  * Dockerfile plus everything it `COPY`s) — so two configs that build the same
  * bytes share a tag and any edit that matters forces a new one.
  *
- * WHAT `up` DOES WITH ANY OF THIS TODAY: NOTHING. This docstring used to state
- * that "`up` refuses to run against an image that is absent or fails `verify`"
- * — which is ISC-189's sentence verbatim, and it was never true. `up.ts` does
- * not contain the string "image" at all; `verifyImage` has exactly one caller
- * in the tree (`cli/commands/image.ts`, the `image verify` subcommand); and
- * NONE of the three `docker image inspect` calls in `src/` is on `up`'s path —
- * `doctor.ts`'s `imageStatus` REPORTS, for `doctor` alone, and the other two
- * are the ones below in this module, reached only from the operator-driven
- * `image` subcommands (`listImages` from `image list` and, via `gcImages`,
- * `image gc`; `verifyImage` from `image verify`). `config/render.ts` calls
- * `imageTag` solely to place the tag in the `docker run` argv — and `imageTag`
- * only hashes, it never shells out.
+ * WHAT `up` DOES WITH THIS, stated as narrowly as the code supports. `up` now
+ * calls `assertImagesReady` (bottom of this file) immediately after
+ * `assertModelsAllowed`, before the first clone and before any supervisor
+ * exists, on the CONTAINER path only. That gate does two things per distinct
+ * tag: `imagePresent` (one `docker image inspect`) and then `verifyImage`. A
+ * failure of either is a refusal naming the ROLE.
  *
- * So an absent image is discovered by the DAEMON, after `up` has already
- * created the run directory, cloned a checkout per worker, registered a remote
- * per worker in the operator's repository, materialized every input and
- * launched every supervisor — surfacing as `worker <id> died during startup`
- * (EXIT.WORKER_DIED) from the idle gate at the end of `up`, not as a refusal.
- * A stale-but-present image is not detected at all.
+ * BE PRECISE ABOUT THE EVIDENCE BEHIND THAT SENTENCE, because this module's
+ * header is where an overclaim has twice been mistaken for a control. The
+ * ABSENT half is exercised end-to-end by the real CLI in
+ * `test/integration/up-wiring.test.ts` against a `docker` PATH shim, in the
+ * fast `test` CI job. The FAILS-VERIFY half is exercised by the same file
+ * through the same shim — which proves the WIRING (that `up` calls verify, on
+ * the tag it is about to launch, at the right point, and refuses with the right
+ * exit code) and NOT that a real stale image is caught by a real daemon. No CI
+ * job runs that: the `container` job's file list in `.github/workflows/ci.yml`
+ * does not include `up-wiring.test.ts`. ISC-189 is graded `[~]` for exactly
+ * that residual, and ISC-32 — the absent half alone — is the one with a
+ * daemon-free reproducible reader.
  *
- * SRD §5.7 asks for the refusal; ISC-32 and ISC-189 track it and are graded
- * open in ISA.md with this stated. A comment is not a control — do not let this
- * one read as coverage again.
+ * The gate is SKIPPED when `PIFLEET_PI_COMMAND` is set, and that is not a hole:
+ * that variable is the documented statement "run the Pi double instead of
+ * containers", `up` starts no container at all on that path, and there is
+ * therefore no image for a gate to be about. See `up.ts` at the call site.
+ *
+ * WHAT IT WAS BEFORE, kept because the shape of the mistake is the point: this
+ * docstring used to state ISC-189's sentence verbatim as a fact while `up.ts`
+ * did not contain the string "image" at all, `verifyImage` had exactly one
+ * caller in the tree (`cli/commands/image.ts`), and NONE of the three `docker
+ * image inspect` calls in `src/` was on `up`'s path. An absent image was
+ * discovered by the DAEMON, after `up` had created the run directory, cloned a
+ * checkout per worker, registered a remote per worker in the operator's
+ * repository, materialized every input and launched every supervisor —
+ * surfacing as `worker <id> died during startup` (EXIT.WORKER_DIED) from the
+ * idle gate at the END of `up`, not as a refusal. A comment is not a control.
+ * If the gate below is ever deleted, delete these paragraphs with it.
  */
 
 import { createHash } from "node:crypto";
@@ -139,11 +152,14 @@ export interface ImageInputs {
    * entrypoint and the verbgate COPYs all live in the Dockerfile, and while
    * they were outside the hash an edit to any of them left the tag unchanged —
    * so a run found the stale image present under the expected tag and used it
-   * with nothing reporting the reuse. (This clause used to say "so `up`, which
-   * only refuses an image that is ABSENT, found the stale one" — `up` refuses
-   * neither case; see the module header. The hash is what makes the tag move,
-   * and today it is the ONLY thing standing between an edited build context and
-   * a silently-reused image.)
+   * with nothing reporting the reuse. (This clause once said "so `up`, which
+   * only refuses an image that is ABSENT, found the stale one", at a time when
+   * `up` refused NEITHER case. It now refuses both, through
+   * `assertImagesReady`. The hash is still the mechanism that makes a changed
+   * build context produce a DIFFERENT tag; the gate is what refuses a tag whose
+   * bytes are wrong anyway. They are two controls, not one — ISC-270 tracks the
+   * hash's own fail-open, where a new `COPY` source is added to the Dockerfile
+   * without being added to `BUILD_CONTEXT_ASSETS`.)
    *
    * Hashing the Dockerfile alone closed only part of that. The Dockerfile
    * `COPY`s two files it does not contain: `docker/verbgate`, which IS the
@@ -397,4 +413,213 @@ export async function gcImages(
     if (r.code === 0) removed.push(img.tag);
   }
   return { kept, removed };
+}
+
+// ---------------------------------------------------------------------------
+// The launch gate (ISC-32, ISC-189)
+// ---------------------------------------------------------------------------
+
+/**
+ * Is this exact tag in the local daemon's image store?
+ *
+ * `--format {{.Id}}` rather than a bare inspect so a present image produces a
+ * short, loggable datum instead of a JSON document, and so "exit 0 with empty
+ * stdout" cannot pass for a real answer.
+ *
+ * Deliberately does NOT distinguish "image absent" from "daemon unreachable"
+ * or "docker not installed" in its RETURN — all three mean the same thing to
+ * the caller (this run cannot have that container) and all three are the same
+ * exit code. The distinction survives in `detail`, which the refusal quotes, so
+ * an operator reading the message can still tell a missing build from a stopped
+ * Docker Desktop.
+ */
+export async function imagePresent(
+  tag: string,
+  exec: Exec = realExec,
+): Promise<{ present: boolean; detail: string }> {
+  const r = await exec(["docker", "image", "inspect", tag, "--format", "{{.Id}}"], {
+    timeoutMs: 30_000,
+  });
+  const id = r.stdout.trim();
+  if (r.code === 0 && id.length > 0) return { present: true, detail: id };
+  const said = r.stderr.trim() || r.stdout.trim();
+  return {
+    present: false,
+    detail: r.timedOut
+      ? "docker image inspect timed out after 30s"
+      : said.length > 0
+        ? said
+        : `docker image inspect exited ${String(r.code)} with no output`,
+  };
+}
+
+/** One worker's demand on the image store, as the renderer computed it. */
+export interface ImageRequirement {
+  workerId: string;
+  role: string;
+  toolchain: Toolchain;
+  /** The tag `renderWorker` put in this worker's `docker run` argv. */
+  image: string;
+}
+
+/** The distinct tags a launch set needs, and who needs each. */
+export interface RequiredImage {
+  tag: string;
+  toolchain: Toolchain;
+  /** Every role landing on this tag, first-seen order. Named in the refusal. */
+  roles: string[];
+  /** Every worker landing on this tag, first-seen order. */
+  workers: string[];
+}
+
+/**
+ * Collapse per-worker demands onto the distinct tags behind them.
+ *
+ * Sixteen workers on one role are one image, and checking it sixteen times
+ * would cost sixteen `docker image inspect` calls and — far worse — sixteen
+ * full `verifyImage` runs, each of which starts several containers. The
+ * criterion is about the image, not about the worker count.
+ *
+ * The requirement carries `image` rather than recomputing `imageTag` from the
+ * config, and that is the whole design. A gate that checks a tag the launch
+ * does not use is worse than no gate: it certifies the wrong bytes. The value
+ * here comes from `renderWorker`, which is the same function that writes the
+ * tag into the `docker run` argv, so the two cannot drift.
+ */
+export function requiredImages(entries: readonly ImageRequirement[]): RequiredImage[] {
+  const byTag = new Map<string, RequiredImage>();
+  for (const e of entries) {
+    let rec = byTag.get(e.image);
+    if (rec === undefined) {
+      rec = { tag: e.image, toolchain: e.toolchain, roles: [], workers: [] };
+      byTag.set(e.image, rec);
+    }
+    if (!rec.roles.includes(e.role)) rec.roles.push(e.role);
+    if (!rec.workers.includes(e.workerId)) rec.workers.push(e.workerId);
+  }
+  return [...byTag.values()];
+}
+
+/**
+ * A launch refused because a role's image is absent, or present and wrong.
+ *
+ * `EXIT.BACKEND_UNAVAILABLE`, matching the egress-network and hazard-scan
+ * refusals in `up` and matching `image verify`'s own failure code — nothing is
+ * wrong with the command line, the HOST is not in a state this run can use.
+ * `EXIT.USAGE` would tell a machine caller to rewrite its arguments, which is
+ * the misclassification `EXIT.INTERNAL` was added to stop (ISC-216), aimed the
+ * other way.
+ *
+ * `readonly exitCode` is all the structural `ExitCoded` protocol wants, so this
+ * needs no CLI import — same shape as `BuildContextError` above.
+ */
+export class ImageGateError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+
+  constructor(
+    message: string,
+    readonly tag: string,
+    readonly roles: readonly string[],
+    readonly reason: "absent" | "unverified",
+  ) {
+    super(message);
+    this.name = "ImageGateError";
+  }
+}
+
+export interface ImageGateOptions {
+  exec?: Exec;
+  /** Injectable so a test can hold presence fixed and move only the verdict. */
+  verify?: (tag: string, expectedPiVersion: string, exec: Exec) => Promise<VerifyResult>;
+  /** Called once per tag that PASSED, for the ledger / stderr. */
+  onReady?: (image: RequiredImage & { id: string }) => void | Promise<void>;
+}
+
+/**
+ * Refuse the launch unless every required image is present AND verifies
+ * (ISC-32, ISC-189).
+ *
+ * ## Why both halves are one function
+ *
+ * They are one sentence in the SRD and they fail for one reason — the operator
+ * is about to run agents against bytes that are not what the config describes.
+ * Splitting them would let a caller wire the cheap half and skip the expensive
+ * one, which is precisely the state ISC-189 was filed over: the presence
+ * primitive existed (in `doctor.ts`) and the verify primitive existed (here),
+ * and neither was on the launch path.
+ *
+ * ## Why presence is checked first and separately
+ *
+ * `verifyImage` on an absent tag does not report an absent tag. It reports six
+ * failed checks whose details are Docker's "Unable to find image" repeated six
+ * times, and its read-only-root check documents in as many words that a
+ * nonexistent image exits 125 and reads as "root is read-only". The cheap
+ * inspect is what turns that into one accurate sentence, and it costs one
+ * subprocess.
+ *
+ * ## The cost, stated rather than hidden
+ *
+ * `verifyImage` starts several containers per tag. This runs once per DISTINCT
+ * tag, so a sixteen-worker single-role fleet pays it once — but a four-toolchain
+ * fleet pays it four times, and on a cold daemon that is not free. It is paid
+ * before the first clone, which is the only placement where paying it is cheap
+ * relative to being wrong: after the clones, a refusal has state on disk to
+ * reap; after the supervisors, it is not a refusal at all.
+ *
+ * There is deliberately NO flag to skip it. A control with an opt-out is a
+ * control that is off in the shell profile of the one operator who most needed
+ * it.
+ *
+ * ## Sequential, not `Promise.all`
+ *
+ * The first failure must be the one reported. Running the tags concurrently
+ * would make WHICH role gets named a race, and this refusal's entire job is to
+ * name a role.
+ */
+export async function assertImagesReady(
+  required: readonly RequiredImage[],
+  expectedPiVersion: string,
+  opts: ImageGateOptions = {},
+): Promise<void> {
+  const exec = opts.exec ?? realExec;
+  const verify = opts.verify ?? verifyImage;
+
+  for (const req of required) {
+    const roles = req.roles.map((r) => `'${r}'`).join(", ");
+    const who =
+      `role${req.roles.length > 1 ? "s" : ""} ${roles} ` +
+      `(worker${req.workers.length > 1 ? "s" : ""} ${req.workers.join(", ")})`;
+    const rebuild = `pifleet image build --toolchain ${req.toolchain}`;
+
+    const presence = await imagePresent(req.tag, exec);
+    if (!presence.present) {
+      throw new ImageGateError(
+        `refusing to start: ${who} needs image ${req.tag}, which is NOT present on this host ` +
+          `— ${presence.detail}. Nothing has been cloned and no supervisor has been launched. ` +
+          `Build it with: ${rebuild}`,
+        req.tag,
+        req.roles,
+        "absent",
+      );
+    }
+
+    const result = await verify(req.tag, expectedPiVersion, exec);
+    if (!result.ok) {
+      const failed = result.checks
+        .filter((c) => !c.ok)
+        .map((c) => `${c.name} (${c.detail})`)
+        .join("; ");
+      throw new ImageGateError(
+        `refusing to start: ${who} needs image ${req.tag}, which IS present but FAILS ` +
+          `verification — ${failed}. A tag that exists is not the same as an image that is ` +
+          `what the config describes. Nothing has been cloned and no supervisor has been ` +
+          `launched. Rebuild it with: ${rebuild}`,
+        req.tag,
+        req.roles,
+        "unverified",
+      );
+    }
+
+    await opts.onReady?.({ ...req, id: presence.detail });
+  }
 }

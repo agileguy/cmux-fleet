@@ -160,7 +160,31 @@ async function main(): Promise<void> {
   const controlAuth = await ensureControlAuth(run);
 
   const ledger = new LedgerWriter(run, argv.workerId);
-  const pgid = (await pgidOf(process.pid)) ?? process.pid;
+  /**
+   * The launch-time process group, RECORDED and never guessed (ISC-272).
+   *
+   * This read `(await pgidOf(process.pid)) ?? process.pid`, and the fallback
+   * was the problem. `process.pid` is not a reading, it is the architectural
+   * invariant restated — `launchDetached` spawns every supervisor `detached`,
+   * so a supervisor IS its own group leader and `pgid === pid` (ISC-77/78) —
+   * and recording it makes a FAILED capture indistinguishable on disk from a
+   * successful one. That matters because `down` no longer takes this number on
+   * trust: it confirms it against the OS and requires the identity-validated
+   * process to LEAD the group. A guess that happens to be right would make the
+   * launch record decorative, since every check it has to pass could then be
+   * satisfied by the pid alone — the record would contribute nothing, and
+   * "recorded when the supervisor launched" would be true of the field's name
+   * only.
+   *
+   * `0` is the capture-failed sentinel, in the same spirit as `""` for
+   * `started` on the next line, and it is a value the schema already permits
+   * (`z.number().int().nonnegative()`) and every reader already handles:
+   * `signalIfSame` refuses to address a non-positive group, `reaper.ts` maps
+   * `entry.pgid > 0 ? entry.pgid : null` to "no group", and `down` reports
+   * `group_unrecorded` and keeps the checkout rather than signalling. Nothing
+   * on this path fabricates a group it did not measure.
+   */
+  const pgid = (await pgidOf(process.pid)) ?? 0;
   const started = (await processStartTime(process.pid)) ?? "";
 
   // Serialize events.jsonl appends so two async writes cannot interleave.

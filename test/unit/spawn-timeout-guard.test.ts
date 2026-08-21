@@ -572,8 +572,8 @@ describe("no spawning test inherits bun's default timeout (ISC-274, ISC-273)", (
   test("down-prune.test.ts specifically: every test derives its ceiling", () => {
     const rel = "test/integration/down-prune.test.ts";
     const sites = scanTestFile(join(ROOT, rel), rel);
-    expect(sites.length).toBe(13);
-    expect(sites.filter((s) => s.spawnCount > 0).length).toBe(13);
+    expect(sites.length).toBe(16);
+    expect(sites.filter((s) => s.spawnCount > 0).length).toBe(15);
     expect(violations(sites).map(describeViolation)).toEqual([]);
   });
 });

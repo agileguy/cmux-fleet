@@ -50,6 +50,7 @@ import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { IDENTITY_FORMAT, isPinnedIdentity, processStartTime } from "../../src/run/registry.ts";
+import { processGroupId } from "../../src/safety/kill.ts";
 import { initialWorkerState, writeWorkerState } from "../../src/run/state.ts";
 import { cliBudget } from "../support/budget.ts";
 
@@ -89,10 +90,36 @@ const LEGACY_START = "Thu 20 Aug 06:44:42 2026";
  */
 const LADDER_FIXED_WAIT_MS = 9_000;
 
+/**
+ * The part of the same fixed cost a test pays when the ladder SUCCEEDS at its
+ * first signal: `down.ts`'s `GRACEFUL_WAIT_MS`, spent waiting for a control
+ * socket that is not there, and then SIGTERM does the job.
+ *
+ * Split out from `LADDER_FIXED_WAIT_MS` rather than reusing it because since
+ * ISC-272 a test that plants a REAL, confirmable process group actually stops
+ * its target, so it never reaches the two `TERM_WAIT_MS` waits. Charging the
+ * full 9 s would be over-provisioning by a number that no longer describes the
+ * test, which is the same objection budget.ts raises against inflating a spawn
+ * count to reach a workable ceiling.
+ */
+const GRACEFUL_WAIT_MS = 5_000;
+
 const bases: string[] = [];
 const children: Array<{ pid: number; kill: (sig?: number | NodeJS.Signals) => void }> = [];
+/** Process groups this file created, reaped WHOLE so no member is left behind. */
+const groups: number[] = [];
 
 afterAll(async () => {
+  for (const pgid of groups) {
+    try {
+      // Safe by construction: every entry is the pid of a leader THIS file
+      // spawned detached, verified `pgid === pid` before recording it. Nothing
+      // else can be in the group, which is the same property the tests assert.
+      process.kill(-pgid, "SIGKILL");
+    } catch {
+      // Already reaped — the desired state.
+    }
+  }
   for (const c of children) {
     try {
       c.kill("SIGKILL");
@@ -117,6 +144,67 @@ function bystander(): { pid: number } {
   const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
   children.push(child);
   return { pid: child.pid };
+}
+
+/**
+ * A REAL process group, shaped like a real supervisor's (ISC-272).
+ *
+ * `detached: true` is what `supervisor/launch.ts` uses and what makes the
+ * spawned process a group leader in its own session — `pgid === pid`, the
+ * invariant `launchDetached`'s header states as ISC-77/78's observable proof.
+ * The inner `sleep` is a second member, so a group signal has something to
+ * reach beyond the leader and "the whole group died" is an assertion with
+ * content rather than a restatement of "the leader died".
+ *
+ * WHY THIS AND NOT `bystander()`. A non-detached `sleep` lives in the TEST
+ * RUNNER's group. Measured on this machine: runner pid 91290, runner pgid
+ * 91286, and a detached leader at 91291 reporting pgid 91291 with members
+ * [91291, 91292, 91293]. `kill(-91291, SIGKILL)` reaped exactly those three
+ * and the runner was untouched. That is the only way to assert a real group
+ * signal without aiming one at the suite — which is not hypothetical, it is
+ * the scar `down-prune.test.ts` records from the day a fixture recorded
+ * `process.pid` and `down` SIGTERMed the runner's own group.
+ *
+ * Returns the leader pid, which is also the pgid, and the group's membership
+ * so a test can prove the group had more than one process in it.
+ */
+async function groupLeader(): Promise<{ pid: number; pgid: number; members: number[] }> {
+  const leader = Bun.spawn(["sh", "-c", "sleep 30 & sleep 30"], {
+    detached: true,
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  leader.unref();
+  // The shell has to reach its `sleep`s before the group has members.
+  for (let i = 0; i < 40; i++) {
+    const found = await groupMembers(leader.pid);
+    if (found.length >= 2) {
+      // The fixture is only usable if it really is its own leader; asserting
+      // it here means a test that follows cannot be quietly vacuous.
+      expect(await processGroupId(leader.pid)).toBe(leader.pid);
+      groups.push(leader.pid);
+      return { pid: leader.pid, pgid: leader.pid, members: found };
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`group leader ${leader.pid} never acquired members`);
+}
+
+/** Every pid currently in a process group, straight from `ps`. */
+async function groupMembers(pgid: number): Promise<number[]> {
+  const p = Bun.spawn(["ps", "-o", "pid=", "-g", String(pgid)], {
+    env: { ...process.env, LC_ALL: "C" },
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  if (p.exitCode !== 0) return [];
+  return out
+    .trim()
+    .split("\n")
+    .map((l) => Number.parseInt(l.trim(), 10))
+    .filter((n) => Number.isInteger(n));
 }
 
 async function rig(): Promise<{ root: string; runId: string; run: ReturnType<typeof runPaths> }> {
@@ -150,13 +238,22 @@ async function down(
 const parse = (stdout: string): Record<string, unknown> =>
   JSON.parse(stdout.trim().split("\n").pop() ?? "{}") as Record<string, unknown>;
 
-/** Plant a one-worker run whose `state.json` names `pid`. */
+/**
+ * Plant a one-worker run whose `state.json` names `pid`.
+ *
+ * `pgid` defaults to `pid`, which is what a real supervisor records because a
+ * detached supervisor leads its own group. For a fixture built on `bystander()`
+ * that default is a value the OS will DISAGREE with — the bystander lives in
+ * the runner's group — and since ISC-272 that disagreement is itself refused.
+ * Every test below either wants that refusal or passes a real group leader.
+ */
 async function plantWorker(
   run: ReturnType<typeof runPaths>,
   runId: string,
   id: string,
   pid: number,
   procStarted?: string,
+  pgid: number = pid,
 ): Promise<void> {
   const wp = workerPaths(run, id);
   await mkdir(wp.dir, { recursive: true });
@@ -166,7 +263,7 @@ async function plantWorker(
       worker: id,
       runId,
       pid,
-      pgid: pid,
+      pgid,
       startedAt: new Date().toISOString(),
       // Omitted by default, which is the pre-`proc_started` state file every
       // refusal test in this file depends on: absent records as `""`, and
@@ -497,31 +594,53 @@ describe("an unverifiable identity refuses rather than relaxes", () => {
    */
   test("a daemon-less run whose supervisor recorded its own identity is stopped", async () => {
     const { root, runId, run } = await rig();
-    const victim = bystander();
+    /**
+     * A REAL process group, because since ISC-272 this test cannot be written
+     * any other way and stay honest.
+     *
+     * It used to plant a `bystander()` — a non-detached `sleep` — and record
+     * `pgid = pid`. That recording is a value the OS disagrees with (the
+     * bystander lives in the test runner's group), so `down` now refuses it as
+     * `group_mismatch` before any ladder runs. The old assertion worked around
+     * the same gap from the other side: it asserted `how: "sigkill"` BECAUSE
+     * the bogus group made every signal raise ESRCH, so the fixture survived a
+     * ladder that never actually reached it. The claim under test was "the
+     * anchor resolved and the ladder was entered", and it was being proved by
+     * a signal that went nowhere.
+     *
+     * A detached leader lets the same claim be proved by the outcome instead:
+     * the ladder is entered, the group is signalled, and the group DIES.
+     */
+    const leader = await groupLeader();
+    expect(leader.members.length).toBeGreaterThan(1); // a group, not just a pid
     // Exactly what a live supervisor writes: its OWN reading, in the pinned
-    // rendering, for the pid its state file names.
-    const self = await processStartTime(victim.pid);
+    // rendering, for the pid its state file names, and the group it leads.
+    const self = await processStartTime(leader.pid);
     expect(self).not.toBeNull();
-    await plantWorker(run, runId, "eng-1", victim.pid, self!);
+    await plantWorker(run, runId, "eng-1", leader.pid, self!, leader.pgid);
     // Still no registry.json — that is the whole point.
 
     const r = await down(root, runId);
     /**
-     * The assertion is on the VERDICT, for the reason the `--force-identity`
-     * test states: this bystander is spawned as a non-group-leader so a stray
-     * `kill(-pid, …)` raises ESRCH, and it therefore SURVIVES the ladder by
-     * construction. `how` reaching "sigkill" is the whole claim — it means the
-     * anchor RESOLVED and the ladder was entered, which is exactly what
-     * `identity_unrecorded` prevented before `proc_started` existed.
-     *
-     * `forced_identity` must be absent: this climbed on a real recorded
-     * identity, not on the override.
+     * `stopped: true` on a real recorded identity and a real confirmed group.
+     * `forced_identity` must be absent: this climbed on what was recorded at
+     * launch, not on the override.
      */
     const report = parse(r.stdout) as { workers: Array<Record<string, unknown>> };
-    expect(report.workers[0]).toMatchObject({ id: "eng-1", how: "sigkill" });
+    expect(report.workers[0]).toMatchObject({ id: "eng-1", stopped: true, how: "sigterm" });
     expect(report.workers[0]).not.toHaveProperty("forced_identity");
     expect(report.workers[0]).not.toMatchObject({ how: "identity_unrecorded" });
-  }, cliBudget(2) + LADDER_FIXED_WAIT_MS);
+    // And the whole GROUP went, not just the leader — which is the thing a
+    // group signal is for and the thing an ESRCH-based fixture could never show.
+    expect(await groupMembers(leader.pgid)).toEqual([]);
+  },
+  // One `down` spawn, plus the fixture: `groupLeader` costs one `sh` spawn,
+  // its `ps -g` membership polls (2 typical, one per 25 ms until the shell has
+  // forked) and one `processGroupId` `ps`; then one `processStartTime` `ps` and
+  // one closing `ps -g`. Eight spawns, every one charged at the expensive CLI
+  // rate per budget.ts. The ladder is entered and the target dies on SIGTERM,
+  // so only the 5 s graceful wait is paid, not the full 9 s.
+  cliBudget(8) + GRACEFUL_WAIT_MS);
 
   /**
    * The guard on the test above: a self-recorded identity is still COMPARED,
@@ -602,6 +721,270 @@ describe("an unverifiable identity refuses rather than relaxes", () => {
 });
 
 // ---------------------------------------------------------------------------
+// A process GROUP is proved against REAL process groups (ISC-272)
+// ---------------------------------------------------------------------------
+
+/**
+ * Identity was validated on the LEADER; the signal went to `-state.pgid`.
+ *
+ * Those are different numbers. The second one was read from a state file
+ * `down` reads precisely because it may be stale, was compared against
+ * nothing, and reaches EVERY process in that group rather than one — a wider
+ * blast radius than an unvalidated pid, not a narrower one. The failure
+ * direction had an assertion (a mismatched leader signals nothing); the
+ * POSITIVE direction — that the recorded pgid really is the validated
+ * process's own group — was checked nowhere.
+ *
+ * EVERY FIXTURE IN THIS BLOCK IS A REAL PROCESS GROUP, and that is not
+ * incidental. A simulated one cannot show that a real signal did not travel,
+ * and the easy simulation is worse than useless here: recording `pgid = pid`
+ * for a non-detached child is a value the OS disagrees with, so a fixture
+ * built that way exercises the refusal path no matter what the code does.
+ * That is the same class of error the TZ test at the top of this file
+ * documents — an assertion that passes with the fix reverted.
+ *
+ * Every group here is spawned `detached`, exactly as `supervisor/launch.ts`
+ * spawns a supervisor, so it is isolated in its own session and a group signal
+ * aimed at it can reach nothing this suite did not create.
+ */
+describe("a process GROUP is confirmed to be the target's own before it is signalled", () => {
+  /**
+   * THE POSITIVE DIRECTION, which is what ISC-272 was left open on.
+   *
+   * A supervisor-shaped fixture: a detached group leader with a second process
+   * inside its group, its identity and its group both recorded exactly as
+   * `supervisor/index.ts` records them. `down` must confirm the group and
+   * signal it, and the whole group must die — not just the leader, which is
+   * the entire reason `down` addresses a group at all (ISC-72/73: `-pgid`
+   * takes the Pi child with it and leaves no orphan).
+   *
+   * Fails if: group addressing is dropped and only the leader is signalled —
+   * the surviving inner `sleep` shows up in `groupMembers`. Or if confirmation
+   * rejects a group that IS the target's own, which would make every real run
+   * unstoppable.
+   */
+  test("a recorded group the OS confirms is signalled, and the whole group dies", async () => {
+    const { root, runId, run } = await rig();
+    const leader = await groupLeader();
+    expect(leader.members.length).toBeGreaterThan(1);
+    expect(leader.members).toContain(leader.pid);
+
+    const self = await processStartTime(leader.pid);
+    expect(self).not.toBeNull();
+    await plantWorker(run, runId, "eng-1", leader.pid, self!, leader.pgid);
+
+    const r = await down(root, runId);
+    expect(r.code, `stderr: ${r.stderr.slice(0, 400)}`).toBe(EXIT.SUCCESS);
+    expect(parse(r.stdout)).toMatchObject({
+      clean: true,
+      workers: [{ id: "eng-1", stopped: true, how: "sigterm" }],
+    });
+    // Every member, not just the one whose identity was checked.
+    expect(await groupMembers(leader.pgid)).toEqual([]);
+  },
+  // One `down`; `groupLeader` four; one `processStartTime`; one closing
+  // `ps -g`. Seven spawns at the expensive rate, plus the graceful wait the
+  // ladder pays before SIGTERM succeeds.
+  cliBudget(7) + GRACEFUL_WAIT_MS);
+
+  /**
+   * THE BLAST-RADIUS TEST. The recorded pgid names a real, live process group
+   * that this run did not launch — a stale or hand-edited state file, which is
+   * the premise `down` operates under. The supervisor's own identity is
+   * perfect, so the leader check passes and only the group check stands
+   * between `-pgid` and a group of innocent processes.
+   *
+   * Fails if: the group is taken on trust — `down` SIGTERMs and then SIGKILLs
+   * `-foreign.pgid`, and `groupMembers` reads back empty. That is the exact
+   * mutation this test exists to catch, and it is why the assertion is on the
+   * foreign group's SURVIVAL rather than on the report alone.
+   */
+  test("a recorded group that is a live FOREIGN group is refused, and that group is untouched", async () => {
+    const { root, runId, run } = await rig();
+    const supervisor = await groupLeader();
+    const foreign = await groupLeader();
+    expect(foreign.members.length).toBeGreaterThan(1);
+    expect(foreign.pgid).not.toBe(supervisor.pgid);
+
+    const self = await processStartTime(supervisor.pid);
+    expect(self).not.toBeNull();
+    // Identity: correct. Group: somebody else's.
+    await plantWorker(run, runId, "eng-1", supervisor.pid, self!, foreign.pgid);
+
+    const r = await down(root, runId);
+    expect(r.code).toBe(EXIT.WORKER_DIED);
+    expect(parse(r.stdout)).toMatchObject({
+      workers: [{ id: "eng-1", stopped: false, how: "group_mismatch" }],
+    });
+    // Nothing was signalled: not the foreign group, and not the supervisor
+    // whose identity was perfectly good.
+    expect(await groupMembers(foreign.pgid)).toEqual(foreign.members);
+    expect(await groupMembers(supervisor.pgid)).toEqual(supervisor.members);
+    // And the operator is told which fact they are looking at.
+    expect(r.stderr).toContain("--force-identity");
+  },
+  // One `down`; two `groupLeader` fixtures at four spawns each; one
+  // `processStartTime`; two closing `ps -g`. Twelve. No ladder runs — the
+  // anchor refuses before Phase 1 — so no fixed wait is added.
+  cliBudget(12));
+
+  /**
+   * THE SCAR, isolated so it can be run safely.
+   *
+   * `down-prune.test.ts` records the day a fixture recorded `process.pid` and
+   * `down` SIGTERMed the test runner's own process group, killing the suite
+   * five seconds in. The shape of that defect is a supervisor that is a MEMBER
+   * of a group it does not LEAD: record and OS agree about the number, and the
+   * number still belongs to somebody else's tree.
+   *
+   * Agreement between the file and the OS is therefore NOT sufficient, and
+   * this is the test that says so. The worker's pid here is an inner member of
+   * a real detached group and the recorded pgid is that group's real leader,
+   * so `live === recorded` holds and only the leadership condition refuses.
+   *
+   * It is built on an isolated group rather than on the runner's own so that
+   * the mutation FAILS the test instead of killing the process running it —
+   * the historical version of this took the suite down with it, which is a
+   * long way to travel to find a missing condition.
+   *
+   * Fails if: the leadership condition is dropped — `down` signals the group,
+   * the whole isolated group dies, and `groupMembers` reads back empty.
+   */
+  test("a supervisor that does not LEAD its recorded group is refused, agreement notwithstanding", async () => {
+    const { root, runId, run } = await rig();
+    const group = await groupLeader();
+    const member = group.members.find((m) => m !== group.pid);
+    expect(member).toBeDefined();
+
+    const self = await processStartTime(member!);
+    expect(self).not.toBeNull();
+    // The OS agrees this process is in group `group.pgid`. It just does not
+    // lead it, so that group is led by a process nothing here validated.
+    expect(await processGroupId(member!)).toBe(group.pgid);
+    await plantWorker(run, runId, "eng-1", member!, self!, group.pgid);
+
+    const r = await down(root, runId);
+    expect(r.code).toBe(EXIT.WORKER_DIED);
+    expect(parse(r.stdout)).toMatchObject({
+      workers: [{ id: "eng-1", stopped: false, how: "group_not_led" }],
+    });
+    expect(await groupMembers(group.pgid)).toEqual(group.members);
+  },
+  // One `down`; `groupLeader` four; one `processStartTime`; one
+  // `processGroupId`; one closing `ps -g`. Eight. No ladder.
+  cliBudget(8));
+
+  /**
+   * The capture-failed sentinel, end to end. `supervisor/index.ts` used to
+   * record `(await pgidOf(process.pid)) ?? process.pid` — the architectural
+   * invariant restated as if it had been measured — which made a failed
+   * capture indistinguishable on disk from a successful one. It now records
+   * `0`, and `0` is not a group.
+   *
+   * The refusal matters more than it looks: without it, the launch record
+   * would be decorative. Every condition the group check applies could be
+   * satisfied by a value derived from the pid, so "recorded when the
+   * supervisor launched" would be true of the field's name only.
+   *
+   * Fails if: a non-positive recorded group silently narrows to the validated
+   * leader and the supervisor is stopped anyway — reported as the group stop
+   * that was asked for.
+   */
+  test("a capture-failed group (0) refuses rather than narrowing to the leader", async () => {
+    const { root, runId, run } = await rig();
+    const leader = await groupLeader();
+    const self = await processStartTime(leader.pid);
+    expect(self).not.toBeNull();
+    await plantWorker(run, runId, "eng-1", leader.pid, self!, 0);
+
+    const r = await down(root, runId);
+    expect(r.code).toBe(EXIT.WORKER_DIED);
+    expect(parse(r.stdout)).toMatchObject({
+      workers: [{ id: "eng-1", stopped: false, how: "group_unrecorded" }],
+    });
+    expect(await groupMembers(leader.pgid)).toEqual(leader.members);
+  },
+  // One `down`; `groupLeader` four; one `processStartTime`; one closing
+  // `ps -g`. Seven. No ladder.
+  cliBudget(7));
+
+  /**
+   * THE DATA-LOSS HALF, for the group (SRD §9.3).
+   *
+   * `--prune`'s gate acts only on `stopped`. An unconfirmable GROUP must
+   * therefore be incapable of reporting `stopped: true`, or a live worker
+   * whose supervisor was never signalled becomes prunable and `down` deletes a
+   * checkout a container is still writing to. That is the measured corruption
+   * the identity half of this criterion was re-graded over, reached through
+   * the other half.
+   *
+   * The refusal REASON is asserted to differ from BOTH of the other two: no
+   * ladder ran, so "survived the kill ladder" would be false, and the
+   * supervisor WAS identified, so "could not be identified" would be false
+   * too. An operator told the wrong fact reaches for the wrong fix.
+   *
+   * Fails if: a group refusal ever reports `stopped: true` — the checkout is
+   * deleted and `PRECIOUS.txt` is gone.
+   */
+  test("a live worker whose group cannot be confirmed keeps its checkout", async () => {
+    const { root, runId, run } = await rig();
+    const supervisor = await groupLeader();
+    const foreign = await groupLeader();
+    const self = await processStartTime(supervisor.pid);
+    expect(self).not.toBeNull();
+    await plantWorker(run, runId, "eng-1", supervisor.pid, self!, foreign.pgid);
+
+    const repo = join(await mkdtemp(join(tmpdir(), "pifleet-downgrp-repo-")), "repo");
+    bases.push(repo);
+    const checkout = join(repo, ".worktrees", "eng-1");
+    await mkdir(checkout, { recursive: true });
+    await writeFile(join(checkout, "PRECIOUS.txt"), "a live container is still writing here\n", "utf8");
+    await writeFile(
+      run.runJson,
+      JSON.stringify({
+        schema: "pifleet.run/v1",
+        run_id: runId,
+        repo,
+        worktrees: [
+          {
+            workerId: "eng-1",
+            path: checkout,
+            branch: "wk/eng-1",
+            baseSha: "0".repeat(40),
+            remoteName: "wk-eng-1",
+            baselineStatus: "",
+            baselineTree: "",
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const r = await down(root, runId, ["--prune"]);
+    expect(r.code).not.toBe(EXIT.SUCCESS);
+    const out = parse(r.stdout);
+    expect(out).toMatchObject({
+      workers: [{ id: "eng-1", stopped: false, how: "group_mismatch" }],
+      pruned: [{ workerId: "eng-1", pruned: false }],
+    });
+    const reason = String((out["pruned"] as Array<Record<string, unknown>>)[0]!["reason"]);
+    expect(reason).toContain("process group");
+    expect(reason).toContain("--force-identity");
+    // Not the ladder's words, and not the identity refusal's words either.
+    expect(reason).not.toContain("survived the kill ladder");
+    expect(reason).not.toContain("could not be identified");
+
+    // The assertion the whole finding is about.
+    expect(await Bun.file(join(checkout, "PRECIOUS.txt")).exists()).toBe(true);
+    expect(await groupMembers(supervisor.pgid)).toEqual(supervisor.members);
+    expect(await groupMembers(foreign.pgid)).toEqual(foreign.members);
+  },
+  // One `down`; two `groupLeader` fixtures at four each; one
+  // `processStartTime`; two closing `ps -g`. Twelve. No ladder.
+  cliBudget(12));
+});
+
+// ---------------------------------------------------------------------------
 // The hatch
 // ---------------------------------------------------------------------------
 
@@ -612,32 +995,61 @@ describe("--force-identity is the deliberate override, and only that", () => {
    * anchor — whatever holds the pid becomes the target, every LATER rung
    * still identity-checked.
    *
-   * The bystander survives here for the ESRCH reason `down-prune.test.ts`
-   * documents (its recorded pgid is not a group leader), which is why the
-   * assertion is on the VERDICT: `how` reaching "sigkill" proves the ladder
-   * was entered, which is the whole difference the flag makes.
+   * AND IT NEVER WIDENS TO A GROUP (ISC-272), which is what the second half of
+   * this test now proves. Before, a forced anchor passed `state.pgid` straight
+   * to the ladder, so the one flag that re-opens the fail-open also aimed
+   * SIGTERM and then SIGKILL at a process group on nothing but the operator's
+   * word. Typing `--force-identity` is an operator asserting the run directory
+   * is theirs; it is not an assertion that some integer in it names a group
+   * they are willing to destroy. So a forced anchor addresses the validated
+   * leader ALONE.
    *
-   * Fails if: the flag stops overriding, or starts overriding by default.
+   * The state file here records a pgid that names a real, live, foreign
+   * process group — the shape of a stale record, and the widest damage the old
+   * behaviour could do. The flag must stop the supervisor and leave that group
+   * standing.
+   *
+   * This test also changed shape with the contract. It used to assert
+   * `how: "sigkill"` and `stopped: false`, and both were artefacts: the forced
+   * signal went to `-pid` of a non-leader, raised ESRCH, reached nothing, and
+   * the target "survived" a ladder that never touched it. Now the flag
+   * actually stops it, at the first rung, which is what the flag is for.
+   *
+   * Fails if: the flag stops overriding, starts overriding by default, or ever
+   * signals a group it could not confirm.
    */
-  test("it climbs the ladder a bare `down` refused to start", async () => {
+  test("it stops what a bare `down` refused to, and never signals an unconfirmed group", async () => {
     const { root, runId, run } = await rig();
     const victim = bystander();
-    await plantWorker(run, runId, "eng-1", victim.pid);
+    const foreign = await groupLeader();
+    expect(foreign.members.length).toBeGreaterThan(1);
+    // A legacy identity (so the anchor refuses) AND a recorded group that is
+    // somebody else's entirely.
+    await plantWorker(run, runId, "eng-1", victim.pid, undefined, foreign.pgid);
     await plantRegistry(run, runId, [{ id: "eng-1", pid: victim.pid, started: LEGACY_START }]);
 
     const refused = await down(root, runId);
     expect(parse(refused.stdout)).toMatchObject({
       workers: [{ id: "eng-1", stopped: false, how: "identity_legacy_format" }],
     });
+    expect(await processStartTime(victim.pid)).not.toBeNull();
 
     const forced = await down(root, runId, ["--force-identity"]);
     expect(parse(forced.stdout)).toMatchObject({
-      workers: [{ id: "eng-1", stopped: false, how: "sigkill", forced_identity: true }],
+      workers: [{ id: "eng-1", stopped: true, how: "sigterm", forced_identity: true }],
     });
-    // Two `down` spawns. The second one CLIMBS — graceful 5 s, SIGTERM 2 s,
-    // SIGKILL 2 s against a target that never dies — so the 9 s of fixed
-    // waiting is added on top of the spawn budget, which does not model it.
-  }, cliBudget(2) + LADDER_FIXED_WAIT_MS);
+    // The supervisor stand-in is stopped…
+    expect(await processStartTime(victim.pid)).toBeNull();
+    // …and the group the record named is untouched, every member of it. This
+    // is the load-bearing negative: the flag narrowed, it did not widen.
+    expect(await groupMembers(foreign.pgid)).toEqual(foreign.members);
+  },
+  // Two `down` spawns; `groupLeader` costs four (one `sh`, two `ps -g` polls,
+  // one `processGroupId`); two `processStartTime` `ps` calls and one closing
+  // `ps -g`. Nine spawns at the expensive CLI rate. The second `down` climbs
+  // only to SIGTERM, where the target dies, so it pays the graceful wait and
+  // not the two `TERM_WAIT_MS` waits.
+  cliBudget(9) + GRACEFUL_WAIT_MS);
 });
 
 // ---------------------------------------------------------------------------

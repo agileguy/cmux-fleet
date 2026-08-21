@@ -15,13 +15,25 @@ import { dockerAvailable } from "../../container/run.ts";
 /**
  * Register `pifleet image` (SRD §5.7, §10): build | list | verify | gc.
  *
- * `verify` is OPERATOR-DRIVEN and nothing else consults it. This used to claim
- * "`up` refuses to start on it, so a run never silently uses an image whose Pi
- * differs from the §4.2 protocol pin" — `up` has no image gate of any kind, and
- * `verifyImage` has no caller outside this file. Running `image verify` is
- * currently the only thing that checks an image, and only when a human asks.
- * See `container/image.ts`'s header for the measured detail, and ISC-32 /
- * ISC-189, which track the missing refusal and are graded open.
+ * `verify` is no longer only operator-driven. `up`'s launch gate
+ * (`container/image.ts`'s `assertImagesReady`) calls the same `verifyImage`
+ * this subcommand calls, on the container path, before the first clone — so a
+ * run refuses an image that is absent OR that fails verification, and the role
+ * is named in the refusal. This subcommand stays the way to ask the question on
+ * its own, against an explicit `--tag` or `--pi-version` the launch path has no
+ * reason to offer.
+ *
+ * WHAT THIS DOCSTRING USED TO CLAIM, kept visible because the shape of the
+ * mistake matters more than the mistake: it asserted "`up` refuses to start on
+ * it, so a run never silently uses an image whose Pi differs from the §4.2
+ * protocol pin" at a time when `up` had no image gate of any kind and
+ * `verifyImage` had no caller outside this file. Grading a PRIMITIVE as though
+ * it were its consumer is exactly how ISC-189's sentence ended up copied
+ * verbatim into `container/image.ts`'s header as a statement of fact. ISC-24 —
+ * this subcommand catching a Pi-version mismatch on a REAL image in the
+ * Docker-gated `container` job — is still the only part of any of this with a
+ * real daemon behind it. The `up` side's fails-verify half is proven against a
+ * `docker` PATH shim, and ISC-189 is graded `[~]` for that residual.
  */
 export function register(program: Command): void {
   program

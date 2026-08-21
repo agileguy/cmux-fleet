@@ -126,7 +126,25 @@ export type WorkerEntry = z.infer<typeof WorkerEntrySchema>;
 
 export const BackendSchema = z
   .object({
-    kind: z.enum(["cmux", "tmux", "headless"]).default("cmux"),
+    /**
+     * OPTIONAL, not defaulted, and that is load-bearing (ISC-271).
+     *
+     * `up`'s precedence is `explicit --backend > backend.kind > DEFAULT_BACKEND`,
+     * and the middle term can only exist if an ABSENT block is distinguishable
+     * from a block that says `cmux`. With `.default("cmux")` these three parse
+     * to byte-identical objects, all carrying `kind: "cmux"`:
+     *
+     *     (no backend: block at all)
+     *     backend: {}
+     *     backend: {kind: cmux}
+     *
+     * Consuming that would not honour the configs that SET `kind` — it would
+     * force cmux onto every `fleet.yaml` in existence, including the ones that
+     * say nothing, turning every run on a cmux-less host into exit 3. An absent
+     * block means UNSET; inferring cmux from it relocates the silent-override
+     * defect rather than removing it.
+     */
+    kind: z.enum(["cmux", "tmux", "headless"]).optional(),
     workspace: shortStr.default("pifleet"),
     split: z.enum(["alternate", "columns", "rows"]).default("alternate"),
     focus_on_dispatch: z.boolean().default(false),
@@ -260,6 +278,52 @@ const relayUpstream = shortStr.superRefine((raw, ctx) => {
   if (err !== null) ctx.addIssue({ code: "custom", message: err });
 });
 
+/**
+ * The schemes an `llm.base_url` may carry: `http:` and `https:`, and nothing
+ * else.
+ *
+ * `z.string().url()` is a WELL-FORMEDNESS check, not a protocol one. It accepts
+ * `file:///etc/passwd`, `ftp://â¦`, `gopher://â¦` and `data:` â every scheme the
+ * WHATWG parser knows â and this field is not merely stored. It is fed to
+ * `fetch` by `doctor`'s host-side probe, and `hostReachableBaseUrl` derives a
+ * dial target FROM it, so the URL an operator writes here becomes a request
+ * this process issues with their model-server credential attached.
+ *
+ * Refused at the SCHEMA rather than at each dial, and the placement is the
+ * point. A `config validate` failure names the field and the file; a refusal
+ * inside a probe arrives after `up` has already built a bridge, and a probe
+ * that simply fails on `file:` teaches nothing about why. It is also the only
+ * place that covers every reader at once â there is more than one, and
+ * `assertModelsSupportToolCalls` reads this value verbatim from inside a
+ * container.
+ *
+ * This is a NARROWING, and one that cannot break a working fleet: the field's
+ * documented meaning is an OpenAI-compatible HTTP endpoint, the shipped default
+ * is `http:`, and no other scheme has ever reached a working request.
+ */
+const HTTP_SCHEMES = new Set(["http:", "https:"]);
+
+const httpUrl = z.string().url().superRefine((raw, ctx) => {
+  let scheme: string;
+  try {
+    scheme = new URL(raw).protocol;
+  } catch {
+    // Unreachable: `.url()` has already parsed it. Not thrown from here
+    // regardless â a second parse failure is `.url()`'s message to give.
+    return;
+  }
+  if (!HTTP_SCHEMES.has(scheme)) {
+    ctx.addIssue({
+      code: "custom",
+      message:
+        `base_url must be an http: or https: URL; got '${scheme}'. This value is dialed â ` +
+        `'doctor' fetches it from the host with the API key attached, and every worker fetches ` +
+        `it from inside the egress bridge â so a non-HTTP scheme is not a stored string, it is a ` +
+        `request this process would issue`,
+    });
+  }
+});
+
 export const LlmSchema = z
   .object({
     /** oMLX — on the Docker host, or on a trusted LAN peer (§5.9). */
@@ -270,7 +334,7 @@ export const LlmSchema = z
      * `host.docker.internal`, the relay's listen-side alias on that bridge
      * (§5.9). To move the server itself, set `relay_upstream`.
      */
-    base_url: z.string().url().default("http://host.docker.internal:8000/v1"),
+    base_url: httpUrl.default("http://host.docker.internal:8000/v1"),
     /**
      * Where the RELAY dials — `host:port`, explicit port required (§5.9; ISC-259).
      *

@@ -61,12 +61,35 @@ jobs:
         # evidence unavailable on any PR where the image happens to be broken.
         env:
           LABEL: live-oMLX
-          # Four probes, all `test.skipIf(!LIVE)` — measured, not assumed:
-          # `bun test test/integration/model-probe.test.ts` reports
-          # "Ran 4 tests across 1 file". Collection, not passes: see the total
-          # check in probe-guard.sh for why that is the number that catches a
-          # file falling out of the run entirely.
-          TOTAL_EXPECTED: "4"
+          # EIGHTEEN collected, not eight, and not four.
+          #
+          # FOUR are the original live probes, all `test.skipIf(!LIVE)` and all
+          # pinned by name below. The other FOURTEEN are deliberately plain
+          # `test(...)` and NOT under this file's `it = test.skipIf(!LIVE)` —
+          # they stand up their own stubs on ephemeral ports, need no oMLX and
+          # no Docker, and so must run on every push. Do not move them under
+          # `it`; that would make these criteria unreadable in CI.
+          #
+          # Where the fourteen come from:
+          #   4  ISC-291's host-dial-target tests
+          #   6  the host dial target carries every part of base_url — userinfo,
+          #      a user:password pair, a fragment, a query (including the
+          #      slash-into-a-pathless-URL case), an explicit trailing slash,
+          #      and all of them at once through relay_upstream
+          #   3  base_url must be http or https (file:/ftp:/gopher: refused,
+          #      https: accepted)
+          #   1  doctor never forwards the API key to a redirect target
+          #
+          # Collection, not passes: see the total check in probe-guard.sh for
+          # why that is the number that catches a file falling out of the run.
+          # The pinned skip NAMES below are unaffected — every one of the
+          # fourteen passes rather than skips, so the skip set is still exactly
+          # the four live probes.
+          #
+          # DERIVED, not incremented. Measured on bun 1.3.11:
+          #     bun test test/integration/model-probe.test.ts
+          #     -> 14 pass, 4 skip, 0 fail. Ran 18 tests across 1 file.
+          TOTAL_EXPECTED: "18"
           # The exact NAMES, checked against the junit report, not merely how
           # many. A bare count cannot tell "the live probes skipped" apart from
           # "one live probe was deleted and some unrelated test started
@@ -246,12 +269,12 @@ jobs:
         env:
           PIFLEET_DOCKER: "1"
           LABEL: container
-          # All five PIFLEET_DOCKER-gated files, run ONCE by this step, which
+          # All nine PIFLEET_DOCKER-gated files, run ONCE by this step, which
           # both prints their output and grades it. This used to be two
           # separate steps — a "probes" step that ran these files for
           # their own sake, and a "guard" step below it that ran the SAME
           # files a SECOND time just to check the summary counts. That doubled
-          # real Docker cost for no additional coverage: 65 tests against a
+          # real Docker cost for no additional coverage: 88 tests against a
           # real daemon, several individually timed out at 60-180s (see
           # adc.test.ts's ISC-47/255/41/46 blocks), inside a 60-minute job
           # budget that also builds google-cloud-cli into the worker image
@@ -279,7 +302,7 @@ jobs:
           # test this guard exists to catch. The four daemon-free ones running
           # twice is the accepted cost, and they are milliseconds.
           #
-          # TOTAL_EXPECTED is 86 = 20 (image.test.ts: 15 fixed cases + 5
+          # TOTAL_EXPECTED is 88 = 20 (image.test.ts: 15 fixed cases + 5
           # generated from the toolchain-baseline `probes` array — gcloud,
           # kubectl, helm, jq, curl) + 23 (verbgate.test.ts) + 5
           # (egress.test.ts) + 18 (adc.test.ts — up from 12 now that the
@@ -288,7 +311,12 @@ jobs:
           # probes, of which the TWO live-oMLX ones always skip on a runner)
           # + 5 (probe-in-network.test.ts, added by ISC-260)
           # + 2 (container-env.test.ts, added by ISC-31/ISC-127)
-          # + 5 (container-launch.test.ts, added by the container launcher).
+          # + 5 (container-launch.test.ts, added by the container launcher)
+          # + 2 (doctor-preflight.test.ts, added by ISC-292).
+          #
+          # 20 + 23 + 5 + 18 + 8 + 5 + 2 + 5 + 2 = 88. The arithmetic is written
+          # out because this constant has drifted from its own prose twice, and
+          # both times the prose was the half nobody re-derived.
           #
           # 79 -> 81 is container-env.test.ts, which reads ISC-31 and ISC-127
           # back out of `docker inspect` on a container started from the argv
@@ -340,9 +368,12 @@ jobs:
           #     (Re-derived 2026-08-20 for container-launch.test.ts, by running
           #     the command above rather than by adding 5 to 81 — which is the
           #     method this block insists on for exactly the reason it gives.)
-          # No daemon, no image. Do this before changing the number. The 2
-          # passes are ISC-260's two daemon-free argv tests, and they count
-          # toward the total exactly as a skip would.
+          # No daemon, no image. Do this before changing the number. The 6
+          # passes are the daemon-free tests in two of these files: ISC-260's
+          # TWO argv assertions in probe-in-network.test.ts, and FOUR of
+          # container-launch.test.ts's five, which plant a recorder as the
+          # launch record's argv and need no Docker. They count toward the
+          # total exactly as a skip would.
           #
           # NOTE ON RUNTIME, because ISC-261's probes are not cheap. The two
           # enumeration probes each scan all 65535 ports two or three times,
@@ -352,22 +383,32 @@ jobs:
           # cover that, and the job budget is 60 minutes.
           #
           # And measured two ways with the gate OPEN, because both matter:
-          #   - On a host WITH a real ADC file and a real oMLX, all 81 run and
-          #     pass: 81 pass, 0 fail, 0 skip.
+          #   - On a host WITH a real ADC file and a real oMLX, all 88 run and
+          #     pass: 88 pass, 0 fail, 0 skip.
           #   - In THIS job, with no real host ADC but PIFLEET_TEST_ADC_FILE
           #     set by the step above, the file-mode mount-shape test RUNS
           #     (that is the whole point of that step) while the four tests
           #     that need a REAL host ADC to mint a live token cannot, and the
           #     TWO relay probes that need a real inference server cannot
-          #     either: 75 pass, 6 skip. Same total either way, because the
+          #     either: 82 pass, 6 skip. Same total either way, because the
           #     check treats pass+skip as one number — see probe-guard.sh's
           #     total check for why that pairing, specifically, is correct.
           #
-          # These two lines read 79 and 73 while TOTAL_EXPECTED already said
-          # 81 — prose left behind when the total moved. The derivation for
-          # 79 -> 81 lives in ISC-31's close-out and is not repeated here; the
-          # skip count is unchanged, so the pass figure moves with the total.
-          TOTAL_EXPECTED: "86"
+          # 86 -> 88 is doctor-preflight.test.ts (ISC-292). Its two probes ask
+          # the container runtime which host paths it actually shares, which
+          # is a question only a real daemon can answer — a fake would assert
+          # the shape of an answer we invented. Listed by the same rule as
+          # container-env.test.ts: a file with at least one daemon-REQUIRING
+          # probe belongs in this job, or that probe has no automated reader
+          # and becomes the self-skipping test this guard exists to catch.
+          #
+          # DERIVED by the hand method, NOT by adding 2 to 86. Measured
+          # 2026-08-20 on bun 1.3.11, gate UNSET:
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight}.test.ts
+          #     -> 6 pass, 82 skip, 0 fail. Ran 88 tests across 9 files.
+          # The same command WITHOUT doctor-preflight reproduced 86 exactly on
+          # the same run, which is what makes this a derivation and not a bump.
+          TOTAL_EXPECTED: "88"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -462,7 +503,8 @@ jobs:
               test/integration/relay.test.ts \
               test/integration/probe-in-network.test.ts \
               test/integration/container-env.test.ts \
-              test/integration/container-launch.test.ts
+              test/integration/container-launch.test.ts \
+              test/integration/doctor-preflight.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every

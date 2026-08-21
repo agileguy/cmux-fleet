@@ -70,6 +70,25 @@ interface Rig {
   /** Where this rig's `gcloud` shim records every argv it was handed. */
   gcloudCalls: string;
   /**
+   * Where this rig's `docker` shim records every argv it was handed.
+   *
+   * The ISC-32 ordering claim is a NEGATIVE — the launch was refused before
+   * the egress network was touched, and therefore before the relay, the
+   * ledger, the hazard scan, the clones, the materialization and every
+   * supervisor, all of which are strictly later in `up`. An exit code cannot
+   * carry that; this file can.
+   */
+  dockerCalls: string;
+  /**
+   * Where this rig's `cmux` shim records every argv it was handed.
+   *
+   * Same job as `dockerCalls`, for the opposite kind of claim: a backend
+   * refusal reports exit 3 whether the backend was probed and found missing or
+   * never consulted at all, and those are different bugs. A line in here is
+   * what makes "the primary backend WAS probed" evidence.
+   */
+  cmuxCalls: string;
+  /**
    * This rig's fixture ADC file, pointed at by `GOOGLE_APPLICATION_CREDENTIALS`
    * in `env`. Pinning it is what makes the identity assertions deterministic:
    * `resolveIdentity` reads the ADC principal FIRST and only falls back to the
@@ -116,8 +135,8 @@ afterAll(async () => {
   // hand-written number (120_000) instead of a derived one, and it had gone
   // UNDER-budgeted. It spawns one `down` per run directory per rig, and every
   // `makeRig` registers a rig (single `rigs.push`, in `makeRig` itself), so the
-  // counted upper bound is the number of `makeRig` CALLS — 28 in this file, not
-  // estimated. cliBudget(28) = 319_200 ms; the old flat 120_000 was already
+  // counted upper bound is the number of `makeRig` CALLS — 43 in this file, not
+  // estimated. cliBudget(43) = 490_200 ms; the old flat 120_000 was already
   // exceeded by cliBudget(15) = 171_000. Counting rather than estimating is the
   // criterion's own instruction, and this is the case it was written for: the
   // budget silently stopped matching the work as the file grew.
@@ -128,13 +147,25 @@ afterAll(async () => {
   // stops matching the work silently, and a hand-incremented count is the same
   // failure one step later.
   //
+  // RE-COUNTED at 43 when the ISC-32/ISC-189 image-gate, ISC-61 and ISC-271
+  // blocks landed, by running that same `grep -c 'await makeRig('` rather
+  // than by adding the new call sites to 28. Same method, same reason.
+  //
+  // RE-COUNTED at 45 when the ISC-271 no-fallback test landed. Note what the
+  // re-count found: the number had ALREADY drifted. `grep -c 'await makeRig('`
+  // against the previous commit answers 44, not the 43 written above, so one
+  // call site had been added without the count moving with it — the exact
+  // silent-drift failure this note exists to catch, caught only because the
+  // instruction is to re-run the command rather than to add one. 45 is that
+  // command's answer on this revision, not 44 + 1.
+  //
   // Charging every `down` the expensive per-spawn rate is deliberately
   // conservative — rigs whose test never reached `up` contribute zero spawns —
   // because the failure mode here is not a slow suite, it is the one this
   // hook's own docstring above exists to prevent: a timed-out `afterAll`
   // truncates the loop mid-way and leaks detached supervisors onto the
   // developer's machine, which this project has already paid for.
-}, cliBudget(28));
+}, cliBudget(45));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -154,12 +185,45 @@ afterAll(async () => {
  *     re-inspects after creating, because `docker run -d` exiting 0 means the
  *     container STARTED, not that it stayed up — a shim that reported a
  *     running container before anything ran would absorb that check.
+ *  3. `image inspect` answers ABSENT by default — the shape `up`'s launch gate
+ *     (ISC-32/ISC-189) exists to refuse — and answers PRESENT only when a rig
+ *     asks for it by setting `PIFLEET_SHIM_IMAGE`. Absent is the default
+ *     deliberately: a rig that forgets to state which it wants gets the
+ *     refusing answer, never the permissive one.
+ *  4. When `PIFLEET_SHIM_IMAGE` IS set, the six `docker run` / `docker image
+ *     inspect` probes `verifyImage` performs are answered FAITHFULLY — real
+ *     uid, real tmpfs behaviour, a real `/workspace` round-trip through the
+ *     `-v` source — with exactly ONE degree of freedom:
+ *     `PIFLEET_SHIM_PI_VERSION`, the string the image reports for `pi
+ *     --version`. That single knob is what lets one rig prove `up` REFUSES a
+ *     present-but-wrong image and another prove it ACCEPTS a present-and-right
+ *     one, with nothing else differing between them. A shim that failed every
+ *     check would make the refusal test pass for the wrong reason — an `up`
+ *     that merely issued a malformed docker command would look identical.
+ *
+ * WHAT THE VERIFY STAND-IN DOES NOT PROVE, said plainly because this file's
+ * probe branch already had to say it once: there is no daemon here and no
+ * image, so this proves the WIRING — that `up` consults verification, on the
+ * tag it is about to launch, before the first clone, and refuses on the
+ * verdict — and NOT that a real stale image is caught by a real Docker. That
+ * needs the Docker-gated `container` job, whose file list in
+ * `.github/workflows/ci.yml` does not include this file. ISC-189 is graded
+ * `[~]` for exactly that residual; ISC-32, the absent half, needs no daemon
+ * and is fully proven here.
  *
  * Everything else still fails loudly, for the reason the gcloud shim does: a
  * silent `exit 0` stand-in absorbs a changed docker invocation instead of
  * surfacing it.
+ *
+ * Every invocation is APPENDED to `callLog` before dispatch, for the same
+ * reason the gcloud shim logs: two of the claims below are NEGATIVES —
+ * "nothing was cloned", "the egress network was never touched" — and a
+ * subprocess that was never spawned leaves nothing to assert on. The log is
+ * where an absence becomes evidence, and it makes the ORDERING claim (the
+ * refusal preceded every later stage) a comparison of what is in a file
+ * rather than an inference from an exit code.
  */
-async function writeDockerShim(binDir: string): Promise<void> {
+async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
   const shim = join(binDir, "docker");
   await writeFile(
     shim,
@@ -168,6 +232,14 @@ async function writeDockerShim(binDir: string): Promise<void> {
       // Marker for "the relay container has been created", per shim dir so
       // parallel rigs never see each other's relay.
       'STATE="$(dirname "$0")/.relay-created"',
+      // Recorded unconditionally and BEFORE dispatch, including on the
+      // unexpected-argv branches, so an empty log means "no docker call of any
+      // kind" — strictly stronger than "no call this shim classified".
+      `PIFLEET_SHIM_DOCKER_LOG=${JSON.stringify(callLog)}`,
+      `if ! printf '%s\\n' "$*" >> "$PIFLEET_SHIM_DOCKER_LOG"; then`,
+      `  echo "docker shim: cannot append to $PIFLEET_SHIM_DOCKER_LOG" >&2`,
+      "  exit 90",
+      "fi",
       'case "$1" in',
       "  network)",
       '    case "$2" in',
@@ -246,8 +318,105 @@ async function writeDockerShim(binDir: string): Promise<void> {
       "        exit $?",
       "        ;;",
       "    esac",
+      // ---------------------------------------------------------------
+      // `verifyImage`'s probes, stood in for (ISC-189).
+      //
+      // Discriminated on the WORKER IMAGE PREFIX, which is the one thing
+      // every verify run carries and the relay run cannot: the relay runs
+      // pinned upstream Node, deliberately, so `up` cannot be taken down by
+      // an unrelated image problem. Matching on `--read-only` instead would
+      // couple this branch to a flag two unrelated subsystems happen to
+      // share.
+      //
+      // Each case answers the way a HEALTHY image would, so the only thing
+      // that can fail verification here is the Pi version — see the header.
+      '    case " $* " in',
+      '      *"pifleet/pi-worker:"*)',
+      '        if [ -z "${PIFLEET_SHIM_IMAGE:-}" ]; then',
+      // Unreachable in practice — the presence check refuses first — but a
+      // shim that silently ran a container for an image it just said was
+      // absent would be lying about the thing under test.
+      '          echo "docker shim: run against absent image: $*" >&2',
+      "          exit 125",
+      "        fi",
+      '        case " $* " in',
+      // `pi --version` through the entrypoint chain. The ONE knob.
+      '          *" --version "*)',
+      '            echo "pi ${PIFLEET_SHIM_PI_VERSION:-0.0.0-unset}"',
+      "            exit 0",
+      "            ;;",
+      // `id -u` — the uid the image runs as.
+      '          *" /usr/bin/id "*)',
+      '            echo "10001"',
+      "            exit 0",
+      "            ;;",
+      // Read-only root: the tmpfs accepts a write, `/` does not. Printing
+      // TMPFS_OK and NOT printing ROOT_WRITABLE is what a hardened image
+      // does, and both halves are load-bearing in `verifyImage`.
+      '          *"probe-should-work"*)',
+      '            echo "TMPFS_OK"',
+      "            exit 0",
+      "            ;;",
+      // `/workspace` write-through, both directions. Performed for real
+      // against the `-v` source, because "the bytes crossed the mount" is
+      // the entire content of the check and a hardcoded echo would assert
+      // nothing. This is the same liberty the probe branch above takes: it
+      // stands in for a real mechanism rather than papering over one.
+      '          *"from-container"*)',
+      '            src=""',
+      '            prev=""',
+      '            for a in "$@"; do',
+      '              if [ "$prev" = "-v" ]; then',
+      '                case "$a" in',
+      '                  *":/workspace") src="${a%:/workspace}" ;;',
+      "                esac",
+      "              fi",
+      '              prev="$a"',
+      "            done",
+      '            if [ -z "$src" ]; then',
+      '              echo "docker shim: write-through run carried no -v <host>:/workspace: $*" >&2',
+      "              exit 1",
+      "            fi",
+      '            cat "$src/from-host" || exit 1',
+      '            echo "container-wrote-this" > "$src/from-container"',
+      "            exit 0",
+      "            ;;",
+      "          *)",
+      '            echo "docker shim: unexpected worker-image run argv: $*" >&2',
+      "            exit 1",
+      "            ;;",
+      "        esac",
+      "        ;;",
+      "    esac",
       '    : > "$STATE"',
       '    echo "wiring-shim-relay-id"',
+      "    ;;",
+      // ---------------------------------------------------------------
+      // The image store. ABSENT unless a rig says otherwise — see header.
+      "  image)",
+      '    if [ "$2" != "inspect" ]; then',
+      '      echo "docker shim: unexpected image argv: $*" >&2',
+      "      exit 1",
+      "    fi",
+      '    if [ -z "${PIFLEET_SHIM_IMAGE:-}" ]; then',
+      // Docker's own wording, so the refusal quotes something an operator
+      // would recognise from their own terminal rather than a test string.
+      '      echo "Error response from daemon: No such image: $3" >&2',
+      "      exit 1",
+      "    fi",
+      '    case " $* " in',
+      // `verifyImage`'s tini check reads the entrypoint back out of the
+      // image. A healthy answer, so the Pi version stays the only variable.
+      '      *"json .Config.Entrypoint"*)',
+      `        printf '["/usr/bin/tini","--","/usr/local/bin/entrypoint.sh"]\\n'`,
+      "        ;;",
+      "      *)",
+      // What `imagePresent` reads. Non-empty on purpose: an exit 0 with
+      // empty stdout is NOT treated as present, and this is the value that
+      // proves the distinction is real rather than incidental.
+      `        printf 'sha256:wiringshimimageid\\n'`,
+      "        ;;",
+      "    esac",
       "    ;;",
       "  inspect)",
       '    if [ -f "$STATE" ]; then',
@@ -265,6 +434,57 @@ async function writeDockerShim(binDir: string): Promise<void> {
       "    exit 1",
       "    ;;",
       "esac",
+      "",
+    ].join("\n"),
+  );
+  await chmod(shim, 0o755);
+}
+
+/**
+ * A `cmux` that is NOT INSTALLED, and the reason it is a shim rather than an
+ * absence.
+ *
+ * `CmuxClient` defaults its binary to the bare name `cmux`, so the very first
+ * thing `probeCmux` does is run `cmux --version` through PATH. Whether that
+ * succeeds is therefore a property of the DEVELOPER'S MACHINE: this suite was
+ * written on one with `/opt/homebrew/bin/cmux` installed and `ubuntu-latest`
+ * has none, so any test that lets the cmux backend probe for real would take
+ * one branch here and the opposite branch in CI. That is the failure this
+ * whole shim directory exists to prevent — the same argument `writeGcloudShim`
+ * makes about the operator's real gcloud, and a stronger one, because a
+ * successful cmux probe does not merely READ the developer's machine, it goes
+ * on to create windows and panes in the terminal they are working in.
+ *
+ * So the shim answers every invocation the way an uninstalled cmux does: exit
+ * 1, nothing on stdout. `probeCmux` reads that as `cmux-binary` failed
+ * (`DIAG.binaryMissing`), which is a REQUIRED capability, which is what
+ * `resolveBackendWithFallback` turns into either a fallback or exit 3.
+ *
+ * Installed for every rig, not only the ones that name cmux, for exactly the
+ * reason both other shims are: a rig that never mentions cmux must still not
+ * be able to reach the real one by accident.
+ *
+ * Every invocation is appended to `callLog` first, so "the primary backend was
+ * actually probed" is a fact in a file rather than an inference from an exit
+ * code — the same reason the other two shims log.
+ */
+async function writeCmuxShim(binDir: string, callLog: string): Promise<void> {
+  const shim = join(binDir, "cmux");
+  await writeFile(
+    shim,
+    [
+      "#!/bin/sh",
+      `PIFLEET_SHIM_LOG=${JSON.stringify(callLog)}`,
+      `if ! printf '%s\\n' "$*" >> "$PIFLEET_SHIM_LOG"; then`,
+      `  echo "cmux shim: cannot append to $PIFLEET_SHIM_LOG" >&2`,
+      "  exit 90",
+      "fi",
+      // The message a missing binary would not itself print — the SHELL prints
+      // "not found" — but something has to distinguish "the shim answered" from
+      // "the shim was never installed" when a test goes red, and stderr is
+      // where the backend's own diagnosis quotes the failure.
+      'echo "cmux shim: no cmux on this host (test fixture)" >&2',
+      "exit 1",
       "",
     ].join("\n"),
   );
@@ -349,6 +569,17 @@ async function writeGcloudShim(binDir: string, callLog: string): Promise<void> {
  */
 async function readGcloudCalls(rig: Rig): Promise<string[]> {
   const f = Bun.file(rig.gcloudCalls);
+  if (!(await f.exists())) return [];
+  return (await f.text()).split("\n").filter((l) => l !== "");
+}
+
+/**
+ * Every docker argv this rig's CLI ran, in order. Same "absent file is a
+ * genuine zero" guarantee as the gcloud log, and for the same reason: the shim
+ * is installed and pointed at this path unconditionally in `makeRig`.
+ */
+async function readDockerCalls(rig: Rig): Promise<string[]> {
+  const f = Bun.file(rig.dockerCalls);
   if (!(await f.exists())) return [];
   return (await f.text()).split("\n").filter((l) => l !== "");
 }
@@ -460,6 +691,62 @@ interface FleetOptions {
    * other test in this file depends on that transcript shape.
    */
   tokensPerMessage?: number;
+
+  // -------------------------------------------------------------------------
+  // Knobs that shape the RIG rather than the fleet.yaml (ISC-32, ISC-189).
+  // `fleetYaml` ignores them; `makeRig` turns them into environment.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Run the CONTAINER path instead of the Pi double.
+   *
+   * `PIFLEET_PI_COMMAND` is emptied rather than deleted, because `runCli`
+   * spreads `process.env` under `rig.env` and a key cannot be removed by
+   * spreading. Empty is not a workaround: `up` tests the variable with
+   * `.trim() !== ""`, so an empty value IS "no double", by the same rule that
+   * governs an unset one — and the config-less requirement that would demand
+   * it does not apply, because these rigs always pass `--config`.
+   *
+   * This is what puts the image gate on the path at all. Every other test in
+   * this file keeps the double and therefore never reaches it, which is
+   * exactly the intended behaviour: no container is started on that path, so
+   * there is no image for a gate to be about.
+   */
+  containerPath?: boolean;
+  /** `PIFLEET_SHIM_IMAGE`: whether the shimmed image store holds the tag. */
+  imagePresent?: boolean;
+  /**
+   * `PIFLEET_SHIM_PI_VERSION`: what the shimmed image reports for
+   * `pi --version`. The single degree of freedom in the verify stand-in — see
+   * `writeDockerShim`. Match `docker.pi_version` and verification passes;
+   * differ from it and exactly one check fails, which is ISC-24's shape.
+   */
+  shimPiVersion?: string;
+  /**
+   * `docker.network`. Defaults to the shared internal `NETWORK`.
+   *
+   * A name ending `-uplink` is answered NON-internal by the shim, which
+   * `ensureEgressNetwork` refuses to adopt — giving a fast, distinctively
+   * worded failure at the step immediately AFTER the image gate. That is how
+   * the ISC-189 positive control proves the gate was passed rather than
+   * skipped, without waiting out a 60s idle gate on a fleet whose containers
+   * this shim cannot actually run.
+   */
+  network?: string;
+  /**
+   * `backend.kind`, written into a `backend:` block (ISC-271).
+   *
+   * Omitted by default, which is what every other fixture in this file gets
+   * and what a real fleet.yaml usually looks like.
+   *
+   * Omitting it and writing `kind: cmux` used to be INDISTINGUISHABLE after
+   * parse — `BackendSchema.kind` carried `.default("cmux")`, so all three of
+   * "no block", "`backend: {}`" and "`kind: cmux`" produced the same object,
+   * and the ISC-271 block below could only pin the flag half. `kind` is
+   * `.optional()` now, an absent block means UNSET, and the config half is
+   * proven by the tests that use this option.
+   */
+  backendKind?: "cmux" | "tmux" | "headless";
 }
 
 /** Minimal valid fleet.yaml naming the shimmed network and the seeded repo. */
@@ -489,9 +776,13 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
   return [
     "version: 2",
     "name: up-wiring",
+    // Emitted only when a test asks, for the same reason `cloud:` is: writing
+    // the key unconditionally would change the document every other test in
+    // this file loads, for no gain.
+    ...(opts.backendKind === undefined ? [] : ["backend:", `  kind: ${opts.backendKind}`]),
     "docker:",
     '  pi_version: "0.79.6"',
-    `  network: ${NETWORK}`,
+    `  network: ${opts.network ?? NETWORK}`,
     "run:",
     `  repo: ${repo}`,
     ...(opts.maxConcurrent === undefined ? [] : [`  max_concurrent: ${opts.maxConcurrent}`]),
@@ -560,7 +851,8 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
   await mkdir(root, { recursive: true });
   await mkdir(repo, { recursive: true });
   await mkdir(bin, { recursive: true });
-  await writeDockerShim(bin);
+  const dockerCalls = join(base, "docker-calls.log");
+  await writeDockerShim(bin, dockerCalls);
   // Both shims always: only a cloud_access run invokes gcloud, but a shim
   // that is present regardless means any UNEXPECTED gcloud call from another
   // path fails loudly instead of reaching the developer's real gcloud.
@@ -571,6 +863,11 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
   // for this one's.
   const gcloudCalls = join(base, "gcloud-calls.log");
   await writeGcloudShim(bin, gcloudCalls);
+  // The third shim, unconditionally, for the reason its docstring gives: the
+  // machine this suite runs on must not decide whether the cmux backend probes
+  // healthy, and must never have its real terminal driven by a test.
+  const cmuxCalls = join(base, "cmux-calls.log");
+  await writeCmuxShim(bin, cmuxCalls);
   /**
    * The fixture ADC file. Written for EVERY rig, not only the cloud ones, for
    * the same reason both shims are installed unconditionally: the developer's
@@ -621,19 +918,36 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
     repo,
     configPath,
     gcloudCalls,
+    dockerCalls,
+    cmuxCalls,
     adcFile,
     runId: "",
     env: {
       PIFLEET_RUNS_DIR: root,
+      // Emptied, not omitted, on the container path — see `containerPath`.
       PIFLEET_PI_COMMAND:
-        `${process.execPath} ${FAKE_PI} --scenario ${join(SCENARIOS, "happy.json")}` +
-        (opts.tokensPerMessage === undefined
+        opts.containerPath === true
           ? ""
-          : ` --tokens-per-message ${opts.tokensPerMessage}`),
+          : `${process.execPath} ${FAKE_PI} --scenario ${join(SCENARIOS, "happy.json")}` +
+            (opts.tokensPerMessage === undefined
+              ? ""
+              : ` --tokens-per-message ${opts.tokensPerMessage}`),
       // The shim shadows the real docker for the CLI and everything it spawns.
       PATH: `${bin}:${process.env["PATH"] ?? ""}`,
       // Pins whose ADC `resolveIdentity` reads. See `Rig.adcFile`.
       GOOGLE_APPLICATION_CREDENTIALS: adcFile,
+      // Absent by default: the shim treats an empty value as "no such image",
+      // which is the answer the ISC-32 gate exists to refuse.
+      ...(opts.imagePresent === true ? { PIFLEET_SHIM_IMAGE: "1" } : {}),
+      ...(opts.shimPiVersion === undefined ? {} : { PIFLEET_SHIM_PI_VERSION: opts.shimPiVersion }),
+      /**
+       * `verifyImage`'s `/workspace` write-through probe creates a scratch
+       * directory under `daemonScratchRoot()`, which defaults to the
+       * DEVELOPER's `~/.pifleet/scratch`. Pinned into this rig's own base so a
+       * test never writes outside the directory `afterAll` removes — the same
+       * discipline `GOOGLE_APPLICATION_CREDENTIALS` applies to the ADC lookup.
+       */
+      PIFLEET_SCRATCH_DIR: join(base, "scratch"),
     },
   };
   rigs.push(rig);
@@ -2566,5 +2880,719 @@ describe("a run moves no ref outside fleet/<run-id>/* (ISC-123, ISC-124)", () =>
     // Measured idle is 1454 ms; 90_000 is 62x that, well past the 3x contention
     // and 2x safety cliBudget already applies.
     90_000,
+  );
+});
+
+/**
+ * `up` refuses a launch whose images are not there, and not there in the sense
+ * the SRD means (ISC-32, ISC-189).
+ *
+ * WHY THIS FILE AND NOT A UNIT TEST. `container/image.ts` had both primitives
+ * for a long time — `verifyImage`, and a `docker image inspect` in `doctor.ts`
+ * — while `up.ts` did not contain the string "image" at all. Grading a
+ * primitive as though it were its consumer is the exact defect the ISA records
+ * against these two criteria, so the assertions here drive the REAL `pifleet up`
+ * process against a real config and read the outcome the way an operator would.
+ *
+ * WHY IT NEEDS NO DAEMON. The `docker` PATH shim answers `image inspect` with
+ * Docker's own "No such image" and exit 1 unless a rig asks otherwise, so the
+ * absent case is a plain subprocess test that runs in the fast `test` CI job.
+ *
+ * THE ORDERING IS THE CRITERION. "Refuses to start" and "starts everything,
+ * then reports a corpse" differ in exit code, in diagnosis, and in how much
+ * state is left behind. What shipped before was the second: `up` created the
+ * run directory, cloned a checkout per worker, registered a remote per worker
+ * IN THE OPERATOR'S OWN REPOSITORY, materialized every input, launched every
+ * supervisor, and only met the dead child at the idle gate ~600 lines later as
+ * `worker <id> died during startup` / `EXIT.WORKER_DIED`. So these tests assert
+ * the refusal AND the absence of every one of those side effects, using three
+ * independent witnesses: the docker call log (nothing after the inspect), the
+ * operator's repository (no remote), and the run directory (no clone, no
+ * worker state, no ledger).
+ */
+describe("up refuses to launch against an image it does not have (ISC-32, ISC-189)", () => {
+  /** The config pin every rig in this block writes. Must match `fleetYaml`. */
+  const PINNED_PI = "0.79.6";
+
+  test(
+    "a missing role image is refused, by name, before anything is cloned or launched (ISC-32)",
+    async () => {
+      const rig = await makeRig({ containerPath: true });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+
+      // A refusal, at the code the egress and hazard guards use: the host is
+      // not in a state this run can use, and nothing is wrong with the argv.
+      // NOT `WORKER_DIED`, which is what this same fleet produced before.
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+      expect(up.code).not.toBe(EXIT.WORKER_DIED);
+
+      // The ROLE is named. This is the criterion's own wording and the whole
+      // reason the gate resolves through the renderer rather than checking a
+      // bare tag: an operator has to know which `roles:` entry to build for.
+      expect(up.stderr).toContain("'engineer'");
+      expect(up.stderr).toContain("eng-1");
+      expect(up.stderr).toContain("refusing to start");
+      expect(up.stderr).toContain("NOT present");
+      // The remedy names the toolchain, so the message is actionable rather
+      // than merely accurate.
+      expect(up.stderr).toContain("pifleet image build --toolchain");
+      // And it quotes what docker actually said, so a stopped daemon and a
+      // missing build do not read identically.
+      expect(up.stderr).toContain("No such image");
+
+      // WITNESS 1 — the docker call log. The gate sits immediately after
+      // `assertModelsAllowed` and immediately BEFORE `ensureEgressNetwork`, so
+      // an inspect with no network call after it places the refusal ahead of
+      // the egress network, the relay, the ledger, the hazard scan, the
+      // clones, the materialization and every supervisor, all of which are
+      // strictly later in `up`.
+      const docker = await readDockerCalls(rig);
+      expect(docker.some((c) => c.startsWith("image inspect pifleet/pi-worker:"))).toBe(true);
+      expect(docker.filter((c) => c.startsWith("network "))).toEqual([]);
+      expect(docker.filter((c) => c.startsWith("run "))).toEqual([]);
+
+      // WITNESS 2 — the operator's repository. `createWorkerWorktrees`
+      // registers one remote per worker HERE, in the repo the operator works
+      // in, and that side effect outlives a failed `up`. It is the most
+      // expensive thing the old behaviour did before discovering the image was
+      // missing, and the one an operator would have to clean up by hand.
+      expect(await gitOk(rig.repo, "remote")).toBe("");
+
+      // WITNESS 3 — the run directory. It exists (it is created before the
+      // config is even read, which is why the gate cannot promise otherwise),
+      // but it must hold no clone, no worker state and no ledger record.
+      const runIds = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
+      expect(runIds).toHaveLength(1);
+      const run = runPaths(runIds[0]!, rig.root);
+      expect(await readdir(run.workersDir)).toEqual([]);
+      const { records } = await mergeLedger(run);
+      expect(records).toEqual([]);
+    },
+    // ISC-266/273 audit: ONE `bun run <cli>` spawn (`runCli`). The two `gitOk`
+    // calls inside `makeRig`'s `seedGitRepo` and the one here are fixture git,
+    // tens of milliseconds each, and charging them the CLI-startup rate would
+    // be the fiction the ISC-119 test above declines for the same reason.
+    cliBudget(1),
+  );
+
+  test(
+    "the refusal names the role even when the worker id and the role differ (ISC-32)",
+    async () => {
+      // `--workers` names `rev-1`; the ROLE is `reviewer`. A gate that echoed
+      // the worker id and called it the role would pass the test above, where
+      // the fixture's only worker is `eng-1` on role `engineer` and the two
+      // strings are similar enough to hide the mistake.
+      const rig = await makeRig({
+        containerPath: true,
+        extraWorkers: [{ id: "rev-1", role: "reviewer" }],
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "rev-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+      expect(up.stderr).toContain("'reviewer'");
+      expect(up.stderr).toContain("rev-1");
+      // And it did NOT gate on the worker that was not asked for.
+      expect(up.stderr).not.toContain("'engineer'");
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "an image that is PRESENT but fails verify is refused too, on the verdict (ISC-189)",
+    async () => {
+      // Present in the store, and reporting a Pi version that is not the pin.
+      // This is ISC-24's shape moved onto the launch path: the image exists,
+      // the tag resolves, and the bytes are wrong.
+      const rig = await makeRig({
+        containerPath: true,
+        imagePresent: true,
+        shimPiVersion: "0.60.0-stale",
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+      expect(up.stderr).toContain("'engineer'");
+      expect(up.stderr).toContain("FAILS verification");
+      // The FAILING CHECK is named, and it is the pi-version one specifically
+      // — not a shim that answered everything wrong. The shim answers uid,
+      // read-only root, tini and write-through the way a healthy image does,
+      // so this string can only come from the one knob that was moved.
+      expect(up.stderr).toContain("pi-version");
+      expect(up.stderr).toContain("0.60.0-stale");
+      expect(up.stderr).toContain(PINNED_PI);
+      // It is NOT the absent message. The two halves of ISC-189 have different
+      // diagnoses and must not collapse into one.
+      expect(up.stderr).not.toContain("NOT present");
+
+      // Same ordering witnesses. Verification ran (several `docker run`s
+      // against the worker image), and still nothing touched the network, the
+      // operator's repository or the run directory.
+      const docker = await readDockerCalls(rig);
+      expect(docker.some((c) => c.startsWith("image inspect pifleet/pi-worker:"))).toBe(true);
+      expect(docker.some((c) => c.startsWith("run ") && c.includes("--version"))).toBe(true);
+      expect(docker.filter((c) => c.startsWith("network "))).toEqual([]);
+      expect(await gitOk(rig.repo, "remote")).toBe("");
+      const runIds = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
+      expect(runIds).toHaveLength(1);
+      expect(await readdir(runPaths(runIds[0]!, rig.root).workersDir)).toEqual([]);
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "an image that is present AND verifies is accepted, and the run advances past the gate (ISC-189)",
+    async () => {
+      /**
+       * THE POSITIVE CONTROL, and the two refusals above are worth nothing
+       * without it: a gate that refused unconditionally would satisfy both.
+       *
+       * The ONLY difference from the test above is `shimPiVersion` — the
+       * version the shimmed image reports. Everything else, the config
+       * included, is identical.
+       *
+       * `network` ends in `-uplink`, which the shim answers NON-internal and
+       * `ensureEgressNetwork` refuses to adopt. That is the step immediately
+       * after the image gate, so its distinctively-worded failure is the
+       * cheapest possible proof that the gate was passed rather than skipped.
+       * Letting the run continue instead would mean waiting out a 60s idle
+       * gate on containers this shim cannot start, to learn nothing more.
+       */
+      const rig = await makeRig({
+        containerPath: true,
+        imagePresent: true,
+        shimPiVersion: PINNED_PI,
+        network: `${NETWORK}-uplink`,
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+      ]);
+
+      // The gate SAID it passed, naming the tag and the role it cleared.
+      expect(up.stdout).toContain("present and verified");
+      expect(up.stdout).toContain("engineer");
+      // And it refused for the NEXT reason instead, which is the evidence that
+      // execution continued rather than stopping here.
+      expect(up.stderr).not.toContain("FAILS verification");
+      expect(up.stderr).not.toContain("NOT present");
+      expect(up.stderr).toContain("is NOT internal");
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+
+      // The network WAS reached this time — the same log line whose absence
+      // carries the ordering claim in the two refusals above.
+      const docker = await readDockerCalls(rig);
+      expect(docker.some((c) => c.startsWith("network inspect"))).toBe(true);
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "the Pi double keeps its exemption, and the gate is not consulted at all (ISC-32)",
+    async () => {
+      /**
+       * The scope boundary, stated as a test rather than as a comment.
+       *
+       * `PIFLEET_PI_COMMAND` means "run the double instead of containers", and
+       * `up` starts no container on that path — so there is no image for a
+       * gate to be about, and demanding one would refuse every double run in
+       * this repository for want of a build. This rig has NO image in the
+       * shimmed store and must still reach a successful launch.
+       *
+       * It is also the guard on the other side: if the gate were ever moved
+       * ahead of the double check, this test goes red immediately rather than
+       * taking the whole integration suite with it in a way that reads as
+       * unrelated breakage.
+       */
+      const rig = await makeRig();
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      // Not merely "it worked": the image store was never asked.
+      const docker = await readDockerCalls(rig);
+      expect(docker.filter((c) => c.startsWith("image "))).toEqual([]);
+    },
+    cliBudget(1),
+  );
+});
+
+/**
+ * The container count follows `workers:` (ISC-61), measured AT THE CLI.
+ *
+ * WHY NOT AT THE MODULE, which is the whole point of this block. ISC-61 was
+ * graded `[x]` for a long time on two tests that called library functions —
+ * `renderAllWorkers` in `test/unit/render.test.ts` and `resolveAllWorkers` in
+ * `test/unit/config.test.ts`. Both were true. Both remain true. And the
+ * criterion was FALSE in production the entire time, in the direction the
+ * wording least suggests: `renderAllWorkers` had ZERO callers in `src/`, and
+ * `up` derived its launch set from argv alone with the commander default
+ * `"eng-1"` — so `up --backend headless --json` with no `--workers` launched
+ * exactly one worker called `eng-1` whether or not any config defined it, and
+ * `--workers a1,b2,c3` launched three ids no config defined. Editing `workers:`
+ * changed nothing about a run.
+ *
+ * So the assertion is on the `up --json` worker array, from the real CLI, with
+ * two configs that differ in `workers:` LENGTH and in nothing else. A library
+ * call cannot close this criterion, because a library call is what left it open.
+ *
+ * These rigs keep the Pi double, deliberately: this criterion is about the
+ * COUNT, and the double is the only way to actually reach a launched,
+ * idle fleet without a daemon. The image gate is not on this path — that is
+ * the block above's subject, and mixing the two would make a failure here
+ * ambiguous between them.
+ */
+describe("the container count follows workers:, at the CLI (ISC-61)", () => {
+  /** `up --json`'s worker array, which is one entry per launched supervisor. */
+  async function launchedWorkerIds(rig: Rig): Promise<string[]> {
+    const up = await runCli(rig, ["up", "--config", rig.configPath, "--backend", "headless", "--json"]);
+    expect(up.stderr === "" || up.code === EXIT.SUCCESS).toBe(true);
+    expect(up.code).toBe(EXIT.SUCCESS);
+    const parsed = JSON.parse(up.stdout.trim()) as {
+      run_id: string;
+      workers: { id: string; pid: number; pgid: number }[];
+    };
+    rig.runId = parsed.run_id;
+    return parsed.workers.map((w) => w.id);
+  }
+
+  test(
+    "adding entries to workers: adds workers to the run, with no other edit and no --workers",
+    async () => {
+      // ONE worker — the fixture's default document.
+      const one = await makeRig();
+      // THREE. The only difference between the two fleet.yaml files is two
+      // extra lines in `workers:` (and the two role declarations they force,
+      // which the schema requires and which name no behaviour).
+      const three = await makeRig({
+        extraWorkers: [
+          { id: "rev-1", role: "reviewer" },
+          { id: "qa-1", role: "qa" },
+        ],
+      });
+
+      // NEITHER command passes `--workers`. That is the criterion: the count
+      // has to come from the file.
+      expect(await launchedWorkerIds(one)).toEqual(["eng-1"]);
+      expect(await launchedWorkerIds(three)).toEqual(["eng-1", "rev-1", "qa-1"]);
+    },
+    // Two `bun run <cli>` `up` spawns, one per rig. Counted, not estimated.
+    cliBudget(2),
+  );
+
+  test(
+    "--workers still narrows the set it is given, and still wins over the file",
+    async () => {
+      /**
+       * The half that must NOT change. `--workers` is an explicit operator
+       * override, and Phase 1 depends on it naming ids that exist only on the
+       * command line — a `PIFLEET_PI_COMMAND` double run has no config entry
+       * to resolve, and most of this repo's integration suite runs that way.
+       *
+       * WHAT WAS DECIDED ABOUT UNDEFINED IDS: they are still accepted, exactly
+       * as before. `assertModelsAllowed` skips them by an explicit membership
+       * test (they have no configured model to check), and `up`'s image gate
+       * skips them by the same set (they have no role and so no image). What
+       * changed is only the DEFAULT — and on the default path every id came
+       * from `workers:`, so both skips become unreachable and every worker is
+       * checked. The skip narrowed; it did not widen.
+       */
+      const rig = await makeRig({
+        extraWorkers: [
+          { id: "rev-1", role: "reviewer" },
+          { id: "qa-1", role: "qa" },
+        ],
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "rev-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      const parsed = JSON.parse(up.stdout.trim()) as {
+        run_id: string;
+        workers: { id: string }[];
+      };
+      rig.runId = parsed.run_id;
+      // One of the three, and the one named — not the config's first entry,
+      // and not the old `"eng-1"` commander default, which this fleet also
+      // happens to define and which a regression would silently produce.
+      expect(parsed.workers.map((w) => w.id)).toEqual(["rev-1"]);
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "with no config there is no list to default to, and up says so instead of inventing one",
+    async () => {
+      /**
+       * The old commander default was the literal string `"eng-1"`. Removing
+       * it leaves exactly one shape with no launch set at all — no config AND
+       * no `--workers` — and it has to be refused rather than answered with a
+       * hard-coded id nobody named.
+       *
+       * `HOME` is redirected at an empty directory so implicit config
+       * resolution genuinely finds nothing: without it this test would depend
+       * on whether the developer happens to have `~/.config/pifleet/fleet.yaml`.
+       * `cwd` is the rig's base for the same reason — `./fleet.yaml` must not
+       * resolve to this repository's own.
+       */
+      const rig = await makeRig();
+      const emptyHome = join(rig.base, "empty-home");
+      await mkdir(emptyHome, { recursive: true });
+      const up = await runCli(rig, ["up", "--backend", "headless", "--json"], {
+        cwd: emptyHome,
+        home: emptyHome,
+      });
+      expect(up.code).toBe(EXIT.USAGE);
+      expect(up.stderr).toContain("no workers named");
+      // And it did not quietly launch the id the old default carried.
+      expect(up.stdout).not.toContain("eng-1");
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "--workers naming nothing is a usage error, not an empty fleet",
+    async () => {
+      const rig = await makeRig();
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        ",, ,",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.USAGE);
+      expect(up.stderr).toContain("no workers named");
+      // Distinguished from the no-config message above: an operator who typed
+      // the flag needs a different sentence from one who omitted it.
+      expect(up.stderr).toContain("--workers was given");
+    },
+    cliBudget(1),
+  );
+});
+
+/**
+ * The backend `up` selects, and which input decided it (ISC-271).
+ *
+ * ISC-271 asks that a `fleet.yaml` setting `backend.kind` either GET that
+ * backend or be REJECTED — never be silently overridden by the flag default.
+ * Both halves are now provable and both are proven here:
+ *
+ *  - THE FLAG HALF. `--backend` carries no commander default any more, so "the
+ *    operator typed it" and "nobody said anything" are different states, and
+ *    the reported backend is the one actually selected.
+ *  - THE CONFIG HALF. `BackendSchema.kind` is `.optional()` rather than
+ *    `.default("cmux")`, so an absent `backend:` block, `backend: {}` and
+ *    `backend: {kind: cmux}` are no longer three spellings of one parsed
+ *    object. `up` can honour the third without forcing cmux onto the first two.
+ *
+ * WHAT `backend.kind` NOW COSTS AN OPERATOR, which is the fact the last test
+ * in this block exists for. The field became binding in the same change that
+ * made it optional, and binding cuts both ways: a config naming a backend this
+ * host cannot present is now exit 3 and no fleet, where before the value was
+ * read by nothing and every such run silently got headless. "The config
+ * decided" is observable in `run.json` whatever the host can run; the
+ * CONSEQUENCE of that decision is only observable on the path with no
+ * `--backend-fallback`, and a criterion that pins the first without the second
+ * grades the half that cannot hurt anyone.
+ */
+describe("which input decides the backend (ISC-271)", () => {
+  test(
+    "an explicit --backend still wins, and the run reports the backend it selected",
+    async () => {
+      const rig = await makeRig();
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      const parsed = JSON.parse(up.stdout.trim()) as { run_id: string; backend: string };
+      rig.runId = parsed.run_id;
+      // Present AND correct. `backend` used to be the raw flag string, which
+      // `JSON.stringify` would have dropped entirely once the commander
+      // default was removed — a key that silently vanishes from a
+      // machine-readable payload is worse than one that is wrong.
+      expect(parsed.backend).toBe("headless");
+      // The run record agrees with the payload. Two records of one fact that
+      // can disagree is how the `--backend-fallback` case went wrong.
+      const runDoc = (await Bun.file(runPaths(parsed.run_id, rig.root).runJson).json()) as {
+        backend: string;
+      };
+      expect(runDoc.backend).toBe("headless");
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "with no --backend at all the run still starts, and still reports a real backend",
+    async () => {
+      /**
+       * The regression guard on removing the commander default. `up` with no
+       * `--backend` must keep selecting `headless` — the value every run in
+       * this repository has been getting — rather than `undefined`, an empty
+       * key, or a crash.
+       */
+      const rig = await makeRig();
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      const parsed = JSON.parse(up.stdout.trim()) as { run_id: string; backend: string };
+      rig.runId = parsed.run_id;
+      expect(parsed.backend).toBe("headless");
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "a config setting backend.kind IS honoured when no --backend is given (ISC-271)",
+    async () => {
+      /**
+       * The middle term of `explicit --backend > backend.kind > DEFAULT_BACKEND`.
+       *
+       * This test previously asserted the DEFECT — that `up` selected
+       * `headless` despite the config saying `cmux` — and was written to go
+       * red the day the schema made `kind` optional. That change has landed
+       * (`BackendSchema.kind` is `.optional()`), so the test now asserts the
+       * contract instead of the gap.
+       *
+       * The witness is `run.json`'s `backend`, which `up` writes from
+       * `requestedBackend` BEFORE `resolveBackendWithFallback` runs — NOT
+       * `--json`'s `backend`, which reports what was finally RESOLVED.
+       *
+       * That distinction is what makes this test portable, and it is not a
+       * detail: whether a cmux server is reachable is a property of the
+       * machine, so asserting the resolved value would pass on a developer's
+       * Mac with cmux.app running and fail on `ubuntu-latest`, where the
+       * fallback fires and resolves to headless. ISC-271 claims the CONFIG
+       * DECIDED, and the requested value is where that decision is observable
+       * regardless of what the host can actually run. `--backend-fallback` is
+       * passed so the run completes either way.
+       */
+      const rig = await makeRig({ backendKind: "cmux" });
+      expect(await Bun.file(rig.configPath).text()).toContain("kind: cmux");
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend-fallback",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      const parsed = JSON.parse(up.stdout.trim()) as { run_id: string; backend: string };
+      rig.runId = parsed.run_id;
+      const doc = JSON.parse(
+        await Bun.file(runPaths(rig.runId, rig.root).runJson).text(),
+      ) as { backend: string };
+      expect(doc.backend).toBe("cmux");
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "an explicit --backend still beats the config (ISC-271)",
+    async () => {
+      /**
+       * The other direction, and the half that makes this a precedence rule
+       * rather than an inversion. The criterion is that the flag's DEFAULT
+       * must stop winning — not that the flag itself stops winning. An
+       * operator who types `--backend headless` against a `kind: cmux` config
+       * gets headless.
+       */
+      const rig = await makeRig({ backendKind: "cmux" });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      const parsed = JSON.parse(up.stdout.trim()) as { run_id: string; backend: string };
+      rig.runId = parsed.run_id;
+      const doc = JSON.parse(
+        await Bun.file(runPaths(rig.runId, rig.root).runJson).text(),
+      ) as { backend: string };
+      expect(doc.backend).toBe("headless");
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "a config naming an unavailable backend, with no fallback, is exit 3 and NO fleet (ISC-271)",
+    async () => {
+      /**
+       * THE OPERATOR-VISIBLE CONSEQUENCE of `backend.kind` becoming binding,
+       * which the three tests above deliberately do not measure.
+       *
+       * Each of them either types `--backend` or passes `--backend-fallback
+       * headless` "so the run completes either way", and then reads
+       * `run.json`'s `backend` — a value `up` writes from `requestedBackend`
+       * BEFORE `resolveBackendWithFallback` is reached. That proves the CONFIG
+       * DECIDED and nothing about what the decision costs. This is the path
+       * with no fallback, where `resolveBackendWithFallback` throws
+       * `BackendUnavailableError` and the operator gets exit 3 and no fleet.
+       *
+       * It is the upgrade case stated as a test. `backend.kind` was parsed and
+       * read by nothing until this change, so a `fleet.yaml` derived from the
+       * shipped example has been running headless on every host regardless of
+       * what it said; the same file on this build refuses. That is why the
+       * shipped `fleet.example.yaml` no longer writes `kind:` live — see the
+       * comment on that block — and this test is what keeps the refusal it
+       * describes real rather than asserted in prose.
+       *
+       * ## WHY THIS IS PORTABLE, which the ISC-271 tests above had to buy by
+       * ## asserting the requested value instead of the resolved one
+       *
+       * Whether cmux is present is a property of the machine: `/opt/homebrew/
+       * bin/cmux` on the workstation this was written on, nothing at all on
+       * `ubuntu-latest`. A test that let the real binary answer would take one
+       * branch here and the other in CI — pass locally, fail in CI, or the
+       * reverse — which is precisely what this file is forbidden to ship.
+       *
+       * So the machine does not get a vote. `makeRig` installs a `cmux` shim
+       * FIRST on this rig's PATH (`writeCmuxShim`), and it answers every
+       * invocation exit 1 with nothing on stdout, which is what an uninstalled
+       * cmux looks like to `probeCmux`'s opening `cmux --version`. The shim
+       * shadows a real cmux where one exists and supplies a definite answer
+       * where none does, so BOTH hosts run the identical code path: probe →
+       * `cmux-binary` required capability fails → no fallback → exit 3. The
+       * only host-dependent input has been removed rather than tolerated, and
+       * the log assertion below proves the shim was reached rather than
+       * bypassed.
+       *
+       * That is the same discipline the `docker` and `gcloud` shims already
+       * apply to this suite; cmux was simply the one external binary nothing
+       * had pinned, because until `backend.kind` bound, no fixture could reach
+       * it from a config.
+       */
+      const rig = await makeRig({ backendKind: "cmux" });
+      expect(await Bun.file(rig.configPath).text()).toContain("kind: cmux");
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--json",
+      ]);
+
+      // Exit 3, not 1 and not 0: `BackendUnavailableError` carries the code
+      // structurally (contracts.ts) and the CLI maps it straight through.
+      expect(up.code, `stderr: ${up.stderr.slice(0, 400)}`).toBe(EXIT.BACKEND_UNAVAILABLE);
+      // Named, actionable, and it says which input is missing. An operator
+      // reading only "backend unavailable" reaches for the config; this one
+      // tells them the flag that completes the run.
+      expect(up.stderr).toContain("backend 'cmux' unavailable");
+      expect(up.stderr).toContain("no --backend-fallback was given");
+
+      // The primary really WAS probed. Without this, an `up` that refused for
+      // some unrelated reason with a coincidentally matching message would
+      // satisfy every assertion above.
+      const cmuxLog = await Bun.file(rig.cmuxCalls)
+        .text()
+        .catch(() => "");
+      expect(cmuxLog).toContain("--version");
+
+      /**
+       * The CONFIG is what asked for cmux — no `--backend` was typed. Read off
+       * `run.json`, which `up` wrote before the resolution failed, so the two
+       * halves of this test (what was requested, what it cost) rest on one
+       * run rather than on two that could disagree.
+       */
+      const runIds = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
+      expect(runIds).toHaveLength(1);
+      const run = runPaths(runIds[0]!, rig.root);
+      const doc = (await Bun.file(run.runJson).json()) as { backend: string };
+      expect(doc.backend).toBe("cmux");
+
+      /**
+       * AND NO FLEET — measured on the SUPERVISOR's own records, not on the
+       * worker directory.
+       *
+       * `workers/eng-1/` does exist by this point: `up` materializes each
+       * worker's inputs long before it resolves a backend, so an
+       * empty-directory assertion here would be pinning an ordering that is
+       * not the one under test, and it would go red for the wrong reason
+       * (measured: the directory is present with `eng-1` in it).
+       *
+       * `state.json` and `launch.json` are the files a SUPERVISOR writes about
+       * ITSELF once it is running, so their absence is the honest statement of
+       * "nothing was launched" — `state.json` specifically being the file
+       * `down`'s anchor reads to decide there is a process to stop at all. That
+       * is the half separating a clean refusal from a half-started run an
+       * operator would then have to `down`.
+       */
+      const wp = workerPaths(run, "eng-1");
+      expect(await Bun.file(wp.stateJson).exists()).toBe(false);
+      expect(await Bun.file(wp.launchJson).exists()).toBe(false);
+    },
+    cliBudget(1),
   );
 });

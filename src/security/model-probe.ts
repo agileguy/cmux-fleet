@@ -20,8 +20,11 @@
  * same worker list, and reading them as a pair is the point.
  */
 
+import { isIP } from "node:net";
 import { EXIT } from "../contracts.ts";
 import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts";
+import { normalizeHost } from "./egress.ts";
+import { parseRelayUpstream, RELAY_DEFAULT_DIAL_HOST } from "./relay.ts";
 
 /**
  * The `fetch` surface this module actually uses, so a test can inject a double.
@@ -500,6 +503,202 @@ export class ToolCallProbeUnavailableError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Where the HOST reaches the model server (ISC-291)
+// ---------------------------------------------------------------------------
+
+/**
+ * The narrowest config a host-side dial target can be derived from.
+ *
+ * `relay_upstream` is optional at the TYPE level for the same reason
+ * `RelayConfigView` makes it optional: absent and `null` mean the same thing,
+ * so a caller holding a pre-ISC-259 shape still type-checks and still gets the
+ * documented default.
+ */
+export interface HostDialConfigView {
+  llm: { base_url: string; relay_upstream?: string | null };
+}
+
+/**
+ * `host.docker.internal`, resolved from the Docker host itself.
+ *
+ * Not a policy choice and not a guess at where oMLX lives — it is what the
+ * alias DENOTES, evaluated from the one machine the alias is defined relative
+ * to. `RELAY_DEFAULT_DIAL_HOST` means "the Docker host"; asked on the Docker
+ * host, the answer is loopback.
+ */
+export const DOCKER_HOST_LOOPBACK = "127.0.0.1";
+
+/**
+ * The single place that answers: WHERE DOES THIS HOST REACH THE MODEL SERVER?
+ * (ISC-291.)
+ *
+ * ## The defect
+ *
+ * `llm.base_url` is documented in `config/schema.ts` as "what a WORKER dials,
+ * from inside the egress bridge — NOT necessarily where the model server is",
+ * and its host component "must stay `host.docker.internal`". That alias is
+ * published by the relay ON the internal bridge and is defined nowhere else.
+ * Measured on this machine 2026-08-20:
+ *
+ *   host           `ping host.docker.internal` → "cannot resolve … Unknown host"
+ *   default bridge `getent hosts host.docker.internal` → 192.168.5.2
+ *   --internal net `getent hosts host.docker.internal` → no answer
+ *
+ * So a HOST-side probe that dials `base_url` verbatim cannot resolve it, ever,
+ * on the shipped default. `doctor` consequently reported the endpoint
+ * unreachable on a healthy machine — and because two of its checks are gated on
+ * having actually fetched a model list, ISC-256's allowlist comparison and
+ * ISC-55's measured completion latency were BOTH silently unreported on the
+ * default path. A note explained the unreachability away rather than removing
+ * it.
+ *
+ * ## The derivation, which falls out of the schema rather than being invented
+ *
+ * 1. `llm.relay_upstream` set — that field already IS the separately-configured
+ *    host-reachable dial target (`schema.ts`, ISC-259). Use it. It is validated
+ *    to be an IP literal or the Docker-host alias, so nothing here has to guess
+ *    whether it resolves.
+ * 2. `relay_upstream` null/absent — the schema documents the default as
+ *    `host.docker.internal:<port from base_url>`. Evaluate that alias from the
+ *    Docker host: loopback, at `base_url`'s port. The port comes from
+ *    `base_url` because that is where the schema says it comes from; deriving
+ *    it anywhere else would be the "second, drifting derivation" the
+ *    `relay_upstream` docstring refuses.
+ * 3. `base_url` already names something else — returned VERBATIM. An operator
+ *    who wrote a real address there meant it, and rewriting it to loopback is
+ *    precisely the `hostFacingBaseUrl` mistake ISC-260 deleted: it answers "can
+ *    this host reach SOME model server" in place of the question asked. On this
+ *    fleet the difference is measured, not hypothetical — the Docker host's own
+ *    instance serves NONE of `fleet.example.yaml`'s allowlisted models while
+ *    the LAN peer serves all three (SRD §5.9, ISC-259), so a loopback rewrite
+ *    would grade a server the fleet was never going to use.
+ *
+ * ## What this deliberately does NOT do
+ *
+ * It does not collapse `base_url` and `relay_upstream`, and it must not. The
+ * separation is what lets the relay's `decide()` gate judge a dial target
+ * against a policy the target was not derived from; overloading `base_url` is
+ * exactly what made that check circular and therefore vacuous (ISC-253). This
+ * function READS both fields and writes neither. `base_url` remains, verbatim
+ * and un-rewritten, what every worker and every container-vantage probe dials —
+ * see `assertModelsSupportToolCalls`, which is why that function is NOT a
+ * caller of this one.
+ *
+ * It is also not a claim that the derived target ANSWERS. It is a claim about
+ * where to ask. Whether anything is listening is what the probe reports.
+ */
+export function hostReachableBaseUrl(cfg: HostDialConfigView): string {
+  // The schema's `z.string().url()` guarantees this parses. A caller holding an
+  // unvalidated string gets the throw, which is the correct outcome: there is
+  // no host-reachable answer for a base_url that is not a URL.
+  const url = new URL(cfg.llm.base_url);
+
+  const raw = cfg.llm.relay_upstream;
+  if (raw !== null && raw !== undefined && raw !== "") {
+    // Through the relay's OWN parser, not a second one. A dial target that
+    // parsed one way here and another way there is the drift this project
+    // keeps a criterion open about.
+    const target = parseRelayUpstream(raw);
+    const host = target.host === RELAY_DEFAULT_DIAL_HOST ? DOCKER_HOST_LOOPBACK : target.host;
+    return compose(url, host, String(target.port), cfg.llm.base_url);
+  }
+
+  // `url.hostname` yields IPv6 WITH brackets; `normalizeHost` strips them and
+  // lowercases, which is what makes this comparison agree with the relay's.
+  if (normalizeHost(url.hostname) === RELAY_DEFAULT_DIAL_HOST) {
+    return compose(url, DOCKER_HOST_LOOPBACK, url.port, cfg.llm.base_url);
+  }
+  return cfg.llm.base_url;
+}
+
+/**
+ * Rebuild a URL with a new authority, changing nothing else.
+ *
+ * Composed from parts rather than by assigning `url.hostname`, because that
+ * setter FAILS SILENTLY on a bare IPv6 literal — measured on bun 1.3.x:
+ * `u.hostname = "fd00::1"` leaves the URL completely unchanged and throws
+ * nothing. A host-reachable target that quietly stayed pointed at the
+ * container alias is the same class of silent wrong answer this whole function
+ * exists to remove.
+ *
+ * The trailing slash is matched to the INPUT because `URL` normalizes an empty
+ * path to `/`, and every caller builds `${baseUrl}/models` by concatenation —
+ * so an introduced slash becomes a `//models` request against a server that
+ * never saw one before.
+ *
+ * ## Everything means EVERYTHING, and two parts used to fall on the floor
+ *
+ * `url.username`/`url.password` and `url.hash` were never re-emitted. The
+ * userinfo case is the one that costs something: `http://key@omlx:8000/v1`
+ * derived to `http://127.0.0.1:8000/v1`, silently credential-free, so a
+ * `doctor` probe against a server that requires Basic auth reported an
+ * unauthenticated 401 as the endpoint's health — the same class of confident
+ * wrong answer this function exists to remove, arriving from the other end.
+ *
+ * Carried through rather than refused, because carrying through is what the
+ * sentence at the top of this docstring PROMISES and there is nothing here
+ * that cannot honour it: userinfo is turned into an `Authorization` header by
+ * the client, and the relay forwards bytes, so a credential that works for a
+ * worker works for the derived host target too. Refusing would be defensible
+ * if the relay could not forward it; it can, so a silent drop is simply a bug.
+ *
+ * ## Why the trailing-slash test moved onto the PATH
+ *
+ * It used to read the last byte of the whole composed STRING against the last
+ * byte of the whole original. With a query present that inspects the query:
+ * `http://host:8000?x=1` composed to `http://127.0.0.1:8000/?x=1` — a slash
+ * introduced into a path that had none, precisely the `//models` hazard above
+ * — because neither string ends in `/` and the heuristic saw no problem.
+ *
+ * The question it was always trying to ask is whether the ORIGINAL had a path
+ * component at all, and `URL` cannot answer that: it normalizes an absent path
+ * to `/`, which is the same value an explicit `http://host/` produces. So it
+ * is answered on the original string, by looking at the first character that
+ * ends the authority. `/` means there was a path and its slashes are the
+ * operator's; `?`, `#` or end-of-string mean there was none and this function
+ * must not invent one.
+ */
+function compose(url: URL, host: string, port: string, original: string): string {
+  const authority = isIP(host) === 6 ? `[${host}]` : host;
+  /**
+   * Emitted only when present, and the password only when it is non-empty —
+   * `user@` and `user:@` are different authorities, and echoing a colon the
+   * input did not carry would be its own quiet rewrite.
+   */
+  const userinfo =
+    url.username === "" && url.password === ""
+      ? ""
+      : `${url.username}${url.password === "" ? "" : `:${url.password}`}@`;
+  return (
+    `${url.protocol}//${userinfo}${authority}${port === "" ? "" : `:${port}`}` +
+    `${originalHadPath(original) ? url.pathname : ""}${url.search}${url.hash}`
+  );
+}
+
+/**
+ * Did the input URL carry a path component of its own?
+ *
+ * Answered on the raw string because the parsed `URL` cannot answer it: an
+ * absent path and an explicit `/` both normalise to `pathname === "/"`, and
+ * `compose` has to tell them apart to avoid introducing a slash into a base
+ * URL that never had one (see its docstring).
+ *
+ * The authority ends at the first `/`, `?` or `#` after the scheme separator.
+ * A `/` there means a path follows; anything else — including running off the
+ * end of the string — means there is none. The scheme separator is always
+ * present: every caller has been through `new URL(...)`, and `config/schema.ts`
+ * additionally allowlists `http:`/`https:`, both of which are special schemes
+ * that require `//`. The guard below is for the caller that has not.
+ */
+function originalHadPath(original: string): boolean {
+  const sep = original.indexOf("://");
+  if (sep === -1) return original.includes("/");
+  const afterAuthorityStart = original.slice(sep + 3);
+  const end = afterAuthorityStart.search(/[/?#]/);
+  return end !== -1 && afterAuthorityStart[end] === "/";
+}
+
 /**
  * Refuse every named worker whose model cannot emit native tool calls, before
  * any supervisor launches (ISC-53).
@@ -549,6 +748,20 @@ export async function assertModelsSupportToolCalls(
     else owners.push(workerId);
   }
 
+  /**
+   * `base_url` VERBATIM, and this is the container-side contract — do not
+   * "fix" it to `hostReachableBaseUrl` (ISC-291 explicitly does not).
+   *
+   * `up` asks this gate through `containerFetch`, from a container on the
+   * egress bridge, which is the entire content of ISC-260: the gate's value is
+   * that it tests the path the WORKERS use, and on that path the correct dial
+   * target is the worker-facing URL. Substituting a host-reachable one here
+   * would certify a path no worker takes — the defect ISC-260 closed, arriving
+   * back through the door ISC-291 opened.
+   *
+   * The host-reachable derivation exists for surfaces that genuinely run on the
+   * host and say so: `doctor`, whose report carries `"vantage": "host"`.
+   */
   const baseUrl = loaded.config.llm.base_url;
   const apiKey = process.env[loaded.config.llm.api_key_env] ?? "";
 
