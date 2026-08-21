@@ -79,6 +79,81 @@ function target(worker: string, proc: { pid: number; started: string }): ReapTar
   return { worker, proc, pgid: null, container: null };
 }
 
+/** Every pid currently in a process group, straight from `ps`. */
+async function groupMembers(pgid: number): Promise<number[]> {
+  const p = Bun.spawn(["ps", "-o", "pid=", "-g", String(pgid)], {
+    env: { ...process.env, LC_ALL: "C" },
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = await new Response(p.stdout).text();
+  await p.exited;
+  return out
+    .split("\n")
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n > 0);
+}
+
+/**
+ * A REAL process group with a leader and a non-leader member.
+ *
+ * Every fixture in this file until now recorded `pgid: null` (line 80) or
+ * `pgid: 0` — both of which make `signalIfSame` skip `confirmGroup` entirely,
+ * so no test here had ever reached the group check from the reaper at all. The
+ * ISC-272 refusals were proved only against a fake OS in `kill.test.ts`, and
+ * what the reaper DID with a refusal was proved nowhere.
+ *
+ * `detached: true` is what `supervisor/launch.ts` uses, and it is what makes
+ * the shell a group leader in its own session — `pgid === pid`. That matters
+ * for blast radius as much as for realism: a NON-detached `sleep` lives in the
+ * TEST RUNNER's group, so a fixture that recorded its live pgid would aim any
+ * regression at the suite itself. That is not hypothetical; it is the scar
+ * `down-prune.test.ts` records. Here the only group any regression can reach is
+ * this fixture's own.
+ *
+ * The `member` is the second process in that group: alive, real, and NOT the
+ * leader, which is precisely the shape `confirmGroup` refuses as `not_led` and
+ * precisely the shape a supervisor takes when it fails to detach.
+ */
+async function detachedGroup(): Promise<{
+  pgid: number;
+  leader: { pid: number; started: string };
+  member: { pid: number; started: string };
+  kill: () => void;
+}> {
+  const shell = Bun.spawn(["sh", "-c", "sleep 300 & sleep 300"], {
+    detached: true,
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  shell.unref();
+  const kill = () => {
+    try {
+      process.kill(-shell.pid, "SIGKILL");
+    } catch {
+      // Already reaped — the desired end state.
+    }
+  };
+  for (let i = 0; i < 40; i++) {
+    const members = await groupMembers(shell.pid);
+    const other = members.find((pid) => pid !== shell.pid);
+    if (other !== undefined) {
+      const leaderStarted = await realProcessOps.startTime(shell.pid);
+      const memberStarted = await realProcessOps.startTime(other);
+      if (leaderStarted === null || memberStarted === null) break;
+      return {
+        pgid: shell.pid,
+        leader: { pid: shell.pid, started: leaderStarted },
+        member: { pid: other, started: memberStarted },
+        kill,
+      };
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  kill();
+  throw new Error(`detached group ${shell.pid} never acquired a second member`);
+}
+
 describe("reapSupervisor against real processes", () => {
   /**
    * Fails if: the ladder stops delivering real signals (fake-ops tests can't
@@ -159,6 +234,185 @@ describe("reapSupervisor against real processes", () => {
       victim.kill();
     }
   }, cliBudget(1));
+});
+
+/**
+ * A REAP THAT STOPPED NOTHING MUST DESTROY NOTHING (ISC-272).
+ *
+ * `group_unconfirmed` means the supervisor is ALIVE and was deliberately not
+ * signalled. `down` honours that — it refuses, keeps the container and keeps
+ * the checkout. The reaper did not: it gated `docker rm -f` on the container
+ * merely EXISTING, the daemon deleted the registry entry for every report it
+ * was handed, and `monitor.forget` dropped the staleness clock. A supervisor
+ * that is not its own group leader therefore had its live container removed
+ * mid-write, vanished from `registry.json`, and became invisible to every later
+ * scan — an orphan holding a worktree nothing on the host still named.
+ *
+ * These probes reach `confirmGroup` from the reaper, which no test in this file
+ * did before: every fixture recorded `pgid: null` or `pgid: 0`, both of which
+ * make `signalIfSame` skip the group check entirely.
+ */
+describe("a reap that refused to stop anything destroys nothing", () => {
+  function frozenState(container: string | null): WorkerState {
+    return WorkerStateSchema.parse({
+      schema: "pifleet.state/v1",
+      worker: "w-1",
+      run_id: "r-1",
+      pid: 1,
+      pgid: 0,
+      started_at: "2026-07-27T09:00:00Z",
+      phase: "busy",
+      epoch: 1,
+      heartbeat_at: "2026-07-27T10:00:00Z",
+      container: container === null ? null : { name: container, id: "abc", image: "img" },
+    });
+  }
+
+  /**
+   * `mismatch`: the record names a group the OS does not put this process in —
+   * a stale or hand-edited state file, which is the entire premise of reading
+   * one at all.
+   *
+   * The recorded number is deliberately `pgid + 1_000_000`, far above any pid
+   * this kernel will issue, so it cannot name a live group. That is blast-radius
+   * insurance rather than realism: if the confirmation is ever deleted, the
+   * signal goes to a group that does not exist and fails with ESRCH instead of
+   * reaching a bystander — and the `container` assertion below still catches the
+   * regression, because ESRCH reads as `already_gone` and `already_gone` removes.
+   *
+   * Fails if: the container is removed on an outcome that never stopped
+   * anything — the live supervisor keeps writing to a worktree whose container
+   * has been torn out from under it.
+   */
+  test("a group the record disagrees with: nothing signalled, the container is spared", async () => {
+    const g = await detachedGroup();
+    try {
+      const { ops, removed } = opsWithFakeDocker();
+      const report = await reapSupervisor(
+        {
+          worker: "w-mismatch",
+          proc: g.leader,
+          pgid: g.pgid + 1_000_000,
+          container: "pifleet-w-mismatch",
+        },
+        { ops, ...FAST },
+      );
+      expect(report.supervisor).toBe("group_unconfirmed");
+      expect(report.container).toBe("spared");
+      expect(removed).toEqual([]);
+      expect(await alive(g.leader.pid)).toBe(g.leader.started);
+      expect(await alive(g.member.pid)).toBe(g.member.started);
+    } finally {
+      g.kill();
+    }
+    // ONE fixture spawn (a detached `sh` that forks two `sleep`s), plus one
+    // charge for the `ps` traffic: the group-membership poll, two identity
+    // reads for the fixture, and the ladder's own reads. Two.
+  }, cliBudget(2));
+
+  /**
+   * `not_led`: record and OS agree perfectly, and the group still belongs to
+   * somebody else, because the target is a MEMBER of it rather than its leader.
+   * That is exactly a supervisor that failed to detach and shares its
+   * launcher's group — the case where `-pgid` would reach the launcher and all
+   * of its other children.
+   *
+   * Fails if: the container is removed, or either process dies. The leader
+   * assertion is the load-bearing one — it is the process a group signal would
+   * have reached in addition to the target.
+   */
+  test("a group the supervisor does not LEAD: nothing signalled, the container is spared", async () => {
+    const g = await detachedGroup();
+    try {
+      const { ops, removed } = opsWithFakeDocker();
+      const report = await reapSupervisor(
+        {
+          worker: "w-notled",
+          proc: g.member,
+          pgid: g.pgid,
+          container: "pifleet-w-notled",
+        },
+        { ops, ...FAST },
+      );
+      expect(report.supervisor).toBe("group_unconfirmed");
+      expect(report.container).toBe("spared");
+      expect(removed).toEqual([]);
+      expect(await alive(g.member.pid)).toBe(g.member.started);
+      expect(await alive(g.leader.pid)).toBe(g.leader.started);
+    } finally {
+      g.kill();
+    }
+    // Same derivation as the mismatch probe above: one fixture spawn plus one
+    // for the `ps` traffic. Two.
+  }, cliBudget(2));
+
+  /**
+   * The staleness clock is the part that decides whether a refusal is a RETRY
+   * or an amnesia. `monitor.forget` was called for every report; for a worker
+   * that is still alive and still registered that resets its staleness to zero,
+   * so it has to spend another full 3x interval going stale before anything
+   * looks at it again — every cycle, forever.
+   *
+   * Fails if: the clock is forgotten for an un-stopped worker. The second scan
+   * then reaps nothing, because the worker it refused a moment ago now reads as
+   * freshly observed.
+   */
+  test("a refused supervisor keeps its staleness clock and is retried next scan", async () => {
+    const g = await detachedGroup();
+    try {
+      const registry = RegistrySchema.parse({
+        schema: "pifleet.registry/v1",
+        run_id: "r-1",
+        daemon: { pid: process.pid, started: "x" },
+        workers: {
+          "w-1": {
+            worker: "w-1",
+            pid: g.member.pid,
+            pgid: g.pgid, // positive, real — and led by someone else
+            started: g.member.started,
+            registered_at: "2026-07-27T09:00:00Z",
+          },
+        },
+      });
+
+      let t = 0;
+      const monitor = new HeartbeatMonitor(() => t);
+      const { ops, removed } = opsWithFakeDocker();
+      const cycle = () =>
+        reapStale({
+          registry,
+          readState: () => Promise.resolve(frozenState("pifleet-w-1")),
+          monitor,
+          heartbeatIntervalMs: 1_000,
+          ops,
+          ...FAST,
+        });
+
+      expect(await cycle()).toEqual([]); // first scan only observes
+      t += 60_000;
+
+      const first = await cycle();
+      expect(first.map((r) => r.supervisor)).toEqual(["group_unconfirmed"]);
+      expect(first[0]!.container).toBe("spared");
+      expect(removed).toEqual([]);
+
+      // The clock survived the refusal: still the full stale interval, not the
+      // zero a forgotten worker reads.
+      expect(monitor.sinceChangeMs("w-1")).toBe(60_000);
+
+      // ...which is what makes the next scan try again instead of starting the
+      // staleness wait over from nothing.
+      const second = await cycle();
+      expect(second.map((r) => r.supervisor)).toEqual(["group_unconfirmed"]);
+
+      expect(await alive(g.member.pid)).toBe(g.member.started);
+      expect(await alive(g.leader.pid)).toBe(g.leader.started);
+    } finally {
+      g.kill();
+    }
+    // One fixture spawn; one for the `ps` traffic of three scans plus the
+    // fixture's own reads. Two.
+  }, cliBudget(2));
 });
 
 describe("HeartbeatMonitor: staleness is change-detection on a monotonic clock", () => {
@@ -297,11 +551,17 @@ describe("the daemon reaps and deregisters", () => {
     return { run, cleanup: () => rm(root, { recursive: true, force: true }) };
   }
 
-  function entry(worker: string, proc: { pid: number; started: string }) {
+  /**
+   * `pgid` defaults to the capture-failed sentinel `0`, which is what every
+   * probe here recorded before ISC-272 had a reaper-side test: a non-positive
+   * group makes `reapStale` pass `pgid: null` and the ladder never reaches
+   * `confirmGroup`. Pass a real, positive one to exercise the group check.
+   */
+  function entry(worker: string, proc: { pid: number; started: string }, pgid = 0) {
     return {
       worker,
       pid: proc.pid,
-      pgid: 0,
+      pgid,
       started: proc.started,
       registered_at: "2026-07-27T09:00:00Z",
     };
@@ -380,6 +640,70 @@ describe("the daemon reaps and deregisters", () => {
       await cleanup();
     }
   }, cliBudget(2));
+
+  /**
+   * The deregistration half of the same rule. `registry.json` is what `status`
+   * and `down` read to find out what this run is running, so deleting an entry
+   * ASSERTS there is no supervisor behind that name. The daemon deleted every
+   * worker it was handed a report for, including the ones the ladder refused to
+   * signal — so a live supervisor lost its name, `down` could no longer stop
+   * it, and the next scan could no longer see it to try again.
+   *
+   * Fails if: an un-stopped supervisor is deregistered. The on-disk assertion
+   * is the load-bearing one; an in-memory-only survival would still leave every
+   * other process reading a file that says the worker is gone.
+   */
+  test("a supervisor the ladder refused to stop stays registered", async () => {
+    const { run, cleanup } = await scratchRun();
+    const g = await detachedGroup();
+    let clock = 0;
+    const announced: string[] = [];
+    const { ops, removed } = opsWithFakeDocker();
+
+    const daemon = await startRegistryDaemon(run, {
+      reaper: {
+        heartbeatIntervalMs: 1_000,
+        scanIntervalMs: 3_600_000,
+        readState: (w) => Promise.resolve(state(w, "2026-07-27T10:00:00Z")),
+        now: () => clock,
+        ops,
+        onReap: (rs) => announced.push(...rs.map((r) => r.worker)),
+        ...FAST,
+      },
+    });
+
+    try {
+      const secret = await loadControlSecret(run);
+      // A MEMBER of a real group, not its leader: the shape `confirmGroup`
+      // refuses as `not_led`, recorded with the positive pgid that makes the
+      // reaper actually ask.
+      await socketRequest(run.daemonSock, {
+        cmd: "register_worker",
+        entry: entry("w-1", g.member, g.pgid),
+      }, { secret });
+
+      expect(await daemon.reapOnce()).toEqual([]); // observe only
+      clock += 60_000;
+
+      const reports = await daemon.reapOnce();
+      expect(reports.map((r) => r.supervisor)).toEqual(["group_unconfirmed"]);
+
+      // Alive, un-signalled, and STILL REGISTERED on disk.
+      expect(await alive(g.member.pid)).toBe(g.member.started);
+      expect(await alive(g.leader.pid)).toBe(g.leader.started);
+      expect((await readRegistry(run))?.workers["w-1"]).toBeDefined();
+      expect(removed).toEqual([]);
+      // The refusal is still announced: a live supervisor this run cannot prove
+      // it owns is precisely the fact an operator needs out of the ledger.
+      expect(announced).toEqual(["w-1"]);
+    } finally {
+      await daemon.stop();
+      g.kill();
+      await cleanup();
+    }
+    // One fixture spawn; one for the daemon's own startup `ps`; one for the
+    // `ps` traffic of two scans. Three.
+  }, cliBudget(3));
 
   test("a healthy worker survives every cycle", async () => {
     const { run, cleanup } = await scratchRun();

@@ -30,6 +30,11 @@ import {
   type ReaperOps,
   type ReapReport,
 } from "../safety/reaper.ts";
+// TYPE-ONLY, and it has to stay that way: `kill.ts` imports `processStartTime`
+// from this module, so a value import here would close the documented
+// `kill.ts -> run/registry.ts -> … -> safety/reaper.ts -> kill.ts` cycle from a
+// second direction. A `import type` is erased before it can.
+import type { KillOutcome } from "../safety/kill.ts";
 import { writeJsonAtomic, LineSplitter, parseLine } from "../util/jsonl.ts";
 import { workerPaths, type RunPaths } from "./paths.ts";
 import { readWorkerState } from "./state.ts";
@@ -371,8 +376,54 @@ export interface ReaperConfig {
   sleep?: (ms: number) => Promise<void>;
   termGraceMs?: number;
   killGraceMs?: number;
-  /** Observability hook — the CLI writes these to the ledger. */
+  /**
+   * Observability hook — the CLI writes these to the ledger.
+   *
+   * Called with EVERY reap attempted, including the ones that refused to stop
+   * anything. A refusal is the fact an operator most needs to see: a live
+   * supervisor that nothing in this run can prove it owns. Filtering those out
+   * to keep the ledger tidy would hide exactly the case that needs a human.
+   */
   onReap?: (reports: ReapReport[]) => void;
+}
+
+/**
+ * Whether a reap report authorises removing the worker from the registry.
+ *
+ * DEREGISTRATION IS A CLAIM, not bookkeeping. `registry.json` is what `status`
+ * and `down` read to find out what this run is running; deleting an entry
+ * asserts there is no longer a supervisor behind that name. For an outcome that
+ * means the supervisor is ALIVE — `group_unconfirmed`, `unconfirmed` — that
+ * assertion is false, and it is false in the direction that loses things: the
+ * worker becomes invisible to `down`, so nothing ever stops it, and invisible
+ * to the reaper's next scan, so nothing ever tries again. It keeps its
+ * container, its worktree and its token spend, and no process on the host names
+ * it any more.
+ *
+ * A SECOND EXHAUSTIVE SWITCH, deliberately not a shared predicate with
+ * `reaper.ts`'s `supervisorStopped`. The two answers agree today, and they are
+ * still two different questions — "may this container be destroyed" and "may
+ * this name be forgotten". A seventh `KillOutcome` has to be answered for both,
+ * by someone looking at both, and a shared helper would answer the second one
+ * silently from a decision made about the first. The `never`-typed default is
+ * what forces that: the root cause of the defect this fixes was that adding a
+ * union member is invisible to `tsc` for a consumer that only stores the value.
+ */
+function deregisterOnReap(outcome: KillOutcome): boolean {
+  switch (outcome) {
+    case "aborted":
+    case "terminated":
+    case "killed":
+    case "already_gone":
+      return true;
+    case "unconfirmed":
+    case "group_unconfirmed":
+      return false;
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`unhandled KillOutcome: ${String(unhandled)}`);
+    }
+  }
 }
 
 /**
@@ -473,6 +524,10 @@ export async function startRegistryDaemon(
    * registry holds at write time rather than by overwriting the snapshot. A
    * worker that registered mid-scan must not be erased by a scan that started
    * before it existed.
+   *
+   * Only the reports that PROVE the supervisor is gone remove anything;
+   * `deregisterOnReap` says why. The rest are still announced, because a
+   * refusal is a fact the ledger needs.
    */
   const reapOnce = async (): Promise<ReapReport[]> => {
     const cfg = opts.reaper;
@@ -488,15 +543,16 @@ export async function startRegistryDaemon(
       now: cfg.now,
       sleep: cfg.sleep,
     });
-    if (reports.length > 0) {
+    const gone = reports.filter((r) => deregisterOnReap(r.supervisor));
+    if (gone.length > 0) {
       await serialized(async () => {
         const workers = { ...registry.workers };
-        for (const r of reports) delete workers[r.worker];
+        for (const r of gone) delete workers[r.worker];
         registry = { ...registry, workers };
         await writeJsonAtomic(run.registryJson, RegistrySchema.parse(registry));
       });
-      cfg.onReap?.(reports);
     }
+    if (reports.length > 0) cfg.onReap?.(reports);
     return reports;
   };
 
