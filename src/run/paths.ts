@@ -118,6 +118,29 @@ export interface RunPaths {
   daemonLog: string;
   daemonSock: string;
   ledgerDir: string;
+  /**
+   * Host-collected copies of the per-worker verbgate ledgers (ISC-172).
+   *
+   * A SIBLING of `ledgerDir`, emphatically not a shard inside it. The two hold
+   * different things: `ledgerDir` holds pifleet's own ledger shards, every row
+   * of which `mergeLedger` parses with `LedgerRecordSchema`, and Phase G just
+   * pinned the behaviour that a malformed record lands in `errors`. Verbgate
+   * rows have an entirely different shape, so filing them as a shard would
+   * generate one merge error per gated verb the fleet ever ran — a working
+   * audit trail expressed as a permanent stream of parse failures.
+   *
+   * Under the run dir and named in NO mount, which is the whole point: a
+   * worker's writable reach into the run dir is `<run>/outbox/<id>` and
+   * `<run>/sessions`, and this is neither. Note what does and does not hold
+   * that up. `assertNoRunDirMount` refuses a mount that IS or CONTAINS the run
+   * dir, so nothing can reach this by mounting an ancestor — but it
+   * deliberately does not flag paths UNDER the run dir, because the entire
+   * §5.5 mount table lives there. So the guarantee for this directory is that
+   * the mount table does not name it, which is an ABSENCE, and an absence has
+   * to be re-checked rather than assumed: `test/unit/render.test.ts` asserts it
+   * against the argv `renderWorker` actually produces.
+   */
+  auditDir: string;
   inboxDir: string;
   sessionsDir: string;
   workersDir: string;
@@ -179,6 +202,7 @@ export function runPaths(runId: string, root: string = runsRoot()): RunPaths {
     daemonLog: join(base, "daemon.log"),
     daemonSock: socketPath(runId, "@daemon"),
     ledgerDir: join(base, "ledger"),
+    auditDir: join(base, "audit"),
     inboxDir: join(base, "inbox"),
     sessionsDir: join(base, "sessions"),
     workersDir: join(base, "workers"),
@@ -373,6 +397,45 @@ export function workerBranch(branchPrefix: string, runId: string, workerId: stri
 /** Ledger shards are per writer (SRD §7.7); the shard name is the writer id. */
 export function ledgerShard(run: RunPaths, writerId: string): string {
   return join(run.ledgerDir, `${writerId}.jsonl`);
+}
+
+/**
+ * The verbgate ledger the WORKER writes, as the HOST spells it (ISC-172).
+ *
+ * `docker/verbgate` writes `/outbox/ledger/verbgate.jsonl` and `/outbox` is
+ * the bind mount `render.ts` pushes as `workerOutboxDir(run.root, w.id)`, so
+ * this is the same file seen from the other side of the mount.
+ *
+ * It is derived from `workerOutboxDir` rather than re-joining `outbox/<id>`
+ * for the reason that function's own header gives: a path duplicated in two
+ * modules eventually diverges in one of them, and a bind-mount disagreement
+ * does not throw — it silently produces an empty directory. Here the failure
+ * would be quieter still: the collector would tail a path nothing writes and
+ * report an empty audit trail for a worker that ran gated verbs all day.
+ *
+ * ABSENCE IS NORMAL and is not an error at any caller. Nothing on the host
+ * creates `<outbox>/ledger/` — only verbgate's own `mkdir -p`, inside the
+ * container, on the first gated verb. A worker that has invoked none, or a run
+ * whose containers never started, legitimately has no such file.
+ */
+export function workerVerbgateLedger(runRoot: string, workerId: string): string {
+  return join(workerOutboxDir(runRoot, workerId), "ledger", "verbgate.jsonl");
+}
+
+/**
+ * The host-collected copy of one worker's verbgate ledger (ISC-172).
+ *
+ * The destination the worker cannot reach — see `RunPaths.auditDir` for why
+ * this is a sibling of the ledger directory rather than a shard in it, and for
+ * exactly what holds the unreachability up.
+ *
+ * Per worker, not one merged file: the collector's whole claim is about
+ * custody, and two workers appending through one host handle would make each
+ * one's trail depend on the other's volume. Sharding by writer is also what
+ * `ledgerShard` does one function up, for the same reason (SRD §7.7).
+ */
+export function verbgateCollectedPath(run: RunPaths, workerId: string): string {
+  return join(run.auditDir, `${workerId}.jsonl`);
 }
 
 /** Where `dispatch` records the full envelope it sent (SRD §7.1). */

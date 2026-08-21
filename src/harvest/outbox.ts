@@ -23,7 +23,8 @@
  * cases are distinct variants so the caller cannot conflate them.
  */
 
-import type { Dirent } from "node:fs";
+import { constants, type Dirent } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { MAX_ITEMS, ResultEnvelopeSchema, type ResultEnvelope } from "../contracts.ts";
@@ -41,6 +42,32 @@ export const MAX_ENVELOPE_BYTES = 4 * 1024 * 1024;
 
 /** Entries walked under `files/` before the scan refuses to continue. */
 export const MAX_OUTBOX_ENTRIES = 10_000;
+
+/**
+ * Validated artifacts HELD OPEN at once before the scan refuses to hold more.
+ *
+ * This bound exists because `safe` holds descriptors (ISC-246, as restated)
+ * and `MAX_OUTBOX_ENTRIES` does not bound them anywhere near tightly enough.
+ * MEASURED, not assumed: a process holding descriptors one-per-entry reaches
+ * `EMFILE: too many open files` after 252 opens under a 256 soft limit — the
+ * macOS default in plenty of launch contexts — which is forty times below
+ * `MAX_OUTBOX_ENTRIES`. Uncapped, a large outbox would not merely fail its own
+ * scan; it would drain the process table out from under everything the
+ * harvester still has to do afterwards, including writing the report that says
+ * what went wrong.
+ *
+ * 128 is half of that 256 floor, so the scan leaves headroom for the rest of
+ * the process even in the worst common environment, and it is far above any
+ * legitimate task outbox. Exceeding it is a NAMED refusal, not an exception:
+ * refused entries are surfaced through `harvest/index.ts` like every other
+ * refusal, so an operator who genuinely needs more artifacts learns why rather
+ * than reading an errno.
+ *
+ * It is a bound, not a guarantee: Node exposes no portable `getrlimit`, so the
+ * scan cannot know the ambient soft limit. Where that limit is below this cap,
+ * the per-entry open failure is the backstop and reports the errno by name.
+ */
+export const MAX_HELD_DESCRIPTORS = 128;
 
 /** Where a task's envelope lives and which mounts its paths may refer to. */
 export interface OutboxLocation {
@@ -60,12 +87,65 @@ export type OutboxRead =
   | { kind: "refused"; reason: string }
   | { kind: "ok"; envelope: ResultEnvelope };
 
+/**
+ * One validated artifact, HELD OPEN (ISC-246, as restated).
+ *
+ * The descriptor is the point. A scan that returned a path string would be
+ * handing a consumer a NAME, and a name is re-resolved every time it is used:
+ * whatever `realpath` and `nlink` proved at scan time would have to be taken
+ * on trust at read time, with the worker that authored the directory free to
+ * act in between. Holding the descriptor means the inode that passed the
+ * checks IS the inode a consumer reads, with no second resolution to race.
+ */
+export interface OutboxFile {
+  /**
+   * Host path the entry was found at.
+   *
+   * For REPORTING — this is the name an operator needs to see. It is
+   * deliberately not the way to reach the content: re-opening it is the exact
+   * re-resolution `handle` exists to avoid.
+   */
+  path: string;
+  /**
+   * Open read descriptor on the inode that passed the checks.
+   *
+   * THE CALLER OWNS IT AND MUST CLOSE IT — `closeOutboxScan` releases a whole
+   * scan in one call. Every accepted entry holds one for the lifetime of the
+   * scan result, which is what `MAX_HELD_DESCRIPTORS` bounds.
+   */
+  handle: FileHandle;
+}
+
 /** One physically-checked entry under `<outbox>/<task>/files/`. */
 export interface OutboxFileScan {
-  /** Host paths of regular files that passed the lstat/realpath checks. */
-  safe: string[];
+  /** Regular files that passed the checks, each holding an open descriptor. */
+  safe: OutboxFile[];
   /** Entries refused, with the reason — surfaced, never silently dropped. */
   refused: Array<{ path: string; reason: string }>;
+}
+
+/**
+ * Release every descriptor a scan is holding. Idempotent.
+ *
+ * `safe` is EMPTIED as it is closed, so a second call is a no-op and a
+ * double-close is not reachable through this function. A caller that has
+ * finished with a scan should call this in a `finally`; there is no finalizer
+ * behind it, and a scan dropped without closing leaks one descriptor per
+ * accepted artifact.
+ */
+export async function closeOutboxScan(scan: OutboxFileScan): Promise<void> {
+  const held = scan.safe.splice(0);
+  await Promise.all(
+    held.map(async (f) => {
+      // A close that fails has nothing left to release — the descriptor is
+      // gone either way, and throwing here would strand its siblings.
+      try {
+        await f.handle.close();
+      } catch {
+        /* already closed, or the fd was invalidated under us */
+      }
+    }),
+  );
 }
 
 /**
@@ -390,6 +470,30 @@ export async function readResultEnvelope(loc: OutboxLocation): Promise<OutboxRea
  * directories are refused outright rather than resolved — recursing through
  * one is a walk loop waiting to happen, and nothing legitimate needs a
  * directory symlink inside its own outbox.
+ *
+ * VALIDATE THEN HOLD (ISC-246, as restated). An accepted entry is OPENED and
+ * the descriptor is kept in `safe`; `nlink` and "is this a regular file" are
+ * then answered by `fstat` ON THAT DESCRIPTOR rather than by a second `lstat`
+ * on the name. The name is resolved exactly once, and the inode that passed
+ * the checks is the inode the caller receives — there is no later re-open for
+ * the authoring worker to race. `O_NOFOLLOW` makes the open itself a check: an
+ * entry that `readdir` reported as a plain file and that has become a symlink
+ * by the time it is opened fails with `ELOOP` instead of being followed.
+ * `O_NONBLOCK` covers the same swap into a FIFO, which would otherwise wedge
+ * the open until a writer appeared (§12.5).
+ *
+ * THE HONESTY PARAGRAPH — what holding descriptors does NOT buy, stated here
+ * because this is where the next reader will look for it. **The directory WALK
+ * IS STILL PATH-BASED, and that cannot be fixed in this runtime**: Node
+ * exposes no `openat` relative to a `FileHandle`, so `readdir` and the
+ * `realpath` containment check below both operate on names, re-resolved from
+ * the root on every call. A DIRECTORY swapped mid-walk — `files/sub` replaced
+ * between the `readdir` that listed it and the `open` of a leaf inside it — is
+ * NOT caught, and no amount of descriptor-holding at the leaves catches it.
+ * Containment therefore remains a path-time claim: what is pinned is the
+ * IDENTITY of each accepted file, not the identity of the tree it was found
+ * in. That is a real and deliberate limit, not an oversight to be closed by a
+ * test.
  */
 export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileScan> {
   const taskOutbox = join(loc.workerOutboxDir, loc.taskId);
@@ -407,6 +511,81 @@ export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileSc
    */
   const refuse = (path: string, reason: string): void => {
     out.refused.push({ path: safeForReport(path), reason: safeForReport(reason, 512) });
+  };
+
+  /** Set once the descriptor budget is spent, to unwind the walk. */
+  let budgetSpent = false;
+
+  /**
+   * The ONLY way an entry enters `safe`, and the only place a descriptor is
+   * opened — the counterpart to `refuse` above, and a choke point for the same
+   * reason: an accept path added later cannot forget to validate on the
+   * descriptor or to close on refusal, because there is nothing else to call.
+   *
+   * `reportAs` is the name the entry was found under, which is what the
+   * operator needs to see. `target` is the path that passed containment, which
+   * is what gets opened — for a plain file they are the same name; for an
+   * accepted in-outbox symlink they differ, and opening the RESOLVED path is
+   * deliberate: it is the path containment was actually measured against.
+   *
+   * Every exit that is not the final `push` closes the descriptor first. That
+   * is the whole fd-lifetime discipline, and it is confined to this function
+   * on purpose.
+   */
+  const holdIfSafe = async (reportAs: string, target: string): Promise<void> => {
+    if (out.safe.length >= MAX_HELD_DESCRIPTORS) {
+      refuse(reportAs, `more than ${MAX_HELD_DESCRIPTORS} artifacts to hold open; scan stopped`);
+      budgetSpent = true;
+      return;
+    }
+
+    let handle: FileHandle;
+    try {
+      // O_NOFOLLOW: refuse rather than follow, if the name became a link
+      // between the walk and here. O_NONBLOCK: a FIFO swapped in must not
+      // wedge this open waiting for a writer.
+      handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (e) {
+      // Named, never an escaping errno: EMFILE (the ambient soft limit is
+      // below MAX_HELD_DESCRIPTORS), ELOOP (it is a symlink now and was not
+      // during the walk), EACCES, ENOENT (it vanished) all land here.
+      const code = (e as NodeJS.ErrnoException).code ?? "unknown";
+      refuse(reportAs, `cannot be opened to hold (${code})`);
+      return;
+    }
+
+    try {
+      // fstat, NOT a second lstat on the name: this answers for the inode the
+      // descriptor already holds, so nothing between here and the caller's
+      // read can change the thing being described.
+      const st = await handle.stat();
+      if (!st.isFile()) {
+        // A directory or FIFO swapped in behind a plain-file dirent. Opening
+        // it succeeded; it is still not a regular file.
+        refuse(reportAs, "not a regular file");
+        return void (await handle.close());
+      }
+      // A hard link to a file outside the outbox resolves INSIDE it — the link
+      // is the inode's second name and realpath cannot see the first. Link
+      // count is the only local evidence, so more than one name means the
+      // harvester cannot prove the content originated here. Read from the
+      // DESCRIPTOR, so a name raised to a second link after the path checks
+      // cannot present itself as single-linked.
+      if (st.nlink > 1) {
+        refuse(reportAs, `file has ${st.nlink} links; may be a hard link to content outside the outbox`);
+        return void (await handle.close());
+      }
+    } catch {
+      refuse(reportAs, "file vanished during the scan");
+      try {
+        await handle.close();
+      } catch {
+        /* nothing left to release */
+      }
+      return;
+    }
+
+    out.safe.push({ path: reportAs, handle });
   };
 
   // The containment root must be canonicalized with the same realpath the
@@ -461,6 +640,9 @@ export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileSc
       return; // files/ is optional; a task with no file artifacts has none
     }
     for (const e of entries) {
+      // The budget was spent deeper in the tree; unwind rather than refuse
+      // once per remaining entry. One refusal names the cause.
+      if (budgetSpent) return;
       if (++seen > MAX_OUTBOX_ENTRIES) {
         refuse(dir, `more than ${MAX_OUTBOX_ENTRIES} entries; scan stopped`);
         return;
@@ -482,15 +664,11 @@ export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileSc
           continue;
         }
         // In-outbox symlink: harmless as a reference, but only when its
-        // target is a regular file — checked via the resolved path, which by
-        // construction cannot be a link.
-        try {
-          const ts = await lstat(target);
-          if (ts.isFile()) out.safe.push(p);
-          else refuse(p, "symlink target is not a regular file");
-        } catch {
-          refuse(p, "symlink target vanished");
-        }
+        // target is a regular file. Opened at the RESOLVED path — the one
+        // containment was measured against, and by construction not itself a
+        // link — then judged on the descriptor. Reported under the name it was
+        // found as, so the operator sees the link and not its target.
+        await holdIfSafe(p, target);
         continue;
       }
       if (e.isDirectory()) {
@@ -541,21 +719,11 @@ export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileSc
           refuse(p, `file escapes the outbox (→ ${real})`);
           continue;
         }
-        // A hard link to a file outside the outbox resolves INSIDE it — the
-        // link is the inode's second name and realpath cannot see the first.
-        // Link count is the only local evidence, so more than one name means
-        // the harvester cannot prove the content originated here.
-        try {
-          const st = await lstat(p);
-          if (st.nlink > 1) {
-            refuse(p, `file has ${st.nlink} links; may be a hard link to content outside the outbox`);
-            continue;
-          }
-        } catch {
-          refuse(p, "file vanished during the scan");
-          continue;
-        }
-        out.safe.push(p);
+        // Opened at `p` rather than at `real`: for a plain entry the two name
+        // the same inode, and `p` is the name O_NOFOLLOW can still refuse if
+        // it has become a symlink since the walk listed it. `nlink` is then
+        // read from the descriptor — see `holdIfSafe`.
+        await holdIfSafe(p, p);
         continue;
       }
       // FIFO, socket, device: opening one can block forever (§12.5's wedged
@@ -564,6 +732,16 @@ export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileSc
     }
   };
 
-  await walk(filesRoot);
+  // The scan hands its descriptors to the caller, so it must not hand back a
+  // PARTIAL set it can no longer name. If the walk dies unexpectedly there is
+  // no result to own them and every fd opened so far would leak silently;
+  // releasing before the throw is the only point at which they are still
+  // reachable.
+  try {
+    await walk(filesRoot);
+  } catch (e) {
+    await closeOutboxScan(out);
+    throw e;
+  }
   return out;
 }

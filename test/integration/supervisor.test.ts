@@ -19,10 +19,11 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, readdir, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskEnvelopeSchema, type TaskEnvelope } from "../../src/contracts.ts";
+import { runGit } from "../../src/harvest/git.ts";
 import { RpcClient } from "../../src/rpc/client.ts";
 import { runPaths, taskRecordPath, workerPaths, type WorkerPaths } from "../../src/run/paths.ts";
 import {
@@ -136,7 +137,18 @@ async function waitForIdle(wp: WorkerPaths, pid: number, budgetMs = 20_000): Pro
   }, budgetMs);
 }
 
-function makeEnvelope(runId: string, worker: string, taskId: string): TaskEnvelope {
+function makeEnvelope(
+  runId: string,
+  worker: string,
+  taskId: string,
+  /**
+   * The host-side worktree, defaulting to the envelope's "no worktree"
+   * spelling. Only the ISC-154 block below passes a real one: the supervisor
+   * samples the tree at settle, and every other test here dispatches against
+   * `"unset"` precisely so no git subprocess enters the path it is measuring.
+   */
+  hostWorkdir: string = "unset",
+): TaskEnvelope {
   return TaskEnvelopeSchema.parse({
     schema: "pifleet.task/v1",
     task_id: taskId,
@@ -148,7 +160,7 @@ function makeEnvelope(runId: string, worker: string, taskId: string): TaskEnvelo
     title: "integration task",
     brief: "do the integration thing",
     repo: "unset",
-    host_workdir: "unset",
+    host_workdir: hostWorkdir,
     container_workdir: "/workspace",
     branch: `fleet/${runId}/${worker}`,
     base_ref: "0".repeat(40),
@@ -1683,5 +1695,146 @@ describe("export_html over the control socket (ISC-234)", () => {
     // supervisor budget this test exists to observe, plus launch and a turn.
     // Measured 8.5 s at load average 3.1-3.6 on a 14-core box.
     60_000,
+  );
+});
+
+/**
+ * ISC-154, producer half: the supervisor samples the worktree at QUIESCE.
+ *
+ * This is the half that cannot be faked in `harvest.test.ts`, which writes
+ * the task record by hand. The criterion's premise is that the two hashes are
+ * taken at different moments by different code — if the harvester took both,
+ * they would be two reads microseconds apart against one tree, always equal,
+ * and the check could never fire. So one of them has to be taken HERE, in the
+ * supervisor, in a different process, at the instant the epoch is declared
+ * over. These tests are the evidence that it is.
+ */
+describe("the supervisor records a quiesce tree hash at settle (ISC-154)", () => {
+  /** A real repository for the worker to have "worked" in. */
+  async function scratchWorktree(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-sup-tree-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    await runGit(dir, ["init", "-q", "-b", "main"]);
+    await runGit(dir, ["config", "user.email", "fixture@test"]);
+    await runGit(dir, ["config", "user.name", "fixture"]);
+    await writeFile(join(dir, "work.txt"), "original\n");
+    await runGit(dir, ["add", "-A"]);
+    await runGit(dir, ["commit", "-qm", "base"]);
+    return dir;
+  }
+
+  test(
+    "the settled task record carries a quiesce hash of the real worktree",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("treehash");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      await mkdir(wp.tasksDir, { recursive: true });
+      await mkdir(run.sessionsDir, { recursive: true });
+      const workdir = await scratchWorktree();
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("happy.json") },
+        logPath: wp.supervisorLog,
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      const dispatch = async (taskId: string): Promise<string | null> => {
+        const reply = await controlCall(run, "eng-1", {
+          cmd: "dispatch",
+          envelope: makeEnvelope(runId, "eng-1", taskId, workdir),
+          attempt_id: `att-${taskId}`,
+          requested_epoch: null,
+        });
+        expect(reply["accepted"]).toBe(true);
+        const settled = await waitFor(
+          async () => (await readTaskRecord(taskRecordPath(wp, taskId))) !== null,
+          10_000,
+        );
+        expect(settled).toBe(true);
+        return (await readTaskRecord(taskRecordPath(wp, taskId)))!.tree_hash;
+      };
+
+      // THE assertion: a real git tree id, written by the supervisor, into
+      // the durable record harvest reads. Before this wiring the field did
+      // not exist and `tree_hash_quiesce` was null on every run in the fleet,
+      // which is what made the live ISC-154 rule unreachable.
+      const first = await dispatch("T-TREE-1");
+      expect(first).toMatch(/^[0-9a-f]{40}$/);
+
+      /**
+       * And it is a MEASUREMENT, not a constant.
+       *
+       * A supervisor that wrote any fixed string — the empty tree, HEAD, a
+       * placeholder — would satisfy the assertion above and still leave the
+       * criterion inert, because two equal constants never differ. So the
+       * tree is changed with an UNTRACKED file (the criterion's actual
+       * scenario, and the one an index-only hash cannot see) and a second
+       * task is dispatched through the same supervisor. The hash must move.
+       */
+      await writeFile(join(workdir, "background-output.log"), "written between settles\n");
+      const second = await dispatch("T-TREE-2");
+      expect(second).toMatch(/^[0-9a-f]{40}$/);
+      expect(second).not.toBe(first);
+    },
+    // scratchWorktree = 5 git spawns, + 1 supervisor launch, + 2 settles each
+    // costing `worktreeContentHash` 2 git spawns (`add -A`, `write-tree`).
+    cliBudget(10),
+  );
+
+  /**
+   * The absence direction, at the producer.
+   *
+   * A task dispatched with no worktree (`host_workdir: "unset"`) has no tree
+   * to sample, and the supervisor must record that as null rather than
+   * running git somewhere arbitrary or inventing a value. Null is what makes
+   * the adjudicator stay silent; a sentinel string here would compare unequal
+   * to a real harvest hash and void a task nobody could defend.
+   */
+  test(
+    "a task with no worktree settles with a null hash, not a guess",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("treenull");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      await mkdir(wp.tasksDir, { recursive: true });
+      await mkdir(run.sessionsDir, { recursive: true });
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("happy.json") },
+        logPath: wp.supervisorLog,
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-TREE-NONE"),
+        attempt_id: "att-none",
+        requested_epoch: null,
+      });
+      const settled = await waitFor(
+        async () => (await readTaskRecord(taskRecordPath(wp, "T-TREE-NONE"))) !== null,
+        10_000,
+      );
+      expect(settled).toBe(true);
+      const record = await readTaskRecord(taskRecordPath(wp, "T-TREE-NONE"));
+      expect(record?.verdict).toBe("success");
+      expect(record?.tree_hash).toBeNull();
+    },
+    // 1 supervisor launch + 1 dispatch. No worktree by construction, so
+    // `worktreeContentHash` is never reached and costs no git spawns.
+    cliBudget(2),
   );
 });

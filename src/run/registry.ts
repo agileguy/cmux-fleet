@@ -38,6 +38,7 @@ import type { KillOutcome } from "../safety/kill.ts";
 import { writeJsonAtomic, LineSplitter, parseLine } from "../util/jsonl.ts";
 import { workerPaths, type RunPaths } from "./paths.ts";
 import { readWorkerState } from "./state.ts";
+import { VerbgateCollector, type VerbgateCollectReport } from "./verbgate-collect.ts";
 
 // ---------------------------------------------------------------------------
 // Process identity — pid + start time, never pid alone.
@@ -734,6 +735,16 @@ export interface RegistryDaemon {
    * that races a timer is the anti-pattern this whole suite avoids.
    */
   reapOnce(): Promise<ReapReport[]>;
+  /**
+   * One verbgate-ledger collection pass (ISC-172). Exposed for the same reason
+   * `reapOnce` is — so a collection can be driven deterministically — and for
+   * one more: `down` needs a FINAL pass after the containers are gone but
+   * before this daemon stops. Everything the collector has already copied
+   * survives a worker truncating its ledger; rows written and truncated
+   * between two passes do not, so the last pass is the difference between an
+   * audit trail that ends at the final tick and one that ends at teardown.
+   */
+  collectVerbgateOnce(): Promise<VerbgateCollectReport[]>;
 }
 
 /**
@@ -939,6 +950,20 @@ export async function startRegistryDaemon(
     return reports;
   };
 
+  /**
+   * The verbgate-ledger collector (ISC-172), on the daemon's own tick.
+   *
+   * One instance for the daemon's lifetime, because a `TailReader`'s value is
+   * its byte offset: rebuilt each pass it would re-copy every worker's whole
+   * ledger every period, and — worse — never observe a truncation, since a
+   * fresh reader has nothing to notice a restart against.
+   */
+  const verbgateCollector = new VerbgateCollector(run);
+  let collecting = false;
+
+  const collectVerbgateOnce = async (): Promise<VerbgateCollectReport[]> =>
+    verbgateCollector.collectOnce();
+
   let scanning = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   if (opts.reaper !== undefined) {
@@ -947,6 +972,34 @@ export async function startRegistryDaemon(
       // A scan outlasting its period must not stack: the ladder's grace
       // periods are seconds long, and overlapping scans would aim two kill
       // ladders at one pid — the second at whatever inherits it.
+      /*
+       * Collection is started BESIDE the reap, not inside it, and the two
+       * failure paths are deliberately separate (ISC-172).
+       *
+       * They protect different things and neither is allowed to disable the
+       * other: a collector that throws on one unreadable ledger must not stop
+       * the fleet being reaped, and a reap that aborts mid-iteration must not
+       * cost the audit trail its pass. Sharing `scanning` would also couple
+       * their periods — a slow reap would silently skip collections, and the
+       * gap between two collections is exactly the window in which a worker
+       * can write a row and truncate it unseen.
+       */
+      if (!collecting) {
+        collecting = true;
+        void collectVerbgateOnce()
+          .catch((err: unknown) => {
+            // Same stance as the reaper's catch below, for the same reason: a
+            // persistent cause would otherwise disable collection for the
+            // whole run with nothing anywhere saying so.
+            process.stderr.write(
+              `verbgate collector: pass aborted, retrying next period: ${String(err)}\n`,
+            );
+          })
+          .finally(() => {
+            collecting = false;
+          });
+      }
+
       if (scanning) return;
       scanning = true;
       void reapOnce()
@@ -981,9 +1034,42 @@ export async function startRegistryDaemon(
       server = null;
     },
     reapOnce,
+    collectVerbgateOnce,
   };
   onShutdown = () => {
-    void daemon.stop().then(() => opts.onShutdown?.());
+    /**
+     * ONE LAST COLLECTION, BEFORE THE TICK DIES (ISC-172).
+     *
+     * `down` removes the containers and then tells this daemon to stop, so
+     * without a pass here the audit trail ends at the last periodic tick and
+     * every gated verb between that tick and teardown is lost — including
+     * anything a worker did precisely because it was being shut down. The tick
+     * stops inside `daemon.stop()`, so this has to run first.
+     *
+     * It is BOUNDED and its failure is swallowed, deliberately. A daemon that
+     * refuses to stop is a worse outcome than an audit trail missing its last
+     * few rows: `down` would hang, and the operator's recourse would be to
+     * kill it, which loses the rows anyway AND leaves a socket behind. So the
+     * collection races a timeout and shutdown proceeds either way — the
+     * guarantee this criterion makes is "everything collected survives", never
+     * "everything is collected".
+     */
+    const FINAL_PASS_MS = 5_000;
+    const bounded = Promise.race([
+      collectVerbgateOnce().catch((err: unknown) => {
+        process.stderr.write(`verbgate collector: final pass failed: ${String(err)}\n`);
+      }),
+      new Promise<void>((resolve) => {
+        const t = setTimeout(() => {
+          process.stderr.write(
+            `verbgate collector: final pass exceeded ${String(FINAL_PASS_MS)}ms, stopping anyway\n`,
+          );
+          resolve();
+        }, FINAL_PASS_MS);
+        t.unref?.();
+      }),
+    ]);
+    void bounded.then(() => daemon.stop()).then(() => opts.onShutdown?.());
   };
   return daemon;
 }

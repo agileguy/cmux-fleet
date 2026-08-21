@@ -32,6 +32,7 @@ import {
 } from "../contracts.ts";
 import { workerOutboxDir, workerPaths, taskRecordPath, type RunPaths } from "../run/paths.ts";
 import { readTaskRecord, readWorkerState } from "../run/state.ts";
+import { worktreeContentHash } from "../run/treehash.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
   readResultEnvelope,
@@ -326,6 +327,39 @@ export async function harvestTask(
       reasons.push(`acceptance could not be run: ${String(err)}`);
     }
   }
+
+  /**
+   * ISC-154: the two worktree hashes, and the reason they are two.
+   *
+   * The check is "did the tree move between quiesce and harvest end", and it
+   * only means anything if the two samples are taken at genuinely different
+   * moments by genuinely different code. They are:
+   *
+   *   - QUIESCE is sampled by the SUPERVISOR, inside `settle`, in a different
+   *     process, at the instant it declares the epoch over. It survives to
+   *     here only because it was written into the task record — the same
+   *     durable channel this function already reads supervisor-terminal
+   *     verdicts from a few lines above.
+   *   - HARVEST END is sampled HERE, last, after the diff has been derived
+   *     and after any acceptance exam has been held. Deliberately the final
+   *     measurement in the function: sampling it earlier would leave a window
+   *     at the end of harvest that the check is blind to, which is precisely
+   *     the window a backgrounded writer occupies.
+   *
+   * Had both been taken by this function they would be two calls microseconds
+   * apart against one tree, always equal, and the criterion would be closed
+   * by a comparison that cannot fail.
+   *
+   * The quiesce hash is accepted ONLY from a record matching this envelope's
+   * epoch. A record from a different epoch describes a different dispatch of
+   * this task; comparing its tree against today's harvest would void the task
+   * for the entirely legitimate act of having been retried.
+   */
+  factsWithHarness.tree_hash_quiesce =
+    record !== null && record.epoch === envelope.epoch ? record.tree_hash : null;
+  factsWithHarness.tree_hash_harvest = hasWorktree
+    ? await worktreeContentHash(envelope.host_workdir)
+    : null;
 
   const adj = adjudicateFacts(factsWithHarness, claimed);
   let verdict = adj.verdict;

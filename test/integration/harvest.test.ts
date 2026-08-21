@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { HarvestSchema, VerdictSchema } from "../../src/contracts.ts";
 import { DEFAULT_HARNESS_PATTERNS, harnessSurfaceFor } from "../../src/harvest/acceptance.ts";
 import { deriveGitFacts } from "../../src/harvest/git.ts";
+import { worktreeContentHash } from "../../src/run/treehash.ts";
 import { cliBudget } from "../support/budget.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
@@ -374,6 +375,88 @@ beforeAll(async () => {
         ],
       }),
     );
+  }
+
+  /**
+   * T-tree-*: the ISC-154 pair, and the ONLY difference between them is one
+   * untracked file appearing after quiesce.
+   *
+   * Both get their own worktree, an identical honest envelope, an identical
+   * passing acceptance command, and a task record carrying a REAL quiesce
+   * hash of their tree. Everything the adjudicator weighs is therefore
+   * identical, and both would reach `success` — which is what makes the pair
+   * a controlled experiment rather than two assertions. Any verdict
+   * difference is the moved tree's doing and nothing else's.
+   *
+   * The quiesce hash is computed here with the same module the SUPERVISOR
+   * uses, standing in for the supervisor because this file has no supervisor
+   * in it. That the supervisor genuinely writes this field on the real path
+   * is proved where the supervisor actually runs — `supervisor.test.ts`,
+   * "the settled task record carries a quiesce hash of the real worktree".
+   * The half being proved HERE is the other one: that harvest reads it, takes
+   * its own independent sample at the end, and acts on the difference.
+   */
+  for (const [id, worker, moved] of [
+    ["T-tree-moved", "w-moved", true],
+    ["T-tree-still", "w-still", false],
+  ] as const) {
+    const tw = join(repo, ".worktrees", worker);
+    await git(repo, "worktree", "add", "-q", "-b", `fleet/${RUN_ID}/${worker}`, tw, baseSha);
+    await writeFile(join(tw, "a.txt"), "one\nCHANGED\nthree\n");
+    await git(tw, "add", ".");
+    await git(tw, "commit", "-q", "-m", "real work");
+    await writeFile(
+      join(runDir, "inbox", `${id}.json`),
+      JSON.stringify(taskEnvelope(id, worker, tw, ["grep -q CHANGED a.txt"])),
+    );
+    await mkdir(join(runDir, "outbox", worker, id), { recursive: true });
+    await writeFile(
+      join(runDir, "outbox", worker, id, "result.json"),
+      JSON.stringify({
+        schema: "pifleet.result/v1",
+        task_id: id,
+        epoch: 1,
+        worker,
+        status: "success",
+        summary: "finished and stopped, honest",
+        files_changed: [{ path: "a.txt", change: "modified" }],
+      }),
+    );
+
+    // Quiesce: the supervisor's sample, taken while the tree is still what
+    // the worker left. Recorded with verdict `success` so nothing but the
+    // hash can influence the outcome — an `aborted` record would override
+    // the verdict outright and prove nothing about ISC-154.
+    const quiesce = await worktreeContentHash(tw);
+    expect(quiesce).not.toBeNull();
+    await mkdir(join(runDir, "workers", worker, "tasks"), { recursive: true });
+    await writeFile(
+      join(runDir, "workers", worker, "tasks", `${id}.json`),
+      JSON.stringify({
+        schema: "pifleet.taskrecord/v1",
+        task_id: id,
+        attempt_id: "att-1",
+        worker,
+        run_id: RUN_ID,
+        epoch: 1,
+        verdict: "success",
+        reason: "quiesced",
+        settled_at: new Date().toISOString(),
+        tree_hash: quiesce,
+      }),
+    );
+
+    /**
+     * ...and then, for ONE of the two, backgrounded work keeps writing.
+     *
+     * An UNTRACKED file specifically. That is what a build, a test run or a
+     * half-finished edit actually leaves behind, and it is the case an
+     * index-only hash cannot see — so this is the mutation the criterion is
+     * really about, not a modified tracked file.
+     */
+    if (moved) {
+      await writeFile(join(tw, "background-output.log"), "still writing after quiesce\n");
+    }
   }
 });
 
@@ -884,6 +967,94 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.derived.acceptance[0]!.met).toBe(true);
     expect(h.verdict).toBe("success");
+  }, cliBudget(1));
+
+  /**
+   * ISC-154 on the LIVE path — a worktree that moved between quiesce and
+   * harvest end forces `unknown`.
+   *
+   * These spawn the CLI rather than importing `harvestTask`, for the reason
+   * this whole file exists and the reason ISC-154 sat inert for two phases:
+   * the decision rule had a full passing test suite and NOTHING populated the
+   * two fields it reads, so the criterion was satisfied only inside tests of
+   * an antecedent that could never occur. A test that hands `adjudicate` two
+   * differing strings re-proves the string comparison. Only a test that makes
+   * a real tree move and then runs the real command proves the fleet can
+   * NOTICE it.
+   *
+   * `T-tree-moved` and `T-tree-still` are identical in every input the
+   * adjudicator weighs — same shape of diff, same honest envelope, same
+   * passing exam, same `success` task record. One untracked file separates
+   * them.
+   */
+  test("a worktree that moved between quiesce and harvest end forces unknown (ISC-154)", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-tree-moved", "--run-acceptance", "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as {
+      verdict: string;
+      reasons: string[];
+      facts: { tree_hash_quiesce: string | null; tree_hash_harvest: string | null };
+    };
+
+    // BOTH samples are real. This is the assertion that would have caught the
+    // inert state: before the wiring, both were null on every run and the
+    // rule's antecedent was unreachable no matter what a worker did.
+    expect(payload.facts.tree_hash_quiesce).toMatch(/^[0-9a-f]{40}$/);
+    expect(payload.facts.tree_hash_harvest).toMatch(/^[0-9a-f]{40}$/);
+    // And they DIFFER, because an untracked file appeared after quiesce.
+    expect(payload.facts.tree_hash_harvest).not.toBe(payload.facts.tree_hash_quiesce);
+
+    // The verdict is not merely annotated — it is CHANGED. The exam passed
+    // and the envelope was honest, so without ISC-154 this is `success`; the
+    // control below is that same task with the tree left alone.
+    expect(payload.verdict).toBe("unknown");
+    expect(payload.reasons.join(" ")).toContain("ISC-154");
+  }, cliBudget(1));
+
+  /**
+   * The control, and the half that makes the test above falsifiable.
+   *
+   * Same fixture, tree untouched. If this were also `unknown` the pair would
+   * prove nothing — a hash that changed spuriously (embedding a timestamp, a
+   * temp path, or the harvester's own sampling) would void every honest task
+   * in the fleet, which is a worse failure than the one ISC-154 prevents and
+   * one that "moved tree → unknown" alone cannot detect.
+   */
+  test("an untouched worktree hashes equal at both moments and stays success (ISC-154)", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-tree-still", "--run-acceptance", "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as {
+      verdict: string;
+      reasons: string[];
+      facts: { tree_hash_quiesce: string | null; tree_hash_harvest: string | null };
+    };
+    expect(payload.facts.tree_hash_quiesce).toMatch(/^[0-9a-f]{40}$/);
+    expect(payload.facts.tree_hash_harvest).toBe(payload.facts.tree_hash_quiesce);
+    expect(payload.verdict).toBe("success");
+    expect(payload.reasons.join(" ")).not.toContain("ISC-154");
+  }, cliBudget(1));
+
+  /**
+   * The absence case, on the live path (ISC-154's other direction).
+   *
+   * `T-exam-pass` has no task record at all, so no quiesce sample exists. The
+   * harvester still takes its own end-of-harvest sample — a fact worth
+   * recording either way — but with nothing to compare it against the rule
+   * must stay silent. A missing hash is absence of evidence, never proof that
+   * the tree held still, and never grounds to void a task.
+   */
+  test("a harvest with no quiesce sample records one hash and voids nothing (ISC-154)", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-exam-pass", "--run-acceptance", "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as {
+      verdict: string;
+      reasons: string[];
+      facts: { tree_hash_quiesce: string | null; tree_hash_harvest: string | null };
+    };
+    expect(payload.facts.tree_hash_quiesce).toBeNull();
+    expect(payload.facts.tree_hash_harvest).toMatch(/^[0-9a-f]{40}$/);
+    expect(payload.verdict).toBe("success");
+    expect(payload.reasons.join(" ")).not.toContain("ISC-154");
   }, cliBudget(1));
 
   /**
