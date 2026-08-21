@@ -139,9 +139,13 @@ determines order.
 | **RC-5** | **Owner decision** — an answer changes the shape of the work | Ask. Building first is speculative. | 3 |
 
 **RC-1 (8):** ISC-61, 110, 115, 117, 154, 193, 248, 271.
-Each names a module with a grep-provable absence of callers — `renderAllWorkers` (0 callers),
+Each named a module with a grep-provable absence of callers AT THE TIME OF FILING. Two have
+since been wired, and their rows are CORRECTED below rather than deleted, because the absence
+is the fact each criterion was filed over: `renderAllWorkers` (0 callers then, `up.ts:488`
+now),
 `src/safety/budget.ts` (0 importers), `classifyStall` (definition only, before the scheduler
-wiring), `TokenRefresher` (0 callers), `backend.kind` (parsed, read by nothing),
+wiring), `TokenRefresher` (0 callers), `backend.kind` (parsed and read by nothing then; now
+the middle term of `up.ts`'s `explicit --backend > backend.kind > DEFAULT_BACKEND`),
 `tree_hash_quiesce`/`tree_hash_harvest` (never populated).
 
 **RC-2 (22):** ISC-32, 51, 57, 108, 111, 112, 125, 126, 157, 172, 189, 192, 233, 246, 263,
@@ -442,7 +446,7 @@ and the kill ladder addresses identities recorded at launch.
 |---|---|---|
 | Role image present | `grep -in image src/cli/commands/up.ts` returns **zero lines** | `doctor.ts`'s `imageStatus` already does the inspect |
 | Role image verifies | `verifyImage` has one caller — the `image verify` subcommand | The harder half; a stale-but-present image is invisible |
-| `backend.kind` honored | Parsed at `schema.ts:129`, **read by nothing**; `up` silently uses the flag default | Either honor it or reject it at `config validate` |
+| `backend.kind` honored | **CLOSED.** Was parsed at `schema.ts:129` and read by nothing, with `up` silently using the flag default. `BackendSchema.kind` is `.optional()` at `schema.ts:147` now, so an absent block is distinguishable from `kind: cmux`; the flag carries no commander default; `up` honors the config. | Binding it has a cost, which is why `fleet.example.yaml` no longer ships `kind:` live: a config naming a backend the host cannot present is exit 3 and no fleet. |
 | Probe target reachable | Probe dials `llm.base_url` from the host, where the alias does not resolve | **On the critical path — §5** |
 | Mount sources shared | An unshared macOS path is silently replaced by an empty directory | Cost a false diagnosis once already; ISC-277's precondition |
 
@@ -452,8 +456,10 @@ taken on trust from a state file. Both must be recorded when the supervisor **la
 the same launch-record mechanism the container launcher introduced.
 
 **ISC-61 belongs here** because it is a launch-path fact, not a config-rendering fact:
-`renderAllWorkers` is the only function mapping N `workers:` entries onto N containers and it
-has zero callers in `src/`. Changing `workers:` length changes nothing today.
+`renderAllWorkers` is the only function mapping N `workers:` entries onto N containers, and it
+HAD zero callers in `src/` when this was filed -- changing `workers:` length changed nothing.
+It is called from `up.ts:488` now, and `--workers` no longer carries a commander default, so an
+absent flag means every worker the config declares.
 
 **Does not.** Add a preflight that runs after the first container starts. The value of every
 check in this phase is that it fires before any side effect.

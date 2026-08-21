@@ -274,7 +274,7 @@ jobs:
           # separate steps — a "probes" step that ran these files for
           # their own sake, and a "guard" step below it that ran the SAME
           # files a SECOND time just to check the summary counts. That doubled
-          # real Docker cost for no additional coverage: 65 tests against a
+          # real Docker cost for no additional coverage: 88 tests against a
           # real daemon, several individually timed out at 60-180s (see
           # adc.test.ts's ISC-47/255/41/46 blocks), inside a 60-minute job
           # budget that also builds google-cloud-cli into the worker image
@@ -302,7 +302,7 @@ jobs:
           # test this guard exists to catch. The four daemon-free ones running
           # twice is the accepted cost, and they are milliseconds.
           #
-          # TOTAL_EXPECTED is 86 = 20 (image.test.ts: 15 fixed cases + 5
+          # TOTAL_EXPECTED is 88 = 20 (image.test.ts: 15 fixed cases + 5
           # generated from the toolchain-baseline `probes` array — gcloud,
           # kubectl, helm, jq, curl) + 23 (verbgate.test.ts) + 5
           # (egress.test.ts) + 18 (adc.test.ts — up from 12 now that the
@@ -311,7 +311,12 @@ jobs:
           # probes, of which the TWO live-oMLX ones always skip on a runner)
           # + 5 (probe-in-network.test.ts, added by ISC-260)
           # + 2 (container-env.test.ts, added by ISC-31/ISC-127)
-          # + 5 (container-launch.test.ts, added by the container launcher).
+          # + 5 (container-launch.test.ts, added by the container launcher)
+          # + 2 (doctor-preflight.test.ts, added by ISC-292).
+          #
+          # 20 + 23 + 5 + 18 + 8 + 5 + 2 + 5 + 2 = 88. The arithmetic is written
+          # out because this constant has drifted from its own prose twice, and
+          # both times the prose was the half nobody re-derived.
           #
           # 79 -> 81 is container-env.test.ts, which reads ISC-31 and ISC-127
           # back out of `docker inspect` on a container started from the argv
@@ -363,9 +368,12 @@ jobs:
           #     (Re-derived 2026-08-20 for container-launch.test.ts, by running
           #     the command above rather than by adding 5 to 81 — which is the
           #     method this block insists on for exactly the reason it gives.)
-          # No daemon, no image. Do this before changing the number. The 2
-          # passes are ISC-260's two daemon-free argv tests, and they count
-          # toward the total exactly as a skip would.
+          # No daemon, no image. Do this before changing the number. The 6
+          # passes are the daemon-free tests in two of these files: ISC-260's
+          # TWO argv assertions in probe-in-network.test.ts, and FOUR of
+          # container-launch.test.ts's five, which plant a recorder as the
+          # launch record's argv and need no Docker. They count toward the
+          # total exactly as a skip would.
           #
           # NOTE ON RUNTIME, because ISC-261's probes are not cheap. The two
           # enumeration probes each scan all 65535 ports two or three times,
@@ -375,21 +383,17 @@ jobs:
           # cover that, and the job budget is 60 minutes.
           #
           # And measured two ways with the gate OPEN, because both matter:
-          #   - On a host WITH a real ADC file and a real oMLX, all 81 run and
-          #     pass: 81 pass, 0 fail, 0 skip.
+          #   - On a host WITH a real ADC file and a real oMLX, all 88 run and
+          #     pass: 88 pass, 0 fail, 0 skip.
           #   - In THIS job, with no real host ADC but PIFLEET_TEST_ADC_FILE
           #     set by the step above, the file-mode mount-shape test RUNS
           #     (that is the whole point of that step) while the four tests
           #     that need a REAL host ADC to mint a live token cannot, and the
           #     TWO relay probes that need a real inference server cannot
-          #     either: 75 pass, 6 skip. Same total either way, because the
+          #     either: 82 pass, 6 skip. Same total either way, because the
           #     check treats pass+skip as one number — see probe-guard.sh's
           #     total check for why that pairing, specifically, is correct.
           #
-          # These two lines read 79 and 73 while TOTAL_EXPECTED already said
-          # 81 — prose left behind when the total moved. The derivation for
-          # 79 -> 81 lives in ISC-31's close-out and is not repeated here; the
-          # skip count is unchanged, so the pass figure moves with the total.
           # 86 -> 88 is doctor-preflight.test.ts (ISC-292). Its two probes ask
           # the container runtime which host paths it actually shares, which
           # is a question only a real daemon can answer — a fake would assert

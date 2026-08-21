@@ -26,7 +26,7 @@ import { resolveHarnessPatterns } from "../../src/harvest/patterns.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
-import { parseDuration } from "../../src/config/schema.ts";
+import { BackendSchema, parseDuration } from "../../src/config/schema.ts";
 import { EXIT } from "../../src/contracts.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -809,5 +809,32 @@ describe("config validate CLI (ISC-58)", () => {
     const parsed = JSON.parse(r.stdout) as { valid: boolean; errors: { path: string }[] };
     expect(parsed.valid).toBe(false);
     expect(parsed.errors.some((e) => e.path === "workers.0.role")).toBe(true);
+  });
+});
+
+/**
+ * `BackendSchema.kind` is OPTIONAL, and nothing else in this file parses it.
+ *
+ * The whole of ISC-271 rests on one property of this schema: that an absent
+ * `backend:` block is distinguishable from `backend: {kind: cmux}` after parse.
+ * It used to carry `.default("cmux")`, under which all three spellings below
+ * produced byte-identical objects — so `up` could not honour a config that SET
+ * `kind` without also forcing cmux onto every config that said nothing, which
+ * is exit 3 on every host with no cmux.
+ *
+ * Three lines, asserted on the SCHEMA directly rather than through `loadConfig`,
+ * because a default restored here would break `up`'s precedence silently: the
+ * integration tests that cover it drive the CLI, and a config that suddenly
+ * means `cmux` fails them with a backend error whose cause is three layers
+ * away. This fails at the source, and says which.
+ */
+describe("BackendSchema.kind distinguishes 'unset' from 'cmux' (ISC-271)", () => {
+  test("an absent block, an empty block, and an explicit kind parse to three different answers", () => {
+    // Absent: `prefault({})` supplies the block, and `kind` stays undefined.
+    expect(BackendSchema.parse(undefined).kind).toBeUndefined();
+    // Present but empty: same answer, because "{}" says nothing about kind.
+    expect(BackendSchema.parse({}).kind).toBeUndefined();
+    // Explicit: the operator's word, carried through.
+    expect(BackendSchema.parse({ kind: "cmux" }).kind).toBe("cmux");
   });
 });
