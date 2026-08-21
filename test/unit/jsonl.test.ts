@@ -572,8 +572,60 @@ describe("TailReader restart reporting (ISC-172)", () => {
       expect(await r.poll()).toEqual(['{"n":8}', '{"n":9}']);
 
       expect(r.restarts).toBe(1);
-      expect(r.lastRestart?.reasons).toEqual(["head_rewritten"]);
+      // BOTH fingerprints fire, and that is arithmetic rather than redundancy:
+      // the file is 16 bytes, so `min(16, 64)` makes the head range and the
+      // tail range the same sixteen bytes. On a file longer than 64 bytes they
+      // cover disjoint regions and can fire independently — see the probe
+      // below, where only the tail can see the rewrite at all.
+      expect(r.lastRestart?.reasons).toEqual(["head_rewritten", "tail_rewritten"]);
       expect(r.lastRestart?.abandonedOffset).toBe(16);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The truncation that defeats all three ORIGINAL signals at once, found by
+   * attacking a real container and reproduced here so it is re-checked on
+   * every run rather than only in the Docker-gated job.
+   *
+   * `docker/verbgate` stamps whole seconds, so two rows written inside one
+   * second share a 64-byte prefix byte for byte. A worker that truncates in
+   * place and writes a row at least as long as the one it erased then gets:
+   * no `shrank` (the file regrew past the old offset), no `replaced` (an
+   * in-place truncate keeps the inode), and no `head_rewritten` (the head is
+   * identical). The reader resumed mid-record and handed its caller a
+   * one-byte fragment as a complete line — into an AUDIT TRAIL, unmarked.
+   *
+   * Only a fingerprint anchored at the consumed frontier can see it, which is
+   * why the assertion below is `toEqual` on exactly one reason rather than
+   * `toContain`: if any other signal starts firing here, this probe has
+   * stopped testing the case it was written for.
+   */
+  test("records an in-place truncate whose replacement shares the head and regrows past it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-"));
+    try {
+      const p = join(dir, "verbgate.jsonl");
+      // Byte for byte what verbgate emits before the argv, for any two rows in
+      // one second. Pinned, so a shortened prefix cannot silently turn this
+      // into a test of the head fingerprint.
+      const PREFIX = '{"ts":"2026-08-21T15:47:54Z","tool":"kubectl","verb":"delete pod ';
+      expect(PREFIX.length).toBeGreaterThanOrEqual(64);
+
+      await writeFile(p, `${PREFIX}first"]}\n`);
+      const r = new TailReader(p);
+      expect(await r.poll()).toEqual([`${PREFIX}first"]}`]);
+      const offsetBefore = r.offset;
+
+      // The attack. `writeFile` is O_TRUNC on the same inode — the shell's
+      // `: >` by another name — and the replacement is one byte longer than
+      // what it erased, which is what puts the new size ABOVE the old offset.
+      await writeFile(p, `${PREFIX}second"]}\n`);
+      expect(await r.poll()).toEqual([`${PREFIX}second"]}`]);
+
+      expect(r.restarts).toBe(1);
+      expect(r.lastRestart?.reasons).toEqual(["tail_rewritten"]);
+      expect(r.lastRestart?.abandonedOffset).toBe(offsetBefore);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

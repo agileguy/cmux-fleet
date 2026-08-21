@@ -193,6 +193,27 @@ export async function* readJsonl<T = unknown>(
 const HEAD_FINGERPRINT_BYTES = 64;
 
 /**
+ * How many bytes at the CONSUMED FRONTIER identify the record boundary.
+ *
+ * The head fingerprint and this one answer different questions, which is why
+ * both exist. The head asks "is this the same file generation?"; the tail asks
+ * "is the boundary my offset points at still the same boundary?" — and only
+ * the second one survives a writer whose rows share a long common prefix.
+ *
+ * MEASURED, not hypothesised. `docker/verbgate` stamps whole seconds
+ * (`date -u +%Y-%m-%dT%H:%M:%SZ`), so two rows written inside one second begin
+ * `{"ts":"2026-08-21T15:47:54Z","tool":"kubectl","verb":"delete pod ` —
+ * sixty-four bytes, byte for byte identical. A worker that truncates in place
+ * and rewrites a row at least as long as the one it erased therefore defeats
+ * ALL THREE original signals at once: `shrank` cannot fire because the file
+ * regrew past the old offset, `replaced` cannot fire because an in-place
+ * truncate keeps the inode, and `head_rewritten` cannot fire because the head
+ * is unchanged. The reader then resumed mid-record and the audit copy took a
+ * one-byte fragment — `}` — as a genuine collected row.
+ */
+const TAIL_FINGERPRINT_BYTES = 64;
+
+/**
  * Hash of exactly the first `n` bytes of `path`, or `null` if unreadable.
  *
  * `n` is FIXED by the caller across polls and never derived from the current
@@ -201,6 +222,22 @@ const HEAD_FINGERPRINT_BYTES = 64;
  * perfectly ordinary append is misread as a rewrite — the reader then replays
  * records it has already returned.
  */
+async function rangeHash(path: string, start: number, end: number): Promise<string | null> {
+  if (end <= start || start < 0) return null;
+  try {
+    const bytes = new Uint8Array(await Bun.file(path).slice(start, end).arrayBuffer());
+    // A short read means the range no longer exists — the file shrank under
+    // us. `null` is "could not read", never "changed"; the caller keeps the
+    // two apart deliberately.
+    if (bytes.length < end - start) return null;
+    const h = new Bun.CryptoHasher("sha256");
+    h.update(bytes);
+    return h.digest("hex").slice(0, 16);
+  } catch {
+    return null;
+  }
+}
+
 async function headHash(path: string, n: number): Promise<string | null> {
   if (n <= 0) return null;
   try {
@@ -225,7 +262,7 @@ async function headHash(path: string, n: number): Promise<string | null> {
  * collapsing them to a single winner throws that away at the only moment it
  * can be observed.
  */
-export type TailRestartReason = "shrank" | "replaced" | "head_rewritten";
+export type TailRestartReason = "shrank" | "replaced" | "head_rewritten" | "tail_rewritten";
 
 /** One observed restart. See `TailReader.lastRestart`. */
 export interface TailRestart {
@@ -250,6 +287,15 @@ export class TailReader {
   /** Byte count the head fingerprint covers; fixed once, never size-derived. */
   #headLen = 0;
   #headHash: string | null = null;
+  /**
+   * Byte count the tail fingerprint covers, and the digest of the bytes
+   * ending at `#offset`. RE-ANCHORED EVERY POLL, unlike the head — the head
+   * pins a fixed prefix for the life of a generation, the tail pins a moving
+   * frontier, so freezing it the way the head is frozen would compare the
+   * current offset's bytes against a boundary the reader passed long ago.
+   */
+  #tailLen = 0;
+  #tailHash: string | null = null;
   #splitter = new LineSplitter();
   #restarts = 0;
   #lastRestart: TailRestart | null = null;
@@ -336,6 +382,13 @@ export class TailReader {
     const anchored = this.#headLen > 0 && this.#headHash !== null;
     const head = anchored ? await headHash(this.path, this.#headLen) : null;
     const headChanged = anchored && head !== null && head !== this.#headHash;
+    // The frontier check. Same null-vs-changed discipline as the head: an
+    // unreadable range is not evidence of a rewrite.
+    const tailAnchored = this.#tailLen > 0 && this.#tailHash !== null;
+    const tail = tailAnchored
+      ? await rangeHash(this.path, this.#offset - this.#tailLen, this.#offset)
+      : null;
+    const tailChanged = tailAnchored && tail !== null && tail !== this.#tailHash;
     /*
      * Every signal that fired, not the first one that did.
      *
@@ -356,6 +409,7 @@ export class TailReader {
       if (size < this.#offset) reasons.push("shrank");
       if (identity !== this.#identity) reasons.push("replaced");
       if (headChanged) reasons.push("head_rewritten");
+      if (tailChanged) reasons.push("tail_rewritten");
     }
     if (reasons.length > 0) {
       // Recorded BEFORE the reset, because the reset is what destroys the
@@ -365,6 +419,8 @@ export class TailReader {
       this.#offset = 0;
       this.#headLen = 0;
       this.#headHash = null;
+      this.#tailLen = 0;
+      this.#tailHash = null;
       this.#splitter = new LineSplitter();
     }
     this.#identity = identity;
@@ -389,6 +445,20 @@ export class TailReader {
       if (h !== null) {
         this.#headLen = len;
         this.#headHash = h;
+      }
+    }
+    // Re-anchored unconditionally, because the frontier moved. A failure here
+    // leaves the PREVIOUS anchor in place rather than clearing it: a stale
+    // anchor over a range the file still contains is a false-positive risk
+    // measured in one spurious restart, while clearing it withdraws the
+    // guarantee silently and for good — the failure mode the head's retry
+    // comment already names.
+    if (this.#offset > 0) {
+      const tlen = Math.min(this.#offset, TAIL_FINGERPRINT_BYTES);
+      const t = await rangeHash(this.path, this.#offset - tlen, this.#offset);
+      if (t !== null) {
+        this.#tailLen = tlen;
+        this.#tailHash = t;
       }
     }
     return this.#splitter.push(bytes);

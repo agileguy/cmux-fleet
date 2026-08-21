@@ -98,7 +98,7 @@ const TruncationSchema = z.object({
   kind: z.literal("truncation"),
   ts: z.string(),
   worker: z.string(),
-  reasons: z.array(z.enum(["shrank", "replaced", "head_rewritten"])).readonly(),
+  reasons: z.array(z.enum(["shrank", "replaced", "head_rewritten", "tail_rewritten"])).readonly(),
   collected_bytes: z.number(),
   size_after: z.number(),
 });
