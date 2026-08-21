@@ -828,6 +828,34 @@ async function localImage(tag: string, exec: Exec): Promise<string | undefined> 
   return r.code === 0 ? tag : undefined;
 }
 
+/**
+ * NEVER FOLLOW A REDIRECT ON A CREDENTIALED PROBE.
+ *
+ * `fetch` defaults to `redirect: "follow"`, and both probes below attach
+ * `Authorization: Bearer <the operator's model API key>`. Under `follow`, a 302
+ * from the configured endpoint sends that header onward to whatever host the
+ * `Location:` names â the credential leaves the machine, to an address nobody
+ * configured, and `doctor` reports the redirect target's answer as the health
+ * of the fleet's model server.
+ *
+ * This mattered less when it could not happen. `doctor` used to dial
+ * `host.docker.internal`, a bridge alias that resolves nowhere on the host, so
+ * the request failed by construction and there was no response to redirect.
+ * ISC-291 made the target a real, operator-config-supplied address reached from
+ * the host â which is the whole point of that change and also what put a
+ * credentialed request on the wire for the first time.
+ *
+ * `"manual"` and not `"error"`: a redirect is a fact about the endpoint worth
+ * REPORTING rather than a transport failure. The response comes back opaque
+ * with its status intact, so the `!res.ok` branch below says
+ * `GET /models â HTTP 302` â an operator reading that knows exactly what their
+ * server did, and no header went anywhere.
+ *
+ * Spread rather than written inline twice so the two probes cannot drift apart;
+ * a single credentialed fetch that forgot this would reopen the whole hole.
+ */
+const NO_REDIRECT = { redirect: "manual" } as const;
+
 async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
   /**
    * The HOST-REACHABLE target, derived in exactly one place (ISC-291).
@@ -877,7 +905,11 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
 
   try {
     const t0 = performance.now();
-    const res = await fetch(`${baseUrl}/models`, { headers, signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(`${baseUrl}/models`, {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+      ...NO_REDIRECT,
+    });
     report.listLatencyMs = Math.round(performance.now() - t0);
     if (!res.ok) {
       report.detail = `GET /models → HTTP ${res.status}${key ? "" : ` (no ${keyEnv} in environment)`}`;
@@ -988,6 +1020,7 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ model, messages: [{ role: "user", content: "ping" }], max_tokens: 1 }),
         signal: AbortSignal.timeout(60_000),
+        ...NO_REDIRECT,
       });
       if (res.ok) {
         await res.json();
