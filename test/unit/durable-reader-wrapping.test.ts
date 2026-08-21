@@ -57,8 +57,8 @@
  * parsed in memory — so no `budget.ts` allowance applies.
  */
 
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import * as ts from "typescript";
@@ -265,7 +265,13 @@ describe("no durable reader parses file bytes with a schema outside a try", () =
  * tree's history, and each fails if the detection logic is weakened.
  */
 describe("the detector itself", () => {
+  // Removed in `afterAll`, matching every other new file in this phase. A
+  // describe body runs at module evaluation, so without the cleanup each
+  // `bun test` run leaks one directory of fixtures.
   const dir = mkdtempSync(join(tmpdir(), "pifleet-readerscan-"));
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
   function scan(body: string, name = "f.ts"): ParseSite[] {
     const p = join(dir, name);
     writeFileSync(p, body, "utf8");

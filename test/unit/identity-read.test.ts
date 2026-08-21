@@ -68,12 +68,22 @@ import {
 } from "../../src/run/registry.ts";
 
 /**
- * A pid the shimmed `ps` refuses to read. The NUMBER is irrelevant — the shim
- * refuses whatever it is handed — and that is the point: the refusal is a
- * property of the reading, not of the pid, so nothing here depends on a
- * kernel's out-of-range behaviour.
+ * The pid handed to the shimmed `ps`, and it is THIS PROCESS on purpose.
+ *
+ * The first version used 424242, and that was still wrong for the reason the
+ * pid ceiling was wrong: 424242 is ALSO above Darwin's ceiling, so a real `ps`
+ * refuses it with a diagnostic and the refusal tests pass whether or not the
+ * shim takes effect. Measured by disabling the PATH mutation: 8 of 9 tests
+ * still passed on this machine. The shim was decorative and the platform was
+ * still doing the work — the same trap one layer down.
+ *
+ * A live pid cannot do that. A real `ps` answers it with exit 0 and a start
+ * time, so every assertion about refusal below FAILS LOUDLY on every platform
+ * the moment the shim stops being reached — a noexec `TMPDIR`, a hostile
+ * umask, or a refactor of `withPsFrom`. That is what makes the shim
+ * load-bearing rather than merely first on PATH.
  */
-const UNREADABLE_PID = 424_242;
+const UNREADABLE_PID = process.pid;
 
 /** The stderr line the shim emits, asserted on so the diagnostic is carried. */
 const SHIM_DIAGNOSTIC = "ps: cannot read process table (test shim)";
@@ -88,6 +98,8 @@ const SHIM_DIAGNOSTIC = "ps: cannot read process table (test shim)";
  * bun file run sequentially, so the mutation cannot leak into a sibling.
  */
 let shimDir: string | null = null;
+let killedDir: string | null = null;
+let emptyDir: string | null = null;
 
 beforeAll(async () => {
   // Built ONCE for the file rather than per call. Four mkdtemp+write cycles
@@ -99,15 +111,44 @@ beforeAll(async () => {
     encoding: "utf8",
     mode: 0o755,
   });
+  /*
+   * A `ps` that is KILLED BY A SIGNAL rather than exiting. `kill -9 $$` makes
+   * the shim die the way an OOM killer, a cgroup limit or a stray `pkill`
+   * would kill a real one: no exit status at all, and silence on both pipes.
+   */
+  // A PATH entry with no `ps` in it at all, prepended AND with the real
+  // directories removed by the caller — the minimal-container case.
+  emptyDir = await mkdtemp(join(tmpdir(), "pifleet-ps-absent-"));
+  killedDir = await mkdtemp(join(tmpdir(), "pifleet-ps-killed-"));
+  await writeFile(join(killedDir, "ps"), `#!/bin/sh\nkill -9 $$\n`, {
+    encoding: "utf8",
+    mode: 0o755,
+  });
 });
 
 afterAll(async () => {
   if (shimDir !== null) await rm(shimDir, { recursive: true, force: true });
+  if (killedDir !== null) await rm(killedDir, { recursive: true, force: true });
+  if (emptyDir !== null) await rm(emptyDir, { recursive: true, force: true });
 });
 
-async function withBrokenPs<T>(fn: () => Promise<T>): Promise<T> {
+async function withPsFrom<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   const saved = process.env.PATH;
-  process.env.PATH = `${shimDir!}:${saved ?? ""}`;
+  process.env.PATH = `${dir}:${saved ?? ""}`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
+
+const withBrokenPs = <T,>(fn: () => Promise<T>): Promise<T> => withPsFrom(shimDir!, fn);
+const withKilledPs = <T,>(fn: () => Promise<T>): Promise<T> => withPsFrom(killedDir!, fn);
+
+/** No `ps` anywhere on PATH — PATH is REPLACED, not prepended. */
+async function withNoPs<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.PATH;
+  process.env.PATH = emptyDir!;
   try {
     return await fn();
   } finally {
@@ -163,6 +204,54 @@ describe("processStartTime distinguishes gone from unreadable", () => {
     // And the message must say what this is NOT, because the failure mode is a
     // reader concluding "gone" from a refusal.
     expect(msg).toContain("NOT the process being gone");
+  });
+
+  /**
+   * THE ROW THAT WAS MISSING FROM THE MEASUREMENT TABLE.
+   *
+   * A signal-killed `ps` is byte-identical to an absent process on every
+   * channel this function reads: `exitCode !== 0` holds (bun reports `null`,
+   * not a number), stdout is empty and stderr is empty. Measured on bun
+   * 1.3.11: `{exitCode: null, signalCode: "SIGKILL", stdoutLen: 0,
+   * stderrLen: 0}`.
+   *
+   * Fails if: absence stops requiring a NORMAL exit. `gone` is the one verdict
+   * `down` may report as a stop, act on with `docker rm -f` and hand to the
+   * `--prune` gate — so under memory pressure, an OOM killer or a stray
+   * `pkill`, this returning `null` deletes the checkout of a supervisor that
+   * is alive and mid-write.
+   */
+  test("a `ps` killed by a signal is a failed read, not an absent process", async () => {
+    const err = await withKilledPs(() =>
+      processStartTime(UNREADABLE_PID).catch((e: unknown) => e),
+    );
+    expect(err).toBeInstanceOf(IdentityReadError);
+    // The diagnosis must name the signal: "ps exited null" tells an operator
+    // nothing about a machine that is killing short-lived children.
+    expect((err as Error).message).toContain("killed by SIGKILL");
+    expect((err as { exitCode?: number }).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+  });
+
+  /**
+   * The likeliest real instance of "the measuring instrument is broken": a
+   * minimal container image with no procps at all.
+   *
+   * `Bun.spawn` throws SYNCHRONOUSLY here — `Executable not found in $PATH` —
+   * with no `exitCode` on the error, so an unwrapped spawn is reported by the
+   * entry point as `EXIT.INTERNAL`, "a bug in pifleet itself", for what is
+   * purely an environment failure. Every other refusal in this file exercises
+   * a `ps` that RAN; this is the one that never starts.
+   *
+   * Fails if: the spawn is unwrapped again. The `exitCode` assertion is the
+   * load-bearing half — a bare `Error` satisfies `toBeInstanceOf(Error)` and
+   * proves nothing.
+   */
+  test("a `ps` that is not on PATH at all is a diagnosed refusal, not an internal error", async () => {
+    const err = await withNoPs(() => processStartTime(process.pid).catch((e: unknown) => e));
+    expect(err).toBeInstanceOf(IdentityReadError);
+    expect((err as { exitCode?: number }).exitCode).toBe(EXIT.BACKEND_UNAVAILABLE);
+    expect((err as { exitCode?: number }).exitCode).not.toBe(EXIT.INTERNAL);
+    expect((err as Error).message).toContain("could not be started");
   });
 
   test("the refusal is a DIAGNOSED failure, not an internal error", async () => {

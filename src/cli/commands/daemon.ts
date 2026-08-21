@@ -40,7 +40,7 @@ import { readRunHeartbeatIntervalMs } from "../../run/state.ts";
  * `reaper.ts`'s `supervisorStopped` or `registry.ts`'s `deregisterOnReap`.
  * Those two answer "may this be destroyed" and "may this name be forgotten";
  * this one answers "what is the true name of what just happened". The three
- * agree today. A seventh `KillOutcome` has to be answered for all three by
+ * agree today. An eighth `KillOutcome` has to be answered for all three by
  * someone looking at all three, which the `never` default is what forces.
  */
 function reapEventName(outcome: KillOutcome): string {

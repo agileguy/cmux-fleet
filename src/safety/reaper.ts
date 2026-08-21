@@ -168,8 +168,8 @@ export interface ReapReport {
  * to `KillOutcome` and every consumer that merely STORES the value kept
  * compiling, so the reaper went on removing containers on an outcome that means
  * "still alive, deliberately not signalled". A union member is invisible to
- * `tsc` for a consumer that does not switch on it. Switching on it here means a
- * seventh member breaks the build at the decision point instead of falling into
+ * `tsc` for a consumer that does not switch on it. Switching on it here means an
+ * eighth member breaks the build at the decision point instead of falling into
  * the destructive branch in silence.
  *
  * `already_gone` is TRUE. It is not a stop the reaper performed, but it is the
@@ -218,7 +218,7 @@ export interface ReapOptions {
  * mid-write, and `docker rm -f` would take it away from a live process. The
  * refusal declined to signal that supervisor precisely because it could not be
  * shown to be ours; destroying its container instead would be the same act
- * committed by another route. The gate is `supervisorStopped`, so a seventh
+ * committed by another route. The gate is `supervisorStopped`, so an eighth
  * `KillOutcome` cannot land on the destructive side by omission.
  */
 export async function reapSupervisor(

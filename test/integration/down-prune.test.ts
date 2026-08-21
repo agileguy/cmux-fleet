@@ -28,7 +28,7 @@ import { parseConfig } from "../../src/config/load.ts";
 import { EXIT } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { processStartTime } from "../../src/run/registry.ts";
-import { groupRefusal, isAnchorRefusal } from "../../src/cli/commands/down.ts";
+import { groupRefusal, isAnchorRefusal, isGroupRefusal } from "../../src/cli/commands/down.ts";
 import { processGroupId } from "../../src/safety/kill.ts";
 import { ensureControlAuth } from "../../src/security/control-auth.ts";
 import { initialWorkerState, writeWorkerState } from "../../src/run/state.ts";
@@ -995,6 +995,28 @@ describe("a process group that stops confirming mid-ladder (ISC-272)", () => {
 
     // And the mid-ladder value the test above produces classifies with them.
     expect(isAnchorRefusal("group_unconfirmed")).toBe(true);
+
+    /**
+     * `identity_read_failed` — the ladder's own IDENTITY refusal, and the one
+     * this block existed to catch in advance. It was added to `down.ts` with
+     * its set membership, its operator wording and its docstring, and NOTHING
+     * named it: `grep identity_read_failed test/` returned empty, so deleting
+     * every branch that produces it left the suite green. That is the
+     * guard-surviving-its-own-deletion shape this file's own comment warns
+     * about ("a classification nothing checks is how a new refusal silently
+     * acquires the wrong operator-facing words").
+     *
+     * It must be an ANCHOR refusal — no signal was sent — and it must NOT be a
+     * GROUP refusal, because that set is what routes an operator to
+     * `--force-identity`, which cannot help against a `ps` that will not run:
+     * forcing re-anchors using the reading that just failed.
+     */
+    expect(isAnchorRefusal("identity_read_failed")).toBe(true);
+    expect(isGroupRefusal("identity_read_failed")).toBe(false);
+    // The three identity refusals that predate it are unmoved.
+    expect(isAnchorRefusal("identity_mismatch")).toBe(true);
+    expect(isAnchorRefusal("identity_legacy_format")).toBe(true);
+    expect(isAnchorRefusal("identity_unrecorded")).toBe(true);
     // While the ladder's own outcomes do not — that distinction is what makes
     // "REFUSED" and "STILL RUNNING" different sentences.
     expect(isAnchorRefusal("sigterm")).toBe(false);

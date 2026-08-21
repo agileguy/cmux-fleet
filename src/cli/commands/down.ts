@@ -416,7 +416,15 @@ export function register(program: Command): void {
         // killed the supervisor would read as STILL RUNNING on a bare
         // `processStartTime`, and `down` would exit WORKER_DIED over a
         // stranger it never touched.
-        const stopped = !(await sameIdentity(target, realProcessOps));
+        /*
+         * A read that fails HERE must not abort the command, and must not be
+         * reported as a stop. `stopped: false` with the identity refusal is
+         * the same answer the rungs above produce, and it is what blocks the
+         * prune gate below — the property the whole branch exists for.
+         */
+        const held = await identityHolds(target);
+        const stopped = held === false;
+        if (held === null) how = LADDER_IDENTITY_UNCONFIRMED;
         report.push({ id, stopped, how, ...(anchor.forced ? { forced_identity: true } : {}) });
         await ledger.append("worker_down", {
           worker: id,
@@ -505,10 +513,23 @@ export function register(program: Command): void {
           let how = "graceful";
           if (!(await waitGone(target, TERM_WAIT_MS))) {
             how = "sigterm";
-            await signalGuarded(target, "SIGTERM", anchor.group);
-            await waitGone(target, TERM_WAIT_MS);
+            /*
+             * The outcome was DISCARDED here, and the worker rung's fix did
+             * not reach this one. `signalGuarded` can answer
+             * `group_unconfirmed`, `identity_unconfirmed` or `errored`, and
+             * every one means NO SIGNAL WAS SENT — so keeping `how = "sigterm"`
+             * printed `daemon: STILL RUNNING (sigterm)`, claiming a ladder was
+             * climbed that never ran. That is the same falsehood this file
+             * removed for workers, left standing three hundred lines down.
+             */
+            const outcome = await signalGuarded(target, "SIGTERM", anchor.group);
+            if (outcome === "group_unconfirmed") how = LADDER_GROUP_UNCONFIRMED;
+            else if (outcome === "identity_unconfirmed") how = LADDER_IDENTITY_UNCONFIRMED;
+            else await waitGone(target, TERM_WAIT_MS);
           }
-          daemonReport = { stopped: !(await sameIdentity(target, realProcessOps)), how };
+          const daemonHeld = await identityHolds(target);
+          if (daemonHeld === null) how = LADDER_IDENTITY_UNCONFIRMED;
+          daemonReport = { stopped: daemonHeld === false, how };
         }
       } catch {
         // No daemon ever ran (integration setups) — nothing to stop.
@@ -824,11 +845,25 @@ export function register(program: Command): void {
         const parts: string[] = [];
         if (survivors.length > 0) parts.push(`${survivors.length} supervisor(s) survived the kill ladder`);
         if (refused.length > 0) {
+          /*
+           * `--force-identity` IS the answer for a record that disagrees with
+           * the world, and is NOT the answer for a `ps` that cannot be read:
+           * forcing re-anchors on whatever holds the pid, measured with the
+           * same instrument that just failed, and the anchor already succeeded
+           * anyway or this rung would not have been reached. Offering it there
+           * sends an operator to disable the identity check to fix a broken
+           * machine. The two remedies are therefore split by which refusals
+           * are actually present.
+           */
+          const hows = [...new Set(refused.map((r) => r.how))].sort();
+          const forcible = refused.filter((r) => r.how !== LADDER_IDENTITY_UNCONFIRMED);
           parts.push(
             `${refused.length} were never signalled because their recorded launch identity or ` +
-              `process group could not be confirmed ` +
-              `(${[...new Set(refused.map((r) => r.how))].sort().join(", ")}); ` +
-              `--force-identity signals the supervisor alone, never an unconfirmed group`,
+              `process group could not be confirmed (${hows.join(", ")})` +
+              (forcible.length > 0
+                ? `; --force-identity signals the supervisor alone, never an unconfirmed group`
+                : `; \`ps\` could not be read on this machine — --force-identity cannot help, ` +
+                  `because it re-anchors using the same reading that failed`),
           );
         }
         throw new CliError(parts.join("; "), EXIT.WORKER_DIED);
@@ -907,7 +942,14 @@ export type AnchorRefusal =
    * not be READ rather than that it disagreed. An operator told "the record is
    * stale" about a `ps` that never ran goes and edits a file that is fine.
    */
-  | "group_read_failed";
+  | "group_read_failed"
+  /**
+   * The identity READ failed — `ps` could not be run or could not be believed.
+   * Unlike the four above, this says nothing about the record; the instrument
+   * broke. Shares the string with the ladder's own verdict so one refusal
+   * reads the same wherever it is produced.
+   */
+  | typeof LADDER_IDENTITY_UNCONFIRMED;
 
 /**
  * The ladder's OWN identity refusal, the twin of `LADDER_GROUP_UNCONFIRMED`.
@@ -976,8 +1018,15 @@ export function isAnchorRefusal(how: string): boolean {
   return IDENTITY_REFUSALS.has(how) || GROUP_REFUSALS.has(how);
 }
 
-/** True for the subset of refusals that are about the GROUP, not the leader. */
-function isGroupRefusal(how: string): boolean {
+/**
+ * True for the subset of refusals that are about the GROUP, not the leader.
+ *
+ * EXPORTED for the same reason `isAnchorRefusal` is: this set is what routes
+ * an operator to `--force-identity`, so a refusal landing in it by accident
+ * offers a remedy that cannot work. Graded directly rather than through a
+ * fixture, because the members that matter most need `ps` itself to fail.
+ */
+export function isGroupRefusal(how: string): boolean {
   return GROUP_REFUSALS.has(how);
 }
 
@@ -1072,7 +1121,29 @@ async function anchorIdentity(
   recordedPgid: number | null,
   opts: { force: boolean },
 ): Promise<Anchor> {
-  const current = await processStartTime(pid);
+  /*
+   * THE FIRST READ IN THE WHOLE COMMAND, and therefore the first place a
+   * broken `ps` can escape. Since ISC-192 `processStartTime` refuses rather
+   * than reporting absence, and the worker loop that calls this is not inside
+   * a try — so an unguarded throw here aborts `down` entirely before any
+   * report row exists, which is why the ladder's own refusal branches below
+   * were unreachable in exactly the case they were written for.
+   *
+   * It becomes the same refusal the rungs produce: `stopped: false`, no
+   * signal, prune gate blocked. `--force-identity` is deliberately NOT offered
+   * — it would re-anchor on whatever holds the pid using the reading that just
+   * failed, which is the fail-open this refusal exists to keep shut.
+   */
+  let current: string | null;
+  try {
+    current = await processStartTime(pid);
+  } catch (err) {
+    return {
+      kind: "refused",
+      how: LADDER_IDENTITY_UNCONFIRMED,
+      detail: `the launch identity of pid ${pid} could not be read: ${String(err)}`,
+    };
+  }
   // Nothing holds the pid. The one genuine success among these answers, and
   // the only one that may report `stopped: true`.
   if (current === null) return { kind: "gone" };
@@ -1292,10 +1363,35 @@ async function signalGuarded(
 }
 
 /** True once the recorded identity is gone — dead, or replaced by a stranger. */
+/**
+ * `sameIdentity`, with a FAILED READ as a third answer rather than a throw.
+ *
+ * Since ISC-192 `processStartTime` refuses a `ps` it cannot read instead of
+ * reporting the process absent, so every bare `sameIdentity` here became a
+ * throw site — and the worker loop is not inside a try. An escape there aborts
+ * the WHOLE command: remaining workers unsignalled, the daemon rung skipped,
+ * `--json` never emitted, and no report row for the worker whose read failed.
+ * That is worse than the answer it replaced.
+ *
+ * `null` is "could not tell", and every caller turns it into a refusal that
+ * reports `stopped: false` — which is what blocks the prune gate.
+ */
+async function identityHolds(target: ProcId): Promise<boolean | null> {
+  try {
+    return await sameIdentity(target, realProcessOps);
+  } catch {
+    return null;
+  }
+}
+
 async function waitGone(target: ProcId, budgetMs: number): Promise<boolean> {
   const clock = new Stopwatch();
   for (;;) {
-    if (!(await sameIdentity(target, realProcessOps))) return true;
+    // `null` (unreadable) must NOT return true: `true` here means "it is gone",
+    // which the caller reports as a graceful stop. Falling through to the
+    // budget makes an unreadable `ps` look like a survivor, and the rung's own
+    // re-check then produces the refusal.
+    if ((await identityHolds(target)) === false) return true;
     if (clock.elapsedMs() > budgetMs) return false;
     await new Promise((r) => setTimeout(r, 50));
   }

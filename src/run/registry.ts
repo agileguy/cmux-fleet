@@ -137,6 +137,18 @@ export class IdentityReadError extends Error {
   }
 }
 
+/** The `ps` spawn, factored out ONLY so `proc`'s type can be named below. */
+function spawnIdentityPs(pid: number) {
+  return Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], {
+    // Explicitly, not inherited. This is the whole fix: without it the
+      // token carries the caller's TZ and locale into a value that another
+      // process, in another environment, compares byte-for-byte.
+      env: { ...process.env, ...IDENTITY_PS_ENV },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
 /**
  * Start time of a pid as a tagged, environment-independent token. `null` means
  * `ps` AFFIRMATIVELY reported no such process; a read that failed for any other
@@ -182,15 +194,23 @@ export class IdentityReadError extends Error {
  * `identityAlive` below, and `kill.ts`'s `realProcessOps.startTime` (and
  * through it `sameIdentity` and every rung of the ladder) all now REFUSE on an
  * unreadable `ps` instead of declaring the process gone. Every one of those is
- * fail-closed in the direction that matters. `down` and `kill` are not in this
- * change's file set, so the refusal they get is the diagnosed `BACKEND_UNAVAILABLE`
- * exit above rather than a per-worker `identity_read_failed` verdict alongside
- * `group_read_failed`; that verdict is the right end state and is recorded as
- * the residual of this change.
+ * fail-closed in the direction that matters. The per-worker verdict this
+ * originally deferred now EXISTS: `down` reports `identity_read_failed`
+ * alongside `group_read_failed`, `signalIfSame` and `runKillLadder` answer
+ * `identity_unconfirmed`, and a broken `ps` on one worker therefore refuses
+ * that worker instead of aborting the run. Review found the deferral was not
+ * merely coarse — the whole worker loop sits outside a try, so an escaping
+ * read took the command with it.
  *
  * CAPTURE SITES persist `?? ""` and genuinely want leniency:
  * `startRegistryDaemon` below, `supervisor/index.ts`, and `up.ts` for a pid
- * `launchDetached` has just returned. None is forced onto the strict path and
+ * `launchDetached` has just returned. NOTE the third is weaker than the other
+ * two and review said so: `up.ts`'s pid is a freshly-spawned CHILD, not
+ * `process.pid`, so "alive by construction" does not strictly hold — it can be
+ * reaped between launch and read. The consequence is the `""` sentinel, which
+ * every reader already treats as capture-failed, so the leniency is still the
+ * right call there; it is recorded rather than glossed. None is forced onto
+ * the strict path and
  * none needed to be, because for all three the pid is alive BY CONSTRUCTION —
  * two of them read `process.pid` — so `ps` answers exit 0 with a start time and
  * neither the `null` nor the throw is reachable. The throw becomes reachable
@@ -203,14 +223,21 @@ export class IdentityReadError extends Error {
  * @throws {IdentityReadError} `ps` could not be read.
  */
 export async function processStartTime(pid: number): Promise<string | null> {
-  const proc = Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], {
-    // Explicitly, not inherited. This is the whole fix: without it the token
-    // carries the caller's TZ and locale into a value that another process,
-    // in another environment, is going to compare byte-for-byte.
-    env: { ...process.env, ...IDENTITY_PS_ENV },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  /*
+   * THE SPAWN ITSELF CAN THROW, and that is the likeliest real instance of
+   * "the measuring instrument is broken": a minimal container image with no
+   * procps. `Bun.spawn` raises `Error: Executable not found in $PATH: "ps"`
+   * synchronously, with no `exitCode` — so without this wrapper the entry
+   * point reports `EXIT.INTERNAL`, "a bug in pifleet itself", for an
+   * environment failure. `down.ts` already wraps its `docker` spawn for
+   * exactly this reason.
+   */
+  let proc: ReturnType<typeof spawnIdentityPs>;
+  try {
+    proc = spawnIdentityPs(pid);
+  } catch (err) {
+    throw new IdentityReadError(pid, `ps could not be started: ${String(err)}`);
+  }
   // Both pipes concurrently. Draining one to EOF while the other fills its
   // buffer is how a tiny read becomes a deadlock on the day `ps` gets chatty —
   // and it does: the illegal-flag reading above is a five-line usage block.
@@ -223,10 +250,37 @@ export async function processStartTime(pid: number): Promise<string | null> {
   await proc.exited;
 
   if (proc.exitCode !== 0) {
-    if (out.length === 0 && err.length === 0) return null; // affirmatively gone
+    /*
+     * A SIGNAL-KILLED `ps` IS NOT AN ABSENT PROCESS, and it looks exactly like
+     * one on every channel this function reads. Measured on bun 1.3.11: a child
+     * terminated by a signal reports `exitCode: null`, `signalCode: "SIGKILL"`,
+     * and empty stdout AND stderr — so `exitCode !== 0` is true, both pipes are
+     * silent, and the pre-fix condition below answered "affirmatively gone".
+     *
+     * That is the destructive answer. `gone` is the one verdict `down` may
+     * report as a stop, act on with `docker rm -f`, and pass to the `--prune`
+     * gate as prunable, so a `ps` killed by memory pressure, an OOM killer, a
+     * cgroup limit or a stray `pkill` would have deleted the checkout of a
+     * supervisor that was alive and mid-write.
+     *
+     * Worse, it defeats the identity re-check guard on ITS OWN stated threat
+     * model: that guard exists because "the conditions that break one `ps` are
+     * exactly the conditions that break the other", and under exactly that
+     * pressure BOTH children are signal-killed, both read as absent, and the
+     * guard concludes `gone` — the outcome it was built to prevent.
+     *
+     * So absence requires a NORMAL exit. `exitCode === null` means the child
+     * never got to say anything about the process, which is the definition of
+     * a failed read.
+     */
+    if (proc.exitCode !== null && out.length === 0 && err.length === 0) return null;
     throw new IdentityReadError(
       pid,
-      err.length > 0 ? err : `ps exited ${String(proc.exitCode)} without saying why`,
+      err.length > 0
+        ? err
+        : proc.signalCode !== null
+          ? `ps was killed by ${proc.signalCode} before it could answer`
+          : `ps exited ${String(proc.exitCode)} without saying why`,
     );
   }
   if (out.length === 0) {
@@ -731,7 +785,7 @@ export interface ReaperConfig {
  * A SECOND EXHAUSTIVE SWITCH, deliberately not a shared predicate with
  * `reaper.ts`'s `supervisorStopped`. The two answers agree today, and they are
  * still two different questions — "may this container be destroyed" and "may
- * this name be forgotten". A seventh `KillOutcome` has to be answered for both,
+ * this name be forgotten". An eighth `KillOutcome` has to be answered for both,
  * by someone looking at both, and a shared helper would answer the second one
  * silently from a decision made about the first. The `never`-typed default is
  * what forces that: the root cause of the defect this fixes was that adding a
@@ -896,8 +950,19 @@ export async function startRegistryDaemon(
       if (scanning) return;
       scanning = true;
       void reapOnce()
-        .catch(() => {
-          // A failed scan is not fatal to the daemon; the next one retries.
+        .catch((err: unknown) => {
+          /*
+           * A failed scan is not fatal to the daemon; the next one retries.
+           * It must not be SILENT, though, and that distinction is newer than
+           * this catch. A scan aborts mid-iteration, so the whole `reports`
+           * array is discarded: workers already reaped in that pass get no
+           * ledger record and no deregistration, while their staleness clocks
+           * have already been dropped. If the cause is persistent — an
+           * unreadable `ps`, a missing procps — every subsequent scan dies the
+           * same way and reaping is disabled for the entire fleet with nothing
+           * anywhere saying so.
+           */
+          process.stderr.write(`reaper: scan aborted, retrying next period: ${String(err)}\n`);
         })
         .finally(() => {
           scanning = false;
