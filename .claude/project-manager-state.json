@@ -1,0 +1,167 @@
+{
+  "srd_path": "Docs/SRD-COMPLETION.md",
+  "srd_id": "SRD-PIFLEET-002",
+  "repo_path": "/Users/de895996/repos/cmux-fleet",
+  "total_phases": 11,
+  "phases": [
+    "A-decide",
+    "B-guards",
+    "C-proof-plane",
+    "D-accounting",
+    "E-control-seam",
+    "F-launch-preflight",
+    "G-durable-formats",
+    "H-evidence",
+    "I-acceptance",
+    "J-egress",
+    "K-end-to-end"
+  ],
+  "current_phase": "H-evidence",
+  "completed_phases": [
+    "A-decide",
+    "B-guards",
+    "F-launch-preflight",
+    "G-durable-formats"
+  ],
+  "status": "phase_g_merged_awaiting_next_phase_start",
+  "version_file": "package.json",
+  "isa_progress_at_start": "239/293",
+  "criteria_remaining_at_start": 54,
+  "decisions": {
+    "ISC-243": "arm1-close-holes-restate (Phase I)",
+    "ISC-264": "arm2-accept-overload-pin (Phase J)",
+    "ISC-268": "arm1-wire-through-buildDockerArgv (Phase J)",
+    "ISC-271": "arm1-honour-config-in-up (Phase F, owner decision 2026-08-20) \u2014 up reads config.backend.kind when --backend absent; explicit flag still wins. Open sub-question: BackendSchema.kind defaults to 'cmux', so absent-block vs set-block must be distinguishable or every headless run silently becomes cmux. schema.ts NOT in eng1's file set."
+  },
+  "isa_progress": "250/293",
+  "note_phase_C": "BLOCKED on infrastructure: needs a self-hosted Apple-silicon runner (Docker + oMLX + Google credential). Deferred, not skipped. Code half (ISC-51/57 bridge containment) can proceed independently.",
+  "phase_f": {
+    "criteria": [
+      "ISC-32",
+      "ISC-61",
+      "ISC-189",
+      "ISC-191",
+      "ISC-271",
+      "ISC-272",
+      "ISC-291",
+      "ISC-292"
+    ],
+    "split": {
+      "eng1_up_gate": [
+        "ISC-32",
+        "ISC-189",
+        "ISC-61",
+        "ISC-271"
+      ],
+      "eng2_probe_mount": [
+        "ISC-291",
+        "ISC-292"
+      ],
+      "eng3_down_group": [
+        "ISC-272",
+        "ISC-191"
+      ]
+    },
+    "unassigned_owner_decision": [],
+    "standing_constraints": {
+      "omlx": "NEVER 127.0.0.1:8000 or localhost:8000 (local LaunchAgent com.pai.omlx deliberately unloaded). Fleet oMLX is the LAN peer 192.168.86.49:8000 only. ISC-259 amended SRD 5.9; LAN peer serves all 3 allowlisted models, local serves none.",
+      "isc291_evidence": "Stub HTTP server on an ephemeral port (relay.test.ts:21 pattern). NOT a live oMLX. Ephemeral port proves the dial target is read from config rather than hardcoded; a fixed :8000 cannot prove that.",
+      "contracts_ts": "READ-ONLY to phase engineers. Scoped exception granted to eng3 for launch-time identity fields on WorkerStateSchema/WorkerLaunchSchema ONLY, with a stated compatibility policy for records already on disk.",
+      "file_ownership": "Disjoint per engineer; engineers run NO git commands; orchestrator owns the index."
+    },
+    "prior_attempt": "Lost to IOGPUFamily kernel panic 2026-08-20 15:06:38 after 7 min; no file changes survived; clean resume.",
+    "results": {
+      "ISC-291": "[x] proposed. CORRECTION: defect was NOT in up (ISC-260 already moved that probe into a container via containerFetch, where base_url is correct); the host-vantage probe is doctor. Fix = hostReachableBaseUrl() at model-probe.ts:591, single named function, reads base_url+relay_upstream, writes neither. 4 ungated stub tests (plain test(), NOT the file's skipIf(!LIVE) it) run in fast `test` job.",
+      "ISC-292": "[~] proposed. doctor-side sentinel round-trip probeMountVisibility, runtime-agnostic. Residual: CI runner is ubuntu-latest (native Linux, all paths shared) so CI only ever exercises the POSITIVE direction; the negative direction runs only on VM-backed runtimes (macOS/colima). Enforcement is in doctor, not on finished argv (render.ts/up.ts owned by others).",
+      "ISC-32": "[x] eng1. Gate at up.ts:485 after assertModelsAllowed, before first clone. Mutation: `if (false)` -> Expected 3 (BACKEND_UNAVAILABLE) / Received 6 (WORKER_DIED, the pre-existing behaviour). 3 ordering witnesses: zero network/run docker lines, empty git remotes, empty workersDir+ledger.",
+      "ISC-61": "[x] eng1. --workers default removed (up.ts:146), launch set defaults to config.workers (up.ts:441), renderAllWorkers now has a real src/ caller. KEY DATUM: under the same mutation the two pre-existing MODULE-level ISC-61 tests stay GREEN (2 pass/0 fail) while production launches 1 worker for a 3-worker config \u2014 empirically why it was [x] while false.",
+      "ISC-189": "[~] eng1. Both halves wired into one gate; verifyImage gets its first non-operator caller. Mutation isolates cleanly (only fails-verify test reddens). RESIDUAL: proven against a docker PATH shim, not a real stale image on a real daemon. NOTE: eng1 suggested adding up-wiring.test.ts to the container job \u2014 ORCHESTRATOR CHECKED AND REJECTED: that file has zero PIFLEET_DOCKER/skipIf probes, so by the container job's own listing rule it does not belong there; adding it would run shim tests twice and prove nothing. Lifting to [x] needs a NEW daemon-requiring probe that builds a real image and mismatches it.",
+      "ISC-271": "[x] ORCHESTRATOR-COMPLETED. eng1 graded its own work [ ] honestly (its mutation survived: 3 pass/0 fail) because the change was behaviourally inert while the middle term was null. Orchestrator landed the schema half: schema.ts kind .default('cmux') -> .optional(); up.ts:680 middle term wired to loadedConfig?.config.backend.kind. Two mutation proofs: (1) un-wire -> Expected cmux/Received headless; (2) restore .default('cmux') -> no-backend-block test Expected headless/Received cmux (the blast radius, caught). Tests re-anchored on run.json's requested backend, NOT --json's resolved backend, because cmux.app runs on this Mac but not on ubuntu-latest.",
+      "ISC-272": "[~] eng3. Met and machine-checked vs REAL spawned process groups (5 new integration tests, 5 mutation proofs, e2e lifecycle green). NO contracts.ts schema field added after all \u2014 the ~34 lines are a doc comment on the existing pgid. Reasoning: a group is NAMED BY its leader's pid, so once down requires the validated supervisor to LEAD the group, the group's launch identity IS the leader's, already in proc_started. A second copy would widen a Phase-3 seam to store a derivable value. No migration needed/possible-to-need: pgid is required and always was. Residuals: (1) supervisor/index.ts ?? 0 sentinel untested at the WRITER end; (2) 'survived the kill ladder' prune reason now unreachable from any fixture (lost coverage as a side effect); (3) mid-climb group revocation correct-by-construction but unreachable; (4) reaper.ts maps pgid<=0 to null i.e. NARROWS to leader where down REFUSES \u2014 deliberate inconsistency, outside eng3's file set.",
+      "ISC-191": "[~] HELD, not upgraded. Residual (b) unvalidated group CLOSED. Residual (a) holds it: --force-identity still restores the rung-0 self-anchor and rung 0 cannot tell a supervisor from a stranger. NEW residual: force now signals the leader ALONE, so it may ORPHAN child processes a group signal would have taken."
+    },
+    "ci_fixes_by_orchestrator": [
+      "container job: registered test/integration/doctor-preflight.test.ts; TOTAL_EXPECTED 86 -> 88 (hand-derived: 9 files gate-unset = 88; same run reproduced 86 without it)",
+      "live-oMLX step: TOTAL_EXPECTED 4 -> 8 (derived: model-probe.test.ts now collects 8 = 4 pass ungated ISC-291 + 4 skip live). Flagged by eng2; would have gone red in CI.",
+      "stale prose 'All five PIFLEET_DOCKER-gated files' -> 'nine'"
+    ],
+    "found_beyond_criteria": "doctor could never resolve host.docker.internal on a default fleet.yaml, so ISC-256's allowlist comparison and ISC-55's latency were SILENTLY UNREPORTED on the default path. doctor documented its own blindness in vantageNote instead of removing it.",
+    "still_inert": "BackendSchema.workspace/split/focus_on_dispatch have zero config readers in src/. Wiring kind alone leaves 3 documented options that change nothing \u2014 needs its own criterion.",
+    "orchestrator_verification_lesson": "grep -rn MUTATION src/ is UNSOUND for detecting leftover mutations \u2014 eng3's M5 was SEMANTIC (group: null -> group: recordedPgid), unmarked, and sat in the tree while grep reported clean. The '1 fail' I attributed to a code/test disagreement WAS that mutation printing itself. Use cmp against a pristine snapshot, not grep.",
+    "flake_fixed": "test/unit/control-auth-comparator.test.ts:237 \u2014 PRE-EXISTING ON MAIN, untouched by Phase F. Hardcoded 'f' as the differing char against a random hex secret, so first/last-char mutation was a no-op ~1-in-16 per end. MEASURED 5 failures / 30 runs (16%) before, 0/30 after. Fixed because it would randomly redden this PR's CI and misattribute to Phase F.",
+    "file_next": "reaper.ts:205 pgid<=0 -> null divergence from down's refusal (same safety property, opposite resolution). BackendSchema workspace/split/focus_on_dispatch still inert (zero config readers).",
+    "pr": 46,
+    "ci": "all green \u2014 test 4m17s, load 3m55s, container 7m11s (after fixing a missing line continuation that silently dropped doctor-preflight from the arg list; the count guard caught it)",
+    "isa": "244/293 -> 248/293  ([x]=248 [~]=22 [ ]=23, reconciles to 293)"
+  },
+  "phase_f_review": {
+    "reviewers": [
+      "claude:architecture+security",
+      "gemini:cross-file contracts",
+      "codex:typescript/bun"
+    ],
+    "verdict": "CHANGES_REQUESTED (unanimous)",
+    "consensus_findings": [
+      "reaper.ts+registry.ts consume group_unconfirmed as a completed reap: docker rm -f a live supervisor container, delete registry entry, monitor.forget \u2014 found independently by all 3",
+      "fleet.example.yaml:12 ships kind: cmux, now binding; example-derived configs hard-fail exit 3 on cmux-less hosts \u2014 found by 2 of 3"
+    ],
+    "fixing_now": [
+      "reaper/registry exhaustive switch",
+      "ProcessOps.groupId required",
+      "confirmGroup TOCTOU identity re-check",
+      "confirmGroup read_failed vs gone",
+      "down signalGuarded outcome propagation",
+      "down daemon REFUSED mislabel",
+      "fleet.example.yaml",
+      "doctor redirect:manual + scheme allowlist",
+      "compose() userinfo/fragment/path-slash",
+      "model-probe test budgets",
+      "prose drift ci.yml/up-wiring/SRD"
+    ],
+    "deferred_filed_not_fixed": [
+      "down.ts:143-148 bare catch on readdir(workersDir): non-ENOENT errno yields workerIds=[] -> allStopped vacuously true -> exit 0 -> --prune deletes every live workers checkout (PRE-EXISTING)",
+      "supervisor/index.ts:186 pgid ?? 0 sentinel makes a pgidOf failure permanently un-down-able; only escape is --force-identity which weakens the identity axis to recover from a group-capture failure. reaper.ts:205 resolves the same fact the opposite (better) way",
+      "doctor computes host.docker.internal as 127.0.0.1 while the runtime resolves it to the bridge gateway (192.168.5.2) \u2014 doctor can only be MORE optimistic than up",
+      "doctor bind-mount check hand-writes two roots and misses run.repo -> /workspace; run/paths.ts already exports bindMountSources()",
+      "doctor reads relay_upstream but never calls assertTargetsAllowed \u2014 passes green on a config up will refuse",
+      "down.ts:167 corrupt-but-present state.json throws StateReadError mid-teardown, unguarded worker loop",
+      "down.ts:166-170 absent state.json on a just-launched supervisor reports already_gone -> prunable",
+      "up.ts:486-488 image gate passes vacuously when --workers names undefined ids, then clones and registers remotes anyway",
+      "pgidOf (launch.ts:50-59) vs processGroupId (kill.ts:114-125) diverge: no exitCode check, no LC_ALL pin, isFinite vs isInteger>0. The laxer one WRITES every recorded pgid; the stricter one vouches for it",
+      "kill.ts:47-49 says classifyStall has no production caller; kill.ts:421-423 says scheduler.ts is its first \u2014 scheduler.ts:383 confirms the second",
+      "backend.workspace/split/focus_on_dispatch still read by nothing"
+    ],
+    "reviewer_verified_clean": [
+      "CI TOTAL_EXPECTED 88 and 8 reproduced independently (junit tests=88; 4 pass/4 skip with oMLX down)",
+      "base_url vs relay_upstream separation holds (ISC-253)",
+      "image gate ordering: gate at up.ts:488 precedes worktree 844, materialize 991, daemon 1012, launchDetached 1108",
+      "backend.kind has exactly one reader, up.ts:673, correctly ?? guarded",
+      "ISA arithmetic honest, enforced by isa-frontmatter.test.ts:52",
+      "Darwin: a reaped pid is invisible to ps, so empty output means gone \u2014 no fixture depends on observing a zombie"
+    ]
+  },
+  "phase_g": {
+    "pr": 47,
+    "merged_commit": "e32ee78",
+    "criteria": [
+      "ISC-157",
+      "ISC-192"
+    ],
+    "outcome": "both CLOSED, both RESTATED \u2014 the criteria as written had no subject",
+    "owner_decision": "refuse by design, named, with a hatch \u2014 NOT accept-and-upgrade; no version stamp on ledger records, no v0->v1 ladder",
+    "carry_ins": [
+      "readdir errno bug",
+      "processStartTime ps-failure/absent-process conflation"
+    ],
+    "review": "CHANGES_REQUESTED; fixed in e97d9a5; guard audit in ac0d2a8 found 8 of 10 new guards untested",
+    "uncovered_and_recorded": "down.ts waitGone leniency, worker rung how/stopped guards, daemon rung outcome capture \u2014 defensive, not exercised; recorded on ISC-192 and in the test docstring",
+    "isa_delta": "248/293 -> 250/293"
+  },
+  "open_process_gap": "CHANGELOG.md last updated at PR #27; PRs #28-#46 (incl. Phase B and Phase F) are not recorded there. ProjectManager step 2.8 has been skipped. Backfill is ~19 PRs - raise with owner rather than doing silently.",
+  "process_risk_flagged_by_engineer": "Both Phase G engineers worked in the SAME checkout, not separate worktrees. One engineers live mutation broke the others tsc mid-run; a git commit -a from either would have swept up the others in-progress mutation. Use isolation:worktree for future parallel phases.",
+  "changelog_backlog": {
+    "last_recorded_pr": 27,
+    "written_2026_08_21": "Phase F (#46) and Phase G (#47)",
+    "still_unrecorded": "PRs #28-#45 \u2014 mostly ISA grading work, but #29/#34/#36/#37/#40/#42/#43 changed behaviour"
+  }
+}

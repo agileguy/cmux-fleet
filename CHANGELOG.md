@@ -5,6 +5,89 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ### Added
+
+- **A durable file with an unrecognised stamp now refuses by name instead of throwing a library
+  error (Phase G, ISC-157, ISC-192).** Both criteria asked to *read* an older file "rather than
+  failing"; the owner chose the opposite deliberately — **refuse by design, named, with a hatch** —
+  so both were **restated and closed against the restatement**, not built as written. No version
+  stamp was added to ledger records and no `v0 -> v1` upgrade ladder exists. **Measured before it
+  was fixed:** a `v0` stamp threw a bare `ZodError` whose message's first line was the lone
+  character `[`, and a truncated file a bare `SyntaxError`; neither carried an `exitCode`, so both
+  left the CLI as a stack trace on exit 1, off the §10 ladder entirely. Four readers now separate
+  **provenance from damage** — `readRegistry`, `control-auth`, `attended/mode` and `report/collect`
+  each pair a schema error naming a build to go back to with a damage error that deliberately does
+  not. The stamp is checked **before** the schema at every site, so a future `v2` renaming a field
+  is not misdiagnosed as a missing one. Two of the brief's premises were wrong and were corrected
+  against the tree rather than implemented: `attended/mode.ts` was already wrapped, and `collect.ts`
+  already caught — what neither could do was tell version skew from damage.
+
+- **`down` no longer treats an unreadable `ps` as a dead worker, which was the data-loss half
+  (Phase G).** `processStartTime` conflated "`ps` failed" with "no such process", and `down`'s
+  `anchorIdentity` maps that to the one verdict that reports `stopped: true`, calls `reapContainer()`
+  and makes the worker **prunable** — so a broken `ps` could destroy a live worker's container and
+  worktree. It now raises `IdentityReadError` and `down` reports `identity_read_failed`. The rule it
+  rests on was measured, not assumed: on Darwin, exit 1 with empty stdout does **not** identify an
+  absent process — a reaped pid, an out-of-range pid, a malformed `-p` and an illegal flag all
+  produce it. Only silence on **all three** channels does.
+
+- **`mergeLedger`'s shape tolerance is pinned, including the position clause (Phase G).** A
+  malformed record does not crash the merge, it lands in `errors`, and every well-formed record
+  around it survives **regardless of position**. The position half is load-bearing and was measured:
+  under a mutation hoisting the try/catch to per-shard, the last-position test still **passes** while
+  mid-shard reddens — so a merge that silently drops the tail after an error would have passed a
+  naive test. This pins shape tolerance and is **not** a version policy: a record failing today's
+  schema is discarded rather than read, and the merge cannot tell "written by an older writer" from
+  "corrupt shard".
+
+- **The launch preflight refuses before it can leave anything behind (Phase F).** The image-presence
+  gate runs ahead of any clone, remote registration or supervisor launch, so a missing image costs
+  nothing to recover from.
+
+- **Every rung of the kill ladder now validates the process GROUP, not just the leader (Phase F,
+  ISC-272).** `down` signals `-pgid`, so the previous weak anchor aimed SIGTERM and then SIGKILL at
+  an entire group named by a possibly stale file. A group that disagrees with the OS, or that the
+  identity-validated supervisor does not lead, now refuses the ladder (`group_unconfirmed`). No
+  schema field was needed — a group is named by its leader's pid, so its launch-time identity *is*
+  the leader's, already recorded. Mutation-measured on real spawned groups: with the old rung
+  restored, `foreign group members: 24667,24669,24670` became `(none — DEAD)` while the actual
+  supervisor was never touched.
+
+### Fixed
+
+- **A supervisor that refused the kill ladder could be destroyed by the reaper while still alive
+  (Phase F, found by review, not by grading).** Adding `group_unconfirmed` to `KillOutcome` was
+  invisible to `tsc` for consumers that only *stored* the value: `reaper.ts` gated `docker rm -f` on
+  the container merely being present, `registry.ts` deregistered every report it was handed, and
+  `monitor.forget` dropped the staleness clock. A supervisor that was not its own group leader went
+  stale **while alive**, was never signalled, lost its live container mid-write, lost its name in
+  `registry.json`, and became invisible to every later scan — recorded in the ledger as
+  `worker_reaped`. Fixed with three exhaustive switches carrying `never`-typed defaults, deliberately
+  **not** one shared predicate, so a seventh member must be answered at all three sites by someone
+  looking at all three.
+
+- **Eight of ten guards added by the Phase G review were held in place by nothing (guard audit,
+  `ac0d2a8`).** Each new guard was reverted in turn to see whether anything reddened. Reverting all
+  five of `kill.ts`'s at once left 1335 unit and 19 reaper tests **green** — `processStartTime` got
+  guards and tests, `processGroupId` got byte-identical guards and none. All ten are covered now.
+  What still is not, stated rather than glossed: `down.ts`'s `waitGone` leniency, the worker rung's
+  `how`/`stopped` guards and the daemon rung's outcome capture are **defensive, not exercised** —
+  measured at thresholds 1 through 6, the verdict is `identity_read_failed` every time, produced
+  earlier by the anchor or the SIGTERM rung.
+
+### Changed
+
+- **`backend.kind` no longer defaults to `cmux` at the schema (Phase F, ISC-271).** It is
+  `.optional()`, so `up` can distinguish an absent backend block from one explicitly set — without
+  which every headless run silently became `cmux`. `up` now honours `config.backend.kind` when
+  `--backend` is absent; an explicit flag still wins. **This affects every existing `fleet.yaml`.**
+
+- **An identity value written before this build is reported `identity_legacy_format`, not
+  `identity_mismatch`.** Pinning `ps -o lstart=` to `TZ=UTC LC_ALL=C` changes the bytes of every
+  `started` value already on disk — including on a machine already in UTC, because `LC_ALL=C` also
+  reorders the fields. Values written by this build carry a `utc1 ` tag; no locale renders a weekday
+  as `utc1`, so the tag cannot collide with a legacy value. `--force-identity` is the named hatch.
+  Reporting such a value as a mismatch would assert something false about the world and train the
+  operator to reach reflexively for the one flag that re-opens the fail-open.
 - **Five anti-criteria now have probes that can actually fail (ISC-138, 139, 140, 165, 199).** An
   `Anti:` criterion asserts an *absence*, which is the one claim a green suite cannot make on its
   own — each was satisfied by a codebase that had simply not done the forbidden thing yet. Every
