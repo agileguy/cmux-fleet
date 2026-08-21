@@ -663,6 +663,27 @@ export const TaskRecordSchema = z.object({
   verdict: VerdictSchema,
   reason: z.string().default(""),
   settled_at: z.string(),
+  /**
+   * ISC-154: the worktree content hash AT QUIESCE, sampled by the supervisor
+   * inside `settle` — the only moment anything in the fleet can observe.
+   *
+   * This field exists because quiesce and harvest happen in different
+   * PROCESSES. The supervisor decides an epoch is over and exits or moves on;
+   * `artifacts` runs later, possibly much later, possibly after the supervisor
+   * is dead. So the quiesce sample has to be written down by whoever took it,
+   * and the task record is already the durable channel across that boundary —
+   * it is what `wait` polls, what carries the supervisor-terminal verdicts
+   * harvest already honours, and it is already read by `harvestTask`. Adding
+   * a field to it beats inventing a second file that could disagree with it.
+   *
+   * Nullable with a null DEFAULT, which is what keeps this backward
+   * compatible: every record written before this field existed still parses,
+   * and reads as "no sample was taken" rather than as a hash of nothing. That
+   * distinction is the whole safety property of ISC-154 — the adjudicator
+   * fires only when BOTH hashes are present and differ, so an absent sample
+   * can never void a task.
+   */
+  tree_hash: z.string().nullable().default(null),
 });
 export type TaskRecord = z.infer<typeof TaskRecordSchema>;
 

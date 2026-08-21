@@ -56,6 +56,7 @@ import {
   writeWorkerState,
 } from "../run/state.ts";
 import { LedgerWriter } from "../run/ledger.ts";
+import { worktreeContentHash } from "../run/treehash.ts";
 import { processStartTime, registryCall, serveJsonlSocket } from "../run/registry.ts";
 import { ensureControlAuth } from "../security/control-auth.ts";
 import { pgidOf } from "./launch.ts";
@@ -338,6 +339,16 @@ async function main(): Promise<void> {
   let livePromptId: string | null = null;
   let probing = false;
   let shuttingDown = false;
+  /**
+   * The host-side worktree of the LIVE epoch, or null when there is no epoch
+   * or the task was dispatched without one (ISC-154).
+   *
+   * Held per-epoch rather than per-worker because it is the live TASK's tree
+   * that quiesce is a statement about, and it is cleared in `settle` for the
+   * same reason `livePromptId` is: a path left behind from a settled epoch
+   * would let a later settlement sample a tree that epoch never owned.
+   */
+  let liveWorkdir: string | null = null;
 
   /**
    * Fence writes are serialized for the same tmp-name-collision reason as
@@ -375,6 +386,20 @@ async function main(): Promise<void> {
         verdict: "failed",
         reason: "supervisor_restarted",
         settled_at: new Date().toISOString(),
+        /**
+         * No quiesce sample exists for a burned epoch, and inventing one now
+         * would be a lie about WHEN it was taken (ISC-154).
+         *
+         * This path runs at STARTUP, recovering an epoch a dead incarnation
+         * left live. There was no `settle`, so nothing observed the tree at
+         * the moment work stopped — and the tree has since been sitting there
+         * for however long the supervisor was down. Hashing it here would
+         * label a startup-time measurement as a quiesce-time one, and it
+         * would then compare EQUAL to whatever harvest sees, actively
+         * certifying that nothing moved. Null says the one true thing: nobody
+         * was watching.
+         */
+        tree_hash: null,
       });
       state.completed_epochs = [...state.completed_epochs, settled.epoch];
     }
@@ -396,6 +421,8 @@ async function main(): Promise<void> {
     probing = false;
     livePromptId = null;
     deadlineMs = null;
+    const settledWorkdir = liveWorkdir;
+    liveWorkdir = null;
     // Disarm the kill ladder: the epoch is over. Leaving it armed would keep
     // the event loop alive and, worse, let a timer from a settled epoch fire
     // against whatever epoch is live by then.
@@ -405,6 +432,31 @@ async function main(): Promise<void> {
     }
     tracker.reset();
     await persistFence();
+    /**
+     * The ISC-154 quiesce sample, taken HERE and nowhere else.
+     *
+     * This line is the whole reason quiesce is a meaningful moment rather
+     * than a word in a docstring. `settle` is where the supervisor declares
+     * the epoch over — the agent has stopped, the completion probe has
+     * confirmed it twice, and from this instant nothing is SUPPOSED to write
+     * to the tree again. Sampling anywhere else measures a different claim:
+     * earlier and the agent is still working, later and the sample is taken
+     * by whoever is asking, which is the failure below.
+     *
+     * It is taken on EVERY settle path, not just the quiesced one. A task
+     * that timed out, was aborted, or died with its worker is exactly the
+     * task most likely to have left something running, and those are the
+     * paths where a stale-tree void matters most.
+     *
+     * `worktreeContentHash` cannot throw and cannot hang past its own
+     * timeout, both of which are load-bearing here: `settle` is the only
+     * writer of the record `wait` polls, so an exception or a wedged git in
+     * this line would not degrade the evidence, it would hang the task
+     * forever. Failure yields null, which the adjudicator reads as no
+     * evidence and which changes no verdict.
+     */
+    const treeHash =
+      settledWorkdir === null ? null : await worktreeContentHash(settledWorkdir);
     await writeTaskRecord(taskRecordPath(wp, settled.task_id), {
       schema: "pifleet.taskrecord/v1",
       task_id: settled.task_id,
@@ -415,6 +467,7 @@ async function main(): Promise<void> {
       verdict,
       reason,
       settled_at: new Date().toISOString(),
+      tree_hash: treeHash,
     });
     state.phase = shuttingDown ? state.phase : "idle";
     state.task_id = null;
@@ -723,6 +776,17 @@ async function main(): Promise<void> {
         await flushState();
         deadline.restart();
         deadlineMs = envelope.deadline_s * 1000;
+        /**
+         * Remember which tree this epoch owns, so `settle` can sample it
+         * (ISC-154). `"unset"` and `""` are the envelope's two spellings of
+         * "this task has no worktree" — the same pair `harvestTask` guards on
+         * — and both must stay null rather than becoming a path that would
+         * make git run somewhere arbitrary.
+         */
+        liveWorkdir =
+          envelope.host_workdir === "unset" || envelope.host_workdir === ""
+            ? null
+            : envelope.host_workdir;
 
         const message = renderPrompt(envelope);
         try {
