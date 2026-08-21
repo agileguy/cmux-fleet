@@ -51,9 +51,10 @@
  *
  * So all three of the mutations ISC-154 must be able to observe move the
  * value: a modified tracked file (new blob id), a new untracked file (new
- * entry), and a deleted file (missing entry). `test/unit/treehash.test.ts`
- * asserts each one against a real repository rather than trusting this
- * paragraph.
+ * entry), and a deleted file (missing entry).
+ * `test/integration/tree-hash.test.ts` asserts each one against a real
+ * repository rather than trusting this paragraph — integration, not unit,
+ * because a claim about what git DOES cannot be proved without running git.
  *
  * ## Two boundaries, stated rather than hidden
  *
@@ -128,7 +129,7 @@ export async function writeTreeSnapshot(path: string): Promise<TreeSnapshot> {
     // `.git/index`'s — so concurrent harvests of tasks sharing one worktree
     // do not contend (the F23 hazard `harvestAll` serializes against).
     const env = { GIT_INDEX_FILE: tmpIndex };
-    const added = await runGit(path, ["status", "--porcelain"], env);
+    const added = await runGit(path, ["add", "-A"], env);
     if (added.code !== 0) {
       return { ok: false, what: `git add -A (snapshot) in ${path}`, result: added };
     }
