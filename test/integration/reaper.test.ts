@@ -24,10 +24,10 @@ import {
 } from "../../src/run/registry.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { loadControlSecret } from "../../src/security/control-auth.ts";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { realProcessOps } from "../../src/safety/kill.ts";
+import { GroupReadError, processGroupId, realProcessOps } from "../../src/safety/kill.ts";
 import {
   HeartbeatMonitor,
   isStale,
@@ -234,6 +234,116 @@ describe("reapSupervisor against real processes", () => {
       victim.kill();
     }
   }, cliBudget(1));
+});
+
+/**
+ * `processGroupId`: "not there" and "could not find out" are different facts.
+ *
+ * IT LIVES HERE rather than in `test/unit/kill.test.ts` because it runs a real
+ * `ps` — that file's header promises "every process here is fake" and it spawns
+ * nothing. What is under test is the CLASSIFICATION of a real subprocess's exit
+ * status and streams, which a fake ops table cannot reach: the fakes in
+ * `kill.test.ts` cover what `confirmGroup` DOES with each answer, and these
+ * cover which answer the real reader produces.
+ *
+ * THE STUB IS THE POINT. Forcing the real `/bin/ps` to fail in a specific way
+ * is not portable — measured on Darwin 25.5, a reaped pid, a pid above the
+ * ceiling, a malformed `-p` argument and an illegal flag ALL exit 1 with empty
+ * stdout, and Linux `procps` was not available here to measure. A stub `ps` on
+ * PATH makes each case exact and identical on every platform, and it is the
+ * genuine `processGroupId` doing the classifying either way.
+ */
+describe("processGroupId: an absent process and a failed read are different facts", () => {
+  /** Run `fn` with a stub `ps` script as the only executable on PATH. */
+  async function withStubPs<T>(script: string, fn: () => Promise<T>): Promise<T> {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-stub-ps-"));
+    const stub = join(dir, "ps");
+    await Bun.write(stub, script);
+    await chmod(stub, 0o755);
+    const saved = process.env["PATH"];
+    // ONLY the stub directory: a fall-through to the real `ps` would make a
+    // failing assertion look like a passing one.
+    process.env["PATH"] = dir;
+    try {
+      return await fn();
+    } finally {
+      if (saved === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = saved;
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Fails if: `ps` saying nothing at all stops meaning "no such process". That
+   * is the ONE reading a caller may act destructively on — `down` maps it to
+   * the only anchor verdict that reports `stopped: true` and force-removes the
+   * container — so it has to keep working, not merely be hard to reach.
+   */
+  test("silence on every channel is an absent process", async () => {
+    expect(await withStubPs("#!/bin/sh\nexit 1\n", () => processGroupId(4242))).toBeNull();
+    // One stub `ps` spawn. One.
+  }, cliBudget(1));
+
+  /**
+   * THE F4 CASE. Same exit status and same empty stdout as the absent process
+   * above; the only difference is that `ps` explained itself on stderr. Before
+   * the split this returned `null` — indistinguishable from "gone" — so a
+   * transient `ps` failure against a LIVE supervisor made `down` report it
+   * stopped, `docker rm -f` its container, and `--prune` delete the checkout it
+   * was still writing to.
+   *
+   * Fails if: a diagnosed failure is read as an absent process again.
+   */
+  test("a diagnosed failure is a failed read, not an absent process", async () => {
+    await withStubPs(
+      '#!/bin/sh\necho "ps: Resource temporarily unavailable" 1>&2\nexit 1\n',
+      async () => {
+        await expect(processGroupId(4242)).rejects.toBeInstanceOf(GroupReadError);
+        await expect(processGroupId(4242)).rejects.toThrow(/Resource temporarily unavailable/);
+      },
+    );
+    // TWO stub `ps` spawns, one per assertion — counted, not estimated.
+  }, cliBudget(2));
+
+  /**
+   * The third way a read can fail, and the one no exit status reveals: `ps`
+   * claimed SUCCESS and printed something that is not a process group. An
+   * unparseable answer is not an answer.
+   *
+   * Fails if: unparseable output falls back to `null` — which is what the
+   * original `Number.isInteger(pgid) && pgid > 0 ? pgid : null` did, feeding
+   * the same "gone" verdict from a third direction.
+   */
+  test("output that is not a process group is a failed read", async () => {
+    await withStubPs('#!/bin/sh\necho "not-a-number"\nexit 0\n', async () => {
+      await expect(processGroupId(4242)).rejects.toBeInstanceOf(GroupReadError);
+    });
+    // One stub `ps` spawn. One.
+  }, cliBudget(1));
+
+  /**
+   * The real binary, unstubbed, on both sides of the fact — so the stubs above
+   * are anchored to something actually true of this machine's `ps` rather than
+   * to scripts that agree with them by construction.
+   *
+   * Fails if: a live pid stops yielding its group, or a reaped one stops
+   * reading as absent.
+   */
+  test("the real ps: a live pid has a group, a reaped pid has none", async () => {
+    const victim = await spawnVictim(["sleep", "300"]);
+    const live = await processGroupId(victim.pid);
+    expect(live).not.toBeNull();
+    expect(live!).toBeGreaterThan(0);
+
+    victim.kill();
+    for (let i = 0; i < 80; i++) {
+      if ((await realProcessOps.startTime(victim.pid)) === null) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(await processGroupId(victim.pid)).toBeNull();
+    // One victim spawn, plus one charge for the `ps` traffic — two
+    // `processGroupId` reads and the death poll. Two.
+  }, cliBudget(2));
 });
 
 /**

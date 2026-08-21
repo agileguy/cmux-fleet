@@ -94,7 +94,33 @@ export interface ProcessOps {
 }
 
 /**
- * The live process group of a pid, from `ps`.
+ * A `ps` read of a process group that did not produce a group, for a reason
+ * OTHER than the process being gone (ISC-272).
+ *
+ * "The process is not there" and "I could not find out" are different facts
+ * with opposite safe answers, and `processGroupId` used to return `null` for
+ * both. `confirmGroup` mapped that `null` to `gone`, and `down` maps `gone` to
+ * the ONE anchor verdict that reports `stopped: true`, calls `reapContainer()`
+ * and makes the worker prunable. So a transient `ps` failure against a LIVE
+ * supervisor reported it stopped, force-removed its container, and let
+ * `--prune` delete the checkout it was still writing to. Unknown IDENTITY
+ * already refused; unknown GROUP-because-the-read-failed declared success and
+ * deleted.
+ *
+ * Thrown rather than returned so the two facts cannot be conflated again by a
+ * caller that forgets to look: there is no in-band value to ignore.
+ */
+export class GroupReadError extends Error {
+  constructor(pid: number, detail: string) {
+    super(`could not read the process group of pid ${pid}: ${detail}`);
+    this.name = "GroupReadError";
+  }
+}
+
+/**
+ * The live process group of a pid, from `ps`. `null` means `ps` AFFIRMATIVELY
+ * reported no such process; a read that failed for any other reason throws
+ * `GroupReadError`.
  *
  * DELIBERATE DUPLICATION of `supervisor/launch.ts`'s `pgidOf`, and the reason
  * is layering rather than oversight. `safety/` must not import `supervisor/`:
@@ -108,6 +134,29 @@ export interface ProcessOps {
  * environment, though the stakes are far lower: this field is an integer, not
  * a rendered timestamp. Pinning it costs nothing and removes the question.
  *
+ * WHAT "AFFIRMATIVELY GONE" LOOKS LIKE, measured on this machine (Darwin 25.5,
+ * the base-system `ps`) rather than assumed. Same five readings twice:
+ *
+ *   pid 999998, above the pid ceiling  exit 1  stdout ""       stderr "ps: process id too large: 999998"
+ *   a live pid                         exit 0  stdout "15391"  stderr ""
+ *   `-p not-a-number`                  exit 1  stdout ""       stderr "ps: Invalid process id: not-a-number"
+ *   an unknown flag                    exit 1  stdout ""       stderr "ps: illegal option -- -"
+ *   a pid that exited and was reaped   exit 1  stdout ""       stderr ""
+ *
+ * THE EXIT CODE IS NOT THE DISCRIMINATOR, which is the whole reason this was
+ * worth measuring instead of reasoning about: a reaped pid and a malformed
+ * invocation are byte-identical on exit status AND on stdout. The one thing
+ * that separates them is that a genuinely-absent process is the case where `ps`
+ * says NOTHING — no output and no diagnostic. So stderr is captured rather than
+ * ignored, and silence on all three channels is what `null` means.
+ *
+ * Linux `procps` was NOT probed: no image in this checkout carries `ps`, and
+ * CI's runner was not available to measure. It does not have to be. A platform
+ * whose `ps` writes a diagnostic for an absent pid degrades to `read_failed`,
+ * which REFUSES — the cost is a dead supervisor's container outliving it until
+ * a later scan, never a live supervisor's container being destroyed.
+ * `confirmGroup`'s identity re-check covers the opposite direction.
+ *
  * A pgid is only ever COMPARED here, never trusted on its own — see
  * `confirmGroup`.
  */
@@ -115,13 +164,32 @@ export async function processGroupId(pid: number): Promise<number | null> {
   const proc = Bun.spawn(["ps", "-o", "pgid=", "-p", String(pid)], {
     env: { ...process.env, LC_ALL: "C" },
     stdout: "pipe",
-    stderr: "ignore",
+    stderr: "pipe",
   });
-  const out = (await new Response(proc.stdout).text()).trim();
+  // Both pipes concurrently. Draining one to EOF while the other fills its
+  // buffer is how a tiny read becomes a deadlock on the day `ps` gets chatty.
+  const [rawOut, rawErr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const out = rawOut.trim();
+  const err = rawErr.trim();
   await proc.exited;
-  if (proc.exitCode !== 0 || out.length === 0) return null;
+
+  if (proc.exitCode !== 0) {
+    if (out.length === 0 && err.length === 0) return null; // affirmatively gone
+    throw new GroupReadError(
+      pid,
+      err.length > 0 ? err : `ps exited ${String(proc.exitCode)} without saying why`,
+    );
+  }
   const pgid = Number.parseInt(out, 10);
-  return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
+  if (!Number.isInteger(pgid) || pgid <= 0) {
+    // Exit 0 with nothing usable on stdout. `ps` claimed success and told us
+    // nothing, which is a broken read and emphatically not "no such process".
+    throw new GroupReadError(pid, `ps printed ${JSON.stringify(out)}, which is not a process group`);
+  }
+  return pgid;
 }
 
 export const realProcessOps: ProcessOps = {
@@ -141,10 +209,16 @@ export async function sameIdentity(target: ProcId, ops: ProcessOps): Promise<boo
 /**
  * Why a recorded process group was not accepted as the target's own (ISC-272).
  *
- * Four different facts, kept apart for the same reason `down`'s anchor keeps
+ * Five different facts, kept apart for the same reason `down`'s anchor keeps
  * its three apart: they have different causes and different answers, and the
  * one that means "the record is lying" must not read like the one that means
  * "nothing was ever recorded".
+ *
+ * `gone` and `read_failed` are the newest split and the most consequential.
+ * `gone` is the only refusal that is really a SUCCESS — there is nothing left
+ * to kill — and `down` maps it to the one anchor verdict that reports
+ * `stopped: true`, force-removes the container and makes the checkout prunable.
+ * Everything that is merely UNKNOWN must land on the other side of that line.
  */
 export type GroupRefusal =
   /** Nothing usable was recorded at launch — absent, zero, or negative. */
@@ -154,7 +228,16 @@ export type GroupRefusal =
   /** The record agrees with the OS, and the group is somebody ELSE's. */
   | "not_led"
   /** The leader vanished between the identity check and the group read. */
-  | "gone";
+  | "gone"
+  /**
+   * The group could not be READ. `ps` failed for a reason other than the
+   * process being absent, or answered with something that is not a group.
+   *
+   * Not a stop and not a success: the target is presumed ALIVE and is refused.
+   * Collapsing this into `gone` is what let a transient `ps` failure report a
+   * live supervisor as stopped and delete its checkout.
+   */
+  | "read_failed";
 
 export type GroupVerdict = { ok: true; pgid: number } | { ok: false; why: GroupRefusal };
 
@@ -192,6 +275,28 @@ export type GroupVerdict = { ok: true; pgid: number } | { ok: false; why: GroupR
  * proof (ISC-77/78)". What is new is that the invariant is CHECKED at the
  * moment it is relied upon, instead of assumed by a comment.
  *
+ * A FAILED READ IS NOT AN ABSENT PROCESS, and both halves of that are enforced
+ * here rather than trusted to `ps`:
+ *
+ *  - A `GroupReadError` — `ps` failed for a reason other than absence, or
+ *    answered with something that is not a group — becomes `read_failed`, which
+ *    refuses. It never becomes `gone`.
+ *  - A `null` (`ps` said nothing at all, which on this platform means the
+ *    process is not there) is CHECKED against the identity before it is
+ *    believed. If `(pid, started)` still holds, the process is demonstrably
+ *    still running and the group read simply lied, so that is `read_failed`
+ *    too. Identity disappearance is this module's definition of goneness
+ *    everywhere else — `sameIdentity`, the ladder's default `dead()`, `down`'s
+ *    `waitGone` — so resting the most destructive verdict on the same primitive
+ *    is coherence rather than paranoia.
+ *
+ * The check is deliberately ASYMMETRIC: it can turn `gone` into `read_failed`
+ * and never the reverse. Making it symmetric would mean concluding "gone" from
+ * an identity read that ALSO failed, and the conditions that break one `ps`
+ * (fork exhaustion, most plausibly) are exactly the conditions that break the
+ * other — so a busy machine would talk itself into deleting a live worker's
+ * checkout. One-way is the only safe direction.
+ *
  * Condition 3 is also what makes condition 2 safe to write a test for. Without
  * it, the only way to give a fixture an honest pgid is to record the group the
  * fixture actually lives in — the test runner's — and `down` then signals
@@ -208,8 +313,20 @@ export async function confirmGroup(
   if (recorded == null || !Number.isInteger(recorded) || recorded <= 0) {
     return { ok: false, why: "unrecorded" };
   }
-  const live = await (ops.groupId ?? processGroupId)(target.pid);
-  if (live === null) return { ok: false, why: "gone" };
+  let live: number | null;
+  try {
+    live = await (ops.groupId ?? processGroupId)(target.pid);
+  } catch {
+    // Every failure to read a group is a failed read, whatever threw. The
+    // alternative — inspecting the error and letting unrecognised ones through
+    // — would put the destructive verdict back on the default path.
+    return { ok: false, why: "read_failed" };
+  }
+  if (live === null) {
+    return (await sameIdentity(target, ops))
+      ? { ok: false, why: "read_failed" }
+      : { ok: false, why: "gone" };
+  }
   if (live !== recorded) return { ok: false, why: "mismatch" };
   if (live !== target.pid) return { ok: false, why: "not_led" };
   return { ok: true, pgid: live };
@@ -223,6 +340,13 @@ export async function confirmGroup(
  * terms (there is nothing left to kill); `group_unconfirmed` means the target
  * is ALIVE and was deliberately not signalled, which must never be reported as
  * a stop — that collapse is the one ISC-191's second round was re-graded over.
+ *
+ * `group_unconfirmed` covers EVERY group refusal except `gone`, `read_failed`
+ * included. A group that could not be read is not a group that was shown to be
+ * somebody else's, but the two call for the same answer: the target is presumed
+ * alive and nothing is signalled. Only an affirmative absence may report
+ * `gone`, because `gone` is the one answer a caller is allowed to act
+ * destructively on.
  */
 export type SignalOutcome = "signalled" | "gone" | "group_unconfirmed";
 

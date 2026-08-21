@@ -14,6 +14,7 @@ import { EXIT, isExitCoded, type ProcId } from "../../src/contracts.ts";
 import {
   classifyStall,
   confirmGroup,
+  GroupReadError,
   runKillLadder,
   signalIfSame,
   TaskDeadlineError,
@@ -235,14 +236,124 @@ describe("confirmGroup: a group is addressable only when it is the target's own"
    * `gone` the ESRCH case is, arriving one call later. Reporting it as a group
    * refusal would fail a `down` that has nothing left to do.
    *
+   * THE FIXTURE HAS TO MOVE THE WORLD, which the version of this test that
+   * stood here until now did not. It set the target alive in the identity
+   * table and merely absent from the GROUP table, and called that "a pid that
+   * died in between" — but a pid that died is absent from BOTH. What it
+   * actually described was a group read that came back empty about a process
+   * still running, which is `read_failed` (below), not `gone`. It passed only
+   * because those two facts used to collapse into the same answer.
+   *
    * Fails if: a vanished target reads as an unconfirmed group.
    */
-  test("a leader that vanishes between the two reads is gone, not unconfirmed", async () => {
+  test("a leader that really vanishes between the two reads is gone, not unconfirmed", async () => {
     const h = harness();
-    h.table.set(TARGET.pid, TARGET.started); // alive to `startTime`…
-    // …and absent from the group table, as a pid that died in between is.
-    expect(await confirmGroup(TARGET, TARGET.pid, h.ops)).toEqual({ ok: false, why: "gone" });
-    expect(await signalIfSame(TARGET, "SIGKILL", { pgid: TARGET.pid, ops: h.ops })).toBe("gone");
+    h.alive();
+    // The group read is where the world moves: the leader exits inside it, so
+    // `ps` finds no group AND the identity is gone by the time it is asked.
+    const vanishing: ProcessOps = {
+      ...h.ops,
+      groupId() {
+        h.table.delete(TARGET.pid);
+        h.groups.delete(TARGET.pid);
+        return Promise.resolve(null);
+      },
+    };
+    expect(await confirmGroup(TARGET, TARGET.pid, vanishing)).toEqual({ ok: false, why: "gone" });
+
+    h.alive(); // wind the fixture back for the signalling pass
+    expect(await signalIfSame(TARGET, "SIGKILL", { pgid: TARGET.pid, ops: vanishing })).toBe("gone");
+    expect(h.signals).toEqual([]);
+  });
+
+  /**
+   * THE F4 SPLIT. `ps` produced no group and the process is STILL THERE, so
+   * what failed is the READ, not the process.
+   *
+   * This is far past a naming quibble. `down` maps a `gone` group verdict to
+   * the one anchor answer that reports `stopped: true`, calls `reapContainer()`
+   * (`docker rm -f`) and makes the worker prunable. A transient `ps` failure
+   * against a live supervisor therefore reported it stopped, destroyed its
+   * container and let `--prune` delete the checkout it was still writing to.
+   * Unknown IDENTITY already refused; unknown GROUP-because-the-read-failed
+   * declared success and deleted.
+   *
+   * Fails if: a failed read is called `gone` again. The `group_unconfirmed`
+   * assertion is the one that keeps `down` from reporting a stop.
+   */
+  test("a silent group read on a process that is still there is a failed read", async () => {
+    const h = harness();
+    h.alive();
+    h.groups.delete(TARGET.pid); // `ps` says nothing about the group…
+    // …while the identity still holds, so the process is demonstrably alive.
+    expect(await confirmGroup(TARGET, TARGET.pid, h.ops)).toEqual({
+      ok: false,
+      why: "read_failed",
+    });
+    expect(await signalIfSame(TARGET, "SIGKILL", { pgid: TARGET.pid, ops: h.ops })).toBe(
+      "group_unconfirmed",
+    );
+    expect(h.signals).toEqual([]);
+  });
+
+  /**
+   * The other half of the split: `ps` failed LOUDLY rather than silently — it
+   * could not be run, or answered with something that is not a group.
+   * `processGroupId` throws for those, and a thrown read is never a dead
+   * process.
+   *
+   * Fails if: the throw escapes (a failed `ps` would crash a `down` that still
+   * has other workers to stop) or is swallowed into `gone`.
+   */
+  test("a group read that throws is refused, and the throw does not escape", async () => {
+    const h = harness();
+    h.alive();
+    const broken: ProcessOps = {
+      ...h.ops,
+      groupId() {
+        return Promise.reject(new GroupReadError(TARGET.pid, "Resource temporarily unavailable"));
+      },
+    };
+    expect(await confirmGroup(TARGET, TARGET.pid, broken)).toEqual({
+      ok: false,
+      why: "read_failed",
+    });
+    expect(await signalIfSame(TARGET, "SIGKILL", { pgid: TARGET.pid, ops: broken })).toBe(
+      "group_unconfirmed",
+    );
+    expect(h.signals).toEqual([]);
+  });
+
+  /**
+   * The refusal has to survive the LADDER, not just the primitive. A reaper
+   * that climbed on through a failed read would reach SIGKILL against a group
+   * nothing ever vouched for.
+   *
+   * Fails if: `read_failed` reaches `runKillLadder` as anything but
+   * `group_unconfirmed`. `already_gone` and `terminated` would both report a
+   * stop that never happened, and since F1 both of those authorise
+   * `docker rm -f` and deregistration.
+   */
+  test("runKillLadder reports group_unconfirmed for a failed read, and signals nothing", async () => {
+    const h = harness();
+    h.alive();
+    const broken: ProcessOps = {
+      ...h.ops,
+      groupId() {
+        return Promise.reject(new GroupReadError(TARGET.pid, "Resource temporarily unavailable"));
+      },
+    };
+    const outcome = await runKillLadder({
+      target: TARGET,
+      pgid: TARGET.pid,
+      abort: null,
+      dead: () => Promise.resolve(false),
+      ...FAST,
+      ops: broken,
+      now: h.now,
+      sleep: h.sleep,
+    });
+    expect(outcome).toBe("group_unconfirmed");
     expect(h.signals).toEqual([]);
   });
 
