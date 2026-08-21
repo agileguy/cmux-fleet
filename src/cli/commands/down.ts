@@ -146,11 +146,56 @@ export function register(program: Command): void {
       const run = runPaths(runId, root);
       const ledger = new LedgerWriter(run, `cli-down-${process.pid}`);
 
-      let workerIds: string[];
+      /**
+       * ONLY `ENOENT` MEANS "NO WORKERS".
+       *
+       * This `catch` used to be bare, and a bare catch here is a data-loss
+       * path rather than a tidy default. `readRunWorktrees` reads `run.json`
+       * and is entirely independent of `workersDir`, so `recorded.byWorker`
+       * stays FULLY POPULATED when the listing fails. With `workerIds = []`
+       * the three consequences compound:
+       *
+       *  - no supervisor is signalled, because the ladder below iterates
+       *    `workerIds`. Every one of them keeps running.
+       *  - `report` is `[]`, so `report.every(r => r.stopped)` is VACUOUSLY
+       *    TRUE. `clean: true`, exit 0 — `down` reports success over a fleet
+       *    it never touched.
+       *  - under `--prune`, `workerOutcome` is empty, so `row === undefined`
+       *    for every worker in `recorded.byWorker` and each falls straight
+       *    through to `pruneWorkerWorktree`. EVERY LIVE WORKER'S CHECKOUT IS
+       *    DELETED — the §9.3 corruption reached through a broken measuring
+       *    instrument, which is the same failure `group_read_failed` exists
+       *    to refuse one channel over.
+       *
+       * `ENOENT` is the one errno that genuinely means what the old catch
+       * assumed: no `workers/` directory was ever created, which is the
+       * documented prunable case below (a run that recorded checkouts before
+       * any supervisor launched). `EACCES`, `EMFILE`, `ENOTDIR`, `EIO` and
+       * their neighbours all describe a directory that EXISTS and could not
+       * be read, and the honest answer to those is "unknown", not "empty".
+       *
+       * The refusal is deliberately not a `throw` here. `down` still has real
+       * work it can do without the listing — the daemon rung, the control
+       * socket, the ledger — and the SRD's order is quiesce, stop, then
+       * VERIFY. What the refusal must guarantee is the verify half: `clean`
+       * is false, the prune phase never runs, and the exit code is non-zero.
+       * An empty `report` produced by a FAILED listing must never read as
+       * clean, exactly as `stopped: false` must survive an anchor refusal.
+       */
+      let workerIds: string[] = [];
+      let listingRefusal: string | null = null;
       try {
         workerIds = (await readdir(run.workersDir)).filter((w) => !w.startsWith("."));
-      } catch {
-        workerIds = [];
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+        if (code !== "ENOENT") {
+          listingRefusal =
+            `${run.workersDir} exists but could not be listed (${code}), so 'down' cannot enumerate ` +
+            `the supervisors this run launched: none was signalled, none can be shown to have stopped, ` +
+            `and the checkouts recorded in run.json must not be deleted on the strength of a listing ` +
+            `that failed — fix the directory's readability (permissions, mounts, open-file limits) and ` +
+            `run 'down' again`;
+        }
       }
 
       /**
@@ -495,7 +540,21 @@ export function register(program: Command): void {
        */
       const pruned: PruneOutcome[] = [];
       let pruneRefusals = 0;
-      if (opts.prune === true) {
+      /**
+       * THE PRUNE PHASE IS BLOCKED OUTRIGHT when the worker listing failed.
+       *
+       * Not merely degraded, and not left to the per-worker gate below: that
+       * gate keys off `workerOutcome`, which is built from `report`, which is
+       * empty for precisely this reason. Every checkout would read as
+       * "no supervisor was ever writing here" and be deleted. The refusal has
+       * to be taken before the loop, because inside the loop the evidence it
+       * would need is exactly the evidence that is missing.
+       */
+      if (opts.prune === true && listingRefusal !== null) {
+        await ledger.append("prune_skipped", { detail: { reason: listingRefusal } });
+        if (opts.json !== true) process.stderr.write(`  cannot prune: ${listingRefusal}\n`);
+        pruneRefusals++;
+      } else if (opts.prune === true) {
         const recorded = await readRunWorktrees(run);
         if (recorded.note !== null) {
           await ledger.append("prune_skipped", { detail: { reason: recorded.note } });
@@ -657,7 +716,17 @@ export function register(program: Command): void {
 
       await ledger.append("run_down", {});
 
-      const allStopped = report.every((r) => r.stopped);
+      /**
+       * `clean` is an ASSERTION ABOUT THE FLEET, so it cannot be derived from
+       * an enumeration that failed.
+       *
+       * `report.every(...)` over an empty array is `true` — the vacuous truth
+       * that let a failed listing report success over a fleet nothing
+       * touched. The listing refusal is therefore a first-class term here
+       * rather than a message printed beside a `clean: true`: a caller
+       * parsing `--json` reads this field and nothing else.
+       */
+      const allStopped = listingRefusal === null && report.every((r) => r.stopped);
       const refused = report.filter((r) => isAnchorRefusal(r.how));
       if (opts.json === true) {
         process.stdout.write(
@@ -665,6 +734,10 @@ export function register(program: Command): void {
             run_id: runId,
             workers: report,
             clean: allStopped,
+            // Why `workers` is empty, when it is empty because nothing could
+            // be read. Absent on the healthy path, so `workers: []` on a run
+            // that genuinely had none stays exactly what it was.
+            ...(listingRefusal !== null ? { workers_unlistable: listingRefusal } : {}),
             // Additive, and non-fatal by design — see the daemon rung above.
             // Present so `--json` carries the fact at all: a refusal there
             // used to be indistinguishable from a daemon that was never running.
@@ -674,6 +747,11 @@ export function register(program: Command): void {
         );
       } else {
         process.stdout.write(`run ${runId} down\n`);
+        // Printed BEFORE the (empty) worker list, because it is the reason
+        // the list is empty. Underneath it, an absent list reads as "this run
+        // had no workers", which is the false reading this whole path exists
+        // to prevent.
+        if (listingRefusal !== null) process.stdout.write(`  REFUSED: ${listingRefusal}\n`);
         for (const r of report) {
           // REFUSED reads differently from STILL RUNNING on purpose. "Still
           // running" says a ladder was climbed and lost; a refusal says no
@@ -704,6 +782,26 @@ export function register(program: Command): void {
        * of those. The old single sentence claimed a ladder had been climbed
        * for both.
        */
+      /**
+       * The listing refusal takes its OWN exit before the ladder's, and takes
+       * a different code (ISC-192 carry-in).
+       *
+       * `WORKER_DIED` below means "a ladder ran and something outlived it" —
+       * a fact about the RUN. A directory that cannot be read is a fact about
+       * the MACHINE, and it is the same class of failure `StateReadError` and
+       * `RunPolicyUnreadableError` already answer with
+       * `BACKEND_UNAVAILABLE`. An operator handed exit 6 goes looking for a
+       * stuck supervisor; the thing to fix here is a mount, a permission or
+       * an open-file limit.
+       *
+       * Placed after the report is written, not before, so `clean: false` and
+       * the reason are on stdout by the time this throws — the diagnosis is
+       * the point, and a caller that only sees an exit code still gets an
+       * accurate `clean`.
+       */
+      if (listingRefusal !== null) {
+        throw new CliError(listingRefusal, EXIT.BACKEND_UNAVAILABLE);
+      }
       if (!allStopped) {
         const survivors = report.filter((r) => !r.stopped && !isAnchorRefusal(r.how));
         const parts: string[] = [];
