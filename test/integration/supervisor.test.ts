@@ -1783,7 +1783,9 @@ describe("the supervisor records a quiesce tree hash at settle (ISC-154)", () =>
       expect(second).toMatch(/^[0-9a-f]{40}$/);
       expect(second).not.toBe(first);
     },
-    60_000,
+    // scratchWorktree = 5 git spawns, + 1 supervisor launch, + 2 settles each
+    // costing `worktreeContentHash` 2 git spawns (`add -A`, `write-tree`).
+    cliBudget(10),
   );
 
   /**
@@ -1831,6 +1833,8 @@ describe("the supervisor records a quiesce tree hash at settle (ISC-154)", () =>
       expect(record?.verdict).toBe("success");
       expect(record?.tree_hash).toBeNull();
     },
-    60_000,
+    // 1 supervisor launch + 1 dispatch. No worktree by construction, so
+    // `worktreeContentHash` is never reached and costs no git spawns.
+    cliBudget(2),
   );
 });

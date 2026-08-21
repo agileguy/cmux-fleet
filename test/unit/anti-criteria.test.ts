@@ -109,8 +109,30 @@ describe("no generated git artifact carries AI attribution (ISC-139)", () => {
       { verb: "push", re: /["'`]push["'`]/ },
       { verb: "gh", re: /["'`]gh["'`]/ },
     ];
+    /**
+     * Comments are stripped before the match, and the reason is a measured
+     * false positive rather than a tidy-up.
+     *
+     * `src/harvest/outbox.ts` acquired the docstring "Every exit that is not
+     * the final `push` closes the descriptor first" — prose about
+     * `Array.prototype.push`, in backticks because that is how one spells a
+     * method name in a comment. The pin read it as an argv literal and failed
+     * the build. The criterion is about a git subcommand appearing as an ARGV
+     * LITERAL; a method name in a docstring is not one, and forcing prose to
+     * avoid ordinary English to appease a regex makes the code worse and the
+     * guard less trusted.
+     *
+     * Stripped CONSERVATIVELY, so the tightening cannot hide a real call:
+     * block comments, and whole-line `//` comments only. A TRAILING comment is
+     * deliberately left in the scanned text — `spawn(["git", "push"]) // ok`
+     * still fails, which is the direction to err in.
+     */
+    const stripComments = (src: string): string =>
+      src
+        .replace(/\/\*[\s\S]*?\*\//g, " ")
+        .replace(/^[ \t]*\/\/.*$/gm, " ");
     for (const rel of await filesUnder("src/**/*.ts")) {
-      const text = await read(rel);
+      const text = stripComments(await read(rel));
       for (const { verb, re } of FORBIDDEN) {
         expect(
           re.test(text),
