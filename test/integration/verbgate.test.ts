@@ -553,13 +553,22 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
     const run = runPaths(`r-vgp-${process.pid.toString(36)}`, root);
     const worker = "eng-1";
 
-    // The run tree as `up` leaves it: an outbox the worker can write, and
-    // NOTHING under it. `ledger/` is created by verbgate's own `mkdir -p` on
-    // the first gated verb — if the host pre-created it, the test would pass
-    // on a directory it made itself rather than one the shim made.
+    // The run tree as `up` leaves it, with `ledger/` pre-created and opened
+    // for the same reason `makeSandbox` does it — and the reason is CLEANUP,
+    // not the shim. On Linux a bind mount passes host ownership through, so a
+    // `ledger/` created by verbgate belongs to uid 10001 at the container's
+    // umask and the runner cannot unlink the file inside it; `afterEach` then
+    // fails with EACCES having asserted everything correctly. macOS squashes
+    // ownership and hides it, which is how this reached CI green locally.
+    //
+    // Pre-creating it does NOT weaken the claim. A helper/shim disagreement on
+    // the DIRECTORY name still surfaces: the shim would `mkdir -p` its own
+    // name and write there, and the read below — which takes its whole path
+    // from `workerVerbgateLedger` — would miss it exactly as before.
     const outbox = workerOutboxDir(run.root, worker);
-    await mkdir(outbox, { recursive: true });
+    await mkdir(join(outbox, "ledger"), { recursive: true });
     await makeWorkerAccessible(outbox, true);
+    await makeWorkerAccessible(join(outbox, "ledger"), true);
 
     const policy = join(root, "policy", "cloud-allow");
     await mkdir(join(root, "policy"), { recursive: true });
@@ -627,8 +636,10 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
     const run = runPaths(`r-vgt-${process.pid.toString(36)}`, root);
     const worker = "eng-1";
     const outbox = workerOutboxDir(run.root, worker);
-    await mkdir(outbox, { recursive: true });
+    // Same Linux ownership reason as the probe above and as `makeSandbox`.
+    await mkdir(join(outbox, "ledger"), { recursive: true });
     await makeWorkerAccessible(outbox, true);
+    await makeWorkerAccessible(join(outbox, "ledger"), true);
 
     const policy = join(root, "policy", "cloud-allow");
     await mkdir(join(root, "policy"), { recursive: true });
