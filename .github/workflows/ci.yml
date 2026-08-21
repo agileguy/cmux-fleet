@@ -488,7 +488,7 @@ jobs:
               test/integration/relay.test.ts \
               test/integration/probe-in-network.test.ts \
               test/integration/container-env.test.ts \
-              test/integration/container-launch.test.ts
+              test/integration/container-launch.test.ts \
               test/integration/doctor-preflight.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
