@@ -60,11 +60,23 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadConfig } from "../../src/config/load.ts";
 import {
   chatProbeModel,
+  DOCKER_HOST_LOOPBACK,
+  hostReachableBaseUrl,
   isEmbeddingModelId,
   probeNativeToolCalls,
 } from "../../src/security/model-probe.ts";
+
+/**
+ * The loopback address the ISC-291 stubs bind, imported rather than spelled.
+ *
+ * The constant is the product's own answer to "where is the Docker host, asked
+ * from the Docker host". A test that re-typed the literal could agree with
+ * itself while disagreeing with the code it is grading.
+ */
+const DIAL_LOOPBACK = DOCKER_HOST_LOOPBACK;
 
 const LIVE = process.env["PIFLEET_OMLX"] === "1";
 if (!LIVE) {
@@ -402,4 +414,235 @@ describe("doctor reports the live oMLX surface (ISC-54, ISC-55)", () => {
     // it is asserted only when the server's order makes it reachable.
     if (isEmbeddingModelId(served[0]!)) expect(chosen).not.toBe(served[0]!);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// ISC-291 — where the HOST reaches the model server
+// ---------------------------------------------------------------------------
+
+/**
+ * DELIBERATELY UNGATED. These use `test`, not the `it = test.skipIf(!LIVE)`
+ * above, and the distinction is the whole point of the section.
+ *
+ * Everything before this line needs a real inference server and skips without
+ * one. ISC-291 is not a claim about a model — it is a claim about WHICH
+ * ADDRESS a host-vantage probe dials, and that is settled by any HTTP server
+ * that answers. So these stand one up themselves and run everywhere, which is
+ * what lets the criterion close on reproducible evidence rather than on the
+ * maintainer's machine. Do not move them under `it`.
+ *
+ * ## Why an EPHEMERAL port is load-bearing, not incidental
+ *
+ * `port: 0` makes the OS choose, so the number is different on every run and
+ * cannot exist anywhere in the source. A probe that reached a stub on a FIXED
+ * port would be equally consistent with a hardcoded dial target — it would
+ * pass just as well if the code ignored the config entirely. Only a port that
+ * did not exist until this process started proves the target was READ FROM
+ * CONFIG. That is strictly stronger evidence than hitting a real server on a
+ * known port, which is why this is the closing evidence and not a placeholder
+ * for it.
+ *
+ * ## What is NOT claimed
+ *
+ * That a real inference server answers. Nothing here dials one, and no test in
+ * this section touches the Docker host's own instance — every dial goes to a
+ * stub this file created moments earlier on a port the OS just handed out. The
+ * live half belongs to ISC-258/262.
+ */
+
+/** An oMLX-shaped stub that answers the tools-bearing probe with a NATIVE call. */
+function stubToolCallServer(): {
+  port: number;
+  urls: string[];
+  stop: () => void;
+} {
+  const urls: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: DIAL_LOOPBACK,
+    fetch(req) {
+      urls.push(req.url);
+      return Response.json({
+        id: "chatcmpl-isc291-stub",
+        object: "chat.completion",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_0",
+                  type: "function",
+                  function: { name: "pifleet_probe", arguments: "{}" },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      });
+    },
+  });
+  // `Bun.serve().port` is `number | undefined` in the types — undefined only for
+  // a unix-socket server, which this is not. Asserted rather than cast, so a
+  // stub that somehow bound no port fails here instead of producing a dial
+  // target reading `…:undefined/v1` that every assertion below would misreport.
+  const port = server.port;
+  if (port === undefined) throw new Error("the ISC-291 stub bound no TCP port");
+  return {
+    port,
+    urls,
+    stop: () => {
+      server.stop(true);
+    },
+  };
+}
+
+/**
+ * A fleet.yaml naming `base_url`, and `relay_upstream` only when asked for.
+ *
+ * Written to disk and pushed through the REAL `loadConfig` rather than
+ * hand-building a config object, because half of what ISC-291 rests on is the
+ * SCHEMA's documented default — `relay_upstream: null` meaning
+ * `host.docker.internal:<port from base_url>`. A hand-built object would let
+ * this file assert that default against its own restatement of it, which is
+ * the circularity ISC-253 is the standing example of.
+ */
+async function configWith(baseUrl: string, relayUpstream?: string): Promise<string> {
+  const base = await mkdtemp(join(tmpdir(), "pifleet-isc291-"));
+  bases.push(base);
+  const path = join(base, "fleet.yaml");
+  await writeFile(
+    path,
+    [
+      "version: 2",
+      "name: isc291",
+      "docker:",
+      '  pi_version: "0.79.6"',
+      "run:",
+      `  repo: ${base}`,
+      "  budget:",
+      "    tokens_ceiling: 1000000",
+      "llm:",
+      "  model: stub-model",
+      `  base_url: ${baseUrl}`,
+      ...(relayUpstream === undefined ? [] : [`  relay_upstream: "${relayUpstream}"`]),
+      "roles:",
+      "  engineer: {}",
+      "workers:",
+      "  - {id: eng-1, role: engineer}",
+      "",
+    ].join("\n"),
+  );
+  return path;
+}
+
+describe("the host-side probe dials a host-reachable endpoint (ISC-291)", () => {
+  test("an explicit relay_upstream IS the host's dial target, and the probe reaches it", async () => {
+    const stub = stubToolCallServer();
+    try {
+      /**
+       * The worker-facing URL names the bridge alias on a port NOTHING is
+       * listening on, exactly as a real `fleet.yaml` does. If the derivation
+       * returned `base_url` — or ignored `relay_upstream` — the probe would
+       * dial a name this host cannot resolve and the assertions below would
+       * fail on an unreachable endpoint rather than pass on a stub.
+       */
+      const loaded = await loadConfig(
+        await configWith("http://host.docker.internal:8000/v1", `${DIAL_LOOPBACK}:${stub.port}`),
+      );
+
+      const target = hostReachableBaseUrl(loaded.config);
+      expect(target).toBe(`http://${DIAL_LOOPBACK}:${stub.port}/v1`);
+
+      const result = await probeNativeToolCalls(target, "", "stub-model", fetch, 10_000);
+      expect(result.ok).toBe(true);
+      expect(result.failure).toBeNull();
+
+      // The stub actually SAW it. Without this, a probe that somehow reported
+      // ok having sent nothing would pass every assertion above.
+      expect(stub.urls).toEqual([`http://${DIAL_LOOPBACK}:${stub.port}/v1/chat/completions`]);
+
+      /**
+       * THE FIELDS ARE NOT COLLAPSED (ISC-253). Deriving a host target must
+       * not disturb what a worker dials; `base_url` is still the bridge alias,
+       * byte for byte, and the two values are still different strings.
+       */
+      expect(loaded.config.llm.base_url).toBe("http://host.docker.internal:8000/v1");
+      expect(loaded.config.llm.relay_upstream).toBe(`${DIAL_LOOPBACK}:${stub.port}`);
+      expect(target).not.toBe(loaded.config.llm.base_url);
+    } finally {
+      stub.stop();
+    }
+  });
+
+  test("with relay_upstream null the host dials the Docker host's loopback, not the bridge alias", async () => {
+    const stub = stubToolCallServer();
+    try {
+      /**
+       * The SHIPPED DEFAULT's shape: `relay_upstream` is omitted entirely, so
+       * the schema's own `null` default applies and the derivation has to fall
+       * back to "`host.docker.internal:<port from base_url>`, evaluated from
+       * the Docker host". Only the PORT differs from the shipped literal, and
+       * only because this test binds its own server rather than dialing the
+       * machine's real inference port — which it must never do. The host
+       * component under test is the shipped one, unchanged.
+       */
+      const loaded = await loadConfig(
+        await configWith(`http://host.docker.internal:${stub.port}/v1`),
+      );
+      expect(loaded.config.llm.relay_upstream).toBeNull();
+
+      const target = hostReachableBaseUrl(loaded.config);
+
+      // The alias is GONE from the dial target — the defect, stated directly.
+      expect(target).not.toContain("host.docker.internal");
+      // And the port travelled with it, which is what makes this a derivation
+      // from config rather than a constant.
+      expect(target).toBe(`http://${DIAL_LOOPBACK}:${stub.port}/v1`);
+
+      const result = await probeNativeToolCalls(target, "", "stub-model", fetch, 10_000);
+      expect(result.ok).toBe(true);
+      expect(stub.urls).toEqual([`http://${DIAL_LOOPBACK}:${stub.port}/v1/chat/completions`]);
+
+      // Still not collapsed: the worker's URL keeps naming the bridge alias.
+      expect(loaded.config.llm.base_url).toContain("host.docker.internal");
+    } finally {
+      stub.stop();
+    }
+  });
+
+  /**
+   * The guard that stops this becoming `hostFacingBaseUrl` again.
+   *
+   * The deleted helper rewrote ANY host to localhost, so a fleet pointed at a
+   * LAN server had its health silently measured on the wrong box. That is not
+   * hypothetical here: SRD §5.9 records the Docker host's own instance serving
+   * NONE of `fleet.example.yaml`'s allowlisted models while the LAN peer serves
+   * all three, so a loopback rewrite would grade a server the fleet never uses.
+   *
+   * The address below is a STRING under assertion and is never dialed.
+   */
+  test("a configured address that is not the bridge alias is returned untouched", async () => {
+    const lan = "http://192.168.86.49:8000/v1";
+    const loaded = await loadConfig(await configWith(lan));
+    expect(hostReachableBaseUrl(loaded.config)).toBe(lan);
+  });
+
+  /**
+   * The shipped default, asserted as a STRING and deliberately not dialed.
+   *
+   * This is the case ISC-291 was filed over — a default `fleet.yaml` on a
+   * machine whose model server is on the Docker host — and it is the one case
+   * this suite must not execute, because dialing it would send a request to
+   * the real local inference port. Computing the target proves the derivation;
+   * sending nothing keeps the prohibition. The port here is the schema's, not
+   * a chosen one.
+   */
+  test("the shipped default derives to the Docker host's loopback at base_url's port", async () => {
+    const loaded = await loadConfig(await configWith("http://host.docker.internal:8000/v1"));
+    expect(hostReachableBaseUrl(loaded.config)).toBe(`http://${DIAL_LOOPBACK}:8000/v1`);
+  });
 });

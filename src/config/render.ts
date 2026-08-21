@@ -41,6 +41,7 @@ import {
   type WorkerPaths,
 } from "../run/paths.ts";
 import { ConfigError, expandPath, resolveWorker, type LoadedConfig, type ResolvedWorker } from "./load.ts";
+import type { Toolchain } from "./schema.ts";
 
 /** Container path the briefing file is mounted at. */
 export const BRIEFING_MOUNT = "/briefing/system-append.md";
@@ -56,6 +57,17 @@ export interface RenderedWorker {
    */
   runDir: string;
   image: string;
+  /**
+   * The toolchain `image` was tagged from.
+   *
+   * Carried rather than re-derived because `up`'s image gate has to tell an
+   * operator WHICH `pifleet image build --toolchain <t>` would produce the tag
+   * it just refused, and reading it back out of the tag string would be parsing
+   * a value this record already holds. Recomputing it from the config would be
+   * a second derivation of the thing `image` is the first derivation of — the
+   * same drift ISC-188 exists to prevent one layer up.
+   */
+  toolchain: Toolchain;
   /** Full `docker run` argv, element 0 = "docker". */
   docker: string[];
   /** The worker process argv as Pi sees it, element 0 = "pi". */
@@ -344,6 +356,7 @@ export async function renderWorker(
     runId,
     runDir: run.root,
     image,
+    toolchain: w.toolchain,
     docker,
     pi,
     systemAppend: hasBriefing
@@ -357,14 +370,36 @@ export async function renderWorker(
   };
 }
 
-/** Render every configured worker — one container per `workers:` entry (ISC-61). */
+/**
+ * Render every configured worker — one container per `workers:` entry (ISC-61).
+ *
+ * `workerIds` DEFAULTS to the whole `workers:` list, which is the criterion's
+ * own sentence and the shape every existing caller uses. It is a parameter
+ * rather than an assumption because `up` may be pointed at a subset with
+ * `--workers`, and its image gate has to be about the containers this run will
+ * actually start — gating on a worker that is not launching would refuse a run
+ * for an image nothing needed, and gating on the whole list while launching a
+ * subset would be the same bug wearing the opposite sign.
+ *
+ * WHAT THIS FUNCTION USED TO BE: unreachable. It had ZERO callers in `src/` —
+ * only `test/unit/render.test.ts` and `test/e2e/scale-16-workers.test.ts` — so
+ * the only function in the tree that mapped a `workers:` list of length N onto
+ * N rendered containers was exercised exclusively by tests, while `up` derived
+ * its launch set from argv alone and defaulted it to the literal string
+ * "eng-1". ISC-61 was graded `[x]` on that arrangement, and was false in
+ * production. It is now on the `up` path via the image gate; the count itself
+ * is re-checked at the CLI in `test/integration/up-wiring.test.ts`, not here,
+ * because a test that calls this function directly is what produced the wrong
+ * grade the first time.
+ */
 export async function renderAllWorkers(
   loaded: LoadedConfig,
   options: RenderOptions = {},
+  workerIds: readonly string[] = loaded.config.workers.map((w) => w.id),
 ): Promise<RenderedWorker[]> {
   const out: RenderedWorker[] = [];
-  for (const w of loaded.config.workers) {
-    out.push(await renderWorker(loaded, w.id, options));
+  for (const id of workerIds) {
+    out.push(await renderWorker(loaded, id, options));
   }
   return out;
 }

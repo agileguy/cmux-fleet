@@ -181,6 +181,40 @@ export const WorkerStateSchema = z.object({
   worker: workerId,
   run_id: shortStr,
   pid: z.number().int().nonnegative(),
+  /**
+   * The supervisor's LAUNCH-TIME process group, read from the OS by the
+   * process it describes (`supervisor/index.ts`, via `pgidOf`).
+   *
+   * NO SCHEMA CHANGE WAS NEEDED TO CLOSE ISC-272, and that is worth recording
+   * because the criterion was filed expecting one. The expectation was that a
+   * `ps`-comparable string would have to be added here, by analogy with
+   * `proc_started` below — `started_at` being an ISO stamp that can anchor
+   * nothing. A process group needs no such thing: a group is NAMED by its
+   * leader's pid, so once `down` requires the identity-validated supervisor to
+   * LEAD the group it addresses (`safety/kill.ts`'s `confirmGroup`), the
+   * group's launch-time identity IS the leader's launch-time identity, and
+   * that is already recorded in `proc_started`. Adding a second copy of it
+   * under another name would have widened a Phase-3 seam file to store a value
+   * derivable from two fields already here.
+   *
+   * `0` IS THE CAPTURE-FAILED SENTINEL, not a group. It is what the supervisor
+   * records when `ps` could not tell it its own group; the previous build
+   * recorded `process.pid` there, which is the architectural invariant
+   * (`detached` supervisors lead their own groups) written down as if it had
+   * been measured. Readers refuse it rather than address it: `signalIfSame`
+   * will not signal a non-positive group, and `down` reports
+   * `group_unrecorded` with `stopped: false`, which keeps the checkout.
+   *
+   * COMPATIBILITY, decided rather than discovered. Every state file already on
+   * disk carries this field — it is required and always has been — so nothing
+   * has to tolerate its absence, and no record written by an older build fails
+   * to parse. What changed is only what a reader DOES with it: a value that
+   * disagrees with the OS, or that names a group the supervisor does not lead,
+   * is now refused (`group_mismatch` / `group_not_led`) instead of signalled.
+   * A refusal reports `stopped: false` and exits non-zero, so it can never be
+   * mistaken for the success it used to be silently reported as, and it never
+   * reaches the `--prune` gate as prunable.
+   */
   pgid: z.number().int().nonnegative(),
   started_at: z.string(),
   /**

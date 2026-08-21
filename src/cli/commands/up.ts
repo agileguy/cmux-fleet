@@ -20,6 +20,8 @@ import { resolveBackendWithFallback } from "../../backends/tmux/fallback.ts";
 import { isBackendKind, loadBackend } from "../../backends/registry.ts";
 import type { PaneRef } from "../../backends/types.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
+import { assertImagesReady, requiredImages } from "../../container/image.ts";
+import { renderAllWorkers } from "../../config/render.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
 import {
   ConfigError,
@@ -97,25 +99,73 @@ const IDLE_TIMEOUT_MS = 60_000;
 const POLL_MS = 100;
 
 /**
+ * The backend `up` selects when NOTHING says otherwise.
+ *
+ * Named rather than inlined as a commander default, because "nobody said
+ * anything" and "the operator typed `--backend headless`" have to be
+ * distinguishable for a config to ever get a say (ISC-271). A commander
+ * default destroys that distinction before the action body runs.
+ *
+ * `headless` and not the schema's `cmux`: this is the value that has to hold
+ * on a machine with no terminal multiplexer at all, and it is the one every
+ * run in this repository has been getting.
+ */
+const DEFAULT_BACKEND = "headless";
+
+/**
  * Register `pifleet up` (SRD §10): build the run directory, start the daemon
  * and one detached supervisor per worker, and wait for the fleet to go idle.
  *
- * Phase 1 scope: the `headless` backend against the Pi double selected by
- * `PIFLEET_PI_COMMAND`. Config-file resolution and the container path land
- * with the config loader; the worker list comes from `--workers` until then.
+ * THE LAUNCH SET COMES FROM `workers:` (ISC-61), and `--workers` narrows it.
+ *
+ * `--workers` used to carry the commander default `"eng-1"`, which made the
+ * container count a function of ARGV and nothing else: `up --backend headless
+ * --json` with no flag launched exactly one worker called `eng-1` whether or
+ * not any config defined it, and `--workers a1,b2,c3` launched three ids no
+ * config defined. Editing `workers:` therefore changed nothing about a run —
+ * the criterion said the opposite, and was graded `[x]` on a test that called
+ * `renderAllWorkers` directly rather than on anything `up` did.
+ *
+ * The default is now `undefined`, and an absent flag means "every worker the
+ * config declares". `--workers` keeps its Phase 1 meaning EXACTLY: an explicit
+ * operator override that may name ids the config does not define, because a
+ * `PIFLEET_PI_COMMAND` double run legitimately names ids that exist nowhere but
+ * on the command line, and most of this repo's integration suite runs that way.
+ * What changed is only which set you get when you say nothing.
+ *
+ * That narrows, rather than widens, the reach of `assertModelsAllowed`'s
+ * membership skip below: on the default path every id came FROM `workers:`, so
+ * the `continue` for an undefined id is unreachable and every worker is checked.
+ * It stays reachable only for ids an operator typed by hand.
  */
 export function register(program: Command): void {
   program
     .command("up")
     .description("Build the run directory, worktrees, skill bundles, containers and panes")
     .option("-c, --config <path>", "path to fleet.yaml")
-    .option("--workers <ids>", "comma-separated subset of workers", "eng-1")
-    .option("--backend <kind>", "cmux|tmux|headless", "headless")
+    .option("--workers <ids>", "comma-separated subset of workers (default: every worker in workers:)")
+    .option("--backend <kind>", `cmux|tmux|headless (default: ${DEFAULT_BACKEND})`)
     .option("--backend-fallback <kind>", "backend to use if the primary is unavailable")
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers: string; backend: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean }) => {
-      if (!isBackendKind(opts.backend)) {
+    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean }) => {
+      /**
+       * `--backend` carries NO commander default any more (ISC-271, and the
+       * same shape as ISC-61 one option up).
+       *
+       * Commander cannot tell "the operator typed `--backend headless`" from
+       * "nobody said anything" once a default has been substituted, and that
+       * inability was the whole defect: the literal `"headless"` default beat
+       * every config unconditionally, so a `fleet.yaml` setting `backend.kind`
+       * was silently overridden and nothing anywhere said so. `undefined` now
+       * means silence, and the fallback is applied ONCE, at the selection
+       * point below, where a config could be consulted between the two.
+       *
+       * BEHAVIOUR IS UNCHANGED BY THIS COMMIT, deliberately — see the comment
+       * at `requestedBackend`. What changes is that the missing input has a
+       * named seam instead of being spread across an option default.
+       */
+      if (opts.backend !== undefined && !isBackendKind(opts.backend)) {
         throw new CliError(
           `unknown backend '${opts.backend}'; expected cmux, tmux or headless`,
           EXIT.USAGE,
@@ -166,21 +216,57 @@ export function register(program: Command): void {
         );
       }
 
-      // Deduped, and not merely as tidiness. A repeated id is a plain typo
-      // (`--workers eng-1,eng-1`), and every stage below treats the list as a
-      // set of distinct workers: it would launch two supervisors for one id
-      // against one control socket, materialize one worker's inputs twice, and
-      // wait on the same state file under two names. `[...new Set()]` keeps
-      // first-seen order, so nothing else about the list changes.
-      const workers = [
-        ...new Set(
-          opts.workers
-            .split(",")
-            .map((w) => w.trim())
-            .filter((w) => w.length > 0),
-        ),
-      ];
-      if (workers.length === 0) throw new CliError("no workers named", EXIT.USAGE);
+      /**
+       * `--workers`, parsed but NOT yet defaulted (ISC-61).
+       *
+       * `null` means the flag was absent, which is a different statement from
+       * "the flag named nothing" and resolves to a different launch set: the
+       * config's whole `workers:` list, decided below once the config has
+       * actually loaded. An empty flag (`--workers ""`, `--workers ,,`) is an
+       * operator who meant to name workers and named none, and is refused HERE
+       * — before the run directory exists — because it can be.
+       *
+       * Deduped, and not merely as tidiness. A repeated id is a plain typo
+       * (`--workers eng-1,eng-1`), and every stage below treats the list as a
+       * set of distinct workers: it would launch two supervisors for one id
+       * against one control socket, materialize one worker's inputs twice, and
+       * wait on the same state file under two names. `[...new Set()]` keeps
+       * first-seen order, so nothing else about the list changes. The config
+       * path needs no dedupe of its own — `workers.*.id` uniqueness is a schema
+       * refusal (ISC-68) — but it costs nothing to run both through one set.
+       */
+      const namedWorkers =
+        opts.workers === undefined
+          ? null
+          : [
+              ...new Set(
+                opts.workers
+                  .split(",")
+                  .map((w) => w.trim())
+                  .filter((w) => w.length > 0),
+              ),
+            ];
+      if (namedWorkers !== null && namedWorkers.length === 0) {
+        throw new CliError("no workers named: --workers was given but names no worker", EXIT.USAGE);
+      }
+      /**
+       * The launch set. Filled from `workers:` at config load when `--workers`
+       * was absent; `let` rather than `const` for exactly that one assignment.
+       */
+      let workers: string[] = namedWorkers ?? [];
+
+      /**
+       * Whether this run uses the Pi DOUBLE instead of containers.
+       *
+       * Read once, here, and consumed twice: by the image gate below and by
+       * `materializeWorkerInputs`'s `writeLaunchRecord` further down. It used to
+       * be computed only at the second of those. Two independent readings of one
+       * environment variable are two things that can disagree after an edit, and
+       * "the gate thought we were launching containers while materialization
+       * thought we were not" is a disagreement that would show up as a refusal
+       * on a run that needed no image at all.
+       */
+      const useDouble = (process.env["PIFLEET_PI_COMMAND"] ?? "").trim() !== "";
 
       const root = runsRoot();
       const runId = newRunId();
@@ -290,6 +376,24 @@ export function register(program: Command): void {
             EXIT.USAGE,
           );
         }
+        /**
+         * No config AND no `--workers` is the one shape with no launch set at
+         * all (ISC-61).
+         *
+         * It used to be answered by the commander default `"eng-1"` — a
+         * hard-coded id that made the count argv-shaped forever. With that
+         * default gone, this case has to say so out loud rather than launch
+         * something nobody named. Refused HERE, beside the other config-less
+         * requirement, because they are the same sentence: there is no file to
+         * take a default from, so the command line has to carry it.
+         */
+        if (namedWorkers === null) {
+          throw new CliError(
+            "no workers named: with no fleet.yaml there is no workers: list to default to — " +
+              "pass --workers, or point --config at a fleet.yaml.",
+            EXIT.USAGE,
+          );
+        }
       }
 
       if (configPath !== null) {
@@ -309,6 +413,27 @@ export function register(program: Command): void {
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
 
         /**
+         * THE LAUNCH SET, when `--workers` did not name one (ISC-61).
+         *
+         * This single line is what makes the container count a function of
+         * `workers:`. Everything downstream — worktree creation, input
+         * materialization, the supervisor loop, the credential plan, the idle
+         * gate and the `--json` worker array — already iterates `workers`, so
+         * one worker per `workers:` entry falls out of it with no further
+         * wiring. `renderWorker` is called once per id by
+         * `materializeWorkerInputs`, which is why N entries produce N rendered
+         * containers.
+         *
+         * Assigned AFTER the parse and BEFORE `assertModelsAllowed`, which is
+         * the only ordering that works: the gate below has to see the real set.
+         * `workers.*.id` is schema-unique (ISC-68), so this cannot introduce a
+         * duplicate, and `workers:` is `.min(1)`, so it cannot be empty.
+         */
+        if (namedWorkers === null) {
+          workers = loadedConfig.config.workers.map((w) => w.id);
+        }
+
+        /**
          * ISC-52 — a config-vs-config comparison, so it runs at the earliest
          * possible moment.
          *
@@ -317,6 +442,74 @@ export function register(program: Command): void {
          * relay, and the reason is ISC-260 — see the comment at that call.
          */
         assertModelsAllowed(loadedConfig, workers);
+
+        /**
+         * EVERY ROLE'S IMAGE MUST EXIST AND MUST VERIFY (ISC-32, ISC-189).
+         *
+         * Here, beside `assertModelsAllowed`, and for the identical reason that
+         * gate gives: before the daemon, before any pane, before any
+         * supervisor, and — the part that distinguishes this criterion from the
+         * behaviour it replaces — before the first CLONE.
+         *
+         * WHAT USED TO HAPPEN WITH A MISSING IMAGE, because "refuses to start"
+         * and what shipped are not the same event. `up` created the run
+         * directory, cloned a checkout per worker, registered a remote per
+         * worker IN THE OPERATOR'S OWN REPOSITORY, materialized every input and
+         * launched every supervisor; the dead child then surfaced at the idle
+         * gate ~600 lines later as `worker <id> died during startup` with
+         * `EXIT.WORKER_DIED`, leaving the whole run's state on disk to be
+         * reaped. Different exit code, different diagnosis, different cleanup.
+         *
+         * THE TAGS COME FROM THE RENDERER, not from a second call to
+         * `imageTag`. `renderAllWorkers` is the function that writes the tag
+         * into the `docker run` argv `materializeWorkerInputs` will record and
+         * the supervisor will spawn, so gating on its output is gating on the
+         * bytes this run will actually use. A gate that recomputed the tag
+         * could pass while the launch used a different one, which is a worse
+         * failure than no gate: it would certify the wrong image.
+         *
+         * SKIPPED ON THE DOUBLE, and this is not a hole. `PIFLEET_PI_COMMAND`
+         * is the documented statement "run this instead of the real thing";
+         * `up` starts NO container on that path (see `writeLaunchRecord`
+         * below), so there is no image for the gate to be about. Demanding one
+         * would refuse every test double in this repo for want of a build.
+         *
+         * IDS THE CONFIG DOES NOT DEFINE are skipped, by the same membership
+         * rule and the same `defined` set `assertModelsAllowed` uses — an id
+         * that exists only on the command line has no role, no toolchain and
+         * therefore no image to check. On the DEFAULT path that filter removes
+         * nothing, because every id came from `workers:`; it only bites when an
+         * operator typed `--workers` by hand, which is the case Phase 1 keeps
+         * deliberately open.
+         */
+        if (!useDouble) {
+          const definedIds = new Set(loadedConfig.config.workers.map((w) => w.id));
+          const gated = workers.filter((id) => definedIds.has(id));
+          const rendered = await renderAllWorkers(loadedConfig, { runId }, gated);
+          await assertImagesReady(
+            requiredImages(
+              rendered.map((r) => ({
+                workerId: r.workerId,
+                role: r.role,
+                toolchain: r.toolchain,
+                image: r.image,
+              })),
+            ),
+            loadedConfig.config.docker.pi_version,
+            {
+              onReady: (img) => {
+                // Said out loud, because a control nobody can see is one an
+                // operator cannot tell apart from one that did not run. Not on
+                // the `--json` path: that stream carries one object.
+                if (opts.json !== true) {
+                  process.stdout.write(
+                    `  image ${img.tag} present and verified (${img.roles.join(", ")})\n`,
+                  );
+                }
+              },
+            },
+          );
+        }
       }
 
       /**
@@ -438,11 +631,53 @@ export function register(program: Command): void {
        * means creation never completed. Only one of those should read as
        * "there is nothing on disk to reap".
        */
+      /**
+       * THE ONE PLACE THE BACKEND IS CHOSEN (ISC-271).
+       *
+       *     explicit --backend  >  the config's backend.kind  >  DEFAULT_BACKEND
+       *
+       * All three terms are now here. The middle one was absent until the
+       * schema could express it, and the reason is worth keeping: while
+       * `BackendSchema.kind` carried `.default("cmux")` these three documents
+       * parsed to BYTE-IDENTICAL `config.backend` objects, all three carrying
+       * `kind: "cmux"` —
+       *
+       *     (no backend: block at all)
+       *     backend: {}
+       *     backend: {kind: cmux}
+       *
+       * — so consuming it would not have honoured the configs that SET `kind`.
+       * It would have forced cmux onto every `fleet.yaml` in existence,
+       * turning every run on a cmux-less host into exit 3 via
+       * `resolveBackendWithFallback`. That is a silent SCHEMA-default override
+       * replacing a silent FLAG-default override: the defect relocated, not
+       * removed.
+       *
+       * `kind` is now `.optional()`, so an absent block means UNSET and this
+       * expression can read it. Both halves are mutation-proved: un-wiring
+       * this line turns the config-honoured test red (`Expected "cmux",
+       * Received "headless"`), and restoring `.default("cmux")` in the schema
+       * turns the no-backend-block test red (`Expected "headless", Received
+       * "cmux"`) — the blast radius above, caught rather than described.
+       *
+       * The witness is `run.json`'s `backend`, written from `requestedBackend`
+       * BELOW, before `resolveBackendWithFallback`. `--json`'s `backend`
+       * reports what was RESOLVED, which depends on what the host can run, so
+       * it cannot grade this criterion portably.
+       *
+       * NOT FIXED HERE, and named so it is filed rather than forgotten:
+       * `workspace`, `split` and `focus_on_dispatch` in the same
+       * `BackendSchema` block still have no config reader anywhere. Wiring
+       * `kind` alone leaves three documented options that change nothing.
+       */
+      const configBackend: "cmux" | "tmux" | "headless" | null = loadedConfig?.config.backend.kind ?? null;
+      const requestedBackend = opts.backend ?? configBackend ?? DEFAULT_BACKEND;
+
       const runDoc: Record<string, unknown> = {
         schema: "pifleet.run/v1",
         run_id: runId,
         created_at: new Date().toISOString(),
-        backend: opts.backend,
+        backend: requestedBackend,
         workers,
         heartbeat_interval_ms: heartbeatIntervalMs,
         harness_patterns: harnessPatterns,
@@ -477,7 +712,7 @@ export function register(program: Command): void {
       };
       await writeJsonAtomic(run.runJson, runDoc);
       const ledger = new LedgerWriter(run, "cli-up");
-      await ledger.append("run_created", { detail: { workers, backend: opts.backend } });
+      await ledger.append("run_created", { detail: { workers, backend: requestedBackend } });
       // The durable half of the `--i-know` override warned about above: a run
       // that raced a training run must say so in its own record, so `report`
       // can explain a panicked host months later.
@@ -728,7 +963,12 @@ export function register(program: Command): void {
         // after the fact records neither, which is the forensic gap on exactly
         // the failure path this is built to make loud.
         /**
-         * The one place the fleet decides between containers and the double.
+         * `useDouble` — the fleet's choice between containers and the double —
+         * is read ONCE, at the top of this action, and consumed here and at the
+         * image gate. It used to be computed at this line only; the gate needs
+         * the same answer several hundred lines earlier, and two independent
+         * readings of one environment variable are two things that can disagree
+         * after an edit.
          *
          * `PIFLEET_PI_COMMAND` is documented as the path to the Pi DOUBLE, so
          * setting it is an explicit statement of intent — run this instead of
@@ -742,7 +982,6 @@ export function register(program: Command): void {
          * doubles for an operator who expected containers, and every artifact
          * would look like a normal run.
          */
-        const useDouble = (process.env["PIFLEET_PI_COMMAND"] ?? "").trim() !== "";
         if (useDouble && opts.json !== true) {
           process.stderr.write(
             "pifleet: PIFLEET_PI_COMMAND is set, so workers run as host processes against the " +
@@ -795,8 +1034,13 @@ export function register(program: Command): void {
        * "I asked for six panes and got none, and nothing said so" is the
        * failure this ordering exists to prevent.
        */
+      /**
+       * The precedence expression lives further up, beside `runDoc` — the run
+       * record and the `run_created` ledger event both state which backend was
+       * requested, and both are written long before this point.
+       */
       const resolution = await resolveBackendWithFallback({
-        primary: await loadBackend(opts.backend),
+        primary: await loadBackend(requestedBackend),
         ledger,
         ...(opts.backendFallback === undefined
           ? {}
@@ -805,7 +1049,7 @@ export function register(program: Command): void {
       const backend = resolution.backend;
       await ledger.append("backend_ready", {
         detail: {
-          requested: opts.backend,
+          requested: requestedBackend,
           active: backend.kind,
           fell_back: resolution.fellBack,
           primary_failures: resolution.primaryFailures.map((c) => `${c.name}: ${c.detail ?? ""}`),
@@ -1079,8 +1323,24 @@ export function register(program: Command): void {
       await registryCall(run, { cmd: "ping" }, { optional: true });
 
       if (opts.json === true) {
+        /**
+         * `backend` is the backend that was ACTUALLY SELECTED, not the one
+         * that was asked for.
+         *
+         * It used to be `opts.backend` — the raw flag. With
+         * `--backend-fallback` in play those are different values, so a run
+         * that asked for cmux, found it unavailable and fell back to tmux
+         * reported `"cmux"` to its only machine-readable consumer while
+         * `presentation.json` (written from `backend.kind` a few hundred lines
+         * up) correctly said tmux. Two records of one fact, disagreeing.
+         *
+         * Removing the commander default would ALSO have turned this field
+         * into `undefined` — which `JSON.stringify` drops entirely, so the key
+         * would have vanished from the payload rather than gone wrong loudly.
+         * Fixing the value and removing the default are the same edit.
+         */
         process.stdout.write(
-          `${JSON.stringify({ run_id: runId, backend: opts.backend, workers: launched })}\n`,
+          `${JSON.stringify({ run_id: runId, backend: backend.kind, workers: launched })}\n`,
         );
       } else {
         process.stdout.write(`run ${runId}\n`);

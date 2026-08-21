@@ -1,6 +1,6 @@
 /**
- * The general kill ladder (ISC-116, ISC-117, ISC-191) and the stall policy
- * that decides when to climb it.
+ * The general kill ladder (ISC-116, ISC-117, ISC-191, ISC-272) and the stall
+ * policy that decides when to climb it.
  *
  * A pid is not an identity. Pids are reused — quickly, on a machine that
  * forks as much as this one — and a ladder that checks the pid once at the
@@ -11,6 +11,17 @@
  * The re-read is `registry.ts`'s `processStartTime`; this module deliberately
  * does not reimplement it, it injects it, which is also what makes the ladder
  * testable without spawning anything.
+ *
+ * A PGID IS NOT AN IDENTITY EITHER, and for a while only half of that was
+ * enforced. Identity was validated on the LEADER while the signal was
+ * delivered to `-pgid` — a different number, read off a state file, checked
+ * against nothing, and reaching every process in that group rather than one.
+ * An unvalidated group is a strictly wider blast radius than an unvalidated
+ * pid. `confirmGroup` closes it (ISC-272): a group is addressable only when it
+ * was recorded at LAUNCH, still agrees with the OS, and is LED by the process
+ * whose identity was just validated — which is what makes the group's identity
+ * the leader's identity, already checked, rather than an integer nobody can
+ * vouch for.
  *
  * The ladder is: abort → await dead → SIGTERM → grace → SIGKILL, signalling
  * the process GROUP where the caller says one exists. The supervisor already
@@ -61,12 +72,61 @@ import { Deadline, monotonicMs } from "../util/clock.ts";
 export interface ProcessOps {
   /** Start time of a pid from the OS, or null if no such process. */
   startTime(pid: number): Promise<string | null>;
+  /**
+   * Process-group id of a pid from the OS, or null if no such process.
+   *
+   * Read from the OS at the moment of use, never from a file. A group is the
+   * WIDER of the two things a rung can address, so the one number that decides
+   * how wide has to come from the kernel (ISC-272).
+   *
+   * OPTIONAL, and the reason is compatibility rather than design. Ops tables
+   * are written by callers, including ones outside this module's reach, and a
+   * newly-required method turns every existing literal into a compile error
+   * for a capability it may never exercise. An ops table that does not
+   * override this one gets `processGroupId` — the real OS — which is the same
+   * default `opts.ops ?? realProcessOps` already applies to the table as a
+   * whole. A fake that never matches an identity never reaches this call at
+   * all, because the leader check runs first.
+   */
+  groupId?(pid: number): Promise<number | null>;
   /** Send a signal. A negative pid addresses the process group. */
   signal(pid: number, sig: "SIGTERM" | "SIGKILL"): void;
 }
 
+/**
+ * The live process group of a pid, from `ps`.
+ *
+ * DELIBERATE DUPLICATION of `supervisor/launch.ts`'s `pgidOf`, and the reason
+ * is layering rather than oversight. `safety/` must not import `supervisor/`:
+ * `launch.ts` pulls in `run/registry.ts` and `security/control-auth.ts`, and
+ * this module already sits on the documented `kill.ts -> run/registry.ts -> …
+ * -> safety/reaper.ts -> kill.ts` initialisation cycle. Adding a second, wider
+ * arc to that cycle to save nine lines is how `realProcessOps before
+ * initialization` becomes reproducible instead of merely fragile.
+ *
+ * `LC_ALL=C` for the same class of reason `processStartTime` pins its
+ * environment, though the stakes are far lower: this field is an integer, not
+ * a rendered timestamp. Pinning it costs nothing and removes the question.
+ *
+ * A pgid is only ever COMPARED here, never trusted on its own — see
+ * `confirmGroup`.
+ */
+export async function processGroupId(pid: number): Promise<number | null> {
+  const proc = Bun.spawn(["ps", "-o", "pgid=", "-p", String(pid)], {
+    env: { ...process.env, LC_ALL: "C" },
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = (await new Response(proc.stdout).text()).trim();
+  await proc.exited;
+  if (proc.exitCode !== 0 || out.length === 0) return null;
+  const pgid = Number.parseInt(out, 10);
+  return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
+}
+
 export const realProcessOps: ProcessOps = {
   startTime: processStartTime,
+  groupId: processGroupId,
   signal(pid, sig) {
     process.kill(pid, sig);
   },
@@ -79,28 +139,135 @@ export async function sameIdentity(target: ProcId, ops: ProcessOps): Promise<boo
 }
 
 /**
- * Re-validate identity, then signal — the ISC-191 primitive, one atom.
+ * Why a recorded process group was not accepted as the target's own (ISC-272).
  *
- * Returns false without signalling when the recorded process no longer
+ * Four different facts, kept apart for the same reason `down`'s anchor keeps
+ * its three apart: they have different causes and different answers, and the
+ * one that means "the record is lying" must not read like the one that means
+ * "nothing was ever recorded".
+ */
+export type GroupRefusal =
+  /** Nothing usable was recorded at launch — absent, zero, or negative. */
+  | "unrecorded"
+  /** The record disagrees with the group the OS puts this process in. */
+  | "mismatch"
+  /** The record agrees with the OS, and the group is somebody ELSE's. */
+  | "not_led"
+  /** The leader vanished between the identity check and the group read. */
+  | "gone";
+
+export type GroupVerdict = { ok: true; pgid: number } | { ok: false; why: GroupRefusal };
+
+/**
+ * Confirm that a LAUNCH-RECORDED pgid really is this validated process's own
+ * group — the second half of ISC-191, filed as ISC-272.
+ *
+ * `sameIdentity` validates the LEADER. The signal is delivered to `-pgid`,
+ * which is a different number, reaches every process in that group rather than
+ * one, and until this function existed was validated against nothing at all.
+ * An unvalidated group is a strictly wider blast radius than an unvalidated
+ * pid.
+ *
+ * THREE CONDITIONS, and each is load-bearing on its own:
+ *
+ *  1. `recorded > 0` — a group was actually captured when the supervisor
+ *     launched. Zero and negative are the writers' capture-failed sentinels
+ *     (`supervisor/index.ts` records `0`, `launchDetached` returns `-1`), and
+ *     a sentinel is not a group.
+ *  2. `live === recorded` — the OS agrees with the record. This is what
+ *     catches a stale or hand-edited state file, which is the entire premise
+ *     of `down`: it reads run directories precisely because they may no longer
+ *     describe the world.
+ *  3. `live === target.pid` — the validated process LEADS the group. This is
+ *     the condition that makes the group's identity knowable at all. A process
+ *     group is named by its leader's pid, so a group led by the process whose
+ *     `(pid, started)` we just validated is a group whose identity we have
+ *     already checked. A group the target merely BELONGS to is led by some
+ *     process we know nothing about, and `-pgid` would reach that process and
+ *     all of its other children.
+ *
+ * Condition 3 is not a new architectural demand: `supervisor/launch.ts` spawns
+ * every supervisor `detached`, and its header states the invariant as
+ * "`pgid == pid` with a session distinct from the launcher's is the observable
+ * proof (ISC-77/78)". What is new is that the invariant is CHECKED at the
+ * moment it is relied upon, instead of assumed by a comment.
+ *
+ * Condition 3 is also what makes condition 2 safe to write a test for. Without
+ * it, the only way to give a fixture an honest pgid is to record the group the
+ * fixture actually lives in — the test runner's — and `down` then signals
+ * `-testRunnerGroup` and kills the suite. That is not hypothetical; it is the
+ * scar `down-prune.test.ts` carries in its own comments from the day it
+ * happened. With condition 3, recording the test runner's group is REFUSED,
+ * which is exactly the protection the criterion asks for.
+ */
+export async function confirmGroup(
+  target: ProcId,
+  recorded: number | null | undefined,
+  ops: ProcessOps = realProcessOps,
+): Promise<GroupVerdict> {
+  if (recorded == null || !Number.isInteger(recorded) || recorded <= 0) {
+    return { ok: false, why: "unrecorded" };
+  }
+  const live = await (ops.groupId ?? processGroupId)(target.pid);
+  if (live === null) return { ok: false, why: "gone" };
+  if (live !== recorded) return { ok: false, why: "mismatch" };
+  if (live !== target.pid) return { ok: false, why: "not_led" };
+  return { ok: true, pgid: live };
+}
+
+/**
+ * What one attempt to signal a validated identity did.
+ *
+ * A boolean used to carry this, and it could not: "did not signal" now has two
+ * causes that call for different words. `gone` is a success in the ladder's
+ * terms (there is nothing left to kill); `group_unconfirmed` means the target
+ * is ALIVE and was deliberately not signalled, which must never be reported as
+ * a stop — that collapse is the one ISC-191's second round was re-graded over.
+ */
+export type SignalOutcome = "signalled" | "gone" | "group_unconfirmed";
+
+/**
+ * Re-validate identity AND group, then signal — the ISC-191/272 primitive.
+ *
+ * Returns `gone` without signalling when the recorded process no longer
  * exists. The check-then-signal window is not zero; a process that dies in it
  * surfaces as ESRCH, which is the same fact ("already gone") arriving late,
  * so it is swallowed rather than escalated. Any other error is real.
+ *
+ * `pgid` has THREE meanings and they are not interchangeable:
+ *
+ *  - `null`/`undefined` — this rung addresses no group BY DESIGN. The signal
+ *    goes to the validated leader pid and nowhere else. `down`'s daemon rung
+ *    and the reaper's `entry.pgid > 0 ? … : null` both mean this.
+ *  - a positive number — a LAUNCH-RECORDED group, re-confirmed by
+ *    `confirmGroup` before every signal. Every rung, not once at the top: each
+ *    grace period is a window in which the world can change, and a group
+ *    confirmed before an await is not a group confirmed after it.
+ *  - zero or negative — a capture-failed sentinel. The caller asked for a
+ *    group signal and no group exists to send it to, so NOTHING is signalled
+ *    and the caller is told why. Silently narrowing to the leader would be a
+ *    different action than the one requested, reported as if it were the same.
  */
 export async function signalIfSame(
   target: ProcId,
   sig: "SIGTERM" | "SIGKILL",
   opts: { pgid?: number | null; ops?: ProcessOps } = {},
-): Promise<boolean> {
+): Promise<SignalOutcome> {
   const ops = opts.ops ?? realProcessOps;
-  if (!(await sameIdentity(target, ops))) return false;
-  const addr = opts.pgid != null && opts.pgid > 0 ? -opts.pgid : target.pid;
+  if (!(await sameIdentity(target, ops))) return "gone";
+  let addr = target.pid;
+  if (opts.pgid != null) {
+    const group = await confirmGroup(target, opts.pgid, ops);
+    if (!group.ok) return group.why === "gone" ? "gone" : "group_unconfirmed";
+    addr = -group.pgid;
+  }
   try {
     ops.signal(addr, sig);
   } catch (err) {
-    if ((err as { code?: string }).code === "ESRCH") return false;
+    if ((err as { code?: string }).code === "ESRCH") return "gone";
     throw err;
   }
-  return true;
+  return "signalled";
 }
 
 // ---------------------------------------------------------------------------
@@ -108,17 +275,33 @@ export async function signalIfSame(
 // ---------------------------------------------------------------------------
 
 /**
- * How the climb ended. Everything except `unconfirmed` means the target is
- * gone; `already_gone` specifically means it was never signalled because the
- * recorded identity no longer existed — reaping the dead is a no-op, not an
- * error (ISC-118).
+ * How the climb ended. Everything except `unconfirmed` and `group_unconfirmed`
+ * means the target is gone; `already_gone` specifically means it was never
+ * signalled because the recorded identity no longer existed — reaping the dead
+ * is a no-op, not an error (ISC-118).
+ *
+ * `group_unconfirmed` is the ISC-272 answer and it is NOT a stop: the target
+ * is alive, a group signal was asked for, and the recorded group could not be
+ * shown to be the target's own. Distinct from `unconfirmed`, which means the
+ * ladder was climbed to the top and the target outlived it.
  */
-export type KillOutcome = "aborted" | "terminated" | "killed" | "already_gone" | "unconfirmed";
+export type KillOutcome =
+  | "aborted"
+  | "terminated"
+  | "killed"
+  | "already_gone"
+  | "unconfirmed"
+  | "group_unconfirmed";
 
 export interface KillLadderOpts {
   /** The recorded identity to kill. Never a bare pid. */
   target: ProcId;
-  /** Process group to address for SIGTERM/SIGKILL; identity is checked on the leader. */
+  /**
+   * LAUNCH-RECORDED process group to address for SIGTERM/SIGKILL, re-confirmed
+   * against the OS at every rung (`confirmGroup`). `null` means this ladder
+   * addresses the validated leader only, by design. See `signalIfSame` for why
+   * those two are different from a capture-failed zero.
+   */
   pgid?: number | null;
   /**
    * Advisory abort (Pi's `abort` RPC). Null skips the rung — a wedged
@@ -205,11 +388,13 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
     }
   }
 
-  // Rung 2: SIGTERM, re-validated. `false` here means the target died inside
-  // the abort grace without `dead()` noticing — gone before we ever signalled.
-  if (!(await signalIfSame(target, "SIGTERM", { pgid: opts.pgid, ops }))) {
-    return opts.abort != null ? "aborted" : "already_gone";
-  }
+  // Rung 2: SIGTERM, re-validated on BOTH the leader and the group. `gone`
+  // means the target died inside the abort grace without `dead()` noticing —
+  // gone before we ever signalled. `group_unconfirmed` means it is still there
+  // and was deliberately spared, which is its own outcome and never a stop.
+  const term = await signalIfSame(target, "SIGTERM", { pgid: opts.pgid, ops });
+  if (term === "group_unconfirmed") return "group_unconfirmed";
+  if (term === "gone") return opts.abort != null ? "aborted" : "already_gone";
   if (await awaitDead(dead, opts.termGraceMs ?? DEFAULT_TERM_GRACE_MS, pollMs, now, sleep)) {
     return "terminated";
   }
@@ -218,7 +403,9 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
 
   // Rung 3: SIGKILL. No grace can save the target now; the wait only exists
   // so the caller gets a confirmed answer rather than a hopeful one.
-  if (!(await signalIfSame(target, "SIGKILL", { pgid: opts.pgid, ops }))) return "terminated";
+  const kill = await signalIfSame(target, "SIGKILL", { pgid: opts.pgid, ops });
+  if (kill === "group_unconfirmed") return "group_unconfirmed";
+  if (kill === "gone") return "terminated";
   if (await awaitDead(dead, opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS, pollMs, now, sleep)) {
     return "killed";
   }

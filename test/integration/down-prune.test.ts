@@ -118,19 +118,32 @@ async function makeRig(opts: { workers?: string[]; livePid?: string[] } = {}): P
     await mkdir(wp.dir, { recursive: true });
     if (opts.livePid?.includes(w) === true) {
       /**
-       * A supervisor that is genuinely alive and genuinely unkillable by
-       * `down`'s ladder.
+       * A supervisor that is genuinely alive and that `down` will genuinely
+       * not stop. Since ISC-272 the REASON has changed, and the change is
+       * worth stating because this fixture's own comments are where the
+       * hazard was first written down.
        *
-       * `pid` is a real sleeping child, so `processStartTime` answers
-       * non-null and the liveness test is real. `pgid` is that same pid,
-       * which is NOT a process-group leader — so `kill(-pgid, …)` raises
-       * ESRCH, `trySignal` swallows it, and the child survives the ladder.
-       * That is the state under test: stopped:false, therefore not prunable.
+       * `pid` is a real sleeping child, so `processStartTime` answers non-null
+       * and the identity comparison is real. `pgid` is that same pid — which
+       * is NOT this child's process group, because a non-detached `sleep`
+       * lives in the TEST RUNNER's group. That used to matter only by
+       * accident: `kill(-pgid, …)` raised ESRCH, the error was swallowed, and
+       * the child "survived the ladder". The hazard was routed around, not
+       * removed, and this comment said so.
+       *
+       * It is now removed. `down` reads the live group of the
+       * identity-validated pid and compares it with the record, so the
+       * disagreement is CAUGHT — `group_mismatch`, refused before any signal
+       * is sent. Same end state, and for a reason instead of for a swallowed
+       * errno: alive, `stopped: false`, therefore not prunable.
        *
        * It must NOT be `process.pid`. The first version of this fixture used
        * it, and `down` — a child sharing the test runner's process group —
        * sent SIGTERM to `-testRunnerPid` and killed ITSELF five seconds in,
        * so the prune block never ran and the failure looked like a prune bug.
+       * That is exactly the `group_not_led` case the group check now refuses,
+       * and `down-identity.test.ts` exercises it on an ISOLATED group so the
+       * mutation fails a test rather than the process running it.
        *
        * Built with `initialWorkerState` rather than by hand for a related
        * reason: a hand-written object missed `epoch`, `readWorkerState` threw
@@ -284,25 +297,53 @@ describe("down --prune", () => {
     const pruned = parse(r.stdout)["pruned"] as Array<Record<string, unknown>>;
     const kept = pruned.find((p) => p["workerId"] === "eng-2");
     expect(kept).toMatchObject({ pruned: false });
-    expect(String(kept!["reason"])).toContain("kill ladder");
+    /**
+     * The REASON changed with ISC-272 and the claim under test did not.
+     *
+     * This asserted "kill ladder" — `down`'s wording for a supervisor that was
+     * signalled and outlived it. That was never quite what this fixture
+     * produced: the recorded group was one the OS disagreed with, every signal
+     * raised ESRCH, and nothing was ever delivered. `down` now catches the
+     * disagreement instead of discovering it as an errno, so the honest
+     * wording is the group refusal.
+     *
+     * What this test is FOR is untouched: a worker whose supervisor cannot be
+     * confirmed dead keeps its checkout, PER WORKER, while its sibling loses
+     * one. Both halves are asserted above, on the disk.
+     *
+     * Recorded because it is a real gap rather than a tidy substitution: with
+     * the group confirmed, "survived the kill ladder" is no longer reachable
+     * from a fixture at all. A confirmed group that ignores SIGTERM still
+     * meets SIGKILL, and SIGKILL to a group one owns always wins, so the only
+     * way left to survive the ladder is EPERM — a process this user may not
+     * signal. Nothing in this suite can produce that safely, so that branch of
+     * `down.ts`'s prune reason is now untested, and is named as a residual
+     * rather than left looking covered.
+     */
+    expect(String(kept!["reason"])).toContain("process group");
+    expect(String(kept!["reason"])).toContain("--force-identity");
+    expect(String(kept!["reason"])).not.toContain("kill ladder");
+    // The refusal never signalled it, so it is still there to be refused again.
+    expect(parse(r.stdout)).toMatchObject({
+      workers: [{ id: "eng-1" }, { id: "eng-2", stopped: false, how: "group_mismatch" }],
+    });
   },
-  // ISC-273 audit: the 30_000 stands, and this is the one test in the file
-  // whose cost is NOT process startup. It walks the FULL ladder — graceful 5s,
-  // then SIGTERM 2s, then SIGKILL 2s — against a supervisor that never dies,
-  // so ~9 s of the wall clock is deliberate waiting rather than spawning. It
-  // performs two spawn-reaching calls (`makeRig`, `down`), and `cliBudget(2)` =
-  // 22_800 ms would nominally cover them, but the derivation that governs here
-  // is the ladder: measured at 9908 ms idle on a 14-core box at load 3.55,
-  // which leaves cliBudget(2) only 2.3x headroom against a fixed cost that the
-  // contention factor does not shrink. 9s x CONTENTION (3) = 27_000, rounded
-  // to 30_000. The other twelve tests in this file ARE spawn-bounded and carry
-  // cliBudget(n) accordingly.
+  // ISC-273 audit, REVISED for ISC-272. The 30_000 literal no longer stands,
+  // and the reason it stood has gone away rather than been argued away.
   //
-  // The failure mode this protects against is worth naming: a ladder timeout
-  // presents as an assertion failure on the first `expect` after `down` rather
-  // than as a timeout, which is a long way to travel to find a missing third
-  // argument.
-  30_000);
+  // It was the one test in this file whose cost was NOT process startup: it
+  // walked the FULL ladder — graceful 5s, SIGTERM 2s, SIGKILL 2s — against a
+  // supervisor that never died, measured at 9908 ms idle on a 14-core box at
+  // load 3.55, and 9s x CONTENTION (3) rounded to 30_000. Now the recorded
+  // group is refused at the anchor and NO ladder runs at all, so none of that
+  // fixed wait is paid; the whole thirteen-test file finishes in ~6 s.
+  //
+  // Keeping the literal would leave an audit note describing a cost the test
+  // no longer has, which is the failure budget.ts names in its own words — a
+  // number that no longer describes the test, with no way for the next reader
+  // to tell which part of it was ever real. So this test is now spawn-bounded
+  // like the other twelve: two spawn-reaching calls, `makeRig` and `down`.
+  cliBudget(2));
 
   test("a run that recorded no checkouts prunes nothing and does not invent paths", async () => {
     const base = await mkdtemp(join(tmpdir(), "pifleet-prune-none-"));

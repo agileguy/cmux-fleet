@@ -126,7 +126,25 @@ export type WorkerEntry = z.infer<typeof WorkerEntrySchema>;
 
 export const BackendSchema = z
   .object({
-    kind: z.enum(["cmux", "tmux", "headless"]).default("cmux"),
+    /**
+     * OPTIONAL, not defaulted, and that is load-bearing (ISC-271).
+     *
+     * `up`'s precedence is `explicit --backend > backend.kind > DEFAULT_BACKEND`,
+     * and the middle term can only exist if an ABSENT block is distinguishable
+     * from a block that says `cmux`. With `.default("cmux")` these three parse
+     * to byte-identical objects, all carrying `kind: "cmux"`:
+     *
+     *     (no backend: block at all)
+     *     backend: {}
+     *     backend: {kind: cmux}
+     *
+     * Consuming that would not honour the configs that SET `kind` — it would
+     * force cmux onto every `fleet.yaml` in existence, including the ones that
+     * say nothing, turning every run on a cmux-less host into exit 3. An absent
+     * block means UNSET; inferring cmux from it relocates the silent-override
+     * defect rather than removing it.
+     */
+    kind: z.enum(["cmux", "tmux", "headless"]).optional(),
     workspace: shortStr.default("pifleet"),
     split: z.enum(["alternate", "columns", "rows"]).default("alternate"),
     focus_on_dispatch: z.boolean().default(false),

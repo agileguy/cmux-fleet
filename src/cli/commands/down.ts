@@ -14,7 +14,7 @@ import {
   readRegistry,
   registryCall,
 } from "../../run/registry.ts";
-import { realProcessOps, sameIdentity, signalIfSame } from "../../safety/kill.ts";
+import { confirmGroup, realProcessOps, sameIdentity, signalIfSame } from "../../safety/kill.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { Stopwatch } from "../../rpc/client.ts";
@@ -38,6 +38,16 @@ const TERM_WAIT_MS = 2_000;
  * whose pids the machine has long since handed out again. `anchorIdentity`
  * below is the gate, and it refuses rather than signalling when the recorded
  * identity is missing, unreadable, or disagrees with the OS.
+ *
+ * And every rung addresses a `pgid` that was recorded at LAUNCH and CONFIRMED
+ * against the OS (ISC-272). It used to pass `state.pgid` straight through —
+ * an integer read from a file `down` reads precisely because it may be stale,
+ * checked against nothing, and aimed at a whole process group rather than one
+ * process. That is a wider blast radius than an unvalidated pid, not a
+ * narrower one: `-pgid` reaches every member. `confirmGroup` accepts a group
+ * only when the launch record agrees with the OS and the identity-validated
+ * supervisor LEADS it, which is what makes the group's identity the leader's
+ * identity — already checked — instead of a number nobody can vouch for.
  *
  * MIGRATION POLICY for the pinned identity rendering (ISC-192's territory,
  * decided here rather than discovered by an operator).
@@ -102,7 +112,8 @@ export function register(program: Command): void {
     .option("--force", "prune a checkout that still holds work")
     .option(
       "--force-identity",
-      "signal a process whose recorded launch identity is missing, unreadable or disagrees",
+      "signal a supervisor whose recorded launch identity or process group could not be " +
+        "confirmed; the signal goes to that process alone, never to an unconfirmed group",
     )
     .option("--json", "emit machine-readable output")
     .action(async (opts: {
@@ -192,6 +203,19 @@ export function register(program: Command): void {
           recorded !== undefined && recorded.pid === state.pid
             ? recorded.started
             : stateAnchor,
+          /**
+           * The LAUNCH-RECORDED group, handed to the anchor to be confirmed —
+           * not to the ladder to be trusted (ISC-272).
+           *
+           * `state.pgid` is written once by the supervisor about itself, from
+           * the same `pgidOf(process.pid)` reading that goes into the registry
+           * entry, so the two agree by construction and there is nothing to
+           * choose between them. What made it unsafe was never where it came
+           * from — it was that no rung ever asked the OS whether it was still
+           * true. `anchorIdentity` asks, once, before anything is signalled,
+           * and `signalIfSame` asks again at every rung.
+           */
+          state.pgid,
           { force: forceIdentity },
         );
         /**
@@ -266,13 +290,23 @@ export function register(program: Command): void {
         }
         let how = "graceful";
         if (!(await waitGone(target, GRACEFUL_WAIT_MS))) {
-          // Phase 2: SIGTERM the process GROUP; the supervisor leads it.
+          /**
+           * Phase 2: SIGTERM the process GROUP — the CONFIRMED one.
+           *
+           * `anchor.group`, not `state.pgid`. The supervisor leads its group
+           * (`launchDetached` spawns it detached), and `confirmGroup` has just
+           * established that from the OS rather than from the file, so `-pgid`
+           * takes the Pi child with it and reaches nothing else. Where the
+           * group could not be confirmed the anchor already refused above, and
+           * where none was recorded at all this is `null` and the signal goes
+           * to the validated leader alone.
+           */
           how = "sigterm";
-          await signalGuarded(target, "SIGTERM", state.pgid);
+          await signalGuarded(target, "SIGTERM", anchor.group);
           if (!(await waitGone(target, TERM_WAIT_MS))) {
-            // Phase 3: SIGKILL — the group again, no survivors.
+            // Phase 3: SIGKILL — the same confirmed group, no survivors.
             how = "sigkill";
-            await signalGuarded(target, "SIGKILL", state.pgid);
+            await signalGuarded(target, "SIGKILL", anchor.group);
             await waitGone(target, TERM_WAIT_MS);
           }
         }
@@ -343,6 +377,12 @@ export function register(program: Command): void {
         const anchor = await anchorIdentity(
           pidFile.pid,
           typeof pidFile.started === "string" ? pidFile.started : null,
+          // `null`, and it is a DECLARATION rather than a gap: `daemon.pid`
+          // records no group, so this rung addresses the validated leader and
+          // nothing else. Distinct from a worker whose recorded group came
+          // back `0`, which means a capture that should have happened failed
+          // (ISC-272).
+          null,
           { force: forceIdentity },
         );
         if (anchor.kind === "refused") {
@@ -363,7 +403,7 @@ export function register(program: Command): void {
           let how = "graceful";
           if (!(await waitGone(target, TERM_WAIT_MS))) {
             how = "sigterm";
-            await signalGuarded(target, "SIGTERM", null);
+            await signalGuarded(target, "SIGTERM", anchor.group);
             await waitGone(target, TERM_WAIT_MS);
           }
           daemonReport = { stopped: !(await sameIdentity(target, realProcessOps)), how };
@@ -468,11 +508,24 @@ export function register(program: Command): void {
               // §9.3 reason, but only one of them has a `--force-identity`
               // answer, and an operator cannot pick it if the message hides
               // which case they are in.
-              reason: isAnchorRefusal(row.how)
-                ? `its supervisor could not be identified (${row.how}), so 'down' refused to signal it ` +
-                  `and cannot show it is not still writing here; a live container writing here would be ` +
-                  `corrupted by a delete (--force-identity anchors on whatever holds the pid)`
-                : "its supervisor survived the kill ladder; a live container writing here would be corrupted by a delete",
+              //
+              // The GROUP refusals get their own words for the same reason
+              // again (ISC-272). "Could not be identified" is false for them:
+              // the supervisor WAS identified, and what could not be shown is
+              // that the process group `down` was about to signal is the one
+              // this run launched. An operator told the wrong fact reaches for
+              // the wrong fix.
+              reason: isGroupRefusal(row.how)
+                ? `its supervisor was identified, but the process group 'down' would have signalled ` +
+                  `could not be shown to be that supervisor's own (${row.how}), so no signal was sent ` +
+                  `and it cannot be shown to have stopped writing here; a live container writing here ` +
+                  `would be corrupted by a delete (--force-identity signals the supervisor alone, ` +
+                  `never an unconfirmed group)`
+                : isAnchorRefusal(row.how)
+                  ? `its supervisor could not be identified (${row.how}), so 'down' refused to signal it ` +
+                    `and cannot show it is not still writing here; a live container writing here would be ` +
+                    `corrupted by a delete (--force-identity anchors on whatever holds the pid)`
+                  : "its supervisor survived the kill ladder; a live container writing here would be corrupted by a delete",
             });
             pruneRefusals++;
             continue;
@@ -609,9 +662,10 @@ export function register(program: Command): void {
         if (survivors.length > 0) parts.push(`${survivors.length} supervisor(s) survived the kill ladder`);
         if (refused.length > 0) {
           parts.push(
-            `${refused.length} were never signalled because their recorded launch identity ` +
-              `could not be confirmed (${[...new Set(refused.map((r) => r.how))].sort().join(", ")}); ` +
-              `--force-identity signals them anyway`,
+            `${refused.length} were never signalled because their recorded launch identity or ` +
+              `process group could not be confirmed ` +
+              `(${[...new Set(refused.map((r) => r.how))].sort().join(", ")}); ` +
+              `--force-identity signals the supervisor alone, never an unconfirmed group`,
           );
         }
         throw new CliError(parts.join("; "), EXIT.WORKER_DIED);
@@ -648,22 +702,58 @@ export function register(program: Command): void {
  * Only "nothing holds this pid" is a success; the rest are refusals to act,
  * and an operator who is not told the difference cannot act on it either.
  */
-export type AnchorRefusal = "identity_mismatch" | "identity_unrecorded" | "identity_legacy_format";
+export type AnchorRefusal =
+  | "identity_mismatch"
+  | "identity_unrecorded"
+  | "identity_legacy_format"
+  /**
+   * The GROUP half (ISC-272). Three more facts, kept apart from each other and
+   * from the identity three for the same reason those three are kept apart:
+   * they have different causes, and only some of them mean anything is wrong
+   * with the process itself.
+   *
+   *  - `group_unrecorded` — the launcher never captured a process group, so
+   *    `state.pgid` holds the capture-failed sentinel (`0`). Nothing is known
+   *    to be wrong with the supervisor; what is missing is the record.
+   *  - `group_mismatch` — the recorded group disagrees with the group the OS
+   *    puts this (identity-validated) process in. The state file is stale or
+   *    edited, which is the premise `down` operates under.
+   *  - `group_not_led` — record and OS agree, and the group is led by some
+   *    OTHER process. `-pgid` would reach that leader and every one of its
+   *    children. This is the case that once SIGTERMed the test runner.
+   */
+  | "group_unrecorded"
+  | "group_mismatch"
+  | "group_not_led";
 
-const ANCHOR_REFUSALS = new Set<string>([
+const IDENTITY_REFUSALS = new Set<string>([
   "identity_mismatch",
   "identity_unrecorded",
   "identity_legacy_format",
 ]);
 
+const GROUP_REFUSALS = new Set<string>(["group_unrecorded", "group_mismatch", "group_not_led"]);
+
 /** True for a `how` produced by an anchor refusal rather than by a ladder. */
 function isAnchorRefusal(how: string): boolean {
-  return ANCHOR_REFUSALS.has(how);
+  return IDENTITY_REFUSALS.has(how) || GROUP_REFUSALS.has(how);
+}
+
+/** True for the subset of refusals that are about the GROUP, not the leader. */
+function isGroupRefusal(how: string): boolean {
+  return GROUP_REFUSALS.has(how);
 }
 
 type Anchor =
   | { kind: "gone" }
-  | { kind: "target"; target: ProcId; forced: boolean }
+  /**
+   * `group` is the ONLY pgid any rung is allowed to address, and it is either
+   * a number `confirmGroup` vouched for or `null` — never the raw `state.pgid`
+   * the caller handed in. `null` means "address the validated leader and
+   * nothing else", which is what the daemon rung has always meant and what
+   * `--force-identity` now degrades to.
+   */
+  | { kind: "target"; target: ProcId; group: number | null; forced: boolean }
   | { kind: "refused"; how: AnchorRefusal; detail: string };
 
 /**
@@ -701,16 +791,48 @@ type Anchor =
  *    comparable to anything this build can read off the OS. See the migration
  *    note in `register` for why this is its own answer and not a mismatch.
  *
+ * THE GROUP IS ANCHORED HERE TOO (ISC-272), and it is the second half of the
+ * same argument. Identity was validated on the LEADER while every signal was
+ * delivered to `-state.pgid` — a number read from a state file `down` reads
+ * precisely because it may be stale, reaching every process in that group
+ * rather than one. `recordedPgid` is therefore not passed through to the
+ * ladder: it is handed to `confirmGroup`, which accepts it only when it was
+ * captured at launch, still agrees with the OS, and names a group LED by the
+ * process whose identity was just validated. A group led by an
+ * already-validated process has an identity we have already checked; a group
+ * the target merely belongs to does not.
+ *
+ * `recordedPgid` distinguishes two things a caller can mean by "no group":
+ *
+ *  - `null` — this rung addresses no group BY DESIGN. The daemon rung means
+ *    this: `daemon.pid` records `{pid, started}` and no group, so there is no
+ *    group to get wrong, and the signal goes to the validated leader alone.
+ *    That is the narrowest blast radius available, not a degradation.
+ *  - `0` — a worker's launch record exists and says the capture FAILED
+ *    (`supervisor/index.ts`). Something should have been recorded and was not,
+ *    so this refuses (`group_unrecorded`) rather than quietly narrowing.
+ *
  * `force` is `--force-identity`: it restores the pre-fix weak anchor for the
  * cases above — whatever holds the pid NOW becomes the target, every LATER
  * rung is still identity-checked, but rung 0 cannot tell a supervisor from a
  * stranger. It exists so a refusal is never a dead end, and it is a flag
  * rather than a default because typing it is the operator asserting the run
  * directory is theirs.
+ *
+ * FORCE NEVER RESTORES A GROUP, and that is a deliberate asymmetry rather than
+ * an oversight. Before ISC-272 the flag aimed SIGTERM and then SIGKILL at
+ * `-state.pgid` on nothing but the operator's word, which is the widest
+ * possible reading of "signal it anyway" — the operator asserts the run
+ * directory is theirs, not that some integer in it names a group they are
+ * willing to destroy. So a forced anchor addresses the leader and only the
+ * leader. It is also the only coherent reading: `confirmGroup` derives the
+ * group's identity FROM the validated leader, so on a path where the leader's
+ * identity is unverified there is nothing left for a group check to rest on.
  */
 async function anchorIdentity(
   pid: number,
   recorded: string | null,
+  recordedPgid: number | null,
   opts: { force: boolean },
 ): Promise<Anchor> {
   const current = await processStartTime(pid);
@@ -742,13 +864,62 @@ async function anchorIdentity(
     };
   }
 
-  if (refusal === null) return { kind: "target", target: { pid, started: current }, forced: false };
-  if (opts.force) return { kind: "target", target: { pid, started: current }, forced: true };
-  return { kind: "refused", ...refusal };
+  const target: ProcId = { pid, started: current };
+  if (refusal !== null) {
+    // Forced: the leader, and never a group. See the header above.
+    if (opts.force) return { kind: "target", target, group: null, forced: true };
+    return { kind: "refused", ...refusal };
+  }
+
+  // The identity holds. Now the group the signal would actually reach.
+  if (recordedPgid === null) return { kind: "target", target, group: null, forced: false };
+
+  const group = await confirmGroup(target, recordedPgid, realProcessOps);
+  if (group.ok) return { kind: "target", target, group: group.pgid, forced: false };
+  // The leader died between the identity read and the group read. Racing that
+  // window is not a refusal — it is the `gone` answer arriving a moment late,
+  // and reporting it as anything else would fail a `down` that has nothing
+  // left to do.
+  if (group.why === "gone") return { kind: "gone" };
+  if (opts.force) return { kind: "target", target, group: null, forced: true };
+  return { kind: "refused", ...groupRefusal(group.why, pid, recordedPgid) };
+}
+
+/** Turn a `confirmGroup` verdict into the operator-facing fact it stands for. */
+function groupRefusal(
+  why: "unrecorded" | "mismatch" | "not_led",
+  pid: number,
+  recordedPgid: number,
+): { how: AnchorRefusal; detail: string } {
+  if (why === "unrecorded") {
+    return {
+      how: "group_unrecorded",
+      detail:
+        `no process group was recorded when pid ${pid} launched (the state file holds the ` +
+        `capture-failed sentinel ${recordedPgid}), so there is no group this run can show it owns`,
+    };
+  }
+  if (why === "mismatch") {
+    return {
+      how: "group_mismatch",
+      detail:
+        `the process group recorded for pid ${pid} (${recordedPgid}) is not the group the OS ` +
+        `puts that process in, so the record is stale and signalling it would reach a group ` +
+        `this run never launched`,
+    };
+  }
+  return {
+    how: "group_not_led",
+    detail:
+      `pid ${pid} is a MEMBER of group ${recordedPgid} but does not lead it, so that group is ` +
+      `led by some other process and signalling it would reach that process and all of its ` +
+      `children rather than this run's supervisor`,
+  };
 }
 
 /**
- * Signal a re-validated identity, never a bare pid.
+ * Signal a re-validated identity and a re-confirmed group, never a bare pid
+ * and never a group taken on trust.
  *
  * `signalIfSame` re-reads the pair and compares it before every signal, and
  * swallows the ESRCH of a target that died inside the check-then-signal
@@ -756,6 +927,16 @@ async function anchorIdentity(
  * `down` must still stop the remaining workers, the daemon and the view, and
  * then report this worker as STILL RUNNING, which the identity read after the
  * ladder already does. Throwing out of the loop would skip all of that.
+ *
+ * The `pgid` handed in is always `anchor.group` — a value `confirmGroup`
+ * already vouched for, or `null`. `signalIfSame` confirms it AGAIN before each
+ * signal, which is what makes "every rung" true rather than "the top rung".
+ * The outcome is deliberately not inspected: a group that stops confirming
+ * mid-climb (the supervisor would have to `setpgid` itself between two rungs)
+ * means no signal was sent, so the target is still alive, and the identity
+ * read after the ladder reports exactly that — `stopped: false`, which blocks
+ * the prune gate. There is no additional fact for a return value to carry, and
+ * an unreachable branch reporting it would be an untested one.
  */
 /**
  * `docker rm -f <name>`, reported rather than thrown.

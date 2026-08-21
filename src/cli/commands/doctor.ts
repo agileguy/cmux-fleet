@@ -9,9 +9,10 @@ import { ConfigError, decomposeModel, loadConfig, type LoadedConfig } from "../.
 import { resolveAllWorkers } from "../../config/load.ts";
 import type { FleetConfig, Toolchain } from "../../config/schema.ts";
 import { imageTag } from "../../container/image.ts";
-import { probeMountVisibility, type MountVisibility } from "../../container/mounts.ts";
+import { daemonScratchRoot, probeMountVisibility } from "../../container/mounts.ts";
 import { EXEC_NOT_FOUND, realExec, type Exec } from "../../container/run.ts";
-import { chatProbeModel } from "../../security/model-probe.ts";
+import { chatProbeModel, hostReachableBaseUrl } from "../../security/model-probe.ts";
+import { RELAY_IMAGE } from "../../security/relay.ts";
 import { runsRoot } from "../../run/paths.ts";
 
 /**
@@ -641,7 +642,26 @@ export function allowlistVerdicts(
 
 interface OmlxReport {
   ok: boolean;
+  /**
+   * The URL `doctor` ACTUALLY DIALED — `hostReachableBaseUrl(config)`, not
+   * `llm.base_url` (ISC-291).
+   *
+   * Reported beside `workerBaseUrl` rather than instead of it, because the two
+   * are different questions and a report that showed only one would be making
+   * the ISC-253 mistake in miniature: a single field standing for both "where
+   * the fleet's model server is" and "what a worker dials" is exactly the
+   * overload that turned an earlier check circular. An operator reading this
+   * must be able to see that a substitution happened and what it was.
+   */
   baseUrl: string;
+  /**
+   * `llm.base_url` verbatim — what a WORKER dials, unrewritten (ISC-291).
+   *
+   * Present so `doctor` never silently claims to have probed the configured
+   * value. When it equals `baseUrl` no derivation occurred; when it differs,
+   * both halves are on the record.
+   */
+  workerBaseUrl: string;
   /**
    * WHERE these numbers were measured from. Always `"host"`, and now STATED
    * rather than left to be assumed (ISC-260).
@@ -655,6 +675,18 @@ interface OmlxReport {
    * substitution is invisible. Off it, the rewrite INVENTS an endpoint nobody
    * configured, and the latency reported describes a server the fleet does not
    * use.
+   *
+   * ## Why ISC-291 is not that mistake returning
+   *
+   * `hostReachableBaseUrl` differs from `hostFacingBaseUrl` on the one point
+   * that made the old helper wrong. The old one rewrote ANY host to
+   * `localhost`, so pointing the fleet at a LAN server silently redirected the
+   * measurement to this box. The new one reads `llm.relay_upstream` — the field
+   * whose entire purpose is naming the host-reachable endpoint separately — and
+   * substitutes loopback ONLY for `host.docker.internal`, an alias that denotes
+   * the Docker host by definition and resolves nowhere on the host itself.
+   * A configured LAN address is returned untouched, which is the case the old
+   * helper got backwards.
    *
    * A latency figure whose vantage is ambiguous is the same class of problem
    * as a criterion whose evidence is ambiguous, so the field is emitted in
@@ -713,6 +745,17 @@ interface OmlxReport {
  * stopped being even approximately right the moment the server was not on this
  * box.
  *
+ * ## What ISC-291 left for this to do
+ *
+ * Much less, and the residue is worth stating precisely. `probeOmlx` now dials
+ * `hostReachableBaseUrl(config)`, which never names the container alias when a
+ * config was loaded — so on a real `fleet.yaml` this note is silent and the
+ * probe simply works. It still fires on the CONFIG-LESS fallback, where there
+ * is no `llm` block to derive from and inventing a target would be asserting
+ * something no operator wrote. That case is the note's whole remaining domain,
+ * and keeping it is what stops a bare `doctor` on a machine with no
+ * `fleet.yaml` from reading as an outage.
+ *
  * ## Why this is not a Diagnosis, which is the second wrong fix
  *
  * It WAS one, briefly, and the integration suite caught it: `doctor` exits 3
@@ -745,22 +788,83 @@ function vantageNote(baseUrl: string, network: string | null): string {
   );
 }
 
+/**
+ * One operator-settable directory that gets bind-mounted into a container
+ * (ISC-292).
+ *
+ * `env` is carried because it is the ACTIONABLE half. A finding that named only
+ * the path would leave the operator to work out which knob put it there, and
+ * both of these default to a safe location under `$HOME` — so a path outside
+ * the shared set is always something a specific environment variable did.
+ */
+interface MountRoot {
+  name: string;
+  env: string;
+  dir: string;
+}
+
+interface MountRootReport extends MountRoot {
+  visible: boolean;
+  /**
+   * Whether the check actually RAN, kept separate from `visible` on purpose.
+   *
+   * `visible: false` means "measured, and the path is not shared". Without this
+   * flag a skipped probe reports the same thing, and a check that says nothing
+   * and a check that says "broken" must not be the same value — that is the
+   * self-skipping shape this repo grades `[~]` for.
+   */
+  probed: boolean;
+  detail: string;
+}
+
+/**
+ * Is this image already in the local store?
+ *
+ * `docker image inspect` and not `docker pull`: the answer must be free and
+ * must not change the machine, because `doctor` is a diagnostic.
+ */
+async function localImage(tag: string, exec: Exec): Promise<string | undefined> {
+  const r = await exec(["docker", "image", "inspect", tag]);
+  return r.code === 0 ? tag : undefined;
+}
+
 async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
   /**
-   * VERBATIM — no rewriting of any kind. See `OmlxReport.vantage`.
+   * The HOST-REACHABLE target, derived in exactly one place (ISC-291).
    *
-   * The consequence is deliberate: when `llm.base_url` names the
-   * container-facing hostname (the default), this probe cannot resolve it and
-   * says so — and `vantageNote` appends WHY, so the bare "unreachable" does
-   * not read as an outage on a healthy machine.
+   * `doctor` reports `"vantage": "host"` because it probes from this process.
+   * Dialing `llm.base_url` from here was therefore self-defeating on the
+   * shipped default: `host.docker.internal` is published by the relay on the
+   * internal bridge and resolves nowhere on the host, so the probe failed by
+   * construction — and with it ISC-256's allowlist comparison (gated on
+   * `allowlistChecked`) and ISC-55's completion latency, neither of which can
+   * run without a model list. The result was a command that documented its own
+   * blindness in a note instead of removing it.
+   *
+   * `hostReachableBaseUrl` reads `llm.relay_upstream` when set and otherwise
+   * evaluates the schema's documented default — `host.docker.internal:<port
+   * from base_url>` — from the machine that alias is defined relative to. It
+   * REWRITES NOTHING in the config and leaves a configured LAN address alone.
+   *
+   * ## Why the config-less fallback is deliberately NOT derived
+   *
+   * With no `fleet.yaml` there is no `llm` block, so there is nothing to derive
+   * FROM — and pointing this at loopback anyway would manufacture an endpoint
+   * no operator configured, then report its health as the fleet's. That is the
+   * `hostFacingBaseUrl` mistake with extra steps. The fallback keeps naming the
+   * container alias, fails to resolve, and `vantageNote` says why.
    */
-  const baseUrl = loaded?.config.llm.base_url ?? `http://${CONTAINER_HOSTNAME}:8000/v1`;
+  const baseUrl =
+    loaded === null
+      ? `http://${CONTAINER_HOSTNAME}:8000/v1`
+      : hostReachableBaseUrl(loaded.config);
   const keyEnv = loaded?.config.llm.api_key_env ?? "OMLX_API_KEY";
   const key = process.env[keyEnv] ?? "";
   const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
   const report: OmlxReport = {
     ok: false,
     baseUrl,
+    workerBaseUrl: loaded?.config.llm.base_url ?? `http://${CONTAINER_HOSTNAME}:8000/v1`,
     vantage: "host",
     models: [],
     allowlist: [],
@@ -946,28 +1050,99 @@ export function register(program: Command): void {
         }
       }
 
-      // Mount visibility (see container/mounts.ts). An unshared runs root does
-      // not fail a `docker run` — it mounts empty, so every worker writes an
-      // outbox the harvester will never see and still exits 0. Probing needs a
-      // built image; without one there is nothing to run the check inside.
-      let mount: MountVisibility & { dir: string } = {
-        visible: false,
-        detail: "not probed",
-        dir: runsRoot(),
-      };
-      const probeTag = images.find((i) => i.present)?.tag;
-      if (dockerOk && probeTag !== undefined) {
-        await mkdir(mount.dir, { recursive: true });
-        const r = await probeMountVisibility(mount.dir, probeTag, exec);
-        mount = { ...r, dir: mount.dir };
-        if (!r.visible) {
-          // Docker is installed, current and running; what is wrong is which
-          // paths its daemon has been given permission to see.
-          diagnoses.push({ name: "runs-dir-not-mountable", class: "misconfigured", message: r.detail });
+      /**
+       * BIND-MOUNT SOURCES OUTSIDE THE RUNTIME'S SHARED PATHS (ISC-292).
+       *
+       * On macOS the daemon runs in a VM and only a declared set of host
+       * directories is shared into it. `-v <src>:<dst>` against a path outside
+       * that set DOES NOT FAIL: the VM has no such path, so the runtime creates
+       * an empty directory there and mounts that. The container then sees an
+       * empty directory where the host has content, and exits 0.
+       *
+       * The hazard is that it degrades to SILENT. It surfaced once only because
+       * a worker tried to read a mounted briefing as a FILE and got EISDIR;
+       * `/workspace`, `/skills` and `/outbox` would each have mounted empty and
+       * produced a worker that ran, found no code and no skills, wrote its
+       * outbox where nothing would collect it, and named the cause in no log.
+       *
+       * ## Why a sentinel round-trip rather than a shared-path list
+       *
+       * `probeMountVisibility` writes a token on the host and reads it back
+       * from inside a container. That asks the ACTUAL question — is this path
+       * shared — instead of a proxy for it, which is what makes it
+       * runtime-agnostic: it needs to know nothing about Docker Desktop's
+       * file-sharing set, colima's `mounts:`, Rancher, or a native Linux daemon
+       * where every path is shared and the probe simply passes. Enumerating any
+       * one runtime's configuration would be a check that silently stops
+       * applying the moment the operator changes runtime.
+       *
+       * ## Every operator-settable root, not just the runs root
+       *
+       * `PIFLEET_RUNS_DIR` and `PIFLEET_SCRATCH_DIR` both default under `$HOME`
+       * — safe — and both are documented as overridable, so the hazard arrives
+       * entirely through configuration. That is the shape of ISC-44 and
+       * ISC-127, which are enforced over the FINISHED set rather than described
+       * for one member of it; checking the runs root alone left the scratch
+       * root, whose own docstring names this probe as the way to find out
+       * whether it is visible, unchecked.
+       */
+      const mountRoots: MountRoot[] = [
+        { name: "runs_dir", env: "PIFLEET_RUNS_DIR", dir: runsRoot() },
+        { name: "scratch_dir", env: "PIFLEET_SCRATCH_DIR", dir: daemonScratchRoot() },
+      ];
+      /**
+       * An image to run the probe INSIDE, preferring one the fleet actually
+       * uses and falling back to the pinned relay image.
+       *
+       * The fallback is the point. This check used to run only when a worker
+       * image was already built, so it self-skipped on exactly the machine most
+       * likely to be misconfigured: `doctor` is what an operator runs BEFORE
+       * `pifleet image build`, and a check that reports "not probed" there is a
+       * check that is absent when it is needed. `RELAY_IMAGE` is the same
+       * dependency-free choice `probe-transport.ts` makes for the same reason —
+       * a preflight must not require the build it precedes.
+       *
+       * Only if it is ALREADY PRESENT locally, though: `doctor` is a read-only
+       * diagnostic and must not silently pull an image, which would make it
+       * slow on a cold machine and fail outright on an offline one.
+       */
+      const mountProbeTag = dockerOk
+        ? (images.find((i) => i.present)?.tag ?? (await localImage(RELAY_IMAGE, exec)))
+        : undefined;
+      const mounts: MountRootReport[] = [];
+      for (const root of mountRoots) {
+        if (!dockerOk || mountProbeTag === undefined) {
+          mounts.push({
+            ...root,
+            visible: false,
+            probed: false,
+            detail: dockerOk
+              ? "no local image to run the probe inside — run `pifleet image build`"
+              : "docker unavailable",
+          });
+          continue;
         }
-      } else {
-        mount.detail = dockerOk ? "no worker image built yet" : "docker unavailable";
+        await mkdir(root.dir, { recursive: true });
+        const r = await probeMountVisibility(root.dir, mountProbeTag, exec);
+        mounts.push({ ...root, visible: r.visible, probed: true, detail: r.detail });
+        if (!r.visible) {
+          /**
+           * `misconfigured` by the class's own definition: docker is installed,
+           * current and running, and what is wrong is which paths its daemon
+           * has been given permission to see. Being a diagnosis is what makes
+           * `doctor` exit 3 — the criterion's "says so rather than launching".
+           */
+          diagnoses.push({
+            name: `${root.name.replace(/_/g, "-")}-not-mountable`,
+            class: "misconfigured",
+            message:
+              `${root.dir} (${root.env}) is not visible inside a container: ${r.detail} ` +
+              `A bind mount of this path would silently present an EMPTY directory to the worker.`,
+          });
+        }
       }
+      /** The runs root keeps its own name in the report — it had one first. */
+      const mount = mounts[0]!;
 
       const omlx = await probeOmlx(loaded);
 
@@ -1084,10 +1259,26 @@ export function register(program: Command): void {
                 optional_capabilities: cmux.optional,
               },
               images,
-              mounts: { runs_dir: mount.dir, visible: mount.visible, detail: mount.detail },
+              // `runs_dir`/`visible`/`detail` keep their original names and
+              // meaning so existing consumers are untouched; `roots` is the
+              // ISC-292 addition and covers EVERY operator-settable bind-mount
+              // source, each carrying the env var that set it and whether the
+              // probe actually ran.
+              mounts: {
+                runs_dir: mount.dir,
+                visible: mount.visible,
+                detail: mount.detail,
+                roots: mounts,
+              },
               omlx: {
                 ok: omlx.ok,
+                // What `doctor` DIALED, and beside it what a worker dials
+                // (ISC-291). Both, always — a consumer that saw only the first
+                // could not tell a derived target from a configured one, which
+                // is the ambiguity the pair exists to remove. They are equal
+                // whenever no derivation applied.
                 base_url: omlx.baseUrl,
+                worker_base_url: omlx.workerBaseUrl,
                 // Which vantage the numbers below were measured from
                 // (ISC-260). A consumer that treats them as the fleet's view
                 // of oMLX is now wrong in a way it can detect.
@@ -1128,7 +1319,17 @@ export function register(program: Command): void {
           console.log(`cmux ${c.name}: ${c.ok ? "available" : "unavailable"}${c.detail ? ` — ${c.detail}` : ""}`);
         }
         for (const i of images) console.log(`image ${i.present ? "present" : "ABSENT "}: ${i.tag}`);
-        console.log(`mounts: runs dir ${mount.visible ? "visible" : "NOT VISIBLE"} — ${mount.detail}`);
+        for (const m of mounts) {
+          const verdict = !m.probed ? "not probed " : m.visible ? "visible    " : "NOT VISIBLE";
+          console.log(`mount ${verdict} ${m.name} (${m.env}) ${m.dir} — ${m.detail}`);
+        }
+        // Named only when a derivation actually happened, so the common case
+        // stays one line and the uncommon one cannot be missed (ISC-291).
+        if (omlx.baseUrl !== omlx.workerBaseUrl) {
+          console.log(
+            `omlx dial target: ${omlx.baseUrl} (host-reachable) — workers dial ${omlx.workerBaseUrl}`,
+          );
+        }
         console.log(
           `omlx (from ${omlx.vantage}): ${omlx.ok ? "ok" : "FAIL"} ${omlx.detail}` +
             (omlx.listLatencyMs !== null ? ` — /models ${omlx.listLatencyMs}ms` : "") +

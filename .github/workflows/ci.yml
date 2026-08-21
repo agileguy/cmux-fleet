@@ -61,12 +61,24 @@ jobs:
         # evidence unavailable on any PR where the image happens to be broken.
         env:
           LABEL: live-oMLX
-          # Four probes, all `test.skipIf(!LIVE)` — measured, not assumed:
-          # `bun test test/integration/model-probe.test.ts` reports
-          # "Ran 4 tests across 1 file". Collection, not passes: see the total
-          # check in probe-guard.sh for why that is the number that catches a
-          # file falling out of the run entirely.
-          TOTAL_EXPECTED: "4"
+          # EIGHT collected, not four, since ISC-291 landed. FOUR are the
+          # original live probes, all `test.skipIf(!LIVE)`; the other FOUR are
+          # ISC-291's host-dial-target tests, which are deliberately plain
+          # `test(...)` and NOT under this file's `it = test.skipIf(!LIVE)` —
+          # they stand up their own stub on an ephemeral port, need no oMLX
+          # and no Docker, and so must run on every push. Do not move them
+          # under `it`; that would make this criterion unreadable in CI.
+          #
+          # Collection, not passes: see the total check in probe-guard.sh for
+          # why that is the number that catches a file falling out of the run.
+          # The pinned skip NAMES below are unaffected — the four new tests
+          # pass rather than skip, so the skip set is still exactly the four
+          # live probes.
+          #
+          # DERIVED, not incremented. Measured 2026-08-20 on bun 1.3.11:
+          #     bun test test/integration/model-probe.test.ts
+          #     -> 4 pass, 4 skip, 0 fail. Ran 8 tests across 1 file.
+          TOTAL_EXPECTED: "8"
           # The exact NAMES, checked against the junit report, not merely how
           # many. A bare count cannot tell "the live probes skipped" apart from
           # "one live probe was deleted and some unrelated test started
@@ -246,7 +258,7 @@ jobs:
         env:
           PIFLEET_DOCKER: "1"
           LABEL: container
-          # All five PIFLEET_DOCKER-gated files, run ONCE by this step, which
+          # All nine PIFLEET_DOCKER-gated files, run ONCE by this step, which
           # both prints their output and grades it. This used to be two
           # separate steps — a "probes" step that ran these files for
           # their own sake, and a "guard" step below it that ran the SAME
@@ -367,7 +379,21 @@ jobs:
           # 81 — prose left behind when the total moved. The derivation for
           # 79 -> 81 lives in ISC-31's close-out and is not repeated here; the
           # skip count is unchanged, so the pass figure moves with the total.
-          TOTAL_EXPECTED: "86"
+          # 86 -> 88 is doctor-preflight.test.ts (ISC-292). Its two probes ask
+          # the container runtime which host paths it actually shares, which
+          # is a question only a real daemon can answer — a fake would assert
+          # the shape of an answer we invented. Listed by the same rule as
+          # container-env.test.ts: a file with at least one daemon-REQUIRING
+          # probe belongs in this job, or that probe has no automated reader
+          # and becomes the self-skipping test this guard exists to catch.
+          #
+          # DERIVED by the hand method, NOT by adding 2 to 86. Measured
+          # 2026-08-20 on bun 1.3.11, gate UNSET:
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight}.test.ts
+          #     -> 6 pass, 82 skip, 0 fail. Ran 88 tests across 9 files.
+          # The same command WITHOUT doctor-preflight reproduced 86 exactly on
+          # the same run, which is what makes this a derivation and not a bump.
+          TOTAL_EXPECTED: "88"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -463,6 +489,7 @@ jobs:
               test/integration/probe-in-network.test.ts \
               test/integration/container-env.test.ts \
               test/integration/container-launch.test.ts
+              test/integration/doctor-preflight.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every

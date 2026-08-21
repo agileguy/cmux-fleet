@@ -230,8 +230,17 @@ describe("the comparator's answers — structure without a truth table is half a
   });
 
   test("unequal inputs of the same length compare unequal, wherever they differ", () => {
-    const first = `f${secret.slice(1)}`;
-    const last = `${secret.slice(0, -1)}f`;
+    // The differing character is DERIVED from the one it replaces, never a
+    // literal. `generateControlSecret()` returns random hex, so hardcoding
+    // `f` here produced a string IDENTICAL to `secret` whenever the character
+    // it "changed" was already an `f` — once per 16 secrets at each end. That
+    // is a ~12% chance per run of this file that `expect(first).not.toBe(
+    // secret)` fails on a correct comparator. Measured before the fix: 5
+    // failures in 30 runs. A test whose own fixture is randomly invalid
+    // reddens CI on unrelated pull requests and teaches everyone to re-run it.
+    const differs = (c: string): string => (c === "f" ? "0" : "f");
+    const first = `${differs(secret[0] ?? "")}${secret.slice(1)}`;
+    const last = `${secret.slice(0, -1)}${differs(secret[secret.length - 1] ?? "")}`;
     // Both directions matter: a comparator that bails early is still CORRECT
     // on these, which is exactly why the structural check above exists.
     expect(first).not.toBe(secret);
