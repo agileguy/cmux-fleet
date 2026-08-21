@@ -626,11 +626,77 @@ export function hostReachableBaseUrl(cfg: HostDialConfigView): string {
  * path to `/`, and every caller builds `${baseUrl}/models` by concatenation —
  * so an introduced slash becomes a `//models` request against a server that
  * never saw one before.
+ *
+ * ## Everything means EVERYTHING, and two parts used to fall on the floor
+ *
+ * `url.username`/`url.password` and `url.hash` were never re-emitted. The
+ * userinfo case is the one that costs something: `http://key@omlx:8000/v1`
+ * derived to `http://127.0.0.1:8000/v1`, silently credential-free, so a
+ * `doctor` probe against a server that requires Basic auth reported an
+ * unauthenticated 401 as the endpoint's health — the same class of confident
+ * wrong answer this function exists to remove, arriving from the other end.
+ *
+ * Carried through rather than refused, because carrying through is what the
+ * sentence at the top of this docstring PROMISES and there is nothing here
+ * that cannot honour it: userinfo is turned into an `Authorization` header by
+ * the client, and the relay forwards bytes, so a credential that works for a
+ * worker works for the derived host target too. Refusing would be defensible
+ * if the relay could not forward it; it can, so a silent drop is simply a bug.
+ *
+ * ## Why the trailing-slash test moved onto the PATH
+ *
+ * It used to read the last byte of the whole composed STRING against the last
+ * byte of the whole original. With a query present that inspects the query:
+ * `http://host:8000?x=1` composed to `http://127.0.0.1:8000/?x=1` — a slash
+ * introduced into a path that had none, precisely the `//models` hazard above
+ * — because neither string ends in `/` and the heuristic saw no problem.
+ *
+ * The question it was always trying to ask is whether the ORIGINAL had a path
+ * component at all, and `URL` cannot answer that: it normalizes an absent path
+ * to `/`, which is the same value an explicit `http://host/` produces. So it
+ * is answered on the original string, by looking at the first character that
+ * ends the authority. `/` means there was a path and its slashes are the
+ * operator's; `?`, `#` or end-of-string mean there was none and this function
+ * must not invent one.
  */
 function compose(url: URL, host: string, port: string, original: string): string {
   const authority = isIP(host) === 6 ? `[${host}]` : host;
-  const out = `${url.protocol}//${authority}${port === "" ? "" : `:${port}`}${url.pathname}${url.search}`;
-  return out.endsWith("/") && !original.endsWith("/") ? out.slice(0, -1) : out;
+  /**
+   * Emitted only when present, and the password only when it is non-empty —
+   * `user@` and `user:@` are different authorities, and echoing a colon the
+   * input did not carry would be its own quiet rewrite.
+   */
+  const userinfo =
+    url.username === "" && url.password === ""
+      ? ""
+      : `${url.username}${url.password === "" ? "" : `:${url.password}`}@`;
+  return (
+    `${url.protocol}//${userinfo}${authority}${port === "" ? "" : `:${port}`}` +
+    `${originalHadPath(original) ? url.pathname : ""}${url.search}${url.hash}`
+  );
+}
+
+/**
+ * Did the input URL carry a path component of its own?
+ *
+ * Answered on the raw string because the parsed `URL` cannot answer it: an
+ * absent path and an explicit `/` both normalise to `pathname === "/"`, and
+ * `compose` has to tell them apart to avoid introducing a slash into a base
+ * URL that never had one (see its docstring).
+ *
+ * The authority ends at the first `/`, `?` or `#` after the scheme separator.
+ * A `/` there means a path follows; anything else — including running off the
+ * end of the string — means there is none. The scheme separator is always
+ * present: every caller has been through `new URL(...)`, and `config/schema.ts`
+ * additionally allowlists `http:`/`https:`, both of which are special schemes
+ * that require `//`. The guard below is for the caller that has not.
+ */
+function originalHadPath(original: string): boolean {
+  const sep = original.indexOf("://");
+  if (sep === -1) return original.includes("/");
+  const afterAuthorityStart = original.slice(sep + 3);
+  const end = afterAuthorityStart.search(/[/?#]/);
+  return end !== -1 && afterAuthorityStart[end] === "/";
 }
 
 /**

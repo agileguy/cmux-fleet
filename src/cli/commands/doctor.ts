@@ -827,32 +827,60 @@ async function localImage(tag: string, exec: Exec): Promise<string | undefined> 
   const r = await exec(["docker", "image", "inspect", tag]);
   return r.code === 0 ? tag : undefined;
 }
-
 /**
  * NEVER FOLLOW A REDIRECT ON A CREDENTIALED PROBE.
  *
  * `fetch` defaults to `redirect: "follow"`, and both probes below attach
  * `Authorization: Bearer <the operator's model API key>`. Under `follow`, a 302
- * from the configured endpoint sends that header onward to whatever host the
- * `Location:` names â the credential leaves the machine, to an address nobody
- * configured, and `doctor` reports the redirect target's answer as the health
- * of the fleet's model server.
+ * from the configured endpoint sends the request onward to whatever host the
+ * `Location:` names, and `doctor` then reports THAT host's answer as the health
+ * of the fleet's model server: its model list, its allowlist verdicts, its
+ * latency, all attributed in `--json` to an endpoint nobody configured.
  *
- * This mattered less when it could not happen. `doctor` used to dial
+ * ## What was MEASURED about the credential, rather than assumed
+ *
+ * The obvious reading of this, "a 302 forwards the API key to any host", is NOT
+ * what bun does, and shipping that sentence would assert a mechanism this
+ * project has not verified. Probed directly on bun 1.3.11, one `fetch` carrying
+ * `Authorization: Bearer CANARY` into a 302:
+ *
+ *     same-origin redirect (same host and port, new path)
+ *         -> BOTH requests carry `Bearer CANARY`
+ *     cross-origin redirect (same host, DIFFERENT port)
+ *         -> the redirect target receives `authorization: null`
+ *
+ * So the runtime already strips the header on exactly the hop that would leak
+ * it, and the same-origin hop that keeps it goes back to the same server. That
+ * makes this a smaller defect than it first reads. It does not make it a
+ * non-defect, and the two reasons why are the actual argument for the fix:
+ *
+ *  1. THE REQUEST STILL GOES. `doctor` dials an address the operator never
+ *     wrote and reports a stranger's answer as their server's health. That is
+ *     the same class of confident wrong answer `hostReachableBaseUrl` exists to
+ *     remove, arriving from the other end, plus an outbound request primitive
+ *     aimed by whatever answers the configured endpoint.
+ *  2. THE CREDENTIAL'S SAFETY IS SOMEBODY ELSE'S POLICY. Cross-origin header
+ *     stripping is the fetch specification's rule, implemented by the runtime,
+ *     unversioned from this code's point of view and asserted nowhere in this
+ *     repo. A credentialed request whose confidentiality rests on a behaviour
+ *     we neither own nor test is a dependency, not a control. Not following the
+ *     redirect removes the dependency instead of trusting it.
+ *
+ * This could not happen at all until recently. `doctor` used to dial
  * `host.docker.internal`, a bridge alias that resolves nowhere on the host, so
  * the request failed by construction and there was no response to redirect.
  * ISC-291 made the target a real, operator-config-supplied address reached from
- * the host â which is the whole point of that change and also what put a
- * credentialed request on the wire for the first time.
+ * the host, which is the point of that change and also what put a credentialed
+ * request on the wire for the first time.
  *
  * `"manual"` and not `"error"`: a redirect is a fact about the endpoint worth
  * REPORTING rather than a transport failure. The response comes back opaque
  * with its status intact, so the `!res.ok` branch below says
- * `GET /models â HTTP 302` â an operator reading that knows exactly what their
- * server did, and no header went anywhere.
+ * `GET /models -> HTTP 302`, and an operator reading that knows exactly what
+ * their server did.
  *
  * Spread rather than written inline twice so the two probes cannot drift apart;
- * a single credentialed fetch that forgot this would reopen the whole hole.
+ * one credentialed fetch that forgot this would reopen the whole thing.
  */
 const NO_REDIRECT = { redirect: "manual" } as const;
 

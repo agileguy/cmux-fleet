@@ -61,24 +61,35 @@ jobs:
         # evidence unavailable on any PR where the image happens to be broken.
         env:
           LABEL: live-oMLX
-          # EIGHT collected, not four, since ISC-291 landed. FOUR are the
-          # original live probes, all `test.skipIf(!LIVE)`; the other FOUR are
-          # ISC-291's host-dial-target tests, which are deliberately plain
+          # EIGHTEEN collected, not eight, and not four.
+          #
+          # FOUR are the original live probes, all `test.skipIf(!LIVE)` and all
+          # pinned by name below. The other FOURTEEN are deliberately plain
           # `test(...)` and NOT under this file's `it = test.skipIf(!LIVE)` —
-          # they stand up their own stub on an ephemeral port, need no oMLX
-          # and no Docker, and so must run on every push. Do not move them
-          # under `it`; that would make this criterion unreadable in CI.
+          # they stand up their own stubs on ephemeral ports, need no oMLX and
+          # no Docker, and so must run on every push. Do not move them under
+          # `it`; that would make these criteria unreadable in CI.
+          #
+          # Where the fourteen come from:
+          #   4  ISC-291's host-dial-target tests
+          #   6  the host dial target carries every part of base_url — userinfo,
+          #      a user:password pair, a fragment, a query (including the
+          #      slash-into-a-pathless-URL case), an explicit trailing slash,
+          #      and all of them at once through relay_upstream
+          #   3  base_url must be http or https (file:/ftp:/gopher: refused,
+          #      https: accepted)
+          #   1  doctor never forwards the API key to a redirect target
           #
           # Collection, not passes: see the total check in probe-guard.sh for
           # why that is the number that catches a file falling out of the run.
-          # The pinned skip NAMES below are unaffected — the four new tests
-          # pass rather than skip, so the skip set is still exactly the four
-          # live probes.
+          # The pinned skip NAMES below are unaffected — every one of the
+          # fourteen passes rather than skips, so the skip set is still exactly
+          # the four live probes.
           #
-          # DERIVED, not incremented. Measured 2026-08-20 on bun 1.3.11:
+          # DERIVED, not incremented. Measured on bun 1.3.11:
           #     bun test test/integration/model-probe.test.ts
-          #     -> 4 pass, 4 skip, 0 fail. Ran 8 tests across 1 file.
-          TOTAL_EXPECTED: "8"
+          #     -> 14 pass, 4 skip, 0 fail. Ran 18 tests across 1 file.
+          TOTAL_EXPECTED: "18"
           # The exact NAMES, checked against the junit report, not merely how
           # many. A bare count cannot tell "the live probes skipped" apart from
           # "one live probe was deleted and some unrelated test started
