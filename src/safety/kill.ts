@@ -729,7 +729,18 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
   if (await awaitDead(dead, opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS, pollMs, now, sleep)) {
     return "killed";
   }
-  return (await sameIdentity(target, ops)) ? "unconfirmed" : "killed";
+  /*
+   * THE LAST READ IN THE CLIMB, and it was missed when the other four were
+   * wrapped — found by a reviewer disabling guards one at a time. An escape
+   * here is the worst-placed of the five: SIGKILL has been sent, so the caller
+   * is entitled to an answer about whether it worked, and instead the whole
+   * scan aborts. `reapOnce` discards every report it had collected, so
+   * supervisors already reaped in that pass lose their ledger rows and their
+   * registry entries while their staleness clocks are already dropped.
+   */
+  const outlived = await identityHolds(target, ops);
+  if (outlived === null) return "identity_unconfirmed";
+  return outlived ? "unconfirmed" : "killed";
 }
 
 // ---------------------------------------------------------------------------

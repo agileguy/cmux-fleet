@@ -15,6 +15,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { readAttended as steerReadAttended } from "../../src/cli/commands/steer.ts";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -329,5 +330,74 @@ describe("attended.json this build cannot read (ISC-192)", () => {
     const rec = await enterTui({ run, workerId: "eng-1", backend: new FakeDriver(), pane: PANE });
     expect(rec.schema).toBe(ATTENDED_SCHEMA);
     expect(() => AttendedRecordSchema.parse({ ...rec, schema: "other" })).toThrow();
+  });
+});
+
+/**
+ * `steer.ts` holds a SECOND, private reader of the same file.
+ *
+ * `attended/mode.ts`'s `readAttended(run, worker)` is the one every test above
+ * exercises. `steer.ts` has its own `readAttended(path)` — different module,
+ * different signature, and until now it mapped a foreign stamp to `null`,
+ * which its caller reads as "no record" and answers by WRITING one over the
+ * top. Another build's record, destroyed by a verb the operator ran for an
+ * unrelated reason.
+ *
+ * The guard that fixes it had zero coverage when it was written: an adversarial
+ * pass disabled it and nothing went red. Neither suite saw it — the tests above
+ * grade a different function, and `durable-reader-wrapping.test.ts` cannot see
+ * this shape at all, because `safeParse`-then-return-null is not an unwrapped
+ * `.parse` for its scanner to find.
+ */
+describe("steer's private attended reader refuses a foreign stamp too (ISC-192)", () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    for (const d of dirs) await rm(d, { recursive: true, force: true });
+  });
+
+  async function plantedFile(doc: unknown): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-steer-attended-"));
+    dirs.push(dir);
+    const p = join(dir, "attended.json");
+    await writeFile(p, JSON.stringify(doc), "utf8");
+    return p;
+  }
+
+  test("a foreign stamp throws rather than reading as 'no record'", async () => {
+    const path = await plantedFile({
+      schema: "pifleet.attended/v2",
+      worker: "eng-1",
+      mode: "tui",
+      entered_at: new Date().toISOString(),
+    });
+    const err = await steerReadAttended(path).then(
+      () => new Error("NOTHING THROWN — the reader answered a foreign stamp with a value"),
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(AttendedSchemaError);
+    expect((err as Error).message).toContain("pifleet.attended/v2");
+  });
+
+  test("`null` still means absent, and damage is still lenient", async () => {
+    // The leniency is deliberate and documented: a scribbled file must not
+    // disable a control verb. Only a FOREIGN STAMP is refused.
+    const scribbled = await plantedFile("not-an-object");
+    expect(await steerReadAttended(scribbled)).toBeNull();
+    const missing = join(dirs[0]!, "nope.json");
+    expect(await steerReadAttended(missing)).toBeNull();
+  });
+
+  test("a record this build wrote still reads back", async () => {
+    const path = await plantedFile({
+      schema: ATTENDED_SCHEMA,
+      worker: "eng-1",
+      mode: "viewer",
+      entered_at: new Date().toISOString(),
+      left_at: new Date().toISOString(),
+      voided: [],
+    });
+    const record = await steerReadAttended(path);
+    expect(record).not.toBeNull();
+    expect(record!.worker).toBe("eng-1");
   });
 });

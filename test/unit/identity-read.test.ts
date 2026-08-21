@@ -111,14 +111,17 @@ beforeAll(async () => {
     encoding: "utf8",
     mode: 0o755,
   });
+  // A directory with no `ps` in it. `withNoPs` REPLACES PATH with this one
+  // entry rather than prepending, so nothing else can answer — the
+  // minimal-container case.
+  emptyDir = await mkdtemp(join(tmpdir(), "pifleet-ps-absent-"));
   /*
    * A `ps` that is KILLED BY A SIGNAL rather than exiting. `kill -9 $$` makes
    * the shim die the way an OOM killer, a cgroup limit or a stray `pkill`
    * would kill a real one: no exit status at all, and silence on both pipes.
+   * Platform-neutral for the right reason — it depends on POSIX child
+   * termination, not on how any `ps` implementation behaves.
    */
-  // A PATH entry with no `ps` in it at all, prepended AND with the real
-  // directories removed by the caller — the minimal-container case.
-  emptyDir = await mkdtemp(join(tmpdir(), "pifleet-ps-absent-"));
   killedDir = await mkdtemp(join(tmpdir(), "pifleet-ps-killed-"));
   await writeFile(join(killedDir, "ps"), `#!/bin/sh\nkill -9 $$\n`, {
     encoding: "utf8",
@@ -242,9 +245,14 @@ describe("processStartTime distinguishes gone from unreadable", () => {
    * purely an environment failure. Every other refusal in this file exercises
    * a `ps` that RAN; this is the one that never starts.
    *
-   * Fails if: the spawn is unwrapped again. The `exitCode` assertion is the
-   * load-bearing half — a bare `Error` satisfies `toBeInstanceOf(Error)` and
-   * proves nothing.
+   * Fails if: the spawn is unwrapped again. The INSTANCEOF is the load-bearing
+   * half — an unwrapped spawn throws a bare `Error`, which does not satisfy
+   * `toBeInstanceOf(IdentityReadError)`. The `exitCode` lines below it cannot
+   * fail independently: `exitCode` is a `readonly` class field, so once the
+   * instanceof passes they are true by construction. They are kept as
+   * documentation of the contract, not as a second check — the test that
+   * genuinely pins the field is "the refusal is a DIAGNOSED failure", which
+   * asserts `exitCode` WITHOUT an instanceof.
    */
   test("a `ps` that is not on PATH at all is a diagnosed refusal, not an internal error", async () => {
     const err = await withNoPs(() => processStartTime(process.pid).catch((e: unknown) => e));

@@ -116,7 +116,7 @@ export function nextAttendedRecord(
  * is the residual the criterion records, and this is an instance of it found
  * by reading rather than by the guard.
  */
-async function readAttended(path: string): Promise<AttendedRecord | null> {
+export async function readAttended(path: string): Promise<AttendedRecord | null> {
   let doc: unknown;
   try {
     doc = await Bun.file(path).json();
@@ -152,6 +152,22 @@ export function register(program: Command): void {
         // Liveness BEFORE the socket: a typo'd worker and a dead one refuse
         // connect identically, and only the state file can tell 2 from 6.
         await requireLiveWorker(run, opts.worker);
+
+        /*
+         * READ BEFORE DELIVERY, deliberately, and the write still happens
+         * after the ack. `readAttended` can now REFUSE a record stamped by
+         * another build rather than silently overwriting it — and a refusal
+         * downstream of `controlCall` would mean the steer had already landed
+         * in a live worker's turn while the command reported failure, with no
+         * `steer_sent` ledger row. The operator's next move is to run it
+         * again, injecting the same mid-turn correction twice.
+         *
+         * Here the throw costs nothing: nothing has been delivered. The
+         * "a refused steer must not brand the run attended" rule is about the
+         * WRITE, which is still below the ack where it belongs.
+         */
+        const wp = workerPaths(run, opts.worker);
+        const existingAttended = await readAttended(wp.attendedJson);
 
         let reply: Record<string, unknown>;
         try {
@@ -190,9 +206,8 @@ export function register(program: Command): void {
         // run as human-touched (write-once, never removed), and the ledger
         // carries the audit row. Both AFTER the ack — a refused steer must
         // not brand the run attended.
-        const wp = workerPaths(run, opts.worker);
         const record = nextAttendedRecord(
-          await readAttended(wp.attendedJson),
+          existingAttended,
           opts.worker,
           new Date().toISOString(),
         );

@@ -306,6 +306,69 @@ describe("processGroupId: an absent process and a failed read are different fact
   }, cliBudget(2));
 
   /**
+   * A `ps` KILLED BY A SIGNAL, which is byte-identical to an absent process on
+   * every channel this reader consults: bun reports `exitCode: null` (so
+   * `exitCode !== 0` holds), and both pipes are empty.
+   *
+   * `processStartTime` got this guard and this test on the identity channel;
+   * `processGroupId` got the guard and NOT the test, and an adversarial pass
+   * proved the omission by reverting all five `kill.ts` guards at once and
+   * watching 1335 unit and 19 reaper tests stay green. The guards were correct
+   * and nothing held them there.
+   *
+   * The pid is `process.pid` DELIBERATELY: alive, and answered happily by any
+   * real `ps` on any platform, so a fall-through past the stub fails loudly
+   * instead of being rescued by a kernel that dislikes the number.
+   *
+   * Fails if: absence stops requiring a normal exit. `null` here is read as
+   * `gone`, which is a caller's licence to `docker rm -f` a live supervisor's
+   * container and prune the checkout it is writing to.
+   */
+  test("a `ps` killed by a signal is a failed read, not an absent process", async () => {
+    await withStubPs("#!/bin/sh\nkill -9 $$\n", async () => {
+      const err = await processGroupId(process.pid).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(GroupReadError);
+      expect((err as Error).message).toContain("killed by SIGKILL");
+    });
+    // One stub `ps` spawn.
+  }, cliBudget(1));
+
+  /**
+   * No `ps` ON PATH AT ALL — the minimal-container case, and the likeliest
+   * real instance of a broken measuring instrument.
+   *
+   * `Bun.spawn` throws SYNCHRONOUSLY here, before any of the outcome handling
+   * below it exists, and the raw error carries no `exitCode` — so an unwrapped
+   * spawn is reported by the entry point as `EXIT.INTERNAL`, "a bug in pifleet
+   * itself", for what is purely an environment failure.
+   *
+   * Fails if: the spawn is unwrapped again. The INSTANCEOF is the load-bearing
+   * assertion — an unwrapped spawn throws a bare `Error`, which does not
+   * satisfy `toBeInstanceOf(GroupReadError)`.
+   *
+   * NOTE the asymmetry with `IdentityReadError`, which is deliberate and
+   * documented in `kill.ts`: `GroupReadError` carries NO `exitCode`, because
+   * every `processGroupId` call reaches it through `confirmGroup`, which
+   * catches and converts to `read_failed` — it never travels to the CLI on its
+   * own. `processStartTime` has callers that do not catch, so its error needs
+   * the code. Asserting `exitCode` here would pin a property this type is
+   * specifically not supposed to have.
+   */
+  test("a `ps` that is not on PATH at all is a diagnosed refusal", async () => {
+    // An empty stub dir: `withStubPs` writes the script, so remove it first.
+    await withStubPs("#!/bin/sh\nexit 0\n", async () => {
+      const dir = process.env["PATH"]!;
+      await rm(join(dir, "ps"), { force: true });
+      const err = await processGroupId(process.pid).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(GroupReadError);
+      expect((err as Error).message).toMatch(/could not be started/);
+      // The contract this type DOES have: no exitCode, by design (above).
+      expect((err as { exitCode?: number }).exitCode).toBeUndefined();
+    });
+    // No `ps` spawn succeeds, but the budget covers the attempt.
+  }, cliBudget(1));
+
+  /**
    * The third way a read can fail, and the one no exit status reveals: `ps`
    * claimed SUCCESS and printed something that is not a process group. An
    * unparseable answer is not an answer.
