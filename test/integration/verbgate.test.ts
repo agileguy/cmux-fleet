@@ -10,7 +10,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { makeDaemonScratch, makeWorkerAccessible } from "../../src/container/mounts.ts";
-import { cliBudget } from "../support/budget.ts";
+import { runPaths, workerOutboxDir, workerVerbgateLedger } from "../../src/run/paths.ts";
+import { readCollectedVerbgate, VerbgateCollector } from "../../src/run/verbgate-collect.ts";
+import { cliBudget, containerBudget } from "../support/budget.ts";
 
 const IMAGE = process.env.PIFLEET_TEST_IMAGE ?? "pifleet/pi-worker:verify";
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -513,4 +515,167 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
     expect(out).toContain("10001");
     expect(out).toContain("tini=executable");
   }, cliBudget(1));
+
+  /**
+   * ISC-172's LAST MILE, and the reason every other probe of the collector
+   * cannot reach it: they write the source ledger themselves, at the host path
+   * `workerVerbgateLedger` names. What that proves is that the collector reads
+   * the path the HELPER names. It does not prove this is the path
+   * `docker/verbgate` actually writes through the `/outbox` bind mount. Two
+   * different claims; only one of them was tested, and the untested one is the
+   * one a worker's real trail depends on.
+   *
+   * THE SUFFIX IS WHERE THEY CAN DISAGREE. `workerVerbgateLedger` appends
+   * `ledger/verbgate.jsonl` in TypeScript; `docker/verbgate` hardcodes
+   * `/outbox/ledger/verbgate.jsonl` in shell. Nothing links them — no shared
+   * constant, no generated header, no import — so a rename on either side
+   * leaves BOTH sides internally consistent and every existing test green,
+   * while the collector tails a path nothing writes and reports an empty audit
+   * trail for a worker that ran gated verbs all day. A silent empty is the
+   * worst failure an audit trail has, because it is indistinguishable from
+   * good news.
+   *
+   * WHAT THIS DOES NOT PROVE, stated so the next reader does not over-read it:
+   * that production mounts this directory at `/outbox`. The mount ROOT is
+   * shared by construction — `src/config/render.ts` and this test both call
+   * `workerOutboxDir` — and it is `container-env.test.ts` that reads the real
+   * mount table back out of `docker inspect`. The claim here is the narrower,
+   * previously untested half: the suffix agrees, through a real bind mount,
+   * into a real run tree, with the real shim doing the writing.
+   *
+   * A REFUSED verb is used rather than a permitted one deliberately. A refusal
+   * is the row the trail exists to carry, it needs nothing from the allow file
+   * to be produced, and it does not depend on the wrapped binary succeeding.
+   */
+  test("verbgate writes where the collector looks, through a real bind mount", async () => {
+    const root = await makeDaemonScratch("vgpath");
+    scratches.push(root);
+    const run = runPaths(`r-vgp-${process.pid.toString(36)}`, root);
+    const worker = "eng-1";
+
+    // The run tree as `up` leaves it: an outbox the worker can write, and
+    // NOTHING under it. `ledger/` is created by verbgate's own `mkdir -p` on
+    // the first gated verb — if the host pre-created it, the test would pass
+    // on a directory it made itself rather than one the shim made.
+    const outbox = workerOutboxDir(run.root, worker);
+    await mkdir(outbox, { recursive: true });
+    await makeWorkerAccessible(outbox, true);
+
+    const policy = join(root, "policy", "cloud-allow");
+    await mkdir(join(root, "policy"), { recursive: true });
+    await writeFile(policy, "kubectl rollout restart\n");
+    await chmod(policy, 0o444);
+
+    await inImage(`${PRELUDE}\nkubectl delete pod doomed >/dev/null 2>&1; echo "rc=$?"`, [
+      "-v",
+      `${outbox}:/outbox`,
+      "-v",
+      `${policy}:/policy/cloud-allow:ro`,
+    ]);
+
+    // Half one. The path is taken from the helper and never re-joined here, so
+    // a suffix disagreement surfaces as ENOENT naming the path it looked at.
+    const rows = (await readFile(workerVerbgateLedger(run.root, worker), "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe("refuse");
+
+    // Half two. The collector discovers the worker from the outbox directory on
+    // disk and copies the row out — driven against this same real run tree,
+    // not a hand-built fixture.
+    const reports = await new VerbgateCollector(run).collectOnce();
+    expect(reports.map((r) => r.worker)).toContain(worker);
+    const collected = await readCollectedVerbgate(run, worker);
+    expect(collected.filter((r) => r.kind === "row")).toHaveLength(1);
+  }, containerBudget(1));
+
+  /**
+   * ISC-172 PROVED BY ATTACK, which is the only way this criterion can be
+   * proved at all. Everything else about the collector is a test of OUR code
+   * doing what we meant; this is a test of what a hostile worker can still do
+   * to the trail, run from inside the container with the worker's own uid and
+   * the worker's own writable mount.
+   *
+   * The attack is the one the criterion names: the worker truncates its own
+   * ledger. It runs `: >` (the redirect, which is `open(O_TRUNC)`) — not a
+   * host-side `writeFile`, because the whole question is whether the thing
+   * with write access to the mount can erase what has already been observed.
+   *
+   * THREE ASSERTIONS, AND THEY ARE NOT THE SAME CLAIM:
+   *   1. the pre-truncation row is STILL IN THE COLLECTED COPY afterwards —
+   *      custody survived the attack;
+   *   2. a truncation MARK is present — the attack is recorded, not merely
+   *      survived, so an operator can tell "quiet worker" from "worker that
+   *      wiped its trail", which is the distinction ISC-125 will later need;
+   *   3. the post-truncation row is collected too — the collector recovers and
+   *      keeps following, rather than wedging on the offset it lost.
+   * A collector that copied everything but noticed nothing would pass 1 and 3
+   * and fail 2; one that detected the shrink and then gave up would pass 1 and
+   * 2 and fail 3.
+   *
+   * WHAT IT DOES NOT PROVE, and the owner decision said so up front: TAIL AND
+   * COPY loses rows written AND truncated between two passes. That window is
+   * real, it is the accepted cost of not changing the transport, and no
+   * assertion here should be read as closing it.
+   */
+  test("a worker that truncates its own ledger cannot erase what was collected", async () => {
+    const root = await makeDaemonScratch("vgtrunc");
+    scratches.push(root);
+    const run = runPaths(`r-vgt-${process.pid.toString(36)}`, root);
+    const worker = "eng-1";
+    const outbox = workerOutboxDir(run.root, worker);
+    await mkdir(outbox, { recursive: true });
+    await makeWorkerAccessible(outbox, true);
+
+    const policy = join(root, "policy", "cloud-allow");
+    await mkdir(join(root, "policy"), { recursive: true });
+    await writeFile(policy, "kubectl rollout restart\n");
+    await chmod(policy, 0o444);
+    const mounts = ["-v", `${outbox}:/outbox`, "-v", `${policy}:/policy/cloud-allow:ro`];
+
+    // Pass 1: one refused verb, then the host takes custody of it.
+    await inImage(`${PRELUDE}\nkubectl delete pod first >/dev/null 2>&1 || true`, mounts);
+    const collector = new VerbgateCollector(run);
+    expect((await collector.collectOnce()).map((r) => r.worker)).toContain(worker);
+
+    // THE ATTACK, from inside the container, as the worker uid. `: >` is
+    // open(O_TRUNC) — the same call a worker would reach for to hide a verb.
+    // The second verb after it is what a worker would do next, and it is also
+    // what proves the collector did not simply stop.
+    const out = await inImage(
+      `${PRELUDE}\n: > /outbox/ledger/verbgate.jsonl; echo "truncated=$?"; ` +
+        `wc -l < /outbox/ledger/verbgate.jsonl; ` +
+        `kubectl delete pod second >/dev/null 2>&1 || true`,
+      mounts,
+    );
+    // The attack must actually have landed, or the rest of this test is
+    // asserting against a worker that never managed to truncate anything.
+    expect(out).toContain("truncated=0");
+    expect(out).toContain("0");
+
+    await collector.collectOnce();
+    const collected = await readCollectedVerbgate(run, worker);
+    // `line` is the worker's own row, byte for byte, so the pod name in the
+    // refused argv is what distinguishes the pre- from the post-attack row.
+    const lines = collected.filter((r) => r.kind === "row").map((r) => r.line).join("\n");
+
+    // 1 — the erased row is still in the host's copy.
+    expect(lines).toContain("first");
+    // 2 — and the erasure itself is on the record, with the reason that fired.
+    const marks = collected.filter((r) => r.kind === "truncation");
+    expect(marks).toHaveLength(1);
+    // `tail_rewritten` SPECIFICALLY, not merely "some reason". This attack
+    // defeats the other three by construction — the file regrew past the old
+    // offset, the inode survived the in-place truncate, and verbgate's
+    // second-granular timestamps make the two rows' first 64 bytes identical —
+    // so asserting the generic mark would let the probe pass on a signal that
+    // cannot fire here, which is how it read green before the frontier check
+    // existed.
+    expect(marks[0]?.reasons).toContain("tail_rewritten");
+    // 3 — and collection continued past it.
+    expect(lines).toContain("second");
+  }, containerBudget(2));
 });

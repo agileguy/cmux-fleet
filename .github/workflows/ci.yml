@@ -302,9 +302,12 @@ jobs:
           # test this guard exists to catch. The four daemon-free ones running
           # twice is the accepted cost, and they are milliseconds.
           #
-          # TOTAL_EXPECTED is 88 = 20 (image.test.ts: 15 fixed cases + 5
+          # TOTAL_EXPECTED is 90 = 20 (image.test.ts: 15 fixed cases + 5
           # generated from the toolchain-baseline `probes` array — gcloud,
-          # kubectl, helm, jq, curl) + 23 (verbgate.test.ts) + 5
+          # kubectl, helm, jq, curl) + 25 (verbgate.test.ts — up from 23 with
+          # ISC-172's two container-end probes: the shim writes where the
+          # collector looks, and a worker that truncates its own ledger cannot
+          # erase what was already collected) + 5
           # (egress.test.ts) + 18 (adc.test.ts — up from 12 now that the
           # ISC-44/45/46 mount-shape and credential-absence blocks exist) + 8
           # (relay.test.ts: 3 bridge-denial/enumeration probes and 5 relay
@@ -314,7 +317,7 @@ jobs:
           # + 5 (container-launch.test.ts, added by the container launcher)
           # + 2 (doctor-preflight.test.ts, added by ISC-292).
           #
-          # 20 + 23 + 5 + 18 + 8 + 5 + 2 + 5 + 2 = 88. The arithmetic is written
+          # 20 + 25 + 5 + 18 + 8 + 5 + 2 + 5 + 2 = 90. The arithmetic is written
           # out because this constant has drifted from its own prose twice, and
           # both times the prose was the half nobody re-derived.
           #
@@ -402,13 +405,16 @@ jobs:
           # probe belongs in this job, or that probe has no automated reader
           # and becomes the self-skipping test this guard exists to catch.
           #
-          # DERIVED by the hand method, NOT by adding 2 to 86. Measured
-          # 2026-08-20 on bun 1.3.11, gate UNSET:
+          # DERIVED by the hand method, NOT by adding 2 to 88. Re-measured
+          # 2026-08-21 on bun 1.3.11, gate UNSET, after ISC-172's two
+          # container-end probes landed in verbgate.test.ts:
           #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight}.test.ts
-          #     -> 6 pass, 82 skip, 0 fail. Ran 88 tests across 9 files.
-          # The same command WITHOUT doctor-preflight reproduced 86 exactly on
-          # the same run, which is what makes this a derivation and not a bump.
-          TOTAL_EXPECTED: "88"
+          #     -> 6 pass, 84 skip, 0 fail. Ran 90 tests across 9 files.
+          # The 2026-08-20 derivation this replaces read 88 with 82 skips, so
+          # the delta is two tests and two skips — which is the shape two added
+          # Docker-gated cases must have, and is why the re-derivation is
+          # evidence rather than ceremony.
+          TOTAL_EXPECTED: "90"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
