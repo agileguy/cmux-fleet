@@ -28,6 +28,9 @@ import { parseConfig } from "../../src/config/load.ts";
 import { EXIT } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { processStartTime } from "../../src/run/registry.ts";
+import { groupRefusal, isAnchorRefusal } from "../../src/cli/commands/down.ts";
+import { processGroupId } from "../../src/safety/kill.ts";
+import { ensureControlAuth } from "../../src/security/control-auth.ts";
 import { initialWorkerState, writeWorkerState } from "../../src/run/state.ts";
 import { createWorkerWorktrees, type WorkerWorktree } from "../../src/run/worktree.ts";
 import { git, gitOk, pathExists, seedGitRepo } from "../fixtures/synthetic-repo.ts";
@@ -193,9 +196,45 @@ async function makeRig(opts: { workers?: string[]; livePid?: string[] } = {}): P
   return { base, root, runId, repo, worktrees };
 }
 
-async function down(rig: Rig, args: string[] = []): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, "down", "--run", rig.runId, "--json", ...args], {
-    env: { PATH: process.env["PATH"] ?? "", PIFLEET_RUNS_DIR: rig.root },
+/**
+ * `--json` unless a caller asks for the TEXT output.
+ *
+ * Every test here reads the machine-readable envelope, which is the right
+ * surface for an assertion about a field. It is the wrong surface for an
+ * assertion about a SENTENCE: `down`'s stdout verdict (`stopped` / `REFUSED` /
+ * `STILL RUNNING`) exists only on the non-`--json` path, and the whole class of
+ * defect the ISC-272 block below is about is a true field printed under a false
+ * sentence.
+ */
+async function down(
+  rig: Rig,
+  args: string[] = [],
+  opts: { json?: boolean } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const envelope = opts.json === false ? [] : ["--json"];
+  const p = Bun.spawn([process.execPath, CLI, "down", "--run", rig.runId, ...envelope, ...args], {
+    /**
+     * `TMPDIR` travels with the child, and it is load-bearing rather than
+     * tidy.
+     *
+     * `socketPath` puts every control socket under `os.tmpdir()`. On macOS
+     * that reads `$TMPDIR` — a per-user path like `/var/folders/…/T/` — and
+     * falls back to `/tmp` when the variable is absent. This env was built
+     * from scratch, so the CLI subprocess resolved `/tmp` while the test
+     * resolved `/var/folders`, and the two computed DIFFERENT paths for the
+     * same worker's socket. Nothing failed loudly: `down` treats an
+     * unreachable control socket as "socket dead, process alive" and falls
+     * through to the ladder, which is the same thing it does when there
+     * genuinely is no supervisor listening. So a test that plants a listener
+     * and asserts on what `down` did after dialing it was measuring a dial
+     * that never happened. Measured: the ISC-272 fixture below saw zero
+     * connections and its perl process was SIGTERMed instead.
+     */
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      PIFLEET_RUNS_DIR: rig.root,
+      ...(process.env["TMPDIR"] === undefined ? {} : { TMPDIR: process.env["TMPDIR"] }),
+    },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -661,4 +700,382 @@ describe("dispatch names the checkout that actually exists", () => {
     expect(written.branch).toBe(`experiment/${runId}/rev-1`);
     expect(written.branch).not.toContain("fleet/");
   }, cliBudget(1));
+});
+
+/**
+ * A supervisor whose process group stops confirming MID-LADDER (ISC-272).
+ *
+ * ## The defect this block exists for
+ *
+ * `signalIfSame` re-confirms the recorded process group before EVERY rung, not
+ * once at the top, because each grace period is a window in which the world can
+ * change. When that re-confirmation fails it returns `group_unconfirmed` and
+ * sends NOTHING. `down`'s `signalGuarded` used to throw that answer away, so
+ * `how` stayed `"sigterm"` and then `"sigkill"`, and an operator whose
+ * supervisor had never been signalled at all was told:
+ *
+ *     eng-1: STILL RUNNING (sigkill)
+ *     eng-1: KEPT — its supervisor survived the kill ladder; …
+ *
+ * `down.ts` calls that second sentence "a plain falsehood" — in a comment, four
+ * lines above the branch that produced it.
+ *
+ * ## Why this needs a real process that really changes groups
+ *
+ * The old text on `signalGuarded` argued the branch was unreachable, on the
+ * grounds that "the supervisor would have to `setpgid` itself between two
+ * rungs". That is not unreachable, it is a description of a fixture — and it is
+ * also the honest one, because the state under test is precisely "the group we
+ * confirmed a moment ago is no longer this process's group". Faking it with a
+ * stale number in `state.json` would be refused at the ANCHOR (`group_mismatch`,
+ * which the block above already covers) and would never reach a rung.
+ *
+ * So `PGID_SWITCHER` is a real process that leads its own group, and leaves it
+ * on demand.
+ *
+ * ## Why the trigger is a socket connection and not a sleep
+ *
+ * The switch has to land inside the window between the anchor's `confirmGroup`
+ * and the SIGTERM rung. A timer would make that a race against process startup
+ * on whatever machine is running — and `ci.yml` deliberately runs this suite
+ * under CPU contention, where startup stretches. `down`'s first act against a
+ * live worker is `controlCall(… {cmd: "shutdown"})`, so a listener on that
+ * socket observes the anchor having already passed, causally rather than
+ * probably. It fires `SIGUSR1` and hangs up, and the ladder's own fixed
+ * `GRACEFUL_WAIT_MS` supplies five further seconds before the rung that matters.
+ *
+ * ## Blast radius, stated because this file carries the scar
+ *
+ * The group the switcher joins is its OWN CHILD's, created by that child with
+ * `setpgrp(0,0)`. It is never the test runner's. `down-prune.test.ts` once
+ * recorded `process.pid` as a fixture pgid, `down` sent SIGTERM to
+ * `-testRunnerPid`, and the suite killed itself. Here, even a fully reverted
+ * `down` signals only `-recordedPgid` — a group that by then contains nobody —
+ * so the mutation that proves this test is safe to run.
+ */
+const PGID_SWITCHER = [
+  // Line-buffered: the test reads ONE line and must not wait on an exit.
+  "$| = 1;",
+  // Leave the test runner's process group and lead one of our own. This is the
+  // state `state.json` records and the anchor confirms.
+  "setpgrp(0, 0);",
+  "my $c = fork();",
+  'die "fork failed" unless defined $c;',
+  // The child leads a THIRD group — the destination. It exists only so the
+  // parent has somewhere to go that is not the runner's group.
+  "if ($c == 0) { setpgrp(0, 0); while (1) { sleep 5 } }",
+  // The switch itself, on demand.
+  "$SIG{'USR1'} = sub { setpgrp(0, $c) };",
+  'print "$$ $c\n";',
+  "while (1) { sleep 5 }",
+].join(" ");
+
+describe("a process group that stops confirming mid-ladder (ISC-272)", () => {
+  test(
+    "is reported as a refusal, not as a supervisor that survived the kill ladder",
+    async () => {
+      const base = await mkdtemp(join(tmpdir(), "pifleet-prune-midladder-"));
+      bases.push(base);
+      const root = join(base, "runs");
+      const repo = join(base, "repo");
+      const runId = "2026-08-18T00-00-00Z-mdlr";
+      await seedGitRepo(repo);
+      const yaml = [
+        "version: 2",
+        "name: prune-test",
+        'docker: {pi_version: "0.79.6", network: prune-net}',
+        `run: {repo: ${repo}, budget: {tokens_ceiling: 1000000}}`,
+        "llm: {model: prune-model}",
+        "roles: {engineer: {}}",
+        "workers:",
+        "  - {id: eng-1, role: engineer}",
+        "",
+      ].join("\n");
+      const loaded = await parseConfig(yaml, join(base, "fleet.yaml"));
+      const run = runPaths(runId, root);
+      await mkdir(run.workersDir, { recursive: true });
+      const worktrees = await createWorkerWorktrees({ loaded, run, repo, workerIds: ["eng-1"] });
+
+      const proc = Bun.spawn(["perl", "-e", PGID_SWITCHER], { stdout: "pipe", stderr: "pipe" });
+      livingChildren.push(proc);
+      const reader = proc.stdout.getReader();
+      const first = await reader.read();
+      reader.releaseLock();
+      const [pid, childPid] = new TextDecoder()
+        .decode(first.value)
+        .trim()
+        .split(/\s+/)
+        .map((n) => Number.parseInt(n, 10));
+      if (pid === undefined || childPid === undefined) throw new Error("switcher printed no pids");
+      // The forked child is not `proc` and would outlive it; reaped explicitly.
+      livingChildren.push({
+        kill: () => {
+          try {
+            process.kill(childPid, "SIGKILL");
+          } catch {
+            // Already exited — the desired state.
+          }
+        },
+      });
+      // The fixture is what it claims to be BEFORE anything is asserted about
+      // `down`. Without this, a perl that silently failed `setpgrp` would leave
+      // the anchor refusing `group_mismatch` and this test passing for the
+      // reason the block above already covers.
+      expect(pid).toBe(proc.pid);
+      expect(await processGroupId(pid)).toBe(pid);
+
+      const wp = workerPaths(run, "eng-1");
+      await mkdir(wp.dir, { recursive: true });
+      await writeWorkerState(
+        wp,
+        initialWorkerState({
+          worker: "eng-1",
+          runId,
+          pid,
+          pgid: pid,
+          startedAt: new Date().toISOString(),
+        }),
+      );
+      const started = await processStartTime(pid);
+      if (started === null) throw new Error(`fixture pid ${pid} was not alive when recorded`);
+      await writeFile(
+        run.registryJson,
+        JSON.stringify({
+          schema: "pifleet.registry/v1",
+          run_id: runId,
+          daemon: { pid: 0, started: "" },
+          workers: {
+            "eng-1": {
+              worker: "eng-1",
+              pid,
+              pgid: pid,
+              started,
+              registered_at: new Date().toISOString(),
+            },
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(
+        run.runJson,
+        JSON.stringify({ schema: "pifleet.run/v1", run_id: runId, repo, worktrees }),
+        "utf8",
+      );
+
+      // `controlCall` reads the run's control secret before it dials, so
+      // without this it throws at `loadControlSecret` and never connects — the
+      // trigger below would never fire and the switch would never happen.
+      await ensureControlAuth(run);
+      await mkdir(join(tmpdir(), "pifleet"), { recursive: true });
+      let connections = 0;
+      const listener = Bun.listen({
+        unix: wp.controlSock,
+        socket: {
+          open(socket) {
+            connections++;
+            // The anchor has already confirmed the group; move it now. Hang up
+            // rather than replying, so `down` falls through to the ladder
+            // immediately instead of paying `controlCall`'s 2s timeout.
+            try {
+              process.kill(pid, "SIGUSR1");
+            } catch {
+              // Reported by the group assertion below, which will not hold.
+            }
+            socket.end();
+          },
+          data() {},
+          close() {},
+          error() {},
+        },
+      });
+
+      let r: { code: number; stdout: string; stderr: string };
+      try {
+        r = await down({ base, root, runId, repo, worktrees }, ["--prune"], { json: false });
+      } finally {
+        listener.stop(true);
+      }
+
+      // The trigger really fired, and the group really moved. Asserted after
+      // the run so a `down` that never dialed the socket fails HERE, naming the
+      // cause, rather than three assertions later on a confusing `how`.
+      expect(connections).toBeGreaterThan(0);
+      expect(await processGroupId(pid)).toBe(childPid);
+
+      /**
+       * THE SENTENCE. `REFUSED`, not `STILL RUNNING`, and `how` names the group
+       * rather than a signal — because no signal was sent.
+       */
+      expect(r.stdout).toContain("eng-1: REFUSED (group_unconfirmed)");
+      expect(r.stdout).not.toContain("STILL RUNNING");
+      expect(r.stdout).not.toContain("(sigkill)");
+      expect(r.stdout).not.toContain("(sigterm)");
+
+      /**
+       * AND THE PRUNE REASON, which is the operator-facing half that costs
+       * data. "Survived the kill ladder" would tell an operator to reach for a
+       * bigger hammer; the truth is that nothing was sent and
+       * `--force-identity` is the flag that changes it.
+       */
+      const kept = r.stdout.split("\n").find((l) => l.includes("KEPT"));
+      expect(kept).toBeDefined();
+      expect(kept!).toContain("process group");
+      expect(kept!).toContain("--force-identity");
+      expect(kept!).not.toContain("survived the kill ladder");
+
+      // §9.3 unchanged: unstopped supervisor, checkout kept, non-zero exit.
+      expect(r.code).not.toBe(EXIT.SUCCESS);
+      expect(await pathExists(worktrees[0]!.path)).toBe(true);
+      // And it was never signalled, so it is still there to be refused again.
+      expect(await processStartTime(pid)).toBe(started);
+    },
+    /**
+     * NOT `cliBudget(n)`, and the reason is the one `budget.ts` gives for
+     * having two helpers at all: this test's cost is not process startup.
+     *
+     * It is the only test in this file that reaches a RUNG, so it pays `down`'s
+     * fixed `GRACEFUL_WAIT_MS` — five seconds of polling a supervisor that is
+     * alive and will not be signalled — and that wait is the point rather than
+     * an overhead to be optimised away. Measured idle on a 14-core machine,
+     * three consecutive runs: 5.500 s, 5.684 s and 5.696 s wall for the whole
+     * test — five of those seconds are the graceful wait, the remainder one CLI
+     * spawn plus perl startup. Worst is 5.696, taken as 5.7.
+     *
+     * 5.7 s x CONTENTION (3) x SAFETY (2) = 34.2 s, rounded up to 40_000.
+     * Derived from the same two constants `cliBudget` uses, applied to a measured
+     * cost that is not a spawn — which is exactly what `containerBudget` does for
+     * containers. It stays BOUNDED: a switcher that hangs still fails.
+     */
+    40_000,
+  );
+
+  /**
+   * The refusal TAXONOMY, graded directly.
+   *
+   * Two of `groupRefusal`'s branches describe states this suite cannot summon
+   * from a live process. `read_failed` needs `ps` itself to fail against a
+   * running pid; the fallthrough needs a `confirmGroup` from a future build.
+   * Both decide what an operator is TOLD about a supervisor whose checkout is
+   * about to be kept or deleted, so leaving them unread is how the wrong
+   * sentence ships — the same argument this file makes for driving the real
+   * CLI everywhere else, applied where a fixture cannot reach.
+   */
+  test("every group refusal is classified as a refusal, and none borrows another's words", () => {
+    /**
+     * `read_failed` — `safety/kill.ts`'s split of "`ps` said no such process"
+     * from "the `ps` read failed". The FIRST is `gone`, the anchor's single
+     * success answer: it reports `stopped: true`, `docker rm -f`s the
+     * container, and makes the checkout prunable. A failed read arriving there
+     * would delete a live supervisor's worktree on the strength of a command
+     * that did not run.
+     */
+    const read = groupRefusal("read_failed", 4242, 4242);
+    expect(read.how).toBe("group_read_failed");
+    expect(isAnchorRefusal(read.how)).toBe(true);
+    // Says the group could not be READ — distinct from the group disagreeing.
+    expect(read.detail).toContain("could not be READ");
+    expect(read.detail).not.toContain("stale");
+    expect(read.detail).not.toContain("does not lead it");
+
+    /**
+     * An unrecognised verdict. This used to be `not_led`'s branch — the
+     * function simply ended on that return — so a verdict from a newer
+     * `safety/kill.ts` inherited a sentence asserting a specific, checked fact
+     * about who leads a process group, which nothing had established.
+     */
+    const unknown = groupRefusal("some_future_verdict", 4242, 99);
+    expect(isAnchorRefusal(unknown.how)).toBe(true);
+    expect(unknown.detail).toContain("some_future_verdict");
+    expect(unknown.detail).not.toContain("does not lead it");
+
+    // The three that were always reachable still answer as they did.
+    expect(groupRefusal("unrecorded", 1, 0).how).toBe("group_unrecorded");
+    expect(groupRefusal("mismatch", 1, 7).how).toBe("group_mismatch");
+    expect(groupRefusal("not_led", 1, 7).how).toBe("group_not_led");
+
+    // And the mid-ladder value the test above produces classifies with them.
+    expect(isAnchorRefusal("group_unconfirmed")).toBe(true);
+    // While the ladder's own outcomes do not — that distinction is what makes
+    // "REFUSED" and "STILL RUNNING" different sentences.
+    expect(isAnchorRefusal("sigterm")).toBe(false);
+    expect(isAnchorRefusal("sigkill")).toBe(false);
+    expect(isAnchorRefusal("graceful")).toBe(false);
+  });
+});
+
+/**
+ * The DAEMON rung's verdict, which is the same distinction one line later.
+ *
+ * `down`'s worker lines have printed `REFUSED` and `STILL RUNNING` as different
+ * sentences since the anchor became fail-closed — "still running" says a ladder
+ * was climbed and lost, a refusal says no signal was ever sent, and only one of
+ * them has `--force-identity` as an answer. The daemon line was left behind on
+ * a hardcoded `REFUSED`, and `daemonReport.stopped` is false in BOTH cases: the
+ * anchor refused, or the ladder ran and the daemon outlived it. So a daemon
+ * that really was SIGTERMed and really did survive was announced as one that
+ * was never signalled.
+ *
+ * Reached with a daemon that IGNORES SIGTERM, which is the honest shape of
+ * "the ladder ran and lost". The daemon rung records no process group
+ * (`daemon.pid` holds `{pid, started}` and nothing else), so the signal goes to
+ * the validated leader pid alone and there is no group blast radius to reason
+ * about — this fixture cannot reach anything but itself.
+ */
+const SIGTERM_IGNORER = ["$| = 1;", "$SIG{'TERM'} = 'IGNORE';", 'print "$$\n";', "while (1) { sleep 5 }"].join(" ");
+
+describe("the daemon rung says which of the two happened (ISC-272)", () => {
+  test(
+    "a daemon that outlived SIGTERM reads STILL RUNNING, not REFUSED",
+    async () => {
+      const base = await mkdtemp(join(tmpdir(), "pifleet-down-daemon-"));
+      bases.push(base);
+      const root = join(base, "runs");
+      const runId = "2026-08-18T00-00-00Z-dmn1";
+      const run = runPaths(runId, root);
+      await mkdir(run.workersDir, { recursive: true });
+      await writeFile(
+        run.runJson,
+        JSON.stringify({ schema: "pifleet.run/v1", run_id: runId }),
+        "utf8",
+      );
+
+      const proc = Bun.spawn(["perl", "-e", SIGTERM_IGNORER], { stdout: "pipe", stderr: "pipe" });
+      livingChildren.push(proc);
+      const reader = proc.stdout.getReader();
+      await reader.read();
+      reader.releaseLock();
+      const started = await processStartTime(proc.pid);
+      if (started === null) throw new Error(`fixture pid ${proc.pid} was not alive when recorded`);
+      /**
+       * BOTH halves of the identity, because the anchor is fail-closed: a
+       * `daemon.pid` carrying only a pid — or an empty `started` — refuses at
+       * `identity_unrecorded` and never climbs, which would produce the
+       * `REFUSED` this test must be able to tell apart from the other answer.
+       */
+      await writeFile(run.daemonPid, JSON.stringify({ pid: proc.pid, started }), "utf8");
+
+      const r = await down({ base, root, runId, repo: "", worktrees: [] }, [], { json: false });
+
+      // The ladder ran and lost. `sigterm` is the `how`, and the sentence has
+      // to match it.
+      expect(r.stdout).toContain("daemon: STILL RUNNING (sigterm)");
+      expect(r.stdout).not.toContain("daemon: REFUSED");
+      // A daemon refusal is non-fatal by design — the daemon holds no checkout,
+      // so no `--prune` decision rests on it. Unchanged by this fix.
+      expect(r.code).toBe(EXIT.SUCCESS);
+      // It really did outlive the signal, which is what makes the sentence true.
+      expect(await processStartTime(proc.pid)).toBe(started);
+    },
+    /**
+     * The daemon rung's own fixed cost, not a spawn count: `waitGone` twice at
+     * `TERM_WAIT_MS` (2 s each) around one SIGTERM the target ignores.
+     * Measured idle on a 14-core machine, three consecutive runs: 4.095 s,
+     * 4.149 s and 4.160 s. Worst 4.160, taken as 4.2.
+     *
+     * 4.2 s x CONTENTION (3) x SAFETY (2) = 25.2 s, rounded up to 30_000 — the
+     * same two constants `cliBudget` uses, applied to a measured cost that is
+     * not process startup.
+     */
+    30_000,
+  );
 });

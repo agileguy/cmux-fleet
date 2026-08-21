@@ -14,7 +14,13 @@ import {
   readRegistry,
   registryCall,
 } from "../../run/registry.ts";
-import { confirmGroup, realProcessOps, sameIdentity, signalIfSame } from "../../safety/kill.ts";
+import {
+  confirmGroup,
+  realProcessOps,
+  sameIdentity,
+  signalIfSame,
+  type SignalOutcome,
+} from "../../safety/kill.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import { Stopwatch } from "../../rpc/client.ts";
@@ -302,12 +308,46 @@ export function register(program: Command): void {
            * to the validated leader alone.
            */
           how = "sigterm";
-          await signalGuarded(target, "SIGTERM", anchor.group);
-          if (!(await waitGone(target, TERM_WAIT_MS))) {
+          /**
+           * THE OUTCOME DECIDES `how`, and it has to.
+           *
+           * `signalIfSame` re-confirms the group before EVERY rung, so a
+           * signal this ladder asked for is not a signal that was sent: a
+           * group that stops confirming mid-climb returns `group_unconfirmed`
+           * and NOTHING is delivered. `signalGuarded` used to discard that
+           * answer, so `how` stayed `"sigterm"`/`"sigkill"` and the operator
+           * was told `STILL RUNNING (sigkill)` — and, via the prune gate,
+           * "its supervisor survived the kill ladder" — about a process no
+           * signal ever reached. This function says elsewhere, in as many
+           * words, that such a sentence is "a plain falsehood"; it produced
+           * one here.
+           *
+           * Recording it as a GROUP REFUSAL is what makes the rest of the
+           * command tell the truth for free: `isAnchorRefusal` and
+           * `isGroupRefusal` both cover it, so the stdout verdict reads
+           * REFUSED, the prune reason takes the group-refusal wording, and the
+           * final error names `--force-identity` — which really is the answer
+           * here, exactly as it is for a group refused at the anchor.
+           */
+          if ((await signalGuarded(target, "SIGTERM", anchor.group)) === "group_unconfirmed") {
+            how = LADDER_GROUP_UNCONFIRMED;
+          } else if (!(await waitGone(target, TERM_WAIT_MS))) {
             // Phase 3: SIGKILL — the same confirmed group, no survivors.
             how = "sigkill";
-            await signalGuarded(target, "SIGKILL", anchor.group);
-            await waitGone(target, TERM_WAIT_MS);
+            /**
+             * A group that failed to confirm at SIGTERM will not confirm at
+             * SIGKILL either — re-confirmation reads the same OS — so the
+             * climb STOPS rather than paying another `TERM_WAIT_MS` waiting
+             * for a signal that was never sent to take effect. That is the
+             * same shape `runKillLadder` already uses (`if (term ===
+             * "group_unconfirmed") return "group_unconfirmed"`), applied to the
+             * ladder `down` runs by hand.
+             */
+            if ((await signalGuarded(target, "SIGKILL", anchor.group)) === "group_unconfirmed") {
+              how = LADDER_GROUP_UNCONFIRMED;
+            } else {
+              await waitGone(target, TERM_WAIT_MS);
+            }
           }
         }
         // Identity, not liveness: a pid that was recycled after the ladder
@@ -642,7 +682,15 @@ export function register(program: Command): void {
           process.stdout.write(`  ${r.id}: ${verdict} (${r.how})\n`);
         }
         if (daemonReport !== null && !daemonReport.stopped) {
-          process.stdout.write(`  daemon: REFUSED (${daemonReport.how})\n`);
+          // The SAME distinction the worker line above draws, and for the same
+          // reason. `daemonReport.stopped` is false in two unrelated cases: the
+          // anchor refused, and the ladder ran and lost (`how === "sigterm"`,
+          // set at the daemon rung). Printing REFUSED for both announced a
+          // daemon that had been SIGTERMed and outlived it as one that was
+          // never signalled — the plain falsehood, on the one rung this file
+          // had not widened `isAnchorRefusal` onto.
+          const verdict = isAnchorRefusal(daemonReport.how) ? "REFUSED" : "STILL RUNNING";
+          process.stdout.write(`  daemon: ${verdict} (${daemonReport.how})\n`);
         }
         for (const p of pruned) {
           process.stdout.write(`  ${p.workerId}: ${p.pruned ? "pruned" : "KEPT"} — ${p.reason}\n`);
@@ -694,8 +742,9 @@ export function register(program: Command): void {
 /**
  * Why an anchor declined to hand out a target.
  *
- * Three DIFFERENT facts about the world, kept apart deliberately. They were
- * all reported as `already_gone, stopped: true` — the same words used for
+ * SEVEN DIFFERENT facts about the world (three about the identity, four about
+ * the group), kept apart deliberately. They were all reported as
+ * `already_gone, stopped: true` — the same words used for
  * "nothing holds this pid" — and that collapse is what let a LIVE supervisor
  * be reported as stopped, exit 0, and then have its checkout deleted by
  * `--prune`, because the prune gate refuses only when `stopped` is false.
@@ -707,7 +756,7 @@ export type AnchorRefusal =
   | "identity_unrecorded"
   | "identity_legacy_format"
   /**
-   * The GROUP half (ISC-272). Three more facts, kept apart from each other and
+   * The GROUP half (ISC-272). Four more facts, kept apart from each other and
    * from the identity three for the same reason those three are kept apart:
    * they have different causes, and only some of them mean anything is wrong
    * with the process itself.
@@ -724,7 +773,26 @@ export type AnchorRefusal =
    */
   | "group_unrecorded"
   | "group_mismatch"
-  | "group_not_led";
+  | "group_not_led"
+  /**
+   * `ps` COULD NOT BE READ — the fourth group fact, and the one that must
+   * never be confused with the first three.
+   *
+   * `confirmGroup` used to answer a failed read and an affirmative "no such
+   * process" with the same verdict. They are opposite statements about the
+   * world: one says the supervisor is gone, the other says we do not know. The
+   * first is the anchor's single SUCCESS answer — it reports `stopped: true`,
+   * it reaps the container with `docker rm -f`, and it makes the checkout
+   * PRUNABLE. Letting an unreadable `ps` arrive there would delete a live
+   * supervisor's worktree on the strength of a command that failed, which is
+   * the §9.3 corruption reached through a broken measurement instead of a
+   * stale record.
+   *
+   * So it is a refusal, with its own words, and the words say the group could
+   * not be READ rather than that it disagreed. An operator told "the record is
+   * stale" about a `ps` that never ran goes and edits a file that is fine.
+   */
+  | "group_read_failed";
 
 const IDENTITY_REFUSALS = new Set<string>([
   "identity_mismatch",
@@ -732,10 +800,46 @@ const IDENTITY_REFUSALS = new Set<string>([
   "identity_legacy_format",
 ]);
 
-const GROUP_REFUSALS = new Set<string>(["group_unrecorded", "group_mismatch", "group_not_led"]);
+/**
+ * The ladder's OWN group refusal, which no anchor produces.
+ *
+ * `anchorIdentity` confirms the group once, before anything is signalled;
+ * `signalIfSame` confirms it again at every rung, because each grace period is
+ * a window in which the world can change. A group that confirms at the anchor
+ * and stops confirming at the SIGTERM or SIGKILL rung yields no signal at all,
+ * and this is the `how` that records it. It is a member of `GROUP_REFUSALS`
+ * because it IS one — the group `down` was about to signal could not be shown
+ * to be the supervisor's own — and because every operator-facing consequence
+ * of that fact (the REFUSED verdict, the prune reason, the `--force-identity`
+ * pointer) is already keyed off that set.
+ *
+ * Kept out of `AnchorRefusal` on purpose: that union is what an ANCHOR may
+ * answer, and widening it to hold a value anchors cannot produce would make
+ * the type describe less than it does now.
+ */
+const LADDER_GROUP_UNCONFIRMED = "group_unconfirmed";
 
-/** True for a `how` produced by an anchor refusal rather than by a ladder. */
-function isAnchorRefusal(how: string): boolean {
+const GROUP_REFUSALS = new Set<string>([
+  "group_unrecorded",
+  "group_mismatch",
+  "group_not_led",
+  "group_read_failed",
+  LADDER_GROUP_UNCONFIRMED,
+]);
+
+/**
+ * True for a `how` that means NO SIGNAL WAS SENT — because an anchor refused
+ * to hand out a target, or because a rung of the ladder declined to address an
+ * unconfirmed group.
+ *
+ * EXPORTED for `down-prune.test.ts`, which grades the classification directly.
+ * The alternative is to reach every member through a live fixture, and one of
+ * them (`group_read_failed`) requires `ps` itself to fail on a running
+ * process — a state this suite cannot produce without breaking the machine it
+ * runs on. A classification nothing checks is how a new refusal silently
+ * acquires the wrong operator-facing words.
+ */
+export function isAnchorRefusal(how: string): boolean {
   return IDENTITY_REFUSALS.has(how) || GROUP_REFUSALS.has(how);
 }
 
@@ -876,18 +980,46 @@ async function anchorIdentity(
 
   const group = await confirmGroup(target, recordedPgid, realProcessOps);
   if (group.ok) return { kind: "target", target, group: group.pgid, forced: false };
-  // The leader died between the identity read and the group read. Racing that
-  // window is not a refusal — it is the `gone` answer arriving a moment late,
-  // and reporting it as anything else would fail a `down` that has nothing
-  // left to do.
-  if (group.why === "gone") return { kind: "gone" };
+  /**
+   * `gone` — and ONLY `gone` — may take the success exit.
+   *
+   * The leader died between the identity read and the group read. Racing that
+   * window is not a refusal: it is the `gone` answer arriving a moment late,
+   * and reporting it as anything else would fail a `down` that has nothing
+   * left to do.
+   *
+   * This is also the narrowest gate in the function and the reason the
+   * comparison is spelled out rather than folded into `groupRefusal`'s
+   * fallthrough. `{kind: "gone"}` is the one anchor verdict that reports
+   * `stopped: true`, calls `reapContainer()` (`docker rm -f`), and makes the
+   * worker PRUNABLE. Every OTHER verdict — including one this build has never
+   * heard of — must refuse.
+   */
+  const why: string = group.why;
+  if (why === "gone") return { kind: "gone" };
   if (opts.force) return { kind: "target", target, group: null, forced: true };
-  return { kind: "refused", ...groupRefusal(group.why, pid, recordedPgid) };
+  return { kind: "refused", ...groupRefusal(why, pid, recordedPgid) };
 }
 
-/** Turn a `confirmGroup` verdict into the operator-facing fact it stands for. */
-function groupRefusal(
-  why: "unrecorded" | "mismatch" | "not_led",
+/**
+ * Turn a `confirmGroup` verdict into the operator-facing fact it stands for.
+ *
+ * `why` is typed `string`, not `GroupRefusal`, and that WIDENING IS THE POINT
+ * rather than a lapse. `safety/kill.ts` owns the verdict set and grows it —
+ * `read_failed` is being split out of `gone` there as this is written — and a
+ * narrowly-typed parameter would not make this function handle a new member,
+ * it would only make the day it appears a compile error in one file and a
+ * silently wrong SENTENCE in another. The final branch below is what actually
+ * protects the operator: anything unrecognised refuses in its own words rather
+ * than borrowing a neighbour's.
+ *
+ * EXPORTED for `down-prune.test.ts`. Its two most important branches —
+ * `read_failed` and the unrecognised fallthrough — describe states this suite
+ * cannot summon from a live process, and a refusal message nothing reads is
+ * how the wrong one ships.
+ */
+export function groupRefusal(
+  why: string,
   pid: number,
   recordedPgid: number,
 ): { how: AnchorRefusal; detail: string } {
@@ -908,12 +1040,46 @@ function groupRefusal(
         `this run never launched`,
     };
   }
+  if (why === "not_led") {
+    return {
+      how: "group_not_led",
+      detail:
+        `pid ${pid} is a MEMBER of group ${recordedPgid} but does not lead it, so that group is ` +
+        `led by some other process and signalling it would reach that process and all of its ` +
+        `children rather than this run's supervisor`,
+    };
+  }
+  if (why === "read_failed") {
+    return {
+      how: "group_read_failed",
+      detail:
+        `the process group of pid ${pid} could not be READ — 'ps' failed or answered nothing ` +
+        `usable — so nothing is known about the group recorded for it (${recordedPgid}); this is ` +
+        `NOT the record disagreeing with the OS and NOT the process being gone, and the ` +
+        `supervisor may well be alive and mid-task`,
+    };
+  }
+  /**
+   * A verdict this build does not recognise. FAIL CLOSED, in its own words.
+   *
+   * This branch used to be `not_led`'s: the function ended on that return, so
+   * every unhandled verdict inherited a sentence asserting a specific, checked
+   * fact about who leads a process group — a fact nothing had established. The
+   * whole design of these messages is that an operator told the wrong fact
+   * reaches for the wrong fix, and an invented one is the worst version of
+   * that.
+   *
+   * Reported as `group_read_failed` because that is what is true here: the
+   * group could not be established. The detail names the verdict verbatim so
+   * the gap is traceable to the version skew that caused it rather than
+   * looking like a `ps` failure.
+   */
   return {
-    how: "group_not_led",
+    how: "group_read_failed",
     detail:
-      `pid ${pid} is a MEMBER of group ${recordedPgid} but does not lead it, so that group is ` +
-      `led by some other process and signalling it would reach that process and all of its ` +
-      `children rather than this run's supervisor`,
+      `the process group of pid ${pid} could not be established: 'confirmGroup' returned the ` +
+      `verdict ${JSON.stringify(why)}, which this build of 'down' does not recognise, so the ` +
+      `group recorded for it (${recordedPgid}) cannot be shown to be this supervisor's own`,
   };
 }
 
@@ -931,12 +1097,24 @@ function groupRefusal(
  * The `pgid` handed in is always `anchor.group` — a value `confirmGroup`
  * already vouched for, or `null`. `signalIfSame` confirms it AGAIN before each
  * signal, which is what makes "every rung" true rather than "the top rung".
- * The outcome is deliberately not inspected: a group that stops confirming
- * mid-climb (the supervisor would have to `setpgid` itself between two rungs)
- * means no signal was sent, so the target is still alive, and the identity
- * read after the ladder reports exactly that — `stopped: false`, which blocks
- * the prune gate. There is no additional fact for a return value to carry, and
- * an unreachable branch reporting it would be an untested one.
+ *
+ * THE OUTCOME IS RETURNED, and an earlier revision of this docstring argued at
+ * length that it should not be. That argument was wrong in its conclusion and
+ * instructive in its premise. The premise was right: a group that stops
+ * confirming mid-climb means no signal was sent, so the target is still alive
+ * and `stopped: false` blocks the prune gate. What it missed is that
+ * `stopped: false` is only half of what the operator is shown. The other half
+ * is `how`, which drives the stdout verdict, the prune REASON, and the closing
+ * error — and with the outcome discarded, all three described a kill ladder
+ * that had been climbed and lost, about a process nothing had signalled.
+ *
+ * Nor is the branch unreachable: `down-prune.test.ts` reaches it with a
+ * fixture that leaves its recorded process group between the anchor's check
+ * and the SIGTERM rung, which is exactly the `setpgid`-between-two-rungs case
+ * the old text called hypothetical.
+ *
+ * A thrown error is still swallowed and still reported by the caller's
+ * identity read — that half is unchanged.
  */
 /**
  * `docker rm -f <name>`, reported rather than thrown.
@@ -968,11 +1146,15 @@ async function signalGuarded(
   target: ProcId,
   signal: "SIGTERM" | "SIGKILL",
   pgid: number | null,
-): Promise<void> {
+): Promise<SignalOutcome | "errored"> {
   try {
-    await signalIfSame(target, signal, { pgid });
+    return await signalIfSame(target, signal, { pgid });
   } catch {
-    // Reported as `stopped: false` by the caller's identity read.
+    // EPERM, most plausibly. Distinguished from every `SignalOutcome` so a
+    // caller cannot mistake "the call threw" for "the group did not confirm";
+    // both leave the target alive, and only one of them has --force-identity
+    // as an answer. Reported as `stopped: false` by the caller's identity read.
+    return "errored";
   }
 }
 
