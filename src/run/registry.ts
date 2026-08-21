@@ -92,12 +92,115 @@ export const IDENTITY_FORMAT = "utc1";
 const IDENTITY_PS_ENV = { TZ: "UTC", LC_ALL: "C" } as const;
 
 /**
- * Start time of a pid as a tagged, environment-independent token, or null if
- * no such process.
+ * A `ps` read of a process's start time that did not produce one, for a reason
+ * OTHER than the process being gone.
  *
- * Never returns the empty string: an empty `ps` result is "no such process",
- * which is `null`. Callers that persist `?? ""` are recording "capture
- * failed", and `""` must be read as exactly that and never as an identity.
+ * THE IDENTITY HALF of the fact `GroupReadError` records for the group, and it
+ * is the same defect one channel over rather than a new one. "The process is
+ * not there" and "I could not find out" are different facts with opposite safe
+ * answers, and `processStartTime` used to return `null` for both.
+ *
+ * What that `null` reaches. `down`'s `anchorIdentity` maps it to
+ * `{kind: "gone"}` — the ONE anchor verdict that reports `stopped: true`, calls
+ * `reapContainer()` (`docker rm -f`) and makes the worker PRUNABLE. So a
+ * transient `ps` failure against a LIVE supervisor reported it stopped,
+ * force-removed its container, and let `--prune` delete the checkout it was
+ * still writing to. `processGroupId` was fixed for exactly this and the
+ * identity channel was left carrying it, which is why this is a carry-in of the
+ * Phase F review rather than a fresh finding.
+ *
+ * Thrown rather than returned, for the reason `GroupReadError` is: there is no
+ * in-band value for a caller to forget to look at.
+ *
+ * CARRIES AN `exitCode` WHERE `GroupReadError` DOES NOT, and the asymmetry is
+ * deliberate. Every `processGroupId` call goes through `confirmGroup`, which
+ * catches and converts to `read_failed`, so its error never reaches the CLI.
+ * This one has callers that do not catch (see `processStartTime` below), and an
+ * error with no `exitCode` is reported by the entry point as `EXIT.INTERNAL` —
+ * "a bug in pifleet itself". A `ps` that cannot be read is an environment
+ * failure, so it takes `BACKEND_UNAVAILABLE`, the code `StateReadError` and
+ * `RunPolicyUnreadableError` already use for unreadable control-plane state.
+ */
+export class IdentityReadError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+
+  constructor(
+    readonly pid: number,
+    detail: string,
+  ) {
+    super(
+      `could not read the start time of pid ${pid}: ${detail}. This is NOT the process being ` +
+        `gone — nothing here can tell whether it is alive, so nothing may be stopped, reaped or ` +
+        `pruned on the strength of this read.`,
+    );
+    this.name = "IdentityReadError";
+  }
+}
+
+/**
+ * Start time of a pid as a tagged, environment-independent token. `null` means
+ * `ps` AFFIRMATIVELY reported no such process; a read that failed for any other
+ * reason throws `IdentityReadError`.
+ *
+ * Never returns the empty string: `""` is the CAPTURE-FAILED sentinel that
+ * callers persist via `?? ""`, and it must be read as exactly that and never as
+ * an identity.
+ *
+ * WHAT "AFFIRMATIVELY GONE" LOOKS LIKE, measured on this machine (Darwin 25.5,
+ * the base-system `ps`) for `-o lstart=` specifically rather than inherited
+ * from the `-o pgid=` reading in `safety/kill.ts`. Same five readings twice:
+ *
+ *   a live pid                         exit 0  stdout "Fri Aug 21 04:14:42 2026"  stderr ""
+ *   a pid that exited and was reaped   exit 1  stdout ""                          stderr ""
+ *   pid 999999999, above the ceiling   exit 1  stdout ""                          stderr "ps: process id too large: 999999999"
+ *   `-p not-a-number`                  exit 1  stdout ""                          stderr "ps: Invalid process id: not-a-number"
+ *   an unknown flag                    exit 1  stdout ""                          stderr "ps: illegal option -- -"
+ *
+ * THE EXIT CODE IS NOT THE DISCRIMINATOR, and neither is stdout: a reaped pid
+ * and a malformed invocation are byte-identical on both. The one thing that
+ * separates them is that a genuinely-absent process is the case where `ps` says
+ * NOTHING on all three channels. So stderr is captured rather than ignored —
+ * `stderr: "ignore"` was the whole reason the old `exitCode !== 0 ||
+ * out.length === 0` test could not have been written correctly — and silence
+ * everywhere is what `null` means.
+ *
+ * EXIT 0 WITH EMPTY STDOUT THROWS TOO, and it is a separate branch rather than
+ * a fold into the one above. `ps` claiming success and printing nothing is a
+ * broken read, emphatically not "no such process"; the old condition's
+ * `|| out.length === 0` swept it into the destructive answer.
+ *
+ * Linux `procps` was NOT probed, for the reason `processGroupId` records: a
+ * platform whose `ps` writes a diagnostic for an absent pid degrades to a
+ * throw, which REFUSES. The cost is a dead supervisor's container outliving it
+ * until a later scan, never a live supervisor's container being destroyed.
+ *
+ * ## Every call site, checked — because a throw where a caller expected `null`
+ * ## is a new crash rather than a fix
+ *
+ * CHECK SITES map `null` to "gone" or "dead" and are the ones this fix is for.
+ * `down`'s `anchorIdentity`, `status`, `dispatch`'s liveness probe, `wait`,
+ * `identityAlive` below, and `kill.ts`'s `realProcessOps.startTime` (and
+ * through it `sameIdentity` and every rung of the ladder) all now REFUSE on an
+ * unreadable `ps` instead of declaring the process gone. Every one of those is
+ * fail-closed in the direction that matters. `down` and `kill` are not in this
+ * change's file set, so the refusal they get is the diagnosed `BACKEND_UNAVAILABLE`
+ * exit above rather than a per-worker `identity_read_failed` verdict alongside
+ * `group_read_failed`; that verdict is the right end state and is recorded as
+ * the residual of this change.
+ *
+ * CAPTURE SITES persist `?? ""` and genuinely want leniency:
+ * `startRegistryDaemon` below, `supervisor/index.ts`, and `up.ts` for a pid
+ * `launchDetached` has just returned. None is forced onto the strict path and
+ * none needed to be, because for all three the pid is alive BY CONSTRUCTION —
+ * two of them read `process.pid` — so `ps` answers exit 0 with a start time and
+ * neither the `null` nor the throw is reachable. The throw becomes reachable
+ * for them only if `ps` itself is broken on the host, and aborting there is the
+ * honest outcome rather than a regression: every identity the run would go on
+ * to record is the capture-failed sentinel, so no later `down` could stop any of
+ * its workers without `--force-identity`. Failing at launch beats creating a run
+ * that cannot be safely stopped.
+ *
+ * @throws {IdentityReadError} `ps` could not be read.
  */
 export async function processStartTime(pid: number): Promise<string | null> {
   const proc = Bun.spawn(["ps", "-o", "lstart=", "-p", String(pid)], {
@@ -106,11 +209,30 @@ export async function processStartTime(pid: number): Promise<string | null> {
     // in another environment, is going to compare byte-for-byte.
     env: { ...process.env, ...IDENTITY_PS_ENV },
     stdout: "pipe",
-    stderr: "ignore",
+    stderr: "pipe",
   });
-  const out = (await new Response(proc.stdout).text()).trim();
+  // Both pipes concurrently. Draining one to EOF while the other fills its
+  // buffer is how a tiny read becomes a deadlock on the day `ps` gets chatty —
+  // and it does: the illegal-flag reading above is a five-line usage block.
+  const [rawOut, rawErr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const out = rawOut.trim();
+  const err = rawErr.trim();
   await proc.exited;
-  if (proc.exitCode !== 0 || out.length === 0) return null;
+
+  if (proc.exitCode !== 0) {
+    if (out.length === 0 && err.length === 0) return null; // affirmatively gone
+    throw new IdentityReadError(
+      pid,
+      err.length > 0 ? err : `ps exited ${String(proc.exitCode)} without saying why`,
+    );
+  }
+  if (out.length === 0) {
+    // Exit 0 with nothing on stdout. `ps` claimed success and told us nothing.
+    throw new IdentityReadError(pid, "ps exited 0 and printed no start time");
+  }
   return `${IDENTITY_FORMAT} ${out}`;
 }
 
@@ -126,7 +248,19 @@ export function isPinnedIdentity(recorded: string): boolean {
   return recorded.startsWith(`${IDENTITY_FORMAT} `);
 }
 
-/** True only if the pid is alive AND is still the same process we recorded. */
+/**
+ * True only if the pid is alive AND is still the same process we recorded.
+ *
+ * PROPAGATES `IdentityReadError` rather than folding it into `false`, which is
+ * the same decision `processStartTime` makes one level down and it is load-
+ * bearing here for the same reason. This function answers a two-valued question
+ * about a three-valued world: "alive and ours", "not ours", and "could not
+ * tell". Returning `false` for the third would report an unreadable `ps` as
+ * "the supervisor we recorded is not there" — a statement about the world that
+ * has not been established, and the one that every caller acts on destructively.
+ *
+ * @throws {IdentityReadError} `ps` could not be read for this pid.
+ */
 export async function identityAlive(id: ProcessIdentity): Promise<boolean> {
   const started = await processStartTime(id.pid);
   return started !== null && started === id.started;
