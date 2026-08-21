@@ -79,16 +79,30 @@ export interface ProcessOps {
    * WIDER of the two things a rung can address, so the one number that decides
    * how wide has to come from the kernel (ISC-272).
    *
-   * OPTIONAL, and the reason is compatibility rather than design. Ops tables
-   * are written by callers, including ones outside this module's reach, and a
-   * newly-required method turns every existing literal into a compile error
-   * for a capability it may never exercise. An ops table that does not
-   * override this one gets `processGroupId` — the real OS — which is the same
-   * default `opts.ops ?? realProcessOps` already applies to the table as a
-   * whole. A fake that never matches an identity never reaches this call at
-   * all, because the leader check runs first.
+   * REQUIRED, and it has to be. It was optional, resolved as
+   * `(ops.groupId ?? processGroupId)(target.pid)`, and the argument for that
+   * was compatibility: an ops table that did not override it would fall back to
+   * the real OS, which is the same default `opts.ops ?? realProcessOps` already
+   * applies to the table as a whole.
+   *
+   * THOSE TWO DEFAULTS ARE NOT ALIKE. Defaulting the WHOLE table means a caller
+   * that injected nothing gets the real OS for everything — coherent, and
+   * visibly so at the call site. Defaulting ONE METHOD means a caller that
+   * injected a fake gets the real OS for part of it: `startTime` and `signal`
+   * faked, and a genuine `ps` spawned against a pid the fake invented. The
+   * injection escapes the test.
+   *
+   * The docstring that defended it claimed "a fake that never matches an
+   * identity never reaches this call at all, because the leader check runs
+   * first", and that is true only of doubles whose identity check FAILS. A
+   * double built to MATCH — the ordinary way to exercise the ladder, and what
+   * `kill.test.ts`'s `alive()` helper exists to produce — reaches it every
+   * time. The protection covered exactly the fixtures that did not need it.
+   *
+   * Throwing is part of the contract: see `processGroupId`. `null` means the
+   * process is affirmatively absent, and NOTHING ELSE may be reported that way.
    */
-  groupId?(pid: number): Promise<number | null>;
+  groupId(pid: number): Promise<number | null>;
   /** Send a signal. A negative pid addresses the process group. */
   signal(pid: number, sig: "SIGTERM" | "SIGKILL"): void;
 }
@@ -315,7 +329,7 @@ export async function confirmGroup(
   }
   let live: number | null;
   try {
-    live = await (ops.groupId ?? processGroupId)(target.pid);
+    live = await ops.groupId(target.pid);
   } catch {
     // Every failure to read a group is a failed read, whatever threw. The
     // alternative — inspecting the error and letting unrecognised ones through

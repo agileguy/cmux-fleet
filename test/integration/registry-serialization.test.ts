@@ -284,6 +284,14 @@ describe("registry writes are serialized (ISC-186)", () => {
           readState: async (w) => (w === "filler" ? state(w, `beat-${beat++}`) : null),
           ops: {
             startTime: async () => null,
+            // Consistent with the identity this table already fakes rather than
+            // a second, separate fiction: `null` from either read means "no
+            // such process", so a table that says every pid is gone says it on
+            // both channels. In practice the ladder returns `already_gone` at
+            // rung 0 and never asks — which is exactly why it has to be stated.
+            // `groupId` used to be optional, and an unstated one fell through
+            // to a REAL `ps` spawned against a pid this table invented.
+            groupId: async () => null,
             signal: () => {},
             removeContainer: async () => "absent",
           },
