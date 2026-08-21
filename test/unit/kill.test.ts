@@ -381,6 +381,92 @@ describe("confirmGroup: a group is addressable only when it is the target's own"
   });
 
   /**
+   * THE F3 WINDOW, and the only fixture shape that can express it.
+   *
+   * `confirmGroup` widened the check-then-signal gap by a whole `ps` spawn —
+   * from two statements with no await between them to ~5-50ms — and it reads
+   * the pgid of whatever holds `target.pid` right now without ever re-checking
+   * WHO that is. The dangerous case is not the target dying; it is the target
+   * dying and the kernel handing its pid to a process that is itself a group
+   * leader. Then `live === recorded === target.pid` all pass, `confirmGroup`
+   * says yes, and the ladder SIGKILLs a stranger's entire process group.
+   *
+   * THE FIXTURE HAS TO MUTATE THE WORLD FROM INSIDE THE GROUP READ. The
+   * harness's `groupId` is an already-resolved map lookup, so nothing can die
+   * "during" it and the window structurally does not exist in the default
+   * fixtures — a test built on those would pass no matter what the code did.
+   * This one makes the group read ITSELF recycle the pid before it resolves,
+   * and returns a pgid that WOULD confirm, so the only thing left that can
+   * spare the stranger is an identity check after the group read.
+   *
+   * Fails if: the identity is not re-read between the group read and the
+   * signal. The negative assertion is the load-bearing one — `-100` here is a
+   * group this run never launched.
+   */
+  test("a pid recycled DURING the group read is never signalled, group or not", async () => {
+    const h = harness();
+    h.alive();
+    const recycling: ProcessOps = {
+      ...h.ops,
+      groupId(pid) {
+        // The supervisor exits inside the `ps`, and the pid lands on a process
+        // that leads its own group — so every comparison downstream succeeds.
+        h.table.set(TARGET.pid, "a stranger that inherited pid 100");
+        h.groups.set(TARGET.pid, TARGET.pid);
+        return Promise.resolve(h.groups.get(pid) ?? null);
+      },
+    };
+    // The group check itself is satisfied: this is not a refusal, it is a race.
+    expect(await confirmGroup(TARGET, TARGET.pid, recycling)).toEqual({
+      ok: true,
+      pgid: TARGET.pid,
+    });
+
+    // Wind the fixture back. Without this the assertion below is VACUOUS: the
+    // `confirmGroup` call above already recycled the pid, so `signalIfSame`
+    // would refuse at its FIRST identity check and return `gone` whether or not
+    // the check after the group read exists. Measured — the test passed with
+    // the re-check deleted until this line was added.
+    h.alive();
+
+    expect(await signalIfSame(TARGET, "SIGKILL", { pgid: TARGET.pid, ops: recycling })).toBe(
+      "gone",
+    );
+    expect(h.signals).toEqual([]);
+  });
+
+  /**
+   * The same window through the whole ladder, which is what production runs.
+   *
+   * Fails if: any rung signals on an identity it validated before the group
+   * read. `-100` reaching the signal log here is the stranger's group dying.
+   */
+  test("the ladder never signals a group whose leader was recycled mid-read", async () => {
+    const h = harness();
+    h.alive();
+    const recycling: ProcessOps = {
+      ...h.ops,
+      groupId(pid) {
+        h.table.set(TARGET.pid, "a stranger that inherited pid 100");
+        h.groups.set(TARGET.pid, TARGET.pid);
+        return Promise.resolve(h.groups.get(pid) ?? null);
+      },
+    };
+    const outcome = await runKillLadder({
+      target: TARGET,
+      pgid: TARGET.pid,
+      abort: null,
+      dead: () => Promise.resolve(false),
+      ...FAST,
+      ops: recycling,
+      now: h.now,
+      sleep: h.sleep,
+    });
+    expect(h.signals).toEqual([]);
+    expect(outcome).toBe("already_gone");
+  });
+
+  /**
    * The ladder's answer for the same fact. `group_unconfirmed` is NOT one of
    * the outcomes that mean the target is gone — the reaper must not record a
    * live supervisor as reaped because the group it was asked to signal could

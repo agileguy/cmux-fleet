@@ -372,6 +372,46 @@ export type SignalOutcome = "signalled" | "gone" | "group_unconfirmed";
  * surfaces as ESRCH, which is the same fact ("already gone") arriving late,
  * so it is swallowed rather than escalated. Any other error is real.
  *
+ * THE IDENTITY CHECK IS THE LAST THING BEFORE THE SYSCALL, and that ordering
+ * is the point rather than an implementation detail.
+ *
+ * `confirmGroup` widened the check-then-signal window by an entire subprocess
+ * spawn, in the unsafe direction. Before it existed the window was
+ * `sameIdentity -> signal`: two statements with no await between them,
+ * microseconds wide. With a group to confirm it became
+ * `sameIdentity -> ps -> signal`, and that `ps` costs ~5-50ms — roughly a
+ * thousandfold. `confirmGroup` reads the pgid of whatever holds `target.pid`
+ * RIGHT NOW and never re-checks who that is. So if the supervisor exits inside
+ * that window and the kernel recycles its pid to any process that happens to be
+ * a group leader — any `setsid`'d daemon, any shell job leader — then
+ * `live === recorded === target.pid` all pass, and the ladder SIGKILLs a
+ * stranger's ENTIRE PROCESS GROUP. That is the strictly-wider-blast-radius harm
+ * this module's header exists to argue against, reached through the very check
+ * added to prevent it.
+ *
+ * TWO ORDERINGS CLOSE IT and they are not equivalent. Re-checking the identity
+ * after the group read is what is implemented; reordering to
+ * `confirmGroup -> sameIdentity -> signal` would close the same window with one
+ * fewer `ps`. It was rejected because it changes which verdict wins when BOTH
+ * facts are bad. A supervisor that is genuinely DEAD with a stale recorded
+ * group returns `not_led` or `mismatch` from a reordered `confirmGroup`, so it
+ * reports `group_unconfirmed` — "alive, deliberately spared" — about a process
+ * that is not alive. Since the reaper started honouring that outcome, the
+ * false answer keeps a dead supervisor's container and registry entry forever,
+ * which is precisely the orphan the reaper exists to collect. Checking the
+ * identity FIRST and again LAST keeps `gone` decided before any group verdict
+ * while still leaving no await between the final read and the signal.
+ *
+ * The re-check runs ONLY on the group path. With no group to confirm there is
+ * no await between the first identity read and `ops.signal`, so that read is
+ * already the last thing before the syscall and a second `ps` would buy
+ * nothing.
+ *
+ * The window is not zero even now — nothing short of a syscall that takes an
+ * identity can make it zero — but it is back to the microseconds it was before
+ * ISC-272, and a target that dies inside it surfaces as ESRCH, which is handled
+ * below.
+ *
  * `pgid` has THREE meanings and they are not interchangeable:
  *
  *  - `null`/`undefined` — this rung addresses no group BY DESIGN. The signal
@@ -398,6 +438,12 @@ export async function signalIfSame(
     const group = await confirmGroup(target, opts.pgid, ops);
     if (!group.ok) return group.why === "gone" ? "gone" : "group_unconfirmed";
     addr = -group.pgid;
+    // THE LAST THING BEFORE THE SYSCALL IS AN IDENTITY CHECK. `confirmGroup`
+    // just spawned a `ps`; the identity validated above is now that much older
+    // and this rung is about to widen its own blast radius from one pid to a
+    // whole group. See the header above for why the re-read goes here rather
+    // than the group check being reordered ahead of the first one.
+    if (!(await sameIdentity(target, ops))) return "gone";
   }
   try {
     ops.signal(addr, sig);
