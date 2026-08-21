@@ -59,6 +59,62 @@ export class AttendedModeError extends Error {
 }
 
 /**
+ * The stamp this build writes into `attended.json` and the only one it reads
+ * back (ISC-192). Restated as a value for the reason `control-auth.ts` gives
+ * for its own: a refusal NAMES this, a `parse` COMPARES the schema's literal,
+ * and the operator-facing sentence should not depend on zod's internals.
+ */
+export const ATTENDED_SCHEMA = "pifleet.attended/v1";
+
+/**
+ * An `attended.json` written by a build whose stamp this one does not read
+ * (ISC-192) — as opposed to one that is damaged.
+ *
+ * Its own class rather than a `StateReadError` with different words, on
+ * `down.ts`'s `identity_legacy_format` argument: reporting a version skew as
+ * corruption asserts something false about the world and sends the operator to
+ * the disk to look for damage that is not there.
+ *
+ * WHY THIS ONE MATTERS MORE THAN ITS NEIGHBOURS. `attended: []` in a run
+ * report is an AFFIRMATIVE claim that nobody drove this run by hand, and the
+ * whole subsystem exists so that claim cannot be made falsely. A reader that
+ * answered an unrecognised stamp with `null` — the "consistency refactor" that
+ * `report-collect.test.ts` already records as the dangerous mutation — would
+ * turn a record written by another build into "never attended", silently
+ * upgrading the trustworthiness of work a human touched.
+ *
+ * THE HATCH is therefore NOT "ignore the file". `collectRunReport` catches
+ * this and lists the worker under `attendedUnverified`, so the run still
+ * presents as one whose attendance could not be verified rather than as an
+ * autonomous one. To read the record itself, use the build that wrote it —
+ * named in the message, because a refusal an operator cannot act on trains
+ * them to reach past it.
+ *
+ * NO UPGRADER. A `v0` record's `voided` table describes which guarantees THAT
+ * build believed a human's keystrokes invalidated, and this build's
+ * `TUI_VOIDED` is a different list. Re-stamping would keep the old table under
+ * a new name and re-deriving it would rewrite history — either way the file
+ * would stop describing what actually happened, which is the one thing it is
+ * for.
+ */
+export class AttendedSchemaError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+
+  constructor(
+    readonly path: string,
+    readonly found: string,
+  ) {
+    super(
+      `${path} is stamped ${found}, but this build reads ${JSON.stringify(ATTENDED_SCHEMA)}; ` +
+        `the record cannot be re-stamped without rewriting what a person actually voided, so read it ` +
+        `with the build that wrote it — until then this worker reports as attendance-UNVERIFIED, ` +
+        `never as unattended`,
+    );
+    this.name = "AttendedSchemaError";
+  }
+}
+
+/**
  * The worker's container name, as `config/render.ts` builds it for
  * `docker run --name` (SRD §3.4). Duplicated rather than imported because the
  * renderer computes it inline mid-argv and exporting it from there is outside
@@ -113,7 +169,39 @@ export function viewerArgv(runsRoot: string, runId: string, workerId: string): s
   ];
 }
 
-/** Read a worker's attended record; `null` when the run was never attended. */
+/**
+ * Read a worker's attended record; `null` when the run was never attended.
+ *
+ * THREE ANSWERS, and only one of them is `null`. Absence means the pane was
+ * never handed to a person, which is a real and common state. The other two
+ * are refusals, kept apart because they are acted on differently:
+ * `AttendedSchemaError` says another build wrote this file, `StateReadError`
+ * says this file is damaged. Both were reported as `StateReadError` before
+ * ISC-192, which conflated "upgrade your binary" with "look at your disk".
+ *
+ * IT VALIDATES, AND THE VALIDATION IS NOT OPTIONAL. `doc` is deliberately
+ * `unknown` between the two steps and is never handed back untyped, because
+ * every consumer of this record makes a decision on its contents that it is
+ * not safe to make on unparsed JSON:
+ *
+ *  - `leaveTui` branches on `existing.mode !== "tui"`. An untyped `doc` lets a
+ *    hand-edited or foreign file put any value there, and the guard that stops
+ *    `--leave` manufacturing a hand-back for a session that never happened is
+ *    exactly that comparison.
+ *  - `collectRunReport` puts `voided` straight into the run report. That array
+ *    is the list of guarantees a person's keystrokes invalidated, so an
+ *    unvalidated one is a report asserting which grades to distrust on the
+ *    strength of whatever was in the file.
+ *
+ * The two-step shape exists ONLY to keep the diagnoses apart — bad JSON, wrong
+ * build, wrong shape are three different sentences — not to leave anything
+ * unchecked.
+ *
+ * The stamp is read BEFORE the schema, for the reason `control-auth.ts` gives:
+ * a future `v2` that renames a field fails on that field, and zod reports
+ * whichever issue it reaches first, so a stamp check running second would
+ * diagnose a version skew as a missing `entered_at`.
+ */
 export async function readAttended(
   run: RunPaths,
   workerId: string,
@@ -121,12 +209,26 @@ export async function readAttended(
   const path = workerPaths(run, workerId).attendedJson;
   const file = Bun.file(path);
   if (!(await file.exists())) return null;
+
   let doc: unknown;
   try {
     doc = JSON.parse(await file.text());
   } catch (err) {
     throw new StateReadError(path, err);
   }
+
+  const stamp = (doc as { schema?: unknown } | null)?.schema;
+  if (stamp !== ATTENDED_SCHEMA) {
+    throw new AttendedSchemaError(
+      path,
+      typeof stamp === "string"
+        ? JSON.stringify(stamp)
+        : stamp === undefined
+          ? "<no schema field>"
+          : String(stamp),
+    );
+  }
+
   try {
     return AttendedRecordSchema.parse(doc);
   } catch (err) {
@@ -163,7 +265,7 @@ export interface ModeSwitchArgs {
 export async function enterTui(args: ModeSwitchArgs): Promise<AttendedRecord> {
   const existing = await readAttended(args.run, args.workerId);
   const record: AttendedRecord = AttendedRecordSchema.parse({
-    schema: "pifleet.attended/v1",
+    schema: ATTENDED_SCHEMA,
     worker: args.workerId,
     mode: "tui" satisfies PaneMode,
     entered_at: existing?.entered_at ?? new Date().toISOString(),
