@@ -585,7 +585,6 @@ export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileSc
       return;
     }
 
-    await handle.close(); // MUTATION M1: validate, then let go of the hold
     out.safe.push({ path: reportAs, handle });
   };
 
