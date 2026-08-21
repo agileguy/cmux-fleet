@@ -19,6 +19,7 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  EXIT,
   MAX_ITEMS,
   RunReportSchema,
   TaskEnvelopeSchema,
@@ -31,7 +32,7 @@ import {
 import type { AttendedRecord } from "../contracts.ts";
 import { mergeLedger } from "../run/ledger.ts";
 import { taskRecordPath, workerPaths, type RunPaths } from "../run/paths.ts";
-import { readTaskRecord, readWorkerState } from "../run/state.ts";
+import { readTaskRecord, readWorkerState, StateReadError } from "../run/state.ts";
 import { readAttended } from "../attended/mode.ts";
 import { harvestTask } from "../harvest/index.ts";
 import { precheckMerges, type MergeCheckInput } from "./merge.ts";
@@ -277,6 +278,93 @@ async function collectAttended(
   return { attended: out, unverified };
 }
 
+/**
+ * The stamp this build reads in an inbox dispatch envelope (ISC-192).
+ * Restated as a value for the reason `control-auth.ts` gives for its own: a
+ * refusal NAMES this, a `parse` COMPARES the schema's literal.
+ */
+export const TASK_ENVELOPE_SCHEMA = "pifleet.task/v1";
+
+/**
+ * An inbox envelope written by a build whose stamp this one does not read —
+ * as opposed to one that is damaged (ISC-192).
+ *
+ * Its own class, on `down.ts`'s `identity_legacy_format` argument: an operator
+ * told "inbox/t-1.json is unreadable" about a file another build wrote goes
+ * looking for corruption that is not there.
+ *
+ * WHY THIS ONE DOES NOT ABORT ANYTHING. Unlike its two siblings this error is
+ * never allowed to escape `collectDispatched` — the module header is explicit
+ * that `report` must survive a corrupt run, because `report` is what an
+ * operator runs when things went wrong. So the refusal is DIAGNOSED here and
+ * DOWNGRADED by the caller into a `notes` entry, and the task still appears in
+ * the report with `envelope: null` and a harvested verdict. Refusing the whole
+ * report over one envelope would be a new policy imposed on a module that
+ * already decided this question the other way.
+ *
+ * It carries an `exitCode` anyway, and that is not vestigial: the class is
+ * exported and the same file may be read some day by a caller that is not a
+ * reporter, and a diagnosis whose severity depends on who catches it is the
+ * conflation this phase removes.
+ */
+export class TaskEnvelopeSchemaError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+
+  constructor(
+    readonly path: string,
+    readonly found: string,
+  ) {
+    super(
+      `written by another build: stamped ${found}, but this build reads ` +
+        `${JSON.stringify(TASK_ENVELOPE_SCHEMA)} — the task is still graded from its harvest, ` +
+        `but its dispatch record cannot be shown; re-run 'report' with the build that dispatched it`,
+    );
+    this.name = "TaskEnvelopeSchemaError";
+  }
+}
+
+/**
+ * One inbox envelope, with the two failures kept apart.
+ *
+ * Same three-step shape and the same ordering argument as `readControlAuth`
+ * and `readAttended`: JSON first, stamp second, schema last, because a future
+ * `v2` that renames a field would otherwise be diagnosed as a missing
+ * `base_ref`.
+ *
+ * `Bun.file(...).json()` is deliberately not used. It folds the read and the
+ * `JSON.parse` into one call, so a truncated file and an unreadable one arrive
+ * as the same exception with no bytes to report — and the byte count is the
+ * diagnostic that distinguishes "this file is short" from "this file is
+ * gibberish".
+ */
+async function readDispatchEnvelope(path: string): Promise<TaskEnvelope> {
+  const text = await Bun.file(path).text();
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw new StateReadError(path, `${String(err)} — ${text.length} bytes on disk`);
+  }
+
+  const stamp = (doc as { schema?: unknown } | null)?.schema;
+  if (stamp !== TASK_ENVELOPE_SCHEMA) {
+    throw new TaskEnvelopeSchemaError(
+      path,
+      typeof stamp === "string"
+        ? JSON.stringify(stamp)
+        : stamp === undefined
+          ? "<no schema field>"
+          : String(stamp),
+    );
+  }
+
+  try {
+    return TaskEnvelopeSchema.parse(doc);
+  } catch (err) {
+    throw new StateReadError(path, err);
+  }
+}
+
 /** Every task the inbox has a durable dispatch envelope for, harvested. */
 async function collectDispatched(
   run: RunPaths,
@@ -296,8 +384,16 @@ async function collectDispatched(
 
     let envelope: TaskEnvelope | null = null;
     try {
-      envelope = TaskEnvelopeSchema.parse(await Bun.file(join(run.inboxDir, e)).json());
+      envelope = await readDispatchEnvelope(join(run.inboxDir, e));
     } catch (err) {
+      // STILL A NOTE, deliberately. `report` is what an operator runs when
+      // things went wrong, and this module's header makes failures of
+      // collection findings rather than exceptions — one unreadable envelope
+      // is one degraded row (`envelope: null`), not the loss of the whole
+      // report. The verdict below is still harvested and the task still
+      // appears. What changed is only that `firstLine` now has a sentence to
+      // take: a raw `ZodError`'s first line is the bare character `[`, so
+      // this note used to read `inbox/t-1.json is unreadable: [`.
       notes.push(`inbox/${e} is unreadable: ${firstLine(err)}`);
     }
 

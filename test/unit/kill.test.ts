@@ -147,6 +147,150 @@ describe("signalIfSame (ISC-191 primitive)", () => {
  * same refusals against REAL spawned groups, because a fake group table cannot
  * show that a real signal did not travel.
  */
+describe("every identity read in the ladder can fail, and none may end the climb", () => {
+  /**
+   * The three wrappers this block covers were added together and tested by
+   * nothing — an adversarial pass reverted all five `kill.ts` guards at once
+   * and 1335 unit plus 19 reaper tests stayed green. The reason is structural:
+   * `harness()`'s `startTime` is `Promise.resolve(table.get(pid) ?? null)`,
+   * which has no branch that rejects, so no test in this file could reach the
+   * `null` arm of `identityHolds` at all.
+   *
+   * Each test below asserts on `signals` as well as the outcome, and that is
+   * what makes them non-vacuous: the three wrappers all answer
+   * `identity_unconfirmed`, so the outcome alone cannot say WHICH read failed.
+   * The signal log can — `[]`, `["SIGTERM"]`, `["SIGTERM","SIGKILL"]` — so a
+   * guard moving to a different rung fails here instead of passing quietly.
+   */
+  const BROKEN = new Error("ps: cannot read process table");
+
+  /** Reject when `when(signals)` says so, otherwise read the fake table. */
+  function breakReadsWhen(
+    h: ReturnType<typeof harness>,
+    when: (signals: Array<{ pid: number; sig: string }>) => boolean,
+  ): void {
+    const readable = h.ops.startTime;
+    h.ops.startTime = (pid: number) =>
+      when(h.signals) ? Promise.reject(BROKEN) : readable(pid);
+  }
+
+  test("rung 0: a read that fails before anything is signalled refuses, and signals nothing", async () => {
+    const h = harness();
+    h.alive();
+    breakReadsWhen(h, () => true);
+    const outcome = await runKillLadder({
+      target: TARGET,
+      abort: null,
+      dead: () => Promise.resolve(false),
+      ops: h.ops,
+      now: h.now,
+      sleep: h.sleep,
+    });
+    // NOT `already_gone`, which is what an unreadable `ps` used to look like
+    // here — and `already_gone` is a caller's licence to clean up.
+    expect(outcome).toBe("identity_unconfirmed");
+    expect(h.signals).toEqual([]);
+  });
+
+  test("post-SIGTERM: a read that fails after the term rung refuses without escalating", async () => {
+    const h = harness();
+    h.alive();
+    breakReadsWhen(h, (sig) => sig.some((x) => x.sig === "SIGTERM"));
+    const outcome = await runKillLadder({
+      target: TARGET,
+      abort: null,
+      dead: () => Promise.resolve(false),
+      ops: h.ops,
+      now: h.now,
+      sleep: h.sleep,
+    });
+    expect(outcome).toBe("identity_unconfirmed");
+    // SIGTERM went out; SIGKILL did NOT. Escalating on an unreadable identity
+    // would widen the blast radius on the strength of a reading that failed.
+    expect(h.signals.map((x) => x.sig)).toEqual(["SIGTERM"]);
+  });
+
+  /**
+   * The default `dead()` closure, which is the subtlest of the three.
+   *
+   * It is `(await identityHolds(target, ops)) === false`. A failed read yields
+   * `null`, and `null === false` is `false` — so the poll loop keeps waiting
+   * rather than concluding death. That matters because `dead()` returning true
+   * inside the abort grace ends the climb with `aborted`, which a caller reads
+   * as a clean stop and answers by removing the container.
+   *
+   * Fails if: the closure goes back to `!(await sameIdentity(...))`, under
+   * which a rejected read throws out of `awaitDead` instead of waiting.
+   */
+  test("default dead(): an unreadable identity is not death, and never reports aborted", async () => {
+    const h = harness();
+    h.alive();
+    let reads = 0;
+    const readable = h.ops.startTime;
+    // The FIRST read succeeds so the ladder gets past rung 0; everything after
+    // it fails, which is what puts the failure inside the abort grace.
+    h.ops.startTime = (pid: number) => (++reads === 1 ? readable(pid) : Promise.reject(BROKEN));
+    const outcome = await runKillLadder({
+      target: TARGET,
+      abort: () => Promise.resolve(),
+      ops: h.ops, // no `dead` — the default closure is the subject
+      now: h.now,
+      sleep: h.sleep,
+    });
+    expect(outcome).toBe("identity_unconfirmed");
+    expect(outcome).not.toBe("aborted");
+    expect(h.signals).toEqual([]);
+    // The loop polled rather than exiting on the first `null`.
+    expect(reads).toBeGreaterThan(2);
+  });
+});
+
+describe("the ladder's LAST read decides killed vs unconfirmed, and can fail", () => {
+  /**
+   * The fifth identity read in `runKillLadder`, and the one that was missed
+   * when the other four were wrapped — found by a reviewer disabling guards
+   * one at a time, not by this suite.
+   *
+   * It is the worst-placed of the five. SIGKILL has already been sent, so the
+   * caller is owed an answer about whether it worked; instead the throw leaves
+   * `runKillLadder` entirely. The ladder's only production caller reaches it
+   * through `reapStale` -> `reapOnce`, whose `.catch` discards the WHOLE scan,
+   * so supervisors already reaped in that pass lose their ledger rows and
+   * their registry entries while their staleness clocks have been dropped.
+   *
+   * Fails if: the final read is unwrapped again. The failure is keyed off
+   * `signals` rather than a call counter on purpose — a counter pins the exact
+   * number of `ps` calls the ladder happens to make today, so any reordering
+   * would silently move the failure to a different read and the test would go
+   * on passing while measuring something else.
+   */
+  test("a read that fails after SIGKILL is identity_unconfirmed, never a false verdict", async () => {
+    const h = harness();
+    h.alive();
+    const readable = h.ops.startTime;
+    h.ops.startTime = (pid: number) =>
+      h.signals.some((s) => s.sig === "SIGKILL")
+        ? Promise.reject(new Error("ps: cannot read process table"))
+        : readable(pid);
+
+    const outcome = await runKillLadder({
+      target: TARGET,
+      abort: null,
+      // Never observes death, so the climb runs to the bottom and reaches the
+      // final read rather than returning `terminated` from a grace period.
+      dead: () => Promise.resolve(false),
+      ops: h.ops,
+      now: h.now,
+      sleep: h.sleep,
+    });
+
+    // NOT "killed" (a licence to remove the container) and NOT "unconfirmed"
+    // (a claim the target outlived the climb, which was never established).
+    expect(outcome).toBe("identity_unconfirmed");
+    expect(h.signals.map((s) => s.sig)).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+});
+
 describe("confirmGroup: a group is addressable only when it is the target's own", () => {
   /**
    * Fails if: the recorded pgid is taken on trust again — the criterion's
@@ -183,6 +327,40 @@ describe("confirmGroup: a group is addressable only when it is the target's own"
     expect(await signalIfSame(TARGET, "SIGKILL", { pgid: 55, ops: h.ops })).toBe(
       "group_unconfirmed",
     );
+    expect(h.signals).toEqual([]);
+  });
+
+  /**
+   * A THROWING identity re-check must not escape as an exception.
+   *
+   * This branch is newer than it looks. `confirmGroup` re-reads the identity
+   * when the group read comes back `null`, to tell "the group read lied" from
+   * "the process is affirmatively gone" — and `ops.startTime` could only
+   * RETURN back then. Since ISC-192's identity half, `processStartTime`
+   * REFUSES a `ps` it cannot read rather than reporting the process absent, so
+   * the re-check raises where it used to answer.
+   *
+   * Fails if: the re-check is moved back outside a `try`. Nothing in
+   * `signalIfSame` catches, so the exception leaves `confirmGroup` past every
+   * verdict it exists to produce and aborts the WHOLE `down` — one worker with
+   * a broken `ps` taking the teardown of every other worker with it. The
+   * assertion on `h.signals` is the half that matters: a refusal that still
+   * signalled would be no refusal at all.
+   */
+  test("an identity re-check that throws is a failed read, not an escaping exception", async () => {
+    const h = harness();
+    // The group read answers `null` — nothing is in the table — which is the
+    // only branch that re-reads the identity at all.
+    h.ops.startTime = () => Promise.reject(new Error("ps: illegal option -- q"));
+    expect(await confirmGroup(TARGET, 42, h.ops)).toEqual({ ok: false, why: "read_failed" });
+    // `identity_unconfirmed`, NOT `group_unconfirmed`: the group was never the
+    // problem. `signalIfSame` meets the same broken `ps` at its own leading
+    // identity check, before `confirmGroup` is reached at all.
+    expect(await signalIfSame(TARGET, "SIGKILL", { pgid: 42, ops: h.ops })).toBe(
+      "identity_unconfirmed",
+    );
+    // And with NO group asked for, so the only read that can fail is this one.
+    expect(await signalIfSame(TARGET, "SIGTERM", { ops: h.ops })).toBe("identity_unconfirmed");
     expect(h.signals).toEqual([]);
   });
 

@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunReportSchema } from "../../src/contracts.ts";
 import { runPaths } from "../../src/run/paths.ts";
-import { collectRunReport } from "../../src/report/collect.ts";
+import { collectRunReport, TASK_ENVELOPE_SCHEMA } from "../../src/report/collect.ts";
 import type { MergeCheckInput } from "../../src/report/merge.ts";
 
 const RUN_ID = "2026-07-27T00-00-00Z-rprt";
@@ -634,5 +634,94 @@ describe("an unreadable attended record is never silently dropped", () => {
     });
     expect(attended.map((a) => a.worker)).toEqual(["eng-1"]);
     expect(attendedUnverified).toEqual([]);
+  });
+});
+
+/**
+ * The dispatch envelope's durable format (ISC-192).
+ *
+ * `collectDispatched` used to parse an envelope in one unwrapped line
+ * (`TaskEnvelopeSchema.parse(await Bun.file(...).json())`) and hand whatever
+ * the library threw to `firstLine`. A `ZodError`'s `message` is a
+ * pretty-printed JSON array, so its first line is the bare character `[` — the
+ * note an operator actually read was `inbox/t-1.json is unreadable: [`, which
+ * names neither the problem nor the file's provenance.
+ *
+ * THE POLICY IS UNCHANGED AND THAT IS DELIBERATE. This module's header says
+ * failures of collection are findings, not exceptions, so one unreadable
+ * envelope stays one degraded row rather than becoming a refused report. These
+ * tests pin that as hard as they pin the diagnosis: a "fix" that aborted the
+ * whole report over one bad envelope would break `report` for exactly the runs
+ * it exists to describe.
+ */
+describe("an inbox envelope this build cannot read", () => {
+  async function runWithEnvelope(tag: string, taskId: string, body: string): Promise<string> {
+    const id = `2026-08-20T00-00-00Z-${tag}`;
+    const rp = runPaths(id, runsDir);
+    await mkdir(rp.inboxDir, { recursive: true });
+    await writeFile(rp.runJson, JSON.stringify({ run_id: id }), "utf8");
+    await writeFile(join(rp.inboxDir, `${taskId}.json`), body, "utf8");
+    return id;
+  }
+
+  const collect = (id: string) =>
+    collectRunReport(runPaths(id, runsDir), { precheck: async () => [] });
+
+  test("an unrecognised stamp is named as another build's, not as corruption", async () => {
+    const id = await runWithEnvelope("envv2", "t-1", JSON.stringify({ schema: "pifleet.task/v2", task_id: "t-1" }));
+    const { notes, report } = await collect(id);
+
+    const note = notes.find((n) => n.includes("inbox/t-1.json")) ?? "";
+    // The bare `[` this replaces — a note that says nothing at all.
+    expect(note).not.toContain("unreadable: [");
+    expect(note).toContain("another build");
+    expect(note).toContain("pifleet.task/v2");
+    expect(note).toContain(TASK_ENVELOPE_SCHEMA);
+    // The hatch, so the refusal is not a dead end.
+    expect(note).toContain("re-run 'report'");
+
+    // AND THE REPORT STILL EXISTS. One bad envelope is one degraded row.
+    expect(RunReportSchema.parse(report)).toBeTruthy();
+  });
+
+  test("a damaged envelope is a DIFFERENT note, and carries the bytes", async () => {
+    const id = await runWithEnvelope("envtrunc", "t-2", '{"schema":"pifleet.task/v1","task_id":');
+    const { notes } = await collect(id);
+
+    const note = notes.find((n) => n.includes("inbox/t-2.json")) ?? "";
+    expect(note).not.toContain("unreadable: [");
+    // Damage, not provenance: an operator told "another build" would go and
+    // change binaries over a truncated file.
+    expect(note).not.toContain("another build");
+    expect(note).toContain("bytes on disk");
+  });
+
+  test("the RIGHT stamp with a wrong field names the FIELD, not the array", async () => {
+    const id = await runWithEnvelope(
+      "envfield",
+      "t-3",
+      JSON.stringify({ schema: TASK_ENVELOPE_SCHEMA, task_id: "t-3", run_id: "r", epoch: 0 }),
+    );
+    const { notes } = await collect(id);
+
+    const note = notes.find((n) => n.includes("inbox/t-3.json")) ?? "";
+    expect(note).not.toContain("unreadable: [");
+    // The field path is the whole diagnostic value at this point.
+    expect(note).toMatch(/attempt|worker|title|base_ref/);
+  });
+
+  test("one unreadable envelope never costs the report — the surrounding policy", async () => {
+    // The task must still be REPORTED, with `envelope: null` and a harvested
+    // verdict, because `report` is what an operator runs when things went
+    // wrong. Aborting here would be a new policy imposed on a module that
+    // already answered this question the other way.
+    const id = await runWithEnvelope("envrow", "t-4", "not json at all");
+    const { report, notes } = await collect(id);
+
+    expect(notes.some((n) => n.includes("inbox/t-4.json"))).toBe(true);
+    const parsed = RunReportSchema.parse(report);
+    expect(parsed.schedule.some((t) => t.task_id === "t-4")).toBe(true);
+    // Degraded, and saying so: the row exists with no dispatch record behind it.
+    expect(parsed.totals.tasks).toBeGreaterThan(0);
   });
 });
