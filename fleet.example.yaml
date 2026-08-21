@@ -9,7 +9,27 @@ version: 2
 name: paisley-feature-fleet
 
 backend:
-  kind: cmux                 # cmux | tmux | headless
+  # kind: cmux               # cmux | tmux | headless — COMMENTED OUT ON PURPOSE
+  #
+  # An omitted `kind` means the CLI's own default applies, which is `headless`
+  # (`up.ts`'s DEFAULT_BACKEND): a backend that needs no terminal multiplexer
+  # and therefore runs on any host. Uncomment the line, or write `kind:
+  # headless` explicitly, only once you have decided which of the three this
+  # machine can actually present.
+  #
+  # WHY THIS LINE IS NOT SHIPPED LIVE, which is a compatibility fact and not a
+  # preference. `backend.kind` used to be parsed and read by NOTHING — `up`
+  # hardcoded its config term to null — so every operator who started from this
+  # file has been running headless no matter what this line said. The field is
+  # now binding, and a `fleet.yaml` derived from a shipped `kind: cmux` would
+  # therefore change meaning UNDER AN OPERATOR WHO CHANGED NOTHING: on a host
+  # with no cmux, `pifleet up` refuses with exit 3 and no fleet where it used
+  # to give a working headless run. Shipping the default commented out is what
+  # keeps a copy of this file behaving on the new build the way it behaved on
+  # the old one.
+  #
+  # The domain is still documented above, because that is the value this line
+  # always had. What it must not do is silently BIND one of the three.
   workspace: pifleet         # matched on custom_title; recorded by id in registry.json
   split: alternate           # alternate | columns | rows  (pifleet-side split sequence)
   focus_on_dispatch: false

@@ -80,6 +80,15 @@ interface Rig {
    */
   dockerCalls: string;
   /**
+   * Where this rig's `cmux` shim records every argv it was handed.
+   *
+   * Same job as `dockerCalls`, for the opposite kind of claim: a backend
+   * refusal reports exit 3 whether the backend was probed and found missing or
+   * never consulted at all, and those are different bugs. A line in here is
+   * what makes "the primary backend WAS probed" evidence.
+   */
+  cmuxCalls: string;
+  /**
    * This rig's fixture ADC file, pointed at by `GOOGLE_APPLICATION_CREDENTIALS`
    * in `env`. Pinning it is what makes the identity assertions deterministic:
    * `resolveIdentity` reads the ADC principal FIRST and only falls back to the
@@ -142,13 +151,21 @@ afterAll(async () => {
   // blocks landed, by running that same `grep -c 'await makeRig('` rather
   // than by adding the new call sites to 28. Same method, same reason.
   //
+  // RE-COUNTED at 45 when the ISC-271 no-fallback test landed. Note what the
+  // re-count found: the number had ALREADY drifted. `grep -c 'await makeRig('`
+  // against the previous commit answers 44, not the 43 written above, so one
+  // call site had been added without the count moving with it — the exact
+  // silent-drift failure this note exists to catch, caught only because the
+  // instruction is to re-run the command rather than to add one. 45 is that
+  // command's answer on this revision, not 44 + 1.
+  //
   // Charging every `down` the expensive per-spawn rate is deliberately
   // conservative — rigs whose test never reached `up` contribute zero spawns —
   // because the failure mode here is not a slow suite, it is the one this
   // hook's own docstring above exists to prevent: a timed-out `afterAll`
   // truncates the loop mid-way and leaks detached supervisors onto the
   // developer's machine, which this project has already paid for.
-}, cliBudget(43));
+}, cliBudget(45));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -424,6 +441,57 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
 }
 
 /**
+ * A `cmux` that is NOT INSTALLED, and the reason it is a shim rather than an
+ * absence.
+ *
+ * `CmuxClient` defaults its binary to the bare name `cmux`, so the very first
+ * thing `probeCmux` does is run `cmux --version` through PATH. Whether that
+ * succeeds is therefore a property of the DEVELOPER'S MACHINE: this suite was
+ * written on one with `/opt/homebrew/bin/cmux` installed and `ubuntu-latest`
+ * has none, so any test that lets the cmux backend probe for real would take
+ * one branch here and the opposite branch in CI. That is the failure this
+ * whole shim directory exists to prevent — the same argument `writeGcloudShim`
+ * makes about the operator's real gcloud, and a stronger one, because a
+ * successful cmux probe does not merely READ the developer's machine, it goes
+ * on to create windows and panes in the terminal they are working in.
+ *
+ * So the shim answers every invocation the way an uninstalled cmux does: exit
+ * 1, nothing on stdout. `probeCmux` reads that as `cmux-binary` failed
+ * (`DIAG.binaryMissing`), which is a REQUIRED capability, which is what
+ * `resolveBackendWithFallback` turns into either a fallback or exit 3.
+ *
+ * Installed for every rig, not only the ones that name cmux, for exactly the
+ * reason both other shims are: a rig that never mentions cmux must still not
+ * be able to reach the real one by accident.
+ *
+ * Every invocation is appended to `callLog` first, so "the primary backend was
+ * actually probed" is a fact in a file rather than an inference from an exit
+ * code — the same reason the other two shims log.
+ */
+async function writeCmuxShim(binDir: string, callLog: string): Promise<void> {
+  const shim = join(binDir, "cmux");
+  await writeFile(
+    shim,
+    [
+      "#!/bin/sh",
+      `PIFLEET_SHIM_LOG=${JSON.stringify(callLog)}`,
+      `if ! printf '%s\\n' "$*" >> "$PIFLEET_SHIM_LOG"; then`,
+      `  echo "cmux shim: cannot append to $PIFLEET_SHIM_LOG" >&2`,
+      "  exit 90",
+      "fi",
+      // The message a missing binary would not itself print — the SHELL prints
+      // "not found" — but something has to distinguish "the shim answered" from
+      // "the shim was never installed" when a test goes red, and stderr is
+      // where the backend's own diagnosis quotes the failure.
+      'echo "cmux shim: no cmux on this host (test fixture)" >&2',
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
+  await chmod(shim, 0o755);
+}
+
+/**
  * The account the `gcloud` shim reports. Distinctive on purpose: the ISC-251
  * assertion greps the grant line for this exact string, so any drift between
  * "what gcloud said" and "what `up` printed" is a mismatch, not a maybe.
@@ -669,10 +737,14 @@ interface FleetOptions {
    * `backend.kind`, written into a `backend:` block (ISC-271).
    *
    * Omitted by default, which is what every other fixture in this file gets
-   * and what a real fleet.yaml usually looks like. Note that omitting it and
-   * writing `kind: cmux` are INDISTINGUISHABLE after parse — that is the
-   * criterion's blocker rather than an accident of this helper, and it is why
-   * the ISC-271 block can only pin the flag half.
+   * and what a real fleet.yaml usually looks like.
+   *
+   * Omitting it and writing `kind: cmux` used to be INDISTINGUISHABLE after
+   * parse — `BackendSchema.kind` carried `.default("cmux")`, so all three of
+   * "no block", "`backend: {}`" and "`kind: cmux`" produced the same object,
+   * and the ISC-271 block below could only pin the flag half. `kind` is
+   * `.optional()` now, an absent block means UNSET, and the config half is
+   * proven by the tests that use this option.
    */
   backendKind?: "cmux" | "tmux" | "headless";
 }
@@ -791,6 +863,11 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
   // for this one's.
   const gcloudCalls = join(base, "gcloud-calls.log");
   await writeGcloudShim(bin, gcloudCalls);
+  // The third shim, unconditionally, for the reason its docstring gives: the
+  // machine this suite runs on must not decide whether the cmux backend probes
+  // healthy, and must never have its real terminal driven by a test.
+  const cmuxCalls = join(base, "cmux-calls.log");
+  await writeCmuxShim(bin, cmuxCalls);
   /**
    * The fixture ADC file. Written for EVERY rig, not only the cloud ones, for
    * the same reason both shims are installed unconditionally: the developer's
@@ -842,6 +919,7 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
     configPath,
     gcloudCalls,
     dockerCalls,
+    cmuxCalls,
     adcFile,
     runId: "",
     env: {
@@ -3245,21 +3323,27 @@ describe("the container count follows workers:, at the CLI (ISC-61)", () => {
 /**
  * The backend `up` selects, and which input decided it (ISC-271).
  *
- * THE CRITERION IS NOT CLOSED BY THIS BLOCK, and the block says so in tests
- * rather than only in prose. ISC-271 asks that a `fleet.yaml` setting
- * `backend.kind` either GET that backend or be REJECTED — never be silently
- * overridden by the flag default. What is proven here is the half that could
- * be built from `up.ts` alone: `--backend`'s commander default no longer
- * exists, so "the operator typed it" and "nobody said anything" are now
- * different states, and the reported backend is the one actually selected.
+ * ISC-271 asks that a `fleet.yaml` setting `backend.kind` either GET that
+ * backend or be REJECTED — never be silently overridden by the flag default.
+ * Both halves are now provable and both are proven here:
  *
- * The other half needs `BackendSchema.kind` to stop defaulting to `"cmux"`.
- * Measured: a document with no `backend:` block, one with `backend: {}`, and
- * one with `backend: {kind: cmux}` parse to byte-identical `config.backend`
- * objects. `up` cannot honour the third without also forcing cmux onto the
- * first two — which would break every fleet.yaml that works today on any host
- * without cmux. The last test in this block PINS that override so the day the
- * schema changes, this file fails and says where.
+ *  - THE FLAG HALF. `--backend` carries no commander default any more, so "the
+ *    operator typed it" and "nobody said anything" are different states, and
+ *    the reported backend is the one actually selected.
+ *  - THE CONFIG HALF. `BackendSchema.kind` is `.optional()` rather than
+ *    `.default("cmux")`, so an absent `backend:` block, `backend: {}` and
+ *    `backend: {kind: cmux}` are no longer three spellings of one parsed
+ *    object. `up` can honour the third without forcing cmux onto the first two.
+ *
+ * WHAT `backend.kind` NOW COSTS AN OPERATOR, which is the fact the last test
+ * in this block exists for. The field became binding in the same change that
+ * made it optional, and binding cuts both ways: a config naming a backend this
+ * host cannot present is now exit 3 and no fleet, where before the value was
+ * read by nothing and every such run silently got headless. "The config
+ * decided" is observable in `run.json` whatever the host can run; the
+ * CONSEQUENCE of that decision is only observable on the path with no
+ * `--backend-fallback`, and a criterion that pins the first without the second
+ * grades the half that cannot hurt anyone.
  */
 describe("which input decides the backend (ISC-271)", () => {
   test(
@@ -3396,6 +3480,118 @@ describe("which input decides the backend (ISC-271)", () => {
         await Bun.file(runPaths(rig.runId, rig.root).runJson).text(),
       ) as { backend: string };
       expect(doc.backend).toBe("headless");
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "a config naming an unavailable backend, with no fallback, is exit 3 and NO fleet (ISC-271)",
+    async () => {
+      /**
+       * THE OPERATOR-VISIBLE CONSEQUENCE of `backend.kind` becoming binding,
+       * which the three tests above deliberately do not measure.
+       *
+       * Each of them either types `--backend` or passes `--backend-fallback
+       * headless` "so the run completes either way", and then reads
+       * `run.json`'s `backend` — a value `up` writes from `requestedBackend`
+       * BEFORE `resolveBackendWithFallback` is reached. That proves the CONFIG
+       * DECIDED and nothing about what the decision costs. This is the path
+       * with no fallback, where `resolveBackendWithFallback` throws
+       * `BackendUnavailableError` and the operator gets exit 3 and no fleet.
+       *
+       * It is the upgrade case stated as a test. `backend.kind` was parsed and
+       * read by nothing until this change, so a `fleet.yaml` derived from the
+       * shipped example has been running headless on every host regardless of
+       * what it said; the same file on this build refuses. That is why the
+       * shipped `fleet.example.yaml` no longer writes `kind:` live — see the
+       * comment on that block — and this test is what keeps the refusal it
+       * describes real rather than asserted in prose.
+       *
+       * ## WHY THIS IS PORTABLE, which the ISC-271 tests above had to buy by
+       * ## asserting the requested value instead of the resolved one
+       *
+       * Whether cmux is present is a property of the machine: `/opt/homebrew/
+       * bin/cmux` on the workstation this was written on, nothing at all on
+       * `ubuntu-latest`. A test that let the real binary answer would take one
+       * branch here and the other in CI — pass locally, fail in CI, or the
+       * reverse — which is precisely what this file is forbidden to ship.
+       *
+       * So the machine does not get a vote. `makeRig` installs a `cmux` shim
+       * FIRST on this rig's PATH (`writeCmuxShim`), and it answers every
+       * invocation exit 1 with nothing on stdout, which is what an uninstalled
+       * cmux looks like to `probeCmux`'s opening `cmux --version`. The shim
+       * shadows a real cmux where one exists and supplies a definite answer
+       * where none does, so BOTH hosts run the identical code path: probe →
+       * `cmux-binary` required capability fails → no fallback → exit 3. The
+       * only host-dependent input has been removed rather than tolerated, and
+       * the log assertion below proves the shim was reached rather than
+       * bypassed.
+       *
+       * That is the same discipline the `docker` and `gcloud` shims already
+       * apply to this suite; cmux was simply the one external binary nothing
+       * had pinned, because until `backend.kind` bound, no fixture could reach
+       * it from a config.
+       */
+      const rig = await makeRig({ backendKind: "cmux" });
+      expect(await Bun.file(rig.configPath).text()).toContain("kind: cmux");
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--json",
+      ]);
+
+      // Exit 3, not 1 and not 0: `BackendUnavailableError` carries the code
+      // structurally (contracts.ts) and the CLI maps it straight through.
+      expect(up.code, `stderr: ${up.stderr.slice(0, 400)}`).toBe(EXIT.BACKEND_UNAVAILABLE);
+      // Named, actionable, and it says which input is missing. An operator
+      // reading only "backend unavailable" reaches for the config; this one
+      // tells them the flag that completes the run.
+      expect(up.stderr).toContain("backend 'cmux' unavailable");
+      expect(up.stderr).toContain("no --backend-fallback was given");
+
+      // The primary really WAS probed. Without this, an `up` that refused for
+      // some unrelated reason with a coincidentally matching message would
+      // satisfy every assertion above.
+      const cmuxLog = await Bun.file(rig.cmuxCalls)
+        .text()
+        .catch(() => "");
+      expect(cmuxLog).toContain("--version");
+
+      /**
+       * The CONFIG is what asked for cmux — no `--backend` was typed. Read off
+       * `run.json`, which `up` wrote before the resolution failed, so the two
+       * halves of this test (what was requested, what it cost) rest on one
+       * run rather than on two that could disagree.
+       */
+      const runIds = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
+      expect(runIds).toHaveLength(1);
+      const run = runPaths(runIds[0]!, rig.root);
+      const doc = (await Bun.file(run.runJson).json()) as { backend: string };
+      expect(doc.backend).toBe("cmux");
+
+      /**
+       * AND NO FLEET — measured on the SUPERVISOR's own records, not on the
+       * worker directory.
+       *
+       * `workers/eng-1/` does exist by this point: `up` materializes each
+       * worker's inputs long before it resolves a backend, so an
+       * empty-directory assertion here would be pinning an ordering that is
+       * not the one under test, and it would go red for the wrong reason
+       * (measured: the directory is present with `eng-1` in it).
+       *
+       * `state.json` and `launch.json` are the files a SUPERVISOR writes about
+       * ITSELF once it is running, so their absence is the honest statement of
+       * "nothing was launched" — `state.json` specifically being the file
+       * `down`'s anchor reads to decide there is a process to stop at all. That
+       * is the half separating a clean refusal from a half-started run an
+       * operator would then have to `down`.
+       */
+      const wp = workerPaths(run, "eng-1");
+      expect(await Bun.file(wp.stateJson).exists()).toBe(false);
+      expect(await Bun.file(wp.launchJson).exists()).toBe(false);
     },
     cliBudget(1),
   );
