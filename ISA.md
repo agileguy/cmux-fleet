@@ -933,6 +933,28 @@ the root-cause classification; this table is the index.
   precedent for a criterion whose cost is an architectural first is to decide it in writing and
   build it with its consumer, not before.
 
+  **2026-08-23 — the SRD's two-item path to ISC-290 is a THREE-item path, found by attempting
+  the run.** §5 names ISC-291 (done, `[x]`) and one configuration change as everything standing
+  between the fleet and a real end-to-end run, and calls that "the plan's most actionable claim
+  and the one most worth falsifying first". Falsified. With `llm.relay_upstream:
+  192.168.86.49:8000` and the paired `egress.allow` entry both set and `config validate` green,
+  `up` still refused: *"oMLX unreachable at http://host.docker.internal:8000/v1/chat/completions:
+  fetch failed"*. The URL is CORRECT — `up`'s native-tool-call gate dials `base_url` verbatim
+  through `containerFetch` on purpose, because ISC-260's whole content is that the gate must test
+  the path a WORKER takes. What failed is the relay behind that alias. `docker inspect` on the
+  live container: created 2026-08-20, `PIFLEET_RELAY_TARGETS=[{"listenPort":8000,"host":
+  "host.docker.internal","port":8000,"name":"omlx"}]` — still forwarding to the Docker host's
+  oMLX, which is deliberately unloaded. `up` adopted it unchanged, as `relay.ts:426` says it
+  does: "adoption never compares targets". So the config change is INERT until the relay is
+  recreated by hand, and `down` does not touch the relay because several fleets may share one.
+  **That gap is ISC-265, and ISC-265 is in PHASE J — which the phase table says waits on A and
+  C.** The dependency is therefore wrong for this purpose: ISC-290 cannot be reached without
+  ISC-265 or a manual `docker rm -f`, and Phase J's own exit criterion is worded for exactly
+  this — "changing `relay_upstream` takes effect with no manual `docker rm -f`". **The fix looks
+  cheap and the data already exists:** `ensureEgressRelay` already records what the current
+  checkout WOULD have started on an adopted relay (`relay.ts:423-426`), so drift detection is a
+  comparison against a value that is already computed, not new plumbing.
+
 ## Changelog
 
 - **conjectured:** the verbgate collector already detected truncation, so ISC-172's remaining work was
