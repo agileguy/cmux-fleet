@@ -72,15 +72,14 @@
  * applies to it completely (ISC-249).
  */
 
-import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts";
 import { EXIT } from "../contracts.ts";
 import { runGit, type GitResult } from "../harvest/git.ts";
 import { resolvedWithin } from "../harvest/outbox.ts";
 import { workerBranch, workerWorktree, type RunPaths } from "./paths.ts";
+import { writeTreeSnapshot } from "./treehash.ts";
 
 /**
  * What `up` recorded about one worker's checkout, and what `down --prune`,
@@ -762,19 +761,19 @@ export async function createWorkerWorktrees(
  * Both were reproduced directly (two scratch repos, `git write-tree` run by
  * hand) before this function replaced the status-line comparison an earlier
  * version of this baseline used.
+ *
+ * The mechanism itself now lives in `run/treehash.ts`, because ISC-154 needs
+ * the SAME definition of "the worktree's content" sampled at two moments in
+ * two different processes — the supervisor at quiesce and the harvester at
+ * harvest end — and two independent implementations of a hash that exists to
+ * be COMPARED is the one way to make the comparison meaningless. This wrapper
+ * keeps the local contract: a snapshot `up` cannot take is a run that must not
+ * start, so a failure here throws.
  */
 async function snapshotWorkingTree(path: string): Promise<string> {
-  const tmpIndex = join(tmpdir(), `pifleet-snapshot-${randomUUID()}.index`);
-  try {
-    const env = { GIT_INDEX_FILE: tmpIndex };
-    const added = await runGit(path, ["add", "-A"], env);
-    if (added.code !== 0) throw new WorktreeError(`git add -A (snapshot) in ${path}`, added);
-    const tree = await runGit(path, ["write-tree"], env);
-    if (tree.code !== 0) throw new WorktreeError(`git write-tree (snapshot) in ${path}`, tree);
-    return tree.stdout.trim();
-  } finally {
-    await rm(tmpIndex, { force: true });
-  }
+  const snap = await writeTreeSnapshot(path);
+  if (!snap.ok) throw new WorktreeError(snap.what, snap.result);
+  return snap.tree;
 }
 
 /**

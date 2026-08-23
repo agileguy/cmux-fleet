@@ -10,7 +10,17 @@ import {
   writeJsonAtomic,
   TailReader,
 } from "../../src/util/jsonl.ts";
-import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  writeFile,
+  appendFile,
+  rm,
+  truncate,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -477,5 +487,173 @@ describe("LineTooLongError carries what was already complete", () => {
     expect(() => s.push(enc.encode("y".repeat(MAX_LINE_UNITS + 5)))).toThrow(LineTooLongError);
     s.push(enc.encode("\n")); // close the rejected record
     expect(s.push(enc.encode('{"a":1}\n{"b":2}\n'))).toEqual(['{"a":1}', '{"b":2}']);
+  });
+});
+
+/**
+ * A restart is RECOVERY. Reporting it is a separate obligation (ISC-172).
+ *
+ * `TailReader` has always restarted from offset 0 when the file it follows
+ * shrinks, is replaced, or is rewritten under it, and that is what keeps a
+ * tailer reading correct bytes across a rotation. It said nothing about having
+ * done so. For a transcript follower that silence is right — a rotation is
+ * routine, and a consumer that warned on every one would be noise.
+ *
+ * For an AUDIT collector it is exactly wrong. The whole content of "a worker
+ * cannot truncate its own audit trail" is that a truncation leaves a mark, and
+ * a reader that silently resumes gives the collector nothing to record: the
+ * copy simply grows, and the one event the criterion exists to expose becomes
+ * indistinguishable from an ordinary quiet period.
+ *
+ * So the fact is exposed, and the DETAIL with it — `abandonedOffset` is the
+ * high-water mark reached before the restart, `sizeAtDetection` is what the
+ * file held afterwards. Neither is "bytes lost", and neither is offered as
+ * that: what a worker wrote and destroyed between two polls was never observed
+ * by anything on the host, and no number here can report it. They BOUND the
+ * event, which is what an operator reading the trail can actually use.
+ */
+describe("TailReader restart reporting (ISC-172)", () => {
+  test("reports nothing for a first poll or an ordinary append", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-"));
+    try {
+      const p = join(dir, "verbgate.jsonl");
+      await writeFile(p, '{"n":1}\n');
+      const r = new TailReader(p);
+      expect(r.restarts).toBe(0);
+      await r.poll();
+      // A file seen for the FIRST time is not a restart: it has no previous
+      // identity to differ from. Counting it would make every collector report
+      // a truncation on the first row it ever collected.
+      expect(r.restarts).toBe(0);
+      expect(r.lastRestart).toBeNull();
+      await appendFile(p, '{"n":2}\n');
+      await r.poll();
+      expect(r.restarts).toBe(0);
+      expect(r.lastRestart).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("records an in-place truncation, with the offset it abandoned", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-"));
+    try {
+      const p = join(dir, "verbgate.jsonl");
+      await writeFile(p, '{"n":1}\n{"n":2}\n'); // 16 bytes
+      const r = new TailReader(p);
+      expect(await r.poll()).toHaveLength(2);
+      expect(r.offset).toBe(16);
+
+      // `: > file` — the attack this criterion names. Same inode, size 0.
+      await truncate(p, 0);
+      expect(await r.poll()).toEqual([]);
+
+      expect(r.restarts).toBe(1);
+      expect(r.lastRestart?.reasons).toEqual(["shrank"]);
+      expect(r.lastRestart?.abandonedOffset).toBe(16);
+      expect(r.lastRestart?.sizeAtDetection).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("records a same-length rewrite, which no size check can see", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-"));
+    try {
+      const p = join(dir, "verbgate.jsonl");
+      await writeFile(p, '{"n":1}\n{"n":2}\n');
+      const r = new TailReader(p);
+      expect(await r.poll()).toHaveLength(2);
+
+      // Same inode, same length, different bytes: a worker rewriting its trail
+      // in place rather than emptying it. `size < offset` is false and the
+      // identity triple is unchanged; only the head fingerprint moves.
+      await writeFile(p, '{"n":8}\n{"n":9}\n');
+      expect(await r.poll()).toEqual(['{"n":8}', '{"n":9}']);
+
+      expect(r.restarts).toBe(1);
+      // BOTH fingerprints fire, and that is arithmetic rather than redundancy:
+      // the file is 16 bytes, so `min(16, 64)` makes the head range and the
+      // tail range the same sixteen bytes. On a file longer than 64 bytes they
+      // cover disjoint regions and can fire independently — see the probe
+      // below, where only the tail can see the rewrite at all.
+      expect(r.lastRestart?.reasons).toEqual(["head_rewritten", "tail_rewritten"]);
+      expect(r.lastRestart?.abandonedOffset).toBe(16);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The truncation that defeats all three ORIGINAL signals at once, found by
+   * attacking a real container and reproduced here so it is re-checked on
+   * every run rather than only in the Docker-gated job.
+   *
+   * `docker/verbgate` stamps whole seconds, so two rows written inside one
+   * second share a 64-byte prefix byte for byte. A worker that truncates in
+   * place and writes a row at least as long as the one it erased then gets:
+   * no `shrank` (the file regrew past the old offset), no `replaced` (an
+   * in-place truncate keeps the inode), and no `head_rewritten` (the head is
+   * identical). The reader resumed mid-record and handed its caller a
+   * one-byte fragment as a complete line — into an AUDIT TRAIL, unmarked.
+   *
+   * Only a fingerprint anchored at the consumed frontier can see it, which is
+   * why the assertion below is `toEqual` on exactly one reason rather than
+   * `toContain`: if any other signal starts firing here, this probe has
+   * stopped testing the case it was written for.
+   */
+  test("records an in-place truncate whose replacement shares the head and regrows past it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-"));
+    try {
+      const p = join(dir, "verbgate.jsonl");
+      // Byte for byte what verbgate emits before the argv, for any two rows in
+      // one second. Pinned, so a shortened prefix cannot silently turn this
+      // into a test of the head fingerprint.
+      const PREFIX = '{"ts":"2026-08-21T15:47:54Z","tool":"kubectl","verb":"delete pod ';
+      expect(PREFIX.length).toBeGreaterThanOrEqual(64);
+
+      await writeFile(p, `${PREFIX}first"]}\n`);
+      const r = new TailReader(p);
+      expect(await r.poll()).toEqual([`${PREFIX}first"]}`]);
+      const offsetBefore = r.offset;
+
+      // The attack. `writeFile` is O_TRUNC on the same inode — the shell's
+      // `: >` by another name — and the replacement is one byte longer than
+      // what it erased, which is what puts the new size ABOVE the old offset.
+      await writeFile(p, `${PREFIX}second"]}\n`);
+      expect(await r.poll()).toEqual([`${PREFIX}second"]}`]);
+
+      expect(r.restarts).toBe(1);
+      expect(r.lastRestart?.reasons).toEqual(["tail_rewritten"]);
+      expect(r.lastRestart?.abandonedOffset).toBe(offsetBefore);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("records a replacement, and counts a second restart separately", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-"));
+    try {
+      const p = join(dir, "verbgate.jsonl");
+      await writeFile(p, '{"n":1}\n');
+      const r = new TailReader(p);
+      expect(await r.poll()).toHaveLength(1);
+
+      // unlink + recreate: a new inode, so the identity triple moves.
+      await rm(p);
+      await writeFile(p, '{"n":5}\n');
+      expect(await r.poll()).toEqual(['{"n":5}']);
+      expect(r.restarts).toBe(1);
+      expect(r.lastRestart?.reasons).toContain("replaced");
+
+      await truncate(p, 0);
+      await r.poll();
+      // Monotonic. A counter that reset would let a second truncation hide a
+      // first, which is the whole reason this counts rather than flags.
+      expect(r.restarts).toBe(2);
+      expect(r.lastRestart?.reasons).toEqual(["shrank"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

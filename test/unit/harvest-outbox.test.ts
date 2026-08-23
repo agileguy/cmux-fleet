@@ -14,16 +14,49 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_ENVELOPE_BYTES,
+  MAX_HELD_DESCRIPTORS,
+  closeOutboxScan,
   containerPathToHost,
   readResultEnvelope,
   resolvedWithin,
   safeForReport,
   scanOutboxFiles,
+  type OutboxFileScan,
   type OutboxLocation,
 } from "../../src/harvest/outbox.ts";
 
 let tmp: string;
 let loc: OutboxLocation;
+
+/**
+ * Scans whose descriptors this file is holding, released in `afterEach`.
+ *
+ * `scanOutboxFiles` hands its caller open descriptors (ISC-246, as restated),
+ * so a test that drops a scan leaks one fd per accepted artifact. That is the
+ * tax the restatement charges, and the suite pays it in the same place a
+ * production consumer would have to: a guaranteed release.
+ */
+const heldScans: OutboxFileScan[] = [];
+
+/** `scanOutboxFiles`, with the descriptors registered for release. */
+async function scanHeld(l: OutboxLocation): Promise<OutboxFileScan> {
+  const s = await scanOutboxFiles(l);
+  heldScans.push(s);
+  return s;
+}
+
+/**
+ * The accepted set, as PATHS.
+ *
+ * Deliberately a projection rather than a change of subject: every assertion
+ * that read `scan.safe` as strings before descriptors reads it through here
+ * now, so the containment and symlink tests keep asserting exactly what they
+ * asserted before. Weakening one of them while its subject had no production
+ * consumer is the specific mistake this projection exists to avoid.
+ */
+function paths(s: OutboxFileScan): string[] {
+  return s.safe.map((f) => f.path);
+}
 
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), "pifleet-outbox-"));
@@ -39,6 +72,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const s of heldScans.splice(0)) await closeOutboxScan(s);
   await rm(tmp, { recursive: true, force: true });
 });
 
@@ -318,9 +352,9 @@ describe("scanOutboxFiles — ISC-121 symlinks under files/", () => {
     await writeFile(secret, "hostile target");
     await symlink(secret, join(files, "evil"));
 
-    const scan = await scanOutboxFiles(loc);
-    expect(scan.safe).toContain(join(files, "good.txt"));
-    expect(scan.safe).not.toContain(join(files, "evil"));
+    const scan = await scanHeld(loc);
+    expect(paths(scan)).toContain(join(files, "good.txt"));
+    expect(paths(scan)).not.toContain(join(files, "evil"));
     expect(scan.refused.map((r) => r.path)).toContain(join(files, "evil"));
     expect(scan.refused[0]?.reason).toContain("escapes");
   });
@@ -333,8 +367,8 @@ describe("scanOutboxFiles — ISC-121 symlinks under files/", () => {
     await writeFile(join(files, "real.txt"), "content");
     await symlink(join(files, "real.txt"), join(files, "alias"));
 
-    const scan = await scanOutboxFiles(loc);
-    expect(scan.safe).toContain(join(files, "alias"));
+    const scan = await scanHeld(loc);
+    expect(paths(scan)).toContain(join(files, "alias"));
     expect(scan.refused).toHaveLength(0);
   });
 
@@ -345,7 +379,7 @@ describe("scanOutboxFiles — ISC-121 symlinks under files/", () => {
     await mkdir(files, { recursive: true });
     await symlink(join(tmp, "does-not-exist"), join(files, "dangling"));
 
-    const scan = await scanOutboxFiles(loc);
+    const scan = await scanHeld(loc);
     expect(scan.safe).toHaveLength(0);
     expect(scan.refused[0]?.reason).toContain("resolved");
   });
@@ -358,7 +392,7 @@ describe("scanOutboxFiles — ISC-121 symlinks under files/", () => {
     const p = Bun.spawn(["mkfifo", join(files, "pipe")]);
     expect(await p.exited).toBe(0);
 
-    const scan = await scanOutboxFiles(loc);
+    const scan = await scanHeld(loc);
     expect(scan.safe).toHaveLength(0);
     expect(scan.refused[0]?.reason).toContain("regular file");
   });
@@ -401,9 +435,9 @@ describe("scanOutboxFiles — containment holds at the roots (§12.5)", () => {
     try {
       await mkdir(join(loc.workerOutboxDir, "T-1"), { recursive: true });
       await symlink(join(tmp, "private"), join(loc.workerOutboxDir, "T-1", "files"));
-      const scan = await scanOutboxFiles(loc);
+      const scan = await scanHeld(loc);
       expect(scan.safe).toEqual([]);
-      expect(scan.safe.some((p) => p.includes("id_rsa"))).toBe(false);
+      expect(paths(scan).some((p) => p.includes("id_rsa"))).toBe(false);
       expect(await Bun.file(secret).exists()).toBe(true); // untouched, not read
 
       // The REASON is asserted, not just that something was refused. Two
@@ -429,9 +463,9 @@ describe("scanOutboxFiles — containment holds at the roots (§12.5)", () => {
       await mkdir(loc.workerOutboxDir, { recursive: true });
       await symlink(elsewhere, join(loc.workerOutboxDir, "T-1"));
 
-      const scan = await scanOutboxFiles(loc);
+      const scan = await scanHeld(loc);
       expect(scan.safe).toEqual([]);
-      expect(JSON.stringify(scan.safe)).not.toContain("leak");
+      expect(JSON.stringify(paths(scan))).not.toContain("leak");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
@@ -445,7 +479,7 @@ describe("scanOutboxFiles — containment holds at the roots (§12.5)", () => {
       // realpath resolves this INSIDE the outbox — the inode's other name is
       // invisible from here, which is exactly why nlink is the check.
       await link(secret, join(files, "innocent.txt"));
-      const scan = await scanOutboxFiles(loc);
+      const scan = await scanHeld(loc);
       expect(scan.safe).toEqual([]);
       expect(scan.refused.map((r) => r.reason).join(" ")).toContain("link");
     } finally {
@@ -460,12 +494,160 @@ describe("scanOutboxFiles — containment holds at the roots (§12.5)", () => {
       await mkdir(join(files, "sub"), { recursive: true });
       await writeFile(join(files, "note.md"), "real artifact\n");
       await writeFile(join(files, "sub", "deep.txt"), "also real\n");
-      const scan = await scanOutboxFiles(loc);
+      const scan = await scanHeld(loc);
       expect(scan.refused).toEqual([]);
-      expect(scan.safe.map((p) => p.replace(files, "")).sort()).toEqual(["/note.md", "/sub/deep.txt"]);
+      expect(paths(scan).map((p) => p.replace(files, "")).sort()).toEqual(["/note.md", "/sub/deep.txt"]);
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * ISC-246 AS RESTATED — the scan validates and then HOLDS.
+ *
+ * The criterion as written asked for descriptors so that "a validated path
+ * re-opened later" stops being a TOCTOU window. What is reachable in this
+ * runtime is the LEAF half of that: each accepted artifact is opened during
+ * the scan and the descriptor is what `safe` carries, so the inode that passed
+ * `realpath`, `isFile` and `nlink` is the inode a consumer reads. There is no
+ * second resolution for the authoring worker to race.
+ *
+ * WHAT THESE TESTS DO NOT COVER, and cannot:
+ *
+ * 1. The WALK IS STILL PATH-BASED. Node has no `openat` relative to a
+ *    `FileHandle`, so `readdir` and the containment `realpath` re-resolve
+ *    names from the root every time. A DIRECTORY swapped mid-walk is not
+ *    caught by anything here, and holding leaf descriptors cannot catch it.
+ * 2. "`nlink` is read from the DESCRIPTOR rather than from the path" is not
+ *    behaviourally separable in-process: nothing can interleave a filesystem
+ *    change between the `open` and the `fstat` from inside the same process,
+ *    so a mutation swapping `handle.stat()` for `lstat(target)` leaves every
+ *    behavioural test in this file green. It is pinned by the SOURCE GUARD at
+ *    the end of this block instead, and that guard is a source scan — it
+ *    checks the shape of the call, not the semantics of the result. Recorded
+ *    rather than papered over.
+ */
+describe("scanOutboxFiles — accepted artifacts are HELD OPEN (ISC-246, restated)", () => {
+  /** Would fail if `safe` went back to carrying names instead of descriptors. */
+  test("an accepted artifact carries a readable descriptor, not just a name", async () => {
+    const files = join(loc.workerOutboxDir, "T-1", "files");
+    await mkdir(files, { recursive: true });
+    await writeFile(join(files, "note.md"), "real artifact\n");
+
+    const scan = await scanHeld(loc);
+    expect(scan.safe).toHaveLength(1);
+    const held = scan.safe[0]!;
+    expect(held.path).toBe(join(files, "note.md"));
+    expect((await held.handle.readFile()).toString()).toBe("real artifact\n");
+  });
+
+  /**
+   * THE CRITERION, stated as an observation rather than as a property.
+   *
+   * The path is replaced with hostile content AFTER the scan returns — the
+   * exact "validated path re-opened later" the criterion names. A consumer
+   * holding the descriptor still reads what was validated; a consumer holding
+   * the NAME would read the replacement. Both halves are asserted, because
+   * asserting only the first would stay green if the swap silently failed to
+   * happen and the test would be pinning nothing.
+   */
+  test("the descriptor still reads the validated inode after the path is swapped", async () => {
+    const files = join(loc.workerOutboxDir, "T-1", "files");
+    await mkdir(files, { recursive: true });
+    const artifact = join(files, "report.txt");
+    await writeFile(artifact, "validated content\n");
+
+    const scan = await scanHeld(loc);
+    expect(scan.safe).toHaveLength(1);
+    const held = scan.safe[0]!;
+
+    // The worker acts between validation and use: same name, different inode.
+    await rm(artifact);
+    await writeFile(artifact, "hostile replacement\n");
+
+    expect((await held.handle.readFile()).toString()).toBe("validated content\n");
+    // The swap really happened — without this the assertion above is vacuous.
+    expect(await Bun.file(artifact).text()).toBe("hostile replacement\n");
+  });
+
+  /**
+   * The fd-exhaustion failure mode the restatement introduces, made into a
+   * NAMED refusal rather than an errno.
+   *
+   * MEASURED, not assumed: holding one descriptor per entry hits
+   * `EMFILE: too many open files` after 252 opens under a 256 soft limit,
+   * which is forty times below `MAX_OUTBOX_ENTRIES`. Uncapped, a large outbox
+   * would drain the process table out from under the rest of the harvest.
+   */
+  test("the held-descriptor budget refuses past the cap instead of exhausting the process", async () => {
+    const files = join(loc.workerOutboxDir, "T-1", "files");
+    await mkdir(files, { recursive: true });
+    for (let i = 0; i < MAX_HELD_DESCRIPTORS + 10; i++) {
+      await writeFile(join(files, `a${String(i).padStart(4, "0")}.txt`), "x");
+    }
+
+    const scan = await scanHeld(loc);
+    expect(scan.safe).toHaveLength(MAX_HELD_DESCRIPTORS);
+    // One refusal names the cause, not one per remaining entry.
+    expect(scan.refused).toHaveLength(1);
+    expect(scan.refused[0]!.reason).toContain("artifacts to hold open");
+    expect(scan.refused[0]!.reason).toContain(String(MAX_HELD_DESCRIPTORS));
+  });
+
+  /**
+   * The other half of the tax: someone has to release these.
+   *
+   * `safe` is emptied as it closes, so the second call is a no-op rather than
+   * a double-close — asserted, because "idempotent" is the property a caller
+   * putting this in a `finally` is relying on.
+   */
+  test("closeOutboxScan releases every descriptor and is idempotent", async () => {
+    const files = join(loc.workerOutboxDir, "T-1", "files");
+    await mkdir(files, { recursive: true });
+    await writeFile(join(files, "one.txt"), "a");
+    await writeFile(join(files, "two.txt"), "b");
+
+    const scan = await scanOutboxFiles(loc);
+    expect(scan.safe).toHaveLength(2);
+    const handles = scan.safe.map((f) => f.handle);
+
+    await closeOutboxScan(scan);
+    expect(scan.safe).toEqual([]);
+    for (const h of handles) {
+      await expect(h.readFile()).rejects.toThrow(/bad file descriptor|EBADF|closed/i);
+    }
+
+    // Second call must not throw, and must not re-close a stranger's fd.
+    await closeOutboxScan(scan);
+    expect(scan.safe).toEqual([]);
+  });
+
+  /**
+   * SOURCE GUARD, and its limits are stated where they will be read.
+   *
+   * See note 2 in this block's header: the fd-versus-path distinction is not
+   * observable from behaviour in-process, so this scans the accept path's
+   * SOURCE for the two properties that carry the restatement — the stat is
+   * taken on the handle, and the open refuses to follow a link. It checks the
+   * SHAPE of those calls, not what they return; a `handle.stat()` whose result
+   * is then ignored would pass it. The behavioural tests above are what pin
+   * the results.
+   */
+  test("the accept path stats the descriptor and opens with O_NOFOLLOW", async () => {
+    const src = await Bun.file(new URL("../../src/harvest/outbox.ts", import.meta.url)).text();
+    const start = src.indexOf("const holdIfSafe =");
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf("out.safe.push(", start);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+
+    expect(body).toContain("handle.stat()");
+    expect(body).toContain("O_NOFOLLOW");
+    expect(body).toContain("O_NONBLOCK");
+    // The defect this guards: re-statting the NAME after opening it, which
+    // reintroduces the second resolution the descriptor exists to remove.
+    expect(body).not.toContain("lstat(");
   });
 });
 
@@ -545,7 +727,7 @@ describe("refusal text cannot be forged by a filename", () => {
     await mkdir(files, { recursive: true });
     await symlink("/nonexistent-target", join(files, forge));
 
-    const scan = await scanOutboxFiles(loc);
+    const scan = await scanHeld(loc);
     expect(scan.refused).toHaveLength(1);
     const rendered = `outbox file refused: ${scan.refused[0]!.path}: ${scan.refused[0]!.reason}`;
 
