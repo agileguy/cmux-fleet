@@ -1,0 +1,54 @@
+{
+  "scenario": "ui-mixed",
+  "_comment": "Both SRD §4.2 classes inside one turn, on one wire, from one supervisor — which is what makes ISC-113's negative clause mean something. The pure fire-and-forget scenario next door proves that nothing is sent back for those five methods, but it proves it against a supervisor that answers nothing at all, so \"no response\" holds there for a reason unrelated to the criterion; that is why ISC-113 is graded [~] rather than [x]. Here a blocking `confirm` sits in the middle of the five, so the same run must produce a frame addressed to uireq-confirm and produce nothing addressed to any of uireq-notify, uireq-setstatus, uireq-setwidget, uireq-settitle or uireq-seteditortext. A supervisor that answers all nine fails on the silence; a supervisor that answers none fails on the dialog and never reaches turn_end at all. The five are split around the dialog — two before it, three after — so the silence covers both the requests that arrived while nothing was pending and the ones that arrived while a dialog was open, which is where a responder keyed on \"is anything waiting?\" rather than on the method name would leak. The ids match the pure scenario's so both tests read from one list of the five methods rather than two that could drift. self_resolve_ms is 8000 for the reason ui-dialogs.json gives: an unanswered run ends and is diagnosed, instead of ending the test.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-notify",
+          "method": "notify",
+          "params": { "message": "worker is thinking" }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-setstatus",
+          "method": "setStatus",
+          "params": { "status": "running acceptance" }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-confirm",
+          "method": "confirm",
+          "params": { "prompt": "overwrite the outbox?" },
+          "await_response": true,
+          "self_resolve_ms": 8000
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-setwidget",
+          "method": "setWidget",
+          "params": { "widget": "progress", "value": 0.5 }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-settitle",
+          "method": "setTitle",
+          "params": { "title": "pifleet worker" }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-seteditortext",
+          "method": "set_editor_text",
+          "params": { "text": "draft" }
+        },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}

@@ -47,9 +47,71 @@
  * EmitEntry:
  *   {"delay_ms": 200} | {"partial": "raw text, no newline"} | {"exit": 1}
  *   | {"noise": {"stream": "stderr", "lines": 2000, "bytes": 400}}
+ *   | {"type": "extension_ui_request", "id": "...", "method": "editor",
+ *      "params": {...}, "await_response": true, "self_resolve_ms": 8000}
  *   | any raw record (written verbatim as one JSONL line)
  *
  * Steps for one command are consumed in order; the last one repeats.
+ *
+ * BLOCKING DIALOGS — `await_response` and `self_resolve_ms` (ISC-111/112).
+ *
+ * SRD §4.2 splits the nine `extension_ui_request` methods into two classes and
+ * the split is entirely about who is waiting. The five FIRE-AND-FORGET methods
+ * (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) announce
+ * something and the agent carries on; the four DIALOG methods (`select`,
+ * `confirm`, `input`, `editor`) HOLD THE TURN until someone answers. A double
+ * that emitted a dialog and then finished the turn anyway would model the first
+ * class under the name of the second, and every test written against it would
+ * be green for a reason unrelated to the criterion — ISA.md's ISC-112 note says
+ * it outright: "a scenario that emits an `editor` request and then finishes
+ * anyway would produce a green test proving only that the double does not
+ * block. Until the blocking-step form exists, any pass here is a false one."
+ *
+ * `await_response: true` is that form. The record is written to stdout with the
+ * two scenario directives STRIPPED (real Pi never sends them), and the emission
+ * sequence then stops dead — no `turn_end`, no `agent_end`, nothing that
+ * follows in `emit` — until one of three things happens:
+ *
+ *   1. a frame arrives on stdin that MENTIONS this request's `id` anywhere in
+ *      its values, at any depth (`unblocked_by: "response"`);
+ *   2. `self_resolve_ms` elapses, if the scenario set one
+ *      (`unblocked_by: "self_resolve"`);
+ *   3. the active emission is cancelled by an `abort` (`unblocked_by:
+ *      "cancelled"`).
+ *
+ * THE CORRELATION RULE IS DELIBERATELY SHAPE-BLIND. The exact wire frame of a
+ * UI response is Pi's, not ours, and it is not written down in the SRD — so a
+ * double that demanded `{"type":"extension_ui_response","request_id":...}`
+ * would be asserting a guess, and would hang forever the day the real answer
+ * turned out to carry the id under a different key. Matching on "this frame
+ * mentions the id" is the widest rule that is still a correlation: an answer
+ * addressed to a DIFFERENT dialog does not unblock this one, and an answer
+ * addressed to nothing unblocks nothing at all. A frame that resolves a dialog
+ * is CONSUMED — it is not a command, and passing it to the command dispatcher
+ * would have the double reply to it.
+ *
+ * `self_resolve_ms` exists because SRD §4.2 says `select`/`confirm`/`input`
+ * carry an optional timeout and self-resolve, while **`editor` has no timeout
+ * and hangs forever unanswered**. It is not a safety valve: a scenario that
+ * sets it is claiming its dialogs are the self-resolving kind, and because the
+ * outcome is recorded, a test can tell a real answer from a self-resolve and
+ * fail on the difference. Setting it on an `editor` request would model the one
+ * thing `editor` provably does not do, which is why the `editor` scenario does
+ * not set it and must not.
+ *
+ * SO AN UNANSWERED `editor` DIALOG HANGS THIS PROCESS INDEFINITELY, BY DESIGN.
+ * That is the property that lets ISC-112's probe fail; a double that could not
+ * hang could not produce evidence. `test/integration/ui-requests.test.ts`
+ * proves the hang directly against this executable, with no supervisor
+ * involved, so the claim is measured rather than asserted in a comment.
+ *
+ * Blocking happens inside the emission sequence, which is deliberately NOT
+ * awaited by the command dispatcher (`void runEmissions(...)`). A dialog that
+ * blocked `handle()` would stop this process reading its own stdin, and the
+ * answer that unblocks it arrives on stdin — the double would model a wedged
+ * agent that can never be woken, which is a different failure with the same
+ * shape. `export_html`'s `respond_delay_ms` branch above makes the same point
+ * for the same reason.
  *
  * `sessions` exists because one `PIFLEET_PI_COMMAND` serves an ENTIRE fleet —
  * every worker's double is launched from the same string with the same
@@ -138,7 +200,35 @@ interface EmitNoise {
     chunk_pause_ms?: number;
   };
 }
-type EmitEntry = EmitDelay | EmitPartial | EmitExit | EmitNoise | Record<string, unknown>;
+/**
+ * An `extension_ui_request` the double BLOCKS on (ISC-111/112).
+ *
+ * `await_response` and `self_resolve_ms` are SCENARIO DIRECTIVES, not wire
+ * fields: they are stripped before the record reaches stdout, because real Pi
+ * sends neither and a supervisor that started keying on them would be reading a
+ * fixture artifact. The rest of the record — `type`, `id`, `method`, `params`
+ * and anything else the scenario wrote — goes out verbatim, so the wire shape
+ * of a blocking dialog is byte-identical to a non-blocking one and nothing
+ * downstream can tell which kind the scenario asked for.
+ */
+interface EmitAwaitedDialog {
+  type: "extension_ui_request";
+  /** What an answer has to mention to unblock this dialog; required. */
+  id: string;
+  method: string;
+  params?: Record<string, unknown>;
+  await_response?: boolean;
+  /** Unblock after this long unanswered — the §4.2 optional timeout. */
+  self_resolve_ms?: number;
+}
+
+type EmitEntry =
+  | EmitDelay
+  | EmitPartial
+  | EmitExit
+  | EmitNoise
+  | EmitAwaitedDialog
+  | Record<string, unknown>;
 
 interface Step {
   on: string;
@@ -373,6 +463,12 @@ async function runEmissions(entries: EmitEntry[], cancel: { cancelled: boolean }
       process.exit(entry.exit);
     }
     if (cancel.cancelled) return;
+    // A dialog HOLDS the sequence: everything after it in `emit` — including
+    // this turn's `turn_end` and `agent_end` — waits until it is answered.
+    if (isAwaitedDialog(entry)) {
+      await emitAwaitedDialog(entry as Record<string, unknown>, cancel);
+      continue;
+    }
     const event = entry as Record<string, unknown>;
     trackEvent(event);
     writeRecord(event);
@@ -396,6 +492,192 @@ function trackEvent(event: Record<string, unknown>): void {
     default:
       break;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Blocking dialogs — the only way a scenario can model a request that HOLDS
+// the turn (ISC-111/112)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the double records the life of each awaited dialog, when
+ * `PIFLEET_FAKE_DIALOG_LOG` names a path.
+ *
+ * A SECOND file rather than more lines in `PIFLEET_FAKE_REQUEST_LOG`, and the
+ * separation is load-bearing. That log is documented as, and asserted as, the
+ * RAW lines the supervisor wrote to this process's stdin: `ui-requests.test.ts`
+ * parses every line and requires its `type` to be one of the supervisor's own
+ * six commands. Interleaving the double's own observations there would make
+ * that allowlist fail against the double instead of against the supervisor,
+ * which is the assertion ISC-113 exists for.
+ *
+ * It carries the two facts the wire cannot. ELAPSED: the request log has no
+ * timestamps, so a test reading only that could time a dialog no better than
+ * its own polling interval, and ISC-111's bound ("elapsed < `ui_request_timeout`")
+ * deserves better than a 50 ms quantum. The double knows to the millisecond
+ * when it wrote the request and when the answer landed, and it is the only
+ * party that does. OUTCOME: "the turn continued" is true whether a supervisor
+ * answered or the dialog timed itself out, and a test that could not tell those
+ * apart would credit the supervisor for `self_resolve_ms`. `unblocked_by`
+ * discriminates them, which is what keeps ISC-111 from passing on the fixture's
+ * own timer.
+ *
+ * Off unless the variable is set, exactly like the request log, so no existing
+ * scenario changes behaviour by a byte.
+ */
+const DIALOG_LOG = process.env["PIFLEET_FAKE_DIALOG_LOG"] ?? "";
+
+/** How a blocked dialog stopped being blocked. */
+type DialogOutcome =
+  | { by: "response"; response: Record<string, unknown> }
+  | { by: "self_resolve" }
+  | { by: "cancelled" };
+
+interface PendingDialog {
+  method: string;
+  settle: (outcome: DialogOutcome) => void;
+}
+
+/** Dialogs written to stdout and not yet answered, keyed by request id. */
+const pendingDialogs = new Map<string, PendingDialog>();
+
+/** How often a blocked dialog notices its emission sequence was cancelled. */
+const DIALOG_CANCEL_POLL_MS = 25;
+
+function logDialog(record: Record<string, unknown>): void {
+  if (DIALOG_LOG === "") return;
+  try {
+    appendFileSync(DIALOG_LOG, `${JSON.stringify(record)}\n`);
+  } catch {
+    // Same rule as `logRequest`: a log that cannot be written must not change
+    // what the double does. The test asserting against it fails on the missing
+    // file, which is a better error than a double that behaved differently
+    // because of its own instrumentation.
+  }
+}
+
+function isAwaitedDialog(entry: EmitEntry): boolean {
+  const e = entry as Record<string, unknown>;
+  if (e["type"] !== "extension_ui_request") return false;
+  return e["await_response"] === true || typeof e["self_resolve_ms"] === "number";
+}
+
+/**
+ * Whether `value` mentions `id` anywhere in its values, at any depth.
+ *
+ * The correlation rule, and it is wide ON PURPOSE — see the header. Pi's UI
+ * response frame is not specified in the SRD, so the double must recognise an
+ * answer without knowing which key carries the id: `{"id":...}`,
+ * `{"request_id":...}`, `{"params":{"id":...}}` and a bare echo inside a nested
+ * payload all read the same way here.
+ *
+ * KEYS ARE NOT SEARCHED, only values. A frame with a key literally named after
+ * the request id would be a coincidence, not an address, and matching it would
+ * let a dialog unblock on a message that never meant to answer it.
+ */
+function mentionsRequestId(value: unknown, id: string): boolean {
+  if (typeof value === "string") return value === id;
+  if (Array.isArray(value)) return value.some((v) => mentionsRequestId(v, id));
+  if (value !== null && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some((v) => mentionsRequestId(v, id));
+  }
+  return false;
+}
+
+/**
+ * Unblock the dialog this inbound frame answers, if it answers one.
+ *
+ * Returns whether the frame was CONSUMED. A UI response is not a command, and
+ * handing it to `handle()` would fall through to the default branch and have
+ * the double emit a `response` record for it — inventing traffic on the very
+ * wire the negative half of ISC-113 asserts about.
+ */
+function resolveDialog(msg: Record<string, unknown>): boolean {
+  for (const [id, pending] of pendingDialogs) {
+    if (!mentionsRequestId(msg, id)) continue;
+    pendingDialogs.delete(id);
+    pending.settle({ by: "response", response: msg });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Write a dialog request, then hold the emission sequence until it is answered.
+ *
+ * A dialog with no usable `id` is emitted WITHOUT blocking, loudly. It could
+ * never be addressed, so blocking on it would hang the scenario forever with no
+ * explanation — the `parseNoiseSpec` lesson in the other direction: a scenario
+ * mistake has to be louder than the property it breaks, and "hangs until the
+ * test's budget expires" is the quietest failure this file can produce.
+ */
+async function emitAwaitedDialog(
+  entry: Record<string, unknown>,
+  cancel: { cancelled: boolean },
+): Promise<void> {
+  const { await_response: _await, self_resolve_ms: selfResolveRaw, ...wire } = entry;
+  const id = typeof entry["id"] === "string" ? entry["id"] : "";
+  const method = typeof entry["method"] === "string" ? entry["method"] : "";
+  const selfResolveMs =
+    typeof selfResolveRaw === "number" && Number.isFinite(selfResolveRaw) && selfResolveRaw > 0
+      ? selfResolveRaw
+      : null;
+
+  const refuse = (why: string): void => {
+    process.stderr.write(`fake-pi: emitting '${method || "extension_ui_request"}' WITHOUT blocking — ${why}\n`);
+    trackEvent(wire);
+    writeRecord(wire);
+  };
+  if (id === "") {
+    refuse("'await_response' needs a non-empty string 'id' for an answer to be addressed to");
+    return;
+  }
+  if (pendingDialogs.has(id)) {
+    refuse(`request id '${id}' is already blocked; one answer cannot address two dialogs`);
+    return;
+  }
+
+  let settle!: (outcome: DialogOutcome) => void;
+  const unblocked = new Promise<DialogOutcome>((resolve) => {
+    settle = resolve;
+  });
+  // Registered BEFORE the write: the answer can be on the wire before the next
+  // line of this function runs, and a race there would drop it.
+  pendingDialogs.set(id, { method, settle });
+
+  const startedAt = performance.now();
+  trackEvent(wire);
+  writeRecord(wire);
+  logDialog({ event: "dialog_emitted", id, method, at_ms: Date.now() });
+
+  // `abort` cancels the active emission by flipping a flag rather than by
+  // rejecting anything, so a blocked dialog has to watch for it. Without this
+  // the double would keep holding a turn the supervisor already gave up on and
+  // exit only on stdin EOF.
+  const poll = setInterval(() => {
+    if (cancel.cancelled) settle({ by: "cancelled" });
+  }, DIALOG_CANCEL_POLL_MS);
+  const selfTimer =
+    selfResolveMs === null ? null : setTimeout(() => settle({ by: "self_resolve" }), selfResolveMs);
+
+  const outcome = await unblocked;
+  clearInterval(poll);
+  if (selfTimer !== null) clearTimeout(selfTimer);
+  pendingDialogs.delete(id);
+
+  logDialog({
+    event: "dialog_unblocked",
+    id,
+    method,
+    at_ms: Date.now(),
+    elapsed_ms: Math.round(performance.now() - startedAt),
+    unblocked_by: outcome.by,
+    // Verbatim, unparsed and uninterpreted. The double has no opinion about
+    // what a correct answer looks like — asserting `{cancelled:true}` is the
+    // test's job, and a double that filtered on payload shape would decide the
+    // question ISC-111 is asking.
+    response: outcome.by === "response" ? outcome.response : null,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -614,6 +896,9 @@ for await (const chunk of Bun.stdin.stream()) {
       process.stderr.write(`fake-pi: unparseable request: ${line.slice(0, 120)}\n`);
       continue;
     }
+    // An answer to a blocked dialog is consumed here and goes no further: it
+    // is a response, not a command, and the dispatcher would reply to it.
+    if (msg !== undefined && resolveDialog(msg)) continue;
     if (msg !== undefined) await handle(msg);
   }
 }

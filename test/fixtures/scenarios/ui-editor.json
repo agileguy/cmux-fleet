@@ -1,0 +1,23 @@
+{
+  "scenario": "ui-editor",
+  "_comment": "One `editor` request, blocking, with NO self_resolve_ms — and the omission is the entire scenario. SRD §4.2 gives select/confirm/input an optional timeout that resolves them on their own; `editor` has none, so an unanswered one hangs the agent forever and the supervisor's timer is the only unblocker. That is ISC-112, and it is the one UI criterion ISA.md records as more likely to be FALSE in production than merely unproven: against a supervisor with no responder, this turn blocks until deadline_s expires and settles timed_out / deadline_exceeded_no_terminal_event, which is the kill ladder working correctly and is exactly what \"hangs the run\" means. Giving this dialog a self_resolve_ms would model the one behaviour `editor` provably does not have, and would turn the probe green on the fixture's own timer while the criterion stayed false — the false pass ISA.md warns about in as many words. So the double hangs here indefinitely, on purpose: a run that reaches turn_end proves a supervisor answered, and a run that does not says so in its verdict rather than in a test timeout. The `params` mirror a real editor invocation (a file to open, seeded content) so the log line a human reads afterwards says what was actually being asked for.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-editor",
+          "method": "editor",
+          "params": { "path": "/workspace/NOTES.md", "content": "# scratch\n", "language": "markdown" },
+          "await_response": true
+        },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}
