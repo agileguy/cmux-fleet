@@ -21,12 +21,19 @@
 import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { TaskEnvelopeSchema, type TaskEnvelope } from "../../src/contracts.ts";
 import { runGit } from "../../src/harvest/git.ts";
 import { RpcClient } from "../../src/rpc/client.ts";
-import { runPaths, taskRecordPath, workerPaths, type WorkerPaths } from "../../src/run/paths.ts";
+import {
+  isInsideRunTree,
+  runPaths,
+  taskRecordPath,
+  workerPaths,
+  type WorkerPaths,
+} from "../../src/run/paths.ts";
 import {
   initialWorkerState,
   readFence,
@@ -40,7 +47,7 @@ import { mergeLedger } from "../../src/run/ledger.ts";
 import { identityAlive, processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
 import { EXPORT_MARKER } from "../fixtures/export-marker.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, gateBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -1376,10 +1383,30 @@ describe("ISC-116: a deadline aborts the agent, then reports timed_out", () => {
  * below needs that same preamble, and three copies of it is three places for
  * the gate to be silently dropped from one.
  */
+/**
+ * The two polling gates this preamble waits on, named so a test's ceiling can
+ * be DERIVED from them via `gateBudget` rather than hand-picked beside them.
+ *
+ * They were bare literals here, which was fine while every caller hand-picked
+ * a literal too. The ISC-276 probe below drives the control socket and spawns
+ * no CLI at all, so `cliBudget` cannot express it (a spawn count it does not
+ * perform would be a lie encoded as arithmetic, exactly what `budget.ts`
+ * forbids) — and what that test actually spends is these two gates. Naming
+ * them is what turns "80_000, seems fine" into a derivation someone can read.
+ */
+const IDLE_GATE_MS = 20_000;
+const TRANSCRIPT_GATE_MS = 20_000;
+
 async function workerWithTranscript(
   scenario: string,
   tag: string,
-): Promise<{ root: string; runId: string; run: ReturnType<typeof runPaths>; pid: number }> {
+): Promise<{
+  root: string;
+  runId: string;
+  run: ReturnType<typeof runPaths>;
+  wp: WorkerPaths;
+  pid: number;
+}> {
   const root = await freshRoot();
   const runId = testRunId(tag);
   const { pid, pgid } = await processLauncher.launchDetached({
@@ -1394,7 +1421,7 @@ async function workerWithTranscript(
 
   const run = runPaths(runId, root);
   const wp = workerPaths(run, "eng-1");
-  expect(await waitForIdle(wp, pid)).toBe(true);
+  expect(await waitForIdle(wp, pid, IDLE_GATE_MS)).toBe(true);
 
   const reply = await controlCall(run, "eng-1", {
     cmd: "dispatch",
@@ -1407,10 +1434,10 @@ async function workerWithTranscript(
   const present = await waitFor(async () => {
     const s = await readWorkerState(wp);
     return s?.session_path != null && (await Bun.file(s.session_path).exists());
-  }, 20_000);
+  }, TRANSCRIPT_GATE_MS);
   expect(present).toBe(true);
 
-  return { root, runId, run, pid };
+  return { root, runId, run, wp, pid };
 }
 
 describe("export_html over the control socket (ISC-234)", () => {
@@ -1453,6 +1480,12 @@ describe("export_html over the control socket (ISC-234)", () => {
 
       // --- live: Pi renders its own session --------------------------------
       const liveOut = join(root, "live.html");
+      // ISC-276 must not close the criterion by breaking the feature. `root`
+      // is the RUNS root and the run directory is `<root>/<runId>`, so this
+      // destination is a sibling of the run tree rather than a member of it —
+      // i.e. the ordinary `--html ~/Desktop/foo.html` case, asserted as one
+      // rather than left to be inferred from two `join` calls.
+      expect(isInsideRunTree(run.root, liveOut)).toBe(false);
       const live = await cli(root, [
         "transcript", "--worker", "eng-1", "--run", runId, "--html", liveOut, "--json",
       ]);
@@ -1517,12 +1550,22 @@ describe("export_html over the control socket (ISC-234)", () => {
    * The fix aims Pi at a staging sibling and renames only on confirmed success,
    * so the loser of the race cannot reach the contested name at all.
    *
-   * ANTI-VACUITY. The wait is on the marker appearing SOMEWHERE beside the
-   * output, not on the staging file specifically. A test that waited for the
-   * staging path would assert the mechanism and pass trivially against a Pi
-   * that never rendered at all; waiting for the marker proves the late render
-   * really happened under BOTH the fixed and the unfixed code, and leaves the
-   * next line — where it landed — as the only thing in dispute.
+   * ANTI-VACUITY. The wait is on the marker appearing SOMEWHERE, not on one
+   * named staging path. A test that waited for a specific filename would
+   * assert the mechanism and pass trivially against a Pi that never rendered
+   * at all; waiting for the marker proves the late render really happened
+   * under BOTH the fixed and the unfixed code, and leaves the next line —
+   * where it landed — as the only thing in dispute.
+   *
+   * ISC-276 MOVED WHERE IT LANDS. The abandoned render used to appear beside
+   * the operator's file, because staging was a sibling of the path the caller
+   * asked for; it now appears in the worker's `exportsDir` inside the run
+   * tree. So the poll sweeps BOTH directories and the assertion afterwards is
+   * stronger than it was: not only did the late render fail to reach
+   * `outPath`, it never entered the operator's directory at all. Sweeping both
+   * rather than only the new one is deliberate — a search that looked solely
+   * where the fix puts the file could not notice a regression that put a
+   * second copy back beside the operator.
    */
   test(
     "a render that finishes after the supervisor gave up cannot overwrite the operator's file",
@@ -1550,16 +1593,26 @@ describe("export_html over the control socket (ISC-234)", () => {
       // Pi's render lands ~5s after the CLI already returned. Poll for it
       // rather than sleeping a guessed interval: on a loaded box the write is
       // later, never earlier, so a fixed sleep would be the flaky half.
-      const landed = await waitFor(async () => {
-        for (const name of await readdir(outDir)) {
-          const text = await Bun.file(join(outDir, name))
+      const markerIn = async (dir: string): Promise<boolean> => {
+        for (const name of await readdir(dir).catch(() => [] as string[])) {
+          const text = await Bun.file(join(dir, name))
             .text()
             .catch(() => "");
           if (text.includes(EXPORT_MARKER)) return true;
         }
         return false;
-      }, 30_000);
+      };
+      const landed = await waitFor(
+        async () => (await markerIn(ctx.wp.exportsDir)) || (await markerIn(outDir)),
+        30_000,
+      );
       expect(landed).toBe(true); // the abandoned render DID happen — not a no-op
+
+      // ISC-276: and it happened INSIDE the run tree. This is the half the
+      // sibling-staging design could not assert at all — there, the abandoned
+      // render was in the operator's directory by construction.
+      expect(await markerIn(ctx.wp.exportsDir)).toBe(true);
+      expect(await markerIn(outDir)).toBe(false);
 
       // THE assertion. Before the fix this file was the agent's document and
       // this line read `expect(received).not.toContain("pi-export-html-marker")`
@@ -1603,20 +1656,20 @@ describe("export_html over the control socket (ISC-234)", () => {
       const outDir = join(ctx.root, "export-stage");
       const outPath = join(outDir, "out.html");
 
-      const reply = await controlCall(
-        ctx.run,
-        "eng-1",
-        { cmd: "export_html", path: outPath },
-        { timeoutMs: 15_000 },
-      );
+      // No `path` is sent (ISC-276) — the verb no longer takes one, and the
+      // destination `outPath` above is now purely this test's own business,
+      // exactly as `--html` is the CLI's.
+      const reply = await controlCall(ctx.run, "eng-1", { cmd: "export_html" }, { timeoutMs: 15_000 });
       // A real success — not a refusal that would satisfy the assertions below
       // vacuously by never rendering anything.
       expect(reply["ok"]).toBe(true);
 
-      // The reply names a file, and it is NOT the one that was asked for.
+      // The reply names a file, and it is inside the RUN TREE rather than
+      // anywhere the caller could have influenced (ISC-276).
       const staged = reply["staged"];
       expect(typeof staged).toBe("string");
       expect(staged).not.toBe(outPath);
+      expect(isInsideRunTree(ctx.run.root, staged as string)).toBe(true);
 
       // THE assertion. Pi has finished, the supervisor has confirmed it, and
       // the operator's path still does not exist. MUTATION: move the rename
@@ -1687,6 +1740,144 @@ describe("export_html over the control socket (ISC-234)", () => {
     // supervisor budget this test exists to observe, plus launch and a turn.
     // Measured 8.5 s at load average 3.1-3.6 on a 14-core box.
     60_000,
+  );
+});
+
+/**
+ * ISC-276: a path accepted over the control socket cannot direct a worker's
+ * write outside a defined permitted set.
+ *
+ * THE PERMITTED SET IS `wp.exportsDir`, and the way the criterion is met is
+ * that the caller's string stops being a destination at all — the supervisor
+ * derives Pi's target from the run directory and a UUID, and REFUSES a request
+ * that carries `path`. So this block probes a verb that no longer has the
+ * parameter the criterion is about, which is the point: containment is a
+ * property of the construction rather than of a validator.
+ *
+ * WHY FOUR CASES AND NOT ONE. They fail for different reasons, and a single
+ * case cannot tell a real containment from an accident:
+ *
+ *   - an ABSOLUTE path outside the run tree — the plain shape, and the one a
+ *     root check catches;
+ *   - a bare RELATIVE traversal (`../../escape.html`) — resolved against the
+ *     agent's cwd rather than anything the supervisor computed, so a check
+ *     written against absolute paths never sees it;
+ *   - an ANCHORED traversal that starts inside the run tree and climbs out —
+ *     the shape a naive `startsWith(runRoot)` test ACCEPTS, because the string
+ *     genuinely does start with the run root;
+ *   - a path INSIDE the run tree — which every containment check above
+ *     accepts, and which this design refuses anyway, for the better reason
+ *     that the verb does not take a destination. That case is the one that
+ *     distinguishes "the string was validated" from "the string was never
+ *     consulted", and it is the assertion that would survive someone
+ *     replacing this design with an allowlist and believing it equivalent.
+ *
+ * BOTH HALVES ARE ASSERTED FOR EVERY CASE, and the filesystem half comes
+ * FIRST because it is the one that closes the criterion. A refusal that still
+ * wrote the file closes nothing, so the reply assertions are deliberately not
+ * allowed to be the first thing that goes red.
+ *
+ * ANTI-VACUITY, at the end: a well-formed export in the same test, against the
+ * same live worker, still succeeds and still produces the agent's bytes. Four
+ * refusals prove nothing on their own — an `export_html` that was simply
+ * broken would satisfy every assertion above it.
+ */
+describe("export_html path containment (ISC-276)", () => {
+  /** Entries of `dir` beginning with `prefix`; `[]` for a directory that does not exist. */
+  async function entriesStartingWith(dir: string, prefix: string): Promise<string[]> {
+    const names = await readdir(dir).catch(() => [] as string[]);
+    return names.filter((n) => n.startsWith(prefix)).sort();
+  }
+
+  test(
+    "a path sent over the control socket cannot direct the worker's write anywhere the path names",
+    async () => {
+      const ctx = await workerWithTranscript("happy.json", "exportpwn");
+
+      // A directory nothing else in this process writes to, so "empty
+      // afterwards" is an EXACT statement rather than a filter over whatever
+      // else happens to be in a shared /tmp. This is the `/tmp/pwned-<uuid>`
+      // of the criterion's prose with its parent made enumerable.
+      const hostileDir = await mkdtemp(join(tmpdir(), "pifleet-isc276-"));
+      cleanups.push(() => rm(hostileDir, { recursive: true, force: true }));
+
+      // 1. Absolute, outside the run tree.
+      const absolute = join(hostileDir, "abs-pwned.html");
+
+      // 2. The criterion's literal relative traversal. Resolved against the
+      //    AGENT's cwd, which is neither the run directory nor anything the
+      //    supervisor computes — the reason a check over absolute paths alone
+      //    would never see this shape.
+      const bareTraversal = "../../escape.html";
+      // Where it lands if the agent inherits this process's cwd, which is the
+      // realistic case: the supervisor is launched from here and Pi from it.
+      const bareTraversalDir = resolve(process.cwd(), "..", "..");
+
+      // 3. Anchored traversal: starts INSIDE the run tree and climbs out.
+      //    Built with `relative` and joined by hand so the `..` segments reach
+      //    the supervisor UN-NORMALIZED — a `join` here would resolve them in
+      //    the test and probe a different string than the one being claimed.
+      const anchoredTarget = join(hostileDir, "traversal-pwned.html");
+      const anchored = `${ctx.wp.exportsDir}/${relative(ctx.wp.exportsDir, anchoredTarget)}`;
+
+      // 4. INSIDE the run tree. Every containment check accepts this one.
+      const inside = join(ctx.run.root, "inside-pwned.html");
+      expect(isInsideRunTree(ctx.run.root, inside)).toBe(true);
+
+      const replies: Array<Record<string, unknown>> = [];
+      for (const path of [absolute, bareTraversal, anchored, inside]) {
+        replies.push(
+          await controlCall(ctx.run, "eng-1", { cmd: "export_html", path }, { timeoutMs: 15_000 }),
+        );
+      }
+
+      // --- THE assertion: nothing was written anywhere any of them named ---
+      //
+      // MUTATION (restore the caller's path as the staging destination — i.e.
+      // `const staging = `${path}.pi-export-${randomUUID()}.tmp`` and the
+      // non-empty-string check that used to precede it): every line in this
+      // block goes red, because Pi renders a SIBLING of each attacker-chosen
+      // path, which is an attacker-chosen path. The first reads
+      //   expect(["abs-pwned.html.pi-export-<uuid>.tmp",
+      //           "traversal-pwned.html.pi-export-<uuid>.tmp"]).toEqual([])
+      expect((await readdir(hostileDir)).sort()).toEqual([]);
+      expect(await entriesStartingWith(bareTraversalDir, "escape.html")).toEqual([]);
+      expect(await entriesStartingWith(ctx.run.root, "inside-pwned.html")).toEqual([]);
+      for (const path of [absolute, anchoredTarget, inside, resolve(bareTraversalDir, "escape.html")]) {
+        expect(await Bun.file(path).exists()).toBe(false);
+      }
+
+      // --- and the reply said so, rather than failing silently -------------
+      for (const reply of replies) {
+        expect(reply["ok"]).toBe(false);
+        // Named by criterion, so a future refusal for an UNRELATED reason —
+        // a wedged agent, a missing transcript — cannot be mistaken for this
+        // control still being in place.
+        expect(String(reply["error"])).toContain("ISC-276");
+        // The refusal carries no staging path: there is nothing to claim,
+        // which is what stops a client from renaming a file into existence.
+        expect(reply["staged"]).toBeUndefined();
+      }
+
+      // --- ANTI-VACUITY: the verb still works, on this same live worker ----
+      const good = await controlCall(ctx.run, "eng-1", { cmd: "export_html" }, { timeoutMs: 15_000 });
+      expect(good["ok"]).toBe(true);
+      const staged = good["staged"];
+      expect(typeof staged).toBe("string");
+      // Inside the permitted set, and specifically in the directory `paths.ts`
+      // names — not merely somewhere under the run root.
+      expect(dirname(staged as string)).toBe(ctx.wp.exportsDir);
+      expect(isInsideRunTree(ctx.run.root, staged as string)).toBe(true);
+      // The AGENT's bytes. Without this the four refusals above would pass
+      // just as well against an `export_html` that never rendered anything.
+      expect(await Bun.file(staged as string).text()).toContain(EXPORT_MARKER);
+    },
+    // ISC-266/ISC-273: derived, and `cliBudget` cannot express this test —
+    // it performs ZERO CLI spawns, driving the control socket directly, so any
+    // spawn count would be a fiction. What it spends is the two polling gates
+    // in `workerWithTranscript`; the five control calls are RPCs that return
+    // as fast as the supervisor answers and are not waited on in a loop.
+    gateBudget([IDLE_GATE_MS, TRANSCRIPT_GATE_MS]),
   );
 });
 

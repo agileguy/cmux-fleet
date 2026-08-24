@@ -20,7 +20,7 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { bindMountSources } from "../container/docker-argv.ts";
 import { EXIT } from "../contracts.ts";
 
@@ -272,6 +272,42 @@ export interface WorkerPaths {
    * `supervisor/index.ts`.
    */
   launchJson: string;
+  /**
+   * Where a live worker's `export_html` renders land before the CLI claims one
+   * (ISC-276).
+   *
+   * **This directory IS the permitted set.** The criterion is that a path
+   * accepted over the control socket cannot direct a worker's write outside a
+   * defined permitted set, and the way it is met is that the caller's string
+   * stops being a destination at all: the supervisor derives Pi's target from
+   * `exportsDir` and a fresh UUID, so containment is a property of the
+   * CONSTRUCTION rather than of a validator that has to be right about every
+   * traversal, symlink and encoding a caller might spell. There is no input to
+   * get wrong because there is no input.
+   *
+   * WHY IT IS NAMED HERE rather than joined at the one call site that writes
+   * it. Two subsystems now meet on it — `supervisor/index.ts` renders into it,
+   * and `test/integration/supervisor.test.ts` has to look INSIDE it to prove
+   * an abandoned render landed here and not beside the operator's file. A path
+   * a probe computes independently of the code it probes is the divergence
+   * this module's first rule exists to prevent, and it fails in the direction
+   * that matters least visibly: the probe would look in the wrong empty
+   * directory and pass.
+   *
+   * A control-plane directory like `auditDir` and `budgetJson`, and it holds
+   * up for the same reason theirs do — an ABSENCE, stated as one rather than
+   * dressed up as a guard. No mount spec in `container/mounts.ts` names the
+   * worker directory or anything under it except the four §5.5 container
+   * inputs, which are file mounts by exact path. So a containerised worker
+   * cannot read its own staged exports, let alone another worker's, and
+   * `assertNoRunDirMount` refuses any mount that IS or CONTAINS the run dir.
+   * That is a property of today's mount set; `test/unit/render.test.ts`
+   * re-checks it against the argv `renderWorker` actually produces.
+   *
+   * Absence is normal and means only that this worker has never been asked to
+   * export. `sweepStagedExport` in the supervisor reaps what it leaves behind.
+   */
+  exportsDir: string;
 }
 
 export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
@@ -292,7 +328,50 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     cloudAllow: join(dir, "cloud-allow"),
     kubeconfig: join(dir, "kubeconfig"),
     launchJson: join(dir, "launch.json"),
+    exportsDir: join(dir, "exports"),
   };
+}
+
+/**
+ * Is `candidate` a path INSIDE the run tree rooted at `runRoot`? (ISC-276)
+ *
+ * The second half of the export containment, and deliberately the SMALLER
+ * half. What actually keeps Pi's writes in the run directory is that the
+ * supervisor builds its target from `exportsDir` and a UUID and never from a
+ * caller's string — this predicate cannot be the guarantee, because a
+ * predicate over a hostile string is exactly the thing that has to be right
+ * about `..`, about a trailing slash, about NFC/NFD, about a symlinked
+ * component, and about whatever the next decade's filesystem adds. Getting a
+ * path validator wrong is the normal outcome; building the path yourself is
+ * not.
+ *
+ * So this exists to FAIL CLOSED on a derivation that stopped being safe — a
+ * future edit that reintroduces caller influence into the staging path, which
+ * is precisely how ISC-276 arose the first time (a `path` validated as a
+ * non-empty string and then interpolated). It is asserted on every export, on
+ * a path that by construction always passes, so the day it starts failing is
+ * the day something upstream changed and the export refuses instead of
+ * writing.
+ *
+ * LEXICAL, NOT `realpath`. Both arguments are `resolve`d and compared as
+ * prefixes; no symlink is followed. That is honest about what it can and
+ * cannot see: because `candidate` is derived from `runRoot` itself, the two
+ * share their entire prefix and a lexical answer is EXACT for the intended
+ * use. It would not be exact for a directory inside the run tree that had been
+ * replaced by a symlink pointing out — and that case is out of scope here for
+ * the same reason `auditDir`'s comment gives: reaching it requires write
+ * access to a directory no mount exposes. A `realpath` check would also be
+ * TOCTOU against exactly the adversary who could arrange it, so it would buy
+ * the appearance of a guarantee rather than one.
+ */
+export function isInsideRunTree(runRoot: string, candidate: string): boolean {
+  const root = resolve(runRoot);
+  const rel = relative(root, resolve(candidate));
+  // `""` is the root itself, which is not INSIDE it. A leading `..` segment
+  // escapes; an absolute result means the two share no root at all (different
+  // drives on Windows, and the shape `relative` uses when it cannot express
+  // the hop).
+  return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
 }
 
 /**

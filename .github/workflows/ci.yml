@@ -218,6 +218,35 @@ jobs:
                                  if (!RELAY_IMAGE) { console.error("RELAY_IMAGE is empty"); process.exit(1); }
                                  console.log(RELAY_IMAGE);')"
           docker pull "$relay_image"
+      - name: Pull the bun image the ISC-126 second-uid probe runs in
+        # `control-socket-uid.test.ts` runs BOTH ends of the control socket
+        # inside ONE container — the server as uid 0, the probing client as uid
+        # 12345 — rather than bind-mounting the socket and connecting from a
+        # container. That shape cannot work on macOS at all: connect(2) to a
+        # bind-mounted unix socket returns ENOTSUP even from a path the VM
+        # shares, identically for a matching and a differing uid, so it could
+        # never be observed green anywhere but here. The file's header carries
+        # the measurement.
+        #
+        # The server half executes the real `serveJsonlSocket`, so the image
+        # needs `bun`. The worker image only carries one under `--toolchain
+        # node`, whose `npm install -g bun` layer cannot be built on the
+        # maintainer's proxied network — hence a separate, digest-pinned image
+        # rather than a reuse.
+        #
+        # Pulled in a step of its own for the same reason as the relay image
+        # above: a registry failure should read as a registry failure and not as
+        # a mysteriously slow security probe inside a 60 s budget.
+        #
+        # The digest is read FROM THE SOURCE rather than copied here, so a
+        # rename of the export fails this step instead of silently pulling
+        # nothing.
+        run: |
+          set -eux
+          probe_image="$(bun -e 'import { PROBE_BUN_IMAGE } from "./test/support/probe-image.ts";
+                                 if (!PROBE_BUN_IMAGE) { console.error("PROBE_BUN_IMAGE is empty"); process.exit(1); }
+                                 console.log(PROBE_BUN_IMAGE);')"
+          docker pull "$probe_image"
       - name: Write a synthetic ADC credential for the file-mode mount-shape probe
         # adc.test.ts's "file mode mounts the one ADC file, never its parent
         # directory" test is `test.skipIf(!ADC_FILE_PRESENT)`, where
@@ -269,7 +298,7 @@ jobs:
         env:
           PIFLEET_DOCKER: "1"
           LABEL: container
-          # All nine PIFLEET_DOCKER-gated files, run ONCE by this step, which
+          # All ten PIFLEET_DOCKER-gated files, run ONCE by this step, which
           # both prints their output and grades it. This used to be two
           # separate steps — a "probes" step that ran these files for
           # their own sake, and a "guard" step below it that ran the SAME
@@ -418,18 +447,18 @@ jobs:
           # probe belongs in this job, or that probe has no automated reader
           # and becomes the self-skipping test this guard exists to catch.
           #
-          # DERIVED by the hand method, NOT by adding 1 to 90. Re-measured
-          # 2026-08-23 on bun 1.3.11, gate UNSET, after ISC-265's drift probe
-          # landed in relay.test.ts:
-          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight}.test.ts
-          #     -> 6 pass, 85 skip, 0 fail. Ran 91 tests across 9 files.
-          # The 2026-08-21 derivation this replaces read 90 with 84 skips, so
-          # the delta is one test and one skip — the shape a single added
-          # Docker-gated case must have, and why the re-derivation is evidence
+          # DERIVED by the hand method, NOT by adding 3 to 91. Re-measured
+          # 2026-08-24 on bun 1.3.11, gate UNSET, after ISC-126's second-uid
+          # probe landed in control-socket-uid.test.ts:
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid}.test.ts
+          #     -> 6 pass, 88 skip, 0 fail. Ran 94 tests across 10 files.
+          # The 2026-08-23 derivation this replaces read 91 with 85 skips, so
+          # the delta is three tests and three skips — the shape three added
+          # Docker-gated cases must have, and why the re-derivation is evidence
           # rather than ceremony. Worth noting what the PASS count does NOT do:
-          # it stays at 6, because the added probe is daemon-gated and so
-          # contributes a skip here and a pass on the runner.
-          TOTAL_EXPECTED: "91"
+          # it stays at 6, because all three added probes are Docker-gated and
+          # so contribute skips here and passes on the runner.
+          TOTAL_EXPECTED: "94"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -532,7 +561,8 @@ jobs:
               test/integration/probe-in-network.test.ts \
               test/integration/container-env.test.ts \
               test/integration/container-launch.test.ts \
-              test/integration/doctor-preflight.test.ts
+              test/integration/doctor-preflight.test.ts \
+              test/integration/control-socket-uid.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every

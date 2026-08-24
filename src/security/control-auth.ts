@@ -1,12 +1,23 @@
 /**
  * Control-socket authentication (SRD §12.7).
  *
- * The sockets are filesystem-permission protected, which is sufficient against
- * another USER and insufficient against another PROCESS of the same user —
- * including a worker that escaped its container, the precise adversary Phase 3
- * exists to bound. Reaching the socket must not be the same thing as being
- * allowed to command it: every request must carry a per-run secret the caller
- * could only have learned by reading a 0600 file in the run directory.
+ * Another USER is handled BELOW this layer, and as of ISC-126 by code rather
+ * than by luck. This header used to say the sockets were "filesystem-permission
+ * protected, which is sufficient against another USER" — and that was a claim
+ * with nothing behind it. The permissions were whatever the operator's umask
+ * happened to yield, so the protection inverted at `umask 000` and this token
+ * silently became the FIRST line rather than the second. `run/registry.ts` now
+ * chmods the socket and its directory to 0700 explicitly, and refuses at accept
+ * time any peer whose uid is not the one it serves (`security/peer-uid.ts`), so
+ * the sentence above is finally true of the code instead of the environment.
+ *
+ * What that gate does NOT cover is another PROCESS of the same user — including
+ * a worker that escaped its container, the precise adversary Phase 3 exists to
+ * bound. Same uid, so the kernel's answer is "yes, that is us". Reaching the
+ * socket must not be the same thing as being allowed to command it: every
+ * request must carry a per-run secret the caller could only have learned by
+ * reading a 0600 file in the run directory. That is this module, and it remains
+ * the second line — now with a first line that actually exists.
  *
  * Three provenance rules, enforced here and nowhere else:
  *
