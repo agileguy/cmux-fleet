@@ -160,13 +160,20 @@ afterAll(async () => {
   // instruction is to re-run the command rather than to add one. 45 is that
   // command's answer on this revision, not 44 + 1.
   //
+  // RE-COUNTED at 47 when ISC-189's build-identity test landed, by running
+  // `grep -c 'await makeRig('` on this revision rather than by adding 1 to 45.
+  // The command's answer is 47, not the 46 an increment would have written —
+  // so the number had ALREADY drifted by one again before this block was
+  // touched, which is the third time this note has recorded that and the whole
+  // reason the instruction is a command rather than an increment.
+  //
   // Charging every `down` the expensive per-spawn rate is deliberately
   // conservative — rigs whose test never reached `up` contribute zero spawns —
   // because the failure mode here is not a slow suite, it is the one this
   // hook's own docstring above exists to prevent: a timed-out `afterAll`
   // truncates the loop mid-way and leaks detached supervisors onto the
   // developer's machine, which this project has already paid for.
-}, cliBudget(45));
+}, cliBudget(47));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -201,6 +208,14 @@ afterAll(async () => {
  *     one, with nothing else differing between them. A shim that failed every
  *     check would make the refusal test pass for the wrong reason — an `up`
  *     that merely issued a malformed docker command would look identical.
+ *  5. `image inspect --format {{json .Config.Labels}}` — what
+ *     `imageIdentityDrift` reads — is answered from THE REQUESTED TAG, so a
+ *     shimmed image agrees with the name it is filed under, which is what a
+ *     healthy store looks like. `PIFLEET_SHIM_CONFIG_HASH` is the second and
+ *     last degree of freedom: set it and the store holds the one shape neither
+ *     of the other two checks can see — an image that is present, that passes
+ *     every behavioural check `verifyImage` makes, and whose own build labels
+ *     say it came from a different build context than its tag names.
  *
  * WHAT THE VERIFY STAND-IN DOES NOT PROVE, said plainly because this file's
  * probe branch already had to say it once: there is no daemon here and no
@@ -444,6 +459,30 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       // image. A healthy answer, so the Pi version stays the only variable.
       '      *"json .Config.Entrypoint"*)',
       `        printf '["/usr/bin/tini","--","/usr/local/bin/entrypoint.sh"]\\n'`,
+      "        ;;",
+      // ---------------------------------------------------------------
+      // The build labels `imageIdentityDrift` reads back (ISC-189).
+      //
+      // DERIVED FROM THE REQUESTED TAG, so the default answer is the one a
+      // healthy store gives: the image agrees with the name it is filed
+      // under. A hardcoded fixture hash here would read as a mismatched
+      // image the moment anyone edits `docker/Dockerfile` — the tag moves
+      // with its content by design (ISC-160) — and the gate's refusal would
+      // then be about this fixture rather than about the product.
+      //
+      // `PIFLEET_SHIM_CONFIG_HASH` is the one degree of freedom, the same
+      // discipline `PIFLEET_SHIM_PI_VERSION` follows: exactly one knob
+      // moves, so a refusal can only have come from what the test moved.
+      // Set it and the store holds an image whose recorded build identity is
+      // not its tag's — the retagged-stale-image shape, and the one a real
+      // `docker tag` produces in one command.
+      '      *"json .Config.Labels"*)',
+      '        ref="${3#*:}"',
+      '        hash="${ref##*-}"',
+      '        rest="${ref%-*}"',
+      '        tc="${rest##*-}"',
+      '        pi="${rest%-*}"',
+      `        printf '{"pifleet.pi-version":"%s","pifleet.toolchain":"%s","pifleet.config-hash":"%s"}\\n' "$pi" "$tc" "\${PIFLEET_SHIM_CONFIG_HASH:-$hash}"`,
       "        ;;",
       "      *)",
       // What `imagePresent` reads. Non-empty on purpose: an exit 0 with
@@ -758,6 +797,18 @@ interface FleetOptions {
    */
   shimPiVersion?: string;
   /**
+   * `PIFLEET_SHIM_CONFIG_HASH`: the `pifleet.config-hash` LABEL the shimmed
+   * image carries, overriding the one derived from the tag it is filed under.
+   *
+   * The second degree of freedom in the store stand-in, and the one ISC-189's
+   * harder half needs. Left unset, the shimmed image agrees with its own tag
+   * and `imageIdentityDrift` finds nothing. Set it to anything else and the
+   * store holds the shape a `docker tag` of a stale build produces: present,
+   * behaviourally perfect — the shim answers every `verifyImage` probe the way
+   * a healthy image does — and NOT the bytes the config asked for.
+   */
+  shimConfigHash?: string;
+  /**
    * `docker.network`. Defaults to the shared internal `NETWORK`.
    *
    * A name ending `-uplink` is answered NON-internal by the shim, which
@@ -975,6 +1026,9 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
       // which is the answer the ISC-32 gate exists to refuse.
       ...(opts.imagePresent === true ? { PIFLEET_SHIM_IMAGE: "1" } : {}),
       ...(opts.shimPiVersion === undefined ? {} : { PIFLEET_SHIM_PI_VERSION: opts.shimPiVersion }),
+      ...(opts.shimConfigHash === undefined
+        ? {}
+        : { PIFLEET_SHIM_CONFIG_HASH: opts.shimConfigHash }),
       /**
        * `verifyImage`'s `/workspace` write-through probe creates a scratch
        * directory under `daemonScratchRoot()`, which defaults to the
@@ -3079,6 +3133,71 @@ describe("up refuses to launch against an image it does not have (ISC-32, ISC-18
       const docker = await readDockerCalls(rig);
       expect(docker.some((c) => c.startsWith("image inspect pifleet/pi-worker:"))).toBe(true);
       expect(docker.some((c) => c.startsWith("run ") && c.includes("--version"))).toBe(true);
+      expect(docker.filter((c) => c.startsWith("network "))).toEqual([]);
+      expect(await gitOk(rig.repo, "remote")).toBe("");
+      const runIds = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
+      expect(runIds).toHaveLength(1);
+      expect(await readdir(runPaths(runIds[0]!, rig.root).workersDir)).toEqual([]);
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "an image that passes every verify check is STILL refused when its recorded build identity is not its tag's (ISC-189)",
+    async () => {
+      /**
+       * The case the other two cannot reach, and the reason ISC-189 is not a
+       * duplicate of ISC-32.
+       *
+       * `shimPiVersion` is the PIN, not a stale string — so every check
+       * `verifyImage` makes would pass: the Pi version matches, uid is 10001,
+       * the root refuses a write, tini is PID 1, `/workspace` round-trips.
+       * The ONE thing wrong is the image's own account of itself: its
+       * `pifleet.config-hash` label says it was built from a different build
+       * context than the tag it is filed under names. That is what `docker
+       * tag <stale> <current>` produces in one command, and it is the shape
+       * `Docs/SRD-COMPLETION.md` calls invisible: presence says yes,
+       * behaviour says yes, and the fleet runs on bytes the config never
+       * described.
+       */
+      const rig = await makeRig({
+        containerPath: true,
+        imagePresent: true,
+        shimPiVersion: PINNED_PI,
+        shimConfigHash: "0000deadbeef",
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+      expect(up.stderr).toContain("'engineer'");
+      expect(up.stderr).toContain("NOT built from what that tag names");
+      // The label that disagreed is NAMED, with both values, so an operator
+      // can tell a retagged image from a differently-built one.
+      expect(up.stderr).toContain("pifleet.config-hash");
+      expect(up.stderr).toContain("0000deadbeef");
+      expect(up.stderr).toContain("pifleet image build --toolchain");
+      // All three diagnoses stay distinct. A gate that collapsed them would
+      // send an operator to rebuild when the image is merely missing, or to
+      // hunt a broken image when it is simply the wrong one.
+      expect(up.stderr).not.toContain("NOT present");
+      expect(up.stderr).not.toContain("FAILS verification");
+
+      // AND IT COST NOTHING TO FIND OUT. This refusal is two `docker image
+      // inspect` calls; not one container was started, where the verify
+      // refusal above starts several. That is the ordering claim for the new
+      // check specifically — it runs before verification, not after it.
+      const docker = await readDockerCalls(rig);
+      expect(docker.some((c) => c.includes("json .Config.Labels"))).toBe(true);
+      expect(docker.filter((c) => c.startsWith("run "))).toEqual([]);
       expect(docker.filter((c) => c.startsWith("network "))).toEqual([]);
       expect(await gitOk(rig.repo, "remote")).toBe("");
       const runIds = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
