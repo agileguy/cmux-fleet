@@ -75,11 +75,36 @@ if (!/^[a-z0-9.-]+$/i.test(HOST)) {
 }
 
 const PORT = Number(process.env["OMLX_SHIM_PORT"] ?? "8000");
+
+/**
+ * Which address to listen on. Loopback by DEFAULT, and the default is the safe
+ * one on purpose — but it is not sufficient for every caller, and the
+ * difference is invisible until a container cannot reach it.
+ *
+ * Two kinds of client dial this shim and they arrive from different places:
+ *
+ *   - The model probes in `test/integration/model-probe.test.ts` run ON THE
+ *     HOST and dial `http://localhost:8000/v1`. Loopback serves them.
+ *   - ISC-290's whole-chain test runs the fleet, whose egress relay dials from
+ *     INSIDE a container via `--add-host host.docker.internal:host-gateway`.
+ *     That resolves to the bridge gateway address, NOT 127.0.0.1, so a
+ *     loopback-only listener is simply unreachable — the relay reports the
+ *     upstream as down and the chain fails for a reason that has nothing to do
+ *     with the fleet.
+ *
+ * So a job that runs the chain must set `OMLX_SHIM_BIND=0.0.0.0`. That is a
+ * deliberate widening and it is defensible HERE and only here: an ephemeral CI
+ * runner, and a shim that injects NO credential of its own — a client that
+ * reaches it still needs the API key the upstream demands, so an open listener
+ * proxies to an endpoint that is already public rather than lending anyone the
+ * operator's key. Do not copy this default onto a workstation.
+ */
+const BIND = process.env["OMLX_SHIM_BIND"] ?? "127.0.0.1";
 const UPSTREAM = `https://${HOST}`;
 
 const server = Bun.serve({
   port: PORT,
-  hostname: "127.0.0.1",
+  hostname: BIND,
   // Bun's ceiling. A cold model load on the far side measured 19.4s for a 4-bit
   // MoE and the allowlist includes an 8-bit 35B, so the generous end of this is
   // the load, not the tokens.
