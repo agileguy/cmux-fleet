@@ -216,6 +216,23 @@ export const TimersSchema = z
  */
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = TimersSchema.parse({}).heartbeat_interval * 1000;
 
+/**
+ * The bound a supervisor answers an `extension_ui_request` within when no
+ * config is reachable, in ms (SRD §12.3 guard 2 — ISC-111, ISC-112).
+ *
+ * Derived from the schema for the same reason as the heartbeat above, and the
+ * derivation matters more here than there: ISC-111 is phrased as a literal
+ * "within 5s", `ui_request_timeout` prefaults to `5s`, and a restated
+ * `5_000` would let the criterion and the code that satisfies it drift apart
+ * without either one becoming wrong on its own.
+ *
+ * `ui_request_timeout` was the schema's longest-standing key with no reader —
+ * parsed here since the config landed and consulted by nothing, in the same
+ * shape `max_concurrent` and `branch_prefix` were in — which is precisely why
+ * ISC-111 stayed open with a "within 5s" clause that had no timer behind it.
+ */
+export const DEFAULT_UI_REQUEST_TIMEOUT_MS = TimersSchema.parse({}).ui_request_timeout * 1000;
+
 export const RunSchema = z
   .object({
     root: shortStr.default("~/.pifleet/runs"),
