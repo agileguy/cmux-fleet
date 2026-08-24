@@ -1264,7 +1264,7 @@ export function register(program: Command): void {
           surface_ref: pane.id,
           window_ref: null,
         });
-        const { pid, pgid } = await processLauncher.launchDetached({
+        const { pid, pgid, started } = await processLauncher.launchDetached({
           runId,
           runDir: run.root,
           workerId,
@@ -1286,7 +1286,18 @@ export function register(program: Command): void {
           logPath: wp.supervisorLog,
         });
         launched.push({ id: workerId, pid, pgid });
-        identities.set(workerId, { pid, started: (await processStartTime(pid)) ?? "" });
+        /*
+         * THE LAUNCHER'S RECORD, not a read this command performs (ISC-191,
+         * ISC-272). This line used to be `started: (await
+         * processStartTime(pid)) ?? ""` — a `ps` against a pid whose child
+         * handle this scope does not hold, so nothing here could show the
+         * number still named the supervisor rather than whatever the kernel
+         * reissued it to. `registry.ts` called this capture site "weaker than
+         * the other two" and expected the cost to be the `""` sentinel; the
+         * actual cost is a stranger's `(pid, started)` recorded as this run's,
+         * which every later guard then confirms. See `launchDetached`.
+         */
+        identities.set(workerId, { pid, started });
         await ledger.append("supervisor_launched", {
           worker: workerId,
           detail: { pid, pgid },

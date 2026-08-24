@@ -62,7 +62,7 @@ import { LedgerWriter } from "../run/ledger.ts";
 import { worktreeContentHash } from "../run/treehash.ts";
 import { processStartTime, registryCall, serveJsonlSocket } from "../run/registry.ts";
 import { ensureControlAuth } from "../security/control-auth.ts";
-import { pgidOf } from "./launch.ts";
+import { processGroupId } from "../safety/procgroup.ts";
 import { NO_TOOL_CALLS_REASON, ProseTurnDetector } from "./prose-detector.ts";
 import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
 
@@ -189,8 +189,21 @@ async function main(): Promise<void> {
    * `entry.pgid > 0 ? entry.pgid : null` to "no group", and `down` reports
    * `group_unrecorded` and keeps the checkout rather than signalling. Nothing
    * on this path fabricates a group it did not measure.
+   *
+   * READ THROUGH `processGroupId`, which is the same function `down`'s
+   * `confirmGroup` uses to vouch for what this line writes. It was `pgidOf`, a
+   * second `ps -o pgid=` implementation in `launch.ts` that ignored stderr and
+   * never looked at the exit status — so a `ps` killed by memory pressure and
+   * a `ps` that printed a group were both "a number or null" to the writer,
+   * while the reader had already been fixed to keep those apart. `.catch` maps
+   * a refused read to the SAME `0` a `null` produces: this process cannot act
+   * on the distinction, it can only record that it did not measure.
+   *
+   * `process.pid`, not a pid handed in — so unlike `launchDetached` there is no
+   * reissue window to close here. A process asking the OS about itself cannot
+   * be told about a stranger.
    */
-  const pgid = (await pgidOf(process.pid)) ?? 0;
+  const pgid = (await processGroupId(process.pid).catch(() => null)) ?? 0;
   const started = (await processStartTime(process.pid)) ?? "";
 
   // Serialize events.jsonl appends so two async writes cannot interleave.
