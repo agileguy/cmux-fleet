@@ -219,18 +219,19 @@ whose absence silently weakens everything else).
 | **A — Decide** | Three recorded answers in `ISA.md` `## Decisions`, each naming the chosen arm and the criteria it routes | — (gates 243, 264, 268) | — | Each of the three criteria carries a `## Decisions` entry naming its arm; no arm is "revisit later" |
 | **B — Suite guards** | Five properties over the suite, each with a guard that fails the suite when violated | 254, 270, 273, 274, 278 | A | Each guard **mutation-proved**: introduce the violation, the named test fails |
 | **C — Proof plane** | Self-hosted Apple-silicon runner + the bridge-gateway containment its probes expose | 22, 41, 47, 48, 50, 51, 57, 258, 259, 262 | B | Every listed probe **executes** (not skips) on the runner, and a container on the deny-all bridge cannot reach `172.18.0.1:22` |
-| **D — Accounting and stall** | Budget on the dispatch path with a persisted `budget.json`; production adapters for the stall policy | 110, 115, 117, 193, 281, 282 | B | A run whose reported cost is 0 throughout halts on `tokens_ceiling` and exits 5; a wedged agent is killed by production code |
+| **D — Accounting and stall** | Budget on the dispatch path with a persisted `budget.json`; production adapters for the stall policy; a fleet-wide no-progress ceiling DERIVED from the task list rather than asserted beside it | 110, 115, 117, 193, 281, 282, 293, 294 | B | A run whose reported cost is 0 throughout halts on `tokens_ceiling` and exits 5; a wedged agent is killed by production code |
 | **E — Supervisor control seam** | `extension_ui_request` handler with a real `ui_request_timeout` timer; control-socket path allowlist and peer-uid check; runtime `no_tool_calls` detector | 108, 111, 112, 113, 126, 276 | B | An `editor` request is answered within `ui_request_timeout` and the turn continues; a foreign-uid connect is refused by code, not by umask |
 | **F — Launch preflight and identity** | `up` preflight (image present + verifies, backend honored, mount sources shared, probe target host-reachable); launch-time `(pid, started, pgid)` recorded and used at every rung | 32, 61, 189, 191, 271, 272, 291, 292 | B | `up` refuses each seeded precondition failure with a named exit code; `down`'s ladder reads no identity off the pid |
 | **G — Durable formats** | `schema` discriminator on ledger, state and registry records, with a pinned read policy for older versions | 157, 192 | B | A record stamped `v0` is read under the policy; neither `StateReadError` nor a bare `ZodError` escapes |
 | **H — Evidence outside the container** | Host-side verbgate ledger collector; escape-attempt detector and report; quiesce/harvest tree hashing; fd-based outbox scan | 125, 154, 172, 246 | B | A worker truncating its own ledger changes nothing collected; a seeded escape is reported by name |
 | **I — Containerized acceptance** | Daemon-visibility sentinel, then acceptance in a fresh container from the same image, then the resolution-surface decision from A | 233, 243, 277 | A, F | The sentinel fails loudly on an unshared path; acceptance runs with `docker` as argv[0] |
 | **J — Egress and identity completeness** | Google CONNECT/SNI path, relay config-drift detection, the alias and `adc_mode: file` arms from A, `TokenRefresher` on the supervisor lifecycle | 248, 263, 264, 265, 268 | A, C | A `cloud_access` worker reaches `*.googleapis.com`; changing `relay_upstream` takes effect with no manual `docker rm -f` |
-| **K — End to end** | The full `up` → container → dispatch → settle → harvest chain, and the three proof-strength items that need a real run | 74, 119, 141, 147, 290 | C, D, E, F | One command produces one real Pi turn in a real container, harvested; a hostile repo changes nothing about it |
+| **K — End to end** | The full `up` → container → dispatch → settle → harvest chain, and the three proof-strength items that need a real run | 74, 119, 141, 147, 290 | C, D, E, F, **ISC-265 (from J)** | One command produces one real Pi turn in a real container, harvested; a hostile repo changes nothing about it |
 
 **Serialization:** A → B → C. **Parallel after B:** D, E, F, G, H may proceed concurrently —
 they touch disjoint seams. **I** waits on F (ISC-292's mount check is ISC-277's precondition).
-**J** waits on A and C. **K** waits on C, D, E, F.
+**J** waits on A and C. **K** waits on C, D, E, F — **and on ISC-265, which sits in J.** That one
+cross-phase edge was added 2026-08-23 after the first end-to-end run measured it (§5).
 
 **Effort, in PR-sized units** (one PR = one reviewable change closing one to three criteria):
 
@@ -248,10 +249,13 @@ non-code cost in the plan and is called out again in §6.C.
 ```
    A ──► B ──► C ─────────────────────────┐
                │                          ▼
-               └──► F ── ISC-291 ────►  K ── ISC-290
+               ├──► F ── ISC-291 ────►  K ── ISC-290
+               │                          ▲
+               └──► J ── ISC-265 ─────────┘   (edge added 2026-08-23, see §5.1)
 ```
 
-**To `ISC-290` specifically, the path is two code items:**
+**To `ISC-290` specifically, the path was CLAIMED to be two code items** — §5.1 records the run
+that refuted this and names the two further items it found:
 
 1. **ISC-291** — the host-side native-tool-call probe must dial a host-reachable endpoint.
    `llm.base_url`'s host is pinned to `host.docker.internal` by design (it is what a *worker*
@@ -268,6 +272,41 @@ Everything else `ISC-290` needs was completed by the container launcher (ISC-286
 **This is the plan's most actionable claim and the one most worth falsifying first.** If a
 run still fails after ISC-291 and the config change, the failure is new information and every
 later phase should be re-ordered around it.
+
+---
+
+### 5.1 The run happened, and the two-item claim above is REFUTED (2026-08-23)
+
+The chain ran: `up` cut a worktree, created the relay, launched a container and started a
+supervisor; `dispatch` put a real task on it; a real Pi turn executed in that container against
+the LAN oMLX and produced a correct edit; the supervisor settled, the harvester ran, and
+adjudication returned a reasoned verdict. **What the two-item claim got right:** neither item
+was the blocker it was named for. ISC-291's derivation does not apply to `up`'s gate at all —
+that gate dials `base_url` through `containerFetch` on purpose (ISC-260) — and the allowlist
+resolved itself the moment the fleet dialled the LAN peer.
+
+**What it got wrong: the path was never two items.** Two more were required, and neither was
+visible from any test.
+
+1. **ISC-265 is on this path.** The relay is adopted by NAME without comparing what it
+   forwards, so pointing the fleet at a different oMLX does not take effect until someone runs
+   `docker rm -f` by hand. The phase table placed ISC-265 in J, gated behind A and C; the table
+   is corrected above to record the edge. **The fix is cheap and the data already exists:**
+   `ensureEgressRelay` already computes the targets the current checkout WOULD have started
+   (`relay.ts:423-426`), so drift detection is a comparison against a value already in hand.
+
+2. **Three settle ceilings disagree, and the shortest belongs to the CLI.** `dispatch --auto`
+   abandons after 600s of no progress (`rc=4`); the task's own `deadline_s` was 900s;
+   `event_stall_kill` is 25m. The CLI therefore declared failure five minutes before the
+   supervisor settled the task correctly. Nothing is broken, but an operator reading only the
+   exit code concludes the fleet hangs. Filed as ISC-293 (the ceiling must be derived from the
+   list it schedules) and ISC-294 (the anti-criterion on what the operator may be told), both
+   assigned to Phase D.
+
+**The generalisable lesson, and the reason both landed in one run:** each is a value derived
+once and then never re-compared against the input it describes — the relay's targets against
+the config, the stall constant against the deadlines. A derived value that outlives its input
+is not a check. Look for that shape in the phases still open.
 
 ---
 

@@ -38,7 +38,11 @@ import { ensureEgressNetwork } from "../../security/network.ts";
 import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
 import { containerFetch } from "../../security/probe-transport.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
-import { ensureEgressRelay, type RelayStatus } from "../../security/relay.ts";
+import {
+  ensureEgressRelay,
+  formatRelayTarget,
+  type RelayStatus,
+} from "../../security/relay.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
 import { captureWorktreeBaseline, createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
 import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
@@ -745,11 +749,29 @@ export function register(program: Command): void {
             name: egressRelay.name,
             created: egressRelay.created,
             script_sha256: egressRelay.scriptSha256,
-            targets: egressRelay.targets.map(
-              (t) => `${t.name}:${t.listenPort}->${t.host}:${t.port}`,
-            ),
+            targets: egressRelay.targets.map(formatRelayTarget),
           },
         });
+        /**
+         * A SEPARATE row, not a field on the one above, and deliberately so
+         * (ISC-265). Replacing a drifted relay changes where every worker on
+         * this egress network — including another fleet's — sends its model
+         * traffic, which is a different class of event from "the relay is up".
+         * Its own event type is greppable and cannot be lost in a detail blob.
+         *
+         * `replaced` is null when the previous targets were unreadable, and
+         * the row still fires: the swap happened either way, and the honest
+         * record of an unreadable predecessor is that it was unreadable.
+         */
+        if (egressRelay.created && egressRelay.replaced !== null) {
+          await ledger.append("relay_targets_replaced", {
+            detail: {
+              name: egressRelay.name,
+              was: egressRelay.replaced.map(formatRelayTarget),
+              now: egressRelay.targets.map(formatRelayTarget),
+            },
+          });
+        }
       }
 
       /**

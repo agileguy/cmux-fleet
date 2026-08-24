@@ -310,14 +310,17 @@ jobs:
           # erase what was already collected) + 5
           # (egress.test.ts) + 18 (adc.test.ts — up from 12 now that the
           # ISC-44/45/46 mount-shape and credential-absence blocks exist) + 8
-          # (relay.test.ts: 3 bridge-denial/enumeration probes and 5 relay
+          # (relay.test.ts: 3 bridge-denial/enumeration probes and 6 relay
           # probes, of which the TWO live-oMLX ones always skip on a runner)
+          # (relay.test.ts gains a 9th with ISC-265's drift probe — see the
+          # re-derivation below; it needs a daemon but NOT oMLX, so unlike the
+          # two live-oMLX probes it RUNS here rather than skipping)
           # + 5 (probe-in-network.test.ts, added by ISC-260)
           # + 2 (container-env.test.ts, added by ISC-31/ISC-127)
           # + 5 (container-launch.test.ts, added by the container launcher)
           # + 2 (doctor-preflight.test.ts, added by ISC-292).
           #
-          # 20 + 25 + 5 + 18 + 8 + 5 + 2 + 5 + 2 = 90. The arithmetic is written
+          # 20 + 25 + 5 + 18 + 9 + 5 + 2 + 5 + 2 = 91. The arithmetic is written
           # out because this constant has drifted from its own prose twice, and
           # both times the prose was the half nobody re-derived.
           #
@@ -405,16 +408,18 @@ jobs:
           # probe belongs in this job, or that probe has no automated reader
           # and becomes the self-skipping test this guard exists to catch.
           #
-          # DERIVED by the hand method, NOT by adding 2 to 88. Re-measured
-          # 2026-08-21 on bun 1.3.11, gate UNSET, after ISC-172's two
-          # container-end probes landed in verbgate.test.ts:
+          # DERIVED by the hand method, NOT by adding 1 to 90. Re-measured
+          # 2026-08-23 on bun 1.3.11, gate UNSET, after ISC-265's drift probe
+          # landed in relay.test.ts:
           #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight}.test.ts
-          #     -> 6 pass, 84 skip, 0 fail. Ran 90 tests across 9 files.
-          # The 2026-08-20 derivation this replaces read 88 with 82 skips, so
-          # the delta is two tests and two skips — which is the shape two added
-          # Docker-gated cases must have, and is why the re-derivation is
-          # evidence rather than ceremony.
-          TOTAL_EXPECTED: "90"
+          #     -> 6 pass, 85 skip, 0 fail. Ran 91 tests across 9 files.
+          # The 2026-08-21 derivation this replaces read 90 with 84 skips, so
+          # the delta is one test and one skip — the shape a single added
+          # Docker-gated case must have, and why the re-derivation is evidence
+          # rather than ceremony. Worth noting what the PASS count does NOT do:
+          # it stays at 6, because the added probe is daemon-gated and so
+          # contributes a skip here and a pass on the runner.
+          TOTAL_EXPECTED: "91"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

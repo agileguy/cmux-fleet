@@ -29,6 +29,7 @@ import {
   relayUpstreamFor,
   relayConnectArgv,
   relayContainerName,
+  relayTargetsDrifted,
   relayInspectArgv,
   relayRemoveArgv,
   relayRunArgv,
@@ -39,6 +40,7 @@ import {
   RELAY_IMAGE,
   RELAY_LISTEN_ALIAS,
   RELAY_SCRIPT_CONTAINER_PATH,
+  RELAY_TARGETS_ENV,
   type RelayTarget,
 } from "../../src/security/relay.ts";
 
@@ -663,6 +665,7 @@ describe("parseRelayInspect", () => {
       exists: true,
       running: true,
       id: "abc123",
+      liveTargets: null,
     });
   });
 
@@ -690,6 +693,7 @@ describe("parseRelayInspect", () => {
       exists: false,
       running: false,
       id: null,
+      liveTargets: null,
     });
     expect(parseRelayInspect("relay-x", entry({ Name: "/other" })).exists).toBe(false);
   });
@@ -700,5 +704,216 @@ describe("parseRelayInspect", () => {
     // reasoning `parseNetworkInspect` documents.
     expect(() => parseRelayInspect("relay-x", "not json")).toThrow(/unparseable/);
     expect(() => parseRelayInspect("relay-x", '{"Name":"/relay-x"}')).toThrow(/array/);
+  });
+});
+
+/**
+ * Relay drift detection (ISC-265).
+ *
+ * The defect these close was measured, not imagined: `ensureEgressRelay`
+ * recognized a running relay by NAME alone, so changing `llm.relay_upstream`
+ * left every worker talking to the previous oMLX with no closed port and no
+ * error anywhere. The reproduction fed a real `docker inspect` payload from a
+ * live relay forwarding `192.168.86.49:8000` into a config resolving
+ * `host.docker.internal:8000` and got `created: false` after exactly one
+ * docker call.
+ *
+ * These are the CI-re-checkable half. `test/integration/relay.test.ts` drives
+ * the same path against a real daemon; that one self-skips without Docker,
+ * which is precisely why the decision logic is pinned here too.
+ */
+describe("an adopted relay is compared, not assumed (ISC-265)", () => {
+  const T = (host: string, port = 8000, name = "omlx"): RelayTarget => ({
+    listenPort: 8000,
+    host,
+    port,
+    name,
+  });
+
+  /** A `docker inspect` payload for a running relay with the given env rows. */
+  const inspectWith = (env: unknown): string =>
+    JSON.stringify([
+      {
+        Name: `/${relayContainerName(NET)}`,
+        Id: "abc123",
+        State: { Running: true },
+        Config: { Env: env },
+      },
+    ]);
+
+  const liveRelay = (targets: readonly RelayTarget[]): string =>
+    inspectWith([`${RELAY_TARGETS_ENV}=${JSON.stringify(targets)}`, "PATH=/usr/bin"]);
+
+  describe("reading a running relay's actual targets", () => {
+    test("the stamped env var is read back off the container", () => {
+      const status = parseRelayInspect(relayContainerName(NET), liveRelay([T(LAN_OMLX)]));
+      expect(status.liveTargets).toEqual([T(LAN_OMLX)]);
+    });
+
+    test("the argv writes the very variable this reads — one key, not two", () => {
+      // Guards the pair. A typo on either side yields a check that silently
+      // never fires, which is worse than the defect it replaced.
+      const argv = relayRunArgv(relayContainerName(NET), "u", [T(LAN_OMLX)], "/s.cjs");
+      const row = argv.find((a) => a.startsWith(`${RELAY_TARGETS_ENV}=`));
+      expect(row).toBeDefined();
+      expect(parseRelayInspect(relayContainerName(NET), liveRelay([T(LAN_OMLX)])).liveTargets)
+        .toEqual(JSON.parse(row!.slice(RELAY_TARGETS_ENV.length + 1)));
+    });
+
+    test.each([
+      ["absent", []],
+      ["not an array", "PIFLEET_RELAY_TARGETS"],
+      ["unparseable JSON", [`${RELAY_TARGETS_ENV}={oops`]],
+      ["JSON that is not an array", [`${RELAY_TARGETS_ENV}={"host":"x"}`]],
+      ["an element missing a field", [`${RELAY_TARGETS_ENV}=[{"host":"x","port":1}]`]],
+      ["an element with a wrong type", [`${RELAY_TARGETS_ENV}=[{"listenPort":"8000","host":"x","port":1,"name":"o"}]`]],
+    ])("%s reads as null, never as an empty list", (_label, env) => {
+      // null and [] must not collapse: [] is a relay forwarding nothing, null
+      // is a relay whose posture this build cannot vouch for.
+      expect(parseRelayInspect(relayContainerName(NET), inspectWith(env)).liveTargets).toBeNull();
+    });
+  });
+
+  describe("relayTargetsDrifted", () => {
+    test("the same forwards are not drift", () => {
+      expect(relayTargetsDrifted([T(LAN_OMLX)], [T(LAN_OMLX)])).toBe(false);
+    });
+
+    test("a different upstream host IS drift — the case ISC-265 was filed for", () => {
+      expect(relayTargetsDrifted([T(RELAY_DEFAULT_DIAL_HOST)], [T(LAN_OMLX)])).toBe(true);
+    });
+
+    test("a different upstream PORT is drift", () => {
+      expect(relayTargetsDrifted([T(LAN_OMLX, 8000)], [T(LAN_OMLX, 8001)])).toBe(true);
+    });
+
+    test("a different listen port is drift", () => {
+      const other: RelayTarget = { listenPort: 9000, host: LAN_OMLX, port: 8000, name: "omlx" };
+      expect(relayTargetsDrifted([T(LAN_OMLX)], [other])).toBe(true);
+    });
+
+    test("order is not drift — the target list is a set of forwards", () => {
+      // Comparing serialized JSON instead would cycle a shared container on a
+      // reordering inside `omlxRelayTarget`, which changes nothing real.
+      const a = T(LAN_OMLX);
+      const b = T(LAN_OMLX, 9001, "second");
+      expect(relayTargetsDrifted([a, b], [b, a])).toBe(false);
+    });
+
+    test("a differing count is drift in both directions", () => {
+      expect(relayTargetsDrifted([T(LAN_OMLX)], [])).toBe(true);
+      expect(relayTargetsDrifted([], [T(LAN_OMLX)])).toBe(true);
+    });
+
+    test("unreadable targets count as drift", () => {
+      // "I could not read it, so I assumed it was fine" is the assumption this
+      // whole criterion exists to delete.
+      expect(relayTargetsDrifted(null, [T(LAN_OMLX)])).toBe(true);
+    });
+  });
+
+  describe("ensureEgressRelay acts on the comparison", () => {
+    /**
+     * A fake daemon that answers `inspect` with a chosen payload and reports
+     * success for everything else, so the DECISION is what gets asserted —
+     * which docker verbs ran, in which order.
+     */
+    const daemon = (inspectStdout: string) => {
+      const calls: string[][] = [];
+      let inspects = 0;
+      const exec = async (argv: string[]) => {
+        calls.push(argv);
+        if (argv[1] === "inspect" && argv[2] !== NET) {
+          inspects += 1;
+          // The post-start re-inspect must report a RUNNING relay, or `ensure`
+          // tears down what it just built. Only the FIRST inspect describes
+          // the pre-existing container.
+          return inspects === 1
+            ? { code: 0, stdout: inspectStdout, stderr: "" }
+            : { code: 0, stdout: liveRelay([T(RELAY_DEFAULT_DIAL_HOST)]), stderr: "" };
+        }
+        return { code: 0, stdout: "[]", stderr: "" };
+      };
+      return { calls, exec: exec as unknown as Parameters<typeof ensureEgressRelay>[2] };
+    };
+
+    const verbs = (calls: string[][]) =>
+      calls.filter((c) => c[0] === "docker").map((c) => `${c[1]}${c[1] === "network" ? ` ${c[2]}` : ""}`);
+
+    test("a relay already forwarding what the config wants is adopted untouched", async () => {
+      const { calls, exec } = daemon(liveRelay([T(RELAY_DEFAULT_DIAL_HOST)]));
+      const status = await ensureEgressRelay(cfg(DEFAULT_BASE_URL), NET, exec);
+      expect(status.created).toBe(false);
+      expect(status.replaced).toBeNull();
+      // Idempotence is still the property `up` depends on: one call, no rm.
+      expect(verbs(calls)).toEqual(["inspect"]);
+    });
+
+    test("a relay forwarding somewhere ELSE is removed and rebuilt, with no manual rm -f", async () => {
+      // THE criterion: changing `llm.relay_upstream` takes effect on its own.
+      const { calls, exec } = daemon(liveRelay([T(LAN_OMLX)]));
+      const status = await ensureEgressRelay(
+        cfg(DEFAULT_BASE_URL, { allow: [{ host: LAN_OMLX, port: 8000 }] }),
+        NET,
+        exec,
+      );
+      expect(status.created).toBe(true);
+      expect(status.targets).toEqual([T(RELAY_DEFAULT_DIAL_HOST)]);
+      // The old posture is carried out, so the ledger can say what was displaced.
+      expect(status.replaced).toEqual([T(LAN_OMLX)]);
+      expect(verbs(calls)).toEqual(["inspect", "rm", "run", "network connect", "inspect"]);
+      // Asserted as an argv, not as a verb: `rm` without `-f` leaves a running
+      // container in place and the whole change becomes a no-op.
+      expect(calls.find((c) => c[1] === "rm")).toEqual([
+        "docker",
+        ...relayRemoveArgv(relayContainerName(NET)),
+      ]);
+    });
+
+    test("a relay whose targets cannot be read is replaced, not trusted", async () => {
+      const { calls, exec } = daemon(inspectWith([]));
+      const status = await ensureEgressRelay(cfg(DEFAULT_BASE_URL), NET, exec);
+      expect(status.created).toBe(true);
+      // Null, and the row still fires: the swap happened, and the honest record
+      // of an unreadable predecessor is that we cannot say what it displaced.
+      expect(status.replaced).toBeNull();
+      expect(verbs(calls)).toContain("rm");
+    });
+
+    test("a STOPPED relay is still rebuilt, and reports nothing displaced", async () => {
+      // Drift is only asked of a running relay; a stopped one is our own litter
+      // and is cleared regardless, so `replaced` must stay null there.
+      const stopped = JSON.stringify([
+        {
+          Name: `/${relayContainerName(NET)}`,
+          Id: "abc123",
+          State: { Running: false },
+          Config: { Env: [`${RELAY_TARGETS_ENV}=${JSON.stringify([T(LAN_OMLX)])}`] },
+        },
+      ]);
+      const { calls, exec } = daemon(stopped);
+      const status = await ensureEgressRelay(cfg(DEFAULT_BASE_URL), NET, exec);
+      expect(status.created).toBe(true);
+      expect(status.replaced).toBeNull();
+      expect(verbs(calls)).toEqual(["inspect", "rm", "run", "network connect", "inspect"]);
+    });
+
+    test("the drift removal names both postures when the daemon refuses it", async () => {
+      // An operator who hits this needs to know which way the swap was going.
+      const calls: string[][] = [];
+      const exec = (async (argv: string[]) => {
+        calls.push(argv);
+        if (argv[1] === "inspect") return { code: 0, stdout: liveRelay([T(LAN_OMLX)]), stderr: "" };
+        if (argv[1] === "rm") return { code: 1, stdout: "", stderr: "daemon said no" };
+        return { code: 0, stdout: "[]", stderr: "" };
+      }) as unknown as Parameters<typeof ensureEgressRelay>[2];
+      await expect(
+        ensureEgressRelay(
+          cfg(DEFAULT_BASE_URL, { allow: [{ host: LAN_OMLX, port: 8000 }] }),
+          NET,
+          exec,
+        ),
+      ).rejects.toThrow(/no longer match this config.*was omlx:8000->192\.168\.86\.49:8000.*want omlx:8000->host\.docker\.internal:8000/s);
+    });
   });
 });

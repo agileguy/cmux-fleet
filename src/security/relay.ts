@@ -237,6 +237,20 @@ export const RELAY_IMAGE =
  */
 export const RELAY_SCRIPT_CONTAINER_PATH = "/relay/egress-relay.cjs";
 
+/**
+ * The env var carrying the relay's forwarding table.
+ *
+ * Named once here and used on BOTH sides — `relayRunArgv` stamps it,
+ * `liveTargetsFromEnv` reads it back off a running container (ISC-265). It was
+ * a bare literal in the argv builder while nothing read it; a drift check makes
+ * the two sides a pair, and a pair that spells its own key twice is one typo
+ * away from a check that silently never fires. `docker/egress-relay.cjs`
+ * carries the third spelling by necessity — it is a separate CommonJS file with
+ * no import of this module — and `test/unit/relay.test.ts` pins the argv
+ * byte-for-byte, which is what keeps that copy honest.
+ */
+export const RELAY_TARGETS_ENV = "PIFLEET_RELAY_TARGETS";
+
 /** One forward: accept on `listenPort`, connect to `host:port`. */
 export interface RelayTarget {
   readonly listenPort: number;
@@ -412,12 +426,40 @@ export interface RelayContainerStatus {
   /** True only when the daemon itself reports `State.Running: true`. */
   running: boolean;
   id: string | null;
+  /**
+   * What this container is ACTUALLY forwarding, read back out of the
+   * `PIFLEET_RELAY_TARGETS` env var `relayRunArgv` stamped on it at creation.
+   *
+   * `null` means the question could not be answered — the variable is absent,
+   * unparseable, or does not describe a target list. That is deliberately NOT
+   * the same value as `[]`, and the distinction is load-bearing: an empty list
+   * is a relay forwarding nothing, while `null` is a relay whose posture this
+   * build cannot vouch for (a container from an older build, or one an
+   * operator started by hand under the same name). `relayTargetsDrifted`
+   * treats `null` as drift, because adopting what you cannot read is the
+   * quiet downgrade this module exists to refuse.
+   */
+  liveTargets: readonly RelayTarget[] | null;
 }
 
 export interface RelayStatus {
   name: string;
   /** False when an already-running relay was adopted unchanged. */
   created: boolean;
+  /**
+   * What a drifted relay USED to forward, when this run replaced one (ISC-265);
+   * `null` on every other path — created fresh, or adopted as-is.
+   *
+   * Carried separately from `targets` rather than folded into `created`,
+   * because "created" now covers two materially different events. A relay
+   * created because none existed is unremarkable. A relay created because the
+   * previous one pointed somewhere else is the fleet changing model servers
+   * under a shared resource, and an operator reading the ledger months later
+   * needs the OLD value to reconstruct what the earlier runs were talking to.
+   * `null` when the previous targets were unreadable — the replacement still
+   * happened, and the honest record is that we cannot say what it displaced.
+   */
+  replaced: readonly RelayTarget[] | null;
   /**
    * SHA-256 of the relay script THIS checkout would run, and the targets this
    * config resolves to — recorded whether the relay was created or adopted.
@@ -745,7 +787,7 @@ export function relayRunArgv(
     "-v",
     `${scriptPath}:${RELAY_SCRIPT_CONTAINER_PATH}:ro`,
     "-e",
-    `PIFLEET_RELAY_TARGETS=${JSON.stringify(targets)}`,
+    `${RELAY_TARGETS_ENV}=${JSON.stringify(targets)}`,
     "--entrypoint",
     "node",
     RELAY_IMAGE,
@@ -804,7 +846,7 @@ export function parseRelayInspect(name: string, stdout: string): RelayContainerS
   }
   for (const entry of parsed) {
     if (typeof entry !== "object" || entry === null) continue;
-    const e = entry as { Name?: unknown; Id?: unknown; State?: unknown };
+    const e = entry as { Name?: unknown; Id?: unknown; State?: unknown; Config?: unknown };
     // Docker reports container names with a leading slash; accept both so this
     // does not become a dialect assumption.
     if (e.Name !== name && e.Name !== `/${name}`) continue;
@@ -816,9 +858,88 @@ export function parseRelayInspect(name: string, stdout: string): RelayContainerS
       exists: true,
       running: state.Running === true,
       id: typeof e.Id === "string" ? e.Id : null,
+      liveTargets: liveTargetsFromEnv(e.Config),
     };
   }
-  return { name, exists: false, running: false, id: null };
+  return { name, exists: false, running: false, id: null, liveTargets: null };
+}
+
+/**
+ * Read a running relay's forwarding targets back out of its `Config.Env`.
+ *
+ * The env var is the right place to read this from, and the alternative is
+ * worse in a way worth stating: the targets also appear in `Config.Cmd`-
+ * adjacent argv, but only as the JSON this same variable carries, so parsing
+ * argv would be a second derivation of one fact. `relayRunArgv` stamps
+ * `PIFLEET_RELAY_TARGETS` exactly once, the relay script reads exactly that,
+ * and so does this.
+ *
+ * Returns `null` — never `[]` — for every failure mode, because every one of
+ * them means the same thing to the caller: this container's posture is not
+ * legible to this build. Malformed JSON does not throw here for the same
+ * reason `inspectRelayContainer` does not treat a daemon error as "absent":
+ * an unreadable relay must be REPLACED, not crash `up`, and a throw would
+ * make an old container an unrecoverable error rather than a stale one.
+ */
+function liveTargetsFromEnv(config: unknown): readonly RelayTarget[] | null {
+  if (typeof config !== "object" || config === null) return null;
+  const env = (config as { Env?: unknown }).Env;
+  if (!Array.isArray(env)) return null;
+  const prefix = `${RELAY_TARGETS_ENV}=`;
+  const row = env.find((v): v is string => typeof v === "string" && v.startsWith(prefix));
+  if (row === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.slice(prefix.length));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const out: RelayTarget[] = [];
+  for (const t of parsed) {
+    if (typeof t !== "object" || t === null) return null;
+    const c = t as Record<string, unknown>;
+    if (
+      typeof c.listenPort !== "number" ||
+      typeof c.host !== "string" ||
+      typeof c.port !== "number" ||
+      typeof c.name !== "string"
+    ) {
+      return null;
+    }
+    out.push({ listenPort: c.listenPort, host: c.host, port: c.port, name: c.name });
+  }
+  return out;
+}
+
+/** One target rendered for an operator: `omlx:8000->192.168.86.49:8000`. */
+export function formatRelayTarget(t: RelayTarget): string {
+  return `${t.name}:${t.listenPort}->${t.host}:${t.port}`;
+}
+
+/**
+ * Would adopting this running relay serve the current config? (ISC-265)
+ *
+ * Order-insensitive on purpose: the target list is a SET of forwards, and two
+ * relays carrying the same forwards in a different order are the same relay.
+ * Comparing the serialized JSON instead would make a reordering in
+ * `omlxRelayTarget` read as drift and needlessly cycle a shared container.
+ *
+ * `live === null` is drift. See `RelayContainerStatus.liveTargets` for why the
+ * unreadable case resolves this way rather than the permissive one: the whole
+ * point of the check is that adoption stops being an assumption, and "I could
+ * not read it, so I assumed it was fine" is the assumption.
+ */
+export function relayTargetsDrifted(
+  live: readonly RelayTarget[] | null,
+  desired: readonly RelayTarget[],
+): boolean {
+  if (live === null) return true;
+  if (live.length !== desired.length) return true;
+  const key = (t: RelayTarget) => formatRelayTarget(t);
+  const liveKeys = [...live].map(key).sort();
+  const desiredKeys = [...desired].map(key).sort();
+  return liveKeys.some((k, i) => k !== desiredKeys[i]);
 }
 
 async function docker(exec: Exec, args: string[], timeoutMs: number) {
@@ -839,7 +960,7 @@ export async function inspectRelayContainer(
   const r = await docker(exec, relayInspectArgv(name), 30_000);
   if (r.code !== 0) {
     if (/no such object|no such container/i.test(r.stderr)) {
-      return { name, exists: false, running: false, id: null };
+      return { name, exists: false, running: false, id: null, liveTargets: null };
     }
     throw new Error(`relay: 'docker inspect ${name}' failed: ${r.stderr.trim()}`);
   }
@@ -851,9 +972,13 @@ export async function inspectRelayContainer(
  *
  * Three outcomes, and the difference between them is deliberate:
  *
- *  - **Running** → adopted unchanged, `created: false`. The relay outlives
- *    individual runs on purpose (see the header), so re-creating it on every
- *    `up` would cut the model server out from under a concurrent fleet.
+ *  - **Running AND forwarding what this config resolves to** → adopted
+ *    unchanged, `created: false`. The relay outlives individual runs on
+ *    purpose (see the header), so re-creating it on every `up` would cut the
+ *    model server out from under a concurrent fleet.
+ *  - **Running but forwarding something else** → removed and rebuilt (ISC-265).
+ *    See "Adoption compares targets now" below for why this outranks the
+ *    concurrent-fleet cost.
  *  - **Exists but stopped** → REMOVED and rebuilt. This differs from
  *    `ensureEgressNetwork`'s refusal to touch a pre-existing network, and the
  *    difference is ownership: `pifleet-egress-relay-*` is a name only this
@@ -869,32 +994,47 @@ export async function inspectRelayContainer(
  * every subsequent `up`, forever. That is the quiet downgrade this whole
  * subsystem exists to refuse.
  *
- * KNOWN LIMIT: an already-running relay is adopted without comparing its
- * forwarding targets to the current config. Changing `llm.base_url`'s port
- * therefore needs a `docker rm -f <relay>` to take effect. That failure is
- * loud where it lands — the worker connects to a port nothing is listening on
- * — rather than silently reaching the wrong server, which is why it is
- * documented here instead of being guessed at automatically.
+ * ## Adoption compares targets now (ISC-265, closed 2026-08-23)
  *
- * That limit was FAIR for a port change and is now UNFAIR, because ISC-259 made
- * the dial target configurable. **Say the new failure precisely: after changing
- * `llm.relay_upstream`, an adopted relay keeps forwarding to the OLD machine,
- * and nothing is loud about it.** Every worker connects successfully, gets real
- * completions, and is talking to the previous oMLX — there is no port-closed
- * error to notice. `docker rm -f <relay>` is required for an upstream change to
- * take effect, and this is the one place that says so.
+ * The first bullet used to end "adopted unchanged" full stop, and that was the
+ * defect. An already-running relay was recognized by NAME alone, so changing
+ * `llm.relay_upstream` did nothing until an operator ran `docker rm -f` by
+ * hand — and after ISC-259 made the dial target configurable, the resulting
+ * failure was the dangerous kind rather than the loud kind. Every worker
+ * connects successfully, gets real completions, and is talking to the PREVIOUS
+ * oMLX. There is no closed port to notice and no error to read. Worse for the
+ * amendment's own purpose: the operator who moved the fleet to the LAN server
+ * precisely to reach the allowlisted models could still be served by the host
+ * oMLX that lacks them.
  *
- * Not fixed here, deliberately: comparing an adopted relay's live targets means
- * reading `PIFLEET_RELAY_TARGETS` back out of `docker inspect` and deciding
- * whether a mismatch should kill a relay other fleets may be using — a
- * lifecycle decision, not a parsing one, and out of scope for the change that
- * created the need. Tracked as ISC-265.
+ * So a running relay is now adopted only if `relayTargetsDrifted` says it
+ * already forwards what this config resolves to. On drift it is removed and
+ * rebuilt, and `RelayStatus.replaced` names what it USED to forward so the
+ * ledger records the swap rather than merely the outcome.
  *
- * What makes it DETECTABLE meanwhile is the returned `scriptSha256`/`targets`
- * pair, which `up` writes into the `egress_relay_ready` ledger event on EVERY
- * run, adopted or created — so two runs that disagree about what the relay
- * forwards leave a record that says so. Detectable in a ledger is weaker than
- * refused at `up`, and the gap is named rather than closed.
+ * **The lifecycle question this deferred, answered.** The worry was that a
+ * relay may be serving a concurrent fleet, since `pifleet-egress-relay-<net>`
+ * is shared by every fleet on that egress network. Recreating it does cut the
+ * model server out from under those workers mid-turn — and it is still right,
+ * because the alternative is not "leave the other fleet alone". If the targets
+ * have drifted then two configs disagree about where the one shared relay
+ * points, and it can only ever satisfy one of them. Adoption does not avoid
+ * that conflict; it resolves it silently in favour of whoever booted first,
+ * which is both arbitrary and invisible. Recreating resolves it in favour of
+ * the most recent `up`, which is at least deterministic, and it leaves a
+ * `relay_targets_replaced` row saying so. A wrong answer an operator can read
+ * beats a wrong answer nobody can.
+ *
+ * An unreadable `PIFLEET_RELAY_TARGETS` counts as drift for the same reason —
+ * see `RelayContainerStatus.liveTargets`. Adopting a container whose posture
+ * this build cannot read would reintroduce the assumption in a new place.
+ *
+ * `scriptSha256` is still recorded on every run and is still NOT a drift
+ * input: the script is bind-mounted from the working tree and re-exec'd by
+ * `--restart unless-stopped`, so its hash describes the file on disk now, not
+ * the bytes the running relay started with. Cycling a shared relay on a hash
+ * that cannot be attributed to it would be a guess. The ledger keeps it
+ * answerable after the fact, which is what it was always for.
  */
 export async function ensureEgressRelay(
   cfg: RelayConfigView,
@@ -917,18 +1057,34 @@ export async function ensureEgressRelay(
   const scriptSha256 = await relayScriptSha256();
 
   const existing = await inspectRelayContainer(containerName, exec);
-  if (existing.exists && existing.running) {
-    return { name: containerName, created: false, scriptSha256, targets };
+  /**
+   * The drift check that makes adoption a decision instead of an assumption
+   * (ISC-265). Only meaningful for a RUNNING relay: a stopped one is removed
+   * and rebuilt regardless, so asking what it forwarded would change nothing.
+   */
+  const drifted =
+    existing.exists && existing.running && relayTargetsDrifted(existing.liveTargets, targets);
+  if (existing.exists && existing.running && !drifted) {
+    return { name: containerName, created: false, replaced: null, scriptSha256, targets };
   }
+  const replaced = drifted ? existing.liveTargets : null;
 
   await ensureUplinkNetwork(uplink);
 
   if (existing.exists) {
     const removed = await docker(exec, relayRemoveArgv(containerName), 60_000);
     if (removed.code !== 0) {
+      // Two callers now, and the message has to serve both: a stopped relay
+      // being cleared, and a RUNNING one being cycled because its targets no
+      // longer match the config. The second is the case an operator will be
+      // surprised by, so it says what it was about to do and why.
+      const why = drifted
+        ? `while replacing a relay whose targets no longer match this config ` +
+          `(was ${(replaced ?? []).map(formatRelayTarget).join(", ") || "unreadable"}; ` +
+          `want ${targets.map(formatRelayTarget).join(", ")})`
+        : "while clearing a stopped relay";
       throw new Error(
-        `relay: 'docker rm -f ${containerName}' failed while clearing a stopped relay: ` +
-          `${removed.stderr.trim()}`,
+        `relay: 'docker rm -f ${containerName}' failed ${why}: ${removed.stderr.trim()}`,
       );
     }
   }
@@ -971,5 +1127,5 @@ export async function ensureEgressRelay(
     );
   }
 
-  return { name: containerName, created: true, scriptSha256, targets };
+  return { name: containerName, created: true, replaced, scriptSha256, targets };
 }

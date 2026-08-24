@@ -6,6 +6,19 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **`pifleet up` now re-points the egress relay when `llm.relay_upstream` changes, instead of
+  adopting the old one (ISC-265).** A running relay was recognized by NAME alone, so moving the
+  fleet to a different oMLX did nothing until an operator ran `docker rm -f` by hand — and the
+  resulting failure was silent rather than loud: every worker connected, got real completions, and
+  was talking to the previous server. `up` now reads `PIFLEET_RELAY_TARGETS` back off the running
+  container and compares it as a set against what the config resolves to; a relay forwarding
+  somewhere else is removed and rebuilt, and a new `relay_targets_replaced` ledger event records
+  what was displaced. A relay whose targets cannot be read is replaced too, rather than trusted.
+  **Operators sharing one egress network should know the trade this makes:** the relay is shared,
+  so a replacement interrupts a concurrent fleet's in-flight turns. That is deliberate — with
+  drifted targets the two fleets already disagree about a single shared resource, and the previous
+  behaviour resolved the disagreement silently in favour of whoever booted first.
+
 - **A durable file with an unrecognised stamp now refuses by name instead of throwing a library
   error (Phase G, ISC-157, ISC-192).** Both criteria asked to *read* an older file "rather than
   failing"; the owner chose the opposite deliberately — **refuse by design, named, with a hatch** —
