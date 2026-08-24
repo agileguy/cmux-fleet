@@ -85,6 +85,7 @@
  * lost two workers.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
@@ -257,32 +258,7 @@ interface CliResult {
 
 /** The CLI as a real subprocess — the exit-code ladder is part of the contract. */
 async function cli(env: Record<string, string>, args: string[]): Promise<CliResult> {
-  const proc = Bun.spawn([process.execPath, CLI, ...args], {
-    // The rig's own directory, NOT the developer's cwd. Config resolution is
-    // `--config` -> `./fleet.yaml` -> `~/.config/pifleet/fleet.yaml`, so a
-    // spawn that inherits cwd picks up whatever `fleet.yaml` the developer
-    // happens to have in the repo root — and that file is gitignored, so the
-    // suite behaves one way on a runner and another way on a laptop. Locally
-    // it pointed every rig at ONE shared `run.repo`, where the worker
-    // checkout is `<repo>/.worktrees/<worker>` keyed on worker name and not
-    // on run id, so a second `up` of the same worker collided with the first
-    // and `up` refused it — correctly — with exit 2.
-    //
-    // Derived from `PIFLEET_RUNS_DIR` rather than threaded through every call
-    // site: every rig in this file builds it as `<base>/runs`, so its parent
-    // IS the rig base. If that ever stops being true this falls back to the
-    // system temp dir, which is still not the repo root and still has no
-    // `fleet.yaml` — the property that matters here.
-    cwd: dirname(env["PIFLEET_RUNS_DIR"] ?? tmpdir()),
-    env: { ...process.env, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { code: await proc.exited, stdout, stderr };
+  return spawnCli(args, { cwd: dirname(env["PIFLEET_RUNS_DIR"] ?? tmpdir()), env: { ...env } });
 }
 
 function json<T>(r: CliResult): T {

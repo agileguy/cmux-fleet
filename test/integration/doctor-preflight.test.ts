@@ -47,6 +47,7 @@
  * needs a real daemon and there is nothing meaningful to assert without one.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -128,11 +129,7 @@ interface DoctorJson {
  * shares, so relocating it would move the very variable under test.
  */
 async function doctor(runsDir: string, scratchDir: string): Promise<{ code: number; json: DoctorJson }> {
-  const p = Bun.spawn([process.execPath, CLI, "doctor", "--json"], {
-    env: { ...process.env, PIFLEET_RUNS_DIR: runsDir, PIFLEET_SCRATCH_DIR: scratchDir },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const p = await spawnCliProcess(["doctor", "--json"], { env: { PIFLEET_RUNS_DIR: runsDir, PIFLEET_SCRATCH_DIR: scratchDir } });
   const [stdout, stderr, code] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),

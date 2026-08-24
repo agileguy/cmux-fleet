@@ -45,6 +45,7 @@
  * clones from this project's own repository.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -179,24 +180,11 @@ async function down(
   opts: { json?: boolean } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const envelope = opts.json === false ? [] : ["--json"];
-  const p = Bun.spawn([process.execPath, CLI, "down", "--run", rig.runId, ...envelope, ...args], {
-    // `TMPDIR` travels with the child so the CLI and this process agree on
-    // where control sockets live — see `down-prune.test.ts` for the measured
-    // failure that rule comes from.
-    env: {
+  return spawnCli(["down", "--run", rig.runId, ...envelope, ...args], { env: {
       PATH: process.env["PATH"] ?? "",
       PIFLEET_RUNS_DIR: rig.root,
       ...(process.env["TMPDIR"] === undefined ? {} : { TMPDIR: process.env["TMPDIR"] }),
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
+    }, inheritEnv: false });
 }
 
 const parse = (stdout: string): Record<string, unknown> =>

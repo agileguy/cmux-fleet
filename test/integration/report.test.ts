@@ -12,6 +12,7 @@
  * report at all is the only nonzero.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { beforeAll, afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -45,11 +46,7 @@ async function runCli(
   args: string[],
   runsRoot: string = runsDir,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn(["bun", "run", CLI, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, PIFLEET_RUNS_DIR: runsRoot },
-  });
+  const p = await spawnCliProcess([...args], { env: { PIFLEET_RUNS_DIR: runsRoot } });
   const [stdout, stderr] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),

@@ -56,6 +56,7 @@
  * ISA close-out rather than hidden here.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -240,11 +241,7 @@ async function doctorOmlx(configPath: string): Promise<{
   probe_model: string | null;
   detail: string;
 }> {
-  const p = Bun.spawn([process.execPath, CLI, "doctor", "--json", "-c", configPath], {
-    env: { ...process.env, OMLX_API_KEY: apiKey() },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const p = await spawnCliProcess(["doctor", "--json", "-c", configPath], { env: { OMLX_API_KEY: apiKey() } });
   const [stdout] = await Promise.all([new Response(p.stdout).text(), p.exited]);
   const start = stdout.indexOf("{");
   if (start < 0) throw new Error(`doctor --json emitted no JSON object:\n${stdout}`);
@@ -912,14 +909,7 @@ describe("doctor never forwards the API key to a redirect target (G5)", () => {
           "http://host.docker.internal:8000/v1",
           `${DIAL_LOOPBACK}:${redirectPort}`,
         );
-        const p = Bun.spawn([process.execPath, CLI, "doctor", "--json", "-c", configPath], {
-          // A DISTINCTIVE key: if a future runtime DOES carry the header across
-          // origins, the sink records something unmistakable rather than a
-          // plausible-looking blank.
-          env: { ...process.env, OMLX_API_KEY: "pifleet-redirect-canary-key" },
-          stdout: "pipe",
-          stderr: "pipe",
-        });
+        const p = await spawnCliProcess(["doctor", "--json", "-c", configPath], { env: { OMLX_API_KEY: "pifleet-redirect-canary-key" } });
         const [stdout] = await Promise.all([new Response(p.stdout).text(), p.exited]);
         const start = stdout.indexOf("{");
         if (start < 0) throw new Error(`doctor --json emitted no JSON object:\n${stdout}`);

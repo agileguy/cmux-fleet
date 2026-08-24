@@ -18,6 +18,7 @@
  * bytes across an entire run.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -51,26 +52,7 @@ async function tmux(args: string[]): Promise<{ out: string; code: number }> {
 }
 
 async function cli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, ...args], {
-    // The rig's own directory, NOT the developer's cwd. Config resolution is
-    // `--config` -> `./fleet.yaml` -> `~/.config/pifleet/fleet.yaml`, so a
-    // spawn that inherits cwd picks up whatever `fleet.yaml` the developer
-    // happens to have in the repo root — and that file is gitignored, so the
-    // suite behaves one way on a runner and another way on a laptop. Locally
-    // it pointed every rig at ONE shared `run.repo`, where the worker
-    // checkout is `<repo>/.worktrees/<worker>` keyed on worker name and not
-    // on run id, so the second `up` of `eng-1` collided with the first and
-    // `up` refused it — correctly — with exit 2.
-    cwd: rig.base,
-    env: { ...process.env, ...rig.env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-  ]);
-  return { code: await p.exited, stdout, stderr };
+  return spawnCli(args, { cwd: rig.base, env: { ...rig.env } });
 }
 
 beforeAll(async () => {

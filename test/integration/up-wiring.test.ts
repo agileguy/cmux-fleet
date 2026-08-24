@@ -31,6 +31,7 @@
  * stand-in would absorb a changed docker invocation instead of surfacing it.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -993,24 +994,12 @@ async function runCli(
   args: string[],
   opts: { cwd?: string; home?: string } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, ...args], {
-    cwd: opts.cwd,
-    env: {
-      ...process.env,
-      ...rig.env,
+  return spawnCli(args, { cwd: opts.cwd, env: { ...rig.env,
       // HOME override pins the ~/.config/pifleet/fleet.yaml fallback to a
       // directory the test controls; without it, implicit config resolution
       // depends on whatever the developer's machine happens to contain.
       ...(opts.home !== undefined ? { HOME: opts.home } : {}),
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-  ]);
-  return { code: await p.exited, stdout, stderr };
+    } });
 }
 
 describe("up wires the security controls, in order (review finding 2)", () => {

@@ -32,6 +32,7 @@
  * Each test spawns the CLI once. `cliBudget(1)` is the derived ceiling.
  */
 
+import { spawnCli, spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -95,19 +96,7 @@ async function downWithBrokenPs(
   runId: string,
   args: string[] = [],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, "down", "--run", runId, "--json", ...args], {
-    // PATH REPLACED, not prepended: a fall-through to the real `ps` would make
-    // a failing assertion look like a passing one.
-    env: { PATH: await brokenPsDir(), PIFLEET_RUNS_DIR: root },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
+  return spawnCli(["down", "--run", runId, "--json", ...args], { env: { PATH: await brokenPsDir(), PIFLEET_RUNS_DIR: root }, inheritEnv: false });
 }
 
 const parse = (stdout: string): Record<string, unknown> =>
@@ -253,11 +242,7 @@ describe("a ps that fails MID-LADDER still refuses rather than reporting a stop"
         }),
       );
 
-      const p = Bun.spawn([process.execPath, CLI, "down", "--run", runId, "--json"], {
-        env: { PATH: await flakyPsDir(1, process.pid), PIFLEET_RUNS_DIR: root },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      const p = await spawnCliProcess(["down", "--run", runId, "--json"], { env: { PATH: await flakyPsDir(1, process.pid), PIFLEET_RUNS_DIR: root }, inheritEnv: false });
       const [stdout, , code] = await Promise.all([
         new Response(p.stdout).text(),
         new Response(p.stderr).text(),

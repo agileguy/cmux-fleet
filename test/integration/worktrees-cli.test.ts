@@ -14,6 +14,7 @@
  * the pack file that rule cost.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -80,17 +81,7 @@ async function worktreesList(
   args: string[] = [],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const runArgs = rig.runId === undefined ? [] : ["--run", rig.runId];
-  const p = Bun.spawn([process.execPath, CLI, "worktrees", ...runArgs, ...args], {
-    env: { PATH: process.env["PATH"] ?? "", PIFLEET_RUNS_DIR: rig.root },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
+  return spawnCli(["worktrees", ...runArgs, ...args], { env: { PATH: process.env["PATH"] ?? "", PIFLEET_RUNS_DIR: rig.root }, inheritEnv: false });
 }
 
 const parse = (stdout: string): Record<string, unknown> =>

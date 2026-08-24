@@ -21,6 +21,7 @@
  * under test.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -55,16 +56,7 @@ async function cli(
   root: string,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, ...args], {
-    env: { ...process.env, PIFLEET_RUNS_DIR: root },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-  ]);
-  return { code: await p.exited, stdout, stderr };
+  return spawnCli(args, { env: { PIFLEET_RUNS_DIR: root } });
 }
 
 /** A real supervisor on the happy scenario, so the worker is genuinely live. */

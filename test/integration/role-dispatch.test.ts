@@ -18,6 +18,7 @@
  * records a role, is exactly what passed while the wiring was missing.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -49,16 +50,7 @@ describe("a role composes into the brief the worker receives", () => {
       PIFLEET_PI_COMMAND: `${process.execPath} ${FAKE_PI} --scenario ${SCENARIO}`,
     };
     const cli = async (args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => {
-      const p = Bun.spawn([process.execPath, CLI, ...args], {
-        env: { ...process.env, ...env },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr] = await Promise.all([
-        new Response(p.stdout).text(),
-        new Response(p.stderr).text(),
-      ]);
-      return { code: await p.exited, stdout, stderr };
+      return spawnCli([...args], { env: { ...env } });
     };
 
     const up = await cli(["up", "--workers", "w1", "--backend", "headless", "--json"]);
@@ -111,16 +103,7 @@ describe("a role composes into the brief the worker receives", () => {
       PIFLEET_PI_COMMAND: `${process.execPath} ${FAKE_PI} --scenario ${SCENARIO}`,
     };
     const cli = async (args: string[]): Promise<{ code: number; stdout: string; stderr: string }> => {
-      const p = Bun.spawn([process.execPath, CLI, ...args], {
-        env: { ...process.env, ...env },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr] = await Promise.all([
-        new Response(p.stdout).text(),
-        new Response(p.stderr).text(),
-      ]);
-      return { code: await p.exited, stdout, stderr };
+      return spawnCli([...args], { env: { ...env } });
     };
 
     const up = await cli(["up", "--workers", "w1", "--backend", "headless", "--json"]);

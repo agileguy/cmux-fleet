@@ -45,6 +45,7 @@
  * the whole host would make ISC-54/55 fail for reasons outside ISC-54/55.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -267,9 +268,7 @@ interface DoctorJson {
 }
 
 async function doctorJson(configPath: string): Promise<DoctorJson> {
-  const p = Bun.spawn([process.execPath, CLI, "doctor", "--json", "-c", configPath], {
-    env: {
-      ...process.env,
+  const p = await spawnCliProcess(["doctor", "--json", "-c", configPath], { env: {
       /**
        * A literal placeholder, never the developer's real key.
        *
@@ -280,10 +279,7 @@ async function doctorJson(configPath: string): Promise<DoctorJson> {
        * exported one. Pinned so the test means the same thing everywhere.
        */
       OMLX_API_KEY: "stub-key-not-a-real-credential",
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+    } });
   const [stdout] = await Promise.all([new Response(p.stdout).text(), p.exited]);
   const start = stdout.indexOf("{");
   if (start < 0) throw new Error(`doctor --json emitted no JSON object:\n${stdout}`);
