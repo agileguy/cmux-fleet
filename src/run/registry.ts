@@ -35,6 +35,7 @@ import {
 // `kill.ts -> run/registry.ts -> … -> safety/reaper.ts -> kill.ts` cycle from a
 // second direction. A `import type` is erased before it can.
 import type { KillOutcome } from "../safety/kill.ts";
+import { classifyPeer, ownUid, peerRefusal } from "../security/peer-uid.ts";
 import { writeJsonAtomic, LineSplitter, parseLine } from "../util/jsonl.ts";
 import { workerPaths, type RunPaths } from "./paths.ts";
 import { readWorkerState } from "./state.ts";
@@ -551,6 +552,27 @@ export interface SocketServer {
   stop(): Promise<void>;
 }
 
+/** Accept-time peer controls (ISC-126). Both fields exist for testability. */
+export interface SocketPeerOptions {
+  /**
+   * The single uid allowed to command this socket. Defaults to this process's
+   * own uid.
+   *
+   * There is deliberately no value meaning "do not check": every value narrows
+   * the gate to exactly one uid, so this cannot be used to disable the control,
+   * only to point it somewhere else. That is what a test on a single-uid
+   * machine needs in order to drive the refusal path at all — see
+   * `security/peer-uid.ts`.
+   */
+  expectUid?: number;
+  /**
+   * Where refusals are reported. Defaults to stderr, which for both callers is
+   * a file an operator can read: the daemon's stderr is `run.daemonLog` and a
+   * supervisor's is `supervisorLog` (both wired at `launchDetached`).
+   */
+  log?: (line: string) => void;
+}
+
 /**
  * Serve a one-request-one-response JSONL protocol on a unix socket. A stale
  * socket file from a crashed predecessor is unlinked first: `bind` would
@@ -563,26 +585,103 @@ export interface SocketServer {
  * layer covers every verb any handler will ever add. A refusal is a normal
  * response, not a crash and not a hang: the caller gets a structured error
  * and the server keeps serving.
+ *
+ * ## The uid gate, and why the permission bits below are not enough on their
+ * own (ISC-126)
+ *
+ * Two controls are applied here against ANOTHER USER, and they are independent
+ * on purpose. `security/peer-uid.ts` carries the full reasoning and the
+ * platform measurements; what matters at this call site is why each line is
+ * written the way it is.
+ *
+ * `mkdir` used to be called with no `mode` and `Bun.listen` with no follow-up
+ * `chmod`, so the socket and its directory inherited the ambient umask —
+ * measured 0755/0755 at umask 022, and 0777/0777 at umask 000, at which point
+ * another uid connects freely. The protection was the operator's shell, not
+ * this code.
+ *
+ * The `mode` argument to `mkdir` does not fix that by itself, and it is passed
+ * below only because it narrows the window rather than because it is the
+ * control. It is masked by the umask on the way through, AND it is ignored
+ * entirely when the directory already exists — which is the ordinary case here,
+ * since the run directory is created before any socket is served. The `chmod`
+ * that follows is the line that actually establishes 0700, unconditionally and
+ * in code.
+ *
+ * The socket file is chmodded too, after `Bun.listen` has created it. On Linux
+ * `connect(2)` checks write permission on the socket inode, so that bit is the
+ * one doing the work there; on macOS it is not checked, which is exactly why
+ * the directory bit and the credential check both have to exist.
  */
 export async function serveJsonlSocket(
   path: string,
   handler: SocketHandler,
   auth: { secret: string },
+  peer: SocketPeerOptions = {},
 ): Promise<SocketServer> {
-  const { mkdir, unlink } = await import("node:fs/promises");
+  const { chmod, mkdir, unlink } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
-  await mkdir(dirname(path), { recursive: true });
+  const dir = dirname(path);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700);
   try {
     await unlink(path);
   } catch {
     // Did not exist — the common case.
   }
 
+  const expectUid = peer.expectUid ?? ownUid();
+  const log =
+    peer.log ??
+    ((line: string) => {
+      console.error(line);
+    });
+  // Unavailability is logged ONCE per server, not once per connection. It is a
+  // property of the platform, so every accept would report the same sentence,
+  // and a per-connection line would bury the run's real log under it. A DENIAL
+  // is logged every time, because each one is a distinct event someone may need
+  // to correlate with a timestamp.
+  let unavailableReported = false;
+  const refused = new WeakSet<object>();
+
   const splitters = new WeakMap<object, LineSplitter>();
   const server = Bun.listen({
     unix: path,
     socket: {
+      open(socket) {
+        const fd = (socket as unknown as { fd?: unknown }).fd;
+        // `fd` is not on Bun's public `Socket` type but is present at runtime,
+        // and in `open` it is the ACCEPTED CONNECTION's descriptor — measured
+        // on both platforms, see peer-uid.ts. The cast is narrow and the value
+        // is validated by `readPeerCred`, which rejects a non-descriptor rather
+        // than trusting the shape.
+        const verdict = classifyPeer(typeof fd === "number" ? fd : -1, expectUid);
+        if (verdict.code === "peer_uid_unavailable") {
+          if (!unavailableReported) {
+            unavailableReported = true;
+            log(`pifleet: control socket ${path}: ${verdict.detail}`);
+          }
+          return;
+        }
+        if (verdict.allowed) return;
+        // Refused BEFORE a byte is read, so nothing this peer sends is ever
+        // parsed, and the auth token never enters scope on this path.
+        refused.add(socket);
+        log(
+          `pifleet: control socket ${path}: ${verdict.detail}; closing the connection`,
+        );
+        try {
+          socket.write(`${JSON.stringify(peerRefusal(verdict))}\n`);
+        } catch {
+          // Peer already gone; the close below is all that is left to do.
+        }
+        socket.end();
+      },
       data(socket, chunk) {
+        // A refused peer can have bytes in flight that arrived before `end()`
+        // took effect. Dropping them here is what makes the refusal total: the
+        // gate would otherwise be a race with the peer's first write.
+        if (refused.has(socket)) return;
         let splitter = splitters.get(socket);
         if (splitter === undefined) {
           splitter = new LineSplitter();
@@ -618,6 +717,13 @@ export async function serveJsonlSocket(
       error() {},
     },
   });
+
+  // AFTER `Bun.listen`, because the socket inode does not exist until bind. It
+  // is a second, independent expression of the same 0700 intent as the
+  // directory above: on Linux `connect(2)` checks write permission on this
+  // inode, and a directory that some later change re-widens would otherwise
+  // take the whole filesystem gate with it.
+  await chmod(path, 0o700);
 
   return {
     async stop() {
