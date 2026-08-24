@@ -227,6 +227,22 @@ afterAll(async () => {
  * `[~]` for exactly that residual; ISC-32, the absent half, needs no daemon
  * and is fully proven here.
  *
+ * THE SAME BOUNDARY, DRAWN AROUND THE IDENTITY CHECK (item 5), because it is
+ * the newest thing here and therefore the easiest to overclaim. What these
+ * tests DO prove: that `up` reads an image's build labels back off the tag it
+ * is about to launch, compares them to what that tag claims, and refuses —
+ * before the first container, the first network call and the first clone —
+ * when they disagree, with a diagnosis distinct from both the absent and the
+ * failed-verify ones. What they DO NOT prove: that the labels a REAL daemon
+ * reports on a REAL image are the ones `buildImage` stamped. This shim answers
+ * `{{json .Config.Labels}}` by taking the tag string apart, so the round trip
+ * `docker build --label` → image store → `docker image inspect` is asserted
+ * nowhere in this file. Nothing here would notice if `buildImage` stopped
+ * stamping those labels tomorrow: every rig would keep answering as though it
+ * had. Closing that needs a probe in the `container` job which builds an image
+ * and files it under another image's tag, and until one exists ISC-189's
+ * harder half is WIRED and MUTATION-ISOLATED but NOT daemon-proved.
+ *
  * Everything else still fails loudly, for the reason the gcloud shim does: a
  * silent `exit 0` stand-in absorbs a changed docker invocation instead of
  * surfacing it.
