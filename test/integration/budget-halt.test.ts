@@ -35,6 +35,7 @@
  * this file deliberately does not, and must not be read as covering it.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -208,16 +209,7 @@ async function cli(
   rig: Rig,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, ...args], {
-    env: { ...process.env, ...rig.env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-  ]);
-  return { code: await p.exited, stdout, stderr };
+  return spawnCli(args, { env: { ...rig.env } });
 }
 
 /**

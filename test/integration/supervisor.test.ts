@@ -18,6 +18,7 @@
  * (`tty == ??`), and reparents to PID 1 when its launcher dies.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -174,16 +175,7 @@ async function cli(
   root: string,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn([process.execPath, CLI, ...args], {
-    env: { ...process.env, PIFLEET_RUNS_DIR: root },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { code: await proc.exited, stdout, stderr };
+  return spawnCli(args, { env: { PIFLEET_RUNS_DIR: root } });
 }
 
 async function killSupervisor(pid: number, pgid: number): Promise<void> {

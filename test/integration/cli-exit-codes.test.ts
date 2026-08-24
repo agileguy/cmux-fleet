@@ -13,16 +13,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
 import { cliBudget } from "../support/budget.ts";
+import { spawnCli } from "../support/spawn-cli.ts";
 
-const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
+/**
+ * The repo root, and the one place in the suite that deliberately runs the CLI
+ * from it.
+ *
+ * Every other file gets `spawnCli`'s hermetic default cwd, so an ambient
+ * `fleet.yaml` cannot reach it (ISC-296). This file cannot: it names
+ * `fleet.example.yaml` by RELATIVE path on the argv, so the CLI has to run
+ * where that file is. That is safe here precisely because the path is
+ * explicit — every case passes `-c`, so config DISCOVERY never runs and the
+ * gitignored `fleet.yaml` beside it is never consulted. The cwd is stated
+ * rather than inherited, which is the difference that matters.
+ */
+const REPO_ROOT = new URL("../../", import.meta.url).pathname;
 
 async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn(["bun", "run", CLI, ...args], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-  ]);
-  return { code: await p.exited, stdout, stderr };
+  return spawnCli(args, { cwd: REPO_ROOT });
 }
 
 describe("exit-code ladder", () => {

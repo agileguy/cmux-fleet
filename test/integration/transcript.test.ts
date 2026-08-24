@@ -8,6 +8,7 @@
  * production `runsRoot()` honours.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,11 +31,7 @@ async function runCli(
   root: string,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn(["bun", "run", CLI, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, PIFLEET_RUNS_DIR: root },
-  });
+  const p = await spawnCliProcess([...args], { env: { PIFLEET_RUNS_DIR: root } });
   const [stdout, stderr] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),

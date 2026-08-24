@@ -9,6 +9,7 @@
  * race `tail -F` was chosen to avoid.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -41,33 +42,25 @@ async function makeRun(events: string[] = []): Promise<Fixture> {
   return { root, eventsPath, supervisorLog: join(workerDir, "supervisor.log") };
 }
 
-function runCli(
+async function runCli(
   root: string,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, "logs", ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, PIFLEET_RUNS_DIR: root },
-  });
+  const p = await spawnCliProcess(["logs", ...args], { env: { PIFLEET_RUNS_DIR: root } });
   return Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]).then(
     async ([stdout, stderr]) => ({ code: await p.exited, stdout, stderr }),
   );
 }
 
 /** Spawn a follower and capture its stdout incrementally. */
-function spawnFollow(root: string, args: string[]) {
+async function spawnFollow(root: string, args: string[]) {
   // The CLI DIRECTLY, not `bun run <cli>`. `bun run` is a wrapper process,
   // so `proc.kill("SIGINT")` hit the wrapper rather than the command and the
   // test measured `bun run`'s signal semantics: it reported 130 on Linux
   // while macOS gave 0, so the suite passed locally and failed in CI on a
   // difference that had nothing to do with the code under test. Every other
   // suite in this repo spawns `[process.execPath, CLI, ...]`.
-  const p = Bun.spawn([process.execPath, CLI, "logs", "--worker", WORKER, "--follow", ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, PIFLEET_RUNS_DIR: root },
-  });
+  const p = await spawnCliProcess(["logs", "--worker", WORKER, "--follow", ...args], { env: { PIFLEET_RUNS_DIR: root } });
   let buf = "";
   const decoder = new TextDecoder();
   const drained = (async () => {
@@ -253,7 +246,7 @@ describe("logs — follow", () => {
     const first = evt({ type: "event", seq: 1, event: { type: "agent_start" } });
     const f = await makeRun([first]);
     try {
-      const fw = spawnFollow(f.root, []);
+      const fw = await spawnFollow(f.root, []);
       await until(() => fw.stdout().includes(first), "the pre-existing line");
 
       const second = evt({ type: "event", seq: 2, event: { type: "tool_call" } });
@@ -275,7 +268,7 @@ describe("logs — follow", () => {
   test("waits for an events file that does not exist yet instead of dying", async () => {
     const f = await makeRun(); // no events.jsonl at spawn time
     try {
-      const fw = spawnFollow(f.root, []);
+      const fw = await spawnFollow(f.root, []);
       // Give it time to have died if it were going to (tail -f semantics
       // would have): still running is the property under test.
       await Bun.sleep(400);
@@ -299,7 +292,7 @@ describe("logs — follow", () => {
   test("SIGINT also ends a follower cleanly", async () => {
     const f = await makeRun([evt({ type: "event", seq: 1, event: { type: "agent_start" } })]);
     try {
-      const fw = spawnFollow(f.root, ["--render"]);
+      const fw = await spawnFollow(f.root, ["--render"]);
       await until(() => fw.stdout().length > 0, "first output");
       fw.proc.kill("SIGINT");
       expect(await fw.proc.exited).toBe(0);
@@ -338,7 +331,7 @@ describe("logs — follow", () => {
     );
     const f = await makeRun(backlog);
     try {
-      const fw = spawnFollow(f.root, ["--render"]);
+      const fw = await spawnFollow(f.root, ["--render"]);
       await until(() => fw.stdout().length > 0, "first output");
       fw.proc.kill("SIGINT");
       expect(await fw.proc.exited).toBe(0);
@@ -545,7 +538,7 @@ describe("logs is read-only (SRD §3.3)", () => {
     try {
       const { readdir } = await import("node:fs/promises");
       const namesBefore = (await readdir(join(f.root, RUN_ID, "workers", WORKER))).sort();
-      const follower = spawnFollow(f.root, []);
+      const follower = await spawnFollow(f.root, []);
       await until(() => follower.stdout().includes("agent_start"), "the first line");
       await appendFile(f.eventsPath, `${evt({ type: "event", seq: 2, event: { type: "b" } })}\n`);
       await until(() => follower.stdout().includes('"seq":2'), "the appended line");

@@ -20,6 +20,7 @@
  * the pack file that rule cost.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -212,38 +213,11 @@ async function down(
   opts: { json?: boolean } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const envelope = opts.json === false ? [] : ["--json"];
-  const p = Bun.spawn([process.execPath, CLI, "down", "--run", rig.runId, ...envelope, ...args], {
-    /**
-     * `TMPDIR` travels with the child, and it is load-bearing rather than
-     * tidy.
-     *
-     * `socketPath` puts every control socket under `os.tmpdir()`. On macOS
-     * that reads `$TMPDIR` — a per-user path like `/var/folders/…/T/` — and
-     * falls back to `/tmp` when the variable is absent. This env was built
-     * from scratch, so the CLI subprocess resolved `/tmp` while the test
-     * resolved `/var/folders`, and the two computed DIFFERENT paths for the
-     * same worker's socket. Nothing failed loudly: `down` treats an
-     * unreachable control socket as "socket dead, process alive" and falls
-     * through to the ladder, which is the same thing it does when there
-     * genuinely is no supervisor listening. So a test that plants a listener
-     * and asserts on what `down` did after dialing it was measuring a dial
-     * that never happened. Measured: the ISC-272 fixture below saw zero
-     * connections and its perl process was SIGTERMed instead.
-     */
-    env: {
+  return spawnCli(["down", "--run", rig.runId, ...envelope, ...args], { env: {
       PATH: process.env["PATH"] ?? "",
       PIFLEET_RUNS_DIR: rig.root,
       ...(process.env["TMPDIR"] === undefined ? {} : { TMPDIR: process.env["TMPDIR"] }),
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
+    }, inheritEnv: false });
 }
 
 const parse = (stdout: string): Record<string, unknown> =>

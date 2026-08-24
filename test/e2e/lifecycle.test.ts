@@ -9,6 +9,7 @@
  * the INTEGER, not just the JSON.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -51,21 +52,7 @@ afterAll(async () => {
 });
 
 async function cli(fleet: Fleet, args: string[]): Promise<CliResult> {
-  const proc = Bun.spawn([process.execPath, CLI, ...args], {
-    // The rig's own directory, NOT the developer's cwd. Config resolution is
-    // `--config` -> `./fleet.yaml` -> `~/.config/pifleet/fleet.yaml`, so a
-    // spawn that inherits cwd picks up whatever `fleet.yaml` the developer
-    // happens to have in the repo root — and that file is gitignored, so the
-    // suite behaves one way on a runner and another way on a laptop. Locally
-    // it pointed every rig at ONE shared `run.repo`, where the worker
-    // checkout is `<repo>/.worktrees/<worker>` keyed on worker name and not
-    // on run id, so the second `up` of `eng-1` collided with the first and
-    // `up` refused it — correctly — with exit 2.
-    cwd: fleet.base,
-    env: { ...process.env, ...fleet.env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = await spawnCliProcess([...args], { cwd: fleet.base, env: { ...fleet.env } });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

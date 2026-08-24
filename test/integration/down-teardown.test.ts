@@ -17,6 +17,7 @@
  * a session that must disappear, and one that must survive.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -76,21 +77,11 @@ async function down(
   rig: { root: string; runId: string },
   args: string[] = [],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, "down", "--run", rig.runId, "--json", ...args], {
-    env: {
+  return spawnCli(["down", "--run", rig.runId, "--json", ...args], { env: {
       PATH: process.env["PATH"] ?? "",
       PIFLEET_RUNS_DIR: rig.root,
       PIFLEET_TMUX_SOCKET: SOCKET,
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
+    }, inheritEnv: false });
 }
 
 describe("down destroys the workspace the run opened", () => {

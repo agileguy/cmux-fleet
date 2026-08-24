@@ -16,6 +16,7 @@
  * been bitten by tests sharing a socket path derived only from ids.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -70,17 +71,7 @@ async function attach(
   args: string[],
   env: Record<string, string> = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, "attach", ...args], {
-    env: { PATH: process.env["PATH"] ?? "", PIFLEET_RUNS_DIR: rig.root, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
+  return spawnCli(["attach", ...args], { env: { PATH: process.env["PATH"] ?? "", PIFLEET_RUNS_DIR: rig.root, ...env }, inheritEnv: false });
 }
 
 describe("attach focuses the pane the run recorded", () => {

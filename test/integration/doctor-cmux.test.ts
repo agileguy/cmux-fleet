@@ -14,6 +14,7 @@
  * reaction at all.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -91,24 +92,14 @@ async function shimCmux(commands: readonly string[]): Promise<string> {
 }
 
 async function doctor(binDir: string): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn([process.execPath, CLI, "doctor", "--json"], {
-    env: {
+  return spawnCli(["doctor", "--json"], { env: {
       PATH: `${binDir}:${process.env["PATH"] ?? ""}`,
       PIFLEET_RUNS_DIR: join(binDir, "runs"),
       HOME: binDir, // no developer cmux.json leaking in
       // Inside-a-pane, so `cmuxOnly` socket mode is not itself a diagnosis and
       // the assertions below are about the command list, not the socket.
       CMUX_WORKSPACE_ID: "ws-test",
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(p.stdout).text(),
-    new Response(p.stderr).text(),
-    p.exited,
-  ]);
-  return { code, stdout, stderr };
+    }, inheritEnv: false });
 }
 
 /**

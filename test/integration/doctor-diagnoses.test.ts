@@ -18,6 +18,7 @@
  * of its own verdict.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -108,21 +109,14 @@ interface DoctorRun {
 }
 
 async function doctor(binDir: string): Promise<DoctorRun> {
-  const p = Bun.spawn([process.execPath, CLI, "doctor", "--json"], {
-    // PATH is the shim dir and NOTHING else: the real docker/git/tmux/cmux on
-    // the developer's machine must not be able to answer a probe this test is
-    // asserting on.
-    env: {
+  const p = await spawnCliProcess(["doctor", "--json"], { env: {
       PATH: binDir,
       PIFLEET_RUNS_DIR: join(binDir, "runs"),
       // No developer `fleet.yaml` or `cmux.json` leaks in — with HOME here,
       // config resolution fails and `doctor` probes with defaults, which is
       // the "broken machine is still diagnosable" path §11 promises.
       HOME: binDir,
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+    }, inheritEnv: false });
   const [stdout, stderr, code] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),
@@ -141,11 +135,7 @@ async function doctor(binDir: string): Promise<DoctorRun> {
 
 /** The same probe without `--json` — the operator-facing branch of `register`. */
 async function doctorHuman(binDir: string): Promise<string> {
-  const p = Bun.spawn([process.execPath, CLI, "doctor"], {
-    env: { PATH: binDir, PIFLEET_RUNS_DIR: join(binDir, "runs"), HOME: binDir },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const p = await spawnCliProcess(["doctor"], { env: { PATH: binDir, PIFLEET_RUNS_DIR: join(binDir, "runs"), HOME: binDir }, inheritEnv: false });
   const [stdout, stderr] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),

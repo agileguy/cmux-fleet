@@ -16,6 +16,7 @@
  * the abort — not the passage of time — is what ended the epoch.
  */
 
+import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -113,16 +114,7 @@ async function cli(
   root: string,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn([process.execPath, CLI, ...args], {
-    env: { ...process.env, PIFLEET_RUNS_DIR: root },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { code: await proc.exited, stdout, stderr };
+  return spawnCli(args, { env: { PIFLEET_RUNS_DIR: root } });
 }
 
 describe("abort — ISC-81: busy to idle within 10s, on a real clock", () => {

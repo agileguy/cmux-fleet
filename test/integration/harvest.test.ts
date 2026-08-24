@@ -9,6 +9,7 @@
  * ISC-88 is actually about — pinned by nothing.
  */
 
+import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -67,12 +68,7 @@ async function runCli(
   args: string[],
   cwd: string = tmp,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const p = Bun.spawn(["bun", "run", CLI, ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, PIFLEET_RUNS_DIR: runsDir },
-  });
+  const p = await spawnCliProcess([...args], { cwd: cwd, env: { PIFLEET_RUNS_DIR: runsDir } });
   const [stdout, stderr] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),
@@ -880,12 +876,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const bad = join(scratch, "run-empty");
     await mkdir(join(bad, "inbox"), { recursive: true });
     await writeFile(join(bad, "run.json"), JSON.stringify({ run_id: "run-empty", harness_patterns: [] }));
-    const p = Bun.spawn(["bun", "run", CLI, "artifacts", "--run", "run-empty", "--all", "--json"], {
-      cwd: tmp,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, PIFLEET_RUNS_DIR: scratch },
-    });
+    const p = await spawnCliProcess(["artifacts", "--run", "run-empty", "--all", "--json"], { cwd: tmp, env: { PIFLEET_RUNS_DIR: scratch } });
     const [stdout, stderr, code] = await Promise.all([
       new Response(p.stdout).text(),
       new Response(p.stderr).text(),
