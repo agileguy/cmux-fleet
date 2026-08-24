@@ -39,6 +39,7 @@ import {
 import {
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   DEFAULT_MAX_CONCURRENT,
+  DEFAULT_PROSE_TURNS_BEFORE_FAIL,
   DEFAULT_UI_REQUEST_TIMEOUT_MS,
   type FleetConfig,
 } from "../config/schema.ts";
@@ -126,6 +127,46 @@ export async function readRunUiRequestTimeoutMs(run: RunPaths): Promise<number> 
       .parse(v),
   );
   return doc?.ui_request_timeout_ms ?? DEFAULT_UI_REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * Consecutive zero-tool-call turns this run fails a task at, as `up` recorded
+ * it (SRD §5.9 detector 2 / F39 — ISC-108). `0` means the detector is off.
+ *
+ * The third key to travel this road, and it is here for the same reason as the
+ * two above it: the supervisor is handed a run directory and a worker id and
+ * nothing else — it never loads `fleet.yaml`, by design, because a detached
+ * process re-resolving `./fleet.yaml` months later would judge a running
+ * worker against whatever config sits in today's cwd. So the value travels in
+ * `run.json` or it does not travel at all. ISC-108's grade note recorded
+ * `prose_turns_before_fail` as appearing "nowhere outside `Docs/SRD.md`", and a
+ * schema key without this function would have been the same dead shape one step
+ * further along: validated, documented, and read by nobody.
+ *
+ * `nonnegative`, not `positive`, unlike its two neighbours — because `0` is a
+ * MEANINGFUL value here rather than a corrupt one. It is how
+ * `llm.require_native_tool_calls: false` reaches the supervisor at all
+ * (`effectiveProseTurnsBeforeFail` folds the gate into this number at `up`), so
+ * rejecting it would make the off switch unrepresentable. A NEGATIVE or
+ * fractional value is still refused: neither can be a count of turns, and a
+ * threshold of `-1` would trip on the first turn of every task ever dispatched
+ * — a fail-CLOSED corruption that would look like the detector working.
+ *
+ * Forgiving about absence, like both neighbours, and the direction of that
+ * forgiveness is chosen rather than inherited: a run directory written before
+ * this key existed falls back to the schema default (3) and therefore GETS the
+ * detector. Falling back to `0` would be the fail-open version — an old or
+ * hand-assembled run directory would silently lose the guard, which is the
+ * failure ISC-108 exists to make loud.
+ */
+export async function readRunProseTurnsBeforeFail(run: RunPaths): Promise<number> {
+  const doc = await readValidated(run.runJson, (v) =>
+    z
+      .object({ prose_turns_before_fail: z.number().int().nonnegative().optional() })
+      .loose()
+      .parse(v),
+  );
+  return doc?.prose_turns_before_fail ?? DEFAULT_PROSE_TURNS_BEFORE_FAIL;
 }
 
 /** What `up` recorded about the harness surface, and whether it recorded anything. */

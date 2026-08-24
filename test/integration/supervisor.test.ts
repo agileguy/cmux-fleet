@@ -1354,6 +1354,200 @@ describe("ISC-116: a deadline aborts the agent, then reports timed_out", () => {
 });
 
 /**
+ * ISC-108 — the F39 RUNTIME detector (SRD §5.9 detector 2).
+ *
+ * §5.9 specifies two detectors for the prose-instead-of-tool-calls failure and
+ * only the first was ever built. The startup probe is real and enforced
+ * (`security/model-probe.ts`, ISC-53), and it can be PASSED AND THEN DRIFTED
+ * FROM: a model's willingness to emit native `tool_calls` is a property of its
+ * chat template interacting with the context it is given, so an answer at token
+ * 200 says nothing about token 80,000. §5.9 records the measurement —
+ * `Qwen3-8B-4bit` emitting reasoning prose through this same oMLX server — and
+ * a sharper one was taken on 2026-08-23 against
+ * `Qwen3-Coder-30B-A3B-Instruct-4bit`, a model that PASSES the probe: in 1 of 3
+ * identical probes it leaked its tool call as raw `<function=read>…</tool_call>`
+ * TEXT with `finish_reason=stop`. Intermittent, which is the shape a one-shot
+ * probe cannot see, and the turn genuinely has zero tool calls when it happens.
+ *
+ * **Why this test is here and not in `test/unit/`.** The criterion is about a
+ * WORKER being classified, and the grade note for ISC-108 was precise about
+ * what the tree already had: the supervisor DID count tool calls
+ * (`state.tool_calls++`) and "NO VERDICT PATH READS THAT COUNTER". A unit test
+ * over `ProseTurnDetector` would have reproduced exactly that arrangement one
+ * file further along — a correct module beside a settle path that never asks
+ * it. So the detector is graded here, through a real detached supervisor, a
+ * real RPC stream, and the task record `wait` reads.
+ *
+ * **The two tests are one experiment.** The same scenario and the same
+ * supervisor differ only in `run.json`, so the first test cannot pass by the
+ * fixture merely being unusual and the second cannot pass by the detector being
+ * inert. Together they show the verdict is a FUNCTION of the configured
+ * threshold, which is the claim `prose_turns_before_fail` makes.
+ */
+describe("ISC-108: three turns with zero tool calls are failed, not settled successfully", () => {
+  test(
+    "the task settles failed:no_tool_calls, and the detector says so at the third turn",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("prose-fail");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+
+      /**
+       * No `run.json` written: this run takes the SCHEMA DEFAULT of 3 through
+       * `readRunProseTurnsBeforeFail`, which is the number both ISC-108 ("3
+       * turns") and §5.9 ("default 3") name. Asserting the criterion against a
+       * hand-written threshold would grade a number this test chose.
+       */
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        // Three turns, zero tool calls, then a clean `agent_end` — a worker
+        // that streams, ends turns, settles, and accomplishes nothing.
+        env: { PIFLEET_PI_COMMAND: piCommand("no-tool-calls.json") },
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      // `deadline_s` is the default 300 s against a scenario that emits in one
+      // burst: the deadline is guaranteed NOT to be what ends this task, so a
+      // `timed_out` verdict could not be mistaken for the detector working.
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-PROSE-1"),
+        attempt_id: "prose-attempt-1",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      const settled = await waitFor(
+        async () => (await readTaskRecord(taskRecordPath(wp, "T-PROSE-1"))) !== null,
+        20_000,
+      );
+      expect(settled).toBe(true);
+
+      const record = await readTaskRecord(taskRecordPath(wp, "T-PROSE-1"));
+      // THE CRITERION. Before the detector was wired this read `success`,
+      // "quiesced" — a worker that did nothing, certified as having done it.
+      expect(record?.verdict).toBe("failed");
+      expect(record?.reason).toBe("no_tool_calls");
+
+      const events = await readEvents(wp.eventsJsonl);
+      /**
+       * The verdict alone would be satisfied by any bug that failed this task
+       * for any reason, so the trip record is asserted too — and asserted with
+       * its NUMBERS, which is what makes it evidence about the detector rather
+       * than about a name. `prose_turns: 3` at `threshold: 3` says the
+       * supervisor counted three turns and compared them to the bound it read
+       * from the run, at the moment it crossed.
+       */
+      const trip = events.find((e) => e["type"] === "no_tool_calls_detected");
+      expect(trip).toBeDefined();
+      expect(trip?.["task_id"]).toBe("T-PROSE-1");
+      expect(trip?.["prose_turns"]).toBe(3);
+      expect(trip?.["threshold"]).toBe(3);
+
+      // Nothing else ended this task. Both absences matter: a deadline would
+      // have produced `timed_out`, and the escalation would mean the agent
+      // never honoured the abort — a different path with the same verdict.
+      expect(events.some((e) => e["type"] === "deadline_exceeded")).toBe(false);
+      expect(events.some((e) => e["type"] === "no_tool_calls_escalated")).toBe(false);
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    // Three gates: the idle wait (20 s), the settle wait (20 s), the shutdown
+    // wait (5 s). No CLI is spawned and no container is started, so neither
+    // `cliBudget` nor `containerBudget` describes this test's cost (ISC-273).
+    gateBudget([20_000, 20_000, 5_000]),
+  );
+
+  test(
+    "prose_turns_before_fail: 0 turns the detector off and the same worker settles success",
+    async () => {
+      /**
+       * The control, and the half that makes the test above discriminating.
+       *
+       * Identical scenario, identical supervisor, ONE number different in
+       * `run.json`. If this settled `failed` too, the first test would be
+       * evidence that something in this fixture fails tasks, not that the
+       * detector reads its threshold. If the first test settled `success` with
+       * this one unchanged, the detector would be inert.
+       *
+       * It is also the only executable statement of §5.9's
+       * "`require_native_tool_calls: false` disables both" on the runtime side:
+       * `up` folds that gate into this very key
+       * (`effectiveProseTurnsBeforeFail`), so `0` here is the exact state an
+       * operator who turned the gate off produces.
+       */
+      const root = await freshRoot();
+      const runId = testRunId("prose-off");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+
+      // Written BEFORE launch: the supervisor reads this once at startup,
+      // deliberately, rather than per event.
+      await mkdir(run.root, { recursive: true });
+      await writeFile(
+        run.runJson,
+        JSON.stringify({
+          schema: "pifleet.run/v1",
+          run_id: runId,
+          prose_turns_before_fail: 0,
+        }),
+      );
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        env: { PIFLEET_PI_COMMAND: piCommand("no-tool-calls.json") },
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-PROSE-OFF"),
+        attempt_id: "prose-off-attempt-1",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      const settled = await waitFor(
+        async () => (await readTaskRecord(taskRecordPath(wp, "T-PROSE-OFF"))) !== null,
+        20_000,
+      );
+      expect(settled).toBe(true);
+
+      const record = await readTaskRecord(taskRecordPath(wp, "T-PROSE-OFF"));
+      expect(record?.verdict).toBe("success");
+      expect(record?.reason).toBe("quiesced");
+
+      // Off means off all the way down: no trip record, so the detector did not
+      // fire and get overruled somewhere later.
+      const events = await readEvents(wp.eventsJsonl);
+      expect(events.some((e) => e["type"] === "no_tool_calls_detected")).toBe(false);
+      // And the fixture really did complete three turns while it was watching —
+      // otherwise "off" would be indistinguishable from "never had the chance".
+      expect(events.filter((e) => {
+        const ev = e["event"] as { type?: string } | undefined;
+        return e["type"] === "event" && ev?.type === "turn_end";
+      }).length).toBe(3);
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    gateBudget([20_000, 20_000, 5_000]),
+  );
+});
+
+/**
  * ISC-234: the control socket answers `export_html`, so a LIVE worker's
  * `transcript --html` goes through Pi rather than the CLI's local renderer.
  *

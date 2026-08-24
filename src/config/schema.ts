@@ -241,6 +241,29 @@ export const RunSchema = z
     branch_prefix: shortStr.default("fleet"),
     /** Bounded by measured oMLX throughput, not pane count (SRD §5.9 / F40). */
     max_concurrent: z.number().int().positive().default(2),
+    /**
+     * Consecutive turns a worker may complete with ZERO tool calls before the
+     * supervisor classifies its task `failed:no_tool_calls` (SRD §5.9 detector
+     * 2 / F39 — ISC-108). **`0` disables the detector.**
+     *
+     * `nonnegative`, not `positive`, and that is the whole of the off switch.
+     * The other reading of `0` — "fail before completing any turn" — describes
+     * no configuration anyone would want, since it would fire on every task
+     * including the ones that work. Making it mean OFF gives §5.9's
+     * "`require_native_tool_calls: false` disables both" a single spelling:
+     * `up` folds the gate and this key into ONE effective number (see
+     * `effectiveProseTurnsBeforeFail`), so an operator who turns the guard off
+     * does not also have to know to zero a second key in a different block.
+     *
+     * It lives under `run:` rather than beside `require_native_tool_calls`
+     * under `llm:` because of WHO READS IT. This is a supervisor runtime bound
+     * — it travels to a detached process through `run.json`, exactly as
+     * `timers.ui_request_timeout` and `max_concurrent` do — whereas everything
+     * in `llm:` is consumed at `up`, by the probe and the relay. Putting a
+     * supervisor bound in the block the supervisor never sees is precisely how
+     * `ui_request_timeout` spent so long validating and changing nothing.
+     */
+    prose_turns_before_fail: z.number().int().nonnegative().default(3),
     budget: BudgetSchema,
     timers: TimersSchema,
   })
@@ -283,6 +306,58 @@ export const DEFAULT_BRANCH_PREFIX: string = RunSchema.shape.branch_prefix.parse
  * ever budgeted for; inventing a concurrency cap only delays work.
  */
 export const DEFAULT_MAX_CONCURRENT: number = RunSchema.shape.max_concurrent.parse(undefined);
+
+/**
+ * The zero-tool-call bound a run gets when no config is reachable (SRD §5.9
+ * detector 2 — ISC-108).
+ *
+ * Same construction and the same reason as the two defaults above, and the
+ * derivation earns its keep more sharply here than for either of them: ISC-108
+ * is phrased as a literal "**3** turns", §5.9 says "default **3**", and a
+ * restated `3` in the supervisor's reader would let the criterion and the code
+ * that satisfies it drift apart without either becoming wrong on its own. Move
+ * the schema default and the criterion follows it; restate it and the number in
+ * `ISA.md` quietly stops describing the running system.
+ *
+ * Forgiving about absence, for the reason `readRunUiRequestTimeoutMs` is: a run
+ * directory written before this key existed, or assembled by hand in a test,
+ * must still get the detector rather than silently losing it. A guard that
+ * fails OPEN on an old run directory is the version of this guard that is not
+ * worth having.
+ */
+export const DEFAULT_PROSE_TURNS_BEFORE_FAIL: number =
+  RunSchema.shape.prose_turns_before_fail.parse(undefined);
+
+/**
+ * The ONE number `up` records for a run: `run.prose_turns_before_fail`, zeroed
+ * when `llm.require_native_tool_calls` is off (SRD §5.9 — ISC-108).
+ *
+ * §5.9 ends its two-detector section with "`require_native_tool_calls: false`
+ * disables both", and until this function existed only the first half of that
+ * sentence was executable — `up`'s probe checked the gate, and the runtime
+ * detector did not exist to check it. Resolving both inputs into a single
+ * effective threshold HERE, at `up`, rather than shipping two keys to the
+ * supervisor and re-deciding there, is deliberate for three reasons:
+ *
+ *  1. The supervisor never loads `fleet.yaml` (see `readRunUiRequestTimeoutMs`
+ *     for why), so it could not read `llm.require_native_tool_calls` even if it
+ *     wanted to. Sending the gate along in `run.json` as a second key would
+ *     mean two fields that must be interpreted together by a reader that could
+ *     get the conjunction wrong.
+ *  2. `run.json` then records what the run was actually LAUNCHED under, one
+ *     number, auditable months later without re-deriving a policy from two.
+ *  3. There is exactly one spelling of off, so a test that asserts "off means
+ *     off" tests both routes to it at once.
+ *
+ * Structurally typed rather than taking `FleetConfig` so it can sit beside the
+ * default it pairs with, above the schema that defines its second input.
+ */
+export function effectiveProseTurnsBeforeFail(cfg: {
+  run: { prose_turns_before_fail: number };
+  llm: { require_native_tool_calls: boolean };
+}): number {
+  return cfg.llm.require_native_tool_calls ? cfg.run.prose_turns_before_fail : 0;
+}
 
 /**
  * `llm.relay_upstream` is validated HERE, with the predicate the relay itself

@@ -51,6 +51,7 @@ import { isInsideRunTree, runPaths, taskRecordPath, workerPaths } from "../run/p
 import {
   initialWorkerState,
   readFence,
+  readRunProseTurnsBeforeFail,
   readRunUiRequestTimeoutMs,
   readWorkerLaunch,
   writeFence,
@@ -62,6 +63,7 @@ import { worktreeContentHash } from "../run/treehash.ts";
 import { processStartTime, registryCall, serveJsonlSocket } from "../run/registry.ts";
 import { ensureControlAuth } from "../security/control-auth.ts";
 import { pgidOf } from "./launch.ts";
+import { NO_TOOL_CALLS_REASON, ProseTurnDetector } from "./prose-detector.ts";
 import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
 
 /** Event types that end or could end a turn — logged when attributed prior. */
@@ -244,6 +246,19 @@ async function main(): Promise<void> {
    */
   const uiRequestTimeoutMs = await readRunUiRequestTimeoutMs(run);
 
+  /**
+   * Consecutive turns this worker may complete with ZERO tool calls before its
+   * task is classified `failed:no_tool_calls` (SRD §5.9 detector 2 / F39 —
+   * ISC-108). `0` disables the detector.
+   *
+   * Read from `run.json` HERE, once, for the same two reasons as the bound
+   * above: the value is fixed for a run by definition (`up` resolved it from
+   * `run.prose_turns_before_fail` folded with `llm.require_native_tool_calls`
+   * at launch), and re-reading it on the event path would put a file stat
+   * inside a handler that runs on every record of the stream.
+   */
+  const proseTurnsBeforeFail = await readRunProseTurnsBeforeFail(run);
+
   // In-memory state, flushed atomically on every transition and heartbeat.
   const state: WorkerState = initialWorkerState({
     worker: argv.workerId,
@@ -349,10 +364,34 @@ async function main(): Promise<void> {
 
   const em = new EpochManager(await readFence(wp));
   const tracker = new CompletionTracker();
+  /**
+   * The F39 runtime detector (SRD §5.9 detector 2 — ISC-108).
+   *
+   * Constructed ONCE per supervisor because the threshold is a property of the
+   * run, and `reset()` at every epoch boundary because the count is a property
+   * of the task. It is fed from the LIVE-attributed branch of `onEvent` and
+   * read by `maybeProbe`, which is the whole of the wiring — the criterion's
+   * grade note recorded that the supervisor already counted tool calls and that
+   * "NO VERDICT PATH READS THAT COUNTER", so a counter without the reader below
+   * would have been the same shape one file further along.
+   */
+  const prose = new ProseTurnDetector(proseTurnsBeforeFail);
   const deadline = new Stopwatch();
   let deadlineMs: number | null = null;
   /** Pending kill ladder armed when a deadline `abort` goes unanswered. */
   let abortEscalation: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The same ladder, armed when the PROSE detector's `abort` goes unanswered
+   * (ISC-108).
+   *
+   * A separate handle rather than a second use of `abortEscalation`, and the
+   * separation is load-bearing rather than tidy: both ladders can be armed at
+   * once (the detector trips, and the deadline fires inside the 5 s grace), and
+   * a single variable would leak whichever timer was overwritten — leaving a
+   * `setTimeout` holding the event loop open with no way left to clear it, on a
+   * process whose lifetime must be its child's. `settle` clears both.
+   */
+  let proseEscalation: ReturnType<typeof setTimeout> | null = null;
   let livePromptId: string | null = null;
   let probing = false;
   let shuttingDown = false;
@@ -447,7 +486,20 @@ async function main(): Promise<void> {
       clearTimeout(abortEscalation);
       abortEscalation = null;
     }
+    if (proseEscalation !== null) {
+      clearTimeout(proseEscalation);
+      proseEscalation = null;
+    }
     tracker.reset();
+    /**
+     * Cleared for exactly the reason `livePromptId` and `liveWorkdir` are
+     * cleared two lines up (ISC-108): a prose streak carried across a settle
+     * would let ONE task's degradation classify the NEXT task on the same
+     * worker. The epoch is the unit this verdict is about, so the count has to
+     * die with it — including the latch, which has already been read by the
+     * caller that decided the verdict now being written.
+     */
+    prose.reset();
     await persistFence();
     /**
      * The ISC-154 quiesce sample, taken HERE and nowhere else.
@@ -544,12 +596,56 @@ async function main(): Promise<void> {
         const s2 = (r2.response.data ?? {}) as RpcSessionState;
         recordSessionPath(s1);
         if (r1.response.success && r2.response.success && tracker.confirm(token, s1, s2)) {
-          const verdict: Verdict = em.timedOut
-            ? "timed_out"
-            : em.abortRequested
-              ? "aborted"
-              : "success";
-          await settle(verdict, "quiesced");
+          /**
+           * THE ISC-108 READER. The epoch quiesced; this decides what it
+           * quiesced AS.
+           *
+           * Before this branch existed the chain below was the whole of the
+           * verdict — `timed_out`, else `aborted`, else `success` — which is
+           * why a worker that streamed reasoning prose for three turns and
+           * never called a tool settled `success`, with a clean empty diff, and
+           * looked exactly like a task that had nothing to do. F39's "worker
+           * looks healthy, streams, settles, and does nothing", certified.
+           *
+           * PRECEDENCE: the prose trip outranks `timed_out` and `aborted`, and
+           * that ordering is a decision rather than an accident of where the
+           * line was inserted.
+           *
+           * `timed_out` and `aborted` describe HOW the epoch ended. The prose
+           * trip says WHY it had to. A verdict's job here is to route the
+           * operator to the remediation, and those two route differently:
+           * `timed_out` sends them to raise `per_task_timeout`, which fixes
+           * nothing when the model has stopped emitting tool calls, while
+           * `no_tool_calls` sends them to change the model, which does. The
+           * same reasoning ISC-116 used one branch down to prefer `timed_out`
+           * over `aborted` — "a deadline abort is a timeout that happened to be
+           * polite" — taken one step further: a diagnosis outranks a
+           * description of the ending.
+           *
+           * The window in which the choice is even reachable is small and worth
+           * stating, because it bounds the blast radius. Once the detector
+           * trips it TEARS THE EPOCH DOWN itself (abort, then the ladder at
+           * `ABORT_GRACE_MS`), so `prose.tripped` can only coincide with
+           * `em.timedOut` when a deadline fires inside those 5 s. It cannot
+           * coincide with an abort THE DETECTOR sent, because the trip path
+           * deliberately does not call `em.noteAbortRequested()` — see there.
+           */
+          let verdict: Verdict;
+          let reason: string;
+          if (prose.tripped) {
+            verdict = "failed";
+            reason = NO_TOOL_CALLS_REASON;
+          } else if (em.timedOut) {
+            verdict = "timed_out";
+            reason = "quiesced";
+          } else if (em.abortRequested) {
+            verdict = "aborted";
+            reason = "quiesced";
+          } else {
+            verdict = "success";
+            reason = "quiesced";
+          }
+          await settle(verdict, reason);
           return;
         }
       } catch {
@@ -729,6 +825,86 @@ async function main(): Promise<void> {
   // Event handling — stream-seq attribution first, everything else second.
   // -------------------------------------------------------------------------
 
+  /**
+   * The prose detector tripped: `prose_turns_before_fail` consecutive turns of
+   * this epoch completed with zero tool calls (SRD §5.9 detector 2 / F39 —
+   * ISC-108). Called on the trip EDGE, exactly once per epoch.
+   *
+   * Three things happen here, and the first two are the whole point of the
+   * detector living at runtime rather than in the harvester:
+   *
+   * 1. **It is recorded, now.** §5.9's promise is that this "converts the
+   *    silent failure into a loud one at ~3 turns instead of ~1 hour", and a
+   *    verdict written at settle is not ~3 turns — it is whenever the agent
+   *    happens to stop. The `events.jsonl` line and the ledger row are dated at
+   *    the turn that crossed the threshold, so `logs` and `report` can say when
+   *    the worker stopped acting even for a run that was killed before it
+   *    settled anything.
+   *
+   * 2. **The epoch is torn down** rather than left to burn the rest of
+   *    `per_task_timeout` against `tokens_ceiling`. That budget is the ~1 hour
+   *    in §5.9's sentence: a model degraded under a long context does not
+   *    recover by being given more of it, and a `followUp` loop will happily
+   *    produce prose until the deadline. Teardown also has a second effect
+   *    worth naming — it is what keeps `prose.tripped` reachable at settle. Let
+   *    the deadline get there first and the task settles `timed_out`, and the
+   *    criterion's `failed:no_tool_calls` would be a verdict nothing could
+   *    observe.
+   *
+   * 3. It uses the SAME ladder shape as the deadline branch — advisory `abort`
+   *    first, kill only if it goes unanswered — rather than settling on the
+   *    spot. Settling while the child is still streaming would leave a live
+   *    agent writing into a settled epoch, which is precisely the §7.5
+   *    straggler hazard the fence exists to contain. Ask politely; escalate if
+   *    ignored. `aborted.json` is the agent that honours it and `deaf-abort`
+   *    the one that does not, and both paths end in a settled epoch.
+   *
+   * NOTE what is deliberately NOT called: `em.noteAbortRequested()`. The
+   * deadline branch sets it because a deadline abort really is the task being
+   * stopped from outside, and the fence records that for forensics. Here it
+   * would put `abort_requested: true` in `fence.json` for an abort no operator
+   * sent, and — before the verdict chain in `maybeProbe` was ordered the way it
+   * is — would have relabelled this epoch `aborted`, erasing the diagnosis with
+   * a side effect of the diagnosis itself. The abort is a mechanism here, not a
+   * fact about intent.
+   */
+  const onProseTrip = (): void => {
+    const live = em.live;
+    logEvent({
+      type: "no_tool_calls_detected",
+      task_id: live?.task_id ?? null,
+      epoch: live?.epoch ?? null,
+      // The measurement, in band: a number the supervisor recorded itself
+      // survives into a run directory an operator reads months later, which a
+      // test timing it from outside does not.
+      prose_turns: prose.streak,
+      threshold: prose.threshold,
+    });
+    void ledger.append("no_tool_calls", {
+      worker: argv.workerId,
+      ...(live === null ? {} : { task_id: live.task_id, epoch: live.epoch }),
+      detail: { prose_turns: prose.streak, threshold: prose.threshold },
+    });
+    void client.send("abort").catch(() => {});
+    proseEscalation = setTimeout(() => {
+      proseEscalation = null;
+      if (em.live === null) return; // the abort landed; nothing to escalate.
+      logEvent({ type: "no_tool_calls_escalated", epoch: em.live.epoch });
+      // `.catch` BEFORE `.finally`, for the reason the deadline ladder spells
+      // out at length: `settle()` awaits two unguarded durable writes, and a
+      // bare `void p.finally(...)` would re-raise an ENOSPC rejection as an
+      // unhandled one, taking the supervisor down mid-transition.
+      void settle("failed", NO_TOOL_CALLS_REASON)
+        .catch((err: unknown) => {
+          logEvent({ type: "settle_failed", reason: String(err) });
+        })
+        .finally(() => {
+          // A child that ignored abort is not trustworthy to run the next task.
+          child.kill();
+        });
+    }, ABORT_GRACE_MS);
+  };
+
   const onEvent = (event: RpcEvent, seq: number): void => {
     state.last_event = event.type;
     state.last_event_at = new Date().toISOString();
@@ -772,6 +948,11 @@ async function main(): Promise<void> {
     if (event.type === "agent_start" && em.live !== null && !em.windowOpen) {
       if (em.bindStart(seq)) {
         tracker.reset();
+        // Reset alongside the tracker, not only in `settle` (ISC-108). `settle`
+        // covers the epoch that ENDED; this covers the epoch that begins —
+        // including the one a crashed predecessor left burned, whose counts
+        // this incarnation never saw and must not inherit.
+        prose.reset();
         tracker.observe(event);
         void persistFence();
         logEvent({ type: "epoch_started", epoch: em.live.epoch, seq });
@@ -785,6 +966,27 @@ async function main(): Promise<void> {
     const attribution = em.attribute(seq);
     if (attribution === "live" && em.windowOpen) {
       tracker.observe(event);
+      /**
+       * THE ISC-108 COUNTER, fed from the LIVE branch and nowhere else.
+       *
+       * Note what this is NOT: `state.tool_calls++` in the switch at the top of
+       * this function. That one is cumulative across the worker's whole life
+       * and — because the switch runs BEFORE `em.attribute` — it also counts a
+       * straggler `tool_execution_end` belonging to an epoch that settled
+       * minutes ago. Harmless for a metric `harvest` prints; wrong for a
+       * verdict. Counting here instead means a prior epoch's tool call can
+       * never clear THIS epoch's prose streak, which would silently disarm the
+       * detector on exactly the §7.5 interleaving the fence exists to handle.
+       *
+       * `interrupted` is the second half of that care. A `turn_end` arriving
+       * after the supervisor asked this epoch to stop has zero tool calls
+       * because WE ended it — see `ProseTurnDetector` for why counting it would
+       * send an operator to change a model when the answer was a longer
+       * deadline.
+       */
+      if (prose.observe(event.type, { interrupted: em.timedOut || em.abortRequested })) {
+        onProseTrip();
+      }
       maybeProbe();
       return;
     }
