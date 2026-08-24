@@ -503,6 +503,8 @@ of the same class it repaired.
 
 > **Count reconciliation, 2026-08-23 (ISC-265, relay drift).** `252/295`, RECOUNTED from this file with `grep -c`. Arithmetic from the previous commit's `251 [x] / 23 [~] / 21 [ ] = 295`: ISC-265 moves `[ ]` -> `[x]` (closed 251 -> 252, open 21 -> 20). `252 + 23 + 20 = 295`. The denominator does not move — this closes a criterion rather than filing one. **The grade was drafted `[~]` and corrected UP by CI, which is the rarer direction and worth stating plainly.** The draft reasoned that "takes effect" is an effect claim whose probe needs a Docker daemon, therefore self-skips, therefore `[~]` under the strictness rule. The middle step was false: the Docker-gated integration suite runs in the `container` job on a Linux runner with a real daemon. What no runner has is oMLX and host ADC, which is why the two live-inference probes sitting in the same file still skip and ISC-258/ISC-262 stay `[~]`. **The lesson is about the rule's mechanics, not its severity:** "is this re-checked?" has to be answered by reading what CI actually executes, not by inferring from a dependency's name. Inferring in the pessimistic direction still gets the answer wrong, and an under-claimed criterion is a criterion someone re-does.
 
+> **Count reconciliation, 2026-08-24 (Phase E-C, the runtime prose-turn detector — PHASE E CLOSES).** `263/298`, RECOUNTED from this file with `grep -c`. Arithmetic from main's `262 [x] / 21 [~] / 15 [ ] = 298`: ISC-108 moves `[ ]` -> `[x]` (closed 262 -> 263, open 15 -> 14). `263 + 21 + 14 = 298`. The denominator does not move. **This closes Phase E at six of six** — ISC-108, 111, 112, 113, 126, 276 — and the phase table row is corrected in the same edit: it promised a "control-socket path allowlist" and what shipped is run-dir staging, which is the arm the owner chose and a stronger control than the row described. **A prediction in ISC-108's own note is recorded as REFUTED rather than quietly dropped:** it said `no-tool-calls.json`'s `EXPECTED_SETTLES` entry "becomes the thing to revise", and it does not. That table is a property of the completion TRACKER, which this change does not touch — the scenario still holds one terminal `agent_end` and still settles once. The surviving `[1]` is load-bearing evidence in its own right: had the detector been wired into the tracker instead of the supervisor, prose would have become unsettleable and the entry would have had to become `[]`. **A verdict is not a count, and the entry that did not move is what proves the layering is right.**
+
 > **Count reconciliation, 2026-08-24 (Phase E-B, the control socket's two security criteria).** `262/298`, RECOUNTED from this file with `grep -c`. Arithmetic from main's `260 [x] / 21 [~] / 17 [ ] = 298`: ISC-126 and ISC-276 each move `[ ]` -> `[x]` (closed 260 -> 262, open 17 -> 15). `262 + 21 + 15 = 298`. The denominator does not move — both criteria already existed and neither branch filed a new one. **Both closes corrected something this file previously ASSERTED, which is worth recording because neither correction was sought.** ISC-126's note named the wrong blocker: the obstacle to a bind-mounted second-uid probe on macOS is not the shared set but `connect(2)` returning ENOTSUP for every uid alike, so the design that note anticipated could never have been observed green here. And `security/control-auth.ts` had asserted for weeks that filesystem permissions were sufficient against another USER — true only at the operator's umask, and false at `umask 000`, where the token it describes as the second line was the only line. **Phase E now stands at five of six:** ISC-111, 112, 113, 126 and 276 closed; ISC-108's runtime prose-turn detector is the remainder.
 
 > **Count reconciliation, 2026-08-24 (Phase E-A, the supervisor's UI-request seam).** `260/298`, RECOUNTED from this file with `grep -c` AFTER rebasing onto merged `main` (`712527b`), never incremented from the number this branch carried before the rebase. Arithmetic from main's `257 [x] / 22 [~] / 19 [ ] = 298`: ISC-111 and ISC-112 each move `[ ]` -> `[x]` (closed 257 -> 259, open 19 -> 17), and ISC-113 moves `[~]` -> `[x]` (closed 259 -> 260, partial 22 -> 21). `260 + 21 + 17 = 298`. **The pre-rebase version of this blockquote said `260/297` and it was RIGHT WHEN WRITTEN** — the branch was cut before ISC-297 was filed, and it said so, naming the recount the second lander would owe. This is that recount, and it is recorded rather than silently corrected because a stale denominator that merges cleanly is exactly ISC-285's failure: a clean merge landing an ISA headline the merged body contradicts. **What closed all three is the same single line:** `src/supervisor/index.ts:769`. Without it the policy module is complete, tested and callerless — the shape that put eight criteria in RC-1 — and with it three criteria close at once, which is a fair measure of how much of this phase was one architectural gap rather than three features.
@@ -581,7 +583,7 @@ the root-cause classification; this table is the index.
 | B-guards | Suite-wide properties that govern how every later phase is graded | ISC-254, 270, 273, 274, 278 | A-decide | no |
 | C-proof-plane | Self-hosted Apple-silicon runner + the bridge-gateway containment its probes expose | ISC-22, 41, 47, 48, 50, 51, 57, 258, 259, 262 | B-guards | no |
 | D-accounting | Budget on the dispatch path; production adapters for the stall policy | ISC-110, 115, 117, 193, 281, 282 | B-guards | yes |
-| E-control-seam | UI-request handler + timer, control-socket path allowlist and peer uid, runtime `no_tool_calls` | ISC-108, 111, 112, 113, 126, 276 | B-guards | yes |
+| E-control-seam | UI-request handler + timer, control-socket run-dir staging (NOT the allowlist this row planned — see `## Decisions` 2026-08-24) and peer uid, runtime `no_tool_calls` | ISC-108, 111, 112, 113, 126, 276 | B-guards | **CLOSED 2026-08-24, 6/6** |
 | F-launch-preflight | `up` preflight (image, backend, mount source, probe target) and launch-recorded kill identity | ISC-32, 61, 189, 191, 271, 272, 291, 292 | B-guards | yes |
 | G-durable-formats | Schema discriminator and pinned read policy for ledger, state and registry | ISC-157, 192 | B-guards | yes |
 | H-evidence | Host-side ledger collector, escape detection, quiesce/harvest tree hashes, fd-based outbox scan | ISC-125, 154, 172, 246 | B-guards | yes |
@@ -1097,6 +1099,30 @@ the root-cause classification; this table is the index.
   (3) or (4) was visible from any test; both needed the run.
 
 ## Changelog
+
+- **conjectured:** Phase E was six criteria and roughly three PRs, and the risk was thought to be the
+  supervisor logic — a UI-request state machine, a peer-credential API that might not exist under Bun,
+  a containment policy with no obviously-correct answer.
+  **refuted by:** all three of those being tractable, and the same non-technical failure recurring in
+  four of the four agent runs: a complete, well-argued module written and **never wired to a
+  production caller**, reported as finished. Every one stopped within a sentence of the call site.
+  ISC-111/112 shipped `ui-requests.ts` callerless; ISC-108 shipped `prose-detector.ts` with an import
+  line and no call. Both would have passed a unit suite over the module and closed nothing, which is
+  the RC-1 shape this ISA has recorded eight times. What caught it every time was the same two
+  commands — read the diff rather than the report, and `grep` for the caller before grading.
+  **learned:** the recurring defect in this workflow is not in the code, it is in the reporting layer,
+  and it has a signature: a final line that ends mid-sentence is a token ceiling, not a completion.
+  Treating "done" as a claim to verify rather than a fact to act on cost two commands per criterion
+  and caught four inert deliverables. The generalisable form: **when the deliverable is "a thing that
+  runs", the acceptance test is `grep` for its caller, not the test suite that exercises it directly.**
+  Two smaller lessons worth keeping. The guards paid for themselves without a human in the loop —
+  ISC-147 refused three scenarios with no reviewed expectation and ISC-274 refused five ceilings whose
+  derivation it could not read, and the second named its own remedy in its docstring, so it was fixed
+  correctly by someone who had not written it. And two criteria closed by CORRECTING this file rather
+  than by satisfying it: ISC-126's stated blocker was the wrong blocker (ENOTSUP on a bind-mounted
+  socket, for every uid alike, not the shared set), and `control-auth.ts` had asserted for weeks that
+  filesystem permissions were sufficient against another user — true at the operator's umask, false at
+  `umask 000`. Neither correction was sought; both came from probing a claim the file already made.
 
 - **conjectured:** Phase E-A was three criteria — answer dialogs (ISC-111), stop `editor` hanging (ISC-112), make
   ISC-113's vacuous half mean something — and the plan split it as `src` work and `test` work running in
