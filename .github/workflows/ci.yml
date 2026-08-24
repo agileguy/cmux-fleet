@@ -324,6 +324,16 @@ jobs:
           # out because this constant has drifted from its own prose twice, and
           # both times the prose was the half nobody re-derived.
           #
+          # ISC-51's close (2026-08-23) does NOT move this number, and the
+          # reason is worth writing down because it looks like it should. The
+          # gateway-residual probe was INVERTED, not added to: it asserted the
+          # deny-all bridge REACHED a host-namespace beacon and now asserts it
+          # reaches nothing at all. A rewrite in place changes no count. It did
+          # change the probe's NAME again ("...and is exactly the host-namespace
+          # listeners" -> "...and is EMPTY — the bridge gateway is contained"),
+          # which matters only for probes pinned by name in an EXPECTED_SKIPS
+          # list; this one RUNS on the runner and is pinned in neither.
+          #
           # 79 -> 81 is container-env.test.ts, which reads ISC-31 and ISC-127
           # back out of `docker inspect` on a container started from the argv
           # `renderWorker` actually produced. Both probes need ONLY a daemon

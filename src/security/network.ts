@@ -28,6 +28,7 @@
 // networks. Re-exported here so existing importers keep working against one
 // implementation rather than a second copy of the regex.
 import { assertDockerName, assertNetworkName } from "./docker-names.ts";
+import { ensureGatewayBlocked } from "./gateway-block.ts";
 
 export { assertDockerName, assertNetworkName };
 
@@ -37,6 +38,20 @@ export interface EgressNetworkStatus {
   /** True only when Docker itself reports `Internal: true` — the deny-all bit. */
   internal: boolean;
   id: string | null;
+  /**
+   * The bridge's own address, as the daemon assigned it.
+   *
+   * Carried because `--internal` does NOT contain it (ISC-51): the gateway is
+   * on-link and inside the bridge subnet, so it is delivered through INPUT and
+   * never reaches Docker's FORWARD isolation rule. `gateway-block.ts` needs
+   * the literal address to write a rule narrow enough to be safe, and there is
+   * no second place to learn it from — deriving `.1` from the subnet would be
+   * a guess about IPAM that the daemon is already telling us the answer to.
+   *
+   * `null` when the daemon reports no IPAM config, which is a refusal signal
+   * rather than a default: we do not firewall an address we did not read.
+   */
+  gateway: string | null;
 }
 
 /**
@@ -74,7 +89,7 @@ export function parseNetworkInspect(name: string, stdout: string): EgressNetwork
   }
   for (const entry of parsed) {
     if (typeof entry !== "object" || entry === null) continue;
-    const e = entry as { Name?: unknown; Id?: unknown; Internal?: unknown };
+    const e = entry as { Name?: unknown; Id?: unknown; Internal?: unknown; IPAM?: unknown };
     if (e.Name !== name) continue;
     return {
       name,
@@ -83,9 +98,30 @@ export function parseNetworkInspect(name: string, stdout: string): EgressNetwork
       // internal — the direction that refuses, not the one that reassures.
       internal: e.Internal === true,
       id: typeof e.Id === "string" ? e.Id : null,
+      gateway: gatewayFrom(e.IPAM),
     };
   }
-  return { name, exists: false, internal: false, id: null };
+  return { name, exists: false, internal: false, id: null, gateway: null };
+}
+
+/**
+ * Pull the first IPv4 gateway out of `IPAM.Config`, or `null`.
+ *
+ * Deliberately total and deliberately unfussy about extra entries: a
+ * dual-stack network lists v6 alongside v4, and the containment rule this
+ * feeds is an IPv4 rule. Anything unrecognised reads as `null`, which makes
+ * the caller refuse rather than firewall a value it did not understand.
+ */
+function gatewayFrom(ipam: unknown): string | null {
+  if (typeof ipam !== "object" || ipam === null) return null;
+  const cfg = (ipam as { Config?: unknown }).Config;
+  if (!Array.isArray(cfg)) return null;
+  for (const entry of cfg) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const g = (entry as { Gateway?: unknown }).Gateway;
+    if (typeof g === "string" && /^[0-9.]+$/.test(g) && g.split(".").length === 4) return g;
+  }
+  return null;
 }
 
 async function docker(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -111,7 +147,7 @@ export async function inspectEgressNetwork(name: string): Promise<EgressNetworkS
   const r = await docker(networkInspectArgv(name));
   if (r.code !== 0) {
     if (/no such network|not found/i.test(r.stderr)) {
-      return { name, exists: false, internal: false, id: null };
+      return { name, exists: false, internal: false, id: null, gateway: null };
     }
     throw new Error(`egress: 'docker network inspect ${name}' failed: ${r.stderr.trim()}`);
   }
@@ -137,6 +173,7 @@ export async function ensureEgressNetwork(name: string): Promise<EgressNetworkSt
           `Remove or rename it (docker network rm ${name}) and re-run; refusing to adopt it.`,
       );
     }
+    await containGateway(before);
     return before;
   }
   const created = await docker(networkCreateArgv(name));
@@ -149,7 +186,35 @@ export async function ensureEgressNetwork(name: string): Promise<EgressNetworkSt
       `egress: created network ${JSON.stringify(name)} but the daemon does not report it internal`,
     );
   }
+  await containGateway(after);
   return after;
+}
+
+/**
+ * Close the gateway hole `--internal` leaves open (ISC-51).
+ *
+ * This lives on `ensureEgressNetwork` rather than in `up` on purpose, and the
+ * purpose is the whole lesson of ISC-51: the posture must be inseparable from
+ * the call that claims it. Containment wired into the COMMAND would leave
+ * `ensureEgressNetwork` free to hand back a network that reports deny-all and
+ * is not — to `doctor`, to the integration suite, to whatever calls it next.
+ * The function's contract is "internal, and actually contained", or it throws.
+ *
+ * Applied on the ADOPT path too, not just after create. A network this fleet
+ * made yesterday is not contained today if the host's tables were flushed by a
+ * reboot, and adopting it silently is exactly the quiet downgrade the rest of
+ * this module exists to refuse.
+ */
+async function containGateway(status: EgressNetworkStatus): Promise<void> {
+  if (status.id === null || status.gateway === null) {
+    throw new Error(
+      `egress: the daemon reported network ${JSON.stringify(status.name)} without an id or an ` +
+        `IPv4 gateway, so its bridge gateway cannot be contained (ISC-51). A worker on an ` +
+        `uncontained bridge reaches every port the Docker host listens on while the fleet ` +
+        `reports deny-all; refusing to hand back an unverified posture.`,
+    );
+  }
+  await ensureGatewayBlocked(status.id, status.gateway);
 }
 
 /**

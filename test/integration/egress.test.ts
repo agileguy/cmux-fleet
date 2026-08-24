@@ -120,6 +120,7 @@ describe.skipIf(!DOCKER)("egress network", () => {
         exists: false,
         internal: false,
         id: null,
+        gateway: null,
       });
     },
     EGRESS_TEST_TIMEOUT_MS,

@@ -243,14 +243,18 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       'case "$1" in',
       "  network)",
       '    case "$2" in',
+      // NOTE: the ids below are 64 hex characters because real Docker network
+      // ids are, and ISC-51's containment derives the bridge interface name
+      // (`br-<first 12>`) from them. A memorable non-hex id here would be a
+      // stand-in that could not stand in.
       "      inspect)",
       // The uplink MUST report non-internal or ensureUplinkNetwork refuses it.
       '        case "$3" in',
       "          *-uplink)",
-      `            printf '[{"Name":"%s","Id":"wiring-shim-uplink","Internal":false}]\\n' "$3"`,
+      `            printf '[{"Name":"%s","Id":"c1a5e0f77b1140e9a2d3c4b5a6978869fedcba9876543210fedcba9876543210","Internal":false,"IPAM":{"Config":[{"Subnet":"172.31.0.0/16","Gateway":"172.31.0.1"}]}}]\\n' "$3"`,
       "            ;;",
       "          *)",
-      `            printf '[{"Name":"%s","Id":"wiring-shim","Internal":true}]\\n' "$3"`,
+      `            printf '[{"Name":"%s","Id":"a7b3c9d1e5f20486913a2b4c6d8e0f13579bdf02468ace13579bdf02468ace135","Internal":true,"IPAM":{"Config":[{"Subnet":"172.30.0.0/16","Gateway":"172.30.0.1"}]}}]\\n' "$3"`,
       "            ;;",
       "        esac",
       "        ;;",
@@ -263,6 +267,36 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       "    esac",
       "    ;;",
       "  run)",
+      // ---------------------------------------------------------------
+      // ISC-51's containment call, stood in for WITH STATE.
+      //
+      // `ensureEgressNetwork` writes the bridge-gateway DROP rule through a
+      // privileged container in the host's namespaces, because that is the
+      // only privilege pifleet holds. There is no host firewall to write
+      // here, so this branch models the one behaviour the product actually
+      // depends on: `-C` reports absent until `-I` has run, and present
+      // afterwards. A shim that answered 0 to everything would pass the
+      // insert AND the verify-after-insert without either meaning anything,
+      // which is the same vacuous shape the relay marker file exists to
+      // avoid.
+      //
+      // Keyed on `iptables` rather than on the image, because the image is
+      // the pinned digest and this must not have to be re-edited when the
+      // digest rolls.
+      '    case " $* " in',
+      '      *" iptables "*)',
+      '        GWBLOCK="$(dirname "$0")/.gateway-blocked"',
+      '        case " $* " in',
+      '          *" -C "*)  [ -f "$GWBLOCK" ] && exit 0; exit 1 ;;',
+      '          *" -I "*)  : > "$GWBLOCK"; exit 0 ;;',
+      '          *" -D "*)  rm -f "$GWBLOCK"; exit 0 ;;',
+      '          *)',
+      '            echo "docker shim: unexpected iptables argv: $*" >&2',
+      "            exit 1",
+      "            ;;",
+      "        esac",
+      "        ;;",
+      "    esac",
       // ---------------------------------------------------------------
       // The ISC-260 probe container, stood in for.
       //

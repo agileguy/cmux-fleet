@@ -29,7 +29,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { connect } from "node:net";
 import { containerBudget } from "../support/budget.ts";
-import { ensureEgressNetwork, ensureUplinkNetwork } from "../../src/security/network.ts";
+import {
+  ensureEgressNetwork,
+  ensureUplinkNetwork,
+  inspectEgressNetwork,
+} from "../../src/security/network.ts";
+import { removeGatewayBlock } from "../../src/security/gateway-block.ts";
 import {
   ensureEgressRelay,
   inspectRelayContainer,
@@ -142,7 +147,17 @@ const cleanupContainers: string[] = [];
 const cleanupNetworks: string[] = [];
 afterEach(async () => {
   for (const c of cleanupContainers.splice(0)) await docker(["rm", "-f", c]);
-  for (const n of cleanupNetworks.splice(0)) await docker(["network", "rm", n]);
+  for (const n of cleanupNetworks.splice(0)) {
+    // Remove the ISC-51 containment rule BEFORE the network, while the id and
+    // gateway are still readable. `down` deliberately leaves the rule in place
+    // (the network outlives the run), but these networks are destroyed, so
+    // without this the host accumulates one dead rule per test run.
+    const before = await inspectEgressNetwork(n);
+    if (before.exists && before.id !== null && before.gateway !== null) {
+      await removeGatewayBlock(before.id, before.gateway);
+    }
+    await docker(["network", "rm", n]);
+  }
 });
 
 /**
@@ -529,7 +544,7 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
   );
 
   test(
-    "the gateway's reachable set is ENUMERATED over all 65535 ports, and is exactly the host-namespace listeners",
+    "the gateway's reachable set is ENUMERATED over all 65535 ports, and is EMPTY — the bridge gateway is contained",
     async () => {
       /**
        * ISC-261, and the test that would have caught M1.
@@ -608,9 +623,19 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
        * deny-all bridge REACHES it. Under the original claim that assertion is
        * a contradiction, and you cannot write it without discovering M1.
        *
-       * IF THE HOST-NAMESPACE ASSERTION FAILS, that is very likely GOOD NEWS:
-       * the gateway was hardened and SRD §12.8, ISC-51 and ISC-57 should all
-       * be tightened to match. Do not "fix" it by deleting the assertion.
+       * THE GATEWAY HAS SINCE BEEN HARDENED (ISC-51, 2026-08-23), and this
+       * docstring's prediction is the reason to trust the assertion below: it
+       * said that if the host-namespace probe ever stopped reaching the
+       * gateway, that would be GOOD NEWS to be written into SRD §12.8 and
+       * ISC-51 rather than "fixed" by deleting the line. That is exactly what
+       * happened — `ensureEgressNetwork` now installs a scoped INPUT DROP for
+       * the bridge gateway — so the assertion was INVERTED, not removed, and
+       * the beacon it plants still has to be independently reachable from an
+       * ordinary bridge for the test to mean anything.
+       *
+       * IF THE HOST-NAMESPACE ASSERTION FAILS NOW, the containment rule is not
+       * being installed and workers can reach the Docker host again. Do not
+       * "fix" it by deleting the assertion.
        */
       const net = testNetName();
       const uplink = uplinkNetworkName(net);
@@ -681,30 +706,56 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
       );
 
       // The probes are alive and both beacons are up. Everything below is a
-      // statement about live data because of these lines.
+      // statement about live data because of these lines — and after ISC-51's
+      // close they carry more weight than before: the deny-all bridge's set is
+      // now EMPTY, so these are the only lines standing between "contained"
+      // and "the scanner returned nothing because it is broken".
       expect(listening).toContain(hostNsPort);
       expect(served).toContain(publishedPort);
       expect(served).toContain(hostNsPort);
 
-      // ISC-261's core claim: the deny-all bridge reaches the gateway ONLY on
-      // ports the host is INDEPENDENTLY known to serve — "independently" being
-      // the kernel's own socket table, not another scan. Enumerated over the
-      // whole range, so this bounds the entire term rather than five points in
-      // it. Strict, not vacuous: 53 listens and is NOT reachable.
-      for (const port of reachable) expect(listening).toContain(port);
+      // ISC-261's core claim, TIGHTENED by ISC-51's close: the deny-all bridge
+      // reaches the gateway on NO port at all. Enumerated over the whole range,
+      // so this bounds the entire term rather than five points in it.
+      //
+      // Asserted as an equality against the empty set rather than as a loop
+      // over `reachable`, because a loop over an empty array passes for a
+      // scanner that is simply broken — the exact vacuous shape this file was
+      // rewritten to eliminate. What rules that out is the SAME scanner, the
+      // same script, the same range, run against the ordinary bridge two lines
+      // below: it must come back with both planted beacons.
+      expect(reachable).toEqual([]);
 
-      // And the same relation against the corroborating bridge scan, which
-      // catches the narrower drift of the internal bridge reaching something
-      // an ordinary bridge cannot.
-      for (const port of reachable) expect(served).toContain(port);
+      // ...and the ordinary bridge's own set stays bounded by kernel ground
+      // truth, which is the relation ISC-261 established and this close does
+      // not weaken — the scan is still a strict subset of what actually
+      // listens, so a scanner inventing ports would fail here.
+      for (const port of served) expect(listening).toContain(port);
 
-      // The residual, demonstrated on a planted port so it is never
-      // inconclusive: a host-namespace listener IS reachable from the
-      // deny-all bridge. This is the M1-catching assertion.
-      expect(reachable).toContain(hostNsPort);
+      // CONTAINED as of ISC-51's close (2026-08-23), and demonstrated on a
+      // planted port so it can never pass vacuously: a host-namespace listener
+      // is NOT reachable from the deny-all bridge.
+      //
+      // This is the same line that used to assert the opposite. It was written
+      // as a positive because the gateway WAS wide open — Docker's `--internal`
+      // isolation lives in FORWARD, and the gateway is on-link inside the
+      // bridge subnet, so gateway-destined packets went through INPUT unchecked
+      // (SRD §12.8; M1). `ensureEgressNetwork` now installs
+      // `-I INPUT -i br-<id> -d <gateway> -j DROP` on the Docker host and
+      // refuses to hand back the network if it cannot, so the residual is
+      // closed rather than merely measured.
+      //
+      // The three lines above are what keep this honest: `listening` and
+      // `served` both contain `hostNsPort`, proving the beacon is UP and
+      // reachable from an ordinary bridge. An unreachable-from-everywhere
+      // beacon would satisfy this assertion for the wrong reason.
+      expect(reachable).not.toContain(hostNsPort);
 
-      // And the containment that genuinely holds: a published container port
-      // is NOT. Meaningful only because `served` above proves it was up.
+      // The containment that already held before ISC-51, kept as a separate
+      // line because it fails for a DIFFERENT reason: a published container
+      // port is rewritten by nat/PREROUTING to an address outside the bridge
+      // subnet, so Docker's FORWARD isolation rule does catch it. Meaningful
+      // only because `served` above proves the beacon was up.
       expect(reachable).not.toContain(publishedPort);
 
       // The gateways are DIFFERENT addresses on the same machine — the uplink

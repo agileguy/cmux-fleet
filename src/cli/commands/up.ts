@@ -529,9 +529,22 @@ export function register(program: Command): void {
        * one rather than quietly using it (SRD §5.6, §12).
        */
       let egressInternal: boolean | null = null;
+      let egressGatewayBlocked: string | null = null;
       if (egressNetwork !== null) {
         try {
-          egressInternal = (await ensureEgressNetwork(egressNetwork)).internal;
+          /**
+           * `ensureEgressNetwork` now guarantees BOTH halves of the posture:
+           * the daemon reports the network internal, AND its bridge gateway is
+           * contained by a host firewall rule (ISC-51). `--internal` alone is
+           * not containment — Docker implements it in FORWARD, and the gateway
+           * is on-link inside the bridge subnet, so gateway-destined traffic
+           * is delivered through INPUT and never evaluated. Either half
+           * missing throws here rather than starting a fleet that reports
+           * deny-all while workers reach the host's sshd.
+           */
+          const net = await ensureEgressNetwork(egressNetwork);
+          egressInternal = net.internal;
+          egressGatewayBlocked = net.gateway;
         } catch (err) {
           // `err.message` rather than `String(err)`: these errors already
           // begin "egress: " / "relay: ", and `String(err)` prepends
@@ -727,7 +740,7 @@ export function register(program: Command): void {
       }
       if (egressNetwork !== null) {
         await ledger.append("egress_network_ready", {
-          detail: { network: egressNetwork, internal: egressInternal },
+          detail: { network: egressNetwork, internal: egressInternal, gateway_blocked: egressGatewayBlocked },
         });
       }
       if (egressRelay !== null) {
