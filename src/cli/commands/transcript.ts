@@ -11,14 +11,16 @@
  */
 
 import type { Command } from "commander";
-import { rename } from "node:fs/promises";
+import { copyFile, mkdir, open, rename, unlink } from "node:fs/promises";
+import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import { CliError } from "../index.ts";
 import { EXIT, type WorkerState } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot, workerPaths, type RunPaths } from "../../run/paths.ts";
 import { readWorkerState } from "../../run/state.ts";
 import { SocketRequestError } from "../../run/registry.ts";
 import { ControlAuthError } from "../../security/control-auth.ts";
-import { writeTextAtomic } from "../../util/jsonl.ts";
+import { fsyncDirBestEffort, writeTextAtomic } from "../../util/jsonl.ts";
 import { controlCall } from "../../supervisor/launch.ts";
 import {
   classifySession,
@@ -275,6 +277,84 @@ function rpcExportFailure(err: unknown): string | null {
 }
 
 /**
+ * Publish a render the worker staged inside the run directory at the path the
+ * OPERATOR asked for (ISC-276).
+ *
+ * ## Why this is a copy and not a rename
+ *
+ * The supervisor used to stage into a SIBLING of `outPath`, which made the
+ * claim a same-directory `rename(2)` — atomic and, by construction, never
+ * cross-device. That sibling was load-bearing and it is gone, because a
+ * sibling of an operator-chosen path is still an operator-chosen path and it
+ * was Pi that wrote there. ISC-276 moves the staging file into the run
+ * directory; `~/.pifleet/runs` and `/Volumes/scratch/foo.html` are then
+ * routinely on different filesystems, and `rename` across one fails `EXDEV`.
+ *
+ * So the bytes are COPIED out of the run tree and the rename happens entirely
+ * within the destination directory. Both properties survive: the operator
+ * never observes a half-written document at their path, and the only process
+ * that writes outside the run tree is this one — which already runs with the
+ * operator's own authority, having been started by the operator. That is the
+ * whole substance of the criterion. Nothing about the worker's reach changed
+ * because a CLI cannot exceed the privileges of the person who typed it.
+ *
+ * ## Why the copy is UNCONDITIONAL rather than rename-then-fall-back-on-EXDEV
+ *
+ * Because the fallback arm would never run in CI. A test's runs root and its
+ * output directory both live under one `mkdtemp`, so `rename` succeeds there
+ * every time and the copy — the arm that runs on the operator's machine —
+ * would be the untested one. An unconditional copy is exercised by every
+ * export the suite performs, which is the arrangement where a green suite is
+ * evidence about the code that actually runs.
+ *
+ * ## Why not `writeTextAtomic`
+ *
+ * It implements this same tmp-and-rename and is pinned at every syscall
+ * boundary by `test/unit/jsonl.test.ts` (ISC-156), so reaching for it first
+ * was right. It does not fit: it serializes an in-memory STRING, and using it
+ * here would mean reading Pi's document into a UTF-8 string and writing it
+ * back out. That is a re-encoding of a file this process did not author and
+ * cannot validate — the same "raw means the bytes Pi wrote" argument the A4
+ * branch above makes, applied to A5. A copy is byte-exact and buffers nothing.
+ *
+ * Throws on any failure, having removed its own temp. The caller treats that
+ * as "the export could not be claimed" and falls back to the local render, so
+ * a failure here still ends in a document at `outPath`.
+ */
+async function claimStagedExport(staged: string, outPath: string): Promise<void> {
+  const dir = dirname(outPath);
+  // The operator may name a directory that does not exist yet; the local
+  // fallback creates it via `writeTextAtomic` and this branch must not be the
+  // one that refuses to.
+  await mkdir(dir, { recursive: true });
+  // Unique per call for the reason `writeTextAtomic`'s temp is: two
+  // `transcript --html` invocations against one path in the same millisecond
+  // must not open the same temp inode.
+  const tmp = `${outPath}.pi-claim-${process.pid}-${randomUUID()}`;
+  try {
+    await copyFile(staged, tmp);
+    // Durability parity with the local render, which syncs before its own
+    // rename (ISC-218): when this function returns, the document is on disk,
+    // not merely in the page cache. Opened "r+" rather than "r" — `fsync` on a
+    // read-only descriptor is not portably guaranteed.
+    const fh = await open(tmp, "r+");
+    try {
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    await rename(tmp, outPath);
+  } catch (err) {
+    // Never leave the temp beside the operator's file. They asked for one
+    // document and a failed export that litters their desktop is a second
+    // defect on top of the first.
+    await unlink(tmp).catch(() => {});
+    throw err;
+  }
+  await fsyncDirBestEffort(dir);
+}
+
+/**
  * A5: Pi's `export_html` via the supervisor when one is alive, local render
  * when not. Returns which path produced the file.
  *
@@ -295,27 +375,35 @@ async function exportHtml(
     );
   };
   try {
+    // NO `path` IS SENT (ISC-276). The supervisor refuses a request that
+    // carries one, and where the operator's file goes is this process's own
+    // business — it was already the only writer of `outPath`, and a
+    // destination that never crosses the control socket is a destination no
+    // caller of that socket can choose. See the `export_html` case in
+    // `src/supervisor/index.ts` for why the parameter was removed rather than
+    // accepted and ignored.
     const reply = await controlCall(
       run,
       workerId,
-      { cmd: "export_html", path: outPath },
+      { cmd: "export_html" },
       { timeoutMs: CLI_EXPORT_HTML_TIMEOUT_MS },
     );
     // Trust the reply only as far as the filesystem confirms it: the file is
     // the deliverable (ISC-101), not the acknowledgement.
     //
-    // The reply names a STAGING path Pi rendered into, and this rename is what
-    // publishes it. Doing it here rather than in the supervisor is what closes
-    // the ISC-234 late-write race outright: this process is the only one that
-    // ever names `outPath`, so the losing render has nothing to overwrite and
-    // no ordering between the two sides can put the agent's bytes behind the
-    // word "local". The rename doubles as the existence check it replaced —
-    // a container-namespace path Pi resolved elsewhere fails ENOENT here.
+    // The reply names a STAGING path inside the RUN DIRECTORY that Pi rendered
+    // into, and this claim is what publishes it. Doing it here rather than in
+    // the supervisor is what closes the ISC-234 late-write race outright: this
+    // process is the only one that ever names `outPath`, so the losing render
+    // has nothing to overwrite and no ordering between the two sides can put
+    // the agent's bytes behind the word "local". The claim doubles as the
+    // existence check it replaced — a container-namespace path Pi resolved
+    // elsewhere leaves nothing at the host staging path and fails ENOENT here.
     if (reply["ok"] === true) {
       const staged = reply["staged"];
       if (typeof staged === "string" && staged !== "") {
         try {
-          await rename(staged, outPath);
+          await claimStagedExport(staged, outPath);
           return "rpc";
         } catch (err) {
           note(`the worker's export could not be claimed: ${err instanceof Error ? err.message : String(err)}`);

@@ -33,6 +33,7 @@
 
 import { existsSync } from "node:fs";
 import { mkdir, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   TaskEnvelopeSchema,
@@ -46,7 +47,7 @@ import { appendJsonl } from "../util/jsonl.ts";
 import { RpcClient, RpcTimeoutError, Stopwatch } from "../rpc/client.ts";
 import { CompletionTracker } from "../rpc/completion.ts";
 import { EpochManager } from "../rpc/epoch.ts";
-import { runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
+import { isInsideRunTree, runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
 import {
   initialWorkerState,
   readFence,
@@ -1046,10 +1047,50 @@ async function main(): Promise<void> {
        * unreachable and left every export, live or dead, on the fallback.
        *
        * PI IS NEVER TOLD THE OPERATOR'S PATH, and neither is this process the
-       * one that writes it. Pi renders into a unique staging sibling; the
-       * supervisor reports where; the CLI renames it into place. Exactly ONE
-       * process ever names the operator's file, and it is the process that told
-       * the operator what the file is.
+       * one that writes it. Pi renders into a unique file under the worker's
+       * `exportsDir`; the supervisor reports where; the CLI copies it into
+       * place. Exactly ONE process ever names the operator's file, and it is
+       * the process that told the operator what the file is.
+       *
+       * ISC-276: THE SUPERVISOR NO LONGER ACCEPTS A PATH AT ALL. It used to,
+       * and the staging file was a SIBLING of the operator's — which kept the
+       * CLI's rename same-directory and therefore atomic and never
+       * cross-device, and was the reason the parameter survived the ISC-234
+       * race fix. But a sibling of an attacker-chosen path is an
+       * attacker-chosen path: the caller still picked the directory, still
+       * picked the basename prefix, and Pi still wrote there with Pi's
+       * authority. The race fix changed WHICH process performed the final
+       * write; it changed nothing about which files were reachable, and it is
+       * worth saying so plainly rather than letting the improvement read as a
+       * containment it never was.
+       *
+       * So the destination is now derived ENTIRELY from the run directory —
+       * `wp.exportsDir` plus a UUID — and a request that carries `path` is
+       * REFUSED rather than served with the field ignored. Three reasons, in
+       * ascending order of how much they matter:
+       *
+       *   1. The supervisor makes no decision from it. A parameter that
+       *      changes nothing still advertises influence, and the next reader
+       *      of this block would reasonably assume it steers the write, which
+       *      is the belief the paragraph above exists to correct.
+       *   2. Silence is the worse failure for a client from an older build.
+       *      Ignoring its `path` leaves it renaming a run-dir file across a
+       *      filesystem boundary and reporting `EXDEV` — a true statement
+       *      about the wrong subject. Refusing puts the reason in the reply,
+       *      and `transcript.ts` already prints a refusal on stderr and falls
+       *      back to the local render, so the operator still gets a document
+       *      and now also gets the sentence explaining it.
+       *   3. It is the OBSERVABLE the criterion names. ISC-276's probe is "the
+       *      reply is a refusal and no file is written anywhere the path
+       *      named". Ignoring the field would leave a probe with only the
+       *      negative half, and a negative alone cannot tell containment apart
+       *      from an export that failed for some unrelated reason. A refusal
+       *      pairs a positive assertion with it.
+       *
+       * Where the operator's file ends up is now the CLI's own business and
+       * never travels over this socket. It never needed to: the CLI is the
+       * process the operator typed `--html` at, and it was already the only
+       * writer of that path.
        *
        * That is not tidiness, it is the whole correctness argument, because Pi
        * writes the file itself and the deadline below is advisory — there is no
@@ -1074,18 +1115,46 @@ async function main(): Promise<void> {
        *
        * The orphan a lost race leaves is swept by `sweepStagedExport`. A path
        * Pi resolves inside a container namespace produces no file at the host
-       * staging path, the CLI's rename fails ENOENT, and the export degrades to
-       * the local render instead of reporting a success that wrote nothing.
+       * staging path, the CLI's claim fails ENOENT, and the export degrades to
+       * the local render instead of reporting a success that wrote nothing —
+       * unchanged by ISC-276, since `exportsDir` is no more visible inside the
+       * container namespace than the operator's desktop was.
        */
       case "export_html": {
-        const path = msg["path"];
-        if (typeof path !== "string" || path === "") {
-          return { ok: false, error: "export_html requires a non-empty path" };
+        // ISC-276. `in` rather than a type check on purpose: the objection is
+        // to the field EXISTING, not to its shape. `{"path": null}` and
+        // `{"path": 7}` are callers that believe they are steering this write
+        // just as much as `{"path": "/etc/cron.d/x"}` is, and all three should
+        // hear that they are not.
+        if ("path" in msg) {
+          return {
+            ok: false,
+            error:
+              "export_html does not accept a path (ISC-276): the render is staged inside the run directory and the caller places it",
+          };
         }
-        // A sibling, so the CLI's rename is same-directory and therefore atomic
-        // and never cross-device.
-        const staging = `${path}.pi-export-${randomUUID()}.tmp`;
+        // Derived from the run directory and a UUID, and from nothing else.
+        // `randomUUID` emits only hex and dashes, so there is no separator, no
+        // traversal and no absolute prefix that could reach out of the
+        // directory this joins onto — containment by construction.
+        const staging = join(wp.exportsDir, `pi-export-${randomUUID()}.html`);
+        // Belt and braces over the line above, asserted rather than assumed —
+        // see `isInsideRunTree` for why the predicate is the smaller half of
+        // this and what it is for. On today's derivation it cannot fire.
+        if (!isInsideRunTree(run.root, staging)) {
+          return {
+            ok: false,
+            error: `export_html: refusing to stage outside the run directory (ISC-276): ${staging}`,
+          };
+        }
         try {
+          // Pi is handed a full path, not a directory, and real Pi is under no
+          // obligation to create parents. Cheaper to guarantee the directory
+          // here than to discover its absence as an opaque render failure 8s
+          // later — and lazily, in the handler, because most runs never
+          // export and an empty `exports/` in every worker directory would be
+          // a permanent artefact of a feature nobody used.
+          await mkdir(wp.exportsDir, { recursive: true });
           const sent = await client.send(
             "export_html",
             { path: staging },
