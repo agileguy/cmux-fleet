@@ -179,3 +179,45 @@ export function containerBudget(ops: number): number {
   }
   return Math.max(CONTAINER_COLD_FLOOR_MS, ops * PER_CONTAINER_OP_MS * CONTENTION * SAFETY);
 }
+
+/**
+ * The budget for a test whose cost is the sum of the GATES it waits on, rather
+ * than the number of processes it starts.
+ *
+ * The third helper this file's model always allowed for, and the guard in
+ * `test/unit/spawn-timeout-guard.test.ts` reads this export surface rather than
+ * a hardcoded name precisely so one could be added when a real third cost shape
+ * turned up. This is that shape.
+ *
+ * **Neither `cliBudget` nor `containerBudget` fits it, and borrowing either
+ * would be a derivation in appearance only.** `cliBudget` is calibrated to the
+ * ~1.9 s it costs to transpile and run the pifleet CLI entrypoint; a supervisor
+ * test that never invokes the CLI would have to inflate its spawn count to
+ * reach a workable number, which encodes a lie as arithmetic. `containerBudget`
+ * is a cold-Docker floor, and a test that starts no container is not paying it.
+ * What these tests actually spend is time sitting in `waitFor` loops whose
+ * ceilings the author already had to choose and justify — so the honest ceiling
+ * is built from those same ceilings.
+ *
+ * Sum, then apply `SAFETY`. `CONTENTION` is deliberately NOT applied on top: a
+ * gate is already sized for the slowest path it must outlast, so multiplying by
+ * the contention factor a second time double-counts it and trades a flaky test
+ * for a hanging suite.
+ *
+ * `BUN_DEFAULT_MS` is the floor so this can never return a ceiling TIGHTER than
+ * the inherited default it exists to replace — a caller passing one small gate
+ * should not end up worse off than writing nothing.
+ *
+ * The result stays BOUNDED, which is the property ISC-273 is about: a genuinely
+ * hung process still fails the test, it just fails after the gates have had
+ * their say instead of at a number with no relationship to the work.
+ */
+export function gateBudget(gatesMs: readonly number[]): number {
+  if (gatesMs.length === 0) throw new TypeError("gateBudget expects at least one gate");
+  for (const g of gatesMs) {
+    if (!Number.isFinite(g) || g <= 0) {
+      throw new TypeError(`gateBudget expects positive finite gates, got ${g}`);
+    }
+  }
+  return Math.max(BUN_DEFAULT_MS, gatesMs.reduce((a, b) => a + b, 0) * SAFETY);
+}

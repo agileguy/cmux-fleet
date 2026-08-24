@@ -1,0 +1,40 @@
+{
+  "scenario": "ui-dialogs",
+  "_comment": "The three SELF-RESOLVING dialog methods from SRD §4.2's vocabulary table — select, confirm, input — arrive one after another mid-turn, each blocking the emission sequence until it is answered. This is ISC-111: a dialog request must be answered {cancelled:true} within ui_request_timeout, and the only way to time that honestly is for the double to actually withhold the turn, so `await_response: true` holds turn_end and agent_end behind all three. They are emitted SEQUENTIALLY rather than in a batch because that is what a real agent does — it asks, it waits, it asks again — and because a supervisor that answered only the first would otherwise never be caught. `self_resolve_ms` is set to 8000 on all three, which is §4.2's optional timeout modelled rather than a safety valve: it sits well clear of ui_request_timeout, so a supervisor answering anywhere inside its own bound always wins the race, and a run where NOTHING answers still finishes — with `unblocked_by: \"self_resolve\"` recorded against every dialog, which is the assertion that fails. Without it an unanswered run would burn the whole deadline_s and the test would die of its own budget instead of saying what went wrong. `editor` is deliberately absent: it has no timeout of its own and belongs to ISC-112, in ui-editor.json.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-select",
+          "method": "select",
+          "params": { "prompt": "which base ref?", "options": ["main", "fleet/base"] },
+          "await_response": true,
+          "self_resolve_ms": 8000
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-confirm",
+          "method": "confirm",
+          "params": { "prompt": "force-push the worker branch?" },
+          "await_response": true,
+          "self_resolve_ms": 8000
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "uireq-input",
+          "method": "input",
+          "params": { "prompt": "commit message", "placeholder": "" },
+          "await_response": true,
+          "self_resolve_ms": 8000
+        },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}

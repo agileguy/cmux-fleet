@@ -39,6 +39,7 @@ import {
 import {
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   DEFAULT_MAX_CONCURRENT,
+  DEFAULT_UI_REQUEST_TIMEOUT_MS,
   type FleetConfig,
 } from "../config/schema.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
@@ -90,6 +91,41 @@ export async function readRunHeartbeatIntervalMs(run: RunPaths): Promise<number>
       .parse(v),
   );
   return doc?.heartbeat_interval_ms ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+}
+
+/**
+ * The bound the supervisor answers an `extension_ui_request` within, as `up`
+ * recorded it (SRD §12.3 guard 2 — ISC-111, ISC-112).
+ *
+ * Same shape and the same reason as `readRunHeartbeatIntervalMs` above, and it
+ * exists because `timers.ui_request_timeout` had no route to the only process
+ * that could act on it. The supervisor is handed a run directory and a worker
+ * id and nothing else — it never loads `fleet.yaml`, by design, because a
+ * detached process re-resolving `./fleet.yaml` months later would answer a
+ * running worker's dialogs against whatever config sits in today's cwd. So the
+ * value travels in `run.json` or it does not travel at all, which is exactly
+ * the gap `timers.event_stall_warn` / `event_stall_kill` had before
+ * `runBudgetRecord` carried them to the scheduler, and exactly why all three
+ * keys validated for so long while changing nothing.
+ *
+ * Forgiving about ABSENCE, for the reason the heartbeat threshold is: a run
+ * directory written before this field existed, or assembled by hand in a test,
+ * must still answer dialogs rather than hang on them — and the schema default
+ * (`5s`) is both a safe answer and the number ISC-111 names. Not forgiving
+ * about a present value that is not positive: a non-positive bound would arm a
+ * deadline that has already expired, reporting a breach on every request the
+ * supervisor answered correctly, so the run dir disagreeing with itself is
+ * kept visible by `z.number().positive()` rejecting the parse rather than
+ * silently substituting.
+ */
+export async function readRunUiRequestTimeoutMs(run: RunPaths): Promise<number> {
+  const doc = await readValidated(run.runJson, (v) =>
+    z
+      .object({ ui_request_timeout_ms: z.number().positive().optional() })
+      .loose()
+      .parse(v),
+  );
+  return doc?.ui_request_timeout_ms ?? DEFAULT_UI_REQUEST_TIMEOUT_MS;
 }
 
 /** What `up` recorded about the harness surface, and whether it recorded anything. */

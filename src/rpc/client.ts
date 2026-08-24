@@ -179,6 +179,49 @@ export class RpcClient {
   }
 
   /**
+   * Write one record that is NOT a command and expects NO response.
+   *
+   * The only caller today is the `extension_ui_request` responder (SRD §12.3
+   * guard 2, ISC-111/112), and the reason it cannot use `send()` is that
+   * `send()` is wrong in three separate ways for this frame:
+   *
+   * 1. It stamps its OWN `id` (`${idPrefix}-${n}`) over whatever the caller
+   *    passes. An `extension_ui_response` is correlated by the ID PI CHOSE for
+   *    the request — the child's dispatcher does
+   *    `pendingExtensionRequests.get(response.id)` — so an overwritten id
+   *    matches nothing and the frame is discarded in silence.
+   * 2. It spells the record as `{id, type: command, ...params}`, i.e. it
+   *    treats the first argument as the `type`. That works for the six
+   *    supervisor commands and produces the right shape here only by accident;
+   *    passing a complete frame is clearer than relying on it.
+   * 3. It registers a pending entry with a timeout. Pi answers commands and
+   *    does not answer this, so the entry would sit for the full RPC timeout
+   *    and then reject — a rejection on a promise nobody is holding, which is
+   *    an unhandled rejection and a dead supervisor, the same hazard the
+   *    EPIPE comment below this method was written for.
+   *
+   * Throws rather than returning a status, and closes the client on a write
+   * failure, for exactly the reason `send()` does: a failed write to the
+   * child's stdin means the write end is gone, so every later write fails too
+   * and no pending response can arrive. Synchronous, because the caller runs
+   * inside `onEvent` during line dispatch and needs to know whether the frame
+   * left before it decides what to record.
+   *
+   * @throws {RpcClosedError} the stream was already closed, or the write failed.
+   */
+  sendUncorrelated(frame: Record<string, unknown>): void {
+    if (this.#closed) throw this.#closed;
+    try {
+      this.#sink.write(`${JSON.stringify(frame)}\n`);
+      this.#sink.flush?.();
+    } catch (err) {
+      const reason = `write failed: ${err instanceof Error ? err.message : String(err)}`;
+      this.close(reason);
+      throw new RpcClosedError(reason);
+    }
+  }
+
+  /**
    * Send a command and await its (first) response. Resolves with the response
    * whether or not `success` is true — the caller inspects — plus the stream
    * seq at which the response arrived, which epoch fencing records as the

@@ -45,7 +45,10 @@ import {
 } from "../../security/relay.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
 import { captureWorktreeBaseline, createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
-import { DEFAULT_HEARTBEAT_INTERVAL_MS } from "../../config/schema.ts";
+import {
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_UI_REQUEST_TIMEOUT_MS,
+} from "../../config/schema.ts";
 
 /**
  * This CLI's entrypoint, resolved from this module rather than from `cwd`.
@@ -308,6 +311,19 @@ export function register(program: Command): void {
        */
       let heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS;
       /**
+       * The dialog answer bound travels with the run for the same reason
+       * (SRD §12.3 guard 2 — ISC-111, ISC-112).
+       *
+       * The supervisor is detached and is handed a run directory and a worker
+       * id, never a config path, so `timers.ui_request_timeout` reaches the
+       * only process that can act on it through `run.json` or not at all. It
+       * did not reach it at all until this line: the key parsed, documented
+       * itself in `fleet.example.yaml`, and changed nothing — the same dead
+       * shape `max_concurrent` was in before the budget reached dispatch, and
+       * the reason ISC-111's "within 5s" had no timer behind it.
+       */
+      let uiRequestTimeoutMs = DEFAULT_UI_REQUEST_TIMEOUT_MS;
+      /**
        * The harness surface travels with the run for the same reason (ISC-232).
        *
        * `artifacts` and `report` grade this run later, from a run directory
@@ -412,6 +428,7 @@ export function register(program: Command): void {
           );
         }
         heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
+        uiRequestTimeoutMs = loadedConfig.config.run.timers.ui_request_timeout * 1000;
         harnessPatterns = loadedConfig.config.harness.patterns ?? null;
         egressNetwork = loadedConfig.config.docker.network;
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
@@ -697,6 +714,13 @@ export function register(program: Command): void {
         backend: requestedBackend,
         workers,
         heartbeat_interval_ms: heartbeatIntervalMs,
+        /**
+         * The bound the supervisor answers a blocking `extension_ui_request`
+         * within (SRD §12.3 guard 2 — ISC-111, ISC-112). Read back by
+         * `readRunUiRequestTimeoutMs`, which is the ONLY consumer this key has
+         * ever had — see the declaration above for why it had none.
+         */
+        ui_request_timeout_ms: uiRequestTimeoutMs,
         harness_patterns: harnessPatterns,
         // The parent checkout travels with the run for the same reason the
         // harness surface does: `down --prune` removes remotes from THIS

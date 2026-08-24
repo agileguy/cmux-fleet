@@ -50,6 +50,7 @@ import { runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
 import {
   initialWorkerState,
   readFence,
+  readRunUiRequestTimeoutMs,
   readWorkerLaunch,
   writeFence,
   writeTaskRecord,
@@ -60,6 +61,7 @@ import { worktreeContentHash } from "../run/treehash.ts";
 import { processStartTime, registryCall, serveJsonlSocket } from "../run/registry.ts";
 import { ensureControlAuth } from "../security/control-auth.ts";
 import { pgidOf } from "./launch.ts";
+import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
 
 /** Event types that end or could end a turn — logged when attributed prior. */
 const TERMINAL_EVENT_TYPES = new Set(["agent_end", "auto_retry_end"]);
@@ -226,6 +228,20 @@ async function main(): Promise<void> {
    * here costs one stat on a path that is usually absent.
    */
   const launch = await readWorkerLaunch(wp);
+
+  /**
+   * How long a blocking `extension_ui_request` may go unanswered before the
+   * supervisor reports that it failed to answer it (SRD §12.3 guard 2 —
+   * ISC-111, ISC-112).
+   *
+   * Read from `run.json` HERE, once, rather than per request: the value is
+   * fixed for a run by definition (`up` resolved it from `timers.
+   * ui_request_timeout` at launch), and re-reading it on the event path would
+   * put a file stat inside a handler that must answer a blocked turn promptly.
+   * Absent from a run dir written before the key existed → the schema default,
+   * which is the `5s` ISC-111 names.
+   */
+  const uiRequestTimeoutMs = await readRunUiRequestTimeoutMs(run);
 
   // In-memory state, flushed atomically on every transition and heartbeat.
   const state: WorkerState = initialWorkerState({
@@ -497,6 +513,10 @@ async function main(): Promise<void> {
       worker: argv.workerId,
       detail: { code, signal },
     });
+    // The child is gone, so no answer can ever land and no deadline can say
+    // anything useful about one. Same reasoning as the shutdown path, reached
+    // by the other route: a dead child is not an unanswered dialog.
+    clearUiDeadlines();
     if (shuttingDown) {
       await registryCall(run, { cmd: "deregister_worker", worker: argv.workerId }, { optional: true });
       await server.stop();
@@ -550,6 +570,161 @@ async function main(): Promise<void> {
   };
 
   // -------------------------------------------------------------------------
+  // Extension UI requests (SRD §4.2 / §12.3 guard 2 — ISC-111, ISC-112, ISC-113)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Deadlines armed on dialogs whose answer has not yet been confirmed sent,
+   * keyed by request id. Empty in the normal case: the answer is written
+   * synchronously and the entry is cleared in the same tick.
+   */
+  const uiDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const clearUiDeadlines = (): void => {
+    for (const t of uiDeadlines.values()) clearTimeout(t);
+    uiDeadlines.clear();
+  };
+
+  /**
+   * Answer one `extension_ui_request`, or deliberately do not (§12.3 guard 2).
+   *
+   * THE COUNTER SPLIT, AND WHY `answered` DOES NOT MOVE. §12.3 is explicit that
+   * there is no "deny" verb and that "denial is `{cancelled:true}`" — so every
+   * frame this function sends is a DENIAL and increments `ui_requests.denied`.
+   * `ui_requests.answered` is left for a SUBSTANTIVE answer (`{value}` /
+   * `{confirmed}`), which this supervisor never produces and structurally
+   * cannot: there is no human on this end of a headless fleet, so there is
+   * nothing it could truthfully say a user chose. The two counters are
+   * therefore DISJOINT and `answered + denied` is the number of dialogs replied
+   * to. That is the reading that stays unambiguous — were `answered` a
+   * superset, `{answered: 3, denied: 3}` could not be told apart from three
+   * approvals alongside three denials, and the field would carry no information
+   * the other one did not. `answered` staying 0 for every run today is a fact
+   * about the policy, not an oversight, and it is what an approval seam (a
+   * human in the loop, or a rule that permits a specific `confirm`) would move.
+   *
+   * Requests that could not be answered at all — no usable `id` — move NEITHER
+   * counter. They were not answered and they were not denied; they were
+   * undeliverable, and folding them into `denied` would overstate what the
+   * supervisor actually did on the wire. They are logged instead.
+   *
+   * WHY THE ANSWER IS IMMEDIATE AND NOT DEFERRED TO THE TIMER. SRD §12.3 says
+   * "after `ui_request_timeout`" and ISC-111 says "within 5s", and those two
+   * only look like the same instruction. `ui_request_timeout` is a CEILING —
+   * the longest a turn may sit blocked — and waiting it out would spend the
+   * entire ISC-111 budget to arrive at an identical outcome: per the installed
+   * `rpc-mode.js`, `cancelled:true` resolves select/input/editor to `undefined`
+   * and confirm to `false`, which is byte-for-byte the `defaultValue` those
+   * methods reach when their OWN optional timeout fires. A waited-out
+   * cancellation and a prompt one are indistinguishable to the extension. So
+   * the deadline below is a WATCHDOG on this function, not its schedule.
+   */
+  const handleUiRequest = (event: RpcEvent, seq: number): void => {
+    const plan = classifyUiRequest(event);
+
+    if (plan.action === "ignore") {
+      // ISC-113's half: logged (by the `logEvent` above, verbatim) and NOT
+      // answered. Nothing registered a resolver for this id on the far side,
+      // so a reply would be addressed to nobody.
+      logEvent({ type: "ui_request_ignored", seq, method: plan.method, class: "fire_and_forget" });
+      return;
+    }
+
+    if (plan.action === "unanswerable") {
+      // Not a policy choice — `id` is the correlation key the child's
+      // dispatcher looks the answer up by, so there is no frame to send. Loud
+      // because a real dialog arriving this way WILL hang its turn, and this
+      // line is the only place that can say why before the kill ladder reports
+      // the symptom 25 minutes later.
+      logEvent({ type: "ui_request_unanswerable", seq, method: plan.method, reason: plan.reason });
+      void ledger.append("ui_request_unanswerable", {
+        worker: argv.workerId,
+        detail: { method: plan.method, reason: plan.reason },
+      });
+      return;
+    }
+
+    /**
+     * `editor` is the one method with no other unblocker (SRD §4.2), which is
+     * why ISC-112 is a criterion separate from ISC-111. Carried explicitly out
+     * of the classification table so the failure path below can branch on it
+     * rather than treating all four dialogs as interchangeable.
+     */
+    const soleUnblocker = plan.unblocker === "supervisor_only";
+    const elapsed = new Stopwatch();
+
+    /**
+     * Armed BEFORE the write and cleared after it, so the only way it survives
+     * to fire is an answer that never left. That is not a hypothetical: a
+     * closed or broken stdin throws out of `sendUncorrelated`, and for an
+     * `editor` request that means a turn which cannot recover by any other
+     * route. The timer is what turns "we failed to answer" from a silence into
+     * a dated line at the bound the operator configured.
+     *
+     * `unref` so a pending deadline can never be the reason this process
+     * outlives its child.
+     */
+    const deadline = setTimeout(() => {
+      uiDeadlines.delete(plan.id);
+      logEvent({
+        type: "ui_request_deadline_exceeded",
+        seq,
+        id: plan.id,
+        method: plan.method,
+        sole_unblocker: soleUnblocker,
+        timeout_ms: uiRequestTimeoutMs,
+      });
+      if (soleUnblocker) {
+        // ISC-112 exactly. Nothing downstream rescues this turn: the agent
+        // holds until `per_task_timeout`, then the deadline path settles it
+        // `timed_out` with `deadline_exceeded_no_terminal_event` — a reason
+        // that names the symptom and not the cause. This is the cause.
+        void ledger.append("ui_dialog_unanswered", {
+          worker: argv.workerId,
+          detail: { id: plan.id, method: plan.method, timeout_ms: uiRequestTimeoutMs },
+        });
+      }
+    }, uiRequestTimeoutMs);
+    deadline.unref?.();
+    uiDeadlines.set(plan.id, deadline);
+
+    try {
+      client.sendUncorrelated(cancelledResponse(plan.id));
+    } catch (err) {
+      // Left ARMED on purpose. The write failing is exactly the condition the
+      // deadline exists to report, and reporting it at the configured bound
+      // keeps one code path for "no answer landed" however that came about.
+      logEvent({
+        type: "ui_request_answer_failed",
+        seq,
+        id: plan.id,
+        method: plan.method,
+        sole_unblocker: soleUnblocker,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    clearTimeout(deadline);
+    uiDeadlines.delete(plan.id);
+    state.ui_requests.denied++;
+    logEvent({
+      type: "ui_request_denied",
+      seq,
+      id: plan.id,
+      method: plan.method,
+      sole_unblocker: soleUnblocker,
+      unrecognised: plan.unrecognised,
+      // The ISC-111 measurement, in band. A test can time this from outside,
+      // but a number the supervisor recorded itself survives into a run
+      // directory an operator reads months later.
+      elapsed_ms: elapsed.elapsedMs(),
+      timeout_ms: uiRequestTimeoutMs,
+    });
+    void flushState();
+  };
+
+  // -------------------------------------------------------------------------
   // Event handling — stream-seq attribution first, everything else second.
   // -------------------------------------------------------------------------
 
@@ -574,6 +749,24 @@ async function main(): Promise<void> {
         break;
     }
     logEvent({ type: "event", seq, event });
+
+    /**
+     * AFTER the verbatim log and BEFORE epoch attribution, and it does not
+     * return (SRD §12.3 guard 2 — ISC-111, ISC-112, ISC-113).
+     *
+     * After the log because ISC-113 asserts every UI request reaches
+     * `events.jsonl` intact whether or not it is answered, so the record must
+     * not be conditional on the branch below it. Before attribution because a
+     * blocking dialog must be answered no matter which epoch it belongs to —
+     * an `editor` request attributed to a settled epoch still holds the
+     * child's turn, and a supervisor that answered only live-epoch dialogs
+     * would hang on exactly the straggler case §7.5 exists to handle.
+     *
+     * Falls THROUGH rather than returning so the existing attribution and
+     * `tracker.observe` path is unchanged for this event type — the same path
+     * it took before there was a responder. Answering is strictly additive.
+     */
+    if (event.type === "extension_ui_request") handleUiRequest(event, seq);
 
     if (event.type === "agent_start" && em.live !== null && !em.windowOpen) {
       if (em.bindStart(seq)) {
@@ -940,6 +1133,18 @@ async function main(): Promise<void> {
   async function beginShutdown(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
+    /**
+     * Disarm any UI deadline still outstanding BEFORE the abort below.
+     *
+     * A dialog whose answer never landed is about to stop mattering: the turn
+     * is being aborted and the child's stdin closed, so the deadline firing
+     * during shutdown would append `ui_request_deadline_exceeded` — and, for
+     * an `editor`, a `ui_dialog_unanswered` ledger entry — describing a hang
+     * that an operator-requested stop had already made moot. The ledger is
+     * read to explain why a run went wrong; a shutdown must not write
+     * incidents into it.
+     */
+    clearUiDeadlines();
     // Graceful stop per §13 F3: abort → give the turn a moment to settle →
     // THEN close stdin. Closing stdin first destroys in-flight responses.
     if (em.live !== null) {
