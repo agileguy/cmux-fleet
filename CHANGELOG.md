@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dispatch --auto` no longer abandons a run before its own tasks are due (ISC-293, ISC-294).** The
+  fleet-wide no-progress ceiling was a fixed ten minutes while `deadline_s` defaults to thirty, so a
+  perfectly healthy task list was refused with `rc=4` and *"workers are alive but not settling"*
+  twenty minutes before anything was late — and an operator reading only the exit code concluded the
+  fleet hangs, on runs that settle, harvest and adjudicate on their own. The ceiling is now derived
+  from the list being scheduled: the longest `deadline_s` plus ten minutes of grace. The timeout
+  message names that derivation, so the number is auditable where it bites. A non-finite ceiling is
+  now refused outright rather than obeyed — it does not disable the backstop, it makes the run poll
+  forever.
+
 ### Added
 
 - **`pifleet up` now re-points the egress relay when `llm.relay_upstream` changes, instead of

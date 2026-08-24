@@ -206,14 +206,78 @@ export interface ScheduleBudget {
 export const DEFAULT_POLL_MS = 100;
 
 /**
- * How long the schedule may sit with nothing changing before it is refused.
+ * The GRACE a schedule gets after the longest deadline it is running, before
+ * a fleet where nothing moves is refused.
  *
- * Generous, because a legitimately slow task settles on its own `deadline_s`
- * and this is the backstop for a supervisor that has stopped honouring it —
- * not a second task deadline. Ten minutes of a fleet where nothing at all
- * moves is a wedge, not a long task.
+ * Ten minutes of a fleet where nothing at all moves is a wedge, not a long
+ * task. That reasoning was always sound; what was wrong was applying it as an
+ * ABSOLUTE ceiling. See `stallCeilingFor`.
  */
-const DEFAULT_STALL_TIMEOUT_MS = 600_000;
+const STALL_GRACE_MS = 600_000;
+
+/**
+ * The fleet-wide no-progress ceiling for a given task list (ISC-293, ISC-294).
+ *
+ * ## What this replaces, and why the constant alone was a defect
+ *
+ * This used to be a bare `DEFAULT_STALL_TIMEOUT_MS = 600_000`, and the
+ * docstring beside it stated the intent exactly: *"a legitimately slow task
+ * settles on its own `deadline_s` and this is the backstop for a supervisor
+ * that has stopped honouring it — not a second task deadline."* The first
+ * end-to-end run falsified that sentence in the only way it could be
+ * falsified — by running.
+ *
+ * **A backstop is only a backstop if it sits strictly beyond what it backstops.**
+ * At 600 s against a task whose `deadline_s` is 900 s it was simply the tighter
+ * of two deadlines, so it fired first, on every healthy-but-slow task. Measured
+ * in that run: `dispatch --auto` abandoned with `EXIT.TIMEOUT`, *"workers are
+ * alive but not settling"*, FIVE MINUTES before the supervisor settled epoch 1
+ * at its own 900 s deadline and the harvester ran to completion. Nothing was
+ * wrong with the fleet, and nothing was wrong with 600 seconds in isolation.
+ *
+ * **The default case was worse than the measured one, which is the part no
+ * test would have surfaced.** `TaskSpecSchema.deadline_s` defaults to 1800 s
+ * (`contracts.ts`), so a task list that names no deadline at all was refused
+ * twenty minutes before its own tasks were due. The run happened to use 900 s
+ * and therefore under-reported the size of the defect.
+ *
+ * ## The derivation
+ *
+ * `longest deadline + STALL_GRACE_MS`. Every task is allowed the full deadline
+ * it declares, and only then does the original ten-minute no-progress rule
+ * apply on top. That restores the sentence the old docstring claimed: this
+ * fires ten minutes after the deadline a supervisor failed to honour, rather
+ * than instead of it.
+ *
+ * ## Why this also settles ISC-294, by construction rather than by a second check
+ *
+ * ISC-294 forbids `EXIT.TIMEOUT` while an in-flight task is still inside its
+ * own deadline. The ceiling is measured from the last PROGRESS, and a task's
+ * last progress is never earlier than its own dispatch, so that task's deadline
+ * expires no later than `lastProgress + itsDeadline`. Since the ceiling is
+ * `maxDeadline + grace` and `itsDeadline <= maxDeadline`, the refusal always
+ * lands strictly after the deadline. No separate guard is needed, and adding
+ * one would be a second derivation of the same fact — which is the shape that
+ * produced this defect in the first place.
+ *
+ * An empty list, or a caller passing tasks with no deadlines, falls back to the
+ * grace alone — byte-for-byte the previous behaviour for the one case where
+ * there is no deadline to be shorter than.
+ */
+export function stallCeilingFor(tasks: readonly TaskSpec[]): number {
+  let longestMs = 0;
+  for (const t of tasks) {
+    // Defensive rather than trusting the schema default: `runSchedule` is also
+    // driven directly by tests and by callers that build a TaskSpec by hand,
+    // and a NaN or absent deadline here must not poison the max into NaN and
+    // silently disable the ceiling entirely.
+    const s = t.deadline_s;
+    if (typeof s === "number" && Number.isFinite(s) && s > 0) {
+      longestMs = Math.max(longestMs, s * 1000);
+    }
+  }
+  return longestMs + STALL_GRACE_MS;
+}
 
 /**
  * Run the list to completion. `tasks` must already be validated
@@ -244,6 +308,15 @@ export async function runSchedule(
      *
      * Measured from the last time anything changed, not from the start, so a
      * long but healthy run is never cut off — only a stalled one.
+     *
+     * **Absent, it is DERIVED from `tasks` by `stallCeilingFor`, not read from
+     * a constant (ISC-293).** Overriding it is therefore opting out of that
+     * derivation, and a caller that passes a number shorter than its own
+     * longest `deadline_s` re-creates the exact defect the derivation exists
+     * to remove: the run is refused before the supervisor has had its chance
+     * to settle. The suite pins this — `test/unit/scheduler-stall-ceiling.test.ts`
+     * asserts the property against the derivation, and no production caller
+     * passes this field.
      */
     stallTimeoutMs?: number;
     /**
@@ -277,7 +350,27 @@ export async function runSchedule(
   } = {},
 ): Promise<ScheduleOutcome> {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
-  const stallTimeoutMs = opts.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+  const stallTimeoutMs = opts.stallTimeoutMs ?? stallCeilingFor(tasks);
+  /**
+   * A non-finite ceiling is refused LOUDLY, because its failure mode is a hang
+   * rather than a wrong answer.
+   *
+   * Found by mutation while proving ISC-293: setting the ceiling to `Infinity`
+   * did not fail the suite, it made the run poll forever — `elapsed > Infinity`
+   * is never true, so the refusal below is unreachable and the §9.3 deadlock
+   * this whole guard exists to prevent comes back silently. `stallCeilingFor`
+   * cannot produce one (it filters non-finite deadlines), so this only bites a
+   * caller that passes `stallTimeoutMs` explicitly — which is exactly the
+   * caller with no derivation checking its work.
+   */
+  if (!Number.isFinite(stallTimeoutMs) || stallTimeoutMs <= 0) {
+    throw new SchedulerError(
+      `stallTimeoutMs must be a positive, finite number of milliseconds; got ` +
+        `${String(stallTimeoutMs)}. A non-finite ceiling does not disable the backstop, ` +
+        `it makes the run poll forever.`,
+      EXIT.USAGE,
+    );
+  }
   const onChange = opts.onChange ?? (() => Promise.resolve());
   const budget = opts.budget;
   /**
@@ -739,10 +832,22 @@ export async function runSchedule(
        */
       const stuck = [...inflight.entries()].map(([t, w]) => `${t} on ${w}`);
       if (dispatchedAny) await onChange(graph.snapshot());
+      /**
+       * The message says where the ceiling CAME FROM, because the old one
+       * caused a specific misreading (ISC-294). An operator who read
+       * "not settling" at 600 s concluded the fleet hangs, on a run that
+       * settled, harvested and adjudicated on its own five minutes later.
+       * Naming the longest deadline makes the number auditable at the moment
+       * it bites, rather than something to go and look up in the source.
+       */
+      const longestDeadlineS = Math.round((stallTimeoutMs - STALL_GRACE_MS) / 1000);
       throw new SchedulerError(
         `no progress for ${Math.round(stallTimeoutMs / 1000)}s with ` +
           `${inflight.size} task(s) still in flight (${stuck.join(", ") || "none"}); ` +
-          `workers are alive but not settling — the tasks keep running on their workers`,
+          `workers are alive but not settling — the tasks keep running on their workers. ` +
+          `That ceiling is the list's longest deadline_s (${longestDeadlineS}s) plus ` +
+          `${Math.round(STALL_GRACE_MS / 1000)}s of grace, so every task here is already ` +
+          `past its own deadline and no supervisor settled it`,
         EXIT.TIMEOUT,
       );
     }
