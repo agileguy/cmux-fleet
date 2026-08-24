@@ -800,7 +800,7 @@ export function register(program: Command): void {
        * DETECT, never neutralize, and the distinction is the whole point:
        * `config.run.repo` is the OPERATOR'S working repository, not a
        * disposable per-worker tree. `render.ts` mounts
-       * `<repo>/.worktrees/<worker>` as `/workspace`, so the tree a worker
+       * `<repo>/.worktrees/<run-id>/<worker>` as `/workspace`, so the tree a worker
        * actually reads is not this one — and nothing in this phase creates
        * those worktrees yet. Quarantining here therefore defended nothing and
        * damaged the operator: it renamed their real `AGENTS.md` aside and

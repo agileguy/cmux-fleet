@@ -6,6 +6,21 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **Two fleets can now run against one repo, and a crashed run no longer blocks the next one
+  (ISC-295).** A worker's checkout lived at `<repo>/.worktrees/<worker>` — keyed on the worker id
+  alone — so two runs naming the same worker resolved to the same directory. `up` refused the second
+  rather than adopting another run's tree, which was the right call and is unchanged; but it meant
+  concurrent fleets against one repo were impossible, and a run that crashed left a checkout that
+  blocked every later run of that worker until someone deleted the directory by hand. `git worktree
+  prune` did not help: git's own metadata is pruned first, and what remains is an orphan directory git
+  no longer tracks. Checkouts are now `<repo>/.worktrees/<run-id>/<worker>`, matching the branch,
+  which was already run-scoped. `down --prune` removes a run's directory once its last worker is gone.
+
+  **If you have checkouts under the old layout**, they are now orphans — nothing will find or reuse
+  them, and nothing will delete them either. `<repo>/.worktrees/<worker>` (a worker id directly under
+  `.worktrees/`, rather than a run id) is the old shape; remove those by hand once you are sure they
+  hold no work you want.
+
 - **Workers on the deny-all egress network can no longer reach the Docker host (ISC-51).** `--internal`
   was never the containment it reads as: Docker implements it in the FORWARD chain, which bounds
   traffic *leaving* the bridge, but the bridge gateway is on-link and inside that subnet, so

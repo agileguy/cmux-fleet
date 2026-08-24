@@ -15,6 +15,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HarvestSchema, VerdictSchema } from "../../src/contracts.ts";
+import { workerWorktree } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS, harnessSurfaceFor } from "../../src/harvest/acceptance.ts";
 import { deriveGitFacts } from "../../src/harvest/git.ts";
 import { worktreeContentHash } from "../../src/run/treehash.ts";
@@ -130,7 +131,7 @@ function taskEnvelope(
 beforeAll(async () => {
   tmp = await mkdtemp(join(tmpdir(), "pifleet-harvest-"));
   repo = join(tmp, "repo");
-  worktree = join(repo, ".worktrees", "w1");
+  worktree = workerWorktree(repo, RUN_ID, "w1");
   runsDir = join(tmp, "runs");
   runDir = join(runsDir, RUN_ID);
 
