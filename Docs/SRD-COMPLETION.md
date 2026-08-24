@@ -80,8 +80,8 @@ If you are opening one PR today, this is the whole decision:
 ```
   A  Decide          3 questions, no code          ── ask now, they gate I and J
   B  Suite guards    5 criteria, ~3 PRs            ── land before any feature work
-  C  Proof plane     4 need a runner, 5 do not     ── re-scoped 2026-08-23; see 6.C.1
-     C1 containment  no procurement at all           ── start here: CI already proves the defect
+  C  Proof plane     4 need a runner, 4 do not     ── re-scoped 2026-08-23; see 6.C.1
+     C1 containment  DONE 2026-08-23 — ISC-51 [x]    ── needed no procurement, as predicted
   ───────────────────────────────────────────────────────────────────────────────
   D  Accounting      6    ┐
   E  Control seam    6    │  independent of each other — run in parallel after B
@@ -423,13 +423,22 @@ Re-derived by reading each criterion's skip gate and the job that runs it:
 
 | Item | Criteria | What actually gates it | Procurement |
 |---|---|---|---|
-| **C1 — bridge containment** | 51, half of 57 | A real code defect. Nothing to buy. | **none** |
+| **C1 — bridge containment** | 51 `[x]`, half of 57 | ~~A real code defect. Nothing to buy.~~ **DONE 2026-08-23.** | **none — confirmed** |
 | **C2 — credential plane** | 41, 47, half of 48 | A Google credential on some runner (`HOST_ADC_PRESENT`) | a credential, not a Mac |
 | **C3 — model plane** | 50, 258, 259, 262 | A real generating server; 259 additionally wants the 192.168.86.0/24 LAN | the runner |
 | *(lifted out)* | 22 | A CI step. `bun test --coverage` needs no daemon, no runner, no macOS. | none |
 
-**C1 is the finding that matters, and it inverts the phase's premise.** The containment defect
-is not awaiting a probe — **the probe exists, runs on every push, and is GREEN asserting the
+**C1 is the finding that matters, and it inverted the phase's premise. It is now DONE (2026-08-23,
+ISC-51 `[x]`) and it needed no procurement, exactly as this section predicted.** The one thing that
+nearly stopped it was not a runner but a privilege question — `iptables` needs CAP_NET_ADMIN and
+pifleet is an unprivileged CLI — and that dissolved on measurement: pifleet already holds the Docker
+daemon, and a privileged container in the daemon's host namespace writes the host's own tables. The
+fix is a scoped `-I INPUT -i br-<id> -d <gateway> -j DROP` installed by `ensureEgressNetwork`, which
+now refuses to hand back a network it could not contain. The green-asserting-the-defect probe below
+was INVERTED rather than deleted, which is what its own docstring instructed a future reader to do.
+
+The original finding, retained because the reasoning is the reusable part: the containment defect
+was not awaiting a probe — **the probe existed, ran on every push, and was GREEN asserting the
 defect**. `test/integration/relay.test.ts` plants a `--network host` beacon and a `-p`-published
 one, enumerates all 65535 ports of the bridge gateway, and asserts that the deny-all bridge
 *reaches* the host-namespace listener. CI run 32676569570 logged it:

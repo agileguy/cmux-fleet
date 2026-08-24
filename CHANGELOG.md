@@ -6,6 +6,24 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **Workers on the deny-all egress network can no longer reach the Docker host (ISC-51).** `--internal`
+  was never the containment it reads as: Docker implements it in the FORWARD chain, which bounds
+  traffic *leaving* the bridge, but the bridge gateway is on-link and inside that subnet, so
+  gateway-destined packets went through INPUT unfiltered. A worker with no relay running could pull a
+  live sshd banner off `172.18.0.1:22`, and every other port the Docker host listened on in its own
+  network namespace was reachable the same way — while `up` reported the egress posture as deny-all.
+  `pifleet up` now installs a firewall rule scoped to one bridge and one address
+  (`-I INPUT -i br-<id> -d <gateway> -j DROP`) and **refuses to start if it cannot**, rather than
+  running a fleet whose reported posture is not its real one. Container-to-container traffic and
+  Docker's embedded DNS are unaffected — neither is gateway-destined.
+
+  **Two operational notes.** pifleet needs no new privilege of its own and never calls `sudo`: the
+  rule is written through the Docker daemon, in a privileged container joined to the daemon's host
+  namespaces, so it lands on the machine whose listeners were actually exposed — on macOS that is the
+  Lima/colima VM, not your Mac. And `pifleet down` deliberately leaves the rule in place, for the same
+  reason it leaves the egress network and the relay standing: the network outlives the run, so
+  removing the rule with the run would reopen the hole for whatever attaches next.
+
 - **`dispatch --auto` no longer abandons a run before its own tasks are due (ISC-293, ISC-294).** The
   fleet-wide no-progress ceiling was a fixed ten minutes while `deadline_s` defaults to thirty, so a
   perfectly healthy task list was refused with `rc=4` and *"workers are alive but not settling"*

@@ -404,7 +404,52 @@ describe("parseNetworkInspect", () => {
 
   test("reads exists + internal + id from a well-formed answer", () => {
     const s = parseNetworkInspect("pifleet-egress", entry());
-    expect(s).toEqual({ name: "pifleet-egress", exists: true, internal: true, id: "abc123" });
+    expect(s).toEqual({
+      name: "pifleet-egress",
+      exists: true,
+      internal: true,
+      id: "abc123",
+      gateway: null,
+    });
+  });
+
+  // The gateway is read for ISC-51's containment rule, so "we parsed one" and
+  // "we parsed the RIGHT one" are separate claims — a dual-stack network lists
+  // a v6 config too, and firewalling the wrong entry would be a rule that
+  // silently drops nothing.
+  test("reads the IPv4 gateway out of IPAM.Config", () => {
+    const s = parseNetworkInspect(
+      "pifleet-egress",
+      entry({ IPAM: { Config: [{ Subnet: "172.18.0.0/16", Gateway: "172.18.0.1" }] } }),
+    );
+    expect(s.gateway).toBe("172.18.0.1");
+  });
+
+  test("skips a v6 config entry and takes the v4 gateway", () => {
+    const s = parseNetworkInspect(
+      "pifleet-egress",
+      entry({
+        IPAM: {
+          Config: [
+            { Subnet: "fd00::/64", Gateway: "fd00::1" },
+            { Subnet: "172.18.0.0/16", Gateway: "172.18.0.1" },
+          ],
+        },
+      }),
+    );
+    expect(s.gateway).toBe("172.18.0.1");
+  });
+
+  // `null` makes `up` REFUSE rather than guess. Deriving `.1` from the subnet
+  // would be a guess about IPAM, and the whole point of the rule is that it is
+  // narrow enough to be provably safe.
+  test("absent or unparseable IPAM reports gateway: null, never a derived guess", () => {
+    expect(parseNetworkInspect("pifleet-egress", entry()).gateway).toBeNull();
+    expect(parseNetworkInspect("pifleet-egress", entry({ IPAM: { Config: [] } })).gateway).toBeNull();
+    expect(
+      parseNetworkInspect("pifleet-egress", entry({ IPAM: { Config: [{ Subnet: "172.18.0.0/16" }] } }))
+        .gateway,
+    ).toBeNull();
   });
 
   test("a non-internal network reports internal: false — never assumed true", () => {
