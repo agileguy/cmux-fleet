@@ -28,12 +28,14 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { connect } from "node:net";
+import { containerBudget } from "../support/budget.ts";
 import { ensureEgressNetwork, ensureUplinkNetwork } from "../../src/security/network.ts";
 import {
   ensureEgressRelay,
   inspectRelayContainer,
   relayContainerName,
   uplinkNetworkName,
+  RELAY_DEFAULT_DIAL_HOST,
   RELAY_IMAGE,
   type RelayTarget,
 } from "../../src/security/relay.ts";
@@ -387,10 +389,14 @@ function unexpectedMembers(
  * `llm`. See `test/unit/relay.test.ts` for exactly how much that gate proves
  * today — including the documented case it does NOT catch.
  */
-function cfg(base_url: string) {
+function cfg(
+  base_url: string,
+  relay_upstream: string | null = null,
+  allow: Array<{ host: string; port: number }> = [],
+) {
   return {
-    llm: { base_url },
-    egress: { google_hosts: ["oauth2.googleapis.com"], allow: [] as Array<never> },
+    llm: { base_url, relay_upstream },
+    egress: { google_hosts: ["oauth2.googleapis.com"], allow },
   };
 }
 
@@ -946,6 +952,9 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         expect(again).toEqual({
           name: relay.name,
           created: false,
+          // Adopted, so nothing was displaced (ISC-265). The same call with a
+          // CHANGED upstream is the drift case and is proved separately below.
+          replaced: null,
           scriptSha256: relay.scriptSha256,
           targets: relay.targets,
         });
@@ -1357,5 +1366,97 @@ describe.skipIf(!DOCKER)("egress relay", () => {
     // here for that reason; a derived container number would be a fiction with a
     // helper name attached to it.
     900_000,
+  );
+});
+
+describe.skipIf(!DOCKER)("changing relay_upstream takes effect on its own (ISC-265)", () => {
+  test(
+    "a second `up` with a new upstream re-points the relay, with no manual docker rm -f",
+    async () => {
+      const net = testNetName();
+      registerRelayArtifacts(net);
+      await ensureEgressNetwork(net);
+
+      /**
+       * TWO stand-ins for oMLX, each answering with its own nonce, so "which
+       * server is the worker actually talking to" is a fact this test reads
+       * rather than infers. Asserting only that the second `ensure` returned
+       * `created: true` would pass against a relay that was rebuilt and then
+       * still forwarded to the old port.
+       */
+      const mk = (nonce: string) =>
+        Bun.serve({
+          port: 0,
+          hostname: "0.0.0.0",
+          fetch(req) {
+            const { pathname } = new URL(req.url);
+            if (pathname !== "/v1/models") return new Response("nope", { status: 404 });
+            return Response.json({ object: "list", data: [{ id: nonce, object: "model" }] });
+          },
+        });
+      const before = mk(`was-${process.pid}`);
+      const after = mk(`now-${process.pid}`);
+      // `Bun.serve().port` widens to `number | undefined`; a server that bound
+      // port 0 successfully always has one, and reading it through a template
+      // literal would let an undefined slip in as the string "undefined".
+      const movedPort: number = after.port ?? 0;
+      expect(movedPort).toBeGreaterThan(0);
+      // The LISTEN side is held constant across both configs on purpose: a
+      // worker's `base_url` never changes here, so anything the worker sees
+      // change is the relay's DIAL side and nothing else.
+      const listen = before.port;
+      const url = `http://host.docker.internal:${listen}/v1/models`;
+      const read = (net: string) =>
+        onInternalNetwork(net, `curl -sS -m 5 ${JSON.stringify(url)} 2>&1`);
+
+      try {
+        const first = await ensureEgressRelay(cfg(`http://host.docker.internal:${listen}/v1`), net);
+        expect(first.created).toBe(true);
+        expect(first.replaced).toBeNull();
+        expect(await read(net)).toContain(`was-${process.pid}`);
+
+        /**
+         * The edit under test: one YAML string. `egress.allow` carries the new
+         * destination because `relayGatePolicy` rule 1 only blesses the Docker
+         * host at the LISTEN port — so this also proves the security gate is
+         * still applied on the drift path, rather than being skipped by a
+         * relay that "already exists".
+         */
+        const moved = cfg(
+          `http://host.docker.internal:${listen}/v1`,
+          `${RELAY_DEFAULT_DIAL_HOST}:${movedPort}`,
+          [{ host: RELAY_DEFAULT_DIAL_HOST, port: movedPort }],
+        );
+        const second = await ensureEgressRelay(moved, net);
+
+        // Nothing between the two `ensure` calls ran `docker rm -f`. That is
+        // the entire criterion, and it is asserted by the absence of any such
+        // call in this test rather than by a flag.
+        expect(second.created).toBe(true);
+        expect(second.replaced).toEqual([...first.targets]);
+        expect(second.targets.map((t) => t.port)).toEqual([movedPort]);
+
+        // The proof that matters: the SAME url, from the same least-privileged
+        // container, now reaches the other server.
+        const seen = await read(net);
+        expect(seen).toContain(`now-${process.pid}`);
+        expect(seen).not.toContain(`was-${process.pid}`);
+
+        // And a third `ensure` with the moved config adopts rather than
+        // cycling — drift detection must not have cost idempotence.
+        const third = await ensureEgressRelay(moved, net);
+        expect(third.created).toBe(false);
+        expect(third.replaced).toBeNull();
+      } finally {
+        before.stop(true);
+        after.stop(true);
+      }
+    },
+    // Derived, not picked: five container operations govern this body — three
+    // `ensureEgressRelay` calls (create, drift-replace, adopt) and two
+    // least-privileged `docker run` reads through the relay. Nothing here
+    // succeeds by waiting out a timeout, so unlike the deny-probe tests above,
+    // container startup IS the cost and `containerBudget` describes it.
+    containerBudget(5),
   );
 });
