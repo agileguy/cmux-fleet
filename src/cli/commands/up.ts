@@ -47,7 +47,9 @@ import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-ha
 import { captureWorktreeBaseline, createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
 import {
   DEFAULT_HEARTBEAT_INTERVAL_MS,
+  DEFAULT_PROSE_TURNS_BEFORE_FAIL,
   DEFAULT_UI_REQUEST_TIMEOUT_MS,
+  effectiveProseTurnsBeforeFail,
 } from "../../config/schema.ts";
 
 /**
@@ -324,6 +326,27 @@ export function register(program: Command): void {
        */
       let uiRequestTimeoutMs = DEFAULT_UI_REQUEST_TIMEOUT_MS;
       /**
+       * The zero-tool-call bound travels with the run for the third time and
+       * the same reason (SRD §5.9 detector 2 / F39 — ISC-108).
+       *
+       * The value written below is the EFFECTIVE one —
+       * `run.prose_turns_before_fail` folded together with
+       * `llm.require_native_tool_calls` by `effectiveProseTurnsBeforeFail` — so
+       * §5.9's "`require_native_tool_calls: false` disables both" becomes one
+       * number rather than a conjunction the supervisor would have to re-derive
+       * from a config it cannot read. Until this line the runtime half of that
+       * sentence had nothing behind it in either direction: there was no
+       * detector to disable, and no route by which the gate could have
+       * disabled one.
+       *
+       * The no-config fallback is the schema default (3), NOT zero. A run
+       * started without a `fleet.yaml` is exactly the run nobody probed, so it
+       * is the run most in need of the runtime detector — defaulting it off
+       * would be a guard that vanishes precisely when the other guard is
+       * absent too.
+       */
+      let proseTurnsBeforeFail = DEFAULT_PROSE_TURNS_BEFORE_FAIL;
+      /**
        * The harness surface travels with the run for the same reason (ISC-232).
        *
        * `artifacts` and `report` grade this run later, from a run directory
@@ -429,6 +452,7 @@ export function register(program: Command): void {
         }
         heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
         uiRequestTimeoutMs = loadedConfig.config.run.timers.ui_request_timeout * 1000;
+        proseTurnsBeforeFail = effectiveProseTurnsBeforeFail(loadedConfig.config);
         harnessPatterns = loadedConfig.config.harness.patterns ?? null;
         egressNetwork = loadedConfig.config.docker.network;
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
@@ -721,6 +745,14 @@ export function register(program: Command): void {
          * ever had — see the declaration above for why it had none.
          */
         ui_request_timeout_ms: uiRequestTimeoutMs,
+        /**
+         * Consecutive zero-tool-call turns before a task is failed
+         * `no_tool_calls` (SRD §5.9 detector 2 / F39 — ISC-108), already folded
+         * with `llm.require_native_tool_calls`; `0` is the detector off. Read
+         * back by `readRunProseTurnsBeforeFail`, its only consumer, which is
+         * the supervisor's only route to this policy.
+         */
+        prose_turns_before_fail: proseTurnsBeforeFail,
         harness_patterns: harnessPatterns,
         // The parent checkout travels with the run for the same reason the
         // harness surface does: `down --prune` removes remotes from THIS

@@ -49,6 +49,13 @@ run:
   isolation: worktree        # worktree | shared-ro | none
   branch_prefix: fleet
   max_concurrent: 2          # bounded by oMLX throughput, not pane count (§5.9)
+  # The F39 RUNTIME detector (§5.9 detector 2). A worker completing this many
+  # consecutive turns with ZERO tool calls is failed `no_tool_calls` rather than
+  # settling "successfully" — the startup probe catches a model that cannot emit
+  # native tool_calls, this catches one that could and then stopped under a long
+  # context. 0 disables it, and so does `llm.require_native_tool_calls: false`,
+  # which §5.9 says disables BOTH detectors.
+  prose_turns_before_fail: 3
   budget:
     tokens_ceiling: 6000000  # THE ceiling — local models have no price table
     # Held up front per admission and reconciled at settle. NOTE the shape this

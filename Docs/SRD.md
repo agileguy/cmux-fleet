@@ -619,6 +619,8 @@ run:
   isolation: worktree        # worktree | shared-ro | none
   branch_prefix: fleet
   max_concurrent: 2          # bounded by oMLX throughput, not pane count (§5.9)
+  prose_turns_before_fail: 3 # zero-tool-call turns before `failed:no_tool_calls`;
+                             # 0 = off, as does require_native_tool_calls: false (§5.9)
   budget:
     tokens_ceiling: 6000000  # THE ceiling — local models have no price table
     per_task_reserve_tokens: 400000

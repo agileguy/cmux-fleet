@@ -1,6 +1,6 @@
 {
   "scenario": "no-tool-calls",
-  "_comment": "Three turns, zero tool calls. Settles cleanly here; classifying it failed:no_tool_calls is the harvester's job (acceptance #61, Phase 2).",
+  "_comment": "Three turns, zero tool calls — SRD \u00a75.9's F39 worker, the one that streams, ends turns, settles, and accomplishes nothing. TWO LAYERS READ THIS FILE AND THEY ANSWER DIFFERENT QUESTIONS, which is the whole reason it is worth a comment. The COMPLETION TRACKER settles it cleanly and must: its job is to notice the turn ended, and a tracker that hung on prose would turn a bad task into a stuck worker (test/unit/completion.test.ts). The SUPERVISOR then CLASSIFIES what was settled, and since ISC-108 it classifies this failed:no_tool_calls rather than success (test/integration/supervisor.test.ts). The classification used to be deferred here to 'the harvester's job (acceptance #61, Phase 2)'; it is not the harvester's job and never became one \u2014 \u00a75.9 puts the runtime detector in the supervisor precisely so the failure is loud at ~3 turns instead of at harvest. Three turns is not decoration: it is the default prose_turns_before_fail, so removing one turn makes this fixture stop proving the criterion.",
   "steps": [
     {
       "on": "prompt",
