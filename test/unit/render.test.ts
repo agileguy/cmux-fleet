@@ -50,7 +50,7 @@ import {
   runPaths,
   runsRoot,
   workerOutboxDir,
-  workerPaths,
+  workerPaths, workerWorktree,
 } from "../../src/run/paths.ts";
 
 /**
@@ -422,7 +422,10 @@ describe("docker argv (SRD §5.6)", () => {
       (doc["workers"] as unknown[]).push({ id: "field-1", role: "field" });
     });
     const eng = await renderWorker(loaded, "eng-1"); // run.isolation default → worktree
-    expect(eng.docker).toContain(`${join(dir, ".worktrees", "eng-1")}:/workspace`);
+    // "dry" is `renderWorker`'s own default run id (see `render.ts`), and the
+    // path comes from the helper rather than a second `join` — the mount and
+    // the directory that creates it must not be spelled twice.
+    expect(eng.docker).toContain(`${workerWorktree(dir, "dry", "eng-1")}:/workspace`);
 
     const rev = await renderWorker(loaded, "rev-1"); // role isolation → shared-ro
     expect(rev.docker).toContain(`${dir}:/workspace:ro`);

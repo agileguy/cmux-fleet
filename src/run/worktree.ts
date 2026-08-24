@@ -72,7 +72,7 @@
  * applies to it completely (ISC-249).
  */
 
-import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts";
 import { EXIT } from "../contracts.ts";
@@ -161,7 +161,7 @@ export class WorktreeError extends Error {
   }
 }
 
-/** `<repo>/.worktrees/<id>` already exists; adopting it silently is the one thing not to do. */
+/** `<repo>/.worktrees/<run-id>/<id>` already exists; adopting it silently is the one thing not to do. */
 export class StaleWorktreeError extends WorktreePreflightError {
   constructor(workerId: string, path: string) {
     super(
@@ -614,7 +614,7 @@ export async function createWorkerWorktrees(
 
   const created: WorkerWorktree[] = [];
   for (const workerId of wanted) {
-    const path = workerWorktree(repo, workerId);
+    const path = workerWorktree(repo, run.runId, workerId);
     // lstat, not `exists`: a dangling symlink at this path is still something
     // that must not be cloned over, and `stat` would follow it and report
     // absence.
@@ -962,6 +962,32 @@ export async function pruneWorkerWorktree(opts: {
   const remoteNote = removedRemote.code === 0 ? "remote removed" : "remote already absent";
 
   if (present) await rm(wt.path, { recursive: true, force: true });
+
+  /**
+   * Drop the run's own `.worktrees/<run-id>/` directory once its last worker
+   * is gone (ISC-295).
+   *
+   * Checkouts became run-scoped, which removed the collision between two runs
+   * — and introduced a directory per run that nothing owned. Without this a
+   * repo accumulates one empty directory for every fleet ever started, which
+   * is a smaller problem than the collision but a permanent one.
+   *
+   * `rmdir`, deliberately NOT `rm -r`. It fails on a non-empty directory, and
+   * that failure IS the safety property: a fleet whose other workers are still
+   * checked out must not lose them because one worker was pruned. So the
+   * success condition is "the directory was already empty", which no race can
+   * make wrong — and the failure is swallowed rather than reported, because a
+   * leftover empty directory must never turn a successful prune into a failed
+   * one.
+   *
+   * Guarded on the parent being a direct child of `.worktrees/`, so a
+   * `run.json` recording an unexpected shape cannot walk this upward.
+   */
+  const runDir = dirname(wt.path);
+  if (resolvePath(dirname(runDir)) === resolvePath(join(repo, ".worktrees"))) {
+    await rmdir(runDir).catch(() => {});
+  }
+
   return {
     ...base,
     pruned: true,

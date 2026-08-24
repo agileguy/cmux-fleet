@@ -68,11 +68,19 @@ async function makeRig(opts: {
   branchPrefix?: string;
   isolation?: string;
   seed?: Parameters<typeof seedGitRepo>[1];
+  /**
+   * Point this rig at an EXISTING repo instead of seeding a fresh one, and
+   * give it a run id of its own. Both exist for one test — ISC-295's, which
+   * needs two runs that genuinely share a repo. Defaulting them keeps every
+   * other rig in this file a private, single-run rig as before.
+   */
+  repo?: string;
+  runId?: string;
 } = {}): Promise<Rig> {
   const base = await scratch();
-  const repo = join(base, "repo");
+  const repo = opts.repo ?? join(base, "repo");
   const workers = opts.workers ?? ["eng-1"];
-  await seedGitRepo(repo, opts.seed);
+  if (opts.repo === undefined) await seedGitRepo(repo, opts.seed);
 
   const yaml = [
     "version: 2",
@@ -93,7 +101,7 @@ async function makeRig(opts: {
   const configPath = join(base, "fleet.yaml");
   await writeFile(configPath, yaml, "utf8");
   const loaded = await parseConfig(yaml, configPath);
-  return { base, repo, run: runPaths("run-abc", join(base, "runs")), loaded };
+  return { base, repo, run: runPaths(opts.runId ?? "run-abc", join(base, "runs")), loaded };
 }
 
 const create = (rig: Rig, workerIds: string[]): Promise<WorkerWorktree[]> =>
@@ -113,7 +121,7 @@ describe("clone placement and base ref", () => {
     // asserted through the helper AND through the rendered `-v`, because a
     // bind mount whose source nothing created does not fail, it comes up
     // empty (ISC-188/231).
-    expect(wt!.path).toBe(workerWorktree(rig.repo, "eng-1"));
+    expect(wt!.path).toBe(workerWorktree(rig.repo, rig.run.runId, "eng-1"));
     expect((await stat(wt!.path)).isDirectory()).toBe(true);
 
     // `.git` is a real DIRECTORY, not a `gitdir:` pointer file. This is the
@@ -151,7 +159,7 @@ describe("clone placement and base ref", () => {
     await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreePreflightError);
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/DETACHED HEAD/);
     // Nothing was created behind the refusal.
-    expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
+    expect(await pathExists(workerWorktree(rig.repo, rig.run.runId, "eng-1"))).toBe(false);
   }, cliBudget(4));
 
   test("render mounts exactly the directory that was created", async () => {
@@ -301,7 +309,7 @@ describe("the clone is self-contained", () => {
 
   test("a stale leftover directory is refused, never adopted", async () => {
     const rig = await makeRig();
-    const path = workerWorktree(rig.repo, "eng-1");
+    const path = workerWorktree(rig.repo, rig.run.runId, "eng-1");
     await mkdir(path, { recursive: true });
     await writeFile(join(path, "someone-elses-work.txt"), "do not delete me\n");
 
@@ -333,7 +341,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
 
     await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreePreflightError);
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/submodules at vendor\/inner/);
-    expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
+    expect(await pathExists(workerWorktree(rig.repo, rig.run.runId, "eng-1"))).toBe(false);
   }, cliBudget(8));
 
   test("LFS-tracked content is refused, including from a NESTED .gitattributes", async () => {
@@ -348,7 +356,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
     expect(findings.lfs[0]).toContain("assets/.gitattributes");
 
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/LFS-tracked content/);
-    expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
+    expect(await pathExists(workerWorktree(rig.repo, rig.run.runId, "eng-1"))).toBe(false);
   }, cliBudget(3));
 
   test("an ordinary .gitattributes with no lfs filter is not refused", async () => {
@@ -482,7 +490,7 @@ describe("a failure after the clone exists is rolled back, not left as an orphan
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/switch -c/);
 
     // The clone directory does not survive the failure.
-    expect(await pathExists(workerWorktree(rig.repo, "eng-1"))).toBe(false);
+    expect(await pathExists(workerWorktree(rig.repo, rig.run.runId, "eng-1"))).toBe(false);
     // Nor does a dangling remote in the parent — the same rollback covers it.
     expect((await git(rig.repo, "remote", "get-url", workerRemoteName("eng-1"))).code).not.toBe(0);
   }, cliBudget(4));
@@ -720,4 +728,122 @@ describe("pruneWorkerWorktree refuses a recursive delete outside .worktrees/", (
     expect(outcome.reason).toContain("outside");
     expect(await pathExists(join(outside, "do-not-delete.txt"))).toBe(true);
   }, cliBudget(3));
+});
+
+// ---------------------------------------------------------------------------
+
+describe("two runs share one repo (ISC-295)", () => {
+  /**
+   * The claim ISC-295 was filed for, and the reason it says not to close on a
+   * test that merely passes: before run-scoping, this file was ALREADY green.
+   * Every rig here seeded a private repo, so no test ever asked the question
+   * the defect was about — two runs, one repo, same worker id.
+   *
+   * That is the shape worth naming. The old layout was not caught by a weak
+   * assertion; it was caught by no assertion, because every rig was isolated
+   * by construction and the collision could not arise. A suite can be
+   * thorough about everything except the one arrangement the bug needs.
+   */
+  test(
+    "both runs get their own checkout of the same worker id, and neither refuses",
+    async () => {
+      const first = await makeRig({ runId: "run-alpha" });
+      // Same repo, different run. This is the arrangement that used to be
+      // impossible: `<repo>/.worktrees/eng-1` resolved identically for both,
+      // so the second `createWorkerWorktrees` hit its own leftover and threw
+      // `StaleWorktreeError` — correctly, against a path that should never
+      // have been shared.
+      const second = await makeRig({ repo: first.repo, runId: "run-beta" });
+
+      const [a] = await create(first, ["eng-1"]);
+      const [b] = await create(second, ["eng-1"]);
+      expect(a).toBeDefined();
+      expect(b).toBeDefined();
+
+      // Distinct paths, each carrying its own run id — asserted against the
+      // helper rather than a hand-built join, so a future change to the layout
+      // moves this test with it instead of leaving it pinned to a stale shape.
+      expect(a!.path).toBe(workerWorktree(first.repo, "run-alpha", "eng-1"));
+      expect(b!.path).toBe(workerWorktree(first.repo, "run-beta", "eng-1"));
+      expect(a!.path).not.toBe(b!.path);
+
+      // Both are real directories, at the same time. "The call returned" and
+      // "a checkout exists" are different claims, and a bind mount whose
+      // source is missing does not fail — it comes up empty (ISC-188/231).
+      expect((await stat(a!.path)).isDirectory()).toBe(true);
+      expect((await stat(b!.path)).isDirectory()).toBe(true);
+
+      // And they are independent checkouts rather than two names for one
+      // tree: a commit in the first must not appear in the second. Without
+      // this, two symlinks to one directory would satisfy everything above.
+      await writeFile(join(a!.path, "only-in-alpha.txt"), "alpha\n", "utf8");
+      expect(await pathExists(join(a!.path, "only-in-alpha.txt"))).toBe(true);
+      expect(await pathExists(join(b!.path, "only-in-alpha.txt"))).toBe(false);
+
+      // The branches stay distinct too — they always were run-scoped, which is
+      // what made the un-scoped PATH an asymmetry rather than a design.
+      expect(a!.branch).not.toBe(b!.branch);
+    },
+    cliBudget(8),
+  );
+
+  test(
+    "a leftover from one run does not block a DIFFERENT run of the same worker",
+    async () => {
+      const first = await makeRig({ runId: "run-alpha" });
+      const second = await makeRig({ repo: first.repo, runId: "run-beta" });
+
+      // A crashed run's remains, planted rather than hoped for: the exact
+      // orphan directory that used to block every later run of `eng-1` until
+      // a person deleted it by hand. `git worktree prune` does not clear one
+      // of these — git's metadata goes first, and what is left is a directory
+      // git no longer tracks.
+      const stale = workerWorktree(first.repo, "run-alpha", "eng-1");
+      await mkdir(stale, { recursive: true });
+
+      // The other run is unaffected, which is the whole point of scoping.
+      const [b] = await create(second, ["eng-1"]);
+      expect(b).toBeDefined();
+      expect((await stat(b!.path)).isDirectory()).toBe(true);
+
+      // And the guard has NOT been softened: the run that owns the leftover
+      // still refuses it rather than adopting it. Run-scoping was meant to
+      // remove the collision, not to start trusting stale trees.
+      await expect(create(first, ["eng-1"])).rejects.toThrow(StaleWorktreeError);
+    },
+    cliBudget(6),
+  );
+});
+
+describe("pruning a run-scoped checkout (ISC-295)", () => {
+  test(
+    "the run's own directory goes with its last worker, but not while others remain",
+    async () => {
+      const rig = await makeRig({ workers: ["eng-1", "eng-2"], runId: "run-gamma" });
+      const [a, b] = await create(rig, ["eng-1", "eng-2"]);
+      expect(a).toBeDefined();
+      expect(b).toBeDefined();
+
+      const runDir = join(rig.repo, ".worktrees", "run-gamma");
+      expect(await pathExists(runDir)).toBe(true);
+
+      // Pruning ONE worker must not take the directory its sibling is still
+      // living in. This is the assertion that makes `rmdir` the right call
+      // rather than `rm -r`: the latter would pass every other check here and
+      // delete `eng-2`'s checkout as a side effect of pruning `eng-1`.
+      await pruneWorkerWorktree({ repo: rig.repo, worktree: a!, force: true });
+      expect(await pathExists(runDir)).toBe(true);
+      expect(await pathExists(b!.path)).toBe(true);
+
+      // The last one takes the directory with it, so a repo does not
+      // accumulate one empty directory per fleet ever started.
+      await pruneWorkerWorktree({ repo: rig.repo, worktree: b!, force: true });
+      expect(await pathExists(b!.path)).toBe(false);
+      expect(await pathExists(runDir)).toBe(false);
+
+      // `.worktrees/` itself stays — it is the shared root, not this run's.
+      expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(true);
+    },
+    cliBudget(10),
+  );
 });

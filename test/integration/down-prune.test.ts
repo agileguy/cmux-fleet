@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig } from "../../src/config/load.ts";
 import { EXIT } from "../../src/contracts.ts";
-import { runPaths, workerPaths } from "../../src/run/paths.ts";
+import { runPaths, workerPaths, workerWorktree } from "../../src/run/paths.ts";
 import { processStartTime } from "../../src/run/registry.ts";
 import { groupRefusal, isAnchorRefusal, isGroupRefusal } from "../../src/cli/commands/down.ts";
 import { processGroupId } from "../../src/safety/kill.ts";
@@ -611,7 +611,7 @@ describe("dispatch names the checkout that actually exists", () => {
     const wt = recorded.byWorker.get("eng-1")!;
     expect(wt.branch).toBe(`experiment/${runId}/eng-1`);
     expect(wt.branch).not.toContain("fleet/");
-    expect(wt.path).toBe(join(repo, ".worktrees", "eng-1"));
+    expect(wt.path).toBe(workerWorktree(repo, runId, "eng-1"));
     expect(recorded.repo).toBe(repo);
     // …and that git agrees, which is the half a record-only assertion misses.
     expect(await gitOk(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt.branch);

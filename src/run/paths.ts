@@ -346,10 +346,25 @@ export function roleSkillsDir(runRoot: string, role: string): string {
  * `~/.pifleet/runs`, because git objects must be on the same filesystem the
  * container bind-mounts and the SRD's §5.5 mount table names it there.
  *
- * NOT run-scoped, deliberately and consequentially: two concurrent runs naming
- * the same worker id resolve to the same directory. `run/worktree.ts` turns
- * that into a loud refusal rather than a silent adoption — see its
- * `StaleWorktreeError`.
+ * RUN-SCOPED as of ISC-295 (2026-08-24). It was not, and the previous comment
+ * here called that "deliberate and consequential": two concurrent runs naming
+ * the same worker id resolved to the same directory, and `run/worktree.ts`
+ * turned the collision into a loud refusal rather than a silent adoption.
+ *
+ * The refusal was right and still stands — adopting another run's tree is the
+ * one thing not to do, and `StaleWorktreeError` still says so. What was wrong
+ * was treating a loud refusal as the END of the argument. It made the
+ * collision SAFE; it never made it unnecessary. Two costs were left standing:
+ * two fleets could not run against one repo at all, and a crashed run left a
+ * checkout that blocked every later run of that worker until a person removed
+ * the directory by hand — `git worktree prune` does not clear it, because
+ * git's own metadata goes first and what remains is an orphan directory git no
+ * longer tracks.
+ *
+ * The branch was already run-scoped (`workerBranch` builds
+ * `<prefix>/<run-id>/<worker>`), so this path was the last identity in this
+ * module that was not, and the asymmetry had no defender once it was written
+ * down. Scoping it removes the collision instead of reporting it.
  */
 /**
  * The container `--name` for a worker (SRD §5.6).
@@ -368,8 +383,8 @@ export function workerContainerName(runId: string, workerId: string): string {
   return `pifleet-${runId}-${workerId}`;
 }
 
-export function workerWorktree(repo: string, workerId: string): string {
-  return join(repo, ".worktrees", workerId);
+export function workerWorktree(repo: string, runId: string, workerId: string): string {
+  return join(repo, ".worktrees", runId, workerId);
 }
 
 /**
