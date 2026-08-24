@@ -80,7 +80,8 @@ If you are opening one PR today, this is the whole decision:
 ```
   A  Decide          3 questions, no code          ── ask now, they gate I and J
   B  Suite guards    5 criteria, ~3 PRs            ── land before any feature work
-  C  Proof plane     10 criteria, needs a runner   ── the long-lead item; start provisioning at A
+  C  Proof plane     4 need a runner, 5 do not     ── re-scoped 2026-08-23; see 6.C.1
+     C1 containment  no procurement at all           ── start here: CI already proves the defect
   ───────────────────────────────────────────────────────────────────────────────
   D  Accounting      6    ┐
   E  Control seam    6    │  independent of each other — run in parallel after B
@@ -218,7 +219,7 @@ whose absence silently weakens everything else).
 |---|---|---|---|---|
 | **A — Decide** | Three recorded answers in `ISA.md` `## Decisions`, each naming the chosen arm and the criteria it routes | — (gates 243, 264, 268) | — | Each of the three criteria carries a `## Decisions` entry naming its arm; no arm is "revisit later" |
 | **B — Suite guards** | Five properties over the suite, each with a guard that fails the suite when violated | 254, 270, 273, 274, 278 | A | Each guard **mutation-proved**: introduce the violation, the named test fails |
-| **C — Proof plane** | Self-hosted Apple-silicon runner + the bridge-gateway containment its probes expose | 22, 41, 47, 48, 50, 51, 57, 258, 259, 262 | B | Every listed probe **executes** (not skips) on the runner, and a container on the deny-all bridge cannot reach `172.18.0.1:22` |
+| **C — Proof plane** *(re-scoped — see §6.C.1)* | **C1** bridge-gateway containment (no procurement); **C2** credential plane; **C3** model plane / self-hosted runner | C1: 51, 57*; C2: 41, 47, 48; C3: 50, 258, 259, 262 — *(22 lifted out: a CI step)* | B | Every listed probe **executes** (not skips) on the runner, and a container on the deny-all bridge cannot reach `172.18.0.1:22` |
 | **D — Accounting and stall** | Budget on the dispatch path with a persisted `budget.json`; production adapters for the stall policy; a fleet-wide no-progress ceiling DERIVED from the task list rather than asserted beside it | 110, 115, 117, 193, 281, 282, 293, 294 | B | A run whose reported cost is 0 throughout halts on `tokens_ceiling` and exits 5; a wedged agent is killed by production code |
 | **E — Supervisor control seam** | `extension_ui_request` handler with a real `ui_request_timeout` timer; control-socket path allowlist and peer-uid check; runtime `no_tool_calls` detector | 108, 111, 112, 113, 126, 276 | B | An `editor` request is answered within `ui_request_timeout` and the turn continues; a foreign-uid connect is refused by code, not by umask |
 | **F — Launch preflight and identity** | `up` preflight (image present + verifies, backend honored, mount sources shared, probe target host-reachable); launch-time `(pid, started, pgid)` recorded and used at every rung | 32, 61, 189, 191, 271, 272, 291, 292 | B | `up` refuses each seeded precondition failure with a named exit code; `down`'s ladder reads no identity off the pid |
@@ -237,7 +238,7 @@ cross-phase edge was added 2026-08-23 after the first end-to-end run measured it
 
 | Phase | A | B | C | D | E | F | G | H | I | J | K |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| PRs | 1 | 3 | 2 + infra | 3 | 3 | 4 | 1 | 4 | 3 | 4 | 3 |
+| PRs | 1 | 3 | 4 (1 of them + infra) | 3 | 3 | 4 | 1 | 4 | 3 | 4 | 3 |
 
 ≈ 31 PRs plus one infrastructure provisioning task. Phase C's "infra" is the single largest
 non-code cost in the plan and is called out again in §6.C.
@@ -405,6 +406,74 @@ skips on the runner is `[~]`, exactly as ISC-262 records.
 **Exit.** Every listed probe **executes** on the runner — asserted by the probe-guard's
 `TOTAL_EXPECTED` accounting, not by the job's exit code — and a container on the deny-all
 bridge cannot reach `172.18.0.1:22`.
+
+---
+
+#### 6.C.1 — RE-SCOPED 2026-08-23: Phase C is three separable items, not one blocked lump
+
+Phase C has been carried as "the single largest non-code cost in the plan", blocking ten
+criteria behind provisioning an Apple-silicon runner. **That framing is wrong, and it was wrong
+for a reason worth naming: it inferred what CI can do from what a test DEPENDS on.** The
+`container` job runs the whole `PIFLEET_DOCKER=1` integration suite on a GitHub **Linux** runner
+against a real daemon (`.github/workflows/ci.yml`). "Needs Docker" has never implied "skips in
+CI" here. What no runner has is **oMLX, a Google credential, and Dan's home LAN** — three
+different procurements, only one of which is a Mac.
+
+Re-derived by reading each criterion's skip gate and the job that runs it:
+
+| Item | Criteria | What actually gates it | Procurement |
+|---|---|---|---|
+| **C1 — bridge containment** | 51, half of 57 | A real code defect. Nothing to buy. | **none** |
+| **C2 — credential plane** | 41, 47, half of 48 | A Google credential on some runner (`HOST_ADC_PRESENT`) | a credential, not a Mac |
+| **C3 — model plane** | 50, 258, 259, 262 | A real generating server; 259 additionally wants the 192.168.86.0/24 LAN | the runner |
+| *(lifted out)* | 22 | A CI step. `bun test --coverage` needs no daemon, no runner, no macOS. | none |
+
+**C1 is the finding that matters, and it inverts the phase's premise.** The containment defect
+is not awaiting a probe — **the probe exists, runs on every push, and is GREEN asserting the
+defect**. `test/integration/relay.test.ts` plants a `--network host` beacon and a `-p`-published
+one, enumerates all 65535 ports of the bridge gateway, and asserts that the deny-all bridge
+*reaches* the host-namespace listener. CI run 32676569570 logged it:
+
+```
+[enumerated] host kernel socket table listens on [22, 53, 39681, 40681];
+             gateway 172.19.0.1 (ordinary bridge) serves [22, 39681, 40681];
+             gateway 172.18.0.1 (deny-all bridge) reaches [22, 40681].
+```
+
+A container on the deny-all bridge reaches **host port 22**. That is this phase's exit criterion
+failing, measured, in CI, today — and the mechanism is Linux Docker generally, not Colima:
+isolation lives in the FORWARD chain while the gateway is on-link and delivered through INPUT.
+The work is a host-side rule outside Docker's model (a `DOCKER-USER`/`INPUT` drop from the
+internal bridge interface to the gateway address, most naturally applied at network-create
+time), and the proof is flipping one assertion to `.not.toContain(hostNsPort)` with the planted
+beacons kept so it cannot go vacuous. The test's own comment already anticipates this: *"IF THE
+HOST-NAMESPACE ASSERTION FAILS, that is very likely GOOD NEWS."* The open question is a design
+one — whether pifleet should shell out to `iptables` from its own network setup, and what it
+does on a host where it lacks the privilege — not a hardware one.
+
+**C2 is smaller than filed, and part of it is not a credential problem at all.** `gcloudMinter`
+has **zero callers anywhere in `src/` outside its own module**, and `TokenRefresher` likewise —
+verified by grep. So `up` never mints and never refreshes; there is no token whose identity
+ISC-48 could check. The first tranche is therefore pure wiring, provable in the `container` job
+with a PATH-shimmed `gcloud`. Only the residue — *"the token's identity IS the SA"*, a property
+of a token Google actually issued — needs a real granted service account. ISC-48 has been filed
+as a hardware wait through two revisions; it is code work with a credential tail.
+
+**C3 is the only genuine runner item, and it is four criteria.** ISC-262 is the firmest: ISC-55's
+latency figure exists to size `max_concurrent` against real throughput, so a toy model would not
+substitute. ISC-259 wants a runner on the 192.168.86.0/24 LAN, which an Apple-silicon Mac in a
+rack does not automatically provide.
+
+**Two things this re-scope does NOT claim.** ISC-57's second half is downstream of **ISC-263**,
+which is `[ ]` and sits outside Phase C entirely — Google endpoints are denied because no relay
+forwards them, and closing that needs a CONNECT/SNI path that does not exist. And Phase C's exit
+criterion as written is **insufficient for ISC-258**: "every listed probe executes" does not
+close a criterion whose two bail paths are passes-with-a-warning. Standing the runner up will
+make that probe execute and still not earn `[x]` under this project's strictness rule.
+
+**Net: the largest non-code cost in the plan blocks four criteria, not ten — and blocks none of
+the three that are most defect-shaped.** C1 should be done first and needs nothing but a
+decision.
 
 ---
 

@@ -477,11 +477,18 @@ jobs:
           # appearing in `ps`, `docker inspect`, and command-echoing logs; the
           # cheapest way to keep that fixed is not to ship the key here at all.
           #
-          # The OTHER five relay probes run unconditionally and are expected to
-          # PASS. The gateway-residual one can return early on a host whose
-          # gateway serves none of the candidate ports — it logs
-          # `[inconclusive]` and counts as a pass, deliberately, so it needs no
-          # skip allowance and must not be given one.
+          # The OTHER relay probes run unconditionally and are expected to
+          # PASS, so they need no skip allowance and must not be given one.
+          #
+          # CORRECTED 2026-08-23: this used to say the gateway-residual probe
+          # "can return early on a host whose gateway serves none of the
+          # candidate ports — it logs `[inconclusive]` and counts as a pass".
+          # ISC-261's rewrite DELETED that path by planting beacons, and the
+          # test now says so in as many words: it "can never come out
+          # 'inconclusive'". A reader trusting the old text would wrongly
+          # conclude the CI gateway assertion might be vacuous, which is the
+          # opposite of true — it is currently the strongest evidence in the
+          # repo that ISC-51's containment does NOT hold.
           EXPECTED_LIVE_OMLX_RELAY_SKIPS: |
             the REAL oMLX model list comes back through the relay, from inside the bridge
             a live INFERENCE round-trips through the relay, differentially against a host control
