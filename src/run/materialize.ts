@@ -158,6 +158,21 @@ export interface MaterializedWorker {
   launchJson: string | null;
   /** `--name` of the container that argv will create; null for a double run. */
   container: string | null;
+  /**
+   * The FINISHED `docker run` argv — the same array written to `launch.json`
+   * and spawned VERBATIM by the supervisor; null for a double run.
+   *
+   * Surfaced so `up` can enforce ISC-292 over the argv this run will actually
+   * use, rather than over a second rendering of it. Two independent
+   * computations of one argv are two things that can disagree after an edit,
+   * and a guard that passed on a DIFFERENT argv than the one that launched is
+   * worse than no guard: it certifies the wrong bytes. Same reason the image
+   * gate in `up` takes its tags from the renderer's output rather than
+   * recomputing them.
+   */
+  launchArgv: readonly string[] | null;
+  /** The image that argv runs — an image with a shell, so a probe can use it. */
+  image: string | null;
 }
 
 /** Called as each worker finishes, so a failure part-way leaves a record of what exists. */
@@ -918,6 +933,11 @@ export async function materializeWorkerInputs(
       envFile: paths.envFile,
       launchJson: opts.writeLaunchRecord === true ? paths.launchJson : null,
       container: opts.writeLaunchRecord === true ? launch.container : null,
+      // Gated on the SAME condition as the two above, because they answer one
+      // question: is a container intended at all. On the double path there is
+      // no `docker run` argv to guard and no image to guard it in.
+      launchArgv: opts.writeLaunchRecord === true ? launch.argv : null,
+      image: opts.writeLaunchRecord === true ? launch.image : null,
     };
     out.push(materialized);
     // Wrapped like every other fallible step here. The sink is a ledger

@@ -126,6 +126,15 @@ export async function makeDaemonScratch(
   return dir;
 }
 
+/**
+ * The name every mount probe writes, in ONE spelling.
+ *
+ * `mount-preflight.ts` writes the same file for the same purpose, and two
+ * literals of one magic name are two things that can drift — the second would
+ * then be left behind by the first's cleanup.
+ */
+export const MOUNT_PROBE_SENTINEL = ".pifleet-mount-probe";
+
 /** What to tell a user whose bind mount came up empty. */
 export const MOUNT_SHARING_HINT =
   "the Docker daemon cannot see this path — on macOS only directories shared into the " +
@@ -150,7 +159,7 @@ export async function probeMountVisibility(
   tag: string,
   exec: Exec = realExec,
 ): Promise<MountVisibility> {
-  const sentinel = ".pifleet-mount-probe";
+  const sentinel = MOUNT_PROBE_SENTINEL;
   const token = "pifleet-mount-ok";
   try {
     await writeFile(join(dir, sentinel), `${token}\n`);

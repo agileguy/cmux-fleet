@@ -20,6 +20,7 @@ import { resolveBackendWithFallback } from "../../backends/tmux/fallback.ts";
 import { isBackendKind, loadBackend } from "../../backends/registry.ts";
 import type { PaneRef } from "../../backends/types.ts";
 import { makeWorkerAccessible } from "../../container/mounts.ts";
+import { assertBindMountsVisible } from "../../container/mount-preflight.ts";
 import { assertImagesReady, requiredImages } from "../../container/image.ts";
 import { renderAllWorkers } from "../../config/render.ts";
 import { processLauncher, supervisorArgv } from "../../supervisor/launch.ts";
@@ -1079,7 +1080,7 @@ export function register(program: Command): void {
               "Pi double and NO containers are started; unset it to launch containers\n",
           );
         }
-        await materializeWorkerInputs(loadedConfig, run, workers, async (m) => {
+        const materialized = await materializeWorkerInputs(loadedConfig, run, workers, async (m) => {
           await ledger.append("worker_inputs_materialized", {
             worker: m.workerId,
             detail: {
@@ -1096,6 +1097,73 @@ export function register(program: Command): void {
             },
           });
         }, { writeLaunchRecord: !useDouble });
+
+        /**
+         * EVERY BIND-MOUNT SOURCE THIS RUN WILL USE IS ONE THE RUNTIME CAN SEE
+         * (ISC-292).
+         *
+         * On a VM-backed runtime — Docker Desktop, colima, Rancher — `-v
+         * <src>:<dst>` against a path outside the daemon's shared set DOES NOT
+         * FAIL. The VM has no such path, so the runtime creates an empty
+         * directory there and mounts that, and `docker run` exits 0. The
+         * container reads an empty `/workspace`, finds no `/skills`, writes an
+         * `/outbox` nobody harvests, and names the cause in no log. It cost a
+         * false diagnosis once already, and it was LOUD that time only because
+         * a worker happened to read a mounted briefing as a file and got
+         * EISDIR; the directory mounts degrade to silent.
+         *
+         * ## Why here
+         *
+         * `doctor` has probed the two operator-settable roots since Phase F,
+         * and that is a report an operator has to remember to ask for. The
+         * criterion says such a mount is "refused OR reported"; enforcement
+         * that lives only in `doctor` has the second half while `up` launches
+         * anyway, and the launch is where the cost lands.
+         *
+         * The position in this function is the same argument the allowlist gate
+         * and the materialize block above both make. AFTER materialize, because
+         * the sources have to exist before their visibility is a question that
+         * can be asked — `renderWorker` runs before anything is created, which
+         * is exactly why ISC-127's guard sits there and this one cannot.
+         * BEFORE `launchDetached`, because everything from that line onward
+         * survives a thrown `CliError` and has to be reaped, while a refusal
+         * here has nothing running behind it.
+         *
+         * ## Why the FINISHED argv
+         *
+         * The same reason ISC-44 and ISC-127 are enforced on it: no literal in
+         * the mount table can be audited to rule this out, because the
+         * offending path arrives from `run.repo`, `PIFLEET_RUNS_DIR` and
+         * `PIFLEET_SCRATCH_DIR`. Taking the argv from `materialize`'s own
+         * record rather than re-rendering means the bytes checked are the bytes
+         * the supervisor will spawn.
+         *
+         * It covers strictly more than `doctor` can: `run.repo` and the
+         * kubeconfig are on this argv and are not roots `doctor` knows to name
+         * — both were recorded as residuals of the Phase F close.
+         *
+         * ## Skipped on the double, which is not a hole
+         *
+         * `PIFLEET_PI_COMMAND` starts NO container (see `writeLaunchRecord`
+         * above), so there is no mount to be about and no image to probe in.
+         * `launchArgv` is null on exactly that path, so the filter below states
+         * it rather than re-deriving it.
+         */
+        const containerLaunches = materialized.filter(
+          (m): m is typeof m & { launchArgv: readonly string[]; image: string } =>
+            m.launchArgv !== null && m.image !== null,
+        );
+        if (containerLaunches.length > 0) {
+          await assertBindMountsVisible(
+            containerLaunches.map((m) => m.launchArgv),
+            // The worker image, which `assertImagesReady` proved present far
+            // above — not a probe-specific one. A preflight that pulled its own
+            // image would be slow on a cold machine and would fail outright on
+            // an offline one, and this image is already local by definition.
+            containerLaunches[0]!.image,
+            realExec,
+          );
+        }
       }
 
       // The daemon: detached like the supervisors, single writer of registry.json.
