@@ -249,19 +249,37 @@ describe("launchDetached records an identity, never a read off a live pid (ISC-2
    */
   test("ISC-272: a pgid the launched child does not lead is never recorded", async () => {
     try {
+      /*
+       * `/bin/sleep`, ABSOLUTE, and that is an assertion this test rests on
+       * rather than a style preference. `withStubPs` replaces PATH with a
+       * directory holding nothing but `ps`, and the child inherits it — so a
+       * bare `sleep 30` is NOT FOUND, the shell exits instantly, and the
+       * launcher refuses on the REAPED-CHILD guard instead of the leader
+       * condition. Measured: with `sh -c "sleep 30"` this test passed with the
+       * leader condition DELETED, testing a guard it was not written for. The
+       * child has to be genuinely alive for the refusal to be about the group.
+       */
       const rec = await withStubPs(STUB_PS_FOREIGN_GROUP, async () =>
-        processLauncher.launchDetached(await spec(["/bin/sh", "-c", "sleep 30"])),
+        processLauncher.launchDetached(await spec(["/bin/sleep", "30"])),
       );
       groups.push(rec.pid);
+      /*
+       * THE PRECONDITION, asserted rather than assumed — this is the line that
+       * keeps the refusal below from being satisfiable by the wrong guard. The
+       * stub answers affirmatively for any pid, so a non-null reading here
+       * means the launcher had a live child and a usable identity, and the
+       * ONLY thing left for it to refuse on is the group.
+       */
+      expect(await processStartTime(rec.pid)).not.toBeNull();
       expect(rec.pgid).not.toBe(1);
       expect(rec.pgid).toBe(-1);
       expect(rec.started).toBe("");
     } finally {
       await cleanup();
     }
-    // One `sh`, two stub `ps` inside `launchDetached`, one `ps -o pid= -g` in
-    // cleanup. Four.
-  }, cliBudget(4));
+    // One `sleep`, two stub `ps` inside `launchDetached`, one `ps -o lstart=`
+    // for the precondition, one `ps -o pid= -g` in cleanup. Five.
+  }, cliBudget(5));
 });
 
 // ---------------------------------------------------------------------------
