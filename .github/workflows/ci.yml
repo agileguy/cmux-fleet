@@ -645,3 +645,137 @@ jobs:
           # push. Adding it here would buy no coverage and cost a second run
           # inside the expensive job — the same doubling this step was
           # collapsed to avoid.
+
+  # ISC-262 / ISC-290. The four live-inference probes have never run on a
+  # runner, and `ci.yml` explained why in terms that were true when written:
+  # "they need a real Apple-silicon inference server, which no GitHub-hosted
+  # runner has and none ever will."
+  #
+  # The premise was right and the conclusion no longer follows. The runner does
+  # not need to HAVE an Apple-silicon server; it needs to REACH one. The
+  # maintainer's oMLX is now published through a Cloudflare tunnel, so what was
+  # missing is transport, not hardware.
+  #
+  # WHAT THIS JOB IS AND IS NOT. It is a real witness for the model-side claims
+  # — a real model on real hardware, answering a real tools-bearing probe. It is
+  # NOT yet a witness for ISC-290, which names the whole chain `up` -> supervisor
+  # -> container -> dispatch -> settle -> harvest. No test in this repo asserts
+  # that chain (`grep -rln 'ISC-290' test/` is empty), so there is nothing here
+  # for a runner to re-check yet. This job removes the ENVIRONMENTAL blocker
+  # that made writing one pointless; the test itself is still owed, and ISC-290
+  # stays `[~]` until it exists.
+  #
+  # THE SKIP LIST IS EMPTY ON PURPOSE. `probe-guard.sh` permits exactly the
+  # names in EXPECTED_SKIPS and no others, so an empty list means ANY skip is a
+  # failure. That is the inverse case the guard's own header anticipated: "point
+  # this at a self-hosted runner with PIFLEET_OMLX=1 and the pins below must be
+  # removed, at which point an empty pin list permits NO skips — so a
+  # half-configured environment that asks for the live probes and gets skips
+  # fails loudly instead of quietly." This job is that environment. A green
+  # result here cannot mean "everything skipped".
+  #
+  # IT CAN GO RED FOR A REASON NO CONTRIBUTOR CAUSED. The far side is one
+  # person's machine; asleep, offline, or with oMLX stopped, this job fails.
+  # That is deliberate and it is the honest trade — the alternative is a job
+  # that skips when the witness is absent, which is precisely the silent-green
+  # failure the guard exists to prevent. The reachability check below runs
+  # FIRST so that case says "the upstream is unreachable" instead of surfacing
+  # as a confusing test failure. Keep this job OUT of required status checks.
+  omlx-live:
+    runs-on: ubuntu-latest
+    # Fork PRs get no secrets, so this would fail for something a contributor
+    # cannot fix and did not break. Skipping the whole job is honest there in a
+    # way that skipping individual probes inside it would not be: nothing here
+    # claims to have run.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - run: bun install --frozen-lockfile || bun install
+      - name: Refuse a half-configured environment
+        # Both secrets or neither. One without the other is the state that
+        # produces the most confusing failure: a shim pointing nowhere, or a
+        # live endpoint every request 401s against.
+        env:
+          OMLX_HOST: ${{ secrets.OMLX_HOST }}
+          OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
+        run: |
+          set -eu
+          missing=""
+          [ -n "${OMLX_HOST:-}" ]    || missing="$missing OMLX_HOST"
+          [ -n "${OMLX_API_KEY:-}" ] || missing="$missing OMLX_API_KEY"
+          if [ -n "$missing" ]; then
+            echo "omlx-live: missing repo secret(s):$missing" >&2
+            echo "Set them with: gh secret set <NAME> --repo <owner>/<repo>" >&2
+            exit 1
+          fi
+      - name: Stand up a localhost that behaves like the operator's oMLX
+        # Backgrounded with its log on disk. `bun ... &` inside `run:` dies with
+        # the step's shell unless disowned; nohup + setsid is what keeps it up
+        # for the steps that follow.
+        env:
+          OMLX_HOST: ${{ secrets.OMLX_HOST }}
+        run: |
+          set -eu
+          nohup setsid bun .github/scripts/omlx-shim.ts \
+            > "${RUNNER_TEMP:?}/omlx-shim.log" 2>&1 &
+          echo "shim_pid=$!" >> "$GITHUB_ENV"
+      - name: Confirm the upstream is actually reachable before grading anything
+        # FIRST, and separate, so an asleep laptop reports as an asleep laptop.
+        # 401 counts as reachable for the same reason `relay.test.ts` counts it:
+        # it proves the TCP path and the HTTP server, and says only that no key
+        # was sent — which this probe deliberately does not send.
+        run: |
+          set -eu
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+                     http://127.0.0.1:8000/v1/models || true)
+            case "$code" in
+              200|401) echo "upstream reachable after ${i}s (HTTP $code)"; exit 0 ;;
+            esac
+            sleep 1
+          done
+          echo "omlx-live: upstream never answered on 127.0.0.1:8000" >&2
+          echo "--- shim log ---" >&2
+          cat "${RUNNER_TEMP:?}/omlx-shim.log" >&2 || true
+          exit 1
+      - name: The live-oMLX probes, RUN rather than accounted for
+        env:
+          LABEL: live-oMLX
+          PIFLEET_OMLX: "1"
+          OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
+          # NAMED, not inferred, and the suite refuses to run without it.
+          # `probeModel`'s docstring records why: auto-selecting the first
+          # served chat model once cold-loaded a 35B into a 24GB cap and
+          # SIGABRT'd the maintainer's oMLX, taking every other tenant's warm
+          # model with it. "A test suite must not pick its own GPU workload."
+          #
+          # WHY THIS MODEL. It has to emit NATIVE tool calls to prove anything,
+          # and the candidates are not equal at that. ISA.md records
+          # `Qwen3-Coder-30B-A3B-Instruct-4bit` as unreliable on exactly this
+          # probe — that unreliability is what wedged the agent chain during the
+          # ISC-290 diagnosis — while `GLM-4.5-Air-MLX-4bit` answered it 3/3.
+          # It is also on `fleet.example.yaml`'s allowlist and measured a 19.4s
+          # cold load, so it is the cheapest honest choice, not the biggest
+          # available one.
+          #
+          # This costs the maintainer's GPU roughly half a minute per push.
+          # That is the price of the witness; a cheaper model that cannot emit a
+          # tool call would buy a green tick and no evidence.
+          PIFLEET_OMLX_MODEL: GLM-4.5-Air-MLX-4bit
+          # Same eighteen the `test` job collects. Unchanged here on purpose:
+          # if this number and that one ever disagree, one of the two jobs has
+          # stopped seeing the file.
+          TOTAL_EXPECTED: "18"
+          # EMPTY. See the job header — this is the whole point.
+          EXPECTED_LIVE_OMLX_PROBE_SKIPS: ""
+        run: |
+          set -eu
+          JUNIT_FILE="${RUNNER_TEMP:?}/pifleet-omlx-live.junit.xml" \
+          EXPECTED_SKIPS="$EXPECTED_LIVE_OMLX_PROBE_SKIPS" \
+            .github/scripts/probe-guard.sh test/integration/model-probe.test.ts
+      - name: Shim log
+        if: always()
+        run: cat "${RUNNER_TEMP:?}/omlx-shim.log" || true
