@@ -113,8 +113,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { spawnCli, type CliResult } from "../support/spawn-cli.ts";
@@ -122,6 +121,7 @@ import { seedGitRepo } from "../fixtures/synthetic-repo.ts";
 import { gateBudget } from "../support/budget.ts";
 import { runPaths, taskRecordPath, workerPaths } from "../../src/run/paths.ts";
 import { readTaskRecord, readWorkerState } from "../../src/run/state.ts";
+import { daemonScratchRoot } from "../../src/container/mounts.ts";
 
 const DOCKER = process.env["PIFLEET_DOCKER"] === "1";
 
@@ -332,6 +332,21 @@ async function writeConfig(rig: Rig, model: string): Promise<void> {
    */
   const engineer = section("roles")["engineer"] as Record<string, unknown>;
   engineer["append_system_prompt_file"] = join(REPO_ROOT, "roles", "engineer.md");
+  /**
+   * The ROLE's model, set as well as `llm.model`, because the role is what
+   * actually wins.
+   *
+   * Not defensive tidying — measured. Setting only `llm.model` left the
+   * example's `roles.engineer.model` in place, `defaults <- roles <- worker`
+   * resolved the worker to THAT model, and `up` refused at the allowlist gate:
+   * *"worker eng-1 resolves to model Qwen3-Coder-30B-A3B-Instruct-4bit, which
+   * is not in llm.models_allowlist"*. Which is the gate working correctly, on a
+   * config the test had written wrong.
+   *
+   * Set here rather than deleted so the config states the model at the level
+   * that decides it, instead of depending on merge semantics to fall through.
+   */
+  engineer["model"] = model;
   example["roles"] = { engineer };
   example["workers"] = [{ id: "eng-1", role: "engineer" }];
 
@@ -371,8 +386,32 @@ async function writeTaskList(rig: Rig): Promise<void> {
  */
 const ADD_JS = "export function add(a, b) {\n  return a + b;\n}\n";
 
+/**
+ * Where the rig lives, and why it is emphatically NOT `os.tmpdir()`.
+ *
+ * MEASURED, not anticipated. Sited under `os.tmpdir()` this test failed at
+ * `up` with ISC-292's mount preflight refusing six bind-mount sources at once
+ * — the worktree, the outbox, the sessions dir, the skills bundle, the
+ * cloud-allow file and the system-append file — each reported as *"the host
+ * has ... and the container sees nothing there at all — the mount would come
+ * up EMPTY"*. That refusal is correct: on macOS only directories shared into
+ * the VM are mountable, Colima shares `$HOME` and does NOT share
+ * `/var/folders/...`, and mounting an unshared path presents the worker an
+ * empty directory while the host content sits untouched. A fleet that runs,
+ * finds nothing and says nothing is precisely what that gate exists to
+ * prevent, and a test rig that trips it is testing its own siting.
+ *
+ * `daemonScratchRoot()` is IMPORTED rather than respelled as
+ * `join(homedir(), ...)`, because it is the product's own answer to "a
+ * directory the container runtime can see" — `PIFLEET_SCRATCH_DIR` when set,
+ * `~/.pifleet/scratch` otherwise. A test that hardcoded its own answer could
+ * agree with itself on a machine where the product disagreed, which is the
+ * same class of error as re-typing `DOCKER_HOST_LOOPBACK`.
+ */
 async function makeRig(): Promise<Rig> {
-  const base = await mkdtemp(join(tmpdir(), "pifleet-isc290-"));
+  const scratch = daemonScratchRoot();
+  await mkdir(scratch, { recursive: true });
+  const base = await mkdtemp(join(scratch, "pifleet-isc290-"));
   const rig: Rig = {
     base,
     runsRoot: join(base, "runs"),

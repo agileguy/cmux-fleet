@@ -458,7 +458,30 @@ jobs:
           # rather than ceremony. Worth noting what the PASS count does NOT do:
           # it stays at 6, because all three added probes are Docker-gated and
           # so contribute skips here and passes on the runner.
-          TOTAL_EXPECTED: "94"
+          #
+          # 94 -> 95 is full-chain.test.ts (ISC-290), and it is ONE test on
+          # purpose. Every SEGMENT of `up -> supervisor -> container ->
+          # dispatch -> settle -> harvest` already had a probe in this list;
+          # the JOIN between them had none, and `grep -rln ISC-290 test/`
+          # returned nothing at all. The criterion's own close-out says why a
+          # split-up file would not do: "a criterion that says 'end to end'
+          # must not be closed by three probes that each cover a segment".
+          #
+          # Listed here by the same rule as container-env.test.ts and
+          # doctor-preflight.test.ts — a file with a daemon-REQUIRING probe
+          # belongs in this job, or that probe has no automated reader
+          # anywhere. What it does NOT do is RUN: it needs a live inference
+          # server as well as a daemon, so on this runner it skips, and it is
+          # pinned by name below. See that pin for what that does and does not
+          # buy, and for what it would take to make it actually execute here.
+          #
+          # DERIVED by the hand method, NOT by adding 1 to 94. Measured
+          # 2026-08-24 on bun 1.3.11, gate UNSET, the same command as above
+          # with `full-chain` appended to the brace list:
+          #     -> 6 pass, 89 skip, 0 fail. Ran 95 tests across 11 files.
+          # One test, one skip, and the pass count unmoved at 6 — the shape a
+          # single added Docker-gated case must have.
+          TOTAL_EXPECTED: "95"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -531,6 +554,56 @@ jobs:
           EXPECTED_LIVE_OMLX_RELAY_SKIPS: |
             the REAL oMLX model list comes back through the relay, from inside the bridge
             a live INFERENCE round-trips through the relay, differentially against a host control
+          # ISC-290's whole-chain test, pinned for the same reason and by the
+          # same mechanism — and kept in a list of its OWN, because it is
+          # pinned for a DIFFERENT reason than the two relay probes above and a
+          # reader deleting one should not have to disentangle it from the
+          # other. Those two need an inference server. This one needs an
+          # inference server AND a Docker daemon AND a built worker image, all
+          # at once, which is a strictly harder environment to assemble and is
+          # the only environment in which the criterion can be re-checked.
+          #
+          # BE PRECISE ABOUT WHAT THIS PIN ACHIEVES, because a green tick
+          # beside a skipped end-to-end test is exactly the impression this
+          # repo has spent a session refusing to give. It does NOT run the
+          # chain. It does NOT re-check ISC-290. What it does is make the test
+          # ACCOUNTED FOR: rename it, delete it, or let it start running here
+          # for a reason nobody intended, and this step goes red and says
+          # which. Before this line the criterion had no test at all; after it,
+          # it has a test that one machine can run and CI can only count. That
+          # is a real improvement and it is not coverage, and ISA.md grades
+          # ISC-290 `[~]` accordingly — on the strictness rule, exactly as
+          # ISC-258's live relay probe is graded.
+          #
+          # WHY NEITHER EXISTING JOB CAN RUN IT, stated so the gap is
+          # actionable rather than folklore. The two halves this test needs are
+          # split across two jobs and neither has both: THIS job has a Docker
+          # daemon, a built worker image and a pulled relay image, and no
+          # inference server; PR #60's `omlx-live` job has an inference server
+          # — a Cloudflare-tunnelled oMLX behind
+          # `.github/scripts/omlx-shim.ts` — and no Docker daemon. The chain
+          # needs both AT ONCE, so a dedicated job is the fix rather than an
+          # extra step bolted onto either of these.
+          #
+          # ONE NON-OBVIOUS REQUIREMENT for whoever builds that job, because it
+          # is invisible until the relay times out and reads as a broken fleet.
+          # The shim binds `127.0.0.1`, which serves the model probes perfectly
+          # — they dial from the HOST. This chain's RELAY dials from a
+          # CONTAINER, through `--add-host host.docker.internal:host-gateway`,
+          # which resolves to the host's BRIDGE address; a loopback-only
+          # listener is unreachable from there. That job needs something
+          # listening on 0.0.0.0 in front of the shim, or the relay leg cannot
+          # connect no matter how healthy the tunnel is.
+          #
+          # Until such a job exists, this pin is the honest record.
+          #
+          # NO SECRET IS WIRED IN, for the same reason as the relay probes
+          # above: a key alone flips nothing, because the reachability check
+          # would still fail. The name below is bun's junit `name` attribute,
+          # which is the BARE test name — the `describe` text lands in
+          # `classname` and must NOT be included here.
+          EXPECTED_ISC290_CHAIN_SKIP: |
+            a worker container launched by up completes a real RPC turn end to end
         run: |
           set -eu
           # The grading itself lives in .github/scripts/probe-guard.sh, which
@@ -543,15 +616,17 @@ jobs:
           # grading with a different file list, and two copies of subtle shell
           # is how a parsing fix lands in one and not the other.
           #
-          # The two pin lists are kept SEPARATE above, and concatenated only
-          # here, because they are pinned for unrelated reasons — one needs an
-          # operator's Google login, the other an Apple-silicon inference
-          # server — and a reader deleting one should not have to disentangle
-          # it from the other. Blank lines from the block scalars are ignored
-          # by the guard; that is asserted in probe-guard.test.ts rather than
-          # assumed, because a miscount there would fail a CLEAN run.
+          # The THREE pin lists are kept SEPARATE above, and concatenated only
+          # here, because they are pinned for unrelated reasons — the first
+          # needs an operator's Google login, the second an Apple-silicon
+          # inference server, the third an inference server AND a daemon AND
+          # an image together — and a reader deleting one should not have to
+          # disentangle it from the others. Blank lines from the block scalars
+          # are ignored by the guard; that is asserted in probe-guard.test.ts
+          # rather than assumed, because a miscount there would fail a CLEAN
+          # run.
           JUNIT_FILE="${RUNNER_TEMP:?RUNNER_TEMP is not set by actions/runner}/pifleet-container-probes.junit.xml" \
-          EXPECTED_SKIPS="$(printf '%s\n%s\n' "$EXPECTED_HOST_ADC_MINT_SKIPS" "$EXPECTED_LIVE_OMLX_RELAY_SKIPS")" \
+          EXPECTED_SKIPS="$(printf '%s\n%s\n%s\n' "$EXPECTED_HOST_ADC_MINT_SKIPS" "$EXPECTED_LIVE_OMLX_RELAY_SKIPS" "$EXPECTED_ISC290_CHAIN_SKIP")" \
             .github/scripts/probe-guard.sh \
               test/integration/image.test.ts \
               test/integration/verbgate.test.ts \
@@ -562,7 +637,8 @@ jobs:
               test/integration/container-env.test.ts \
               test/integration/container-launch.test.ts \
               test/integration/doctor-preflight.test.ts \
-              test/integration/control-socket-uid.test.ts
+              test/integration/control-socket-uid.test.ts \
+              test/integration/full-chain.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every
