@@ -81,7 +81,7 @@ import { runPaths, taskRecordPath, workerPaths } from "../../src/run/paths.ts";
 import { readTaskRecord, readWorkerState } from "../../src/run/state.ts";
 import { processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
-import { BUN_DEFAULT_MS, SAFETY } from "../support/budget.ts";
+import { gateBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -179,34 +179,12 @@ const READY_GATE_MS = 20_000;
 const SETTLE_GATE_MS = 40_000;
 
 /**
- * The wall-clock ceiling for a test in this file.
- *
- * NEITHER `cliBudget` NOR `containerBudget` FITS, and reaching for one anyway
- * would be the mistake `budget.ts` warns about in its own words — "borrowing
- * the number would be a derivation in appearance only". `cliBudget` is
- * calibrated to the ~1.9 s it costs to transpile and run the pifleet CLI
- * entrypoint, and nothing in this file runs the CLI; `containerBudget` is a
- * cold-Docker floor, and nothing here starts a container. What these tests
- * actually spend is the sum of the gates they wait on, so that is what the
- * ceiling is built from.
- *
- * `SAFETY` is imported rather than restated so the headroom factor moves with
- * the measured one. `CONTENTION` is deliberately NOT applied on top: the gates
- * above already carry ~14x headroom over the measured idle cost of the work
- * they bound, and multiplying by the contention factor a second time would
- * double-count it — an unbounded-in-practice budget, which trades a flaky test
- * for a hanging suite.
- *
- * The result stays BOUNDED, which is the property that matters: a genuinely
- * hung supervisor still fails the test, it just fails after the gates have had
- * their say instead of at bun's inherited 5000 ms, which is a number with no
- * relationship to anything these tests do (ISC-273).
+ * The wall-clock ceilings in this file are `gateBudget(...)` over the gates
+ * each test actually waits on — see `test/support/budget.ts`, which carries the
+ * full argument for why NEITHER `cliBudget` NOR `containerBudget` governs here:
+ * nothing in this file runs the pifleet CLI, and nothing starts a container.
+ * The gates above are the cost, so the gates are what the ceiling is built from.
  */
-function gateBudget(gatesMs: readonly number[]): number {
-  if (gatesMs.length === 0) throw new TypeError("gateBudget expects at least one gate");
-  const total = gatesMs.reduce((a, b) => a + b, 0);
-  return Math.max(BUN_DEFAULT_MS, total * SAFETY);
-}
 
 const cleanups: Array<() => Promise<void>> = [];
 afterAll(async () => {

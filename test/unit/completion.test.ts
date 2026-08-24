@@ -318,6 +318,29 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
    * (ISC-111/112).
    */
   "ui-fire-and-forget.json": [1],
+  /**
+   * All three settle once, and the reason is worth stating because it is NOT
+   * the same reason `ui-fire-and-forget.json` does.
+   *
+   * These scenarios carry DIALOG methods with `await_response: true`, which in
+   * `fake-pi` holds the emission sequence — `turn_end`, `agent_end`, everything
+   * after it — until a correlated frame arrives on stdin. That blocking is a
+   * property of the DOUBLE, i.e. of a live process reading its own stdin. This
+   * property test does not run the double: it replays the emitted records
+   * against the completion tracker directly, the same way it already ignores
+   * `delay_ms` (see `deaf-abort.json` below). So the records arrive in file
+   * order, `agent_end` among them, and the tracker settles epoch 1 exactly as
+   * it would for a scenario with no dialogs in it at all.
+   *
+   * The consequence to keep in view: `[1]` here is NOT evidence that a dialog
+   * gets answered. That claim belongs to `test/integration/ui-requests.test.ts`,
+   * which runs a real supervisor against a real double and CAN hang. Reading
+   * these entries as coverage of ISC-111/112 would be reading a replay as a
+   * conversation.
+   */
+  "ui-dialogs.json": [1],
+  "ui-editor.json": [1],
+  "ui-mixed.json": [1],
   "duplicate-end.json": [1], // one settle; the duplicate end is prior, never a second
   "aborted.json": [1], // the harness never aborts, so the turn ends naturally
   // Like aborted.json: the simulator replays the emitted sequence and does not
