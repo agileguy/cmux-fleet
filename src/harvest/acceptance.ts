@@ -45,7 +45,19 @@ import {
   type AcceptanceRun,
   type HarnessSurface,
 } from "../contracts.ts";
+import {
+  MOUNT_SHARING_HINT,
+  probeMountVisibility,
+  widenTreeForWorker,
+} from "../container/mounts.ts";
+import type { Exec } from "../container/run.ts";
 import { Deadline, Stopwatch, isoNow } from "../util/clock.ts";
+import {
+  acceptanceContainerArgv,
+  acceptanceContainerEnv,
+  acceptanceContainerName,
+  reapAcceptanceContainer,
+} from "./acceptance-container.ts";
 import { HERMETIC_GIT_ENV, hardenedGitArgv } from "./git.ts";
 
 // ---------------------------------------------------------------------------
@@ -428,8 +440,45 @@ export interface AcceptanceSpec {
    * way any variable reaches an acceptance command — nothing is ever read
    * from `process.env` (ISC-149; `inherited_env: false` is recorded because
    * it is true by construction).
+   *
+   * Applies to the HOST path. On the container path (`container` below) the
+   * environment is built by `acceptanceContainerEnv` instead and this is not
+   * merged in, because the two run in different filesystems: `PATH` and `HOME`
+   * that are correct on the operator's machine name directories the image does
+   * not have. A caller that needs a variable inside the container is a change
+   * to that builder, not a silent pass-through of laptop state into an exam.
    */
   env?: Readonly<Record<string, string>>;
+  /**
+   * Run each command in a FRESH CONTAINER from the worker's own image, rather
+   * than as a host process (SRD §8.2, ISC-233).
+   *
+   * Absent means the host path, which is what a run launched against the
+   * `PIFLEET_PI_COMMAND` double gets: no container ever started, so there is no
+   * image to grade in and demanding one would refuse every test double in this
+   * repo.
+   */
+  container?: AcceptanceContainerOptions;
+}
+
+export interface AcceptanceContainerOptions {
+  /** The image the worker ran, read back out of its `launch.json`. */
+  image: string;
+  /** The network the worker ran on, or `null` for the daemon default. */
+  network?: string | null;
+  /**
+   * Injection point for the ISC-277 visibility probe ONLY.
+   *
+   * The acceptance commands themselves always spawn for real, through
+   * `execBounded`, because their timeout, excerpt and `timed_out`-vs-`failed`
+   * handling is the thing under test everywhere else in this file and routing
+   * them through a second exec abstraction would give the suite a path
+   * production does not have. The probe is different: it is a yes/no question
+   * about the host's mount sharing, and a unit test needs to ask it with the
+   * answer NO without a daemon in reach — which is precisely the differential
+   * ISC-277 asks for.
+   */
+  probeExec?: Exec;
 }
 
 export interface AcceptanceResult {
@@ -516,6 +565,46 @@ function gitEnv(extra: Readonly<Record<string, string>> | undefined): Record<str
 }
 
 /**
+ * Environment for the docker CLIENT on the container path.
+ *
+ * Third environment in this module, and the third one is the least obvious, so
+ * it is spelled out. `buildEnv` is for the graded commands and `gitEnv` is for
+ * the plumbing that stages them; both are built from literals because anything
+ * inherited from the operator's shell is a channel into the exam. The docker
+ * client is plumbing too — it is the same category as `git clone` — but it has
+ * one hard requirement a literal cannot supply: it has to be able to REACH a
+ * daemon, and on this machine that is `DOCKER_HOST`, which Colima sets in the
+ * operator's environment and which no default can be guessed for.
+ *
+ * So exactly the connection variables are forwarded, by name, and nothing
+ * else. The list is short on purpose and each entry is a docker-CLI setting
+ * rather than anything a test could read: none of them is passed to
+ * `docker run`, so none of them reaches the container — the command's
+ * environment is `acceptanceContainerEnv`, built from a literal like the other
+ * two, and the `-e K=V` form supplies values rather than inheriting them
+ * (ISC-31 forbids the bare `-e NAME` pass-through outright).
+ */
+function dockerClientEnv(): Record<string, string> {
+  const out: Record<string, string> = {
+    PATH: DEFAULT_ENV_PATH,
+    LC_ALL: "C",
+  };
+  // `HOME` is on this list rather than blanked, and that is a correction of a
+  // first attempt that blanked it. Docker's client config — `contexts/`,
+  // `config.json`, any credential helper — lives at `$HOME/.docker`, and
+  // Colima installs itself as a CONTEXT as readily as it exports
+  // `DOCKER_HOST`. Blanking `HOME` therefore left the client with no way to
+  // find the daemon on a perfectly ordinary setup, which would have surfaced
+  // as every acceptance run coming back `not_run` on the maintainer's own
+  // machine and nowhere else.
+  for (const k of ["HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"]) {
+    const v = process.env[k];
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
+/**
  * Run every resolved command in a fresh clone of `repo` at `head_sha`.
  *
  * Failure posture: a clone or checkout that cannot be completed yields every
@@ -549,11 +638,21 @@ export async function runAcceptance(spec: AcceptanceSpec): Promise<AcceptanceRes
   const cloneDir = join(scratchAbs, `accept-${spec.head_sha.slice(0, 12)}-${nonce}`);
   const env = buildEnv(spec.env, scratchAbs);
 
+  /**
+   * `image` is the audit record's answer to "which environment graded this
+   * code", and it was the literal `null` from the day this module shipped.
+   * ISC-233's audit measured what that cost: mutating it to a plausible tag —
+   * an audit record naming a container that never ran — left 104 tests across
+   * four files green, because no assertion anywhere read the field. It is now
+   * written from the thing that actually decides, one line below the branch
+   * that decides it, and `acceptance-context.test.ts` reads it back on both
+   * arms so the same mutation cannot pass again.
+   */
   const context = AcceptanceContextSchema.parse({
     clone_path: cloneDir,
     clone_sha: spec.head_sha,
     inherited_env: false,
-    image: null,
+    image: spec.container?.image ?? null,
     timeout_s: Math.ceil(spec.per_command_timeout_ms / 1000),
   });
 
@@ -607,9 +706,74 @@ export async function runAcceptance(spec: AcceptanceSpec): Promise<AcceptanceRes
     return { context, runs: allNotRun(spec.commands, `checkout ${spec.head_sha.slice(0, 12)} failed: ${checkout.excerpt}`) };
   }
 
+  /**
+   * ISC-277: the mount is PROVED before a single command is graded.
+   *
+   * This block is the reason ISC-233 could not simply be "add the argv". On
+   * macOS the daemon runs in a VM that shares only a declared set of host
+   * directories, and `-v` against a path outside that set does NOT fail — the
+   * daemon creates an empty directory inside the VM and mounts THAT
+   * (`container/mounts.ts`, measured). The container would then see an empty
+   * `/workspace`, the acceptance commands would find no tests to fail, they
+   * would exit 0, and the harvester would record `passed`: a green exam
+   * against a directory containing nothing, with every symptom pointing at the
+   * worker. That is strictly worse than the host-side clone it replaces, which
+   * at least grades real files, and it is why the probe is sequenced BEFORE
+   * the argv rather than after it.
+   *
+   * Presence of the mount proves nothing, so presence is not what is checked:
+   * `probeMountVisibility` writes a sentinel on the host and reads it back
+   * from inside a container, which is the only thing that separates "shared"
+   * from "silently empty".
+   *
+   * Probed on the SCRATCH ROOT rather than on the clone, for two reasons. The
+   * criterion names the scratch root; and sharing is by path prefix, so a
+   * visible root is a visible clone beneath it, while probing the clone would
+   * mean writing a sentinel file into the tree under examination — a small
+   * contamination of exactly the kind this module exists to prevent.
+   *
+   * Failure is `not_run`, never `failed`. Nothing was learned about the code,
+   * and `not_run` adjudicates to `unknown` — the module's standing posture for
+   * an exam that could not be held.
+   */
+  if (spec.container !== undefined) {
+    // The clone was created by the operator's uid; the image runs as a baked
+    // one. Without a recursive widen every write into /workspace fails on a
+    // Linux daemon and succeeds on macOS, where the VM squashes ownership
+    // (ISC-298). A test suite writing a snapshot or a coverage file is an
+    // ordinary suite, so this is not an edge case.
+    const widen = await widenTreeForWorker(cloneDir);
+    if (!widen.ok) {
+      return {
+        context,
+        runs: allNotRun(
+          spec.commands,
+          `could not open the fresh clone for the worker uid (chmod exit ${widen.code}): ` +
+            `${widen.stderr.trim() || "(no stderr)"}`,
+        ),
+      };
+    }
+
+    const visibility = await probeMountVisibility(
+      scratchAbs,
+      spec.container.image,
+      spec.container.probeExec,
+    );
+    if (!visibility.visible) {
+      return {
+        context,
+        runs: allNotRun(
+          spec.commands,
+          `the acceptance scratch root is not visible to the Docker daemon, so a containerized ` +
+            `exam would grade an EMPTY directory and report passes (ISC-277): ${visibility.detail}`,
+        ),
+      };
+    }
+  }
+
   const runs: AcceptanceRun[] = [];
-  for (const rc of spec.commands) {
-    runs.push(await runOne(rc, cloneDir, env, spec));
+  for (const [index, rc] of spec.commands.entries()) {
+    runs.push(await runOne(rc, cloneDir, env, spec, nonce, index));
   }
   return { context, runs };
 }
@@ -619,6 +783,8 @@ async function runOne(
   cloneDir: string,
   env: Record<string, string>,
   spec: AcceptanceSpec,
+  nonce: string,
+  index: number,
 ): Promise<AcceptanceRun> {
   // `boundedBy` is why a per-command timeout cannot outlive the run's budget:
   // ten 30-second commands under a 60-second run get 60 seconds total, not 300.
@@ -634,6 +800,60 @@ async function runOne(
     // Unrunnable is not the same as failing: nothing executed, so nothing was
     // proven about the code. `not_run` adjudicates to `unknown`.
     return notRun(rc, e instanceof Error ? e.message : String(e));
+  }
+
+  /**
+   * ISC-233: the same command, in a fresh container from the worker's image.
+   *
+   * `cmd` and `source` in the record below stay the OPERATOR'S command text,
+   * not the docker argv. The record answers "what was the exam", and
+   * `docker run --rm --user 10001 ... bun test` is not a question anybody
+   * asked; the fact that it ran in a container is carried by
+   * `AcceptanceContext.image`, which is where an auditor looks for it.
+   *
+   * `cwd` becomes the scratch root rather than the clone: on this path the
+   * spawned process is the docker CLIENT, and its working directory has no
+   * bearing on the container, which gets `-w /workspace`. Pointing the client
+   * at the graded tree would be one more way for the exam to depend on it.
+   *
+   * The environment splits the same way and for the same reason as `gitEnv`
+   * above: `dockerClientEnv` is what the CLIENT needs to find its daemon, and
+   * `acceptanceContainerEnv` — passed as `-e K=V` inside the argv — is what
+   * the COMMAND gets. Nothing crosses.
+   */
+  if (spec.container !== undefined) {
+    const containerName = acceptanceContainerName(spec.head_sha, nonce, index);
+    const dockerArgv = acceptanceContainerArgv({
+      image: spec.container.image,
+      cloneDir,
+      argv,
+      env: acceptanceContainerEnv(),
+      network: spec.container.network ?? null,
+      containerName,
+    });
+    const clientEnv = dockerClientEnv();
+    const cr = await execBounded(dockerArgv, resolve(spec.scratch_dir), clientEnv, timeoutMs);
+    /**
+     * The timeout killed the docker CLIENT. It did not kill the container.
+     *
+     * `--rm` is a client-side action, so a SIGKILLed client leaves the
+     * container running with nothing left to remove it — the same property
+     * `container-launch.test.ts` describes for the supervisor's kill ladder.
+     * Measured on this feature's own `timed_out` probe: a `sleep 60` container
+     * was still `Up` after the run had been recorded and returned. A real
+     * acceptance suite is not a 60-second sleep, so the leak is unbounded in
+     * both time and resources.
+     */
+    if (cr.timedOut) await reapAcceptanceContainer(containerName, clientEnv);
+    return AcceptanceRunSchema.parse({
+      cmd: rc.cmd,
+      source: rc.source,
+      resolved_from: rc.resolved_from,
+      outcome: cr.timedOut ? "timed_out" : cr.exit === 0 ? "passed" : "failed",
+      exit_code: cr.timedOut ? null : cr.exit,
+      duration_ms: Math.round(cr.durationMs),
+      excerpt: cr.excerpt,
+    });
   }
 
   const r = await execBounded(argv, cloneDir, env, timeoutMs);

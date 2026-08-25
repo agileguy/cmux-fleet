@@ -105,6 +105,45 @@ export async function makeWorkerReadable(file: string, hostRewritable: boolean):
   await chmod(file, hostRewritable ? 0o644 : 0o444);
 }
 
+/** Outcome of a recursive widen; a datum rather than a throw, so each caller frames it. */
+export interface TreeWidenResult {
+  ok: boolean;
+  code: number;
+  stderr: string;
+}
+
+/**
+ * Open an ENTIRE host tree so the worker uid can read, traverse and WRITE it.
+ *
+ * `makeWorkerAccessible` above opens one directory, which is enough to create,
+ * `sed -i` and rm+recreate inside it — and NOT enough to open an existing file
+ * for writing. That distinction was measured (ISC-298, inside a Linux
+ * container, so the macOS ownership squash was not in the path): a 0777
+ * directory holding 0644 files owned by another uid takes an `open(O_WRONLY)`
+ * and returns `EACCES`, which is precisely what an agent's write/edit tool
+ * does and the first thing it reaches for. A directory-only widen therefore
+ * yields a tree where SOME edits land and others do not depending on which
+ * tool the model picked — worse than an honest total failure.
+ *
+ * `a+rwX` and not `a+rwx`: the capital X sets the execute bit on directories
+ * and on files that already have one, so a widen does not turn every source
+ * file into a program.
+ *
+ * ONE implementation, here, rather than a `chmod -R` spawn per caller. Both
+ * callers — the worker's own clone and the acceptance exam's clone — widen for
+ * the identical reason (a baked uid meets a host-created tree), and two copies
+ * of one magic argv are two things that drift.
+ *
+ * Callers MUST only point this at a tree pifleet created. It is a deliberate
+ * widening of host permissions and has no business inside an operator's
+ * repository or home directory.
+ */
+export async function widenTreeForWorker(dir: string): Promise<TreeWidenResult> {
+  const p = Bun.spawn(["chmod", "-R", "a+rwX", dir], { stdout: "pipe", stderr: "pipe" });
+  const [code, stderr] = await Promise.all([p.exited, new Response(p.stderr).text()]);
+  return { ok: code === 0, code, stderr };
+}
+
 /**
  * Create a fresh scratch directory under the daemon-visible root.
  *

@@ -14,11 +14,12 @@
  * "task failed" alike.
  */
 
-import { mkdtemp, readdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { adjudicate as adjudicateFacts } from "./adjudicate.ts";
 import { harnessSurfaceFor, resolveFromEnvelope, runAcceptance } from "./acceptance.ts";
+import { networkFromLaunchArgv } from "./acceptance-container.ts";
+import { makeDaemonScratch } from "../container/mounts.ts";
 import { Deadline } from "../util/clock.ts";
 import {
   DerivedFactsSchema,
@@ -31,7 +32,7 @@ import {
   type Verdict,
 } from "../contracts.ts";
 import { workerOutboxDir, workerPaths, taskRecordPath, type RunPaths } from "../run/paths.ts";
-import { readTaskRecord, readWorkerState } from "../run/state.ts";
+import { readTaskRecord, readWorkerLaunch, readWorkerState } from "../run/state.ts";
 import { worktreeContentHash } from "../run/treehash.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
@@ -77,7 +78,17 @@ export interface HarvestOptions {
    * and `~/.config` discovery reach `up`; they do not reach harvest.
    */
   harnessPatterns?: readonly string[];
-  /** Scratch root for the fresh clone. Defaults to the OS temp dir. */
+  /**
+   * Scratch root for the fresh clone. Defaults to a DAEMON-VISIBLE root
+   * (`makeDaemonScratch`), not the OS temp dir — see the call site for why
+   * `os.tmpdir()` is the one path this must not be (ISC-277).
+   *
+   * A caller supplying its own is supplying one this module cannot vouch for,
+   * which is why `runAcceptance` probes rather than trusts: the containerized
+   * path reads a host-written sentinel back from inside the container before
+   * it grades anything, and an unshared root yields `not_run` instead of a
+   * green exam against an empty directory.
+   */
   acceptanceScratch?: string;
   /** Whole-run budget for acceptance execution. */
   acceptanceBudgetMs?: number;
@@ -309,7 +320,47 @@ export async function harvestTask(
    * filled with a guess.
    */
   if (opts.runAcceptance === true && git.ok && git.facts.head_ref !== null && hasWorktree) {
-    const scratchRoot = opts.acceptanceScratch ?? (await mkdtemp(join(tmpdir(), "pifleet-accept-")));
+    /**
+     * ISC-277: the scratch root moves off `os.tmpdir()`.
+     *
+     * It was `mkdtemp(join(tmpdir(), "pifleet-accept-"))` — literally the path
+     * `container/mounts.ts:51` marks "Deliberately NOT `os.tmpdir()`", in the
+     * table it measured on this machine, next to the words "not shared,
+     * silently empty". That was harmless for as long as nothing mounted it,
+     * and it becomes a false PASS the moment something does: an unshared path
+     * bind-mounts as an empty directory, the exam finds no tests to fail, and
+     * a worker that changed nothing is certified. `makeDaemonScratch` is the
+     * existing answer — it allocates under `$HOME/.pifleet/scratch`,
+     * overridable with `PIFLEET_SCRATCH_DIR`, and opens the mode for the
+     * baked worker uid.
+     *
+     * The move is made even on the HOST path (no container in reach), rather
+     * than only when containerizing. A scratch root whose visibility depends
+     * on which branch the harvester happens to take is a root that is right by
+     * coincidence, and `runAcceptance`'s probe would then be asserting a
+     * property the caller could withdraw.
+     */
+    const ownScratch = opts.acceptanceScratch === undefined;
+    const scratchRoot = opts.acceptanceScratch ?? (await makeDaemonScratch("accept"));
+
+    /**
+     * ISC-233: which image graded the code, taken from what the run RECORDED.
+     *
+     * `launch.json` already carries the tag the supervisor actually spawned —
+     * `WorkerLaunchSchema.image`, written by `materializeWorkerInputs` — so no
+     * new persistence is needed and, more to the point, no second derivation
+     * exists to disagree with the first. That matters here for the same reason
+     * `up`'s image gate gives about taking its tags from `renderAllWorkers`
+     * rather than calling `imageTag` again: a grader that recomputed the tag
+     * could certify an image the run never used.
+     *
+     * `null` is a real answer, not a degraded one. It means the run had no
+     * container at all — `PIFLEET_PI_COMMAND`, which is how this repo's entire
+     * e2e and integration suite runs — so there is no image to hold the exam
+     * in and the host path is the only honest option. `readWorkerLaunch`
+     * returns exactly that, and the supervisor already branches on it.
+     */
+    const launch = await readWorkerLaunch(workerPaths(run, envelope.worker));
     try {
       const result = await runAcceptance({
         repo: envelope.host_workdir,
@@ -318,6 +369,10 @@ export async function harvestTask(
         commands: resolveFromEnvelope([...envelope.acceptance], envelope.base_ref),
         deadline: new Deadline(opts.acceptanceBudgetMs ?? 600_000),
         per_command_timeout_ms: opts.acceptancePerCommandMs ?? 120_000,
+        container:
+          launch === null
+            ? undefined
+            : { image: launch.image, network: networkFromLaunchArgv(launch.argv) },
       });
       factsWithHarness.acceptance = result.runs;
       factsWithHarness.acceptance_context = result.context;
@@ -325,6 +380,28 @@ export async function harvestTask(
       // An exam that could not be held is not an exam the worker failed
       // (ISC-152). Recorded as a reason so the verdict stays uncertifiable.
       reasons.push(`acceptance could not be run: ${String(err)}`);
+    } finally {
+      /**
+       * Remove the scratch root, and ONLY one this function allocated.
+       *
+       * The leak predates this change — nothing ever removed the old
+       * `mkdtemp(tmpdir())` root either — but it was survivable there because
+       * the OS reaps its temp directory. Moving to `$HOME/.pifleet/scratch`
+       * for ISC-277 makes the same leak DURABLE: every `artifacts
+       * --run-acceptance` would leave a full clone of the repository behind
+       * forever, under the operator's home directory, and this feature's own
+       * test run left six of them in a single afternoon.
+       *
+       * `ownScratch` is the whole condition. A caller that supplied
+       * `acceptanceScratch` owns that directory — it is a fixture root in the
+       * suite and could be a directory an operator cares about — and deleting
+       * it would be tidying someone else's state rather than cleaning up after
+       * this function.
+       *
+       * Failures are swallowed. The harvest result is already assembled; a
+       * cleanup error must not replace a real verdict with a housekeeping one.
+       */
+      if (ownScratch) await rm(scratchRoot, { recursive: true, force: true }).catch(() => {});
     }
   }
 
