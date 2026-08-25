@@ -187,11 +187,11 @@ export function buildWorkerEnv(
    */
   if (w.cloudAccess) {
     if (cloud.quota_project !== null) vars["CLOUDSDK_CORE_PROJECT"] = cloud.quota_project;
+    // `adc_mode` has one value (ISC-268 removed `file`), so this reads as a
+    // tautology today. It is kept as a branch rather than collapsed because
+    // the record it mirrors — `AdcModeSchema` — is what a probe asserts the
+    // mode from, and a second mode returning would need exactly this line.
     if (cloud.adc_mode === "token") Object.assign(vars, tokenModeStartupEnv());
-    // `file` mode deliberately emits nothing here: `fileModeStartupEnv` has no
-    // production caller by design, and inventing one would put
-    // GOOGLE_APPLICATION_CREDENTIALS into a run-dir artifact for a mode the
-    // product refuses unless explicitly opted into. ISC-268 owns that path.
   }
 
   return { vars, missingApiKey: apiKey === undefined || apiKey === "", apiKeyEnvName };

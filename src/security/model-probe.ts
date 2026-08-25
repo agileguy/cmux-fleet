@@ -24,7 +24,12 @@ import { isIP } from "node:net";
 import { EXIT } from "../contracts.ts";
 import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts";
 import { normalizeHost } from "./egress.ts";
-import { parseRelayUpstream, RELAY_DEFAULT_DIAL_HOST } from "./relay.ts";
+import {
+  LEGACY_RELAY_LISTEN_ALIAS,
+  parseRelayUpstream,
+  RELAY_DEFAULT_DIAL_HOST,
+  RELAY_LISTEN_ALIAS,
+} from "./relay.ts";
 
 /**
  * The `fetch` surface this module actually uses, so a test can inject a double.
@@ -606,7 +611,20 @@ export function hostReachableBaseUrl(cfg: HostDialConfigView): string {
 
   // `url.hostname` yields IPv6 WITH brackets; `normalizeHost` strips them and
   // lowercases, which is what makes this comparison agree with the relay's.
-  if (normalizeHost(url.hostname) === RELAY_DEFAULT_DIAL_HOST) {
+  //
+  // Compared against the LISTEN aliases, not `RELAY_DEFAULT_DIAL_HOST`
+  // (ISC-264). `base_url` is what a WORKER dials, so its host is the listen
+  // alias; the branch above handles the dial side, where comparing against the
+  // dial constant is correct. This line used to name the dial constant too, and
+  // it worked only because the two held the same string — the third site in the
+  // codebase with that defect, after `relayGatePolicy`'s rule 1 and
+  // `policyFromConfig`'s apparent self-agreement. The rename is what made all
+  // three visible.
+  //
+  // Both spellings, because `base_url` still accepts the old one during the
+  // transition and a config carrying it must still be probeable from the host.
+  const baseHost = normalizeHost(url.hostname);
+  if (baseHost === RELAY_LISTEN_ALIAS || baseHost === LEGACY_RELAY_LISTEN_ALIAS) {
     return compose(url, DOCKER_HOST_LOOPBACK, url.port, cfg.llm.base_url);
   }
   return cfg.llm.base_url;

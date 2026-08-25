@@ -305,9 +305,56 @@ async function main(): Promise<void> {
    * last write wins with the freshest data.
    */
   let stateChain: Promise<void> = Promise.resolve();
+
+  /**
+   * Latch `session_present` the first time the recorded transcript is on disk
+   * (ISC-96's absent-to-present transition), and log it exactly once.
+   *
+   * ONE definition, called from the write chain below. It used to live inline
+   * in the heartbeat, which made the heartbeat's 250 ms period the flag's
+   * detection latency — see `flushState` for why that mattered and what it
+   * cost. The `!state.session_present` guard is what keeps `session_file_
+   * present` a single event rather than one per tick.
+   */
+  const noteSessionFilePresent = (): void => {
+    if (state.session_path === null || state.session_present) return;
+    if (!existsSync(state.session_path)) return;
+    state.session_present = true;
+    logEvent({ type: "session_file_present", path: state.session_path });
+  };
+
+  /**
+   * ISC-281: the flag is recomputed HERE, immediately before the bytes are
+   * written, rather than only on the heartbeat's schedule.
+   *
+   * `recordSessionPath` sets `session_present` from `existsSync` at the
+   * instant `get_state` first reports a path — which is BEFORE the file is
+   * created lazily on the first assistant message, so it starts `false`. The
+   * correction was made only by the heartbeat, so the flag trailed the
+   * transcript's appearance by up to one 250 ms tick, and MEASURABLY did: at
+   * the instant `dispatch --auto` exited, a worker that had run a task to
+   * completion and whose transcript held 400 tokens still read
+   * `session_present: false` on disk, flipping ~400 ms later.
+   *
+   * Computing it in the chain rather than at the `flushState()` call site is
+   * deliberate and matches the note below: the chain always writes the CURRENT
+   * state, so the check belongs where the value is serialized, not where the
+   * write was requested. Every state.json a reader can observe after any
+   * activity therefore carries a flag computed at that write.
+   *
+   * **What this does NOT claim.** Detection is still by sampling, so a reader
+   * polling state.json in the gap between two writes can see a value that went
+   * stale after the last one. Polling cannot close that, and the criterion's
+   * other arm is what actually holds the line: no consumer that must not lose
+   * money reads this flag at all, pinned structurally by
+   * `test/unit/session-presence-consumers.test.ts`.
+   */
   const flushState = (): Promise<void> => {
     stateChain = stateChain
-      .then(() => writeWorkerState(wp, state))
+      .then(() => {
+        noteSessionFilePresent();
+        return writeWorkerState(wp, state);
+      })
       .catch((err) => logEvent({ type: "state_write_failed", message: String(err) }));
     return stateChain;
   };
@@ -1201,11 +1248,10 @@ async function main(): Promise<void> {
 
   const heartbeat = setInterval(() => {
     state.heartbeat_at = new Date().toISOString();
-    if (state.session_path !== null && !state.session_present && existsSync(state.session_path)) {
-      // The absent→present transition (ISC-96), recorded the moment it happens.
-      state.session_present = true;
-      logEvent({ type: "session_file_present", path: state.session_path });
-    }
+    // The absent→present transition (ISC-96) is latched by
+    // `noteSessionFilePresent`, which `flushState` calls at the bottom of this
+    // tick. It used to be checked inline here, which made this interval's
+    // period the flag's detection latency (ISC-281).
     if (deadlineMs !== null && em.live !== null && deadline.elapsedMs() > deadlineMs) {
       deadlineMs = null;
       em.noteTimedOut();

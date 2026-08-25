@@ -126,7 +126,7 @@ describe("the --env-file contract with docker/entrypoint.sh", () => {
     const loaded = await load(baseDoc());
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
     expect(plan.vars["PIFLEET_LLM_PROVIDER"]).toBe("omlx");
-    expect(plan.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://host.docker.internal:8000/v1");
+    expect(plan.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://omlx.pifleet.internal:8000/v1");
     expect(plan.vars["PIFLEET_LLM_MODELS"]).toBe("TestModel");
   });
 

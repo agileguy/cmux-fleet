@@ -719,16 +719,22 @@ export function sameProc(a: ProcId | null, b: ProcId | null): boolean {
 /**
  * How a container is given Google identity (§5.8).
  *
- * `token` is the default and the safe one: a ~1h ACCESS token, which expires
- * on its own. `file` writes credentials the container can read, and a
- * credentials file that contains a `refresh_token` is a permanent grant — the
- * container could mint new access tokens forever, long after the run ended,
- * and the blast radius of one escaped worker stops being time-boxed.
+ * `token` is the only mode: a ~1h ACCESS token, which expires on its own.
  *
- * The mode therefore appears in the injected record, so a probe can assert
- * which one was actually used rather than which one was configured.
+ * `file` was removed with the config field (ISC-268). It would have written a
+ * credentials file the container can read, and a credentials file containing a
+ * `refresh_token` is a permanent grant — the container could mint new access
+ * tokens forever, long after the run ended, and the blast radius of one
+ * escaped worker would stop being time-boxed.
+ *
+ * The mode still appears in the injected record, so a probe can assert which
+ * one was actually used rather than which one was configured. Narrowed here
+ * as well as in the config schema deliberately: a two-valued type whose second
+ * value nothing can produce is the same "accepted and inert" shape ISC-268
+ * exists to remove, one layer down. If `file` is ever built, both come back
+ * together — which is the point.
  */
-export const AdcModeSchema = z.enum(["token", "file"]);
+export const AdcModeSchema = z.enum(["token"]);
 export type AdcMode = z.infer<typeof AdcModeSchema>;
 
 /**

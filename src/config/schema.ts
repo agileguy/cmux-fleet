@@ -422,15 +422,25 @@ export const LlmSchema = z
     provider: shortStr.default("omlx"),
     /**
      * What a WORKER dials, from inside the egress bridge — NOT necessarily
-     * where the model server is. The host component must stay
-     * `host.docker.internal`, the relay's listen-side alias on that bridge
+     * where the model server is. The host component must be
+     * `omlx.pifleet.internal`, the relay's listen-side alias on that bridge
      * (§5.9). To move the server itself, set `relay_upstream`.
+     *
+     * Renamed from `host.docker.internal` by ISC-264. That name claimed the
+     * relay was the Docker host, which stopped being true when `relay_upstream`
+     * could name a LAN peer. The old spelling is still ACCEPTED and still
+     * RESOLVES — `relayConnectArgv` attaches both aliases — with a deprecation
+     * warning, so an existing `fleet.yaml` needs no edit to keep working.
      */
-    base_url: httpUrl.default("http://host.docker.internal:8000/v1"),
+    base_url: httpUrl.default("http://omlx.pifleet.internal:8000/v1"),
     /**
      * Where the RELAY dials — `host:port`, explicit port required (§5.9; ISC-259).
      *
      * `null` (the default) means `host.docker.internal:<port from base_url>` —
+     * the DOCKER HOST, which is a different constant from the listen alias
+     * above and deliberately kept as this literal (ISC-264: the two used to be
+     * the same string, and a policy rule about this side was written from that
+     * side's name by accident) —
      * exactly the pre-ISC-259 behaviour, so every existing `fleet.yaml` keeps
      * working untouched. The default is `null` rather than a literal because it
      * depends on ANOTHER field's value; a static default here would be a
@@ -460,8 +470,32 @@ export const LlmSchema = z
 export const CloudSchema = z
   .object({
     adc: z.boolean().default(false),
-    /** `token` is the deliberate default: a 1h token, not a refresh token (§5.8). */
-    adc_mode: z.enum(["token", "file"]).default("token"),
+    /**
+     * `token` is the ONLY mode (§5.8, ISC-268). A 1h access token, not a
+     * refresh token.
+     *
+     * `file` was removed 2026-08-25 rather than wired. It had been accepted by
+     * this schema and implemented nowhere: `buildDockerArgv` emitted no
+     * `/creds` mount and the three file-mode symbols had no caller in `src/`,
+     * so an operator could set it, `up` would not refuse, and no credential
+     * was mounted. A mode that neither works nor fails is worse than one that
+     * is absent — the failure surfaces as an unexplained permission error
+     * inside the container instead of at launch.
+     *
+     * Wiring it was the other option and was rejected on what it would mount:
+     * the host ADC file is `type: authorized_user` and carries a
+     * `refresh_token`, a non-expiring grant over the operator's whole Google
+     * account. That is §12.4's F37, the highest-value exfiltration target in
+     * the threat model, and it would have been the FIRST credential path built
+     * — ISC-248 established there is no credential runtime at all yet — into a
+     * container that runs model output, on a machine where it cannot be
+     * verified end to end.
+     *
+     * Kept as a one-value enum rather than deleted so an operator who has
+     * `adc_mode: file` in their config gets "Invalid option: expected 'token'"
+     * naming the field, instead of `.strict()`'s "unrecognized key".
+     */
+    adc_mode: z.enum(["token"]).default("token"),
     quota_project: shortStr.nullable().default(null),
     impersonate_service_account: shortStr.nullable().default(null),
     /** A FILTERED kubeconfig copy; never the host default (§5.5). */

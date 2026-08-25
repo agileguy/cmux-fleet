@@ -36,6 +36,7 @@ import {
   relayScriptPath,
   relayScriptSha256,
   uplinkNetworkName,
+  LEGACY_RELAY_LISTEN_ALIAS,
   RELAY_DEFAULT_DIAL_HOST,
   RELAY_IMAGE,
   RELAY_LISTEN_ALIAS,
@@ -43,6 +44,7 @@ import {
   RELAY_TARGETS_ENV,
   type RelayTarget,
 } from "../../src/security/relay.ts";
+import { hostReachableBaseUrl } from "../../src/security/model-probe.ts";
 
 const NET = "pifleet-egress";
 
@@ -72,7 +74,10 @@ function cfg(
 
 /** The measured LAN oMLX this change exists to permit (SRD §5.9; ISC-259). */
 const LAN_OMLX = "192.168.86.49";
-const DEFAULT_BASE_URL = "http://host.docker.internal:8000/v1";
+// The CURRENT spelling (ISC-264). Most of this file should exercise what an
+// untouched fleet.yaml produces today; the legacy name is tested explicitly,
+// by name, in the two transition tests rather than incidentally everywhere.
+const DEFAULT_BASE_URL = "http://omlx.pifleet.internal:8000/v1";
 
 describe("omlxRelayTarget", () => {
   test("derives the forward from llm.base_url's port — never a hardcoded 8000", () => {
@@ -117,14 +122,15 @@ describe("omlxRelayTarget", () => {
   test("REFUSES a base_url pointing anywhere other than the Docker host", () => {
     // This relay is single-purpose. A target built for `10.0.0.5:8000` would
     // be forwarded from a listener that no worker can ever reach, because the
-    // only name aliased onto the internal bridge is `host.docker.internal` —
-    // so the fleet would report a working relay and every worker would fail to
-    // resolve its model server. Refusing loudly is the only honest answer.
+    // only names aliased onto the internal bridge are `omlx.pifleet.internal`
+    // and its legacy spelling — so the fleet would report a working relay and
+    // every worker would fail to resolve its model server. Refusing loudly is
+    // the only honest answer.
     expect(() => omlxRelayTarget(cfg("http://10.0.0.5:8000/v1"))).toThrow(
-      /host\.docker\.internal/,
+      /omlx\.pifleet\.internal/,
     );
     expect(() => omlxRelayTarget(cfg("http://localhost:8000/v1"))).toThrow(
-      /host\.docker\.internal/,
+      /omlx\.pifleet\.internal/,
     );
   });
 
@@ -135,7 +141,7 @@ describe("omlxRelayTarget", () => {
   test("a port outside the TCP range is refused, not silently listened on", () => {
     // `listen(0)` means "any free port" to node, which would come up healthy
     // and forward nothing a worker could find.
-    expect(() => omlxRelayTarget(cfg("http://host.docker.internal:0/v1"))).toThrow(
+    expect(() => omlxRelayTarget(cfg("http://omlx.pifleet.internal:0/v1"))).toThrow(
       /port/,
     );
   });
@@ -347,10 +353,24 @@ describe("assertTargetsAllowed — the relay applies the egress policy (ISC-253)
     // `policyFromConfig`. Leaving the old test passing would have left a green
     // assertion claiming this gate is circular after the circularity was cut.
     //
-    // The old fact, kept because it is WHY the production call had to change:
-    // policyFromConfig still agrees with itself by construction.
-    const c = cfg("http://host.docker.internal:22/v1");
-    expect(() => assertTargetsAllowed([omlxRelayTarget(c)], policyFromConfig(c))).not.toThrow();
+    // The old fact USED to be: "policyFromConfig still agrees with itself by
+    // construction", asserted here as `not.toThrow()`. ISC-264 made that false,
+    // and the reason is worth more than the assertion was.
+    //
+    // The self-agreement was never structural — it was an artifact of two
+    // constants holding the same string. `policyFromConfig` derives its `llm`
+    // rule from `base_url`, which is the LISTEN side; the target is built from
+    // the DIAL side. Those were spelled `host.docker.internal` both times, so
+    // the rule matched the target and the gate looked circular. Renaming the
+    // listen alias separated them, and the same call now REFUSES:
+    const c = cfg("http://omlx.pifleet.internal:22/v1");
+    expect(() => assertTargetsAllowed([omlxRelayTarget(c)], policyFromConfig(c))).toThrow(
+      /default-deny/,
+    );
+    // So PR #18's DOCUMENTED VACUITY had a second cause nobody had named. The
+    // production call still had to change — `relayGatePolicy` is what makes the
+    // gate independent of config BY DESIGN rather than by coincidence, which is
+    // what the rest of this test pins — but the coincidence is gone too.
 
     // The new fact: policyFromConfig's `llm` rule tracks base_url's HOST, so
     // routing the relay through it would re-open the circularity through a
@@ -457,7 +477,7 @@ describe("the LAN upstream gate — MUTATION PROOF of non-vacuity (ISC-253, ISC-
     // after all. It cannot — the listen-side pin refuses it, and the diagnosis
     // points at the field that IS the right one to edit.
     expect(() => omlxRelayTarget(cfg(`http://${LAN_OMLX}:8000/v1`))).toThrow(
-      /host\.docker\.internal/,
+      /omlx\.pifleet\.internal/,
     );
     expect(() => omlxRelayTarget(cfg(`http://${LAN_OMLX}:8000/v1`))).toThrow(/relay_upstream/);
   });
@@ -469,6 +489,126 @@ describe("the LAN upstream gate — MUTATION PROOF of non-vacuity (ISC-253, ISC-
     expect(relayGatePolicy(c).rules.map((r) => r.name)).toEqual(["relay-docker-host"]);
   });
 
+  /**
+   * ISC-264's real finding, pinned so it cannot come back.
+   *
+   * Rule 1 authorizes the destination the relay may reach without an operator
+   * allow entry: the DOCKER HOST at the listen port. It was written from
+   * `RELAY_LISTEN_ALIAS` — the name workers dial on the internal bridge, which
+   * is a different thing entirely — and nothing could tell, because the two
+   * constants held the same string.
+   *
+   * Renaming the listen alias made it fatal in one step: the default target
+   * `host.docker.internal:8000` stopped matching the default rule
+   * `omlx.pifleet.internal:8000`, and every fleet would have refused at launch
+   * with no config having changed.
+   */
+  /**
+   * The transition, both halves. An existing `fleet.yaml` spelling the old name
+   * must keep working — and must SAY it is on a deprecated spelling, because a
+   * silently-accepted legacy value is how a transition becomes permanent.
+   */
+  test("the legacy base_url spelling still works, and warns", () => {
+    const warnings: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = (chunk: unknown): boolean => {
+      warnings.push(String(chunk));
+      return true;
+    };
+    try {
+      const c = cfg("http://host.docker.internal:8000/v1");
+      // WORKS: the listen port is derived, the target is built, the gate passes.
+      expect(omlxRelayTarget(c).listenPort).toBe(8000);
+      expect(() => assertTargetsAllowed([omlxRelayTarget(c)], relayGatePolicy(c))).not.toThrow();
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stderr as any).write = write;
+    }
+    const joined = warnings.join("");
+    expect(joined).toContain("host.docker.internal");
+    expect(joined).toContain("omlx.pifleet.internal");
+  });
+
+  test("the NEW spelling warns about nothing", () => {
+    // Otherwise the warning above is noise every operator learns to ignore,
+    // and the deprecation stops carrying information.
+    const warnings: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = (chunk: unknown): boolean => {
+      warnings.push(String(chunk));
+      return true;
+    };
+    try {
+      omlxRelayTarget(cfg(DEFAULT_BASE_URL));
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stderr as any).write = write;
+    }
+    expect(warnings.join("")).toBe("");
+  });
+
+  test("rule 1 names the DIAL host, not the listen alias", () => {
+    const c = cfg(DEFAULT_BASE_URL);
+    const [rule] = relayGatePolicy(c).rules;
+    expect(rule?.host).toBe(RELAY_DEFAULT_DIAL_HOST);
+    expect(rule?.host).not.toBe(RELAY_LISTEN_ALIAS);
+  });
+
+  /**
+   * The guard that keeps the finding above meaningful. If these two constants
+   * ever hold the same string again, every test in this file passes whichever
+   * one rule 1 is written from, and the conflation is undetectable exactly as
+   * it was before — a latent launch-breaking bug with full green coverage.
+   */
+  /**
+   * The THIRD site with the same conflation, kept in this file because the
+   * defect is one defect and a reader chasing it should find all of them
+   * together.
+   *
+   * `hostReachableBaseUrl` maps a worker-facing `base_url` to something the
+   * HOST can dial. `base_url`'s host is the LISTEN alias, and the comparison
+   * was written against `RELAY_DEFAULT_DIAL_HOST` — correct-looking, and only
+   * ever correct because the two constants held the same string. Renaming the
+   * listen alias broke it: the substitution stopped happening and `doctor`/`up`
+   * would have probed `omlx.pifleet.internal` from the host, a name the host
+   * cannot resolve.
+   *
+   * Both spellings map, because `base_url` still accepts the old one.
+   */
+  test("hostReachableBaseUrl substitutes loopback for EITHER listen spelling", () => {
+    for (const alias of [RELAY_LISTEN_ALIAS, LEGACY_RELAY_LISTEN_ALIAS]) {
+      expect(
+        hostReachableBaseUrl({ llm: { base_url: `http://${alias}:8000/v1`, relay_upstream: null } }),
+      ).toBe("http://127.0.0.1:8000/v1");
+    }
+  });
+
+  test("…and leaves a host it does not recognise alone", () => {
+    // The guard that keeps the assertion above from passing for a function
+    // that rewrites everything to loopback.
+    expect(
+      hostReachableBaseUrl({ llm: { base_url: "http://10.0.0.5:8000/v1", relay_upstream: null } }),
+    ).toBe("http://10.0.0.5:8000/v1");
+  });
+
+  test("the listen alias and the dial host are DIFFERENT strings, on purpose", () => {
+    expect(RELAY_LISTEN_ALIAS).not.toBe(RELAY_DEFAULT_DIAL_HOST);
+    // And the legacy spelling is the dial host's string, which is precisely why
+    // the two were confusable: the rename did not invent a distinction, it
+    // revealed one that was always there.
+    expect(LEGACY_RELAY_LISTEN_ALIAS).toBe(RELAY_DEFAULT_DIAL_HOST);
+  });
+
+  test("the DEFAULT configuration is allowed with no operator allow entry", () => {
+    // The end-to-end version of the two assertions above, and the one that
+    // would have caught the break directly: an untouched fleet.yaml must reach
+    // its model server.
+    const c = cfg(DEFAULT_BASE_URL);
+    expect(() => assertTargetsAllowed([omlxRelayTarget(c)], relayGatePolicy(c))).not.toThrow();
+  });
+
   test("RESIDUAL, STATED: the Docker host at the listen port needs no allow entry", () => {
     // The one destination `relayGatePolicy` authorizes on its own, kept so that
     // every pre-ISC-259 fleet.yaml keeps working with no new config.
@@ -478,7 +618,7 @@ describe("the LAN upstream gate — MUTATION PROOF of non-vacuity (ISC-253, ISC-
     // no relay running at all, so the relay grants no reachability here that the
     // bridge did not already have. That is why this residual is acceptable and
     // the LAN one is not.
-    const c = cfg("http://host.docker.internal:22/v1");
+    const c = cfg("http://omlx.pifleet.internal:22/v1");
     expect(() => assertTargetsAllowed([omlxRelayTarget(c)], relayGatePolicy(c))).not.toThrow();
   });
 
@@ -630,13 +770,21 @@ describe("relayScriptSha256 — what the relay actually executes (S5/S8)", () =>
 });
 
 describe("relay docker argv, remaining", () => {
-  test("connect uses the alias that makes host.docker.internal resolve for workers", () => {
-    // Without `--alias host.docker.internal` the relay is reachable only by
-    // container name, and every worker's baked-in `host.docker.internal:8000`
-    // fails to resolve at all. This flag IS the mechanism.
+  test("connect attaches BOTH aliases so either base_url spelling resolves", () => {
+    // Without `--alias` the relay is reachable only by container name, and
+    // every worker's baked-in `<alias>:8000` fails to resolve at all. This flag
+    // IS the mechanism.
+    //
+    // Both names, for the duration of ISC-264's transition: a worker's
+    // models.json is rendered from `llm.base_url`, so a fleet still spelling
+    // the old name needs it to RESOLVE and not merely to validate. Asserted as
+    // an exact argv rather than a `toContain`, so DROPPING one is a failure —
+    // which is the whole risk here, and the assertion a laxer check would miss.
     expect(relayConnectArgv(NET, "relay-x")).toEqual([
       "network",
       "connect",
+      "--alias",
+      "omlx.pifleet.internal",
       "--alias",
       "host.docker.internal",
       NET,

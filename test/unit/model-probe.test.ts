@@ -313,7 +313,7 @@ describe("probeNativeToolCalls reads the wire shape correctly", () => {
    * block used to assert, and that inversion IS the criterion.
    *
    * Five tests here pinned `hostFacingBaseUrl`, a helper whose whole job was
-   * rewriting the worker-facing `host.docker.internal` to `localhost` so the
+   * rewriting the worker-facing listen alias to `localhost` so the
    * probe could be issued from the HOST. It is deleted. The probe now runs
    * from a container on `docker.network` (`security/probe-transport.ts`),
    * which is where the workers run — so the URL a worker dials is the URL the
@@ -326,8 +326,8 @@ describe("probeNativeToolCalls reads the wire shape correctly", () => {
    */
   test("the base URL reaches the transport verbatim, with no rewriting", async () => {
     const { fetch, calls } = jsonFetch(TOOL_CALL_BODY);
-    await probeNativeToolCalls("http://host.docker.internal:8000/v1", "k", "m", fetch);
-    expect(calls[0]).toBe("http://host.docker.internal:8000/v1/chat/completions");
+    await probeNativeToolCalls("http://omlx.pifleet.internal:8000/v1", "k", "m", fetch);
+    expect(calls[0]).toBe("http://omlx.pifleet.internal:8000/v1/chat/completions");
     expect(calls[0]).not.toContain("localhost");
   });
 

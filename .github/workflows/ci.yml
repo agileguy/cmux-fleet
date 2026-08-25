@@ -247,53 +247,6 @@ jobs:
                                  if (!PROBE_BUN_IMAGE) { console.error("PROBE_BUN_IMAGE is empty"); process.exit(1); }
                                  console.log(PROBE_BUN_IMAGE);')"
           docker pull "$probe_image"
-      - name: Write a synthetic ADC credential for the file-mode mount-shape probe
-        # adc.test.ts's "file mode mounts the one ADC file, never its parent
-        # directory" test is `test.skipIf(!ADC_FILE_PRESENT)`, where
-        # ADC_FILE_PRESENT checks for a file at
-        # `PIFLEET_TEST_ADC_FILE ?? hostAdcFile()`. Until this step existed,
-        # PIFLEET_TEST_ADC_FILE was never set anywhere in CI, so the test fell
-        # back to the OPERATOR's real
-        # `~/.config/gcloud/application_default_credentials.json` — which no CI
-        # runner has — and so it ran in NO CI job at all, despite being fully
-        # capable of running here. The test only asserts a MOUNT SHAPE: it
-        # inspects the resulting container's `docker inspect` mount table and
-        # checks that exactly one file lands at the right destination,
-        # read-only, and that the host gcloud config directory is never a
-        # mount source. Docker does not care whether the bytes it mounts are a
-        # usable Google credential, so any file at some path satisfies it.
-        #
-        # This is NOT a substitute for a real credential. The other adc.test.ts
-        # skip condition, HOST_ADC_PRESENT, gates the four tests that mint a
-        # genuine ~1h access token from an already-authenticated host ADC and
-        # check that real `gcloud` accepts it (ISC-41/46/47/255) — those need
-        # Google to actually honor the thing, which nothing synthetic can do,
-        # and they correctly keep skipping in this job. See
-        # EXPECTED_HOST_ADC_MINT_SKIPS on the next step for exactly which four
-        # and why pinning them by name, not just by count, matters.
-        #
-        # The JSON below is a SYNTHETIC `authorized_user` ADC: a made-up
-        # account, a made-up OAuth client, and a refresh-token-shaped string
-        # that mints nothing because it corresponds to no OAuth grant Google
-        # has ever issued. It is not a credential, grants nothing, and is safe
-        # to print in a log.
-        #
-        # It is written under $RUNNER_TEMP, not under the runner's own
-        # `~/.config/gcloud` — deliberately. The mount-table helper
-        # adc.test.ts uses (`classifyHostGcloudExposure`, via
-        # `expectNoHostGcloudConfigMount`) has an `allowAdcFile` escape hatch
-        # for the ADC file itself, but every OTHER mount is still required to
-        # read as clean relative to the host gcloud store. Planting the
-        # synthetic file inside that same store would make every "nothing else
-        # from the gcloud store is mounted" assertion in this file depend on
-        # the escape hatch correctly excluding the one file we just put there
-        # — a confusing thing to have to reason about, for no benefit: the test
-        # only needs *a* file at *some* path, never specifically that one.
-        run: |
-          set -eu
-          adc_file="${RUNNER_TEMP:?RUNNER_TEMP is not set by actions/runner}/pifleet-ci-synthetic-adc.json"
-          printf '%s\n' '{"type":"authorized_user","account":"ci-synthetic@example.test","client_id":"ci.apps.googleusercontent.com","client_secret":"ci-not-a-real-secret","refresh_token":"1//ci-synthetic-not-a-real-token"}' > "$adc_file"
-          echo "PIFLEET_TEST_ADC_FILE=$adc_file" >> "$GITHUB_ENV"
       - name: Container, verbgate, egress, relay, and ADC probes, verified rather than merely run
         env:
           PIFLEET_DOCKER: "1"
@@ -428,16 +381,21 @@ jobs:
           # cover that, and the job budget is 60 minutes.
           #
           # And measured two ways with the gate OPEN, because both matter:
-          #   - On a host WITH a real ADC file and a real oMLX, all 88 run and
-          #     pass: 88 pass, 0 fail, 0 skip.
-          #   - In THIS job, with no real host ADC but PIFLEET_TEST_ADC_FILE
-          #     set by the step above, the file-mode mount-shape test RUNS
-          #     (that is the whole point of that step) while the four tests
-          #     that need a REAL host ADC to mint a live token cannot, and the
-          #     TWO relay probes that need a real inference server cannot
-          #     either: 82 pass, 6 skip. Same total either way, because the
-          #     check treats pass+skip as one number — see probe-guard.sh's
+          #   - On a host WITH a real ADC and a real oMLX, all of them run and
+          #     pass: 0 fail, 0 skip.
+          #   - In THIS job, the four tests that need a REAL host ADC to mint a
+          #     live token cannot run, and the TWO relay probes that need a real
+          #     inference server cannot either. Same total either way, because
+          #     the check treats pass+skip as one number — see probe-guard.sh's
           #     total check for why that pairing, specifically, is correct.
+          #
+          # A "Write a synthetic ADC credential" step used to run before this
+          # one, setting PIFLEET_TEST_ADC_FILE so a file-mode mount-shape probe
+          # could execute here. ISC-268 removed `adc_mode: file`, so that probe
+          # and its gate are gone and NOTHING reads that variable — the step
+          # went with them. It is worth noting what its removal also removes:
+          # CI no longer writes a refresh-token-shaped string into the runner
+          # environment at all, synthetic or otherwise.
           #
           # 86 -> 88 is doctor-preflight.test.ts (ISC-292). Its two probes ask
           # the container runtime which host paths it actually shares, which
@@ -475,13 +433,27 @@ jobs:
           # pinned by name below. See that pin for what that does and does not
           # buy, and for what it would take to make it actually execute here.
           #
-          # DERIVED by the hand method, NOT by adding 1 to 94. Measured
-          # 2026-08-24 on bun 1.3.11, gate UNSET, the same command as above
-          # with `full-chain` appended to the brace list:
-          #     -> 6 pass, 89 skip, 0 fail. Ran 95 tests across 11 files.
-          # One test, one skip, and the pass count unmoved at 6 — the shape a
-          # single added Docker-gated case must have.
-          TOTAL_EXPECTED: "95"
+          # DERIVED by the hand method, NOT by subtracting 1 from 95.
+          # Re-measured 2026-08-25 on bun 1.3.11, gate UNSET, running the exact
+          # file list below:
+          #     -> 6 pass, 88 skip, 0 fail. Ran 94 tests across 11 files.
+          # One test fewer, one skip fewer, and the pass count unmoved at 6 —
+          # the shape a single REMOVED Docker-gated case must have, and the
+          # reason this number went down rather than up.
+          #
+          # What was removed: adc.test.ts's `file`-mode mount-shape test, with
+          # `adc_mode: file` itself (ISC-268). It was FORWARD-LOOKING by its own
+          # header — it hand-wrote the `-v` and inspected a shape it authored,
+          # because no production path mounted an ADC file. The mode is now
+          # refused by the config schema, so the contract it pinned has no
+          # future implementation to be a contract FOR.
+          #
+          # The previous entry (95) recorded the same derivation in the other
+          # direction, when full-chain.test.ts was added. Both are here because
+          # this number has drifted for good reasons twice, and the guard's own
+          # error message asks the next reader to confirm the file list before
+          # touching it — this comment is that confirmation, written down.
+          TOTAL_EXPECTED: "94"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -506,6 +478,11 @@ jobs:
           # deliberately built so it cannot satisfy this one — see that
           # step's comment for why a fake file must not be dressed up as a
           # real credential here.
+          #
+          # ISC-268 removed that second gate along with `adc_mode: file`, so
+          # ADC_FILE_PRESENT and the synthetic file it read no longer exist.
+          # HOST_ADC_PRESENT is the only ADC gate left, and the four names
+          # below are unchanged — they were always the mint-requiring ones.
           EXPECTED_HOST_ADC_MINT_SKIPS: |
             without the production tmpfs, gcloud crashes on the read-only config dir (ISC-255)
             with cloud_access and a token, gcloud auth print-access-token succeeds (ISC-41)

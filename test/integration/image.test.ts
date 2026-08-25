@@ -207,7 +207,7 @@ describe("entrypoint models.json rendering (ISC-39, ISC-40)", () => {
   // rendering step has run — same code path, observable output.
   const env = {
     PIFLEET_LLM_PROVIDER: "omlx",
-    PIFLEET_LLM_BASE_URL: "http://host.docker.internal:8000/v1",
+    PIFLEET_LLM_BASE_URL: "http://omlx.pifleet.internal:8000/v1",
     PIFLEET_LLM_MODELS: "ModelA,ModelB",
     OMLX_API_KEY: "test-key",
     PIFLEET_WORKER_BIN: "/bin/sh",
@@ -220,7 +220,7 @@ describe("entrypoint models.json rendering (ISC-39, ISC-40)", () => {
       providers: Record<string, { baseUrl: string; apiKey: string; models: { id: string }[] }>;
     };
     const omlx = doc.providers["omlx"]!;
-    expect(omlx.baseUrl).toBe("http://host.docker.internal:8000/v1");
+    expect(omlx.baseUrl).toBe("http://omlx.pifleet.internal:8000/v1");
     expect(omlx.apiKey).toBe("test-key");
     expect(omlx.models.map((m) => m.id)).toEqual(["ModelA", "ModelB"]);
   }, PROBE_TIMEOUT);

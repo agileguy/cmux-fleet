@@ -60,18 +60,6 @@ export const TOKEN_DIR = "/tmp/.pifleet-adc";
 export const TOKEN_FILE = `${TOKEN_DIR}/access-token`;
 
 /**
- * File-mode mount point for the ADC file (§5.8) — bind-mounted at run, ro.
- *
- * NOTE, load-bearing for how the `file`-mode tests should be read: nothing in
- * `src/` mounts this today. `buildDockerArgv` emits no `/creds` mount, and
- * `fileModeMaterials`/`fileModeStartupEnv` have no production caller. The
- * constant is the agreed destination for when §5.8's `file` mode is actually
- * wired; tests that exercise it hand-write the `-v` themselves and are
- * FORWARD-LOOKING shape checks, not evidence about a launch `up` can perform.
- */
-export const ADC_FILE_PATH = "/creds/adc.json";
-
-/**
  * The container-side gcloud config directory — the image's baked
  * `CLOUDSDK_CONFIG` (`docker/Dockerfile`'s `ENV` block).
  *
@@ -218,19 +206,19 @@ export function hostAdcFile(env: Record<string, string | undefined> = process.en
  */
 export type HostGcloudExposure = "is-the-store" | "inside-the-store" | "contains-the-store";
 
-export function classifyHostGcloudExposure(
-  source: string,
-  opts: { allowAdcFile?: boolean } = {},
-): HostGcloudExposure | null {
+export function classifyHostGcloudExposure(source: string): HostGcloudExposure | null {
   const store = resolve(hostGcloudConfigDir());
   const s = resolve(source);
   if (pathsEqual(s, store)) return "is-the-store";
-  if (isPathUnder(s, store)) {
-    // The single documented exception: `file` mode may mount exactly one
-    // artifact out of the store, and nothing else in it.
-    if (opts.allowAdcFile === true && pathsEqual(s, hostAdcFile())) return null;
-    return "inside-the-store";
-  }
+  // NO exception. There used to be one — `file` mode was permitted to mount
+  // exactly one artifact out of the store — and it was removed with the mode
+  // (ISC-268). It is worth naming what it cost while it stood: this is the
+  // most delicate branch in the guard, it defended a path nothing took, and
+  // the day `file` mode was wired it would have become load-bearing on its
+  // first run having never executed against real argv. An exception with no
+  // caller is not a dormant feature; it is an untested hole with a comment
+  // over it.
+  if (isPathUnder(s, store)) return "inside-the-store";
   if (isPathUnder(store, s)) return "contains-the-store";
   return null;
 }
@@ -274,10 +262,10 @@ export class HostGcloudMountError extends Error {
  * described by it. It also covers mounts that arrive from config rather than
  * from a literal in `render.ts` — `run.repo` being the live example.
  *
- * `allowAdcFile` is deliberately NOT offered here: no production path mounts
- * the ADC file today (see `ADC_FILE_PATH`), so the launcher's rule is the
- * strict one. When `file` mode is wired, that exception becomes a decision
- * made here, in the open, rather than a default nobody chose.
+ * There is no exception to offer any more. `classifyHostGcloudExposure` used
+ * to take an `allowAdcFile` opt-out for `file` mode; ISC-268 removed the mode
+ * and the opt-out together, so the launcher's rule and the classifier's rule
+ * are now the SAME rule rather than two that happened to agree.
  */
 export function assertNoHostGcloudMount(argv: readonly string[]): void {
   // `bindMountSources` rather than an inline `-v` scan: the inline copy read
@@ -312,14 +300,6 @@ export function tokenModeStartupEnv(): Record<string, string> {
   return { CLOUDSDK_AUTH_ACCESS_TOKEN_FILE: TOKEN_FILE };
 }
 
-/**
- * Env for a `file`-mode worker: point the client libraries at the ro mount.
- *
- * No production caller — see `ADC_FILE_PATH`. `up` never emits this env.
- */
-export function fileModeStartupEnv(): Record<string, string> {
-  return { GOOGLE_APPLICATION_CREDENTIALS: ADC_FILE_PATH };
-}
 
 /**
  * Every env var §5.8 can use to hand a worker a Google credential, in either
@@ -544,10 +524,6 @@ export function tokenModeMaterials(token: string): InjectionMaterials {
   return { env: tokenModeStartupEnv(), files: { [TOKEN_FILE]: token } };
 }
 
-/** Materials for file mode: the ADC file content that will be mounted ro. */
-export function fileModeMaterials(adcFileContent: string): InjectionMaterials {
-  return { env: fileModeStartupEnv(), files: { [ADC_FILE_PATH]: adcFileContent } };
-}
 
 /**
  * True only when NOTHING crossing the boundary contains a refresh token.

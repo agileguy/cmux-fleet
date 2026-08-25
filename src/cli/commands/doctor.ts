@@ -12,7 +12,11 @@ import { imageTag } from "../../container/image.ts";
 import { daemonScratchRoot, probeMountVisibility } from "../../container/mounts.ts";
 import { EXEC_NOT_FOUND, realExec, type Exec } from "../../container/run.ts";
 import { chatProbeModel, hostReachableBaseUrl } from "../../security/model-probe.ts";
-import { RELAY_IMAGE } from "../../security/relay.ts";
+import {
+  LEGACY_RELAY_LISTEN_ALIAS,
+  RELAY_IMAGE,
+  RELAY_LISTEN_ALIAS,
+} from "../../security/relay.ts";
 import { runsRoot } from "../../run/paths.ts";
 
 /**
@@ -536,10 +540,21 @@ async function probeCmux(exec: Exec, env: Record<string, string | undefined>): P
 }
 
 /**
- * The container-facing hostname a worker-facing `llm.base_url` is written
- * with. Named here so the vantage diagnosis can recognise it.
+ * The container-facing hostnames a worker-facing `llm.base_url` may be written
+ * with. Named here so the vantage diagnosis can recognise them.
+ *
+ * TWO, for the duration of ISC-264's transition, and imported from
+ * `security/relay.ts` rather than spelled again here. A fourth copy of these
+ * literals is exactly how the last conflation happened: `relayGatePolicy`
+ * authorized a DIAL destination using the LISTEN alias' constant, and nothing
+ * could tell because the two held the same string.
+ *
+ * `CONTAINER_HOSTNAME` is what an unconfigured fallback NAMES; both are what
+ * the vantage note RECOGNISES. A fleet that has already renamed its base_url
+ * must not silently lose the diagnosis.
  */
-const CONTAINER_HOSTNAME = "host.docker.internal";
+const CONTAINER_HOSTNAME = RELAY_LISTEN_ALIAS;
+const CONTAINER_HOSTNAMES: readonly string[] = [RELAY_LISTEN_ALIAS, LEGACY_RELAY_LISTEN_ALIAS];
 
 /**
  * One `llm.models_allowlist` entry, judged against what the endpoint serves
@@ -778,9 +793,9 @@ function vantageNote(baseUrl: string, network: string | null): string {
     // problem, and the schema's `z.string().url()` already refuses it.
     return "";
   }
-  if (hostname !== CONTAINER_HOSTNAME) return "";
+  if (!CONTAINER_HOSTNAMES.includes(hostname)) return "";
   return (
-    ` — NOT necessarily an outage: ${CONTAINER_HOSTNAME} resolves only inside the egress ` +
+    ` — NOT necessarily an outage: ${hostname} resolves only inside the egress ` +
     `network${network === null ? "" : ` (${network})`}, where the relay publishes it, and ` +
     `doctor probes from the host. That field is written for the workers. Whether the WORKERS ` +
     `can reach it is checked by \`up\`'s native-tool-call gate, which probes from inside that ` +
