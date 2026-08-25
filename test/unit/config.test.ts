@@ -564,7 +564,10 @@ describe("harness.patterns (ISC-232)", () => {
   // `undefined` — not `[]` — is what tells the harvester to use its defaults.
   test("omitting harness leaves patterns undefined, not empty", async () => {
     const loaded = await writeAndLoad(baseDoc());
-    expect(loaded.config.harness).toEqual({});
+    // `replace: false` is the ISC-243 default and carries no opinion of its
+    // own: with `patterns` undefined there is nothing to extend or replace, so
+    // the meaning of an omitted `harness` key is byte-for-byte what it was.
+    expect(loaded.config.harness).toEqual({ replace: false });
     expect(loaded.config.harness.patterns).toBeUndefined();
   });
 
@@ -680,8 +683,28 @@ describe("resolveHarnessPatterns (ISC-232)", () => {
     const path = join(dir, "fleet.yaml");
     await writeFile(path, stringify(doc));
     const got = await resolveHarnessPatterns(run, path);
-    expect(got.patterns).toEqual(["explicit/**"]);
+    // The EFFECTIVE list, which since ISC-243 EXTENDS the built-in defaults
+    // rather than replacing them. This assertion used to read
+    // `toEqual(["explicit/**"])`, and that expectation was the old semantics:
+    // a config adding one pattern narrowed the surface to that pattern alone
+    // and switched the ISC-150 cap off for every diff that missed it.
+    expect(got.patterns).toContain("explicit/**");
+    expect(got.patterns).toContain("package.json");
+    expect(got.patterns).not.toContain("recorded/**");
     expect(got.surface).toContain("overriding");
+  });
+
+  // The named opt-out, and the control for the case above: an operator who
+  // means "start from nothing" still gets exactly that.
+  test("harness.replace makes an explicit --config start from nothing", async () => {
+    const run = await runWith({ harness_patterns: ["recorded/**"] });
+    const dir = await tempDir();
+    const doc = baseDoc();
+    doc["harness"] = { patterns: ["explicit/**"], replace: true };
+    const path = join(dir, "fleet.yaml");
+    await writeFile(path, stringify(doc));
+    const got = await resolveHarnessPatterns(run, path);
+    expect(got.patterns).toEqual(["explicit/**"]);
   });
 
   // An operator who NAMED a config meant it. Answering a bad --config with

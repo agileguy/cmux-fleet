@@ -77,13 +77,21 @@ export interface IsaClaim {
 export const ISA_CLAIMS: readonly IsaClaim[] = [
   {
     isc: "ISC-74",
-    grade: "[ ]",
+    grade: "[x]",
     claim:
-      "`grep -rn ISC-74 test/` returns one hit, test/unit/voided.test.ts — a statement " +
-      "about a documentation table, not about panes. A second hit means someone wrote " +
-      "the pane-close probe this criterion is waiting for.",
-    argv: ["grep", "-rn", "ISC-74", "test/"],
-    expect: 1,
+      "No backend implementation names supervisor-lifecycle machinery — the " +
+      "restated anti-criterion. This entry REPLACED one asserting that nothing in " +
+      "test/ named ISC-74 at all, which was the state while the criterion was open " +
+      "and became false the moment it closed; kept as a worked example of a claim " +
+      "that had to be revisited with its grade rather than edited to match.",
+    argv: [
+      "grep",
+      "-rEn",
+      "launchDetached|processLauncher|supervisorArgv|runKillLadder|killWedged|process\\.kill",
+      "src/backends/",
+    ],
+    exclude: ["src/backends/types.ts"],
+    expect: "empty",
   },
   {
     isc: "ISC-114",

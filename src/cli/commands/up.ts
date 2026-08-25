@@ -45,6 +45,7 @@ import {
   type RelayStatus,
 } from "../../security/relay.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
+import { effectiveHarnessPatterns } from "../../harvest/acceptance.ts";
 import { captureWorktreeBaseline, createWorkerWorktrees, type WorkerWorktree } from "../../run/worktree.ts";
 import {
   DEFAULT_HEARTBEAT_INTERVAL_MS,
@@ -454,7 +455,7 @@ export function register(program: Command): void {
         heartbeatIntervalMs = loadedConfig.config.run.timers.heartbeat_interval * 1000;
         uiRequestTimeoutMs = loadedConfig.config.run.timers.ui_request_timeout * 1000;
         proseTurnsBeforeFail = effectiveProseTurnsBeforeFail(loadedConfig.config);
-        harnessPatterns = loadedConfig.config.harness.patterns ?? null;
+        harnessPatterns = effectiveHarnessPatterns(loadedConfig.config.harness);
         egressNetwork = loadedConfig.config.docker.network;
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
 

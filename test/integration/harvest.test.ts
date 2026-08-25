@@ -35,6 +35,7 @@ let mainAdvancedSha: string;
 /** Two fleet.yaml files differing ONLY in `harness.patterns` (ISC-232). */
 let cfgDefault: string;
 let cfgCustom: string;
+let cfgReplace: string;
 
 /** The nasty filename that proves argv-array spawning: a shell would run it. */
 const NASTY = "a b;$(touch pwned).txt";
@@ -82,9 +83,11 @@ async function runCli(
  * The two configs these produce are byte-identical apart from that block, so
  * a behaviour difference between them cannot be attributed to anything else.
  */
-function fleetYaml(patterns: string[] | null): string {
+function fleetYaml(patterns: string[] | null, replace = false): string {
   const harness =
-    patterns === null ? "" : `harness:\n  patterns: [${patterns.join(", ")}]\n`;
+    patterns === null
+      ? ""
+      : `harness:\n  patterns: [${patterns.join(", ")}]\n${replace ? "  replace: true\n" : ""}`;
   return (
     `version: 2\n` +
     `name: harvest-fixture\n` +
@@ -313,8 +316,12 @@ beforeAll(async () => {
   // change between them is attributable to that key and nothing else.
   cfgDefault = join(tmp, "fleet-default.yaml");
   cfgCustom = join(tmp, "fleet-custom.yaml");
+  cfgReplace = join(tmp, "fleet-replace.yaml");
   await writeFile(cfgDefault, fleetYaml(null));
   await writeFile(cfgCustom, fleetYaml(["ci/**"]));
+  // The named opt-out (ISC-243). Same patterns, `replace: true` — the one
+  // field that separates "add ci/** to the built-ins" from "grade ONLY ci/**".
+  await writeFile(cfgReplace, fleetYaml(["ci/**"], true));
 
   // T-abort: real work and a claimed success, but the SUPERVISOR settled the
   // epoch as aborted. A fact about the run outranks any inference from the tree.
@@ -663,7 +670,10 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
       reasons: string[];
       facts: { harness: { patterns: string[]; touched: string[] } };
     };
-    expect(payload.facts.harness.patterns).toEqual(["ci/**"]);
+    // A SUPERSET since ISC-243: the built-ins plus what this config adds.
+    // `ci/**` is not a default, so `touched` containing `ci/grade.sh` is still
+    // only reachable if the value travelled from `fleet.yaml` through the CLI.
+    expect(payload.facts.harness.patterns).toContain("ci/**");
     expect(payload.facts.harness.touched).toEqual(["ci/grade.sh"]);
     // Not merely recorded — acted on. The worker claimed success over a diff
     // that rewrote its own grader, and ISC-150's cap must refuse to certify it.
@@ -672,16 +682,36 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
   }, cliBudget(1));
 
   /**
-   * REPLACE, not extend — the half of the semantics that a union
-   * implementation would pass every other assertion here and still get wrong.
+   * EXTEND by default — and this assertion is the reverse of what it was.
    *
-   * `T-harness`'s diff is `bunfig.toml` + `sneak.ts`, which the DEFAULTS
-   * match and `ci/**` does not. Under replacement the cap stops firing for
-   * it; under a union it would still fire. This test fails if someone
-   * "helpfully" merges the two lists.
+   * It read *"config patterns replace the defaults rather than extending
+   * them"*, and its own comment warned against someone "helpfully" merging
+   * the two lists. That was a deliberate decision and it was the wrong one:
+   * ISC-243 measured the consequence, which is that `patterns: ["ci/**"]` —
+   * the first edit anyone writes, to get ONE more file covered — switched the
+   * ISC-150 cap off for every diff that did not touch `ci/`. Over-capping is
+   * loud and under-capping is silent, so the default now fails loudly.
+   *
+   * `T-harness`'s diff is `bunfig.toml` + `sneak.ts`. The DEFAULTS match
+   * `bunfig.toml` and `ci/**` does not, so this is precisely the diff that
+   * used to go uncapped under a config that mentioned neither file.
    */
-  test("config patterns replace the defaults rather than extending them", async () => {
+  test("config patterns extend the defaults, so the cap still fires", async () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-harness", "--config", cfgCustom, "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[]; touched: string[] } } };
+    expect(payload.facts.harness.patterns).toContain("ci/**");
+    expect(payload.facts.harness.patterns).toContain("bunfig.toml");
+    expect(payload.facts.harness.touched).toEqual(["bunfig.toml"]);
+  }, cliBudget(1));
+
+  /**
+   * The OLD behaviour, preserved under its own name — the control that makes
+   * the test above a statement about the default rather than about the
+   * matcher ignoring configuration. One field different, opposite result.
+   */
+  test("harness.replace still grades ONLY the configured patterns", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-harness", "--config", cfgReplace, "--json"]);
     expect(r.code).toBe(0);
     const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[]; touched: string[] } } };
     expect(payload.facts.harness.patterns).toEqual(["ci/**"]);
@@ -735,7 +765,7 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-cfg", "-c", cfgCustom, "--json"]);
     expect(r.code).toBe(0);
     const payload = JSON.parse(r.stdout) as { facts: { harness: { patterns: string[] } } };
-    expect(payload.facts.harness.patterns).toEqual(["ci/**"]);
+    expect(payload.facts.harness.patterns).toContain("ci/**");
   }, cliBudget(1));
 
   /**
@@ -812,9 +842,19 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
    * T-harness's diff is `bunfig.toml` + `sneak.ts`, which the DEFAULTS match
    * and `ci/**` does not. The verdict still follows the config (narrowing is
    * a legitimate operator decision), but the harvest has to SAY so.
+   *
+   * **THIS NOW RUNS AGAINST `harness.replace: true`, and the move is the
+   * point.** ISC-243 made `patterns` EXTEND the built-ins, so the effective
+   * list is a superset and a configured surface can no longer drop a default
+   * match by accident — the accident this discrepancy exists to report is
+   * impossible on the default path, which is a stronger outcome than
+   * reporting it. What remains reachable is the operator who asked for
+   * replacement BY NAME, and that is the case under test here. The paired
+   * test below pins the other half: on the extending path there is nothing
+   * to report.
    */
-  test("a configured surface that silently drops a default match is a discrepancy", async () => {
-    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-harness", "--config", cfgCustom, "--json"]);
+  test("a REPLACING surface that drops a default match is a discrepancy", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-harness", "--config", cfgReplace, "--json"]);
     expect(r.code).toBe(0);
     const payload = JSON.parse(r.stdout) as {
       discrepancies: string[];
@@ -823,6 +863,26 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(payload.facts.harness.touched).toEqual([]);
     expect(payload.facts.harness.defaults_missed).toContain("bunfig.toml");
     expect(payload.discrepancies.join(" ")).toContain("would have flagged");
+  }, cliBudget(1));
+
+  /**
+   * The half ISC-243 created: on the EXTENDING path a default match cannot be
+   * dropped, so there is nothing to report and nothing is reported.
+   *
+   * Fails if `effectiveHarnessPatterns` ever goes back to replacing — this
+   * would go red with `defaults_missed` naming `bunfig.toml`, which is the
+   * silent-disable state the extension exists to remove.
+   */
+  test("no discrepancy on the extending path — a default match cannot be dropped", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-harness", "--config", cfgCustom, "--json"]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout) as {
+      discrepancies: string[];
+      facts: { harness: { touched: string[]; defaults_missed: string[] } };
+    };
+    expect(payload.facts.harness.touched).toEqual(["bunfig.toml"]);
+    expect(payload.facts.harness.defaults_missed).toEqual([]);
+    expect(payload.discrepancies.join(" ")).not.toContain("would have flagged");
   }, cliBudget(1));
 
   // The mirror image: when the configured surface DID fire, there is nothing
