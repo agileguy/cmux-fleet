@@ -976,6 +976,45 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
 
 Disagreement between A1's `files_changed` and A2's diff is a hard failure class (F5), not a warning.
 
+> **IMPLEMENTED 2026-08-25 (ISC-233, ISC-277). Path 1's container half was prose for a year; here is what it now is.**
+>
+> Acceptance ran in a fresh CLONE **on the host**. No container was involved at any point, and
+> `AcceptanceContext.image` — the audit field whose entire purpose is recording which image graded the
+> code — was the literal `null` with no other writer in the repository.
+>
+> **What runs now.** One `docker run` per acceptance command, from the image that worker actually used:
+> the fresh clone bind-mounted at `/workspace` as the **only** mount, `-w /workspace`, `--entrypoint`
+> overriding the image's `tini -- pifleet-entrypoint` (left in place it starts a Pi session, not a test
+> suite), under the worker's own §5.6 posture — `--user 10001`, `--cap-drop ALL`, `no-new-privileges`,
+> `--read-only`, `noexec` `/tmp`. The exam does not run under a weaker posture than the work it grades.
+>
+> **The tag and the network come from the run's own `launch.json`**, not from config and not recomputed.
+> A grader that re-derived the tag could certify an image the run never used; `docker.network` defaults
+> to the relay-confined `pifleet-egress`, so a `bridge`-defaulted exam would hand acceptance commands
+> more egress than the code under examination ever had. `launch.json` absent means `PIFLEET_PI_COMMAND`
+> — no container ever started — and the host path is then the only honest option.
+>
+> **`/workspace` is fixed, not conventional.** `docker/Dockerfile` bakes
+> `git config --system --add safe.directory /workspace` at build time. Without it a container running as
+> 10001 over a bind mount gets `fatal: detected dubious ownership` from every git subcommand. Measured
+> both ways against the real image: `git status --porcelain` exits 0 clean, and the same run plus
+> `-e GIT_CONFIG_SYSTEM=/dev/null` — the host path's environment applied unchanged — fails.
+>
+> **The mount is proved before anything is graded (ISC-277), and this ordering is the whole point.**
+> On macOS the daemon runs in a VM sharing a declared set of host directories, and `-v` against a path
+> outside that set does **not** fail: it mounts an empty directory. A containerized exam over an
+> unshared root finds no tests to fail, exits 0, and records `passed` — a green exam against nothing,
+> with every symptom pointing at the worker. That is strictly worse than the host-side clone it
+> replaces. So the scratch root moved off `os.tmpdir()` onto `makeDaemonScratch`, and a host-written
+> sentinel is read back from inside a container before the first command runs. A negative answer yields
+> `not_run` for every command, which adjudicates to `unknown`.
+>
+> **Two operational defects were found by the new probes rather than by review**, and both are fixed:
+> `--rm` is a client-side action, so a timed-out exam left its container running with nothing to reap
+> it (containers are now named and removed); and nothing ever removed the acceptance scratch root,
+> which was survivable under `os.tmpdir()` and becomes a permanent leak of one full clone per run under
+> `$HOME`.
+
 ### 8.3 Reading a live JSONL stream correctly
 
 This applies to both the session transcript and the RPC stdout stream, and Pi mandates it of its own clients:
