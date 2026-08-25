@@ -75,6 +75,7 @@
 import { lstat, mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts";
+import { widenTreeForWorker } from "../container/mounts.ts";
 import { EXIT } from "../contracts.ts";
 import { runGit, type GitResult } from "../harvest/git.ts";
 import { resolvedWithin } from "../harvest/outbox.ts";
@@ -588,9 +589,14 @@ async function assertValidBranchName(repo: string, branch: string, workerId: str
  * baked `$HOME` unwritable.
  */
 export async function prepareWorktreePermissions(path: string): Promise<void> {
-  const p = Bun.spawn(["chmod", "-R", "a+rwX", path], { stdout: "pipe", stderr: "pipe" });
-  const [code, stderr] = await Promise.all([p.exited, new Response(p.stderr).text()]);
-  if (code !== 0) throw new WorktreePermissionsError(path, code, stderr);
+  // The `chmod -R a+rwX` itself lives in `container/mounts.ts`, whose header is
+  // the documentation for this entire failure class and which now has a second
+  // caller: the acceptance exam's clone (ISC-233) widens for the identical
+  // reason. What stays HERE is the framing — a typed error at
+  // BACKEND_UNAVAILABLE — because a failed widen means `up` must refuse to
+  // launch, while the harvester's version of the same failure is a `not_run`.
+  const r = await widenTreeForWorker(path);
+  if (!r.ok) throw new WorktreePermissionsError(path, r.code, r.stderr);
 }
 
 export interface CreateWorktreesOptions {
