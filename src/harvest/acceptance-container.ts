@@ -46,8 +46,24 @@ import { WORKER_UID } from "../container/mounts.ts";
  * path literally. Mounting the clone anywhere else silently loses it, and
  * every acceptance command that shells out to git — a version test running
  * `git describe`, a snapshot test that diffs against HEAD — fails with
- * `detected dubious ownership` on Linux while working perfectly on macOS,
- * where the VM squashes ownership and hides the entire class.
+ * `detected dubious ownership`.
+ *
+ * MEASURED 2026-08-25 on this machine (Colima, Docker 28.4.0), against the
+ * real `pifleet/pi-worker:verify` and a real scratch clone, because the first
+ * draft of this comment guessed and guessed wrong. It claimed the failure was
+ * Linux-only and hidden on macOS by the VM's ownership squash. It is not
+ * hidden: `stat -c '%u:%g %a' /workspace` inside the container reports
+ * `0:0 777`, so the mount presents as ROOT-owned to a process running as
+ * 10001 and git's ownership check fires here exactly as it would on a runner.
+ * The two arms, one flag apart:
+ *
+ *   --entrypoint git ... status --porcelain      -> exit 0, clean output
+ *   ... plus -e GIT_CONFIG_SYSTEM=/dev/null      -> fatal: detected dubious
+ *                                                   ownership in repository
+ *
+ * That second line is the HOST path's environment applied here unchanged, and
+ * it is why `acceptanceContainerEnv` departs from `buildEnv` rather than
+ * reusing it.
  */
 export const ACCEPTANCE_WORKDIR = "/workspace";
 
@@ -118,10 +134,11 @@ export function networkFromLaunchArgv(argv: readonly string[]): string | null {
  *    on a laptop `/etc/gitconfig` is operator state and grading through it is
  *    grading through the environment. In the image it is the opposite — a
  *    build-time artifact containing exactly one line, the `safe.directory`
- *    entry documented above — so blanking it here would REINSTATE the
- *    ownership refusal this whole path exists on the far side of. Blanking
- *    `GIT_CONFIG_GLOBAL` is still right and is still done: `HOME` is a tmpfs,
- *    so there is nothing there, and saying so costs nothing.
+ *    entry documented above — so blanking it here REINSTATES the ownership
+ *    refusal this whole path exists on the far side of. Not "would": that is
+ *    the measured second arm in `ACCEPTANCE_WORKDIR`'s comment, run against the
+ *    real image. Blanking `GIT_CONFIG_GLOBAL` is still right and is still done:
+ *    `HOME` is a tmpfs, so there is nothing there, and saying so costs nothing.
  */
 export function acceptanceContainerEnv(): Record<string, string> {
   return {
