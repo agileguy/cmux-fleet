@@ -20,6 +20,7 @@
 
 import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readdir, rm, mkdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -2247,6 +2248,99 @@ describe("the supervisor records a quiesce tree hash at settle (ISC-154)", () =>
  * the error count and condemning every unchanged tree — which would fail every
  * legitimately read-only task.
  */
+/**
+ * ISC-281 — the session-presence flag is latched at WRITE time, not on a timer.
+ *
+ * `recordSessionPath` sets `session_present` from `existsSync` at the instant
+ * `get_state` first reports a path, which is BEFORE the transcript is created
+ * lazily on the first assistant message — so it starts `false` and something
+ * has to correct it. That correction used to be an inline check in the 250 ms
+ * heartbeat, which made the heartbeat's PERIOD the flag's detection latency:
+ * measured, a worker that had run a task to completion and whose transcript
+ * held 400 tokens still read `session_present: false` at the instant
+ * `dispatch --auto` exited, flipping ~400 ms later.
+ *
+ * The check now lives in `flushState`'s write chain and there is exactly one
+ * of it. That single call site is what makes this test able to fail: with the
+ * check in one place, deleting it disables the latch entirely rather than
+ * merely slowing it down, so a behavioural probe catches what a structural one
+ * would have to guess at. The structural half — that the call sits in the
+ * write chain rather than back on the timer — is pinned separately in
+ * `test/unit/supervisor-session-latch.test.ts`, because a heartbeat-based
+ * implementation would pass everything below.
+ */
+describe("ISC-281: session_present is latched, and exactly once", () => {
+  test(
+    "a worker that produced a transcript reports it, with one transition event",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("sesslatch");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      await mkdir(wp.tasksDir, { recursive: true });
+      await mkdir(run.sessionsDir, { recursive: true });
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("happy.json") },
+        logPath: wp.supervisorLog,
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      // At idle the path is recorded and the file does NOT yet exist — the
+      // lazy creation this criterion is about. Asserting it here is what makes
+      // the flip below a transition rather than a value that was always true.
+      const atIdle = await readWorkerState(wp);
+      expect(atIdle?.session_path).not.toBeNull();
+      expect(existsSync(atIdle!.session_path!)).toBe(false);
+      expect(atIdle?.session_present).toBe(false);
+
+      const taskId = "T-SESSLATCH";
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", taskId, root),
+        attempt_id: "att-sesslatch",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      expect(
+        await waitFor(async () => (await readTaskRecord(taskRecordPath(wp, taskId))) !== null, 20_000),
+      ).toBe(true);
+
+      // THE CRITERION, read from the same on-disk file every consumer reads.
+      const after = await waitFor(async () => (await readWorkerState(wp))?.session_present === true, 5_000);
+      expect(after, "session_present never flipped — the latch never ran").toBe(true);
+
+      const finalState = await readWorkerState(wp);
+      expect(existsSync(finalState!.session_path!)).toBe(true);
+
+      // Exactly ONE transition event, sampled the moment the flag flips.
+      //
+      // Read what this does and does NOT catch, because the difference was
+      // measured rather than assumed. Dropping the latch's `!session_present`
+      // guard makes it re-log on every flush — and this assertion STAYS GREEN
+      // under that mutation, because the sample is taken within a tick or two
+      // of the first fire and the duplicates have not accumulated yet. The
+      // guard is pinned structurally instead
+      // (`test/unit/supervisor-session-latch.test.ts`). Kept here anyway: it
+      // is the assertion that would catch a latch firing on every state write
+      // from the very first one, which is a different defect and a louder one.
+      const events = await readEvents(wp.eventsJsonl);
+      const transitions = events.filter((e) => e["type"] === "session_file_present");
+      expect(transitions.length).toBe(1);
+      expect(transitions[0]?.["path"]).toBe(finalState!.session_path);
+    },
+    cliBudget(8),
+  );
+});
+
+// ---------------------------------------------------------------------------
+
 describe("ISC-299: tool errors plus an unchanged tree is not success", () => {
   /** A real repository for the worker to have "worked" in. */
   async function scratchWorktree(): Promise<string> {

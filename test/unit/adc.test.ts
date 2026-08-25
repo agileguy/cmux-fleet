@@ -14,12 +14,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Exec, ExecOptions, ExecResult } from "../../src/container/run.ts";
 import {
-  ADC_FILE_PATH,
+  type InjectionMaterials,
   InjectError,
   MintError,
   TOKEN_FILE,
   describeCredentialPlan,
-  fileModeMaterials,
   gcloudMinter,
   injectArgv,
   injectToken,
@@ -224,15 +223,25 @@ describe("proveRefreshTokenAbsent inspects what actually crosses", () => {
     expect(proveRefreshTokenAbsent(tokenModeMaterials(TOKEN))).toBe(true);
   });
 
-  test("false when the injected file IS an authorized_user ADC blob", () => {
+  /**
+   * The negative case SURVIVED ISC-268's removal of `file` mode, and that is
+   * deliberate. It used to build its materials with `fileModeMaterials`, which
+   * is gone; the obvious move was to delete the test with the helper. But this
+   * function's whole job is to inspect materials it did not construct, and the
+   * blob below is exactly what a future `file` mode — or any other path that
+   * writes a credentials file into a container — would carry. Deleting the
+   * only test that proves it can return `false` for a FILE would have left
+   * `proveRefreshTokenAbsent` covered solely on the env path, which is the
+   * easier half.
+   */
+  test("false when an injected file IS an authorized_user ADC blob", () => {
     const adc = JSON.stringify({
       type: "authorized_user",
       client_id: "x.apps.googleusercontent.com",
       refresh_token: "1//0fake-refresh-token",
     });
-    const m = fileModeMaterials(adc);
+    const m: InjectionMaterials = { env: {}, files: { "/creds/adc.json": adc } };
     expect(proveRefreshTokenAbsent(m)).toBe(false);
-    expect(m.files[ADC_FILE_PATH]).toBeDefined();
   });
 
   test("false when a refresh token is smuggled through an env value", () => {
@@ -354,10 +363,15 @@ describe("recordInjection produces a token-free, schema-valid record", () => {
     const clean = recordInjection(args);
     expect(clean.refresh_token_absent).toBe(true);
 
+    // `mode` stays "token" — the only mode there is (ISC-268). The field
+    // under test is `refresh_token_absent`, and the point is that it is
+    // COMPUTED from the materials rather than implied by the mode, so pinning
+    // it with a token-mode record carrying dirty materials is a strictly
+    // stronger version of what this used to assert: a mode that is supposed to
+    // be clean, reported dirty because the bytes were.
     const dirty = recordInjection({
       ...args,
-      mode: "file",
-      materials: fileModeMaterials('{"refresh_token":"1//0x"}'),
+      materials: { env: {}, files: { "/creds/adc.json": '{"refresh_token":"1//0x"}' } },
     });
     expect(dirty.refresh_token_absent).toBe(false);
   });

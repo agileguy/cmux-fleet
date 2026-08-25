@@ -62,13 +62,11 @@ import { realpath } from "node:fs/promises";
 import { type ExecResult, realExec } from "../../src/container/run.ts";
 import { WORKER_UID } from "../../src/container/mounts.ts";
 import {
-  ADC_FILE_PATH,
   CONTAINER_GCLOUD_CONFIG_DIR,
   CREDENTIAL_ENV_VARS,
   TOKEN_FILE,
   type CredentialPlan,
   classifyHostGcloudExposure,
-  fileModeMaterials,
   gcloudConfigTmpfsArgv,
   gcloudMinter,
   hostAdcFile,
@@ -114,37 +112,19 @@ const FAKE_TOKEN = "ya29.pifleet-fake-token-f00d-do-not-mint";
  */
 const REAL_GCLOUD = "/usr/local/libexec/gcloud.real";
 
-/**
- * The ADC file the `file`-mode SHAPE test mounts.
- *
- * Overridable so that assertion can run in CI. What it actually needs is A FILE
- * at a path under the host gcloud store — it inspects the resulting mount
- * table, and Docker does not care whether the bytes are a usable credential.
- * Pinning it to the operator's real ADC made a CI-runnable check host-only for
- * no reason, and part of ISC-44's `[x]` rested on a test that executed in no
- * automated job at all.
- *
- * The LIVE MINT is a different matter and stays gated on the real thing: it
- * needs a credential Google will actually honour, which no synthetic file can
- * be. Hence two flags, not one.
- */
-const ADC_FILE = process.env.PIFLEET_TEST_ADC_FILE ?? hostAdcFile();
-const ADC_FILE_PRESENT = await Bun.file(ADC_FILE).exists();
 
 /**
  * Does this machine have a real host ADC to MINT from? `gcloudMinter` shells
  * `gcloud auth application-default print-access-token` on the HOST, which reads
- * the real store regardless of `PIFLEET_TEST_ADC_FILE`, so this deliberately
- * ignores the override.
+ * the real store.
+ *
+ * ONE flag now, where there used to be two. The other gated a `file`-mode
+ * mount-shape check that could run against any synthetic file, and it went
+ * with the mode (ISC-268). What remains genuinely needs a credential Google
+ * will honour, which no override can fake.
  */
 const HOST_ADC_PRESENT = await Bun.file(hostAdcFile()).exists();
 
-if (DOCKER && !ADC_FILE_PRESENT) {
-  console.warn(
-    `[skip] adc file-mode shape test needs a file at ${ADC_FILE}. ` +
-      `Set PIFLEET_TEST_ADC_FILE to a synthetic ADC JSON to include it.`,
-  );
-}
 if (DOCKER && !HOST_ADC_PRESENT) {
   console.warn(
     `[skip] adc live-credential tests need ${hostAdcFile()}. ` +
@@ -311,10 +291,7 @@ async function mountsOf(name: string): Promise<DockerMount[]> {
  * `expect(relation).toBeNull()` so a failure names the offending source and how
  * it offends, instead of printing `"inside-the-store" is not null`.
  */
-async function expectNoHostGcloudConfigMount(
-  mounts: DockerMount[],
-  opts: { allowAdcFile: boolean },
-): Promise<void> {
+async function expectNoHostGcloudConfigMount(mounts: DockerMount[]): Promise<void> {
   // `realpath` throws on a path that does not exist; a mount source normally
   // does exist, but fall back to the raw value rather than turning a missing
   // path into a confusing test error.
@@ -322,9 +299,7 @@ async function expectNoHostGcloudConfigMount(
   for (const m of mounts) {
     const source = m.Source ?? "";
     if (source === "") continue;
-    const relation = classifyHostGcloudExposure(await norm(source), {
-      allowAdcFile: opts.allowAdcFile,
-    });
+    const relation = classifyHostGcloudExposure(await norm(source));
     expect(`${source} -> ${relation ?? "clean"}`).toBe(`${source} -> clean`);
   }
 }
@@ -597,7 +572,7 @@ describe.skipIf(!DOCKER)("ISC-255/ISC-41: gcloud in the production container sha
 describe.skipIf(!DOCKER)("ISC-44: the host gcloud config dir is never a mount source", () => {
   test("cloud_access: false — nothing is mounted from the host gcloud store", async () => {
     const name = await startContainer({ env: NO_CLOUD_ENV });
-    await expectNoHostGcloudConfigMount(await mountsOf(name), { allowAdcFile: false });
+    await expectNoHostGcloudConfigMount(await mountsOf(name));
   }, containerBudget(2));
 
   test("token mode, after a real injection — still nothing", async () => {
@@ -607,85 +582,9 @@ describe.skipIf(!DOCKER)("ISC-44: the host gcloud config dir is never a mount so
     // that touches a live container's contents. A mount cannot appear from a
     // `docker exec` — proving that is the point.
     await injectToken(realExec, name, FAKE_TOKEN);
-    await expectNoHostGcloudConfigMount(await mountsOf(name), { allowAdcFile: false });
+    await expectNoHostGcloudConfigMount(await mountsOf(name));
   }, containerBudget(2));
 
-  /**
-   * `file` mode. FORWARD-LOOKING, and that qualifier is not modesty.
-   *
-   * No production code path mounts an ADC file: `buildDockerArgv` emits no
-   * `/creds` mount, and `fileModeMaterials`/`fileModeStartupEnv`/
-   * `ADC_FILE_PATH` have no caller in `src/`. So the `-v` below is hand-written
-   * BY THIS TEST, which means the mount-table assertion inspects a shape this
-   * file authored — the "assert on our own beliefs" the header disclaims. It is
-   * kept because the destination and the env still come from production's
-   * `fileModeMaterials`, so it pins the contract `file` mode must satisfy WHEN
-   * it is wired and would catch a future implementation reaching for the parent
-   * directory. It is not evidence about a launch `up` can perform today, and
-   * ISA.md's ISC-44 close-out says so.
-   */
-  test.skipIf(!ADC_FILE_PRESENT)(
-    "file mode mounts the one ADC file, never its parent directory",
-    async () => {
-      const raw = await Bun.file(ADC_FILE).text();
-      const materials = fileModeMaterials(raw);
-      expect(Object.keys(materials.files)).toEqual([ADC_FILE_PATH]);
-
-      // The reason `file` mode is opt-in, measured rather than asserted — but
-      // only where the artifact is the kind that carries one. A bare
-      // `toBe(false)` failed with an uninformative `true !== false` on any host
-      // whose ADC is a service-account or external-account file, which has no
-      // `refresh_token` string at all (it carries a private key or an external
-      // credential config — still a permanent grant, just not this shape).
-      // Naming what was found turns that from a puzzle into a fact.
-      const kind = ((): string => {
-        try {
-          return String((JSON.parse(raw) as { type?: unknown }).type ?? "unknown");
-        } catch {
-          return "unparseable";
-        }
-      })();
-      const absent = proveRefreshTokenAbsent(materials);
-      if (kind === "authorized_user") {
-        expect(`${kind}: refresh_token_absent=${absent}`).toBe(
-          `${kind}: refresh_token_absent=false`,
-        );
-      } else {
-        // Not a failure — a different credential shape. Recorded so the run
-        // says which one it saw rather than silently asserting nothing.
-        console.warn(
-          `[note] ${ADC_FILE} is type "${kind}", not authorized_user; ` +
-            `the refresh_token contrast is only meaningful for the latter.`,
-        );
-      }
-
-      const name = await startContainer({
-        env: materials.env,
-        extraArgs: ["-v", `${ADC_FILE}:${ADC_FILE_PATH}:ro`],
-      });
-      const mounts = await mountsOf(name);
-      await expectNoHostGcloudConfigMount(mounts, { allowAdcFile: true });
-
-      // Exactly one source is the ADC file — "the one file, not the directory"
-      // stated positively, so the test also catches the mount silently
-      // disappearing and leaving a vacuous pass above. Both spellings are
-      // accepted because Docker may report the realpath of a symlinked source.
-      const real = await realpath(ADC_FILE).catch(() => ADC_FILE);
-      const adcSources = mounts.filter((m) => m.Source === ADC_FILE || m.Source === real);
-      expect(adcSources).toHaveLength(1);
-      expect(adcSources[0]?.Destination).toBe(ADC_FILE_PATH);
-
-      // Read-only: a worker that can rewrite the host's ADC file owns the
-      // operator's Google identity outright.
-      expect(adcSources[0]?.Type).toBe("bind");
-      const rw = await inContainer(
-        name,
-        `test -w ${ADC_FILE_PATH} && echo "writable" || echo "read-only"`,
-      );
-      expect(rw).toContain("read-only");
-    },
-    containerBudget(3),
-  );
 });
 
 /**

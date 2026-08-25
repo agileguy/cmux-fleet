@@ -436,16 +436,51 @@ Nothing else is mounted. Notably **not** mounted: the main checkout, `~/.ssh`, `
 
 ### 5.8 Google credentials — inherited from the launching Claude instance
 
-Workers inherit Dan's Google identity via **Application Default Credentials**, so `gcloud`, `kubectl`, and Vertex-backed models work inside a container without a separate service account. Two modes; the default is deliberately not the obvious one.
+Workers inherit Dan's Google identity via **Application Default Credentials**, so `gcloud`, `kubectl`, and Vertex-backed models work inside a container without a separate service account. **One mode.**
 
 | Mode | Mechanism | TTL | Default |
 |---|---|---|---|
 | **`token`** | supervisor runs `gcloud auth application-default print-access-token` on the **host** and injects it as `CLOUDSDK_AUTH_ACCESS_TOKEN` + `GOOGLE_OAUTH_ACCESS_TOKEN`, refreshing every 45 min | **~1 h** (measured: `expires_in: 3599`) | ✅ |
-| `file` | bind-mount `~/.config/gcloud/application_default_credentials.json` read-only at `/creds/adc.json`, `GOOGLE_APPLICATION_CREDENTIALS` pointing at it | **indefinite** | ❌ opt-in |
 
-**Why `token` is the default.** The local ADC file is `type: authorized_user` and contains a **`refresh_token`** — a non-expiring credential for Dan's whole Google account. Any worker with `bash` can `cat` a mounted file and exfiltrate it, and a leaked refresh token outlives the run, the container, and the fleet. A one-hour access token is a bounded blast radius. `file` mode exists because some flows (long `gcloud` operations, certain client libraries) want a credential file, and it is refused unless `cloud.adc_mode: file` is set explicitly.
+**Why `token` is the only mode.** The local ADC file is `type: authorized_user` and contains a **`refresh_token`** — a non-expiring credential for Dan's whole Google account. Any worker with `bash` can `cat` a mounted file and exfiltrate it, and a leaked refresh token outlives the run, the container, and the fleet. A one-hour access token is a bounded blast radius.
 
-**Never mounted in either mode:** the host `~/.config/gcloud` directory. It holds `credentials.db`, `legacy_credentials/`, and `access_tokens.db` — the full gcloud auth store for *every* account Dan has logged in, which is strictly more powerful than ADC itself. Only the single ADC artifact crosses the boundary, and `CLOUDSDK_CONFIG` gives the container its own writable config dir (§5.2).
+> **AMENDED 2026-08-25 (ISC-268): `file` mode is REMOVED, not deferred.**
+>
+> This section previously described a second mode — bind-mount
+> `~/.config/gcloud/application_default_credentials.json` read-only at
+> `/creds/adc.json` with `GOOGLE_APPLICATION_CREDENTIALS` pointing at it,
+> indefinite TTL, opt-in — justified on the grounds that "some flows (long
+> `gcloud` operations, certain client libraries) want a credential file".
+>
+> **It was never implemented.** `buildDockerArgv` emitted no `/creds` mount, and
+> `ADC_FILE_PATH`, `fileModeMaterials` and `fileModeStartupEnv` had no caller
+> anywhere in `src/`. The config schema accepted `adc_mode: file`, `up` did not
+> refuse it, and no credential was mounted — a mode that neither works nor
+> fails, whose failure reaches the operator as an unexplained permission error
+> inside the container instead of at launch.
+>
+> Wiring it was the alternative and was rejected on what it would have mounted:
+> exactly the `refresh_token` this section's own paragraph above exists to keep
+> out of a container, and §12.4's F37. It would also have been the FIRST
+> credential path actually built — ISC-248 records that no credential runtime
+> exists yet — and its production behaviour cannot be exercised on the
+> operator's machine, so it would have shipped unverified. The justification
+> was speculative: no flow in this system had asked for it.
+>
+> Removed with it: `classifyHostGcloudExposure`'s `allowAdcFile` carve-out, the
+> single documented exception permitting one artifact out of the host gcloud
+> store to be mounted. That exception was the most delicate branch in the
+> guard, it defended a path nothing took, and it would have become load-bearing
+> on its first real run having never executed against production argv. The
+> launcher's rule and the classifier's rule are now the same rule.
+>
+> `adc_mode` survives as a one-value enum so an operator carrying
+> `adc_mode: file` gets a refusal that names the field. If a credential-file
+> flow is ever genuinely needed, the shape to build is one that does NOT carry
+> an account-wide refresh token — an impersonated or external-account
+> credential — which is a §5.8 design question, not a re-enable.
+
+**Never mounted:** the host `~/.config/gcloud` directory. It holds `credentials.db`, `legacy_credentials/`, and `access_tokens.db` — the full gcloud auth store for *every* account Dan has logged in, which is strictly more powerful than ADC itself. Only the single ADC artifact crosses the boundary, and `CLOUDSDK_CONFIG` gives the container its own writable config dir (§5.2).
 
 **Scoping.** `cloud.quota_project` sets `CLOUDSDK_CORE_PROJECT` and the ADC quota project (locally: `gen-lang-client-0675968762`). Where a scoped service account exists, `cloud.impersonate_service_account` is strongly preferred — the supervisor mints an impersonated token instead of a user token, and the worker inherits only that SA's roles rather than Dan's full authority.
 
@@ -509,7 +544,7 @@ docker run -i --rm \
 >
 > - **The relay's dial target is untouched.** Under the tunnel shape the tunnel terminates at a listener on the Docker host, so the relay still dials `host.docker.internal` and `§12.8`'s reachable set gains nothing. A tunnel is a property of how the operator's oMLX is *fronted*, upstream of everything this fleet contains.
 > - **`relay_upstream` must still be an IP literal or the Docker-host alias — never a hostname.** That rule was derived from a measured resolver failure, not from a locality assumption, so "private instance" does not license a hostname there. See the `relay_upstream` paragraph below, which stands unamended.
-> - **`llm.base_url` still names `host.docker.internal`.** Nothing about privacy changes the listen-side alias.
+> - **`llm.base_url` still names the listen-side alias.** Nothing about privacy changes it. (That alias is `omlx.pifleet.internal` as of ISC-264; it was `host.docker.internal` when this amendment was written.)
 
 What *did* change (2026-08-19, ISC-259) is the word **local**. This section previously read "oMLX running on the same machine as Docker" and stated same-machine locality as a hard constraint. The Docker host is now the **default**, not the requirement; a **trusted LAN** oMLX is permitted. Two measurements forced the amendment, neither of them a preference:
 
@@ -530,7 +565,7 @@ What *did* change (2026-08-19, ISC-259) is the word **local**. This section prev
 
 **How a LAN oMLX is configured — two fields, deliberately.**
 
-`llm.base_url` describes **what a worker dials**, and its host must remain `host.docker.internal`: that is the relay's listen-side alias on the internal bridge, so a `base_url` naming anything else is a listener no worker can resolve. `llm.relay_upstream` describes **what the relay dials** — `host:port`, explicit port required, defaulting to `host.docker.internal:<port from base_url>` so an untouched `fleet.yaml` behaves exactly as it did before.
+`llm.base_url` describes **what a worker dials**, and its host must be `omlx.pifleet.internal`: that is the relay's listen-side alias on the internal bridge, so a `base_url` naming anything else is a listener no worker can resolve. `llm.relay_upstream` describes **what the relay dials** — `host:port`, explicit port required, defaulting to `host.docker.internal:<port from base_url>` so an untouched `fleet.yaml` behaves exactly as it did before.
 
 Two keys rather than one overloaded key, because `base_url` already serves two masters — the worker's URL *and* the egress policy's LLM rule. Judging the relay's dial target against a policy derived from that same field is a check that can only agree with itself, and that circularity is why ISC-253 stayed open across two PRs. See `src/security/relay.ts:relayGatePolicy`.
 
@@ -538,12 +573,24 @@ Two keys rather than one overloaded key, because `base_url` already serves two m
 
 **`relay_upstream` must be an IP literal (or the Docker-host alias) — never a LAN hostname.** Measured: the relay resolves through Docker's embedded DNS, which forwards to the host resolver, and this machine's resolver does **not** answer mDNS/`.local` names (`macbook.local` needed `dns-sd`). A hostname there produces a relay that starts cleanly, reports ready, and then fails every connection with a resolution error no operator-facing surface shows. `config validate` refuses it, so the failure becomes a sentence instead. Consequently `--add-host host.docker.internal:host-gateway` is emitted **only** when the relay actually dials the Docker host; for a LAN IP there is nothing to resolve and the flag is omitted rather than left in the argv implying a route that is not used.
 
-**Known overload: `host.docker.internal` no longer means "the Docker host" to a worker.** Once the dial side may be a LAN peer, that alias means "wherever this fleet's oMLX is". The honest rename (`omlx.pifleet.internal`) was considered and **deliberately deferred**, for two checkable reasons rather than for convenience:
+**RESOLVED 2026-08-25 (ISC-264): the listen-side alias is `omlx.pifleet.internal`.**
 
-1. **Still true.** The name has no prior meaning on an `--internal` bridge to shadow. Measured: a container on such a bridge cannot resolve `host.docker.internal` at all — Docker does not inject it there — so it resolves only because the relay attaches it as an alias.
-2. **No longer true, and recorded rather than deleted so the decision can be re-judged on current facts.** When this deferral was taken, `model-probe.ts:hostFacingBaseUrl` rewrote exactly this literal to `localhost` for host-side probing, so a second accepted spelling would have skipped that rewrite and misprobed — a new quiet failure introduced by a cosmetic rename. **ISC-260 deleted that helper**: the `up` probe now runs inside the egress network and dials `llm.base_url` verbatim, exactly as a worker does, so no rewrite keyed to this literal remains. That removes the hazard and makes the rename *cheaper* than when it was deferred.
+It was `host.docker.internal`, and that name stopped being true once the dial side could be a LAN peer — to a worker the alias means "wherever this fleet's oMLX is", not "the Docker host". The rename was deferred twice on two checkable arguments, one of which still holds and is why this was a naming debt rather than a live bug:
 
-Anything needing the *actual* Docker host from inside the bridge must use the gateway address (§12.8), never this name — which was already true before this amendment. Note that `doctor` deliberately retains a **host** vantage (its output is labelled `omlx (from host)` / `"vantage": "host"`), so it is not affected by this alias either way. Tracked as ISC-264, whose remaining cost is the rename across `models.json`, `llm.base_url`, `doctor` and `docker/entrypoint.sh`.
+1. **Still true, and it is the reason nothing broke while the overload stood.** The name had no prior meaning on an `--internal` bridge to shadow. Measured: a container on such a bridge cannot resolve `host.docker.internal` at all — Docker does not inject it there — so it resolved only because the relay attached it as an alias.
+2. **Expired.** When the deferral was taken, `model-probe.ts:hostFacingBaseUrl` rewrote exactly this literal to `localhost` for host-side probing, so a second accepted spelling would have skipped the rewrite and misprobed. **ISC-260 deleted that helper**: the `up` probe now runs inside the egress network and dials `llm.base_url` verbatim, exactly as a worker does.
+
+> **What the rename FOUND, which is the part worth reading.**
+>
+> `relayGatePolicy`'s rule 1 authorizes the one destination the relay may reach without an operator-written `egress.allow` entry: **the Docker host at the listen port**. It was built from `RELAY_LISTEN_ALIAS` — the name workers dial on the internal bridge, a different thing — and the dial-side constant is `RELAY_DEFAULT_DIAL_HOST`. The two held the **same string**, so a rule about one side written from the other side's constant was undetectable by any test.
+>
+> Changing the value surfaced it immediately and fatally: the default target `host.docker.internal:8000` no longer matched the default rule `omlx.pifleet.internal:8000`, and every fleet would have refused at launch with no config having changed. Rule 1 now names `RELAY_DEFAULT_DIAL_HOST`. Two constants that mean different things must not be interchangeable by coincidence.
+>
+> The same coincidence had a second consequence, recorded because PR #18 documented the symptom without finding the cause: `policyFromConfig`'s apparent **self-agreement** — the "DOCUMENTED VACUITY" that motivated building a separate relay gate — was itself an artifact of the shared literal. Its `llm` rule derives from `base_url` (the listen side) and the target is built from the dial side; with the names separated, the same call now refuses. The separate gate was still the right fix, because it is independent of config *by design* rather than by coincidence.
+
+**Transition.** `relayConnectArgv` attaches **both** aliases and `llm.base_url` accepts either spelling, warning on the old one. A worker's `models.json` is rendered from `base_url`, so an existing `fleet.yaml` needs the old name to *resolve*, not merely to validate. `RELAY_DEFAULT_DIAL_HOST` is unchanged and remains `host.docker.internal` — it genuinely is the Docker host.
+
+Anything needing the *actual* Docker host from inside the bridge must use the gateway address (§12.8), never the listen alias. `doctor` retains a **host** vantage (output labelled `omlx (from host)` / `"vantage": "host"`) and recognises both spellings for its diagnosis.
 
 **The native-tool-call probe is mandatory (F39).** Whether native tool calls come back is a property of the **model's chat template**, not of oMLX: this codebase has a recorded live measurement of `Qwen3-8B-4bit` emitting reasoning *prose* instead of `tool_calls` through this same server. A Pi worker pointed at such a model looks perfectly healthy — it streams tokens, ends turns, settles — and accomplishes **nothing**, because its intended actions never become tool calls. That is the "correct-fix-as-prose" failure documented in `~/mlx-lab/docs/agentic-sre-srd.md`, and at fleet scale it would burn a whole run before anyone noticed.
 
@@ -558,7 +605,7 @@ Two guards, because a startup probe alone can be passed by a model that then dri
 
 - **The host auth proxy is not built.** There is no cloud provider key to keep out of a container, so §12.4's Class 1 collapses to a single env var. The oMLX key guards a self-hosted inference server with no billing authority, and injecting it directly is proportionate. **The "costs nothing beyond this machine" half of that argument is weaker for a LAN oMLX and is restated honestly in §12.4** — it is not silently carried over.
 - **`usd_ceiling` is meaningless and is removed.** A local model has no price table, so `get_session_stats.cost` is `0` forever. **`tokens_ceiling` is the only real ceiling** and is mandatory. This also dissolves F27 — an unpriced model is now the expected case, not an error to catch.
-- **Containers need no internet for inference.** The egress bridge allows `host.docker.internal:8000` plus the Google endpoints that `cloud_access` roles require, and **denies everything else by default** — a far tighter posture than a hosted-provider design permits. A LAN oMLX does not change what a *worker* reaches: workers still dial only the alias, and it is the relay — not the worker — whose reachable set gains the LAN endpoint (§12.8).
+- **Containers need no internet for inference.** The egress bridge allows the relay's upstream (`host.docker.internal:8000` by default) plus the Google endpoints that `cloud_access` roles require, and **denies everything else by default** — a far tighter posture than a hosted-provider design permits. A LAN oMLX does not change what a *worker* reaches: workers still dial only the alias, and it is the relay — not the worker — whose reachable set gains the LAN endpoint (§12.8).
 
 **What the constraint adds — shared inference (F40).** Six workers are no longer six independent API clients; they are **six clients queuing on one Apple-silicon inference server.** Fleet parallelism is bounded by oMLX throughput, not by an API rate limit:
 
@@ -671,7 +718,7 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — §5
 
 cloud:
   adc: true                  # inherit the launching Claude instance's Google identity
-  adc_mode: token            # token (1h, default) | file (refresh token — opt-in)
+  adc_mode: token            # the only mode: a ~1h access token (§5.8)
   quota_project: gen-lang-client-0675968762
   impersonate_service_account: null    # strongly preferred where one exists
   kubeconfig: null           # path to a FILTERED kubeconfig; never the host default
@@ -1164,7 +1211,7 @@ This is a deliberate exception, not an oversight. Dan's requirement is that work
 
 | Control | Effect |
 |---|---|
-| `adc_mode: token` (default) | container holds a **~1 h access token**, not the non-expiring `refresh_token` — measured `expires_in: 3599` |
+| `adc_mode: token` (the only mode) | container holds a **~1 h access token**, not the non-expiring `refresh_token` — measured `expires_in: 3599` |
 | `cloud_access: false` by default | only roles that explicitly opt in get any Google credential at all |
 | host `~/.config/gcloud` never mounted | `credentials.db`, `legacy_credentials/`, and `access_tokens.db` — every account Dan has logged in — stay out of every container |
 | `impersonate_service_account` | where an SA exists, the worker inherits *its* roles, not Dan's |

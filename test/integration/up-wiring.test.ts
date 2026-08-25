@@ -721,7 +721,7 @@ interface FleetOptions {
   /** `cloud.quota_project`. */
   quotaProject?: string;
   /** `cloud.adc_mode`; omitted leaves the schema default (`token`). */
-  adcMode?: "token" | "file";
+  adcMode?: "token";
   /**
    * Workers beyond `eng-1`. A role name not yet in `roles:` is declared as an
    * empty role; `cloudAccess` is written on the WORKER entry (legal —
@@ -2447,9 +2447,24 @@ describe("impersonation replaces the launching user's identity outright (ISC-48)
  * its line is as load-bearing as the other two, and it must not carry an
  * identity, a project, or a mode it was never granted.
  *
- * `adc_mode: file` deliberately, against the schema default: the ISC-251 case
- * above pins `token` arriving from the default, and a suite that only ever ran
- * the default could not tell "prints the mode" from "prints the word token".
+ * `adc_mode: token` — and the fixture used to say `file` DELIBERATELY, for a
+ * reason that no longer has a way to be served. That is worth stating rather
+ * than quietly editing.
+ *
+ * The old contrast was: the ISC-251 case above pins `token` arriving from the
+ * schema DEFAULT, and this case pinned an EXPLICIT non-default value, so
+ * between them the suite could tell "prints the mode" from "prints the word
+ * token". ISC-268 removed `file` — it was accepted by the schema and
+ * implemented nowhere, and wiring it would have mounted an account-wide
+ * refresh token — so there is now exactly one mode and the contrast is not
+ * expressible by any fixture.
+ *
+ * The lost discrimination is replaced, not merely mourned:
+ * `test/unit/adc-plan-mode.test.ts` asserts structurally that
+ * `planCredential` carries `role.adcMode` through rather than emitting a
+ * literal, which is the property the two-fixture contrast was standing in for.
+ * If a second mode ever returns, put it back here — a live fixture is better
+ * evidence than a source check, and this note is how the next reader knows to.
  */
 describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
   const QUOTA_PROJECT = "pifleet-test-project-49";
@@ -2460,7 +2475,7 @@ describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
       const rig = await makeRig({
         // `engineer` carries the grant; `eng-1` and `eng-2` inherit it.
         cloudAccess: true,
-        adcMode: "file",
+        adcMode: "token",
         quotaProject: QUOTA_PROJECT,
         extraWorkers: [
           { id: "eng-2", role: "engineer" },
@@ -2500,10 +2515,14 @@ describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
         // project cannot pass.
         expect(line).toContain(QUOTA_PROJECT);
         expect(line).not.toContain("(no quota project)");
-        // Mode — the configured `file`, NOT the schema default the sibling test
-        // pins. A line that ignored `cloud.adc_mode` would say `token mode`.
-        expect(line).toContain("file mode");
-        expect(line).not.toContain("token mode");
+        // Mode. This USED to assert the configured `file` against the sibling
+        // test's schema-default `token`, and the contrast is what proved the
+        // line reports `cloud.adc_mode` rather than printing a constant.
+        // ISC-268 removed `file`, so no fixture can make that distinction any
+        // more; `test/unit/adc-plan-mode.test.ts` pins the link structurally
+        // instead. What is still worth asserting here is that the line names a
+        // mode at all, and names the one that exists.
+        expect(line).toContain("token mode");
       }
 
       /**
@@ -2518,8 +2537,8 @@ describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
       expect(quiet).toContain("cloud_access: false");
       expect(quiet).not.toContain(SHIM_ACCOUNT);
       expect(quiet).not.toContain(QUOTA_PROJECT);
-      expect(quiet).not.toContain("file mode");
       expect(quiet).not.toContain("token mode");
+      expect(quiet).not.toContain(" mode");
 
       // And the identity really was resolved once for the whole run, not once
       // per cloud worker — two cloud workers, one subprocess.
@@ -2544,7 +2563,7 @@ describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
     async () => {
       const rig = await makeRig({
         cloudAccess: true,
-        adcMode: "file",
+        adcMode: "token",
         quotaProject: QUOTA_PROJECT,
         extraWorkers: [{ id: "quiet-1", role: "scribe", cloudAccess: false }],
       });
@@ -2562,7 +2581,7 @@ describe("up states the grant for every worker, cloud or not (ISC-49)", () => {
       const [runId] = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
       rig.runId = runId ?? "";
 
-      expect(up.stdout).toContain(`eng-1: google: file mode as ${SHIM_ACCOUNT}, project ${QUOTA_PROJECT}`);
+      expect(up.stdout).toContain(`eng-1: google: token mode as ${SHIM_ACCOUNT}, project ${QUOTA_PROJECT}`);
       expect(up.stdout).toContain("quiet-1: google: no credential (cloud_access: false)");
     },
     // ISC-266 audit: stands. One `up` spawn derives cliBudget(1) = 11_400 ms;

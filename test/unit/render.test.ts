@@ -493,7 +493,14 @@ describe("docker argv (SRD §5.6)", () => {
   /**
    * ISC-44 — the host `~/.config/gcloud` directory (the FULL multi-account
    * gcloud auth store, `credentials.db` and all — SRD §5.8) must never appear
-   * as a bind-mount source, for any worker, in either `adc_mode`.
+   * as a bind-mount source, for any worker.
+   *
+   * This used to say "in either `adc_mode`" and drove the fixture with
+   * `adc_mode: file`, on the reasoning that it was "the mode most likely to
+   * grow a credential mount". ISC-268 removed that mode rather than wiring it,
+   * and removed the guard's one carve-out with it, so there is no longer a
+   * second mode to hold for — and no exception left for this test to be
+   * checking around. The criterion is unchanged and is now unconditional.
    *
    * `renderWorker` is the exact function `up` calls to build the argv it
    * launches (ISC-188), so this is a statement about production code, not
@@ -516,15 +523,15 @@ describe("docker argv (SRD §5.6)", () => {
    */
   test("no rendered docker argv ever mounts the host gcloud config directory (ISC-44)", async () => {
     const { loaded } = await fixture((doc) => {
-      doc["cloud"] = { adc: true, adc_mode: "file", kubeconfig: "./kube/filtered.yaml" };
+      doc["cloud"] = { adc: true, adc_mode: "token", kubeconfig: "./kube/filtered.yaml" };
       (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;
     });
     const store = hostGcloudConfigDir();
     for (const id of ["eng-1", "rev-1"]) {
-      // eng-1: cloud_access true, adc_mode file (the mode most likely to grow
-      // a credential mount). rev-1: cloud_access false — the other shape ISC-44
-      // must hold for, since a role that gets no plan at all must still never
-      // acquire this particular mount by accident.
+      // eng-1: cloud_access true — the shape that gets a credential plan at
+      // all. rev-1: cloud_access false — the other shape ISC-44 must hold for,
+      // since a role that gets no plan must still never acquire this
+      // particular mount by accident.
       const r = await renderWorker(loaded, id);
       for (const a of r.docker) {
         expect(a).not.toContain(store);

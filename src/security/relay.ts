@@ -141,44 +141,73 @@ import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
  *
  * This is the DNS alias attached to the relay's endpoint on the egress bridge
  * (`relayConnectArgv`). It is what makes a worker's baked-in
- * `host.docker.internal:8000` resolve to the relay instead of failing to
+ * `omlx.pifleet.internal:8000` resolve to the relay instead of failing to
  * resolve at all, so `models.json` and `llm.base_url` need no rewriting to
  * work inside a containment they know nothing about.
  *
- * ## The name is now an OVERLOAD, and that was a deliberate choice (ISC-259)
+ * ## The name was an OVERLOAD until ISC-264 renamed it (2026-08-25)
  *
- * Once the dial side can point at a LAN peer, this alias no longer means "the
- * Docker host" to a worker — it means "wherever this fleet's oMLX lives". The
- * honest rename is `omlx.pifleet.internal`, and it was considered and REJECTED
- * for this change for two reasons, both checkable rather than aesthetic:
+ * It used to be the literal `host.docker.internal`, and that was a deliberate
+ * deferral rather than an oversight. Once ISC-259 let the dial side point at a
+ * LAN peer, the alias stopped meaning "the Docker host" to a worker and started
+ * meaning "wherever this fleet's oMLX lives" — two different claims wearing one
+ * name. The deferral rested on two arguments, and the history is kept because
+ * one of them is still load-bearing:
  *
- *  1. **The name has no prior meaning on this bridge to shadow.** Measured (see
- *     the header): a container on an `--internal` network cannot resolve
- *     `host.docker.internal` AT ALL — Docker's automatic injection does not
- *     happen there. Inside the egress bridge this alias resolves ONLY because
- *     `relayConnectArgv` attaches it, so nothing is being displaced. Anything
- *     that genuinely wants the Docker host from inside the bridge must use the
- *     gateway address (SRD §12.8 measures it as reachable), never this name —
- *     which was already true before this change.
- *  2. **NO LONGER TRUE — kept because it dated the decision, not to justify
- *     it now.** When this deferral was taken,
- *     `model-probe.ts:hostFacingBaseUrl` rewrote exactly this literal to
- *     `localhost` so `up`/`doctor` could probe from the host, and a second
- *     accepted spelling that that function did not know about would have
- *     skipped the rewrite and probed a name the host cannot resolve. ISC-260
- *     then DELETED that helper: the `up` probe runs inside the egress network
- *     and dials `llm.base_url` verbatim, exactly as a worker does, so no
- *     rewrite keyed to this literal survives. `doctor` keeps a host vantage on
- *     purpose and labels it (`"vantage": "host"`), which is a reporting choice
- *     rather than a dependency on this name.
+ *  1. **The name had no prior meaning on this bridge to shadow.** Measured: a
+ *     container on an `--internal` network cannot resolve `host.docker.internal`
+ *     AT ALL — Docker's automatic injection does not happen there. Inside the
+ *     egress bridge it resolved ONLY because `relayConnectArgv` attached it, so
+ *     nothing was being displaced. **Still true, and it is why the overload was
+ *     a naming debt rather than a live bug** — anything genuinely wanting the
+ *     Docker host from inside the bridge must use the gateway address (SRD
+ *     §12.8 measures it as reachable), never this name.
+ *  2. **Expired.** `model-probe.ts:hostFacingBaseUrl` used to rewrite exactly
+ *     this literal to `localhost` for host-side probing, so a second accepted
+ *     spelling would have skipped the rewrite and probed a name the host cannot
+ *     resolve. ISC-260 deleted that helper — the `up` probe now runs inside the
+ *     egress network and dials `llm.base_url` verbatim, as a worker does.
  *
- * So the overload is ACCEPTED and stated in SRD §5.9 rather than papered over,
- * on reason 1 alone. Reason 2's removal makes the rename CHEAPER than when it
- * was deferred, not more urgent — the remaining cost is the rename itself
- * across `models.json`, `llm.base_url`, `doctor` and `docker/entrypoint.sh`,
- * which belongs in its own change (ISC-264).
+ * ## What the rename actually FOUND, which is the reason it was worth doing
+ *
+ * `relayGatePolicy`'s rule 1 authorized `RELAY_LISTEN_ALIAS` at the listen
+ * port. Its own documentation describes that rule as covering *the Docker host
+ * at the listen port* — the destination the relay may reach without an operator
+ * allow entry — and the destination constant is `RELAY_DEFAULT_DIAL_HOST`, a
+ * DIFFERENT constant that happened to hold the SAME STRING. So a rule about the
+ * dial side was written from a listen-side constant, and nothing could detect
+ * it while the two literals agreed.
+ *
+ * Changing this value made it visible immediately and loudly: with rule 1
+ * unchanged, the DEFAULT configuration is refused — target
+ * `host.docker.internal:8000` judged against rule `omlx.pifleet.internal:8000`,
+ * no match, every fleet dead at launch. Rule 1 now names
+ * `RELAY_DEFAULT_DIAL_HOST`. Two constants that mean different things must not
+ * be interchangeable by coincidence; this is what that costs when they are.
+ *
+ * ## Transition
+ *
+ * `relayConnectArgv` attaches BOTH names, and `relayListenPort` accepts either
+ * with a deprecation warning on the old one, so an existing `fleet.yaml`
+ * spelling `host.docker.internal` in `base_url` keeps working. See
+ * `LEGACY_RELAY_LISTEN_ALIAS`.
  */
-export const RELAY_LISTEN_ALIAS = "host.docker.internal";
+export const RELAY_LISTEN_ALIAS = "omlx.pifleet.internal";
+
+/**
+ * The name this alias used to have, still attached during the transition.
+ *
+ * Kept ATTACHED rather than merely accepted in config: a worker's `models.json`
+ * is rendered from `llm.base_url`, so a fleet whose config still spells the old
+ * name needs the old name to resolve, not just to validate. `relayConnectArgv`
+ * therefore attaches both.
+ *
+ * It is deliberately NOT in `relayGatePolicy`. That policy judges DIAL targets,
+ * and the dial-side constant is `RELAY_DEFAULT_DIAL_HOST`, which genuinely is
+ * the Docker host and is unaffected by this rename. Adding a legacy listen
+ * alias there would re-create exactly the conflation ISC-264 uncovered.
+ */
+export const LEGACY_RELAY_LISTEN_ALIAS = "host.docker.internal";
 
 /**
  * The DEFAULT dial target's host — used when `llm.relay_upstream` is unset.
@@ -536,7 +565,17 @@ function relayListenPort(cfg: RelayConfigView): number {
   // dot or an upper-case spelling cannot read as a different host here while
   // reading as an allowed one there.
   const host = normalizeHost(url.hostname);
-  if (host !== RELAY_LISTEN_ALIAS) {
+  if (host === LEGACY_RELAY_LISTEN_ALIAS) {
+    // Accepted, and SAID SO. `relayConnectArgv` still attaches this name, so
+    // the fleet works — but silently accepting a spelling that is on its way
+    // out is how a transition becomes permanent.
+    process.stderr.write(
+      `pifleet: llm.base_url names ${LEGACY_RELAY_LISTEN_ALIAS}, which is the relay's OLD ` +
+        `listen alias. It still resolves, but the name means "the Docker host" and the relay ` +
+        `may be forwarding to a LAN peer. Rename it to ${RELAY_LISTEN_ALIAS} (ISC-264); the ` +
+        `port and llm.relay_upstream are unaffected.\n`,
+    );
+  } else if (host !== RELAY_LISTEN_ALIAS) {
     throw new Error(
       `relay: llm.base_url host ${JSON.stringify(url.hostname)} is not ${RELAY_LISTEN_ALIAS} — ` +
         `${RELAY_LISTEN_ALIAS} is the only name resolvable from the internal bridge, so a ` +
@@ -599,7 +638,15 @@ function relayListenPort(cfg: RelayConfigView): number {
  * under a naive `policyFromConfig` gate it would have passed.
  */
 export function relayGatePolicy(cfg: RelayConfigView): EgressPolicy {
-  const rules: EgressRule[] = [makeRule("relay-docker-host", RELAY_LISTEN_ALIAS, relayListenPort(cfg))];
+  // `RELAY_DEFAULT_DIAL_HOST`, not `RELAY_LISTEN_ALIAS` (ISC-264). This rule is
+  // about the DESTINATION the relay may reach without an operator allow entry —
+  // the Docker host — and it was written from the listen-side constant while
+  // the two happened to hold the same string. Renaming the listen alias made
+  // the mismatch fatal in one step: the default target stopped matching the
+  // default rule and every fleet would have refused at launch.
+  const rules: EgressRule[] = [
+    makeRule("relay-docker-host", RELAY_DEFAULT_DIAL_HOST, relayListenPort(cfg)),
+  ];
   for (const r of cfg.egress.allow) {
     rules.push(makeRule(`config:${r.host}:${r.port}`, r.host, r.port));
   }
@@ -779,15 +826,30 @@ export function relayRunArgv(
 /**
  * Attach the relay to the internal bridge under the alias workers resolve.
  *
- * `--alias host.docker.internal` IS the mechanism, not a nicety. Without it
- * the relay is reachable only by container name and every worker's baked-in
- * `host.docker.internal:8000` fails to resolve — the internal bridge's
- * embedded DNS does not answer that name on its own.
+ * `--alias` IS the mechanism, not a nicety. Without it the relay is reachable
+ * only by container name and every worker's baked-in `<alias>:8000` fails to
+ * resolve — the internal bridge's embedded DNS does not answer these names on
+ * its own.
+ *
+ * TWO aliases, for the duration of ISC-264's transition. A worker's
+ * `models.json` is rendered from `llm.base_url`, so a fleet whose config still
+ * spells the old name needs that name to RESOLVE, not merely to pass
+ * validation. Both are attached so neither spelling can produce a worker that
+ * comes up and cannot reach its model server.
  */
 export function relayConnectArgv(egressNetwork: string, containerName: string): string[] {
   assertDockerName("network", egressNetwork);
   assertDockerName("container", containerName);
-  return ["network", "connect", "--alias", RELAY_LISTEN_ALIAS, egressNetwork, containerName];
+  return [
+    "network",
+    "connect",
+    "--alias",
+    RELAY_LISTEN_ALIAS,
+    "--alias",
+    LEGACY_RELAY_LISTEN_ALIAS,
+    egressNetwork,
+    containerName,
+  ];
 }
 
 export function relayInspectArgv(containerName: string): string[] {
