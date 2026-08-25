@@ -446,6 +446,47 @@ function json<T>(r: CliResult, what: string): T {
   }
 }
 
+/**
+ * What the erroring tool calls actually SAID.
+ *
+ * `expect(state.tool_errors).toBe(0)` knows a count and nothing else, which is
+ * the least useful thing a remote failure can tell you: the first CI run of
+ * this test reported `Received: 10` and left no way to ask what the ten were.
+ * The supervisor already logs every event verbatim to `events.jsonl` before it
+ * counts anything (`supervisor/index.ts` — the log is deliberately not
+ * conditional), so the answer is sitting on disk in the rig at the moment the
+ * assertion fires. This reads it back rather than re-running the chain to find
+ * out.
+ *
+ * Deliberately total: a diagnostic that can itself throw would replace the real
+ * failure with its own, so an unreadable or malformed log degrades to a note
+ * saying so.
+ */
+async function toolErrorDigest(eventsJsonl: string): Promise<string> {
+  let raw: string;
+  try {
+    raw = await readFile(eventsJsonl, "utf8");
+  } catch (e) {
+    return `(could not read ${eventsJsonl}: ${e instanceof Error ? e.message : String(e)})`;
+  }
+  const failed: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.trim() === "") continue;
+    let rec: unknown;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue; // a torn last line is not worth failing the diagnostic over.
+    }
+    const ev = (rec as { event?: { type?: string; isError?: boolean } }).event;
+    if (ev?.type !== "tool_execution_end" || ev.isError !== true) continue;
+    failed.push(JSON.stringify(ev).slice(0, 400));
+  }
+  return failed.length === 0
+    ? "(no erroring tool_execution_end events found in the log)"
+    : failed.join("\n");
+}
+
 interface RunJson {
   worktrees: Array<{ workerId: string; path: string; branch: string; baselineTree: string }>;
 }
@@ -572,7 +613,13 @@ describe("the whole chain, in one motion (ISC-290)", () => {
       expect(state!.last_event, "the turn never ended naturally").toBe("agent_end");
       expect(state!.turns).toBeGreaterThanOrEqual(1);
       expect(state!.tool_calls, "the model completed a turn without calling a tool").toBeGreaterThanOrEqual(1);
-      expect(state!.tool_errors).toBe(0);
+      expect(
+        state!.tool_errors,
+        `${state!.tool_errors} of ${state!.tool_calls} tool call(s) errored. ` +
+          `The ratio matters as much as the count — a model that flails once and recovers ` +
+          `is not the same failure as a chain whose tool dispatch is broken. What they said:\n` +
+          (await toolErrorDigest(wp.eventsJsonl)),
+      ).toBe(0);
 
       // --- REAL WORK: the tree changed, and changed into what was asked for.
       expect(

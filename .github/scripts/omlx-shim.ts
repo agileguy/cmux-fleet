@@ -179,4 +179,9 @@ const server = Bun.serve({
   },
 });
 
-console.log(`omlx-shim: 127.0.0.1:${server.port} -> ${UPSTREAM}`);
+// The bind address is READ BACK, not assumed. This line hardcoded 127.0.0.1,
+// so the one run that most needed it — the container-vantage job, which
+// exists precisely because it binds 0.0.0.0 — printed a log claiming a
+// loopback-only listener while serving the bridge correctly. A diagnostic
+// that contradicts the thing it is diagnosing is worse than none.
+console.log(`omlx-shim: ${server.hostname}:${server.port} -> ${UPSTREAM}`);
