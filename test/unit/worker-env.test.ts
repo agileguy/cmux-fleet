@@ -42,6 +42,80 @@ async function load(doc: Record<string, unknown>) {
   return parseConfig(stringify(doc), "/tmp/fleet.yaml");
 }
 
+describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
+  /**
+   * The SECOND of ISC-298's two blockers, and the one the permission fix does
+   * not reach.
+   *
+   * Git refuses on OWNERSHIP and ignores mode (CVE-2022-24765). On a Linux
+   * Docker host a fully world-writable `/workspace` owned by another uid still
+   * answers `fatal: detected dubious ownership` for `status`, `add`, `commit`
+   * and `diff` — so a worker could write its files and could not commit them,
+   * which is strictly worse than the failure the widening fixed.
+   *
+   * Asserted on the env PLAN rather than by running a container, for the same
+   * reason the permission probe in `worktree.test.ts` is asserted on mode bits:
+   * macOS squashes bind-mount ownership, so a container started here never
+   * reaches the refusal, and a local container test would be green on this
+   * machine and silent about the runner. `container-live` exercises the
+   * consequence on real Linux.
+   */
+  test("a worker with a /workspace mount gets safe.directory for it", async () => {
+    const loaded = await load(baseDoc());
+    for (const id of ["w1", "wc"]) {
+      const plan = buildWorkerEnv(loaded, resolveWorker(loaded, id), {});
+      expect(plan.vars["GIT_CONFIG_COUNT"]).toBe("1");
+      expect(plan.vars["GIT_CONFIG_KEY_0"]).toBe("safe.directory");
+      // The CONTAINER path, and specifically not `*`. The wildcard is the form
+      // most answers to this error reach for, and it disables the check for
+      // every repository the container can see rather than the one tree the
+      // worker has business in.
+      expect(plan.vars["GIT_CONFIG_VALUE_0"]).toBe("/workspace");
+    }
+  });
+
+  /**
+   * `shared-ro` is included deliberately: that mount is the operator's OWN
+   * checkout, owned by the operator, so a read-only role running `git log`
+   * meets the identical refusal. Covering only `worktree` would leave half the
+   * mounted roles broken on Linux.
+   */
+  test("a read-only code mount needs it too — the tree is still owned by someone else", async () => {
+    const loaded = await load(
+      baseDoc({
+        roles: { eng: {}, cloudy: { cloud_access: true }, rev: { isolation: "shared-ro" } },
+        workers: [
+          { id: "w1", role: "eng" },
+          { id: "wc", role: "cloudy" },
+          { id: "wr", role: "rev" },
+        ],
+      }),
+    );
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wr"), {});
+    expect(plan.vars["GIT_CONFIG_VALUE_0"]).toBe("/workspace");
+  });
+
+  /**
+   * And `none` gets nothing. A setting emitted unconditionally is one nobody
+   * notices has stopped tracking the mount it exists for — this is what keeps
+   * the assertion above non-vacuous.
+   */
+  test("a worker with no code mount is given no git config at all", async () => {
+    const loaded = await load(
+      baseDoc({
+        roles: { eng: {}, cloudy: { cloud_access: true }, field: { isolation: "none" } },
+        workers: [
+          { id: "w1", role: "eng" },
+          { id: "wc", role: "cloudy" },
+          { id: "wf", role: "field" },
+        ],
+      }),
+    );
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wf"), {});
+    expect(Object.keys(plan.vars).filter((k) => k.startsWith("GIT_CONFIG"))).toEqual([]);
+  });
+});
+
 describe("the --env-file contract with docker/entrypoint.sh", () => {
   /**
    * The three names the entrypoint actually branches on. It guards with

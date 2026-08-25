@@ -228,38 +228,6 @@ export function buildDockerArgv(
       break;
   }
 
-  // ISC-298's SECOND blocker, and the one that hides behind the first.
-  //
-  // Widening the checkout (`prepareWorktreePermissions`) fixes the filesystem
-  // half. It does not touch git, which refuses on OWNERSHIP and ignores mode
-  // entirely (CVE-2022-24765): on a Linux Docker host a bind mount passes host
-  // ownership through, the container runs as the baked uid 10001, and `status`,
-  // `add`, `commit` and `diff` all answer `fatal: detected dubious ownership in
-  // repository at '/workspace'` on a tree that is world-writable. So a worker
-  // could write files and could not commit them, which is a worse failure than
-  // the one the widening fixed — the agent's work would look done and land
-  // nowhere.
-  //
-  // Delivered as `GIT_CONFIG_*` env rather than `git config --global` because
-  // the container's root filesystem is read-only (SRD §5.6) and there is no
-  // writable `$HOME` for a gitconfig to land in. The env form is git's own
-  // supported mechanism and applies to every invocation in the container
-  // without a file existing anywhere.
-  //
-  // Scoped to `/workspace` — the CONTAINER path, and the only tree a worker has
-  // any business running git in. Not `*`, which is the form most StackOverflow
-  // answers reach for and which would disable the check for every repository
-  // the container can see, including any the operator later mounts.
-  //
-  // Applied for `shared-ro` too, not only `worktree`: that mount is the
-  // operator's own checkout, owned by the operator, so a read-only role doing
-  // `git log` meets the identical refusal. `none` gets nothing, because there
-  // is no `/workspace` to name.
-  if (w.isolation !== "none") {
-    argv.push("-e", "GIT_CONFIG_COUNT=1");
-    argv.push("-e", "GIT_CONFIG_KEY_0=safe.directory");
-    argv.push("-e", "GIT_CONFIG_VALUE_0=/workspace");
-  }
   argv.push("-v", `${workerOutboxDir(opts.run.root, w.id)}:/outbox`);
   argv.push("-v", `${opts.run.sessionsDir}:/sessions`);
   argv.push("-v", `${roleSkillsDir(opts.run.root, w.role)}:/skills:ro`);

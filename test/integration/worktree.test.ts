@@ -678,11 +678,15 @@ describe("operator visibility via a named remote", () => {
    * now against the stronger property — the operator's repository gains
    * nothing at all, not even an ignored directory.
    *
-   * Mutation-proved: pointing `workerWorktree` back at
-   * `join(repo, ".worktrees", workerId)` makes the untracked-file assertion
-   * below fail with `?? .worktrees/`, and the gitlink assertion fail after the
-   * `add -A`. Both, not one — which is what distinguishes "the clone is
-   * elsewhere" from "the clone is here and hidden".
+   * Mutation-proved: cloning back into `join(repo, ".worktrees", workerId)`
+   * fails this test at its FIRST assertion, with
+   * `Expected: "" / Received: "?? .worktrees/eng-1/"`. Stated precisely
+   * because a test reports only where it stops — the gitlink assertions below
+   * are never reached under that mutation, so this test's evidence is "the
+   * repository is untouched", and the gitlink assertions are what would catch
+   * a future change that puts something back and excludes it again.
+   * (12 tests in this file go red under that mutation; this is the one that
+   * speaks to the operator's checkout.)
    */
   test("an operator's ordinary `git add -A && git commit` sees nothing of a worker's clone", async () => {
     const rig = await makeRig();

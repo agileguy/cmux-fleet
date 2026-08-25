@@ -438,53 +438,6 @@ describe("docker argv (SRD §5.6)", () => {
     expect(field.docker.some((a) => a.includes(":/workspace"))).toBe(false);
   });
 
-  /**
-   * ISC-298's SECOND blocker, which the permission fix does not reach.
-   *
-   * Git refuses on OWNERSHIP and ignores mode (CVE-2022-24765): on a Linux
-   * Docker host a fully world-writable `/workspace` owned by another uid still
-   * answers `fatal: detected dubious ownership` for `status`, `add`, `commit`
-   * and `diff`. A worker in that state can WRITE its files and cannot COMMIT
-   * them, which is strictly worse than the failure the widening fixed — the
-   * agent's work looks done and lands nowhere.
-   *
-   * Asserted on the argv rather than by running a container, for the same
-   * reason the permission probe is: macOS squashes bind-mount ownership, so a
-   * local container never reaches the refusal and a container-based test here
-   * would be green on the machine and silent about the runner.
-   */
-  test("git's ownership guard is disarmed for /workspace wherever /workspace exists", async () => {
-    const { loaded } = await fixture((doc) => {
-      (doc["roles"] as Record<string, unknown>)["field"] = { isolation: "none" };
-      (doc["workers"] as unknown[]).push({ id: "field-1", role: "field" });
-    });
-
-    for (const id of ["eng-1", "rev-1"]) {
-      const r = await renderWorker(loaded, id);
-      expect(r.docker).toContain("GIT_CONFIG_COUNT=1");
-      expect(r.docker).toContain("GIT_CONFIG_KEY_0=safe.directory");
-      // The CONTAINER path, and specifically not `*`. The wildcard is the form
-      // most answers to this error reach for, and it disables the check for
-      // every repository the container can see rather than the one tree the
-      // worker has business in.
-      expect(r.docker).toContain("GIT_CONFIG_VALUE_0=/workspace");
-      expect(r.docker).not.toContain("GIT_CONFIG_VALUE_0=*");
-    }
-
-    // `shared-ro` is included above deliberately: that mount is the operator's
-    // OWN checkout, owned by the operator, so a read-only role running `git
-    // log` meets the identical refusal. Covering only `worktree` would leave
-    // half the mounted roles broken on Linux.
-    const rev = await renderWorker(loaded, "rev-1");
-    expect(rev.docker.some((a) => a.endsWith(":/workspace:ro"))).toBe(true);
-
-    // `none` has no `/workspace` to name, so it gets nothing — a config that
-    // is emitted unconditionally is one nobody notices has stopped tracking
-    // the mount it exists for.
-    const field = await renderWorker(loaded, "field-1");
-    expect(field.docker.some((a) => a.startsWith("GIT_CONFIG_"))).toBe(false);
-  });
-
   test("state mounts: outbox, sessions, skills ro, container-local pi agent volume", async () => {
     const { runsDir, loaded } = await fixture();
     const r = await renderWorker(loaded, "eng-1");
