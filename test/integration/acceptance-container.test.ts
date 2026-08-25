@@ -31,6 +31,7 @@ import { join } from "node:path";
 
 import { resolveFromEnvelope, runAcceptance } from "../../src/harvest/acceptance.ts";
 import { makeDaemonScratch } from "../../src/container/mounts.ts";
+import { containerBudget } from "../support/budget.ts";
 import { Deadline } from "../../src/util/clock.ts";
 
 const DOCKER = process.env["PIFLEET_DOCKER"] === "1";
@@ -147,7 +148,9 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
 
     const outside = await examOnHost(cmd);
     expect(outside.run.outcome).toBe("failed");
-  });
+    // Two container ops: the ISC-277 visibility probe and the exam itself.
+    // (The host arm starts no container and costs nothing on this scale.)
+  }, containerBudget(2));
 
   test("it runs as the image's baked uid, not the operator's", async () => {
     const r = await exam(`sh -c 'test "$(id -u)" = 10001'`);
@@ -156,14 +159,15 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
     // "not 10001" there would be a claim about the developer's machine and
     // false on a runner that happens to use it. The container arm is exact,
     // and `container-env.test.ts` already pins the `--user` flag itself.
-  });
+  }, containerBudget(2));
 
   test("the fresh clone is on the other side of the mount, with real content", async () => {
     // Not "the mount exists" — an unshared path mounts as an EMPTY directory
     // and would pass that. This reads a file the fixture committed.
     expect((await exam("grep -q needle data.txt")).run.outcome).toBe("passed");
     expect((await exam("grep -q not-in-this-file data.txt")).run.outcome).toBe("failed");
-  });
+    // Two exams, each preceded by its own visibility probe.
+  }, containerBudget(4));
 
   /**
    * The mount is WRITABLE by the baked uid, which is a separate fact from it
@@ -201,7 +205,7 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
     // An EXISTING file the host committed: needs the recursive widen. This is
     // the half a directory-only chmod passes and should not.
     expect((await exam(`sh -c 'echo x > /workspace/data.txt'`)).run.outcome).toBe("passed");
-  });
+  }, containerBudget(4));
 
   /**
    * The claim `acceptance-container.ts` makes about `/workspace` being a fixed
@@ -214,7 +218,7 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
     const r = await exam("git status --porcelain");
     expect(r.run.outcome).toBe("passed");
     expect(r.run.excerpt).not.toContain("dubious ownership");
-  });
+  }, containerBudget(2));
 
   /**
    * `/home/pi`, not `/etc`, and the difference is the whole probe.
@@ -237,7 +241,7 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
     // /tmp is the tmpfs, and it IS writable — the contrast that shows the
     // failure above is the read-only root and not a broken container.
     expect((await exam(`sh -c 'touch /tmp/ok'`)).run.outcome).toBe("passed");
-  });
+  }, containerBudget(4));
 
   test("the audit record names the image the exam actually ran in", async () => {
     const r = await exam("true");
@@ -245,7 +249,7 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
     // And the host arm, in the same file, against the same fixture: `null`
     // is the honest answer when no container was involved.
     expect((await examOnHost("true")).context.image).toBeNull();
-  });
+  }, containerBudget(2));
 
   /**
    * ISC-152 still holds on the new path. A `docker run` that outlives its
@@ -275,9 +279,20 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
        */
       expect(await runningAcceptanceContainers()).toEqual(before);
     },
-    // Above the 8s budget the probe itself sets, plus container start-up. The
-    // default 5s would time the TEST out before the RUNNER could time the
-    // command out, which reads as a failure of the thing being measured.
+    /**
+     * A hand-picked literal, under the standing ISC-274 exception, because this
+     * test's cost is bounded by something OTHER than the processes it starts.
+     *
+     * It performs four container ops — the visibility probe, the exam, the
+     * reaper, and one `docker ps` — so `containerBudget(4)` would apply. That
+     * value does not govern: the test's duration is set by the 8_000 ms
+     * per-command budget it deliberately blows through, and the assertion is
+     * ABOUT that timeout firing. A ceiling derived from op count could land
+     * below the timeout the test is measuring, in which case bun would kill the
+     * test before the runner could record `timed_out` — turning the thing under
+     * measurement into the failure. 60_000 is 8_000 plus room for four cold
+     * container ops, and is deliberately the largest literal in this file.
+     */
     60_000,
   );
 });
@@ -304,5 +319,5 @@ describe.skipIf(!DOCKER)("the mount is proved against the real daemon (ISC-277)"
     const r = await exam("true");
     expect(r.run.outcome).toBe("passed");
     expect(r.run.excerpt).not.toContain("ISC-277");
-  });
+  }, containerBudget(2));
 });
