@@ -166,6 +166,26 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
   });
 
   /**
+   * The mount is WRITABLE by the baked uid, which is a separate fact from it
+   * being readable and needs its own probe.
+   *
+   * The clone is created by the operator's uid and the container runs as
+   * 10001, so without the recursive widen every write into `/workspace` fails.
+   * That is not an edge case: a suite writing a snapshot, a coverage file or a
+   * `.pytest_cache` is an ordinary suite, and ISC-298 measured that a
+   * DIRECTORY-only widen is not enough — an existing file owned by another uid
+   * still refuses `open(O_WRONLY)`, so some edits land and others do not
+   * depending on which call the tool made.
+   */
+  test("the baked uid can write the mounted clone, files as well as directories", async () => {
+    // A new file: needs the directory bit.
+    expect((await exam(`sh -c 'echo x > /workspace/new-file.txt'`)).run.outcome).toBe("passed");
+    // An EXISTING file the host committed: needs the recursive widen. This is
+    // the half a directory-only chmod passes and should not.
+    expect((await exam(`sh -c 'echo x > /workspace/data.txt'`)).run.outcome).toBe("passed");
+  });
+
+  /**
    * The claim `acceptance-container.ts` makes about `/workspace` being a fixed
    * path, measured rather than asserted in prose. The image bakes
    * `git config --system --add safe.directory /workspace`; without it, a
