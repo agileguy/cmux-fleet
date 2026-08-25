@@ -14,7 +14,7 @@
  * "task failed" alike.
  */
 
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { adjudicate as adjudicateFacts } from "./adjudicate.ts";
 import { harnessSurfaceFor, resolveFromEnvelope, runAcceptance } from "./acceptance.ts";
@@ -340,6 +340,7 @@ export async function harvestTask(
      * coincidence, and `runAcceptance`'s probe would then be asserting a
      * property the caller could withdraw.
      */
+    const ownScratch = opts.acceptanceScratch === undefined;
     const scratchRoot = opts.acceptanceScratch ?? (await makeDaemonScratch("accept"));
 
     /**
@@ -379,6 +380,28 @@ export async function harvestTask(
       // An exam that could not be held is not an exam the worker failed
       // (ISC-152). Recorded as a reason so the verdict stays uncertifiable.
       reasons.push(`acceptance could not be run: ${String(err)}`);
+    } finally {
+      /**
+       * Remove the scratch root, and ONLY one this function allocated.
+       *
+       * The leak predates this change — nothing ever removed the old
+       * `mkdtemp(tmpdir())` root either — but it was survivable there because
+       * the OS reaps its temp directory. Moving to `$HOME/.pifleet/scratch`
+       * for ISC-277 makes the same leak DURABLE: every `artifacts
+       * --run-acceptance` would leave a full clone of the repository behind
+       * forever, under the operator's home directory, and this feature's own
+       * test run left six of them in a single afternoon.
+       *
+       * `ownScratch` is the whole condition. A caller that supplied
+       * `acceptanceScratch` owns that directory — it is a fixture root in the
+       * suite and could be a directory an operator cares about — and deleting
+       * it would be tidying someone else's state rather than cleaning up after
+       * this function.
+       *
+       * Failures are swallowed. The harvest result is already assembled; a
+       * cleanup error must not replace a real verdict with a housekeeping one.
+       */
+      if (ownScratch) await rm(scratchRoot, { recursive: true, force: true }).catch(() => {});
     }
   }
 

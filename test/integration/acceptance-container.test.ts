@@ -84,6 +84,17 @@ async function exam(cmd: string, timeoutMs = 120_000) {
   return { run: r.runs[0]!, context: r.context };
 }
 
+/** Names of exam containers currently alive, so a leak is visible as a diff. */
+async function runningAcceptanceContainers(): Promise<string[]> {
+  const p = Bun.spawn(["docker", "ps", "--format", "{{.Names}}"], { stdout: "pipe", stderr: "pipe" });
+  const [, out] = await Promise.all([p.exited, new Response(p.stdout).text()]);
+  return out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("pifleet-accept-"))
+    .sort();
+}
+
 /** The same command on the HOST path — the control every probe is read against. */
 async function examOnHost(cmd: string, timeoutMs = 120_000) {
   const r = await runAcceptance({
@@ -189,11 +200,27 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
    * nothing about the code, and the adjudicator maps it to `unknown`.
    */
   test(
-    "a container that outlives its budget is timed_out, never failed",
+    "a container that outlives its budget is timed_out, and is reaped",
     async () => {
-      const r = await exam("sleep 60", 8_000);
+      const before = await runningAcceptanceContainers();
+      const r = await exam("sleep 120", 8_000);
       expect(r.run.outcome).toBe("timed_out");
       expect(r.run.exit_code).toBeNull();
+
+      /**
+       * The half that is not about the verdict.
+       *
+       * The timeout SIGKILLs the docker CLIENT; `--rm` is a client-side action,
+       * so without an explicit reap the container keeps running to completion
+       * with nothing left to remove it. This assertion is the reason
+       * `reapAcceptanceContainer` exists: writing the file's first draft left a
+       * `sleep 60` container `Up` on the maintainer's machine after the run had
+       * been recorded and returned, and a real acceptance suite runs for far
+       * longer than a sleep. `sleep 120` is deliberately longer than anything
+       * else in this file, so a surviving container cannot be mistaken for one
+       * that simply finished on its own.
+       */
+      expect(await runningAcceptanceContainers()).toEqual(before);
     },
     // Above the 8s budget the probe itself sets, plus container start-up. The
     // default 5s would time the TEST out before the RUNNER could time the

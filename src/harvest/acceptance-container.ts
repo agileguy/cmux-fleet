@@ -74,6 +74,21 @@ export interface AcceptanceContainerSpec {
   cloneDir: string;
   /** The tokenized acceptance command. `argv[0]` becomes the entrypoint. */
   argv: readonly string[];
+  /**
+   * `--name`, so a container that outlives its budget can still be reaped.
+   *
+   * `--rm` is NOT sufficient and the repository already knows why: it is a
+   * CLIENT-side action, so killing the client — which is exactly what a
+   * timeout does — leaves the container running with nothing left to remove
+   * it. `container-launch.test.ts` makes the same point about the supervisor's
+   * kill ladder and `down`. A name is what lets the timeout path issue
+   * `docker rm -f` against a specific container rather than guessing.
+   *
+   * This was found by this feature's OWN test: the `timed_out` probe left a
+   * `sleep 60` container running after the run it belonged to had been
+   * recorded and returned. A real acceptance suite is not a 60-second sleep.
+   */
+  containerName: string;
   /** Environment for the command, as `-e K=V`. Never a pass-through (ISC-31). */
   env: Readonly<Record<string, string>>;
   /**
@@ -109,6 +124,43 @@ export function networkFromLaunchArgv(argv: readonly string[]): string | null {
     if (argv[i] === "--network" || argv[i] === "--net") return argv[i + 1] ?? null;
   }
   return null;
+}
+
+/**
+ * A per-command container name, unique within a run and recognisable in `docker ps`.
+ *
+ * The `pifleet-accept-` prefix is the part that matters operationally: an
+ * operator looking at a stuck daemon can tell an exam container from a worker
+ * (`pifleet-<run>-<worker>`) at a glance, and can sweep them by prefix.
+ */
+export function acceptanceContainerName(headSha: string, nonce: string, index: number): string {
+  return `pifleet-accept-${headSha.slice(0, 12)}-${nonce}-${index}`;
+}
+
+/**
+ * Remove a container that outlived its budget, by name.
+ *
+ * Best-effort and deliberately silent: by the time this runs the acceptance
+ * result is already decided (`timed_out`), and a reaper that threw would
+ * replace a real verdict with its own cleanup failure. A container that
+ * already exited leaves `docker rm -f` with nothing to do and a non-zero exit,
+ * which is not an error worth surfacing either.
+ */
+export async function reapAcceptanceContainer(
+  name: string,
+  env: Record<string, string>,
+): Promise<void> {
+  try {
+    const p = Bun.spawn(["docker", "rm", "-f", name], {
+      env,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await p.exited;
+  } catch {
+    // No docker on PATH at all. Nothing to reap and nothing to say.
+  }
 }
 
 /**
@@ -166,7 +218,12 @@ export function acceptanceContainerArgv(spec: AcceptanceContainerSpec): string[]
   if (spec.argv.length === 0) throw new Error("acceptanceContainerArgv: empty command argv");
   if (spec.image.length === 0) throw new Error("acceptanceContainerArgv: empty image");
 
+  if (spec.containerName.length === 0) {
+    throw new Error("acceptanceContainerArgv: empty container name");
+  }
+
   const argv: string[] = ["docker", "run", "--rm"];
+  argv.push("--name", spec.containerName);
   argv.push("--user", `${WORKER_UID}:${WORKER_UID}`);
   argv.push("--security-opt", "no-new-privileges");
   argv.push("--cap-drop", "ALL");

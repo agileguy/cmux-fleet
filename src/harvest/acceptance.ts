@@ -52,7 +52,12 @@ import {
 } from "../container/mounts.ts";
 import type { Exec } from "../container/run.ts";
 import { Deadline, Stopwatch, isoNow } from "../util/clock.ts";
-import { acceptanceContainerArgv, acceptanceContainerEnv } from "./acceptance-container.ts";
+import {
+  acceptanceContainerArgv,
+  acceptanceContainerEnv,
+  acceptanceContainerName,
+  reapAcceptanceContainer,
+} from "./acceptance-container.ts";
 import { HERMETIC_GIT_ENV, hardenedGitArgv } from "./git.ts";
 
 // ---------------------------------------------------------------------------
@@ -767,8 +772,8 @@ export async function runAcceptance(spec: AcceptanceSpec): Promise<AcceptanceRes
   }
 
   const runs: AcceptanceRun[] = [];
-  for (const rc of spec.commands) {
-    runs.push(await runOne(rc, cloneDir, env, spec));
+  for (const [index, rc] of spec.commands.entries()) {
+    runs.push(await runOne(rc, cloneDir, env, spec, nonce, index));
   }
   return { context, runs };
 }
@@ -778,6 +783,8 @@ async function runOne(
   cloneDir: string,
   env: Record<string, string>,
   spec: AcceptanceSpec,
+  nonce: string,
+  index: number,
 ): Promise<AcceptanceRun> {
   // `boundedBy` is why a per-command timeout cannot outlive the run's budget:
   // ten 30-second commands under a 60-second run get 60 seconds total, not 300.
@@ -815,14 +822,29 @@ async function runOne(
    * the COMMAND gets. Nothing crosses.
    */
   if (spec.container !== undefined) {
+    const containerName = acceptanceContainerName(spec.head_sha, nonce, index);
     const dockerArgv = acceptanceContainerArgv({
       image: spec.container.image,
       cloneDir,
       argv,
       env: acceptanceContainerEnv(),
       network: spec.container.network ?? null,
+      containerName,
     });
-    const cr = await execBounded(dockerArgv, resolve(spec.scratch_dir), dockerClientEnv(), timeoutMs);
+    const clientEnv = dockerClientEnv();
+    const cr = await execBounded(dockerArgv, resolve(spec.scratch_dir), clientEnv, timeoutMs);
+    /**
+     * The timeout killed the docker CLIENT. It did not kill the container.
+     *
+     * `--rm` is a client-side action, so a SIGKILLed client leaves the
+     * container running with nothing left to remove it — the same property
+     * `container-launch.test.ts` describes for the supervisor's kill ladder.
+     * Measured on this feature's own `timed_out` probe: a `sleep 60` container
+     * was still `Up` after the run had been recorded and returned. A real
+     * acceptance suite is not a 60-second sleep, so the leak is unbounded in
+     * both time and resources.
+     */
+    if (cr.timedOut) await reapAcceptanceContainer(containerName, clientEnv);
     return AcceptanceRunSchema.parse({
       cmd: rc.cmd,
       source: rc.source,

@@ -294,4 +294,39 @@ describe("the container path is reached from production, not only from tests", (
     expect(src).toContain("makeDaemonScratch(");
     expect(src).not.toContain("tmpdir()");
   });
+
+  /**
+   * The obligation the move CREATED, and it is not optional.
+   *
+   * Nothing ever removed the old `mkdtemp(tmpdir())` root either, which was
+   * survivable only because the OS reaps its temp directory. Under
+   * `$HOME/.pifleet/scratch` the identical leak is permanent — a full clone of
+   * the repository per `artifacts --run-acceptance`, forever. Six of them
+   * accumulated on this machine during one afternoon of building the feature,
+   * which is how it was noticed at all.
+   *
+   * Guarded on `ownScratch`, because a caller-supplied root is the caller's:
+   * removing it would be tidying state this function did not create.
+   */
+  test("a scratch root this function allocated is removed again", async () => {
+    const src = stripComments(await readFile("src/harvest/index.ts", "utf8"));
+    expect(src).toContain("ownScratch");
+    expect(src).toMatch(/finally\s*\{/);
+    expect(src).toMatch(/if \(ownScratch\) await rm\(scratchRoot/);
+  });
+
+  /**
+   * The container name, checked at the CALL SITE rather than in the builder.
+   *
+   * `acceptance-container.test.ts` proves the argv carries `--name`; only this
+   * proves the runner reaps by it. `--rm` is a client-side action, so a
+   * SIGKILLed docker client leaves the container running — measured on this
+   * feature's own `timed_out` probe, which left a `sleep 60` container `Up`
+   * after its run had been recorded and returned.
+   */
+  test("a timed-out exam reaps its container by name", async () => {
+    const src = stripComments(await readFile("src/harvest/acceptance.ts", "utf8"));
+    expect(src).toContain("acceptanceContainerName(");
+    expect(src).toMatch(/if \(cr\.timedOut\) await reapAcceptanceContainer\(/);
+  });
 });

@@ -19,6 +19,7 @@ import {
   ACCEPTANCE_WORKDIR,
   acceptanceContainerArgv,
   acceptanceContainerEnv,
+  acceptanceContainerName,
   networkFromLaunchArgv,
 } from "../../src/harvest/acceptance-container.ts";
 import { WORKER_UID } from "../../src/container/mounts.ts";
@@ -28,6 +29,7 @@ const BASE = {
   cloneDir: "/Users/x/.pifleet/scratch/accept-1/clone",
   argv: ["bun", "test"] as const,
   env: { CI: "1" },
+  containerName: "pifleet-accept-abc123def456-deadbeef-0",
 };
 
 /** Index of the image in a finished argv — everything after it is the command. */
@@ -111,6 +113,33 @@ describe("the exam's container argv (ISC-233)", () => {
   test("refuses an empty command or an empty image rather than building nonsense", () => {
     expect(() => acceptanceContainerArgv({ ...BASE, argv: [] })).toThrow(/empty command/);
     expect(() => acceptanceContainerArgv({ ...BASE, image: "" })).toThrow(/empty image/);
+    expect(() => acceptanceContainerArgv({ ...BASE, containerName: "" })).toThrow(/container name/);
+  });
+
+  /**
+   * `--name`, and the reason it is not optional.
+   *
+   * `--rm` removes the container when the CLIENT sees it exit, so a timeout —
+   * which SIGKILLs the client — leaves the container running with nothing left
+   * to reap it. This feature's own `timed_out` probe left a `sleep 60`
+   * container `Up` after the run had been recorded and returned; a real
+   * acceptance suite is not a 60-second sleep.
+   */
+  test("names the container so a timed-out exam can still be reaped", () => {
+    const argv = acceptanceContainerArgv(BASE);
+    expect(argv[argv.indexOf("--name") + 1]).toBe(BASE.containerName);
+    // `--rm` stays: it is right for the ordinary path and wrong only for the
+    // one this name exists to cover.
+    expect(argv).toContain("--rm");
+  });
+
+  test("the name is unique per command and recognisable by prefix", () => {
+    const a = acceptanceContainerName("a".repeat(40), "nonce123", 0);
+    const b = acceptanceContainerName("a".repeat(40), "nonce123", 1);
+    expect(a).not.toBe(b);
+    expect(a.startsWith("pifleet-accept-")).toBe(true);
+    // Docker's own name grammar: [a-zA-Z0-9][a-zA-Z0-9_.-]*
+    expect(a).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/);
   });
 });
 
