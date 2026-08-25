@@ -821,3 +821,200 @@ jobs:
       - name: Shim log
         if: always()
         run: cat "${RUNNER_TEMP:?}/omlx-shim.log" || true
+
+  # Phase C's oMLX cluster — ISC-50, 57, 258, 259 — plus ISC-290's whole chain.
+  #
+  # `SRD-COMPLETION.md` called provisioning this "the single highest-value
+  # non-code action ... because nine criteria are already-working mechanisms
+  # with no witness, and no amount of engineering closes them." This job is that
+  # witness for the subset that needs a live inference server.
+  #
+  # WHY A SEPARATE JOB AND NOT THE `container` JOB. Three probes in `container`
+  # are pinned skips today for want of an inference server, and unpinning them
+  # there would make an otherwise hermetic job depend on one person's laptop
+  # being awake. `container` must stay hermetic and requireable. This job is the
+  # one that is allowed to be laptop-dependent, and like `omlx-live` it must
+  # stay OUT of required status checks.
+  #
+  # It costs a second image build. That is the price of not contaminating the
+  # hermetic job, and it is worth paying.
+  #
+  # THE SKIP LIST IS EMPTY, for the same reason it is empty in `omlx-live`:
+  # `probe-guard.sh` permits exactly the names in EXPECTED_SKIPS and no others,
+  # so an empty list permits none at all. A green result here cannot mean the
+  # probes skipped — which is the whole failure mode this job exists to end.
+  container-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - run: bun install --frozen-lockfile || bun install
+      - name: Refuse a half-configured environment
+        env:
+          OMLX_HOST: ${{ secrets.OMLX_HOST }}
+          OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
+        run: |
+          set -eu
+          missing=""
+          [ -n "${OMLX_HOST:-}" ]    || missing="$missing OMLX_HOST"
+          [ -n "${OMLX_API_KEY:-}" ] || missing="$missing OMLX_API_KEY"
+          if [ -n "$missing" ]; then
+            echo "container-live: missing repo secret(s):$missing" >&2
+            exit 1
+          fi
+      - name: Confirm a Docker daemon is present
+        run: docker info
+      - name: Build the worker image
+        run: bun run src/cli/index.ts image build -c fleet.example.yaml --toolchain node
+      - name: Tag it for the container suites
+        # Same derivation as the `container` job, and deliberately not factored
+        # out: `image list --json` emits a bare array, and the one time that
+        # shape was read wrong this job was red for days with no criterion
+        # having executed. Fail loudly on an empty list.
+        run: |
+          set -eux
+          tag="$(bun run src/cli/index.ts image list -c fleet.example.yaml --json \
+                 | bun -e 'const d = JSON.parse(await Bun.stdin.text());
+                           const t = Array.isArray(d) ? d[0]?.tag : undefined;
+                           if (!t) { console.error("image list returned no images"); process.exit(1); }
+                           console.log(t);')"
+          docker tag "$tag" pifleet/pi-worker:verify
+      - name: Pull the relay image the egress relay runs
+        run: |
+          set -eux
+          relay_image="$(bun -e 'import { RELAY_IMAGE } from "./src/security/relay.ts";
+                                 if (!RELAY_IMAGE) { console.error("RELAY_IMAGE is empty"); process.exit(1); }
+                                 console.log(RELAY_IMAGE);')"
+          docker pull "$relay_image"
+      - name: Pull the curl image the container-vantage reachability check runs in
+        # Its own step, by the same rule as the relay image above: `docker run`
+        # would pull it implicitly inside the check, and a registry failure
+        # would then read as "the container cannot reach the shim" — the exact
+        # diagnosis that check exists to make trustworthy.
+        run: docker pull curlimages/curl:8.11.1
+      - name: Stand up the shim where a CONTAINER can reach it
+        # OMLX_SHIM_BIND=0.0.0.0, and the difference from `omlx-live` is the
+        # entire reason this job needs its own step rather than reusing that
+        # one. `omlx-live`'s callers dial from the HOST, so loopback serves
+        # them. These callers do not: the egress relay dials from inside a
+        # container through `--add-host host.docker.internal:host-gateway`,
+        # which resolves to the BRIDGE GATEWAY address. A loopback-only
+        # listener is unreachable from there, and the symptom is the relay
+        # reporting its upstream as down — a diagnosis that points at the fleet,
+        # which is not where the problem would be.
+        env:
+          OMLX_HOST: ${{ secrets.OMLX_HOST }}
+          OMLX_SHIM_BIND: "0.0.0.0"
+        run: |
+          set -eu
+          nohup setsid bun .github/scripts/omlx-shim.ts \
+            > "${RUNNER_TEMP:?}/omlx-shim.log" 2>&1 &
+          echo "started shim pid $!"
+      - name: Prove the shim is reachable from the host AND from a container
+        # BOTH vantages, checked separately and before anything is graded.
+        # The host check alone would pass with a loopback-only bind and leave
+        # the container-side failure to surface later as a confusing relay
+        # error. 401 counts as reachable — it proves the TCP path and the HTTP
+        # server, and says only that no key was sent, which is deliberate here.
+        run: |
+          set -eu
+          echo "--- from the host ---"
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+                     http://127.0.0.1:8000/v1/models || true)
+            case "$code" in 200|401) echo "host: reachable after ${i}s (HTTP $code)"; break ;; esac
+            [ "$i" = 30 ] && { echo "host: never answered" >&2; cat "${RUNNER_TEMP:?}/omlx-shim.log" >&2; exit 1; }
+            sleep 1
+          done
+          echo "--- from inside a container, via host-gateway ---"
+          code=$(docker run --rm --add-host host.docker.internal:host-gateway \
+                   curlimages/curl:8.11.1 \
+                   -s -o /dev/null -w '%{http_code}' --max-time 20 \
+                   http://host.docker.internal:8000/v1/models || true)
+          case "$code" in
+            200|401) echo "container: reachable (HTTP $code)" ;;
+            *) echo "container: UNREACHABLE (HTTP '$code') — the relay would report its upstream as down" >&2
+               cat "${RUNNER_TEMP:?}/omlx-shim.log" >&2; exit 1 ;;
+          esac
+      - name: Warm the model before anything is graded on its latency
+        # Same reasoning as `omlx-live`: `up`'s native-tool-call probe has a 60s
+        # budget that is PRODUCTION behaviour, a cold load blows through it
+        # (measured 60299.68ms), and raising a real gate to suit a test is the
+        # wrong trade. Ungraded — the probes below give the real diagnosis.
+        env:
+          OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
+        run: |
+          set -u
+          start=$(date +%s)
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 300 \
+            http://127.0.0.1:8000/v1/chat/completions \
+            -H "Authorization: Bearer $OMLX_API_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"GLM-4.5-Air-MLX-4bit","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+            || true)
+          echo "warmup HTTP $code after $(( $(date +%s) - start ))s"
+      - name: The relay probes, RUN rather than pinned
+        env:
+          LABEL: container-live
+          PIFLEET_DOCKER: "1"
+          OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
+          # GLM-4.5-Air-MLX-4bit, not the 8-bit 35B. full-chain.test.ts's own
+          # header records both as 3/3 on the tools-bearing probe while
+          # Qwen3-Coder-30B-A3B-Instruct-4bit leaked a tool call as raw text in
+          # 1 of 3 — so either is correct and this is the cheaper one. It is
+          # also the model the warmup above loads, so the two agree by
+          # construction rather than by coincidence.
+          PIFLEET_OMLX_MODEL: GLM-4.5-Air-MLX-4bit
+          # DERIVED by the hand method, not incremented. Measured 2026-08-25 on
+          # bun 1.3.11 with PIFLEET_DOCKER unset and no listener on :8000:
+          #     bun test test/integration/relay.test.ts
+          #     -> 0 pass, 9 skip, 0 fail. Ran 9 tests across 1 file.
+          TOTAL_EXPECTED: "9"
+          # EMPTY. All nine must RUN. The two names pinned as skips in the
+          # `container` job -- both live-oMLX relay probes -- are exactly the
+          # ones this job exists to execute.
+          EXPECTED_CONTAINER_LIVE_SKIPS: ""
+        run: |
+          set -eu
+          JUNIT_FILE="${RUNNER_TEMP:?}/pifleet-container-live.junit.xml" \
+          EXPECTED_SKIPS="$EXPECTED_CONTAINER_LIVE_SKIPS" \
+            .github/scripts/probe-guard.sh \
+              test/integration/relay.test.ts
+      # full-chain.test.ts (ISC-290) is DELIBERATELY not in the list above, and
+      # the reason is a product defect this job found on its first two runs
+      # rather than a softened gate.
+      #
+      # The chain ran. The model reached oMLX through the relay, took its turn,
+      # and emitted 17 native tool calls -- of which 11 failed, every one of
+      # them on the same thing:
+      #
+      #     EACCES: permission denied, open '/workspace/add.js'
+      #     chmod: changing permissions of '/workspace/add.js': Operation not permitted
+      #     sed: couldn't open temporary file /workspace/sedXXXXXX: Permission denied
+      #
+      # The worker image runs as uid 10001. `render.ts` mounts
+      # `<repo>/.worktrees/<run-id>/<worker>` at /workspace, and a Linux bind
+      # mount passes host ownership straight through, so that tree belongs to
+      # the runner's uid and uid 10001 can read it and nothing else. macOS
+      # hides this completely -- the VM's shared filesystem squashes ownership
+      # to the container user -- which is why the identical run is green on
+      # Colima and why this only surfaced once the chain finally ran somewhere
+      # that was not the operator's laptop. `mounts.ts` documents this exact
+      # failure class and widens the run directory and scratch root for it; the
+      # worktree is the one write mount it does NOT widen, and cannot under its
+      # own stated contract, because that path lives inside the operator's
+      # repository.
+      #
+      # Fixing it is a design decision with real alternatives (relocate the
+      # worktrees out of the repo, run as the host uid against ISC-25's baked
+      # 10001, or widen inside the repo and accept that), so it is recorded as
+      # a criterion in ISA.md rather than patched around here. Put this file
+      # back in the list above -- and TOTAL_EXPECTED back to 10 -- when a
+      # worker can write its own worktree on Linux.
+      - name: Shim log
+        if: always()
+        run: cat "${RUNNER_TEMP:?}/omlx-shim.log" || true
