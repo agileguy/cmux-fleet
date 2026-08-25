@@ -96,6 +96,19 @@
  */
 export const NO_TOOL_CALLS_REASON = "no_tool_calls";
 
+/**
+ * The settle reason ISC-299 names, exported for the same reason its sibling
+ * above is: the supervisor writes it and the tests grade it, and two spellings
+ * of one reason is a bug that only shows up as a test that cannot fail.
+ *
+ * It sits beside `NO_TOOL_CALLS_REASON` because the two are the same failure
+ * seen from opposite sides. That one fires when the model never CALLED a tool;
+ * this one fires when it called plenty and the tree is unchanged anyway. An
+ * operator who sees `no_tool_calls` should change the model; one who sees
+ * `no_work_done` should look at why the worker's writes were refused.
+ */
+export const NO_WORK_DONE_REASON = "no_work_done";
+
 /** What the supervisor knows about the turn that this event belongs to. */
 export interface TurnContext {
   /**

@@ -63,7 +63,11 @@ import { worktreeContentHash } from "../run/treehash.ts";
 import { processStartTime, registryCall, serveJsonlSocket } from "../run/registry.ts";
 import { ensureControlAuth } from "../security/control-auth.ts";
 import { processGroupId } from "../safety/procgroup.ts";
-import { NO_TOOL_CALLS_REASON, ProseTurnDetector } from "./prose-detector.ts";
+import {
+  NO_TOOL_CALLS_REASON,
+  NO_WORK_DONE_REASON,
+  ProseTurnDetector,
+} from "./prose-detector.ts";
 import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
 
 /** Event types that end or could end a turn — logged when attributed prior. */
@@ -418,6 +422,27 @@ async function main(): Promise<void> {
    * would let a later settlement sample a tree that epoch never owned.
    */
   let liveWorkdir: string | null = null;
+  /**
+   * The epoch's OWN starting tree hash, and its OWN starting error count
+   * (ISC-299).
+   *
+   * Both are snapshotted when the task envelope arrives rather than read from
+   * anywhere global, and each is that way for a measured reason.
+   *
+   * `liveWorkdirBaseline` is not `up`'s `baselineTree` from `run.json`. That
+   * hash predates the worker entirely, so for the SECOND task on a worker it
+   * differs from the current tree because task ONE changed it — comparing
+   * against it would call every later epoch "changed" no matter what this one
+   * did. The only baseline that answers "did THIS epoch change anything" is
+   * the tree as it stood when this epoch was handed its prompt.
+   *
+   * `liveToolErrorsAtStart` exists because `state.tool_errors` is CUMULATIVE
+   * over the worker's whole life — nothing resets it, deliberately, since
+   * `harvest` reports it as a lifetime total. Reading it raw would let one
+   * task's failures condemn the next task's clean epoch.
+   */
+  let liveWorkdirBaseline: string | null = null;
+  let liveToolErrorsAtStart = 0;
 
   /**
    * Fence writes are serialized for the same tmp-name-collision reason as
@@ -491,7 +516,10 @@ async function main(): Promise<void> {
     livePromptId = null;
     deadlineMs = null;
     const settledWorkdir = liveWorkdir;
+    const settledBaseline = liveWorkdirBaseline;
+    const settledToolErrors = state.tool_errors - liveToolErrorsAtStart;
     liveWorkdir = null;
+    liveWorkdirBaseline = null;
     // Disarm the kill ladder: the epoch is over. Leaving it armed would keep
     // the event loop alive and, worse, let a timer from a settled epoch fire
     // against whatever epoch is live by then.
@@ -539,6 +567,72 @@ async function main(): Promise<void> {
      */
     const treeHash =
       settledWorkdir === null ? null : await worktreeContentHash(settledWorkdir);
+
+    /**
+     * THE ISC-299 READER. The epoch ended cleanly; this decides whether it
+     * ended having DONE anything.
+     *
+     * Sited here, after the quiesce sample, and that placement is forced
+     * rather than chosen: the verdict chain that calls `settle` runs before
+     * this line exists, so the tree evidence simply is not available where the
+     * verdict is first picked. Moving the sample earlier was the alternative
+     * and was rejected — its own docstring above explains why the instant it
+     * is taken at is the whole meaning of the measurement.
+     *
+     * WHY THIS EXISTS. Measured 2026-08-25 on the first Linux CI run of the
+     * whole chain: a worker made 17 native tool calls, ELEVEN of which the
+     * filesystem refused (`EACCES: permission denied, open '/workspace/add.js'`),
+     * wrote nothing, and settled `success`. `dispatch --auto` reported
+     * `verdict: success` and an operator would have been told the task worked.
+     * That is F39's shape — "worker looks healthy, streams, settles, and does
+     * nothing" — one step over from where the ISC-108 reader catches it: that
+     * reader asks whether tools were CALLED, and seventeen were.
+     *
+     * THE PREDICATE IS A CONJUNCTION, and each term is load-bearing:
+     *
+     *  - `verdict === "success"` — this only ever DOWNGRADES. A `timed_out`,
+     *    `aborted` or already-`failed` epoch is telling the operator something
+     *    true, and routing them to a deadline or an abort is more useful than
+     *    relabelling it. Nothing here can upgrade a failure.
+     *  - `settledToolErrors > 0` — errors THIS epoch, not the worker's
+     *    lifetime total. Without this term a legitimately read-only task
+     *    ("summarise these files") would be condemned for changing nothing,
+     *    which is exactly what it was asked to do.
+     *  - the tree is byte-identical to how this epoch found it. This is the
+     *    model-independent half: whatever the agent believed it did, the disk
+     *    disagrees.
+     *
+     * Deliberately NOT "any tool error fails the epoch". A model that mistypes
+     * a path once and then recovers has done the work, and failing it would
+     * make the fleet lie in the other direction — which is the same defect
+     * with the sign flipped, not a fix for it.
+     *
+     * Both null checks are refusals to guess. A null `treeHash` means the hash
+     * could not be taken (`worktreeContentHash` yields null rather than
+     * throwing), and a null baseline means this epoch never had a worktree;
+     * in both cases there is NO evidence about work done, and no evidence must
+     * not read as evidence of failure.
+     */
+    let recordedVerdict = verdict;
+    let recordedReason = reason;
+    if (
+      verdict === "success" &&
+      settledToolErrors > 0 &&
+      treeHash !== null &&
+      settledBaseline !== null &&
+      treeHash === settledBaseline
+    ) {
+      recordedVerdict = "failed";
+      recordedReason = NO_WORK_DONE_REASON;
+      logEvent({
+        type: "no_work_done_detected",
+        epoch: settled.epoch,
+        task_id: settled.task_id,
+        tool_errors: settledToolErrors,
+        tree_hash: treeHash,
+      });
+    }
+
     await writeTaskRecord(taskRecordPath(wp, settled.task_id), {
       schema: "pifleet.taskrecord/v1",
       task_id: settled.task_id,
@@ -546,8 +640,8 @@ async function main(): Promise<void> {
       worker: argv.workerId,
       run_id: argv.runId,
       epoch: settled.epoch,
-      verdict,
-      reason,
+      verdict: recordedVerdict,
+      reason: recordedReason,
       settled_at: new Date().toISOString(),
       tree_hash: treeHash,
     });
@@ -559,9 +653,15 @@ async function main(): Promise<void> {
       worker: argv.workerId,
       task_id: settled.task_id,
       epoch: settled.epoch,
-      detail: { verdict, reason },
+      detail: { verdict: recordedVerdict, reason: recordedReason },
     });
-    logEvent({ type: "settled", task_id: settled.task_id, epoch: settled.epoch, verdict, reason });
+    logEvent({
+      type: "settled",
+      task_id: settled.task_id,
+      epoch: settled.epoch,
+      verdict: recordedVerdict,
+      reason: recordedReason,
+    });
   };
 
   async function onChildExit(code: number | null, signal: string | null): Promise<void> {
@@ -1196,6 +1296,37 @@ async function main(): Promise<void> {
           envelope.host_workdir === "unset" || envelope.host_workdir === ""
             ? null
             : envelope.host_workdir;
+        /**
+         * This epoch's own starting point, for ISC-299's reader in `settle`.
+         *
+         * Taken HERE — after the workdir is known and BEFORE the prompt goes
+         * out — because that is the last instant at which the tree is
+         * guaranteed to be untouched by this epoch. A sample taken after the
+         * prompt races the agent's first write and would silently make the
+         * comparison vacuous: the baseline would already include the change it
+         * exists to detect.
+         *
+         * `worktreeContentHash` cannot throw and is bounded by its own
+         * timeout, so this cannot wedge the dispatch path; a failure yields
+         * null, which the reader treats as no evidence and which changes no
+         * verdict.
+         *
+         * IT DOES COST, and the cost is stated rather than left to be
+         * discovered. This is `git add -A` plus `write-tree`, so dispatch now
+         * blocks on hashing the whole worktree and the per-epoch hashing cost
+         * DOUBLES — `settle` was already paying one. Measured on this
+         * repository (309 tracked files) at 80-130 ms; it scales with the
+         * tree, so a large monorepo will pay noticeably more.
+         *
+         * Taking it off the dispatch path was considered and rejected: an
+         * asynchronous sample races the agent's first write, and a baseline
+         * that already contains the change it exists to detect makes the whole
+         * comparison vacuously equal. A slower dispatch is recoverable; a
+         * silently inert reader is the failure this criterion is about.
+         */
+        liveWorkdirBaseline =
+          liveWorkdir === null ? null : await worktreeContentHash(liveWorkdir);
+        liveToolErrorsAtStart = state.tool_errors;
 
         const message = renderPrompt(envelope);
         try {
