@@ -176,6 +176,24 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
    * DIRECTORY-only widen is not enough — an existing file owned by another uid
    * still refuses `open(O_WRONLY)`, so some edits land and others do not
    * depending on which call the tool made.
+   *
+   * WHERE THIS PROBE ACTUALLY DISCRIMINATES: the Linux runner, and nowhere
+   * else. Removing the widen entirely leaves this test GREEN on macOS —
+   * measured, not assumed — because Colima's shared filesystem squashes
+   * bind-mounted FILE ownership to whatever uid the container runs as, and it
+   * follows `--user`, so there is no uid at which the check can fail here:
+   *
+   *   host:                       de895996:staff 644
+   *   inside, --user 10001:       10001:10001 644   -> write succeeds
+   *   inside, --user 12345:       12345:12345 644   -> write succeeds
+   *
+   * The mount POINT is the exception and reports `0:0` at every uid, which is
+   * exactly why the git probe below CAN fail on macOS while this one cannot:
+   * git checks the repository directory's owner, and a write checks the file's.
+   * On Linux ownership passes through untouched and both fail without the
+   * widen. This is the shape `reference_docker_bind_mount_uid_macos_vs_linux`
+   * describes: green on a Mac is not evidence, and the first CI run is the
+   * real first run.
    */
   test("the baked uid can write the mounted clone, files as well as directories", async () => {
     // A new file: needs the directory bit.
@@ -198,9 +216,24 @@ describe.skipIf(!DOCKER)("the exam is held inside the worker's image (ISC-233)",
     expect(r.run.excerpt).not.toContain("dubious ownership");
   });
 
+  /**
+   * `/home/pi`, not `/etc`, and the difference is the whole probe.
+   *
+   * The first draft wrote to `/etc` and passed — but it passed for the WRONG
+   * REASON: `/etc` is root-owned 0755 and uid 10001 cannot write it whether the
+   * root filesystem is read-only or not. Dropping `--read-only` from the argv
+   * left this test green, which is how the weakness was found. `/home/pi` is
+   * the image's baked `$HOME`, owned by uid 10001, so it is writable on a
+   * normal root and refused on a read-only one — measured both ways:
+   *
+   *   docker run ... sh -c 'touch /home/pi/x'                  -> WROTE
+   *   docker run --read-only ... sh -c 'touch /home/pi/x'      -> REFUSED
+   *                              touch: Read-only file system
+   */
   test("the exam's root filesystem is read-only, as the worker's is", async () => {
-    const r = await exam(`sh -c 'touch /etc/pifleet-should-fail'`);
+    const r = await exam(`sh -c 'touch /home/pi/pifleet-should-fail'`);
     expect(r.run.outcome).toBe("failed");
+    expect(r.run.excerpt).toContain("Read-only file system");
     // /tmp is the tmpfs, and it IS writable — the contrast that shows the
     // failure above is the read-only root and not a broken container.
     expect((await exam(`sh -c 'touch /tmp/ok'`)).run.outcome).toBe("passed");
