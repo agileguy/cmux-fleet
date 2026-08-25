@@ -4,6 +4,42 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **SRD §5.9 is retitled "The LLM is a private oMLX instance" — the constraint is PRIVACY, not
+  LOCATION.** The section had been chasing its own code through two amendments: it began as "the LLM
+  is local — oMLX on the Docker host", became "self-hosted — the Docker host or a trusted LAN peer"
+  when a LAN server was permitted, and would have needed a third clause the moment an operator
+  fronted their own server with a tunnel. Enumerating permitted *places* was the wrong axis — each
+  new place read as a relaxation of the rule when none of them touched the rule at all. **Private
+  means the operator runs the process, holds its key, and decides who may reach it.** The
+  prohibition that actually matters — **no hosted provider, in any role, ever** — is unchanged and
+  is explicitly not what this relaxed; none of the permitted deployments introduces a third party
+  who serves the model.
+
+  Three shapes are now named, and §5.9 states plainly that they are **not equivalent in exposure**:
+  the Docker host (default — the key never leaves the machine), a trusted LAN peer (one unencrypted
+  hop), and a private tunnel to the operator's own server (the public internet, TLS to the tunnel
+  edge). Choosing among them is an operator decision with a security consequence, not a config
+  detail.
+
+  **No behaviour changes.** `relay_upstream` must still be an IP literal or the Docker-host alias —
+  that rule came from a measured resolver failure, not a locality assumption, so "private instance"
+  does not license a hostname there. `llm.base_url` still names `host.docker.internal`. Under the
+  tunnel shape the tunnel terminates at a local listener, so the relay still dials the Docker host
+  and §12.8's reachable set gains nothing.
+
+- **SRD §12.4 re-takes the LLM credential argument for a tunnelled instance, and it does not
+  inherit the LAN one.** The LAN residual rests on one row — *"an attacker is already adjacent to a
+  port they can open anyway"* — which bounds its blast radius. For a publicly-resolvable endpoint
+  that row is **false**: the key stops being one lock on an already-reachable port and becomes the
+  **sole** gate. Transport gets better (TLS to the edge rather than cleartext `http://`); the
+  reachable set gets much worse. Accepted as a residual on the unchanged basis that the key carries
+  no billing authority, no cloud identity and no data at rest, and that the Class 2 Google
+  credential never traverses this path — with a **stricter revisit trigger** than the LAN shape: a
+  shared or guessable key is no longer proportionate when it is the only thing in front of the
+  server.
+
 ### Fixed
 
 - **Two fleets can now run against one repo, and a crashed run no longer blocks the next one

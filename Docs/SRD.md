@@ -485,9 +485,31 @@ docker run -i --rm \
 
 `pifleet up` **refuses to start** if a configured role's image is absent or fails `verify` — no implicit builds, so a run never silently uses a stale image.
 
-### 5.9 The LLM is self-hosted — oMLX on the Docker host or a trusted LAN peer
+### 5.9 The LLM is a private oMLX instance
 
-**Every worker's model is served by an oMLX instance the operator runs.** No hosted provider is involved, in any role, ever. **That prohibition is unchanged and is not what this section relaxed** — it is the constraint that deletes `usd_ceiling`, deletes the provider key, and collapses §12.4's Class 1 to a single env var.
+**Every worker's model is served by a private oMLX instance the operator runs.** No hosted provider is involved, in any role, ever. **That prohibition is unchanged and is not what any amendment to this section has relaxed** — it is the constraint that deletes `usd_ceiling`, deletes the provider key, and collapses §12.4's Class 1 to a single env var.
+
+> **Amendment (2026-08-25) — the constraint is PRIVACY, not LOCATION, and this section is retitled to say so.**
+>
+> Two successive amendments had each moved a boundary and left the title chasing the code. The section began as "the LLM is local — oMLX on the Docker host", became "self-hosted — the Docker host or a trusted LAN peer" when a LAN server was permitted, and would have needed a third clause the moment an operator fronted their own server with a tunnel. Enumerating permitted *places* was the wrong axis: each new place read as a relaxation of the rule when none of them touched the rule at all.
+>
+> **The requirement is that the instance is the operator's own.** Private means: the operator runs the process, holds its key, and decides who may reach it. It says nothing about which interface it binds or how many hops away it sits. Stated this way the prohibition that actually matters — **no hosted provider, in any role, ever** — is the whole of the constraint, and it is not weakened by any of the deployments below because none of them introduces a third party who serves the model.
+>
+> **Three deployment shapes are permitted, and they are NOT equivalent in exposure.** The section title stops varying; the security posture varies instead, per shape, and is stated rather than implied:
+>
+> | Shape | Where the key travels | Who can open a socket to the endpoint |
+> |---|---|---|
+> | **Docker host** (default) | nowhere — loopback only | processes on that host |
+> | **Trusted LAN peer** | one unencrypted L2 hop | every device on the operator's LAN |
+> | **Private tunnel** to the operator's own server | the public internet, TLS to the tunnel edge | anyone who learns the hostname |
+>
+> Exposure grows down that table and the credential argument must be re-taken at each step, which §12.4 does. **Choosing a shape is an operator decision with a security consequence; it is not a config detail**, and the default remains the Docker host precisely because it is the only row whose key never leaves the machine.
+>
+> **What this amendment does NOT change, stated because a reader could reasonably assume otherwise:**
+>
+> - **The relay's dial target is untouched.** Under the tunnel shape the tunnel terminates at a listener on the Docker host, so the relay still dials `host.docker.internal` and `§12.8`'s reachable set gains nothing. A tunnel is a property of how the operator's oMLX is *fronted*, upstream of everything this fleet contains.
+> - **`relay_upstream` must still be an IP literal or the Docker-host alias — never a hostname.** That rule was derived from a measured resolver failure, not from a locality assumption, so "private instance" does not license a hostname there. See the `relay_upstream` paragraph below, which stands unamended.
+> - **`llm.base_url` still names `host.docker.internal`.** Nothing about privacy changes the listen-side alias.
 
 What *did* change (2026-08-19, ISC-259) is the word **local**. This section previously read "oMLX running on the same machine as Docker" and stated same-machine locality as a hard constraint. The Docker host is now the **default**, not the requirement; a **trusted LAN** oMLX is permitted. Two measurements forced the amendment, neither of them a preference:
 
@@ -1113,6 +1135,28 @@ Because inference is always self-hosted oMLX (§5.9), there is **no cloud provid
 > **The condition under which this must be revisited** — stated now so the trigger is not a judgement call later: if `OMLX_API_KEY` ever gates something with billing authority or data access, if the same key is reused for a credential that does, or if the LAN stops being one the operator controls (a guest network, an office, a shared flat), then TLS to the oMLX endpoint becomes **required**, not advisory. None of those hold today.
 >
 > Note the key is the same on the loopback and LAN servers. That does not widen the exposure: the loopback server cannot be reached off-host at all, so a key captured on the LAN buys nothing additional there.
+
+> **Erratum (2026-08-25, §5.9's privacy amendment) — the LAN residual above does NOT carry over to a tunnelled private instance, and the reason is the one line of the table that stops being true.**
+>
+> §5.9 now permits an operator to front their own oMLX with a private tunnel. The exposure that creates is **not** the LAN case with more hops, and treating it as such would be the mistake this erratum exists to prevent.
+>
+> **What gets better.** The LAN residual's sharpest edge was cleartext: `llm.base_url` is plain `http://`, so the key crossed an unencrypted hop in an `Authorization: Bearer` header. A tunnelled endpoint is reached over TLS to the tunnel edge, so the passive-observer capture that the LAN table accepts is no longer the live concern.
+>
+> **What gets worse, and it is the load-bearing half.** The LAN argument rests on one row — *"anyone on `192.168.86.0/24` can reach the endpoint **directly**, with or without the key crossing the wire. Capturing it buys an attacker access to a port they can already open a socket to."* That row is what makes the residual small. **For a publicly-resolvable tunnel endpoint it is false.** The set of parties who can open a socket is no longer "devices adjacent to the operator" but "anyone who learns the hostname", and the key stops being incidental to an already-open port and becomes **the only gate in front of the operator's inference server**.
+>
+> | Consideration | LAN shape | Tunnelled shape |
+> |---|---|---|
+> | Transport | cleartext `http://` | TLS to the tunnel edge |
+> | Who can reach the endpoint | devices on the operator's LAN | anyone who resolves the name |
+> | What the key is | one credential among several ways in | **the sole access control** |
+> | "Attacker is already adjacent" | true — bounds the blast radius | **false** — does not bound anything |
+> | Blast radius of theft | inference cycles on an adjacent machine | inference cycles on the operator's machine, from anywhere |
+>
+> **Accepted as a residual on a narrower basis than the LAN case, and the narrowing is the point.** What the key protects is unchanged and is still the reason this is tolerable at all: free inference on a self-hosted server, with **no billing authority, no cloud identity, and no data at rest** — the Class 2 Google credential never traverses this path, which is where real blast radius would live. An attacker who steals it spends the operator's GPU.
+>
+> **The revisit trigger is therefore STRICTER here than for the LAN shape.** §5.9's LAN residual is revisited if the key ever gates billing or data, if it is reused, or if the LAN stops being trusted. For a tunnelled instance, add: **a shared or guessable key is no longer proportionate.** On the LAN the key was one lock among several on an already-reachable port; here it is the only one, so it must be high-entropy and unique to this endpoint, and the tunnel must not be the transport for any key that also opens something else. If the endpoint ever serves a model whose *output* is trusted for anything beyond code suggestions, or the operator cannot enumerate who knows the hostname, TLS-plus-a-key stops being sufficient and the endpoint needs an authenticating proxy in front of it.
+>
+> **Sequencing note, consistent with ISC-259's original filing.** Nothing in this erratum permits the *relay* to dial a tunnel: §5.9 is explicit that a tunnel terminates at a local listener and the relay still dials `host.docker.internal`, so the deny-all bridge gains no hole and §12.8's reachable set is unchanged. The credential exposure documented here is on the **operator's own host-side hop**, outside the containment boundary this section otherwise governs.
 
 **Class 2 — Google Cloud identity: enters the container by design, bounded and opt-in.**
 
