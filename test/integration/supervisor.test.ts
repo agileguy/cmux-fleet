@@ -2215,3 +2215,267 @@ describe("the supervisor records a quiesce tree hash at settle (ISC-154)", () =>
     cliBudget(2),
   );
 });
+
+/**
+ * ISC-299 — an epoch whose every write was refused is not `success`.
+ *
+ * **The measurement this exists for.** `container-live`'s first execution of
+ * the whole chain on a Linux runner (2026-08-25) produced a worker that made
+ * **17 native tool calls, 11 of which the filesystem refused** with
+ * `EACCES: permission denied, open '/workspace/add.js'`, wrote nothing, and
+ * settled `success`. `dispatch --auto` reported `verdict: success` and an
+ * operator reading pifleet's own output would have been told the task worked.
+ *
+ * **Why the existing detector does not catch it.** ISC-108's reader asks
+ * whether tools were CALLED — see the block above — and seventeen were. That
+ * reader was itself built for F39's "worker looks healthy, streams, settles,
+ * and does nothing"; this is the same shape one step over, and it needs a
+ * different question: not *did it act* but *did anything change*.
+ *
+ * **Why the tree and not the error ratio.** Six of those seventeen calls
+ * SUCCEEDED — the reads worked fine; only the writes were refused. A predicate
+ * of "every call errored" is therefore satisfied by neither the real run nor
+ * the fixture below, and would close nothing. The tree is the
+ * model-independent evidence: whatever the agent believed it did, the disk
+ * disagrees.
+ *
+ * **The three tests are one experiment, and each isolates one term of the
+ * conjunction.** The first two share a single scenario and differ only in
+ * whether the test writes into the worktree during the window it leaves open,
+ * so neither can pass by the fixture merely being unusual. The third swaps the
+ * scenario for one with no errors, so the reader cannot be passing by ignoring
+ * the error count and condemning every unchanged tree — which would fail every
+ * legitimately read-only task.
+ */
+describe("ISC-299: tool errors plus an unchanged tree is not success", () => {
+  /** A real repository for the worker to have "worked" in. */
+  async function scratchWorktree(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-sup-nowork-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    await runGit(dir, ["init", "-q", "-b", "main"]);
+    await runGit(dir, ["config", "user.email", "fixture@test"]);
+    await runGit(dir, ["config", "user.name", "fixture"]);
+    await writeFile(join(dir, "add.js"), "function add(a, b) { return a + b; }\n");
+    await runGit(dir, ["add", "-A"]);
+    await runGit(dir, ["commit", "-qm", "base"]);
+    return dir;
+  }
+
+  /**
+   * Stand up a supervisor against `scenario`, dispatch one task at a real
+   * worktree, optionally mutate that worktree while the epoch is open, and
+   * return the settled record with the worker's events.
+   *
+   * `duringEpoch` is called after `controlCall` resolves, and that ordering is
+   * load-bearing rather than incidental: the supervisor sets `liveWorkdir`,
+   * samples the epoch baseline, and only then returns `accepted: true`
+   * (`supervisor/index.ts` — the sample sits well above the return). So a write
+   * made here is guaranteed to land AFTER the baseline, which is what makes
+   * the changed-tree case deterministic instead of a race with the prompt.
+   */
+  async function runEpoch(
+    label: string,
+    scenario: string,
+    duringEpoch?: (workdir: string) => Promise<void>,
+  ): Promise<{
+    record: Awaited<ReturnType<typeof readTaskRecord>>;
+    events: Array<Record<string, unknown>>;
+    workdir: string;
+  }> {
+    const root = await freshRoot();
+    const runId = testRunId(label);
+    const run = runPaths(runId, root);
+    const wp = workerPaths(run, "eng-1");
+    await mkdir(wp.tasksDir, { recursive: true });
+    await mkdir(run.sessionsDir, { recursive: true });
+    const workdir = await scratchWorktree();
+
+    const { pid, pgid } = await processLauncher.launchDetached({
+      runId,
+      runDir: join(root, runId),
+      workerId: "eng-1",
+      argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+      env: { PIFLEET_PI_COMMAND: piCommand(scenario) },
+      logPath: wp.supervisorLog,
+    });
+    cleanups.push(() => killSupervisor(pid, pgid));
+    expect(await waitForIdle(wp, pid)).toBe(true);
+
+    const taskId = `T-${label.toUpperCase()}`;
+    const reply = await controlCall(run, "eng-1", {
+      cmd: "dispatch",
+      envelope: makeEnvelope(runId, "eng-1", taskId, workdir),
+      attempt_id: `att-${label}`,
+      requested_epoch: null,
+    });
+    expect(reply["accepted"]).toBe(true);
+
+    if (duringEpoch !== undefined) await duringEpoch(workdir);
+
+    const settled = await waitFor(
+      async () => (await readTaskRecord(taskRecordPath(wp, taskId))) !== null,
+      20_000,
+    );
+    expect(settled).toBe(true);
+
+    return {
+      record: await readTaskRecord(taskRecordPath(wp, taskId)),
+      events: await readEvents(wp.eventsJsonl),
+      workdir,
+    };
+  }
+
+  test(
+    "a worker whose writes were all refused settles failed:no_work_done",
+    async () => {
+      const { record, events } = await runEpoch("nowork", "refused-writes.json");
+
+      // THE CRITERION. Before this reader existed both of these read
+      // `success` / `quiesced` — a worker that changed nothing, certified as
+      // having done it.
+      expect(record?.verdict).toBe("failed");
+      expect(record?.reason).toBe("no_work_done");
+
+      /**
+       * The verdict alone would be satisfied by any bug that failed this
+       * task — a crash, a deadline, a refused dispatch. The detector's own
+       * event is what shows this specific reader ran and why it fired, and
+       * its payload carries the two facts the decision was made on.
+       */
+      const trip = events.find((e) => e["type"] === "no_work_done_detected");
+      expect(trip, "the ISC-299 reader never ran").toBeDefined();
+      expect(trip?.["tool_errors"]).toBe(3);
+
+      // And it is NOT the ISC-108 path: five tools were called, so the prose
+      // detector must have stayed silent. If this fires, the two readers are
+      // entangled and this test would pass for the wrong reason.
+      expect(events.some((e) => e["type"] === "no_tool_calls_detected")).toBe(false);
+    },
+    // scratchWorktree 5 git spawns + 1 supervisor launch + 2 for the epoch
+    // baseline hash + 2 for the quiesce hash, and the fixture holds the turn
+    // open for 3 s on purpose.
+    cliBudget(12),
+  );
+
+  test(
+    "the SAME fixture settles success once real work lands in the tree",
+    async () => {
+      const { record, events, workdir } = await runEpoch(
+        "didwork",
+        "refused-writes.json",
+        async (dir) => {
+          // Untracked, deliberately: it is the case an index-only hash cannot
+          // see, and `worktreeContentHash` stages before hashing precisely so
+          // that it can.
+          await writeFile(join(dir, "subtract.js"), "function subtract(a, b) { return a - b; }\n");
+        },
+      );
+
+      // Same scenario, same three tool errors, same supervisor. ONE variable
+      // changed — the tree — and the verdict follows it. That is what shows
+      // the reader is reading the tree rather than the error count.
+      expect(record?.verdict).toBe("success");
+      expect(record?.reason).toBe("quiesced");
+      expect(events.some((e) => e["type"] === "no_work_done_detected")).toBe(false);
+      expect(await Bun.file(join(workdir, "subtract.js")).exists()).toBe(true);
+    },
+    cliBudget(12),
+  );
+
+  test(
+    "a clean read-only epoch that changes nothing is still success",
+    async () => {
+      // `happy.json`: one tool call, no errors. The tree is untouched, exactly
+      // as in the first test — so a reader that condemned every unchanged tree
+      // would fail this, and with it every legitimate "summarise these files"
+      // task in the fleet. The error term is what stops that.
+      const { record, events } = await runEpoch("readonly", "happy.json");
+
+      expect(record?.verdict).toBe("success");
+      expect(record?.reason).toBe("quiesced");
+      expect(events.some((e) => e["type"] === "no_work_done_detected")).toBe(false);
+    },
+    cliBudget(10),
+  );
+
+  test(
+    "a clean SECOND epoch is not condemned by the first epoch's errors",
+    async () => {
+      /**
+       * The hazard this pins, and it is the one bug most likely to be
+       * reintroduced by someone simplifying the reader.
+       *
+       * `state.tool_errors` is CUMULATIVE over a worker's entire life —
+       * nothing resets it, deliberately, because `harvest` reports it as a
+       * lifetime total. A reader that consulted that counter raw would carry
+       * epoch one's three refusals into epoch two, and since epoch two also
+       * changes nothing it would satisfy every term of the conjunction and
+       * settle `failed`. The epoch-start snapshot is what makes the count
+       * mean "errors THIS epoch".
+       *
+       * A single-epoch fixture cannot see this: with one task the delta and
+       * the total are the same number, so the mutation is invisible. Two
+       * epochs on ONE supervisor is the smallest arrangement that separates
+       * them.
+       */
+      const root = await freshRoot();
+      const runId = testRunId("twoepoch");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      await mkdir(wp.tasksDir, { recursive: true });
+      await mkdir(run.sessionsDir, { recursive: true });
+      const workdir = await scratchWorktree();
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        env: { PIFLEET_PI_COMMAND: piCommand("refused-then-clean.json") },
+        logPath: wp.supervisorLog,
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      const dispatch = async (taskId: string): Promise<void> => {
+        const reply = await controlCall(run, "eng-1", {
+          cmd: "dispatch",
+          envelope: makeEnvelope(runId, "eng-1", taskId, workdir),
+          attempt_id: `att-${taskId}`,
+          requested_epoch: null,
+        });
+        expect(reply["accepted"]).toBe(true);
+        expect(
+          await waitFor(
+            async () => (await readTaskRecord(taskRecordPath(wp, taskId))) !== null,
+            20_000,
+          ),
+        ).toBe(true);
+      };
+
+      await dispatch("T-EPOCH-1");
+      await dispatch("T-EPOCH-2");
+
+      // Epoch one is the ISC-299 case and must be caught — without this the
+      // test could pass on a reader that never fires at all.
+      const first = await readTaskRecord(taskRecordPath(wp, "T-EPOCH-1"));
+      expect(first?.verdict).toBe("failed");
+      expect(first?.reason).toBe("no_work_done");
+
+      // THE assertion. Epoch two called one tool, it succeeded, and the tree
+      // is untouched — a clean read-only turn. Under a cumulative error count
+      // this reads `failed` / `no_work_done`.
+      const second = await readTaskRecord(taskRecordPath(wp, "T-EPOCH-2"));
+      expect(second?.verdict).toBe("success");
+      expect(second?.reason).toBe("quiesced");
+
+      // Exactly one trip, belonging to the first epoch.
+      const events = await readEvents(wp.eventsJsonl);
+      const trips = events.filter((e) => e["type"] === "no_work_done_detected");
+      expect(trips).toHaveLength(1);
+      expect(trips[0]?.["task_id"]).toBe("T-EPOCH-1");
+    },
+    // scratchWorktree 5 + 1 launch + 2 epochs x (2 baseline + 2 quiesce).
+    cliBudget(14),
+  );
+});

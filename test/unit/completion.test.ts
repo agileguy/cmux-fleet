@@ -402,6 +402,31 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
   "stale-epoch.json": [1],
   "bad-correlation.json": [1], // the injected response never reaches the tracker
   "interleave.json": [1], // epoch 2's empty prompt must NEVER settle
+  /**
+   * ISC-299's fixture. Settles once, like `happy.json`, and for the same
+   * reason `no-tool-calls.json` still settles once after ISC-108: what changed
+   * is the VERDICT a settle carries, and this table counts settles.
+   *
+   * `simulate` replays a scenario against `EpochManager` + `CompletionTracker`
+   * only. The ISC-299 reader lives in `src/supervisor/index.ts` and consults a
+   * git tree hash, neither of which this simulator runs or models — so a
+   * refused write is, to the tracker, an ordinary `tool_execution_end`. One
+   * terminal `agent_end`, one epoch, one settle.
+   *
+   * The 3 s delay is skipped here by design (`delay_ms` is a marker, not a
+   * record), so the window the integration test writes into costs this
+   * property test nothing.
+   */
+  "refused-writes.json": [1],
+  /**
+   * TWO prompt steps, each with its own terminal `agent_end`, so both epochs
+   * settle. Contrast `interleave.json` directly above, which also has two
+   * prompts and expects `[1]` — there the second prompt emits nothing that
+   * could complete a turn. Here it emits a full clean turn, which is the whole
+   * point of the fixture: the second epoch must be able to reach a verdict of
+   * its own rather than inheriting the first one's.
+   */
+  "refused-then-clean.json": [1, 2],
   "late-failure.json": [], // no terminal event: the late response fails it elsewhere
   "late-response.json": [], // nothing is ever dispatched or emitted
   "truncated.json": [], // the stream dies mid-record; no settle is fabricated

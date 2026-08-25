@@ -1,0 +1,34 @@
+{
+  "scenario": "refused-then-clean",
+  "_comment": "TWO prompt steps, consumed in order by fake-pi's per-command cursor: epoch one is ISC-299's refused-writes worker, epoch two is a clean read-only turn on the same worker. This exists to pin ONE hazard that a single-epoch fixture cannot see. `state.tool_errors` is CUMULATIVE over a worker's whole life and nothing resets it — deliberately, since harvest reports it as a lifetime total — so a reader that consulted it raw would carry epoch one's three failures into epoch two and condemn a blameless clean turn. Epoch two changes nothing either, so under a cumulative count it satisfies every term of the conjunction and settles `failed`. It must settle `success`. Neither turn writes, so no timing window is needed here.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "type": "tool_execution_start", "tool": "write" },
+        { "type": "tool_execution_end", "tool": "write", "isError": true },
+        { "type": "tool_execution_start", "tool": "edit" },
+        { "type": "tool_execution_end", "tool": "edit", "isError": true },
+        { "type": "tool_execution_start", "tool": "bash" },
+        { "type": "tool_execution_end", "tool": "bash", "isError": true },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    },
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "type": "tool_execution_start", "tool": "read" },
+        { "type": "tool_execution_end", "tool": "read", "isError": false },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}

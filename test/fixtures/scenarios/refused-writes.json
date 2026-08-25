@@ -1,0 +1,27 @@
+{
+  "scenario": "refused-writes",
+  "_comment": "ISC-299's worker: it calls tools ENTHUSIASTICALLY and the filesystem refuses the writes. Taken from a measured run, not invented — container-live's first Linux CI execution of the whole chain on 2026-08-25 saw 17 native tool calls of which 11 failed with EACCES on /workspace/add.js, wrote nothing, and settled `success`. THE MIX IS THE POINT AND MUST NOT BE SIMPLIFIED TO ALL-ERRORS: the reads succeed here exactly as they did there, so a predicate of 'every call errored' passes this fixture happily and closes nothing. That is why the criterion turns on the TREE and not on the error ratio. The ISC-108 detector cannot catch this either — it asks whether tools were CALLED, and five are. The delay before turn_end is a WINDOW, not decoration: the paired test writes into the worktree during it to show the same fixture settles `success` once real work lands, so neither test can pass by the fixture merely being unusual.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "turn_start" },
+        { "type": "tool_execution_start", "tool": "read" },
+        { "type": "tool_execution_end", "tool": "read", "isError": false },
+        { "type": "tool_execution_start", "tool": "bash" },
+        { "type": "tool_execution_end", "tool": "bash", "isError": false },
+        { "type": "tool_execution_start", "tool": "write" },
+        { "type": "tool_execution_end", "tool": "write", "isError": true },
+        { "type": "tool_execution_start", "tool": "edit" },
+        { "type": "tool_execution_end", "tool": "edit", "isError": true },
+        { "type": "tool_execution_start", "tool": "bash" },
+        { "type": "tool_execution_end", "tool": "bash", "isError": true },
+        { "delay_ms": 3000 },
+        { "type": "turn_end" },
+        { "type": "agent_end", "messages": [], "willRetry": false },
+        { "type": "queue_update", "steering": [], "followUp": [] }
+      ]
+    }
+  ]
+}
