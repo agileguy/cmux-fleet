@@ -32,7 +32,7 @@ import {
 } from "../../src/security/network.ts";
 
 /** The default-shaped policy: oMLX from config + the Google endpoints on 443. */
-function defaultPolicy(baseUrl = "http://host.docker.internal:8000/v1"): EgressPolicy {
+function defaultPolicy(baseUrl = "http://omlx.pifleet.internal:8000/v1"): EgressPolicy {
   return policyFromConfig({
     llm: { base_url: baseUrl },
     egress: {
@@ -63,7 +63,7 @@ describe("decide: deny-all default", () => {
   });
 
   test("an empty policy denies everything, including the oMLX host", () => {
-    const d = check("host.docker.internal", 8000, { rules: [] });
+    const d = check("omlx.pifleet.internal", 8000, { rules: [] });
     expect(d.allowed).toBe(false);
     expect(d.rule).toBe(RULE_DEFAULT_DENY);
   });
@@ -76,8 +76,8 @@ describe("decide: deny-all default", () => {
 });
 
 describe("decide: the oMLX rule comes from config, not from a constant", () => {
-  test("default base_url allows host.docker.internal:8000", () => {
-    const d = check("host.docker.internal", 8000, defaultPolicy());
+  test("default base_url allows omlx.pifleet.internal:8000", () => {
+    const d = check("omlx.pifleet.internal", 8000, defaultPolicy());
     expect(d.allowed).toBe(true);
     expect(d.rule).toBe("llm");
   });
@@ -87,7 +87,7 @@ describe("decide: the oMLX rule comes from config, not from a constant", () => {
     // only the old host, every worker silently loses its LLM (§5.9).
     const p = defaultPolicy("http://10.0.0.5:9000/v1");
     expect(check("10.0.0.5", 9000, p).allowed).toBe(true);
-    const stale = check("host.docker.internal", 8000, p);
+    const stale = check("omlx.pifleet.internal", 8000, p);
     expect(stale.allowed).toBe(false);
     expect(stale.rule).toBe(RULE_DEFAULT_DENY);
   });
@@ -247,8 +247,8 @@ describe("decide: the port is part of the rule", () => {
   const p = defaultPolicy();
 
   test("the oMLX host on any other port is denied", () => {
-    expect(check("host.docker.internal", 8001, p).allowed).toBe(false);
-    expect(check("host.docker.internal", 443, p).allowed).toBe(false);
+    expect(check("omlx.pifleet.internal", 8001, p).allowed).toBe(false);
+    expect(check("omlx.pifleet.internal", 443, p).allowed).toBe(false);
   });
 
   test("an allowed Google host off 443 is denied", () => {
@@ -270,7 +270,7 @@ describe("decide: the port is part of the rule", () => {
 describe("policy construction", () => {
   test("extra config rules are admitted under a config: name", () => {
     const p = policyFromConfig({
-      llm: { base_url: "http://host.docker.internal:8000/v1" },
+      llm: { base_url: "http://omlx.pifleet.internal:8000/v1" },
       egress: { google_hosts: [], allow: [{ host: "pypi.org", port: 443 }] },
     });
     const d = decide("pypi.org", 443, p);
@@ -340,11 +340,11 @@ describe("config egress section (schema wiring)", () => {
 
   test("the parsed defaults feed policyFromConfig end-to-end", () => {
     const p = policyFromConfig({
-      llm: { base_url: "http://host.docker.internal:8000/v1" },
+      llm: { base_url: "http://omlx.pifleet.internal:8000/v1" },
       egress: EgressSchema.parse({}),
     });
     expect(decide("storage.googleapis.com", 443, p).allowed).toBe(true);
-    expect(decide("host.docker.internal", 8000, p).allowed).toBe(true);
+    expect(decide("omlx.pifleet.internal", 8000, p).allowed).toBe(true);
     expect(decide("example.com", 443, p).allowed).toBe(false);
   });
 

@@ -6,7 +6,10 @@
  * proves the argv and the matcher. Only this file proves the thing the two
  * halves exist for: that a container with NO special flags, attached to
  * nothing but the deny-all internal network, completes a real model-shaped
- * call to `host.docker.internal` — and still cannot reach the internet.
+ * call to the relay's listen alias — and still cannot reach the internet.
+ * (That alias is `omlx.pifleet.internal` as of ISC-264; `host.docker.internal`
+ * remains the name the RELAY dials on the host side, which is a different
+ * thing and is why both spellings appear in this file.)
  *
  * That combination is the whole point, so both halves are asserted in ONE
  * test against ONE container. Splitting them would let a future change open
@@ -813,7 +816,7 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
       });
       try {
         const relay = await ensureEgressRelay(
-          cfg(`http://host.docker.internal:${stub.port}/v1`),
+          cfg(`http://omlx.pifleet.internal:${stub.port}/v1`),
           net,
         );
         expect(relay.created).toBe(true);
@@ -831,10 +834,29 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
 
         // Wait for the forward to be live before enumerating, so a slow start
         // cannot read as "the relay opens no ports".
-        await onInternalNetwork(
+        //
+        // This is also the only LIVE evidence that ISC-264's new alias actually
+        // resolves on a real internal bridge. The unit suite asserts the argv
+        // `relayConnectArgv` builds; nothing there can show that Docker's
+        // embedded DNS answers the name, and the alias is the entire mechanism
+        // by which a worker finds its model server.
+        const viaNew = await onInternalNetwork(
           net,
-          curlProbe("models", `http://host.docker.internal:${stub.port}/v1/models`),
+          curlProbe("models", `http://omlx.pifleet.internal:${stub.port}/v1/models`),
         );
+        expect(viaNew).toContain(nonce);
+
+        // And the LEGACY spelling, from the same container on the same bridge.
+        // ISC-264's transition claim is that an existing fleet.yaml keeps
+        // working, and a worker's models.json is rendered from `llm.base_url` —
+        // so the old name has to RESOLVE, not merely pass validation. Asserting
+        // the argv carries two `--alias` flags does not prove Docker honoured
+        // the second one.
+        const viaLegacy = await onInternalNetwork(
+          net,
+          curlProbe("models-legacy", `http://host.docker.internal:${stub.port}/v1/models`),
+        );
+        expect(viaLegacy).toContain(nonce);
 
         const relayScan = await onInternalNetwork(
           net,
@@ -944,7 +966,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         },
       });
       const port = stub.port;
-      const url = `http://host.docker.internal:${port}/v1/models`;
+      const url = `http://omlx.pifleet.internal:${port}/v1/models`;
 
       try {
         // BEFORE: the destination is unreachable from the bridge. This is the
@@ -960,7 +982,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         // reported a NON-ZERO failure code, which is the measurement.
         expect(before).toMatch(/^pre=[1-9][0-9]*$/m);
 
-        const relay = await ensureEgressRelay(cfg(`http://host.docker.internal:${port}/v1`), net);
+        const relay = await ensureEgressRelay(cfg(`http://omlx.pifleet.internal:${port}/v1`), net);
         expect(relay.created).toBe(true);
         expect(relay.name).toBe(relayContainerName(net));
         // The relay records WHAT it would run and WHERE it would forward, on
@@ -968,6 +990,10 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         // or script change, since adoption never compares them (S5/S8).
         expect(relay.scriptSha256).toMatch(/^[0-9a-f]{64}$/);
         expect(relay.targets).toEqual([
+          // The DIAL host, deliberately still `host.docker.internal` — this is
+          // the target the relay forwards TO, not the alias workers dial. The
+          // two were the same string until ISC-264 and a policy rule was
+          // written from the wrong one because of it.
           { listenPort: port, host: "host.docker.internal", port, name: "omlx" } as RelayTarget,
         ]);
 
@@ -999,7 +1025,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         // Idempotence, the property `up` depends on: a second ensure adopts
         // the running relay rather than rebuilding a shared resource other
         // fleets may be using right now.
-        const again = await ensureEgressRelay(cfg(`http://host.docker.internal:${port}/v1`), net);
+        const again = await ensureEgressRelay(cfg(`http://omlx.pifleet.internal:${port}/v1`), net);
         expect(again).toEqual({
           name: relay.name,
           created: false,
@@ -1039,7 +1065,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         hostname: "0.0.0.0",
         fetch: () => Response.json({ object: "list", data: [{ id: nonce }] }),
       });
-      const base = `http://host.docker.internal:${stub.port}/v1`;
+      const base = `http://omlx.pifleet.internal:${stub.port}/v1`;
       try {
         const first = await ensureEgressRelay(cfg(base), net);
         expect(first.created).toBe(true);
@@ -1054,7 +1080,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         // stub's own body is the fact.
         const out = await onInternalNetwork(
           net,
-          curlProbe("models", `http://host.docker.internal:${stub.port}/v1/models`),
+          curlProbe("models", `http://omlx.pifleet.internal:${stub.port}/v1/models`),
         );
         expect(out).toContain(nonce);
       } finally {
@@ -1076,7 +1102,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
       await ensureEgressNetwork(net);
       await expect(
         ensureEgressRelay(cfg("http://10.0.0.5:8000/v1"), net),
-      ).rejects.toThrow(/host\.docker\.internal/);
+      ).rejects.toThrow(/omlx\.pifleet\.internal/);
       // Nothing was built on the way to that refusal.
       expect((await inspectRelayContainer(relayContainerName(net))).exists).toBe(false);
     },
@@ -1116,7 +1142,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
       expect(directIds.length).toBeGreaterThan(0);
 
       const relay = await ensureEgressRelay(
-        cfg("http://host.docker.internal:8000/v1"),
+        cfg("http://omlx.pifleet.internal:8000/v1"),
         net,
       );
       expect(relay.created).toBe(true);
@@ -1138,7 +1164,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         net,
         curlProbe(
           "models",
-          "http://host.docker.internal:8000/v1/models",
+          "http://omlx.pifleet.internal:8000/v1/models",
           "Authorization: Bearer $OMLX_API_KEY",
         ),
         { OMLX_API_KEY: OMLX_KEY },
@@ -1313,7 +1339,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         return;
       }
 
-      const relay = await ensureEgressRelay(cfg("http://host.docker.internal:8000/v1"), net);
+      const relay = await ensureEgressRelay(cfg("http://omlx.pifleet.internal:8000/v1"), net);
       expect(relay.created).toBe(true);
 
       // Cheap roundtrip first: it waits for the forward to come up, and its
@@ -1326,7 +1352,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
         net,
         curlProbe(
           "models",
-          "http://host.docker.internal:8000/v1/models",
+          "http://omlx.pifleet.internal:8000/v1/models",
           "Authorization: Bearer $OMLX_API_KEY",
         ),
         { OMLX_API_KEY: OMLX_KEY },
@@ -1350,7 +1376,7 @@ describe.skipIf(!DOCKER)("egress relay", () => {
              -H "Authorization: Bearer $OMLX_API_KEY" \\
              -H 'Content-Type: application/json' \\
              --data '${body}' \\
-             ${JSON.stringify("http://host.docker.internal:8000/v1/chat/completions")} \\
+             ${JSON.stringify("http://omlx.pifleet.internal:8000/v1/chat/completions")} \\
              2>/dev/null || echo "curl-failed")
          echo "code=$code"
          echo "reply=$(tr -d '\\n' < /tmp/chat.json)"`,
@@ -1456,12 +1482,12 @@ describe.skipIf(!DOCKER)("changing relay_upstream takes effect on its own (ISC-2
       // worker's `base_url` never changes here, so anything the worker sees
       // change is the relay's DIAL side and nothing else.
       const listen = before.port;
-      const url = `http://host.docker.internal:${listen}/v1/models`;
+      const url = `http://omlx.pifleet.internal:${listen}/v1/models`;
       const read = (net: string) =>
         onInternalNetwork(net, `curl -sS -m 5 ${JSON.stringify(url)} 2>&1`);
 
       try {
-        const first = await ensureEgressRelay(cfg(`http://host.docker.internal:${listen}/v1`), net);
+        const first = await ensureEgressRelay(cfg(`http://omlx.pifleet.internal:${listen}/v1`), net);
         expect(first.created).toBe(true);
         expect(first.replaced).toBeNull();
         expect(await read(net)).toContain(`was-${process.pid}`);
@@ -1474,7 +1500,7 @@ describe.skipIf(!DOCKER)("changing relay_upstream takes effect on its own (ISC-2
          * relay that "already exists".
          */
         const moved = cfg(
-          `http://host.docker.internal:${listen}/v1`,
+          `http://omlx.pifleet.internal:${listen}/v1`,
           `${RELAY_DEFAULT_DIAL_HOST}:${movedPort}`,
           [{ host: RELAY_DEFAULT_DIAL_HOST, port: movedPort }],
         );

@@ -544,7 +544,7 @@ function stubToolCallServer(): {
  * Written to disk and pushed through the REAL `loadConfig` rather than
  * hand-building a config object, because half of what ISC-291 rests on is the
  * SCHEMA's documented default — `relay_upstream: null` meaning
- * `host.docker.internal:<port from base_url>`. A hand-built object would let
+ * the Docker host at `<port from base_url>`. A hand-built object would let
  * this file assert that default against its own restatement of it, which is
  * the circularity ISC-253 is the standing example of.
  */
@@ -593,7 +593,7 @@ describe("the host-side probe dials a host-reachable endpoint (ISC-291)", () => 
        * fail on an unreachable endpoint rather than pass on a stub.
        */
       const loaded = await loadConfig(
-        await configWith("http://host.docker.internal:8000/v1", `${DIAL_LOOPBACK}:${stub.port}`),
+        await configWith("http://omlx.pifleet.internal:8000/v1", `${DIAL_LOOPBACK}:${stub.port}`),
       );
 
       const target = hostReachableBaseUrl(loaded.config);
@@ -612,7 +612,7 @@ describe("the host-side probe dials a host-reachable endpoint (ISC-291)", () => 
        * not disturb what a worker dials; `base_url` is still the bridge alias,
        * byte for byte, and the two values are still different strings.
        */
-      expect(loaded.config.llm.base_url).toBe("http://host.docker.internal:8000/v1");
+      expect(loaded.config.llm.base_url).toBe("http://omlx.pifleet.internal:8000/v1");
       expect(loaded.config.llm.relay_upstream).toBe(`${DIAL_LOOPBACK}:${stub.port}`);
       expect(target).not.toBe(loaded.config.llm.base_url);
     } finally {
@@ -626,21 +626,21 @@ describe("the host-side probe dials a host-reachable endpoint (ISC-291)", () => 
       /**
        * The SHIPPED DEFAULT's shape: `relay_upstream` is omitted entirely, so
        * the schema's own `null` default applies and the derivation has to fall
-       * back to "`host.docker.internal:<port from base_url>`, evaluated from
+       * back to "the Docker host at `<port from base_url>`, evaluated from
        * the Docker host". Only the PORT differs from the shipped literal, and
        * only because this test binds its own server rather than dialing the
        * machine's real inference port — which it must never do. The host
        * component under test is the shipped one, unchanged.
        */
       const loaded = await loadConfig(
-        await configWith(`http://host.docker.internal:${stub.port}/v1`),
+        await configWith(`http://omlx.pifleet.internal:${stub.port}/v1`),
       );
       expect(loaded.config.llm.relay_upstream).toBeNull();
 
       const target = hostReachableBaseUrl(loaded.config);
 
       // The alias is GONE from the dial target — the defect, stated directly.
-      expect(target).not.toContain("host.docker.internal");
+      expect(target).not.toContain("omlx.pifleet.internal");
       // And the port travelled with it, which is what makes this a derivation
       // from config rather than a constant.
       expect(target).toBe(`http://${DIAL_LOOPBACK}:${stub.port}/v1`);
@@ -650,7 +650,7 @@ describe("the host-side probe dials a host-reachable endpoint (ISC-291)", () => 
       expect(stub.urls).toEqual([`http://${DIAL_LOOPBACK}:${stub.port}/v1/chat/completions`]);
 
       // Still not collapsed: the worker's URL keeps naming the bridge alias.
-      expect(loaded.config.llm.base_url).toContain("host.docker.internal");
+      expect(loaded.config.llm.base_url).toContain("omlx.pifleet.internal");
     } finally {
       await stub.stop();
     }
@@ -684,7 +684,7 @@ describe("the host-side probe dials a host-reachable endpoint (ISC-291)", () => 
    * a chosen one.
    */
   test("the shipped default derives to the Docker host's loopback at base_url's port", async () => {
-    const loaded = await loadConfig(await configWith("http://host.docker.internal:8000/v1"));
+    const loaded = await loadConfig(await configWith("http://omlx.pifleet.internal:8000/v1"));
     expect(hostReachableBaseUrl(loaded.config)).toBe(`http://${DIAL_LOOPBACK}:8000/v1`);
   });
 });
@@ -711,7 +711,7 @@ describe("the host-side probe dials a host-reachable endpoint (ISC-291)", () => 
 describe("the host dial target carries every part of base_url (ISC-291)", () => {
   test("userinfo survives the substitution", async () => {
     const loaded = await loadConfig(
-      await configWith("http://probe-key@host.docker.internal:8000/v1"),
+      await configWith("http://probe-key@omlx.pifleet.internal:8000/v1"),
     );
     // The credential is still there, attached to the NEW authority.
     expect(hostReachableBaseUrl(loaded.config)).toBe(`http://probe-key@${DIAL_LOOPBACK}:8000/v1`);
@@ -719,19 +719,19 @@ describe("the host dial target carries every part of base_url (ISC-291)", () => 
 
   test("a user:password pair survives, and an empty password is not invented", async () => {
     const withPass = await loadConfig(
-      await configWith("http://user:s3cret@host.docker.internal:8000/v1"),
+      await configWith("http://user:s3cret@omlx.pifleet.internal:8000/v1"),
     );
     expect(hostReachableBaseUrl(withPass.config)).toBe(
       `http://user:s3cret@${DIAL_LOOPBACK}:8000/v1`,
     );
     // `user@` and `user:@` are different authorities; echoing a colon the input
     // did not carry would be its own quiet rewrite.
-    const noPass = await loadConfig(await configWith("http://user@host.docker.internal:8000/v1"));
+    const noPass = await loadConfig(await configWith("http://user@omlx.pifleet.internal:8000/v1"));
     expect(hostReachableBaseUrl(noPass.config)).toBe(`http://user@${DIAL_LOOPBACK}:8000/v1`);
   });
 
   test("a fragment survives", async () => {
-    const loaded = await loadConfig(await configWith("http://host.docker.internal:8000/v1#tenant-a"));
+    const loaded = await loadConfig(await configWith("http://omlx.pifleet.internal:8000/v1#tenant-a"));
     expect(hostReachableBaseUrl(loaded.config)).toBe(`http://${DIAL_LOOPBACK}:8000/v1#tenant-a`);
   });
 
@@ -739,7 +739,7 @@ describe("the host dial target carries every part of base_url (ISC-291)", () => 
     // A path AND a query: the ordinary case, and the one the old heuristic got
     // right by luck.
     const withPath = await loadConfig(
-      await configWith("http://host.docker.internal:8000/v1?tenant=a"),
+      await configWith("http://omlx.pifleet.internal:8000/v1?tenant=a"),
     );
     expect(hostReachableBaseUrl(withPath.config)).toBe(`http://${DIAL_LOOPBACK}:8000/v1?tenant=a`);
 
@@ -751,7 +751,7 @@ describe("the host dial target carries every part of base_url (ISC-291)", () => 
      * base URL that never had one. Every caller builds `${baseUrl}/models` by
      * concatenation, so that slash becomes a `//models` request.
      */
-    const noPath = await loadConfig(await configWith("http://host.docker.internal:8000?tenant=a"));
+    const noPath = await loadConfig(await configWith("http://omlx.pifleet.internal:8000?tenant=a"));
     const derived = hostReachableBaseUrl(noPath.config);
     expect(derived).toBe(`http://${DIAL_LOOPBACK}:8000?tenant=a`);
     expect(`${derived}/models`).not.toContain("//models");
@@ -761,7 +761,7 @@ describe("the host dial target carries every part of base_url (ISC-291)", () => 
     // The other direction, and what stops the fix becoming "strip every
     // trailing slash": `/v1/` and `/v1` are different paths on some servers,
     // and this function's contract is to change the authority and NOTHING else.
-    const loaded = await loadConfig(await configWith("http://host.docker.internal:8000/v1/"));
+    const loaded = await loadConfig(await configWith("http://omlx.pifleet.internal:8000/v1/"));
     expect(hostReachableBaseUrl(loaded.config)).toBe(`http://${DIAL_LOOPBACK}:8000/v1/`);
   });
 
@@ -771,7 +771,7 @@ describe("the host dial target carries every part of base_url (ISC-291)", () => 
      * set — so neither path can pass by handling one part each.
      */
     const loaded = await loadConfig(
-      await configWith("http://key:pw@host.docker.internal:8000/v1?tenant=a#frag", "10.1.2.3:9000"),
+      await configWith("http://key:pw@omlx.pifleet.internal:8000/v1?tenant=a#frag", "10.1.2.3:9000"),
     );
     expect(hostReachableBaseUrl(loaded.config)).toBe("http://key:pw@10.1.2.3:9000/v1?tenant=a#frag");
   });
@@ -906,7 +906,7 @@ describe("doctor never forwards the API key to a redirect target (G5)", () => {
 
       try {
         const configPath = await configWith(
-          "http://host.docker.internal:8000/v1",
+          "http://omlx.pifleet.internal:8000/v1",
           `${DIAL_LOOPBACK}:${redirectPort}`,
         );
         const p = await spawnCliProcess(["doctor", "--json", "-c", configPath], { env: { OMLX_API_KEY: "pifleet-redirect-canary-key" } });

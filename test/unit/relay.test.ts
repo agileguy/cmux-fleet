@@ -44,6 +44,7 @@ import {
   RELAY_TARGETS_ENV,
   type RelayTarget,
 } from "../../src/security/relay.ts";
+import { hostReachableBaseUrl } from "../../src/security/model-probe.ts";
 
 const NET = "pifleet-egress";
 
@@ -561,6 +562,37 @@ describe("the LAN upstream gate — MUTATION PROOF of non-vacuity (ISC-253, ISC-
    * one rule 1 is written from, and the conflation is undetectable exactly as
    * it was before — a latent launch-breaking bug with full green coverage.
    */
+  /**
+   * The THIRD site with the same conflation, kept in this file because the
+   * defect is one defect and a reader chasing it should find all of them
+   * together.
+   *
+   * `hostReachableBaseUrl` maps a worker-facing `base_url` to something the
+   * HOST can dial. `base_url`'s host is the LISTEN alias, and the comparison
+   * was written against `RELAY_DEFAULT_DIAL_HOST` — correct-looking, and only
+   * ever correct because the two constants held the same string. Renaming the
+   * listen alias broke it: the substitution stopped happening and `doctor`/`up`
+   * would have probed `omlx.pifleet.internal` from the host, a name the host
+   * cannot resolve.
+   *
+   * Both spellings map, because `base_url` still accepts the old one.
+   */
+  test("hostReachableBaseUrl substitutes loopback for EITHER listen spelling", () => {
+    for (const alias of [RELAY_LISTEN_ALIAS, LEGACY_RELAY_LISTEN_ALIAS]) {
+      expect(
+        hostReachableBaseUrl({ llm: { base_url: `http://${alias}:8000/v1`, relay_upstream: null } }),
+      ).toBe("http://127.0.0.1:8000/v1");
+    }
+  });
+
+  test("…and leaves a host it does not recognise alone", () => {
+    // The guard that keeps the assertion above from passing for a function
+    // that rewrites everything to loopback.
+    expect(
+      hostReachableBaseUrl({ llm: { base_url: "http://10.0.0.5:8000/v1", relay_upstream: null } }),
+    ).toBe("http://10.0.0.5:8000/v1");
+  });
+
   test("the listen alias and the dial host are DIFFERENT strings, on purpose", () => {
     expect(RELAY_LISTEN_ALIAS).not.toBe(RELAY_DEFAULT_DIAL_HOST);
     // And the legacy spelling is the dial host's string, which is precisely why
