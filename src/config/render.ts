@@ -211,13 +211,14 @@ export function buildDockerArgv(
       // when the two disagree — Docker creates the missing source and the
       // worker comes up with an empty `/workspace`. That is ISC-188's failure
       // shape exactly, which is why the path now has one definition.
-      // `opts.run.runId`, the same field the container name above uses: the
-      // checkout is run-scoped as of ISC-295, and a mount built from a
-      // different run's id would bind a directory nothing populated. Docker
-      // creates a missing bind-mount source rather than refusing, so that
-      // failure arrives as "the agent changed nothing" and not as a mount
-      // fault — ISC-188's shape, which is why both sides call one helper.
-      argv.push("-v", `${workerWorktree(repo, opts.run.runId, w.id)}:/workspace`);
+      //
+      // `opts.run.root`, NOT `repo`, as of ISC-298: the checkout lives under
+      // the run dir rather than beside the operator's own, so the widening
+      // that lets the container's baked uid write it lands on a directory
+      // pifleet owns. The run id is a segment of `root`, so the run-scoping
+      // ISC-295 introduced is now structural rather than a third argument
+      // this call has to remember to pass. See `workerWorktree`.
+      argv.push("-v", `${workerWorktree(opts.run.root, w.id)}:/workspace`);
       break;
     case "shared-ro":
       argv.push("-v", `${repo}:/workspace:ro`);
@@ -226,6 +227,7 @@ export function buildDockerArgv(
       // No code mount at all — the role works against live systems, not the repo.
       break;
   }
+
   argv.push("-v", `${workerOutboxDir(opts.run.root, w.id)}:/outbox`);
   argv.push("-v", `${opts.run.sessionsDir}:/sessions`);
   argv.push("-v", `${roleSkillsDir(opts.run.root, w.role)}:/skills:ro`);

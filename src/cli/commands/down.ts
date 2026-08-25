@@ -671,6 +671,7 @@ export function register(program: Command): void {
           try {
             outcome = await pruneWorkerWorktree({
               repo: recorded.repo,
+              runRoot: run.root,
               worktree: wt,
               force: opts.force === true,
             });

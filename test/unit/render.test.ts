@@ -424,8 +424,12 @@ describe("docker argv (SRD §5.6)", () => {
     const eng = await renderWorker(loaded, "eng-1"); // run.isolation default → worktree
     // "dry" is `renderWorker`'s own default run id (see `render.ts`), and the
     // path comes from the helper rather than a second `join` — the mount and
-    // the directory that creates it must not be spelled twice.
-    expect(eng.docker).toContain(`${workerWorktree(dir, "dry", "eng-1")}:/workspace`);
+    // the directory that creates it must not be spelled twice. As of ISC-298
+    // it hangs off the RUN root, not the fixture repo, so this reads the same
+    // `runPaths(runId, runsRoot())` that `renderWorker` built it from.
+    expect(eng.docker).toContain(
+      `${workerWorktree(runPaths("dry", runsRoot()).root, "eng-1")}:/workspace`,
+    );
 
     const rev = await renderWorker(loaded, "rev-1"); // role isolation → shared-ro
     expect(rev.docker).toContain(`${dir}:/workspace:ro`);

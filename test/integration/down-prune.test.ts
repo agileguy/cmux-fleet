@@ -585,7 +585,7 @@ describe("dispatch names the checkout that actually exists", () => {
     const wt = recorded.byWorker.get("eng-1")!;
     expect(wt.branch).toBe(`experiment/${runId}/eng-1`);
     expect(wt.branch).not.toContain("fleet/");
-    expect(wt.path).toBe(workerWorktree(repo, runId, "eng-1"));
+    expect(wt.path).toBe(workerWorktree(run.root, "eng-1"));
     expect(recorded.repo).toBe(repo);
     // …and that git agrees, which is the half a record-only assertion misses.
     expect(await gitOk(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(wt.branch);

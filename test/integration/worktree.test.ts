@@ -22,9 +22,9 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
 import { renderWorker } from "../../src/config/render.ts";
 import { runPaths, workerBranch, workerWorktree, type RunPaths } from "../../src/run/paths.ts";
@@ -121,7 +121,7 @@ describe("clone placement and base ref", () => {
     // asserted through the helper AND through the rendered `-v`, because a
     // bind mount whose source nothing created does not fail, it comes up
     // empty (ISC-188/231).
-    expect(wt!.path).toBe(workerWorktree(rig.repo, rig.run.runId, "eng-1"));
+    expect(wt!.path).toBe(workerWorktree(rig.run.root, "eng-1"));
     expect((await stat(wt!.path)).isDirectory()).toBe(true);
 
     // `.git` is a real DIRECTORY, not a `gitdir:` pointer file. This is the
@@ -159,15 +159,115 @@ describe("clone placement and base ref", () => {
     await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreePreflightError);
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/DETACHED HEAD/);
     // Nothing was created behind the refusal.
-    expect(await pathExists(workerWorktree(rig.repo, rig.run.runId, "eng-1"))).toBe(false);
+    expect(await pathExists(workerWorktree(rig.run.root, "eng-1"))).toBe(false);
   }, cliBudget(4));
 
+  /**
+   * The ISC-188 agreement test, and it now probes a DIFFERENT seam than it did.
+   *
+   * Before ISC-298 both sides derived the checkout from `run.repo`, which the
+   * config already carried, so they agreed without either side consulting the
+   * environment. The path now hangs off the run root, and `renderWorker`
+   * resolves that root from `PIFLEET_RUNS_DIR` — the same seam `up` and the
+   * detached daemon use. So this test has to set it, and the setting is the
+   * point rather than plumbing: a render that read a different runs root from
+   * the one `createWorkerWorktrees` cloned into would emit a `-v` whose source
+   * does not exist, and Docker creates a missing bind-mount source rather than
+   * refusing. The worker would come up with an empty `/workspace` and report as
+   * an agent that changed nothing.
+   */
   test("render mounts exactly the directory that was created", async () => {
     const rig = await makeRig();
     const [wt] = await create(rig, ["eng-1"]);
-    const rendered = await renderWorker(rig.loaded, "eng-1", { runId: rig.run.runId });
-    expect(rendered.docker).toContain(`${wt!.path}:/workspace`);
+    const before = process.env["PIFLEET_RUNS_DIR"];
+    process.env["PIFLEET_RUNS_DIR"] = dirname(rig.run.root);
+    try {
+      const rendered = await renderWorker(rig.loaded, "eng-1", { runId: rig.run.runId });
+      expect(rendered.docker).toContain(`${wt!.path}:/workspace`);
+    } finally {
+      if (before === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+      else process.env["PIFLEET_RUNS_DIR"] = before;
+    }
   }, cliBudget(2));
+});
+
+// ---------------------------------------------------------------------------
+
+describe("ISC-298: the clone is writable by a uid that is not the one that made it", () => {
+  /**
+   * The FIRST of ISC-298's two blockers, probed by mode rather than by running
+   * a container — deliberately, and this is the load-bearing choice in the file.
+   *
+   * A container probe here would be worthless on the machine most likely to run
+   * it. macOS Docker (Docker Desktop, colima/Lima) squashes bind-mount
+   * ownership to the container user, so a worker writes a host-owned checkout
+   * happily on a Mac and gets `EACCES` on the identical mount on a Linux
+   * runner. That is not a hypothetical: this whole criterion exists because the
+   * suite was green on the operator's Mac for the entire life of the project
+   * and went red the first time the chain ran on `ubuntu-latest`.
+   *
+   * So the assertion is on the MODE BITS, which mean the same thing on both
+   * platforms and are the thing the fix actually sets. `container-live`
+   * exercises the consequence on real Linux; this pins the cause everywhere.
+   */
+  test("every file and directory in the finished clone is group- and world-writable", async () => {
+    const rig = await makeRig();
+    const [wt] = await create(rig, ["eng-1"]);
+
+    // Walked, not sampled. A directory-only widen is the near-miss this
+    // criterion measured and rejected: it fixes create and rm+recreate and
+    // leaves in-place write to an existing file failing, so a spot check on
+    // the root would pass against the version of this fix that ships a
+    // per-tool inconsistency.
+    const offenders: string[] = [];
+    let sawFile = false;
+    let sawDir = false;
+    let sawGitInternal = false;
+    for (const rel of await readdir(wt!.path, { recursive: true })) {
+      const abs = join(wt!.path, String(rel));
+      const st = await lstat(abs);
+      if (st.isSymbolicLink()) continue; // lchmod is not portable; a symlink's own mode is not consulted
+      if (st.isDirectory()) sawDir = true;
+      else sawFile = true;
+      if (String(rel).startsWith(".git/")) sawGitInternal = true;
+      if ((st.mode & 0o022) !== 0o022) offenders.push(`${rel} ${(st.mode & 0o777).toString(8)}`);
+    }
+
+    // The walk found something of each kind — otherwise "no offenders" is a
+    // claim about an empty set. `.git/` specifically, because that is where
+    // the commit has to land and a widen that skipped it would leave the
+    // worker able to edit and unable to record.
+    expect(sawFile).toBe(true);
+    expect(sawDir).toBe(true);
+    expect(sawGitInternal).toBe(true);
+    expect(offenders).toEqual([]);
+  }, cliBudget(6));
+
+  /**
+   * `a+rwX`, not `a+rwx` — capital X, and this test is the reason to care.
+   *
+   * The lowercase form would mark every source file in the checkout
+   * executable. It would satisfy the writability test above completely, and
+   * the damage would surface much later and somewhere else: the worker's own
+   * `git status` reports a mode change against `HEAD` on every file, on a tree
+   * nobody edited, so the fleet's first act in a fresh checkout is to
+   * manufacture a diff.
+   */
+  test("widening does not make ordinary source files executable", async () => {
+    const rig = await makeRig({ seed: { files: { "src.ts": "export const a = 1;\n" } } });
+    const [wt] = await create(rig, ["eng-1"]);
+
+    const seeded = join(wt!.path, "src.ts");
+    expect(await pathExists(seeded)).toBe(true);
+    expect((await lstat(seeded)).mode & 0o111).toBe(0);
+
+    // The consequence, stated as git sees it: a clone whose files gained a
+    // mode bit is a clone that reports dirty before an agent has touched it.
+    expect(await gitOk(wt!.path, "status", "--porcelain")).toBe("");
+
+    // Directories still traversable — `X` sets the bit where it belongs.
+    expect((await lstat(wt!.path)).mode & 0o111).not.toBe(0);
+  }, cliBudget(6));
 });
 
 // ---------------------------------------------------------------------------
@@ -309,7 +409,7 @@ describe("the clone is self-contained", () => {
 
   test("a stale leftover directory is refused, never adopted", async () => {
     const rig = await makeRig();
-    const path = workerWorktree(rig.repo, rig.run.runId, "eng-1");
+    const path = workerWorktree(rig.run.root, "eng-1");
     await mkdir(path, { recursive: true });
     await writeFile(join(path, "someone-elses-work.txt"), "do not delete me\n");
 
@@ -341,7 +441,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
 
     await expect(create(rig, ["eng-1"])).rejects.toThrow(WorktreePreflightError);
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/submodules at vendor\/inner/);
-    expect(await pathExists(workerWorktree(rig.repo, rig.run.runId, "eng-1"))).toBe(false);
+    expect(await pathExists(workerWorktree(rig.run.root, "eng-1"))).toBe(false);
   }, cliBudget(8));
 
   test("LFS-tracked content is refused, including from a NESTED .gitattributes", async () => {
@@ -356,7 +456,7 @@ describe("ref-scoped preflight (SRD §9.2, retargeted)", () => {
     expect(findings.lfs[0]).toContain("assets/.gitattributes");
 
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/LFS-tracked content/);
-    expect(await pathExists(workerWorktree(rig.repo, rig.run.runId, "eng-1"))).toBe(false);
+    expect(await pathExists(workerWorktree(rig.run.root, "eng-1"))).toBe(false);
   }, cliBudget(3));
 
   test("an ordinary .gitattributes with no lfs filter is not refused", async () => {
@@ -490,7 +590,7 @@ describe("a failure after the clone exists is rolled back, not left as an orphan
     await expect(create(rig, ["eng-1"])).rejects.toThrow(/switch -c/);
 
     // The clone directory does not survive the failure.
-    expect(await pathExists(workerWorktree(rig.repo, rig.run.runId, "eng-1"))).toBe(false);
+    expect(await pathExists(workerWorktree(rig.run.root, "eng-1"))).toBe(false);
     // Nor does a dangling remote in the parent — the same rollback covers it.
     expect((await git(rig.repo, "remote", "get-url", workerRemoteName("eng-1"))).code).not.toBe(0);
   }, cliBudget(4));
@@ -562,20 +662,51 @@ describe("operator visibility via a named remote", () => {
   }, cliBudget(4));
 
   /**
-   * THE regression test for `.git/info/exclude`. Mutation-proved: commenting
-   * out the `excludeWorktreesDir` call in `createWorkerWorktrees` makes this
-   * fail at the FIRST assertion (a gitlink appears) rather than the second,
-   * confirming the exclude entry — not some other control — is what prevents
-   * it.
+   * THE regression test for the gitlink, kept and STRENGTHENED after ISC-298
+   * removed the mechanism it used to probe.
+   *
+   * The old shape of this test asserted that `.git/info/exclude` carried a
+   * `/.worktrees/` entry, and a sibling asserted that entry was written
+   * idempotently. Both are gone with `excludeWorktreesDir`, because ISC-298
+   * moved worker clones out of the operator's checkout entirely — there is no
+   * nested `.git` inside the repo for git to mistake for a submodule, so the
+   * gitlink cannot form and nothing needs excluding.
+   *
+   * Deleting the two tests and stopping there would have been the wrong trade:
+   * the gitlink is the CONSEQUENCE that mattered and the exclude entry was
+   * only ever one way to prevent it. So the consequence is still asserted here,
+   * now against the stronger property — the operator's repository gains
+   * nothing at all, not even an ignored directory.
+   *
+   * Mutation-proved: cloning back into `join(repo, ".worktrees", workerId)`
+   * fails this test at its FIRST assertion, with
+   * `Expected: "" / Received: "?? .worktrees/eng-1/"`. Stated precisely
+   * because a test reports only where it stops — the gitlink assertions below
+   * are never reached under that mutation, so this test's evidence is "the
+   * repository is untouched", and the gitlink assertions are what would catch
+   * a future change that puts something back and excludes it again.
+   * (12 tests in this file go red under that mutation; this is the one that
+   * speaks to the operator's checkout.)
    */
-  test("an operator's ordinary `git add -A && git commit` does not embed a worker's clone as a gitlink", async () => {
+  test("an operator's ordinary `git add -A && git commit` sees nothing of a worker's clone", async () => {
     const rig = await makeRig();
     await create(rig, ["eng-1"]);
 
+    // BEFORE the `add -A`, and with untracked files INCLUDED: the repository
+    // is untouched, rather than touched-and-suppressed. This is the assertion
+    // the exclude-based version could not make.
+    expect(await gitOk(rig.repo, "status", "--porcelain", "--untracked-files=all")).toBe("");
+
+    // And nothing appeals to an exclude list to get there. A `/.worktrees/`
+    // entry appearing here again would mean the clone came back into the repo
+    // and something started hiding it.
+    const excludePath = join(rig.repo, ".git", "info", "exclude");
+    const exclude = await Bun.file(excludePath)
+      .text()
+      .catch(() => "");
+    expect(exclude).not.toContain("/.worktrees/");
+
     await gitOk(rig.repo, "add", "-A");
-    // Nothing to commit if `.worktrees/` was truly excluded — proves the
-    // exclude entry actually suppressed it, not merely that this test forgot
-    // to look.
     expect(await gitOk(rig.repo, "status", "--porcelain")).toBe("");
     const committed = await git(rig.repo, "commit", "-q", "-m", "operator's own unrelated work");
     expect(committed.code).not.toBe(0); // nothing staged to commit
@@ -587,27 +718,6 @@ describe("operator visibility via a named remote", () => {
     expect(findings.gitlinks).toEqual([]);
     expect(() => assertBaseRefCloneable(rig.repo, "main", findings)).not.toThrow();
   }, cliBudget(6));
-
-  test("excludeWorktreesDir is idempotent across repeated `up`s and preserves an operator's existing entries", async () => {
-    const rig = await makeRig();
-    const excludePath = join(rig.repo, ".git", "info", "exclude");
-    await mkdir(join(rig.repo, ".git", "info"), { recursive: true });
-    await writeFile(excludePath, "*.local\n", "utf8");
-
-    const [first] = await create(rig, ["eng-1"]);
-    const once = await Bun.file(excludePath).text();
-    expect(once).toContain("*.local");
-    expect(once).toContain("/.worktrees/");
-
-    await pruneWorkerWorktree({ repo: rig.repo, worktree: first!, force: true });
-    await create(rig, ["eng-1"]);
-    const twice = await Bun.file(excludePath).text();
-    // Appended exactly once, not once per `up` — a second entry would still
-    // be harmless to git, but would be evidence the idempotency check itself
-    // is broken.
-    expect(twice.split("/.worktrees/").length - 1).toBe(1);
-    expect(twice).toContain("*.local");
-  }, cliBudget(4));
 });
 
 // ---------------------------------------------------------------------------
@@ -617,7 +727,7 @@ describe("pruning (SRD §9.3)", () => {
     const rig = await makeRig();
     const [wt] = await create(rig, ["eng-1"]);
 
-    const outcome = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: false });
+    const outcome = await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: wt!, force: false });
     expect(outcome.pruned).toBe(true);
     expect(await pathExists(wt!.path)).toBe(false);
     expect((await git(rig.repo, "remote", "get-url", wt!.remoteName)).code).not.toBe(0);
@@ -633,7 +743,7 @@ describe("pruning (SRD §9.3)", () => {
     const dirt = await inspectCloneDirt(wt!);
     expect(dirt).toMatchObject({ dirty: true, statusLines: 1, commitsAhead: 0 });
 
-    const refused = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: false });
+    const refused = await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: wt!, force: false });
     expect(refused.pruned).toBe(false);
     expect(refused.reason).toContain("--force");
     expect(await pathExists(join(wt!.path, "scratch.txt"))).toBe(true);
@@ -642,7 +752,7 @@ describe("pruning (SRD §9.3)", () => {
     // which is the opposite of what refusing is for.
     expect(await gitOk(rig.repo, "remote", "get-url", wt!.remoteName)).toBe(wt!.path);
 
-    const forced = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: true });
+    const forced = await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: wt!, force: true });
     expect(forced.pruned).toBe(true);
     expect(await pathExists(wt!.path)).toBe(false);
   }, cliBudget(6));
@@ -661,7 +771,7 @@ describe("pruning (SRD §9.3)", () => {
     const dirt = await inspectCloneDirt(wt!);
     expect(dirt).toMatchObject({ dirty: true, statusLines: 0, commitsAhead: 1 });
 
-    const refused = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: false });
+    const refused = await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: wt!, force: false });
     expect(refused.pruned).toBe(false);
     expect(refused.reason).toContain("1 commit(s) past");
   }, cliBudget(7));
@@ -669,8 +779,8 @@ describe("pruning (SRD §9.3)", () => {
   test("pruning is re-runnable: an already-gone checkout is success, not an error", async () => {
     const rig = await makeRig();
     const [wt] = await create(rig, ["eng-1"]);
-    await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: false });
-    const second = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt!, force: false });
+    await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: wt!, force: false });
+    const second = await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: wt!, force: false });
     expect(second.pruned).toBe(true);
     expect(second.reason).toContain("already absent");
   }, cliBudget(4));
@@ -695,7 +805,7 @@ describe("pruning (SRD §9.3)", () => {
     expect(dirt.commitsAhead).toBe(Number.POSITIVE_INFINITY);
     expect(dirt.dirty).toBe(true);
 
-    const refused = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt, force: false });
+    const refused = await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: wt, force: false });
     expect(refused.pruned).toBe(false);
     expect(refused.reason).toContain("no longer in this history");
   }, cliBudget(4));
@@ -722,7 +832,7 @@ describe("pruneWorkerWorktree refuses a recursive delete outside .worktrees/", (
     await writeFile(join(outside, "do-not-delete.txt"), "real data\n");
 
     const wt: WorkerWorktree = { ...created!, path: outside };
-    const outcome = await pruneWorkerWorktree({ repo: rig.repo, worktree: wt, force: true });
+    const outcome = await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: wt, force: true });
 
     expect(outcome.pruned).toBe(false);
     expect(outcome.reason).toContain("outside");
@@ -763,8 +873,8 @@ describe("two runs share one repo (ISC-295)", () => {
       // Distinct paths, each carrying its own run id — asserted against the
       // helper rather than a hand-built join, so a future change to the layout
       // moves this test with it instead of leaving it pinned to a stale shape.
-      expect(a!.path).toBe(workerWorktree(first.repo, "run-alpha", "eng-1"));
-      expect(b!.path).toBe(workerWorktree(first.repo, "run-beta", "eng-1"));
+      expect(a!.path).toBe(workerWorktree(first.run.root, "eng-1"));
+      expect(b!.path).toBe(workerWorktree(second.run.root, "eng-1"));
       expect(a!.path).not.toBe(b!.path);
 
       // Both are real directories, at the same time. "The call returned" and
@@ -798,7 +908,7 @@ describe("two runs share one repo (ISC-295)", () => {
       // a person deleted it by hand. `git worktree prune` does not clear one
       // of these — git's metadata goes first, and what is left is a directory
       // git no longer tracks.
-      const stale = workerWorktree(first.repo, "run-alpha", "eng-1");
+      const stale = workerWorktree(first.run.root, "eng-1");
       await mkdir(stale, { recursive: true });
 
       // The other run is unaffected, which is the whole point of scoping.
@@ -824,25 +934,32 @@ describe("pruning a run-scoped checkout (ISC-295)", () => {
       expect(a).toBeDefined();
       expect(b).toBeDefined();
 
-      const runDir = join(rig.repo, ".worktrees", "run-gamma");
-      expect(await pathExists(runDir)).toBe(true);
+      // The containment root, under the RUN dir as of ISC-298 — not
+      // `<repo>/.worktrees/<run-id>`, which no longer exists.
+      const worktreesDir = join(rig.run.root, "worktrees");
+      expect(await pathExists(worktreesDir)).toBe(true);
 
       // Pruning ONE worker must not take the directory its sibling is still
       // living in. This is the assertion that makes `rmdir` the right call
       // rather than `rm -r`: the latter would pass every other check here and
       // delete `eng-2`'s checkout as a side effect of pruning `eng-1`.
-      await pruneWorkerWorktree({ repo: rig.repo, worktree: a!, force: true });
-      expect(await pathExists(runDir)).toBe(true);
+      await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: a!, force: true });
+      expect(await pathExists(worktreesDir)).toBe(true);
       expect(await pathExists(b!.path)).toBe(true);
 
-      // The last one takes the directory with it, so a repo does not
-      // accumulate one empty directory per fleet ever started.
-      await pruneWorkerWorktree({ repo: rig.repo, worktree: b!, force: true });
+      // The last one takes the directory with it.
+      await pruneWorkerWorktree({ repo: rig.repo, runRoot: rig.run.root, worktree: b!, force: true });
       expect(await pathExists(b!.path)).toBe(false);
-      expect(await pathExists(runDir)).toBe(false);
+      expect(await pathExists(worktreesDir)).toBe(false);
 
-      // `.worktrees/` itself stays — it is the shared root, not this run's.
-      expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(true);
+      // And it stops THERE. The run dir is the parent, and it holds
+      // `control-auth.json`, `ledger/` and `audit/` — an `rmdir` that walked
+      // one level up would meet a directory that could be empty on a run
+      // whose state was never written, and take it.
+      expect(await pathExists(rig.run.root)).toBe(true);
+
+      // The operator's checkout never had a `.worktrees/` at all.
+      expect(await pathExists(join(rig.repo, ".worktrees"))).toBe(false);
     },
     cliBudget(10),
   );

@@ -123,6 +123,54 @@ export function buildWorkerEnv(
     PIFLEET_LLM_MODELS: w.model,
   };
 
+  /*
+   * ISC-298's SECOND blocker, and the one that hides behind the first.
+   *
+   * Widening the checkout (`prepareWorktreePermissions`) fixes the filesystem
+   * half. It does not touch git, which refuses on OWNERSHIP and ignores mode
+   * entirely (CVE-2022-24765): on a Linux Docker host a bind mount passes host
+   * ownership through, the container runs as the baked uid 10001, and `status`,
+   * `add`, `commit` and `diff` all answer `fatal: detected dubious ownership in
+   * repository at '/workspace'` on a tree that is world-writable. A worker in
+   * that state can WRITE its files and cannot COMMIT them — strictly worse than
+   * the failure the widening fixed, because the agent's work looks done and
+   * lands nowhere.
+   *
+   * ## Why it is here and not on the argv
+   *
+   * The obvious home is `buildDockerArgv`, beside the mount it exists for, as
+   * three `-e` flags. ISC-31 forbids that and is right to: `buildDockerArgv`
+   * emits NO `-e` at all, and `test/unit/container-env.test.ts` asserts the
+   * count is ZERO rather than "none of them is a secret" — precisely so that
+   * adding one of any name has to be a deliberate act rather than a diff
+   * nobody reads. That guard caught this on the first full run, with the `-e`
+   * form already written. Delivering a non-secret constant that way would have
+   * been a safe instance of an unsafe precedent, and the alternative costs
+   * nothing: every worker variable already travels through `--env-file`, so
+   * this rides the path that exists instead of opening a second one.
+   *
+   * Env rather than `git config --global` because the container's root
+   * filesystem is read-only (SRD §5.6) — there is no writable `$HOME` for a
+   * gitconfig to land in. `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` is git's own
+   * supported mechanism and needs no file anywhere.
+   *
+   * Scoped to `/workspace`, the CONTAINER path — deliberately not `*`, the
+   * form most answers to this error reach for, which disables the check for
+   * every repository the container can see rather than the one tree a worker
+   * has business in.
+   *
+   * Emitted for `shared-ro` as well as `worktree`: that mount is the
+   * operator's OWN checkout, owned by the operator, so a read-only role
+   * running `git log` meets the identical refusal. `none` has no `/workspace`
+   * to name and gets nothing — a setting emitted unconditionally is one
+   * nobody notices has stopped tracking the mount it exists for.
+   */
+  if (w.isolation !== "none") {
+    vars["GIT_CONFIG_COUNT"] = "1";
+    vars["GIT_CONFIG_KEY_0"] = "safe.directory";
+    vars["GIT_CONFIG_VALUE_0"] = "/workspace";
+  }
+
   // Class 1 (SRD §12.4). Written even when empty is NOT an option — see
   // `missingApiKey` — so the key is omitted entirely rather than written blank,
   // and the entrypoint's `[ -n "${…:-}" ]` guards then behave identically to a

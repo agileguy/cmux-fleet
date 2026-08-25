@@ -969,12 +969,16 @@ jobs:
           # also the model the warmup above loads, so the two agree by
           # construction rather than by coincidence.
           PIFLEET_OMLX_MODEL: GLM-4.5-Air-MLX-4bit
-          # DERIVED by the hand method, not incremented. Measured 2026-08-25 on
-          # bun 1.3.11 with PIFLEET_DOCKER unset and no listener on :8000:
-          #     bun test test/integration/relay.test.ts
-          #     -> 0 pass, 9 skip, 0 fail. Ran 9 tests across 1 file.
-          TOTAL_EXPECTED: "9"
-          # EMPTY. All nine must RUN. The two names pinned as skips in the
+          # DERIVED by the hand method, not incremented. Re-derived 2026-08-25
+          # when full-chain.test.ts was re-added, on bun 1.3.11 with
+          # PIFLEET_DOCKER unset and no listener on :8000:
+          #     bun test test/integration/relay.test.ts \
+          #              test/integration/full-chain.test.ts
+          #     -> 0 pass, 10 skip, 0 fail. Ran 10 tests across 2 files.
+          # The previous entry's own comment predicted "back to 10"; that
+          # prediction is not the evidence, the run above is.
+          TOTAL_EXPECTED: "10"
+          # EMPTY. All ten must RUN. The two names pinned as skips in the
           # `container` job -- both live-oMLX relay probes -- are exactly the
           # ones this job exists to execute.
           EXPECTED_CONTAINER_LIVE_SKIPS: ""
@@ -983,38 +987,38 @@ jobs:
           JUNIT_FILE="${RUNNER_TEMP:?}/pifleet-container-live.junit.xml" \
           EXPECTED_SKIPS="$EXPECTED_CONTAINER_LIVE_SKIPS" \
             .github/scripts/probe-guard.sh \
-              test/integration/relay.test.ts
-      # full-chain.test.ts (ISC-290) is DELIBERATELY not in the list above, and
-      # the reason is a product defect this job found on its first two runs
-      # rather than a softened gate.
+              test/integration/relay.test.ts \
+              test/integration/full-chain.test.ts
+      # full-chain.test.ts (ISC-290) is BACK in the list above as of 2026-08-25,
+      # and the history is kept because the shape of the failure is the reusable
+      # part.
       #
-      # The chain ran. The model reached oMLX through the relay, took its turn,
-      # and emitted 17 native tool calls -- of which 11 failed, every one of
-      # them on the same thing:
+      # It was pulled out after this job's first two runs, which found a real
+      # product defect rather than a flaky probe. The chain ran -- the model
+      # reached oMLX through the relay, took its turn, and emitted 17 native
+      # tool calls, of which 11 failed, every one on the same thing:
       #
       #     EACCES: permission denied, open '/workspace/add.js'
       #     chmod: changing permissions of '/workspace/add.js': Operation not permitted
       #     sed: couldn't open temporary file /workspace/sedXXXXXX: Permission denied
       #
-      # The worker image runs as uid 10001. `render.ts` mounts
-      # `<repo>/.worktrees/<run-id>/<worker>` at /workspace, and a Linux bind
-      # mount passes host ownership straight through, so that tree belongs to
-      # the runner's uid and uid 10001 can read it and nothing else. macOS
-      # hides this completely -- the VM's shared filesystem squashes ownership
-      # to the container user -- which is why the identical run is green on
-      # Colima and why this only surfaced once the chain finally ran somewhere
-      # that was not the operator's laptop. `mounts.ts` documents this exact
-      # failure class and widens the run directory and scratch root for it; the
-      # worktree is the one write mount it does NOT widen, and cannot under its
-      # own stated contract, because that path lives inside the operator's
-      # repository.
+      # The worker image runs as uid 10001, the worktree was mounted from
+      # `<repo>/.worktrees/<run-id>/<worker>`, and a Linux bind mount passes
+      # host ownership straight through -- so the tree belonged to the runner's
+      # uid and 10001 could read it and nothing else. macOS hides this
+      # completely (the VM's shared filesystem squashes ownership to the
+      # container user), which is why the identical run was green on Colima and
+      # why it took the chain running somewhere that was not the operator's
+      # laptop to surface it.
       #
-      # Fixing it is a design decision with real alternatives (relocate the
-      # worktrees out of the repo, run as the host uid against ISC-25's baked
-      # 10001, or widen inside the repo and accept that), so it is recorded as
-      # a criterion in ISA.md rather than patched around here. Put this file
-      # back in the list above -- and TOTAL_EXPECTED back to 10 -- when a
-      # worker can write its own worktree on Linux.
+      # ISC-298 fixed it in production, not here: worker checkouts moved under
+      # the run dir, `prepareWorktreePermissions` widens the finished clone
+      # recursively, and `buildWorkerEnv` names /workspace in safe.directory --
+      # because git refuses on OWNERSHIP and ignores mode, so the widening
+      # alone left every commit failing. TOTAL_EXPECTED was re-derived rather
+      # than incremented back.
+      #
+      # If this file leaves the list again, say which of those three it is.
       - name: Shim log
         if: always()
         run: cat "${RUNNER_TEMP:?}/omlx-shim.log" || true

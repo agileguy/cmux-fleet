@@ -582,7 +582,7 @@ export async function readRunWorktrees(run: RunPaths): Promise<RunWorktrees> {
       branchPrefix,
       note:
         "run.json records worktree creation as INCOMPLETE (worktrees: null) — 'up' did not finish; " +
-        "a checkout may exist on disk with nothing describing it. Check the repository's .worktrees/ " +
+        "a checkout may exist on disk with nothing describing it. Check this run's worktrees/ " +
         "directory by hand before assuming there is nothing to reap.",
       perWorkerNotes: [],
     };

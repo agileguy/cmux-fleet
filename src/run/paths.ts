@@ -409,43 +409,6 @@ export function roleSkillsDir(runRoot: string, role: string): string {
 }
 
 /**
- * The per-worker code checkout mounted rw at `/workspace` (SRD §5.5, §9.1).
- *
- * Named here for the reason this module exists at all: `config/render.ts`
- * open-coded `join(repo, ".worktrees", w.id)` to build the `-v`, and
- * `run/worktree.ts` is the thing that has to CREATE that directory. Two
- * `join()` calls agreeing today is not the same property as one function, and
- * a divergence here has the shape ISC-188 and ISC-231 both had: Docker creates
- * a missing bind-mount source rather than refusing, so a worker pointed at a
- * path nothing populated gets an empty `/workspace` and reports as an agent
- * that changed nothing rather than as a mount fault.
- *
- * Takes the REPO root, not the run root: unlike everything else in this
- * module, this path lives beside the operator's checkout rather than under
- * `~/.pifleet/runs`, because git objects must be on the same filesystem the
- * container bind-mounts and the SRD's §5.5 mount table names it there.
- *
- * RUN-SCOPED as of ISC-295 (2026-08-24). It was not, and the previous comment
- * here called that "deliberate and consequential": two concurrent runs naming
- * the same worker id resolved to the same directory, and `run/worktree.ts`
- * turned the collision into a loud refusal rather than a silent adoption.
- *
- * The refusal was right and still stands — adopting another run's tree is the
- * one thing not to do, and `StaleWorktreeError` still says so. What was wrong
- * was treating a loud refusal as the END of the argument. It made the
- * collision SAFE; it never made it unnecessary. Two costs were left standing:
- * two fleets could not run against one repo at all, and a crashed run left a
- * checkout that blocked every later run of that worker until a person removed
- * the directory by hand — `git worktree prune` does not clear it, because
- * git's own metadata goes first and what remains is an orphan directory git no
- * longer tracks.
- *
- * The branch was already run-scoped (`workerBranch` builds
- * `<prefix>/<run-id>/<worker>`), so this path was the last identity in this
- * module that was not, and the asymmetry had no defender once it was written
- * down. Scoping it removes the collision instead of reporting it.
- */
-/**
  * The container `--name` for a worker (SRD §5.6).
  *
  * Lives here, with the other path-shaped identities, because four subsystems
@@ -462,8 +425,63 @@ export function workerContainerName(runId: string, workerId: string): string {
   return `pifleet-${runId}-${workerId}`;
 }
 
-export function workerWorktree(repo: string, runId: string, workerId: string): string {
-  return join(repo, ".worktrees", runId, workerId);
+/**
+ * The per-worker code checkout mounted rw at `/workspace` (SRD §5.5, §9.1).
+ *
+ * Named here for the reason this module exists at all: `config/render.ts`
+ * open-coded the `-v` source and `run/worktree.ts` is the thing that has to
+ * CREATE that directory. Two `join()` calls agreeing today is not the same
+ * property as one function, and a divergence here has the shape ISC-188 and
+ * ISC-231 both had: Docker creates a missing bind-mount source rather than
+ * refusing, so a worker pointed at a path nothing populated gets an empty
+ * `/workspace` and reports as an agent that changed nothing rather than as a
+ * mount fault.
+ *
+ * ## It lives under the RUN DIR, not beside the operator's checkout (ISC-298)
+ *
+ * This took the run root as of 2026-08-25. It previously took the REPO root
+ * and returned `<repo>/.worktrees/<run-id>/<worker>`, and the reason recorded
+ * for that placement was: *"git objects must be on the same filesystem the
+ * container bind-mounts"*. **That reason was false, and had been since this
+ * feature was built.** The mechanism underneath `isolation: worktree` is a
+ * `git clone --no-hardlinks` (see `run/worktree.ts`), not a linked worktree —
+ * every object is COPIED to a fresh inode, `.git` is a real directory inside
+ * the mount, and nothing resolves outside `/workspace`. A clone has no
+ * same-filesystem constraint at all; the sentence describes the hardlinking
+ * design that module explicitly rejected, and it outlived the design it
+ * described. It is recorded here rather than deleted because it is what a
+ * reader who reaches for the obvious placement will re-derive.
+ *
+ * What actually forced the move is ISC-298. On a Linux Docker host a bind
+ * mount passes host ownership through untouched, so the container's baked
+ * uid 10001 cannot write a checkout owned by the operator: `EACCES` on every
+ * `open(O_WRONLY)`, and `fatal: detected dubious ownership` from git, which
+ * keys on ownership and ignores mode. macOS squashes bind-mount ownership to
+ * the container user, which is why this was invisible for the whole life of
+ * the project and arrived the first time the chain ran on `ubuntu-latest`.
+ * The fix needs the mounted tree to be WIDENED, and widening it in place
+ * would mean chmodding directories inside the operator's own repository.
+ * Under the run root the same widening lands on a directory pifleet created
+ * and owns — see `prepareWorktreePermissions` in `run/worktree.ts`.
+ *
+ * **A sibling of `<run>/outbox/<id>`, and allowed by the same rule.**
+ * `assertNoRunDirMount` refuses a mount that IS the run dir or CONTAINS it;
+ * `classifyRunDirExposure` returns `null` for a source strictly UNDER it,
+ * which is what already lets the outbox be mounted. So this placement needs
+ * no relaxation of that guard, and it must not get one: `control-auth.json`
+ * (mode 0600, the control-socket secret), `ledger/` and `audit/` are siblings
+ * of `worktrees/` and stay unmounted and unwidened. The widening is scoped to
+ * `<run>/worktrees/<worker>` for exactly that reason — a `chmod -R` one level
+ * higher would publish the run secret to every local user on the host.
+ *
+ * RUN-SCOPED as of ISC-295 (2026-08-24) and still so, now structurally: the
+ * run id is a segment of the run root rather than a segment this function
+ * appends, so two concurrent runs cannot resolve to one directory and a
+ * crashed run's leftovers are removed with its run dir instead of lingering
+ * in the operator's repo until someone deletes them by hand.
+ */
+export function workerWorktree(runRoot: string, workerId: string): string {
+  return join(runRoot, "worktrees", workerId);
 }
 
 /**
