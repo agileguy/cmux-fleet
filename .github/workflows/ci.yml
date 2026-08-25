@@ -741,6 +741,48 @@ jobs:
           echo "--- shim log ---" >&2
           cat "${RUNNER_TEMP:?}/omlx-shim.log" >&2 || true
           exit 1
+      - name: Warm the model before anything is graded on its latency
+        # MEASURED, not precautionary. The first CI run with the secrets in
+        # place failed exactly one probe:
+        #
+        #   ISC-53 live: GLM-4.5-Air-MLX-4bit -> ok=false (oMLX returned
+        #   HTTP 200 with an unreadable body: The operation timed out.)
+        #   ... [60299.68ms]
+        #
+        # 60299ms against `model-probe.ts`'s 60s budget. The far side had been
+        # idle for hours, so that time is a COLD WEIGHT LOAD, not generation —
+        # the same load measured at 19.4s locally on a warm-ish host, and the
+        # allowlist also contains an 8-bit 35B for which it is far worse.
+        #
+        # WHY WARM RATHER THAN RAISE THE BUDGET. The 60s budget is production
+        # behaviour: it is what `up` gives the probe before refusing to launch a
+        # fleet, and an operator SHOULD hear about a model that cannot answer in
+        # a minute. Raising it to accommodate CI would weaken a real gate to
+        # make a test convenient. What these probes actually ask is whether a
+        # model emits a NATIVE TOOL CALL — a property of its chat template, not
+        # of how long its weights take to page in. Warming separates the two.
+        #
+        # It also matches the operator's own conditions, which is the whole
+        # point of this job: their oMLX is warm because they use it, and the
+        # local run that passed 18/18 was warm for that reason.
+        #
+        # UNGRADED ON PURPOSE. `|| true` — this step must never be what fails
+        # the job. If the warmup cannot reach the server the probes below will
+        # say so with a real diagnosis, and a red warmup step would just be a
+        # second, worse-worded copy of that message.
+        env:
+          OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
+        run: |
+          set -u
+          echo "warming GLM-4.5-Air-MLX-4bit (untimed, ungraded)"
+          start=$(date +%s)
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 300 \
+            http://127.0.0.1:8000/v1/chat/completions \
+            -H "Authorization: Bearer $OMLX_API_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"GLM-4.5-Air-MLX-4bit","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+            || true)
+          echo "warmup HTTP $code after $(( $(date +%s) - start ))s"
       - name: The live-oMLX probes, RUN rather than accounted for
         env:
           LABEL: live-oMLX
