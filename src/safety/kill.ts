@@ -63,6 +63,7 @@
 
 import { EXIT, type ExitCoded, type ProcId } from "../contracts.ts";
 import { processStartTime } from "../run/registry.ts";
+import { processGroupId } from "./procgroup.ts";
 import { Deadline, monotonicMs } from "../util/clock.ts";
 
 // ---------------------------------------------------------------------------
@@ -108,149 +109,25 @@ export interface ProcessOps {
 }
 
 /**
- * A `ps` read of a process group that did not produce a group, for a reason
- * OTHER than the process being gone (ISC-272).
+ * The process-group read lives in `./procgroup.ts`, which imports NOTHING.
  *
- * "The process is not there" and "I could not find out" are different facts
- * with opposite safe answers, and `processGroupId` used to return `null` for
- * both. `confirmGroup` mapped that `null` to `gone`, and `down` maps `gone` to
- * the ONE anchor verdict that reports `stopped: true`, calls `reapContainer()`
- * and makes the worker prunable. So a transient `ps` failure against a LIVE
- * supervisor reported it stopped, force-removed its container, and let
- * `--prune` delete the checkout it was still writing to. Unknown IDENTITY
- * already refused; unknown GROUP-because-the-read-failed declared success and
- * deleted.
+ * It was moved there when `supervisor/launch.ts` — the WRITER of every
+ * recorded pgid — needed the same reader that vouches for its output. It could
+ * not import this module: `kill.ts` sits on the `kill.ts -> run/registry.ts
+ * -> … -> safety/reaper.ts -> kill.ts` initialisation cycle, and a second arc
+ * into it is how `realProcessOps before initialization` becomes reproducible
+ * instead of merely fragile. The previous answer was a SECOND `ps -o pgid=`
+ * reader in `launch.ts` with the duplication written down as deliberate, and
+ * the two implementations then disagreed about what they had measured: the lax
+ * one reported a signal-killed `ps` and a garbage stdout as a group, the
+ * strict one refuses both. A launch record produced by the lax reader was then
+ * vouched for by the strict one.
  *
- * Thrown rather than returned so the two facts cannot be conflated again by a
- * caller that forgets to look: there is no in-band value to ignore.
+ * `stall.ts` set the precedent for the fix. A dependency-free module cannot
+ * participate in a cycle, so it is importable from anywhere, and the re-export
+ * keeps `kill.ts` the address every existing caller and doc comment uses.
  */
-export class GroupReadError extends Error {
-  constructor(pid: number, detail: string) {
-    super(`could not read the process group of pid ${pid}: ${detail}`);
-    this.name = "GroupReadError";
-  }
-}
-
-/** The `ps` spawn, factored out ONLY so `proc`'s type can be named below. */
-function spawnGroupPs(pid: number) {
-  return Bun.spawn(["ps", "-o", "pgid=", "-p", String(pid)], {
-    env: { ...process.env, LC_ALL: "C" },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-}
-
-/**
- * The live process group of a pid, from `ps`. `null` means `ps` AFFIRMATIVELY
- * reported no such process; a read that failed for any other reason throws
- * `GroupReadError`.
- *
- * DELIBERATE DUPLICATION of `supervisor/launch.ts`'s `pgidOf`, and the reason
- * is layering rather than oversight. `safety/` must not import `supervisor/`:
- * `launch.ts` pulls in `run/registry.ts` and `security/control-auth.ts`, and
- * this module already sits on the documented `kill.ts -> run/registry.ts -> …
- * -> safety/reaper.ts -> kill.ts` initialisation cycle. Adding a second, wider
- * arc to that cycle to save nine lines is how `realProcessOps before
- * initialization` becomes reproducible instead of merely fragile.
- *
- * `LC_ALL=C` for the same class of reason `processStartTime` pins its
- * environment, though the stakes are far lower: this field is an integer, not
- * a rendered timestamp. Pinning it costs nothing and removes the question.
- *
- * WHAT "AFFIRMATIVELY GONE" LOOKS LIKE, measured on this machine (Darwin 25.5,
- * the base-system `ps`) rather than assumed. Same five readings twice:
- *
- *   pid 999998, above the pid ceiling  exit 1  stdout ""       stderr "ps: process id too large: 999998"
- *   a live pid                         exit 0  stdout "15391"  stderr ""
- *   `-p not-a-number`                  exit 1  stdout ""       stderr "ps: Invalid process id: not-a-number"
- *   an unknown flag                    exit 1  stdout ""       stderr "ps: illegal option -- -"
- *   a pid that exited and was reaped   exit 1  stdout ""       stderr ""
- *
- * THE EXIT CODE IS NOT THE DISCRIMINATOR, which is the whole reason this was
- * worth measuring instead of reasoning about: a reaped pid and a malformed
- * invocation are byte-identical on exit status AND on stdout. The one thing
- * that separates them is that a genuinely-absent process is the case where `ps`
- * says NOTHING — no output and no diagnostic. So stderr is captured rather than
- * ignored, and silence on all three channels is what `null` means.
- *
- * Linux `procps` was NOT probed: no image in this checkout carries `ps`, and
- * CI's runner was not available to measure. It does not have to be. A platform
- * whose `ps` writes a diagnostic for an absent pid degrades to `read_failed`,
- * which REFUSES — the cost is a dead supervisor's container outliving it until
- * a later scan, never a live supervisor's container being destroyed.
- * `confirmGroup`'s identity re-check covers the opposite direction.
- *
- * A pgid is only ever COMPARED here, never trusted on its own — see
- * `confirmGroup`.
- */
-export async function processGroupId(pid: number): Promise<number | null> {
-  /*
-   * THE SPAWN ITSELF CAN THROW, and that is the likeliest real instance of
-   * "the measuring instrument is broken": a minimal container image with no
-   * procps. `Bun.spawn` raises `Error: Executable not found in $PATH: "ps"`
-   * synchronously, with no `exitCode` — so without this wrapper the entry
-   * point reports `EXIT.INTERNAL`, "a bug in pifleet itself", for an
-   * environment failure. `down.ts` already wraps its `docker` spawn for
-   * exactly this reason.
-   */
-  let proc: ReturnType<typeof spawnGroupPs>;
-  try {
-    proc = spawnGroupPs(pid);
-  } catch (err) {
-    throw new GroupReadError(pid, `ps could not be started: ${String(err)}`);
-  }
-  // Both pipes concurrently. Draining one to EOF while the other fills its
-  // buffer is how a tiny read becomes a deadlock on the day `ps` gets chatty.
-  const [rawOut, rawErr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const out = rawOut.trim();
-  const err = rawErr.trim();
-  await proc.exited;
-
-  if (proc.exitCode !== 0) {
-    /*
-     * A SIGNAL-KILLED `ps` IS NOT AN ABSENT PROCESS, and it looks exactly like
-     * one on every channel this function reads. Measured on bun 1.3.11: a child
-     * terminated by a signal reports `exitCode: null`, `signalCode: "SIGKILL"`,
-     * and empty stdout AND stderr — so `exitCode !== 0` is true, both pipes are
-     * silent, and the pre-fix condition below answered "affirmatively gone".
-     *
-     * That is the destructive answer. `gone` is the one verdict `down` may
-     * report as a stop, act on with `docker rm -f`, and pass to the `--prune`
-     * gate as prunable, so a `ps` killed by memory pressure, an OOM killer, a
-     * cgroup limit or a stray `pkill` would have deleted the checkout of a
-     * supervisor that was alive and mid-write.
-     *
-     * Worse, it defeats the identity re-check guard on ITS OWN stated threat
-     * model: that guard exists because "the conditions that break one `ps` are
-     * exactly the conditions that break the other", and under exactly that
-     * pressure BOTH children are signal-killed, both read as absent, and the
-     * guard concludes `gone` — the outcome it was built to prevent.
-     *
-     * So absence requires a NORMAL exit. `exitCode === null` means the child
-     * never got to say anything about the process, which is the definition of
-     * a failed read.
-     */
-    if (proc.exitCode !== null && out.length === 0 && err.length === 0) return null;
-    throw new GroupReadError(
-      pid,
-      err.length > 0
-        ? err
-        : proc.signalCode !== null
-          ? `ps was killed by ${proc.signalCode} before it could answer`
-          : `ps exited ${String(proc.exitCode)} without saying why`,
-    );
-  }
-  const pgid = Number.parseInt(out, 10);
-  if (!Number.isInteger(pgid) || pgid <= 0) {
-    // Exit 0 with nothing usable on stdout. `ps` claimed success and told us
-    // nothing, which is a broken read and emphatically not "no such process".
-    throw new GroupReadError(pid, `ps printed ${JSON.stringify(out)}, which is not a process group`);
-  }
-  return pgid;
-}
+export { GroupReadError, processGroupId } from "./procgroup.ts";
 
 export const realProcessOps: ProcessOps = {
   startTime: processStartTime,

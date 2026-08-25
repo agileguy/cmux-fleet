@@ -10,9 +10,17 @@
  * WHAT `up` DOES WITH THIS, stated as narrowly as the code supports. `up` now
  * calls `assertImagesReady` (bottom of this file) immediately after
  * `assertModelsAllowed`, before the first clone and before any supervisor
- * exists, on the CONTAINER path only. That gate does two things per distinct
- * tag: `imagePresent` (one `docker image inspect`) and then `verifyImage`. A
- * failure of either is a refusal naming the ROLE.
+ * exists, on the CONTAINER path only. That gate does three things per distinct
+ * tag: `imagePresent` (one `docker image inspect`), then `imageIdentityDrift`
+ * (one more, reading the build labels back and comparing them to what the tag
+ * claims), and then `verifyImage`. A failure of any of the three is a refusal
+ * naming the ROLE.
+ *
+ * The middle one exists because the other two, together, still accept the real
+ * worker image sitting under someone else's tag: presence is true and all five
+ * of `verifyImage`'s checks are behavioural questions the right bytes under the
+ * wrong name answer correctly. That is the SRD's "a stale-but-present image is
+ * invisible", and `imageIdentityDrift`'s docstring carries the full argument.
  *
  * BE PRECISE ABOUT THE EVIDENCE BEHIND THAT SENTENCE, because this module's
  * header is where an overclaim has twice been mistaken for a control. The
@@ -416,6 +424,131 @@ export async function gcImages(
 }
 
 // ---------------------------------------------------------------------------
+// Recorded build identity (ISC-189)
+// ---------------------------------------------------------------------------
+
+/** The three labels `buildImage` stamps — the image's own account of itself. */
+const IDENTITY_LABELS = {
+  piVersion: "pifleet.pi-version",
+  toolchain: "pifleet.toolchain",
+  configHash: "pifleet.config-hash",
+} as const;
+
+/** What a worker tag CLAIMS about the bytes underneath it. */
+export interface TagClaim {
+  piVersion: string;
+  toolchain: string;
+  configHash: string;
+}
+
+/**
+ * Split `<prefix>:<pi-version>-<toolchain>-<config-hash>` back into its claim.
+ *
+ * Null when the tag was not produced by `imageTag` — there is then no claim to
+ * check anything against. On `up`'s path that branch is unreachable by
+ * construction: the tag comes from `renderWorker`, which gets it from
+ * `imageTag`, which is the function this parse is the inverse of.
+ *
+ * The Pi version is the GREEDY field and the hash the anchored one, because a
+ * pin may legitimately carry dashes (`0.79.6-rc1`) while a toolchain never does
+ * — `ToolchainSchema` is a five-value enum, all single words — and the hash is
+ * always exactly the 12 hex chars `configHash` slices.
+ */
+export function parseImageTag(tag: string): TagClaim | null {
+  const colon = tag.lastIndexOf(":");
+  if (colon < 0) return null;
+  const m = /^(.+)-([^-]+)-([0-9a-f]{12})$/.exec(tag.slice(colon + 1));
+  if (m === null) return null;
+  return { piVersion: m[1]!, toolchain: m[2]!, configHash: m[3]! };
+}
+
+/**
+ * Does the image sitting under `tag` answer to that tag? Null when it does.
+ *
+ * ## The hole this closes, stated as the case that walks through everything else
+ *
+ * Take the REAL worker image — the one this repo builds, that passes every
+ * check `verifyImage` makes — and put it in the store under a tag whose
+ * config-hash is not its own. `docker tag` does that in one command, a registry
+ * pull does it whenever two builds ever shared a name, and an operator does it
+ * by hand more often than anyone admits. Now:
+ *
+ *   - `imagePresent` says PRESENT, because it is.
+ *   - `verifyImage` says OK, because every one of its five checks is a
+ *     BEHAVIOURAL question about the running container — the Pi version, uid
+ *     10001, a read-only root, tini at PID 1, `/workspace` write-through — and
+ *     the bytes answer all five correctly. They are simply not the bytes the
+ *     config describes.
+ *
+ * Both halves of the old gate pass and the fleet runs on the wrong image. That
+ * is precisely `Docs/SRD-COMPLETION.md`'s "a stale-but-present image is
+ * invisible", and it is why the gate needs a check that reads the image's
+ * RECORDED IDENTITY rather than its behaviour. `buildImage` already stamps
+ * that identity — `pifleet.pi-version`, `pifleet.toolchain`,
+ * `pifleet.config-hash` — and until now nothing but `image list`'s cosmetic
+ * output ever read it back.
+ *
+ * ## Why this is not the same control as ISC-160's hash
+ *
+ * `configHash` makes a changed build context produce a DIFFERENT tag, so a
+ * rebuilt image lands somewhere new and the old one is not silently reused.
+ * That mechanism governs the NAME. It says nothing about what is under a name
+ * once something else puts bytes there, and it fails open the moment a
+ * `COPY` source is added to the Dockerfile without being added to
+ * `BUILD_CONTEXT_ASSETS` (ISC-270). This check governs the CONTENT: it asks the
+ * daemon what the image says it is and compares that to what the tag demands.
+ * Two controls, and neither substitutes for the other.
+ *
+ * ## Fail-CLOSED on an unlabelled image, deliberately
+ *
+ * An image carrying none of the three labels cannot show it is the right
+ * bytes, and "cannot show" is the state this gate exists to refuse. Every image
+ * `pifleet image build` has ever produced carries all three (see `buildImage`'s
+ * `--label` arguments), so the operator this refuses is the one running
+ * something else's image under pifleet's name — which is the case.
+ */
+export async function imageIdentityDrift(
+  tag: string,
+  exec: Exec = realExec,
+): Promise<string | null> {
+  const claim = parseImageTag(tag);
+  if (claim === null) return null;
+
+  const r = await exec(["docker", "image", "inspect", tag, "--format", "{{json .Config.Labels}}"], {
+    timeoutMs: 30_000,
+  });
+  const said = r.stdout.trim();
+  if (r.code !== 0) {
+    return `docker could not read the build labels of ${tag}: ${r.stderr.trim() || said || `exit ${String(r.code)}`}`;
+  }
+  let labels: Record<string, string> = {};
+  try {
+    labels = (JSON.parse(said) as Record<string, string> | null) ?? {};
+  } catch {
+    return `the image under ${tag} reports no readable build labels (docker answered ${JSON.stringify(said.slice(0, 120))})`;
+  }
+
+  const drift: string[] = [];
+  let recorded = 0;
+  for (const [field, label] of Object.entries(IDENTITY_LABELS) as Array<
+    [keyof TagClaim, string]
+  >) {
+    const got = labels[label];
+    if (got === undefined || got === "") continue;
+    recorded += 1;
+    if (got !== claim[field]) drift.push(`${label} is "${got}", the tag says "${claim[field]}"`);
+  }
+  if (recorded === 0) {
+    return (
+      `the image under ${tag} carries none of pifleet's build labels ` +
+      `(${Object.values(IDENTITY_LABELS).join(", ")}), so it cannot show it is the image ` +
+      `that tag names — it was not produced by \`pifleet image build\``
+    );
+  }
+  return drift.length === 0 ? null : drift.join("; ");
+}
+
+// ---------------------------------------------------------------------------
 // The launch gate (ISC-32, ISC-189)
 // ---------------------------------------------------------------------------
 
@@ -520,7 +653,7 @@ export class ImageGateError extends Error {
     message: string,
     readonly tag: string,
     readonly roles: readonly string[],
-    readonly reason: "absent" | "unverified",
+    readonly reason: "absent" | "mismatched" | "unverified",
   ) {
     super(message);
     this.name = "ImageGateError";
@@ -600,6 +733,31 @@ export async function assertImagesReady(
         req.tag,
         req.roles,
         "absent",
+      );
+    }
+
+    /**
+     * PRESENT IS NOT THE SAME AS RIGHT, and `verifyImage` cannot tell them
+     * apart — see `imageIdentityDrift`'s docstring for the case that passes
+     * every one of its five checks while being the wrong image.
+     *
+     * Runs BEFORE verification, for two reasons and not for speed alone. It is
+     * one `docker image inspect` against several `docker run`s, so on the
+     * refusing path it is the cheaper answer; and when both would refuse, the
+     * identity mismatch is the more accurate diagnosis — "these are not the
+     * bytes that tag names" tells an operator to rebuild, where a behavioural
+     * check failing on top of it reads as a broken image.
+     */
+    const drift = await imageIdentityDrift(req.tag, exec);
+    if (drift !== null) {
+      throw new ImageGateError(
+        `refusing to start: ${who} needs image ${req.tag}, which IS present but was NOT ` +
+          `built from what that tag names — ${drift}. A tag is a claim about bytes; these ` +
+          `bytes answer to a different one, so the image is stale or was retagged by hand. ` +
+          `Nothing has been cloned and no supervisor has been launched. Rebuild it with: ${rebuild}`,
+        req.tag,
+        req.roles,
+        "mismatched",
       );
     }
 
