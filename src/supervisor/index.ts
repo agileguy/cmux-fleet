@@ -1310,6 +1310,19 @@ async function main(): Promise<void> {
          * timeout, so this cannot wedge the dispatch path; a failure yields
          * null, which the reader treats as no evidence and which changes no
          * verdict.
+         *
+         * IT DOES COST, and the cost is stated rather than left to be
+         * discovered. This is `git add -A` plus `write-tree`, so dispatch now
+         * blocks on hashing the whole worktree and the per-epoch hashing cost
+         * DOUBLES — `settle` was already paying one. Measured on this
+         * repository (309 tracked files) at 80-130 ms; it scales with the
+         * tree, so a large monorepo will pay noticeably more.
+         *
+         * Taking it off the dispatch path was considered and rejected: an
+         * asynchronous sample races the agent's first write, and a baseline
+         * that already contains the change it exists to detect makes the whole
+         * comparison vacuously equal. A slower dispatch is recoverable; a
+         * silently inert reader is the failure this criterion is about.
          */
         liveWorkdirBaseline =
           liveWorkdir === null ? null : await worktreeContentHash(liveWorkdir);
