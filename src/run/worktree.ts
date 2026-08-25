@@ -161,14 +161,38 @@ export class WorktreeError extends Error {
   }
 }
 
-/** `<repo>/.worktrees/<run-id>/<id>` already exists; adopting it silently is the one thing not to do. */
+/**
+ * `chmod -R a+rwX` on a finished clone failed (ISC-298).
+ *
+ * Its own class rather than `WorktreeError`, whose message says "failed (git
+ * exit N)" — accurate for every other failure in this module and a lie about
+ * this one. A widen that fails silently is the worst outcome available here:
+ * the clone exists, `up` reports it created, and the worker meets the failure
+ * later as an agent that appears to refuse every write.
+ */
+export class WorktreePermissionsError extends Error {
+  readonly exitCode = EXIT.BACKEND_UNAVAILABLE;
+  constructor(path: string, code: number, stderr: string) {
+    super(
+      `chmod -R a+rwX ${path} failed (exit ${code}): ${stderr.trim() || "(no stderr)"}. ` +
+        `The worker container runs as a baked uid that is not the uid this clone was created ` +
+        `by, so without this widening every write into /workspace fails on a Linux Docker host.`,
+    );
+    this.name = "WorktreePermissionsError";
+  }
+}
+
+/** `<run>/worktrees/<id>` already exists; adopting it silently is the one thing not to do. */
 export class StaleWorktreeError extends WorktreePreflightError {
   constructor(workerId: string, path: string) {
     super(
       `refusing to create worker ${workerId}: ${path} already exists. ` +
-        `A leftover checkout is either a live run's workspace or a crashed run's remains, ` +
-        `and this path is NOT run-scoped — adopting it would hand a second run's worker a tree ` +
-        `with another run's commits, branch and uncommitted edits in it. ` +
+        `A leftover checkout is either a live run's workspace or a crashed run's remains. ` +
+        `This path IS run-scoped (ISC-295, and structurally so since ISC-298 moved it under the ` +
+        `run dir), so a collision means THIS run id already has a checkout for this worker — a ` +
+        `second \`up\` against a live run, or the remains of one that crashed. Adopting it would ` +
+        `hand the worker a tree carrying commits, a branch and uncommitted edits from that ` +
+        `earlier attempt. ` +
         `Run \`pifleet down --prune\` (add --force if it holds work you do not want) or remove it by hand.`,
     );
     this.name = "StaleWorktreeError";
@@ -504,45 +528,69 @@ async function assertValidBranchName(repo: string, branch: string, workerId: str
 }
 
 /**
- * Idempotently add `.worktrees/` to the OPERATOR's own exclude list, once,
- * before the first clone of a run is created.
+ * Widen the finished clone so the container's baked uid can write it (ISC-298).
  *
- * Without this, an operator's completely ordinary `git add -A && git commit`
- * embeds every worker's clone as a GITLINK (mode 160000): git treats an
- * un-ignored nested `.git` directory as a candidate submodule, not as content
- * to walk into. That gitlink then makes THIS MODULE'S OWN preflight
- * (`assertBaseRefCloneable`, above) refuse every subsequent `up` with a
- * "submodules present" diagnosis the operator never authored and cannot
- * reconcile with `git submodule status` printing nothing — reproduced
- * directly: create one clone, `git add -A && git commit` in the parent, then
- * re-run the ref scan against the new HEAD.
+ * ## Why a chmod exists here at all
  *
- * Written to `.git/info/exclude`, never to `.gitignore`. SRD §12.8 requires
- * the operator's checkout be left otherwise unchanged, and `.gitignore` is
- * TRACKED content — writing to it would edit a file the operator did not ask
- * to edit and put it in their next commit's diff for a reason they never
- * authored. `info/exclude` is git's own mechanism for exactly this: local,
- * untracked, read only by git itself. Resolved via `git rev-parse
- * --git-path` rather than a hand-joined `<repo>/.git/info/exclude`, because
- * the operator's OWN checkout can itself be a linked worktree, where `.git`
- * is a pointer file and the real `info/exclude` lives elsewhere.
+ * A Linux bind mount passes host ownership through untouched. The clone is
+ * created by the operator's uid; the worker container runs as the baked uid
+ * 10001 (ISC-25). So on a Linux Docker host the agent gets `EACCES` on every
+ * `open(O_WRONLY)` into `/workspace` — which is what `write` and `edit` tools
+ * do — while `mkdir` and rm+recreate succeed, because those need only the
+ * DIRECTORY bit. macOS squashes bind-mount ownership to the container user,
+ * so none of this is reachable on the operator's own machine and the whole
+ * class was invisible until `container-live` first ran on `ubuntu-latest`.
+ *
+ * ## Why `-R`, and why a directory-only widen is worse than nothing
+ *
+ * Measured 2026-08-25 inside a Linux container, with the macOS squash out of
+ * the path: `chmod 0777` on the directory ALONE fixes create, `sed -i` and
+ * rm+recreate, and leaves in-place write to an existing 0644 file owned by
+ * another uid still failing. That is not a smaller version of the bug — it is
+ * a worse one. It ships a fleet where an edit lands or does not depending on
+ * which tool the model happened to reach for, so the failure stops being a
+ * clean refusal and becomes a silent, per-tool inconsistency. Recursive is
+ * the only setting that passes every write shape.
+ *
+ * `a+rwX` — capital `X` — sets the execute bit on directories and on files
+ * that already have one, never on plain files. `a+rwx` would mark every
+ * source file in the checkout executable, which is both wrong and something
+ * the worker's own `git status` would then report as a mode change against
+ * `HEAD` on a tree nobody edited.
+ *
+ * ## What this does NOT fix, which is the part that hides
+ *
+ * Permissions are only the first of TWO blockers, and fixing them is what
+ * makes the second visible. Git refuses on OWNERSHIP and ignores mode
+ * entirely (CVE-2022-24765): a fully world-writable checkout still gets
+ * `fatal: detected dubious ownership in repository at '/workspace'` for
+ * `status`, `add`, `commit` and `diff`. No chmod reaches it. The other half
+ * of this fix is a `safe.directory` entry, and it is applied on the CONTAINER
+ * side in `config/render.ts` via `GIT_CONFIG_*` env rather than here, because
+ * the container's root filesystem is read-only and there is no writable
+ * `$HOME/.gitconfig` for a `git config --global` to land in.
+ *
+ * ## Scoped to the worktree, deliberately
+ *
+ * `path` is `<run>/worktrees/<worker>` and the widening stops there. Its
+ * siblings under the run dir are `control-auth.json` (mode 0600, the
+ * control-socket secret), `ledger/` and `audit/`. A `chmod -R` one level up
+ * would publish the run secret to every local user on the host. This is also
+ * why the checkout was moved OUT of the operator's repository first: the same
+ * widening applied in place would be chmodding files inside a repo pifleet
+ * does not own. See `workerWorktree` in `run/paths.ts`.
+ *
+ * The residual is real and is stated rather than implied: `<run>/worktrees/`
+ * is world-writable, so on a multi-user host any local user can write into a
+ * worker's checkout. That is the accepted cost of a baked container uid; the
+ * alternative measured against it was running the container as the invoking
+ * uid, which needs no widening but contradicts ISC-25 and leaves the image's
+ * baked `$HOME` unwritable.
  */
-async function excludeWorktreesDir(repo: string): Promise<void> {
-  const gitPath = await runGit(repo, ["rev-parse", "--git-path", "info/exclude"]);
-  if (gitPath.code !== 0) throw new WorktreeError(`rev-parse --git-path info/exclude in ${repo}`, gitPath);
-  const excludePath = resolvePath(repo, gitPath.stdout.trim());
-
-  let current = "";
-  try {
-    current = await readFile(excludePath, "utf8");
-  } catch {
-    // No exclude file yet — created below.
-  }
-  if (current.split("\n").some((l) => l.trim() === "/.worktrees/")) return;
-
-  await mkdir(dirname(excludePath), { recursive: true });
-  const prefix = current.length > 0 && !current.endsWith("\n") ? `${current}\n` : current;
-  await writeFile(excludePath, `${prefix}/.worktrees/\n`, "utf8");
+export async function prepareWorktreePermissions(path: string): Promise<void> {
+  const p = Bun.spawn(["chmod", "-R", "a+rwX", path], { stdout: "pipe", stderr: "pipe" });
+  const [code, stderr] = await Promise.all([p.exited, new Response(p.stderr).text()]);
+  if (code !== 0) throw new WorktreePermissionsError(path, code, stderr);
 }
 
 export interface CreateWorktreesOptions {
@@ -610,11 +658,9 @@ export async function createWorkerWorktrees(
     );
   }
 
-  await excludeWorktreesDir(repo);
-
   const created: WorkerWorktree[] = [];
   for (const workerId of wanted) {
-    const path = workerWorktree(repo, run.runId, workerId);
+    const path = workerWorktree(run.root, workerId);
     // lstat, not `exists`: a dangling symlink at this path is still something
     // that must not be cloned over, and `stat` would follow it and report
     // absence.
@@ -710,6 +756,14 @@ export async function createWorkerWorktrees(
       const headTree = await runGit(path, ["rev-parse", "HEAD^{tree}"]);
       if (headTree.code !== 0) throw new WorktreeError(`rev-parse HEAD^{tree} in ${path}`, headTree);
       baselineTree = headTree.stdout.trim();
+
+      // AFTER every git operation and BEFORE the worker is told the checkout
+      // exists. Ordering both ways round matters: git's own writes here run as
+      // the operator's uid and would re-create 0644 files under any earlier
+      // widen, and `onCreated` below is what RECORDS the worktree — a clone
+      // announced before it is writable is one a worker can be dispatched to.
+      // Inside the try, so a failure rolls the clone back like any other.
+      await prepareWorktreePermissions(path);
 
       record = { workerId, path, branch, baseSha, remoteName, baselineStatus: "", baselineTree };
       created.push(record);
@@ -908,24 +962,41 @@ export async function inspectCloneDirt(wt: WorkerWorktree): Promise<DirtyState> 
  */
 export async function pruneWorkerWorktree(opts: {
   repo: string;
+  /**
+   * The RUN directory — the containment root for the delete below (ISC-298).
+   *
+   * Separate from `repo`, which this function still needs for the parent-side
+   * `git remote remove`. The two used to be the same answer because checkouts
+   * lived at `<repo>/.worktrees/<run-id>/<worker>`; they are now different
+   * directories with different owners and different purposes, and collapsing
+   * them back into one argument is how the containment check would come to
+   * bound the wrong tree.
+   */
+  runRoot: string;
   worktree: WorkerWorktree;
   force: boolean;
 }): Promise<PruneOutcome> {
-  const { repo, worktree: wt, force } = opts;
+  const { repo, runRoot, worktree: wt, force } = opts;
   const base = { workerId: wt.workerId, path: wt.path };
+  const containment = join(runRoot, "worktrees");
 
   // The recorded path is not container-writable — `run.json` is host-side —
   // but it IS operator-editable, and this is the one place in the module
   // that runs a RECURSIVE delete off a value read back from disk rather than
-  // computed from `workerWorktree(repo, id)`. A hand-edited or truncated
+  // computed from `workerWorktree(runRoot, id)`. A hand-edited or truncated
   // `run.json` must not turn `--force` into an unbounded `rm -rf`; refused as
   // a normal prune outcome, not a thrown error, for the same "runnable twice"
   // reason a missing directory is not an error either.
-  if (!resolvedWithin(join(repo, ".worktrees"), wt.path)) {
+  //
+  // The containment root moved with the checkouts (ISC-298). It is emphatically
+  // NOT widened to the run dir itself: `<run>/` also holds `control-auth.json`
+  // (the run's control-socket secret), `ledger/` and `audit/`, and a `--force`
+  // prune reading a doctored `run.json` must not be able to name any of them.
+  if (!resolvedWithin(containment, wt.path)) {
     return {
       ...base,
       pruned: false,
-      reason: `run.json records this checkout at ${wt.path}, which is outside ${join(repo, ".worktrees")}; refusing to delete it`,
+      reason: `run.json records this checkout at ${wt.path}, which is outside ${containment}; refusing to delete it`,
     };
   }
 
@@ -964,13 +1035,20 @@ export async function pruneWorkerWorktree(opts: {
   if (present) await rm(wt.path, { recursive: true, force: true });
 
   /**
-   * Drop the run's own `.worktrees/<run-id>/` directory once its last worker
-   * is gone (ISC-295).
+   * Drop the run's `worktrees/` directory once its last worker is gone
+   * (ISC-295, relocated by ISC-298).
    *
-   * Checkouts became run-scoped, which removed the collision between two runs
-   * — and introduced a directory per run that nothing owned. Without this a
-   * repo accumulates one empty directory for every fleet ever started, which
-   * is a smaller problem than the collision but a permanent one.
+   * The problem this solved has shrunk. Under the old layout the accumulating
+   * leftovers were in the OPERATOR'S REPOSITORY — one empty
+   * `.worktrees/<run-id>/` per fleet ever started, in a tree pifleet does not
+   * own and the operator would have to clean by hand. They are now inside the
+   * run dir, which `down` removes wholesale, so this is tidiness rather than
+   * the permanent accretion ISC-295 recorded.
+   *
+   * Kept anyway, because the two are not the same event: a `--prune` that
+   * removes every worker does not necessarily remove the run dir, and leaving
+   * an empty `worktrees/` behind would make `run.json`'s record and the disk
+   * disagree about whether a checkout is still there.
    *
    * `rmdir`, deliberately NOT `rm -r`. It fails on a non-empty directory, and
    * that failure IS the safety property: a fleet whose other workers are still
@@ -980,12 +1058,13 @@ export async function pruneWorkerWorktree(opts: {
    * leftover empty directory must never turn a successful prune into a failed
    * one.
    *
-   * Guarded on the parent being a direct child of `.worktrees/`, so a
-   * `run.json` recording an unexpected shape cannot walk this upward.
+   * Guarded on the parent being exactly the containment root, so a `run.json`
+   * recording an unexpected shape cannot walk this upward into the run dir —
+   * where `rmdir` would meet `control-auth.json` and, on an otherwise-emptied
+   * run, could succeed.
    */
-  const runDir = dirname(wt.path);
-  if (resolvePath(dirname(runDir)) === resolvePath(join(repo, ".worktrees"))) {
-    await rmdir(runDir).catch(() => {});
+  if (resolvePath(dirname(wt.path)) === resolvePath(containment)) {
+    await rmdir(containment).catch(() => {});
   }
 
   return {

@@ -127,9 +127,11 @@ function taskEnvelope(
 beforeAll(async () => {
   tmp = await mkdtemp(join(tmpdir(), "pifleet-harvest-"));
   repo = join(tmp, "repo");
-  worktree = workerWorktree(repo, RUN_ID, "w1");
   runsDir = join(tmp, "runs");
   runDir = join(runsDir, RUN_ID);
+  // Derived from the RUN dir, not the repo, as of ISC-298 — so this has to be
+  // ordered after `runDir` exists rather than beside the repo it used to hang off.
+  worktree = workerWorktree(runDir, "w1");
 
   // A real repository with a real base commit.
   await mkdir(repo, { recursive: true });
