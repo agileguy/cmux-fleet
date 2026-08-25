@@ -556,11 +556,21 @@ describe("ISC-114 / ISC-115: crossing the ceiling halts dispatch without destroy
     // into worstExit — no verdict in this schedule can yield it.
     expect(exit).toBe(EXIT.BUDGET);
 
-    // ISC-115: the halt happened on the TOKEN axis with reported cost 0
-    // throughout. A dollar-watching budget never trips against local models.
+    /**
+     * ISC-115: the halt happened on the TOKEN axis with reported cost 0
+     * THROUGHOUT. A dollar-watching budget never trips against local models.
+     *
+     * `snapshots` is the full time series — `onChange` pushes one per state
+     * change — and the whole series is read, not just its end. That is not
+     * belt-and-braces: a mutation adding 1 to `usd_spent` on every settle and
+     * zeroing it in `#halt` leaves the endpoint at 0 while the middle of the
+     * run is non-zero, and the endpoint-only version of this block passed it.
+     */
     const last = snapshots[snapshots.length - 1]!;
     expect(last.halted_at).not.toBeNull();
     expect(last.halted_reason).toContain("tokens_ceiling");
+    expect(snapshots.length).toBeGreaterThan(1);
+    expect(snapshots.map((s) => s.usd_spent)).toEqual(snapshots.map(() => 0));
     expect(last.usd_spent).toBe(0);
     expect(last.tokens_spent).toBe(160);
   });

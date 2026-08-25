@@ -44,11 +44,19 @@
  *    re-read at any rung until ISC-191 was re-graded, and the fixture in
  *    `down-prune.test.ts` still carries the note from the day that ladder
  *    SIGTERMed the test runner's own process group.
- *  - `classifyStall` has no production caller at all — ISC-110 and ISC-117
- *    are both open on exactly that, so the stall policy below is a written
- *    rule nothing consults. `TaskDeadlineError` has no constructor call
- *    outside its own test either; ISC-116 rests on the exit-code protocol it
- *    satisfies, not on a caller.
+ *  - `classifyStall` DOES have a production caller, and this comment said it
+ *    did not for four days after it stopped being true. The stall-wiring
+ *    commission (2026-08-20) moved the function to `./stall.ts` — re-exported
+ *    below for the callers that still reach it through here — and
+ *    `orchestrate/scheduler.ts:476` consults it every poll. ISC-110 and
+ *    ISC-117 are `[~]` because the SCHEDULER's action on the verdict is
+ *    proved against an injected clock while the two PRODUCTION inputs are not
+ *    (ISC-282 owns that), which is a different and much narrower gap than
+ *    "nothing consults it". Corrected 2026-08-25 by the budget re-grade
+ *    audit, which tripped over this line while checking a different stale
+ *    claim. `TaskDeadlineError` still has no constructor call outside its own
+ *    test; ISC-116 rests on the exit-code protocol it satisfies, not on a
+ *    caller.
  *
  * A task exceeding `deadline_s` settles `timed_out`, which `wait` already
  * maps to exit 4 (ISC-116); `TaskDeadlineError` is the diagnosed form for a

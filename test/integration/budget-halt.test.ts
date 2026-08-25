@@ -308,9 +308,20 @@ describe("a ceiling crossed mid-run halts dispatch and exits 5, artifacts intact
       expect(inbox).toHaveLength(2);
       for (const t of held) expect(inbox).not.toContain(`${t.id}.json`);
 
-      // ISC-115: the halt happened on the TOKEN axis while reported cost
-      // stayed 0 for the whole run — the inversion local models force, since
-      // a dollar-watching ceiling has no price table to trip on.
+      /**
+       * ISC-115: the halt happened on the TOKEN axis while reported cost was
+       * 0 — the inversion local models force, since a dollar-watching ceiling
+       * has no price table to trip on.
+       *
+       * BE PRECISE ABOUT WHICH MOMENT THIS IS. `budget.json` is rewritten in
+       * place on every change, so what survives on disk is the END state and
+       * this reads exactly that; it is not the "throughout" the criterion
+       * words. The series-level claim is pinned where a series exists —
+       * `budget-wiring.test.ts`, which collects every `onChange` snapshot, and
+       * `budget.test.ts`, which records `usd_spent` after each settle. This
+       * assertion is still live rather than decorative: leaking 1 usd per
+       * settle turns it red.
+       */
       const budget = BudgetStateSchema.parse(JSON.parse(await Bun.file(rig.run.budgetJson).text()));
       expect(budget.halted_at).not.toBeNull();
       expect(budget.halted_reason).toContain("tokens_ceiling");

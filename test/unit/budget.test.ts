@@ -42,15 +42,33 @@ describe("ISC-115: the ceiling trips on tokens while usd stays 0 throughout", ()
   test("a run spending only unpriced tokens is halted", () => {
     const m = manager(1_000);
     let halted = false;
+    /**
+     * THE WHOLE SERIES, not the last reading — and the reason is a mutation
+     * that survived the last reading.
+     *
+     * This test's final assertion used to be `s.usd_spent === 0` with the
+     * comment "cost really was 0 the whole way", which is a claim about every
+     * moment of the run written against a single endpoint. Measured: make
+     * `settle` add 1 to `usd_spent` and make `#halt` zero it, and cost is
+     * non-zero for the whole middle of this run while the endpoint still
+     * reads 0 — the mutation passes, and the comment is false while the test
+     * is green. Recording every step is what makes the word "throughout" in
+     * this describe's title mean something.
+     */
+    const usdSeries: number[] = [];
     for (let i = 0; i < 20 && !halted; i++) {
       const d = m.admit(`t-${i}`, OPTS);
       if (refused(d)) break;
       // Every settle reports cost 0 — the permanent local-model condition.
       halted = m.settle(`t-${i}`, { tokens: 400, usd: 0 }).halted;
+      usdSeries.push(m.snapshot().usd_spent);
     }
     const s = m.snapshot();
     expect(halted).toBe(true);
-    expect(s.usd_spent).toBe(0); // cost really was 0 the whole way
+    // More than one reading, or "throughout" is one moment wearing a plural.
+    expect(usdSeries.length).toBeGreaterThan(1);
+    expect(usdSeries).toEqual(usdSeries.map(() => 0));
+    expect(s.usd_spent).toBe(0);
     expect(s.halted_at).not.toBeNull();
     expect(s.halted_reason).toContain("tokens_ceiling");
   });
