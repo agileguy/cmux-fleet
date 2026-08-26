@@ -54,6 +54,7 @@ import { stringify } from "yaml";
 import { loadConfig } from "../../src/config/load.ts";
 import { renderWorker } from "../../src/config/render.ts";
 import { CREDENTIAL_ENV_VARS } from "../../src/security/adc.ts";
+import { makeRule } from "../../src/security/egress.ts";
 import {
   relayRunArgv,
   RELAY_DEFAULT_DIAL_HOST,
@@ -257,7 +258,7 @@ describe("no cloud provider key reaches a container environment (ISC-31)", () =>
     const targets: RelayTarget[] = [
       { listenPort: 8000, host: RELAY_DEFAULT_DIAL_HOST, port: 8000, name: "omlx" },
     ];
-    const argv = relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.cjs");
+    const argv = relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.cjs", null);
     // `relayRunArgv` omits the leading "docker", so the image is located by value.
     const imageIndex = argv.findIndex((a) => a.includes("node@sha256:") || a.includes("node:"));
     expect(imageIndex).toBeGreaterThan(0);
@@ -265,6 +266,44 @@ describe("no cloud provider key reaches a container environment (ISC-31)", () =>
     expect(flags.map((f) => f.name)).toEqual(["PIFLEET_RELAY_TARGETS"]);
     expect(flags[0]!.value).toContain("8000");
     expect(flags[0]!.value).not.toContain(PERMITTED_KEY);
+  });
+
+  /**
+   * ISC-263 added two more variables to this argv, and this assertion is
+   * EXTENDED rather than relaxed — the criterion above is that no credential
+   * reaches a container environment, and a new feature is exactly when that
+   * stops being true by accident.
+   *
+   * Both new values are the same KIND of thing as the forwarding table: hosts,
+   * ports and rule names. The proxy is built so no credential is needed — it
+   * splices a socket after a CONNECT and never reads a request body, the same
+   * property `egress-relay.cjs` has and for the same reason.
+   */
+  test("the relay's CONNECT proxy adds only a policy and a port, still no credential", () => {
+    const targets: RelayTarget[] = [
+      { listenPort: 8000, host: RELAY_DEFAULT_DIAL_HOST, port: 8000, name: "omlx" },
+    ];
+    const argv = relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.cjs", {
+      policy: { rules: [makeRule("google:oauth2.googleapis.com", "oauth2.googleapis.com", 443)] },
+      port: 3128,
+      scriptPath: "/repo/docker/connect-proxy.cjs",
+      policyScriptPath: "/repo/docker/egress-policy.cjs",
+    });
+    const imageIndex = argv.findIndex((a) => a.includes("node@sha256:") || a.includes("node:"));
+    const flags = expectCleanEnv("relay+proxy", argv, imageIndex);
+    expect(flags.map((f) => f.name)).toEqual([
+      "PIFLEET_RELAY_TARGETS",
+      "PIFLEET_PROXY_POLICY",
+      "PIFLEET_PROXY_PORT",
+    ]);
+    const policy = flags.find((f) => f.name === "PIFLEET_PROXY_POLICY")!;
+    expect(policy.value).toContain("oauth2.googleapis.com");
+    expect(policy.value).not.toContain(PERMITTED_KEY);
+    // Read-only mounts, like the relay script beside them: the proxy and the
+    // matcher it requires are code the container executes, and a writable
+    // mount would let anything on the bridge rewrite the engine refusing it.
+    expect(argv).toContain("/repo/docker/connect-proxy.cjs:/relay/connect-proxy.cjs:ro");
+    expect(argv).toContain("/repo/docker/egress-policy.cjs:/relay/egress-policy.cjs:ro");
   });
 
   /**

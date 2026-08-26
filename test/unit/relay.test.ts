@@ -17,6 +17,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { EgressPolicy } from "../../src/security/egress.ts";
 import { policyFromConfig } from "../../src/security/egress.ts";
 import {
   assertTargetsAllowed,
@@ -33,6 +34,10 @@ import {
   relayInspectArgv,
   relayRemoveArgv,
   relayRunArgv,
+  relayPolicyDrifted,
+  proxyPolicyFor,
+  PROXY_POLICY_ENV,
+  PROXY_LISTEN_ALIAS,
   relayScriptPath,
   relayScriptSha256,
   uplinkNetworkName,
@@ -208,7 +213,7 @@ describe("relayRunArgv", () => {
     //                              no commit in this repo. This byte-for-byte
     //                              comparison is what stops the digest being
     //                              quietly dropped again.
-    expect(relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.cjs")).toEqual([
+    expect(relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.cjs", null)).toEqual([
       "run",
       "-d",
       "--name",
@@ -256,7 +261,7 @@ describe("relayRunArgv", () => {
     // name the relay never looks up once the upstream is a LAN IP. An argv
     // listing a mapping nothing uses invites the reader to believe the relay
     // reaches the Docker host when it does not.
-    const toHost = relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.cjs");
+    const toHost = relayRunArgv("relay-x", "uplink-x", targets, "/repo/docker/egress-relay.cjs", null);
     expect(toHost).toContain("--add-host");
     expect(toHost).toContain(`${RELAY_DEFAULT_DIAL_HOST}:host-gateway`);
 
@@ -265,6 +270,7 @@ describe("relayRunArgv", () => {
       "uplink-x",
       [{ listenPort: 8000, host: LAN_OMLX, port: 8000, name: "omlx" }],
       "/repo/docker/egress-relay.cjs",
+      null,
     );
     expect(toLan).not.toContain("--add-host");
     expect(toLan.join(" ")).not.toContain("host-gateway");
@@ -298,6 +304,7 @@ describe("relayRunArgv", () => {
       "uplink-x",
       [{ listenPort: 8000, host: LAN_OMLX, port: 9999, name: "omlx" }],
       "/repo/docker/egress-relay.cjs",
+      null,
     );
     const env = argv[argv.indexOf("-e") + 1];
     expect(env).toBe(
@@ -306,7 +313,7 @@ describe("relayRunArgv", () => {
   });
 
   test("an empty target list is refused — a relay that forwards nothing is a lie", () => {
-    expect(() => relayRunArgv("relay-x", "uplink-x", [], "/repo/docker/egress-relay.cjs")).toThrow(
+    expect(() => relayRunArgv("relay-x", "uplink-x", [], "/repo/docker/egress-relay.cjs", null)).toThrow(
       /target/,
     );
   });
@@ -787,6 +794,11 @@ describe("relay docker argv, remaining", () => {
       "omlx.pifleet.internal",
       "--alias",
       "host.docker.internal",
+      // ISC-263: the name a cloud_access worker's HTTPS_PROXY resolves to.
+      // Spelled literally here, like the other two, so a rename of the
+      // constant has to be a deliberate edit in both places.
+      "--alias",
+      "egress.pifleet.internal",
       NET,
       "relay-x",
     ]);
@@ -814,6 +826,7 @@ describe("parseRelayInspect", () => {
       running: true,
       id: "abc123",
       liveTargets: null,
+      livePolicy: null,
     });
   });
 
@@ -842,6 +855,7 @@ describe("parseRelayInspect", () => {
       running: false,
       id: null,
       liveTargets: null,
+      livePolicy: null,
     });
     expect(parseRelayInspect("relay-x", entry({ Name: "/other" })).exists).toBe(false);
   });
@@ -889,8 +903,24 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       },
     ]);
 
-  const liveRelay = (targets: readonly RelayTarget[]): string =>
-    inspectWith([`${RELAY_TARGETS_ENV}=${JSON.stringify(targets)}`, "PATH=/usr/bin"]);
+  /**
+   * An up-to-date relay: the forwarding table AND the CONNECT policy the
+   * current config would produce (ISC-263).
+   *
+   * The policy has to be stamped here or every adoption test would exercise
+   * the DRIFT path instead — a relay carrying no policy is genuinely stale
+   * against a config that wants one, which is the point of the check, and is
+   * not what "already forwarding what the config wants" means to test.
+   */
+  const liveRelay = (
+    targets: readonly RelayTarget[],
+    policy: EgressPolicy = proxyPolicyFor(cfg(DEFAULT_BASE_URL)),
+  ): string =>
+    inspectWith([
+      `${RELAY_TARGETS_ENV}=${JSON.stringify(targets)}`,
+      `${PROXY_POLICY_ENV}=${JSON.stringify(policy)}`,
+      "PATH=/usr/bin",
+    ]);
 
   describe("reading a running relay's actual targets", () => {
     test("the stamped env var is read back off the container", () => {
@@ -901,7 +931,7 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
     test("the argv writes the very variable this reads — one key, not two", () => {
       // Guards the pair. A typo on either side yields a check that silently
       // never fires, which is worse than the defect it replaced.
-      const argv = relayRunArgv(relayContainerName(NET), "u", [T(LAN_OMLX)], "/s.cjs");
+      const argv = relayRunArgv(relayContainerName(NET), "u", [T(LAN_OMLX)], "/s.cjs", null);
       const row = argv.find((a) => a.startsWith(`${RELAY_TARGETS_ENV}=`));
       expect(row).toBeDefined();
       expect(parseRelayInspect(relayContainerName(NET), liveRelay([T(LAN_OMLX)])).liveTargets)
@@ -995,6 +1025,46 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       expect(status.replaced).toBeNull();
       // Idempotence is still the property `up` depends on: one call, no rm.
       expect(verbs(calls)).toEqual(["inspect"]);
+    });
+
+    /**
+     * ISC-263 — the SECOND drift comparison, and the one that had to exist the
+     * moment the relay started enforcing a policy as well as a table.
+     *
+     * `up` adopts a running relay and several fleets share one. Without this,
+     * an operator who added a host to `egress.google_hosts` would get a relay
+     * still enforcing the previous allowlist: `up` reports success and a
+     * `cloud_access` worker gets a 403 for a destination the config plainly
+     * allows. The forwarding table had exactly this bug and ISC-265 fixed it;
+     * adding a second piece of enforced state without extending the check
+     * would have reintroduced it beside the fix.
+     */
+    test("a relay enforcing a STALE policy is rebuilt, though its targets match", async () => {
+      // Targets identical, so the existing comparison sees nothing — the ONLY
+      // difference is the policy, which is what makes this a controlled test
+      // of the new check rather than a second way to observe the old one.
+      const stale = { rules: [] };
+      const { calls, exec } = daemon(liveRelay([T(RELAY_DEFAULT_DIAL_HOST)], stale));
+      const status = await ensureEgressRelay(
+        cfg(DEFAULT_BASE_URL, { google_hosts: ["*.googleapis.com"] }),
+        NET,
+        exec,
+      );
+      expect(status.created).toBe(true);
+      expect(verbs(calls)).toContain("rm");
+    });
+
+    test("rule ORDER alone is not drift — a shared relay must not cycle for nothing", async () => {
+      // `decide` returns the first match and every matching rule allows, so
+      // order carries no meaning. A relay that rebuilt on reordering is one an
+      // operator learns to work around.
+      const forward = proxyPolicyFor(cfg(DEFAULT_BASE_URL, { google_hosts: ["a.example.com", "b.example.com"] }));
+      const reversed = { rules: [...forward.rules].reverse() };
+      expect(relayPolicyDrifted(reversed, forward)).toBe(false);
+      // The control: a genuinely different rule set IS drift.
+      expect(relayPolicyDrifted({ rules: forward.rules.slice(1) }, forward)).toBe(true);
+      // And an unreadable policy is drift, in the direction that rebuilds.
+      expect(relayPolicyDrifted(null, forward)).toBe(true);
     });
 
     test("a relay forwarding somewhere ELSE is removed and rebuilt, with no manual rm -f", async () => {

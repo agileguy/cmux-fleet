@@ -349,8 +349,10 @@ jobs:
           #
           # 77 -> 79 comes from ISC-261 and ISC-258 adding one probe each to
           # relay.test.ts:
-          #   + "the relay opens exactly one port on the bridge, and every
-          #      sibling on the bridge is an expected fleet member" (ISC-261)
+          #   + "the relay opens exactly its two derived ports on the bridge,
+          #      and every sibling on the bridge is an expected fleet member"
+          #      (ISC-261; renamed by ISC-263, which made the relay's
+          #      sanctioned listener set two ports rather than one)
           #   + "a live INFERENCE round-trips through the relay, differentially
           #      against a host control" (ISC-258, skips here)
           # ISC-261 also REWROTE the gateway-residual probe in place — from
@@ -501,7 +503,23 @@ jobs:
           # container runs as, so removing the recursive widen leaves it green
           # on the maintainer's machine and red on this runner. See the probe's
           # own comment for the measurement.
-          TOTAL_EXPECTED: "103"
+          #
+          # 103 -> 104 is ISC-263's CONNECT-proxy probe in relay.test.ts --
+          # "an allowed host is reachable through the proxy and unreachable
+          # without it". One added Docker-gated case, so one more skip with the
+          # gate closed and the pass count unmoved -- the shape one added
+          # daemon-requiring probe must have.
+          #
+          # DERIVED by the hand method, NOT by adding 1 to 103. Measured
+          # 2026-08-26 on bun 1.3.11, gate UNSET, with no listener on :8000,
+          # against the file list actually passed to probe-guard.sh below:
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container}.test.ts
+          #     -> 6 pass, 98 skip, 0 fail. Ran 104 tests across 12 files.
+          # The 6 passes are the same daemon-free tests named above, unmoved.
+          # Independently corroborated: the guard's own parse of the CI run
+          # that rejected 103 read `total=104` with `fail=0` -- a derivation
+          # and an observation agreeing, not one number copied from the other.
+          TOTAL_EXPECTED: "104"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -995,16 +1013,19 @@ jobs:
           # also the model the warmup above loads, so the two agree by
           # construction rather than by coincidence.
           PIFLEET_OMLX_MODEL: GLM-4.5-Air-MLX-4bit
-          # DERIVED by the hand method, not incremented. Re-derived 2026-08-25
-          # when full-chain.test.ts was re-added, on bun 1.3.11 with
-          # PIFLEET_DOCKER unset and no listener on :8000:
+          # DERIVED by the hand method, not incremented. Re-derived 2026-08-26
+          # when ISC-263's CONNECT-proxy probe landed in relay.test.ts, on bun
+          # 1.3.11 with PIFLEET_DOCKER unset and no listener on :8000:
           #     bun test test/integration/relay.test.ts \
           #              test/integration/full-chain.test.ts
-          #     -> 0 pass, 10 skip, 0 fail. Ran 10 tests across 2 files.
-          # The previous entry's own comment predicted "back to 10"; that
-          # prediction is not the evidence, the run above is.
-          TOTAL_EXPECTED: "10"
-          # EMPTY. All ten must RUN. The two names pinned as skips in the
+          #     -> 0 pass, 11 skip, 0 fail. Ran 11 tests across 2 files.
+          # One added Docker-gated case, one more skip, pass unmoved at 0. This
+          # supersedes the 2026-08-25 entry, which read 10 with 10 skips when
+          # full-chain.test.ts was re-added; the delta against it is exactly
+          # the one probe ISC-263 adds. The CI run that rejected 10 parsed
+          # `total=11 fail=0` on its own, which is the corroboration.
+          TOTAL_EXPECTED: "11"
+          # EMPTY. All eleven must RUN. The two names pinned as skips in the
           # `container` job -- both live-oMLX relay probes -- are exactly the
           # ones this job exists to execute.
           EXPECTED_CONTAINER_LIVE_SKIPS: ""

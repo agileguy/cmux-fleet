@@ -261,6 +261,37 @@ export const RELAY_SCRIPT_CONTAINER_PATH = "/relay/egress-relay.cjs";
  */
 export const RELAY_TARGETS_ENV = "PIFLEET_RELAY_TARGETS";
 
+// ---------------------------------------------------------------------------
+// The CONNECT proxy (ISC-263)
+// ---------------------------------------------------------------------------
+
+/**
+ * The name a `cloud_access` worker points `HTTPS_PROXY` at.
+ *
+ * A SECOND alias on the same relay container rather than a reuse of
+ * `RELAY_LISTEN_ALIAS`, and the distinction is not cosmetic: that name means
+ * "the oMLX endpoint" and is baked into `models.json` and `llm.base_url`.
+ * Pointing proxy traffic at it would make one name mean two services, and the
+ * first person to debug a 403 would be reading a hostname that says model
+ * server.
+ */
+export const PROXY_LISTEN_ALIAS = "egress.pifleet.internal";
+
+/**
+ * The proxy's listen port. 3128 is the conventional forward-proxy port
+ * (squid's default), so the value is recognizable to anyone reading a
+ * `HTTPS_PROXY` line, and it cannot collide with the relay's listen ports —
+ * those come from `llm.base_url`, and `relayListenPort` refusing 3128 is not
+ * needed because the two live on the same container and a collision would fail
+ * loudly at `listen(2)` rather than silently mis-route.
+ */
+export const PROXY_LISTEN_PORT = 3128;
+
+export const PROXY_SCRIPT_CONTAINER_PATH = "/relay/connect-proxy.cjs";
+export const PROXY_POLICY_SCRIPT_CONTAINER_PATH = "/relay/egress-policy.cjs";
+export const PROXY_POLICY_ENV = "PIFLEET_PROXY_POLICY";
+export const PROXY_PORT_ENV = "PIFLEET_PROXY_PORT";
+
 /** One forward: accept on `listenPort`, connect to `host:port`. */
 export interface RelayTarget {
   readonly listenPort: number;
@@ -450,6 +481,8 @@ export interface RelayContainerStatus {
    * quiet downgrade this module exists to refuse.
    */
   liveTargets: readonly RelayTarget[] | null;
+  /** The CONNECT policy it is enforcing, or null if unreadable (ISC-263). */
+  livePolicy: EgressPolicy | null;
 }
 
 export interface RelayStatus {
@@ -637,6 +670,33 @@ function relayListenPort(cfg: RelayConfigView): number {
  * rule and is refused. Under the old gate that combination was unexpressible;
  * under a naive `policyFromConfig` gate it would have passed.
  */
+/**
+ * The policy the in-container CONNECT proxy enforces (ISC-263).
+ *
+ * Two sources, and the omission is the interesting part: `egress.google_hosts`
+ * on 443, plus every explicit `egress.allow` entry. The `llm` rule that
+ * `policyFromConfig` derives from `llm.base_url` is DELIBERATELY ABSENT.
+ *
+ * Model traffic does not go through this proxy. It goes through the
+ * port-forward relay on `RELAY_LISTEN_ALIAS`, which is a different listener on
+ * the same container reached by a different name, and a worker's `NO_PROXY`
+ * names that alias precisely so its LLM calls never enter here. Carrying an
+ * `llm` rule anyway would authorize a destination this path is not meant to
+ * serve, and would do it in the one place a reader checks to learn what the
+ * proxy can reach.
+ *
+ * An empty result is legitimate and is not an error: a fleet that configures
+ * no Google hosts and no extra allows gets a deny-all proxy, which is the
+ * correct posture and still better than no proxy at all — the failure is then
+ * a named 403 rather than a connection refused.
+ */
+export function proxyPolicyFor(cfg: RelayConfigView): EgressPolicy {
+  const rules: EgressRule[] = [];
+  for (const h of cfg.egress.google_hosts) rules.push(makeRule(`google:${h}`, h, 443));
+  for (const r of cfg.egress.allow) rules.push(makeRule(`config:${r.host}:${r.port}`, r.host, r.port));
+  return { rules };
+}
+
 export function relayGatePolicy(cfg: RelayConfigView): EgressPolicy {
   // `RELAY_DEFAULT_DIAL_HOST`, not `RELAY_LISTEN_ALIAS` (ISC-264). This rule is
   // about the DESTINATION the relay may reach without an operator allow entry —
@@ -734,11 +794,28 @@ export async function relayScriptSha256(path: string = relayScriptPath()): Promi
  * Docker host), and the hardening set: this process listens on a bridge every
  * worker can reach, so it runs read-only, unprivileged, and capability-less.
  */
+/**
+ * What the relay container needs in order to ALSO serve CONNECT (ISC-263).
+ *
+ * `null` at the call site rather than an optional parameter, so adding the
+ * proxy is a decision every caller states. An optional argument would let a
+ * call site acquire a `cloud_access` role and silently keep launching a relay
+ * without a proxy — the credential-granted-for-a-path-that-does-not-exist
+ * failure this criterion exists to close, reintroduced by a default.
+ */
+export interface RelayProxySpec {
+  readonly policy: EgressPolicy;
+  readonly port: number;
+  readonly scriptPath: string;
+  readonly policyScriptPath: string;
+}
+
 export function relayRunArgv(
   containerName: string,
   uplinkNetwork: string,
   targets: readonly RelayTarget[],
   scriptPath: string,
+  proxy: RelayProxySpec | null,
 ): string[] {
   assertDockerName("container", containerName);
   assertDockerName("network", uplinkNetwork);
@@ -814,8 +891,28 @@ export function relayRunArgv(
     "pifleet.component=egress-relay",
     "-v",
     `${scriptPath}:${RELAY_SCRIPT_CONTAINER_PATH}:ro`,
+    // The CONNECT proxy and the matcher it requires, mounted read-only beside
+    // the relay script. Both are emitted only when a proxy is asked for, so a
+    // fleet with no `cloud_access` role runs an argv with no proxy surface in
+    // it at all rather than one carrying a disabled feature.
+    ...(proxy === null
+      ? []
+      : [
+          "-v",
+          `${proxy.scriptPath}:${PROXY_SCRIPT_CONTAINER_PATH}:ro`,
+          "-v",
+          `${proxy.policyScriptPath}:${PROXY_POLICY_SCRIPT_CONTAINER_PATH}:ro`,
+        ]),
     "-e",
     `${RELAY_TARGETS_ENV}=${JSON.stringify(targets)}`,
+    ...(proxy === null
+      ? []
+      : [
+          "-e",
+          `${PROXY_POLICY_ENV}=${JSON.stringify(proxy.policy)}`,
+          "-e",
+          `${PROXY_PORT_ENV}=${proxy.port}`,
+        ]),
     "--entrypoint",
     "node",
     RELAY_IMAGE,
@@ -847,6 +944,12 @@ export function relayConnectArgv(egressNetwork: string, containerName: string): 
     RELAY_LISTEN_ALIAS,
     "--alias",
     LEGACY_RELAY_LISTEN_ALIAS,
+    // ISC-263: the name `HTTPS_PROXY` resolves to. Attached unconditionally
+    // rather than only when a proxy is configured — an alias costs nothing,
+    // and a worker whose env names a host that does not resolve fails with DNS
+    // noise instead of the connection-refused that says "no proxy here".
+    "--alias",
+    PROXY_LISTEN_ALIAS,
     egressNetwork,
     containerName,
   ];
@@ -865,6 +968,22 @@ export function relayRemoveArgv(containerName: string): string[] {
 /** Absolute path to the relay script in this checkout, resolved from module location. */
 export function relayScriptPath(): string {
   return join(repoRoot(), "docker", "egress-relay.cjs");
+}
+
+/** Absolute path to the CONNECT proxy in this checkout (ISC-263). */
+export function proxyScriptPath(): string {
+  return join(repoRoot(), "docker", "connect-proxy.cjs");
+}
+
+/**
+ * Absolute path to the SHARED matcher in this checkout (ISC-263).
+ *
+ * Mounted beside the proxy because the proxy `require`s it, and it is the same
+ * file `src/security/egress.ts` imports — the host-side policy and the
+ * in-container decision are one implementation, not two that agree.
+ */
+export function proxyPolicyScriptPath(): string {
+  return join(repoRoot(), "docker", "egress-policy.cjs");
 }
 
 /**
@@ -902,9 +1021,10 @@ export function parseRelayInspect(name: string, stdout: string): RelayContainerS
       running: state.Running === true,
       id: typeof e.Id === "string" ? e.Id : null,
       liveTargets: liveTargetsFromEnv(e.Config),
+      livePolicy: livePolicyFromEnv(e.Config),
     };
   }
-  return { name, exists: false, running: false, id: null, liveTargets: null };
+  return { name, exists: false, running: false, id: null, liveTargets: null, livePolicy: null };
 }
 
 /**
@@ -924,6 +1044,76 @@ export function parseRelayInspect(name: string, stdout: string): RelayContainerS
  * an unreadable relay must be REPLACED, not crash `up`, and a throw would
  * make an old container an unrecoverable error rather than a stale one.
  */
+/**
+ * The POLICY a running relay is actually enforcing, read back off the
+ * container (ISC-263).
+ *
+ * The mirror of `liveTargetsFromEnv`, and needed for the same reason ISC-265
+ * needed that one: `up` ADOPTS a running relay, and several fleets share it.
+ * Without this, an operator who added a host to `egress.google_hosts` would
+ * get a relay still enforcing the previous policy — `up` reporting success, a
+ * `cloud_access` worker getting a 403 for a destination the config plainly
+ * allows, and nothing anywhere saying the two disagree. A stale allowlist that
+ * looks applied is the same failure class as a stale forwarding table, and it
+ * is worse in one direction: the denial is silent to the operator and loud
+ * only inside a container nobody is reading.
+ *
+ * `null` means "this build cannot vouch for what that relay enforces", which
+ * `relayPolicyDrifted` treats as drift — the direction that rebuilds.
+ */
+function livePolicyFromEnv(config: unknown): EgressPolicy | null {
+  if (typeof config !== "object" || config === null) return null;
+  const env = (config as { Env?: unknown }).Env;
+  if (!Array.isArray(env)) return null;
+  const prefix = `${PROXY_POLICY_ENV}=`;
+  const row = env.find((v): v is string => typeof v === "string" && v.startsWith(prefix));
+  // ABSENT is a real answer and NOT null: a relay launched before the proxy
+  // existed, or by a build that passed `proxy: null`, is enforcing no policy
+  // at all. Reporting that as "unreadable" would be indistinguishable from a
+  // daemon speaking an unexpected dialect, and the two deserve the same
+  // REBUILD but not the same diagnosis.
+  if (row === undefined) return { rules: [] };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.slice(prefix.length));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const rules = (parsed as { rules?: unknown }).rules;
+  if (!Array.isArray(rules)) return null;
+  for (const r of rules) {
+    if (
+      typeof r !== "object" ||
+      r === null ||
+      typeof (r as { name?: unknown }).name !== "string" ||
+      typeof (r as { host?: unknown }).host !== "string" ||
+      typeof (r as { port?: unknown }).port !== "number"
+    ) {
+      return null;
+    }
+  }
+  return { rules: rules as EgressRule[] };
+}
+
+/**
+ * Has the enforced policy diverged from what this config wants (ISC-263)?
+ *
+ * Compared as a SORTED set of `name|host|port`, not as the serialized JSON:
+ * rule ORDER is not semantic — `decide` returns the first match and every rule
+ * that matches a given (host, port) allows it — so an order change would
+ * otherwise cycle a shared relay for no reason, and a relay that rebuilds
+ * spuriously is one an operator learns to work around.
+ */
+export function relayPolicyDrifted(live: EgressPolicy | null, desired: EgressPolicy): boolean {
+  if (live === null) return true;
+  if (live.rules.length !== desired.rules.length) return true;
+  const key = (r: EgressRule) => `${r.name}|${r.host}|${r.port}`;
+  const a = live.rules.map(key).sort();
+  const b = desired.rules.map(key).sort();
+  return a.some((k, i) => k !== b[i]);
+}
+
 function liveTargetsFromEnv(config: unknown): readonly RelayTarget[] | null {
   if (typeof config !== "object" || config === null) return null;
   const env = (config as { Env?: unknown }).Env;
@@ -1003,7 +1193,7 @@ export async function inspectRelayContainer(
   const r = await docker(exec, relayInspectArgv(name), 30_000);
   if (r.code !== 0) {
     if (/no such object|no such container/i.test(r.stderr)) {
-      return { name, exists: false, running: false, id: null, liveTargets: null };
+      return { name, exists: false, running: false, id: null, liveTargets: null, livePolicy: null };
     }
     throw new Error(`relay: 'docker inspect ${name}' failed: ${r.stderr.trim()}`);
   }
@@ -1105,8 +1295,40 @@ export async function ensureEgressRelay(
    * (ISC-265). Only meaningful for a RUNNING relay: a stopped one is removed
    * and rebuilt regardless, so asking what it forwarded would change nothing.
    */
+  /**
+   * The proxy spec, derived from the SAME config this relay was built for
+   * (ISC-263).
+   *
+   * Built unconditionally rather than gated on "does any role have
+   * cloud_access". The relay is SHARED — `up` adopts a running one and several
+   * fleets depend on it — so gating the proxy on one run's role table would
+   * mean the second fleet's `cloud_access` worker silently inherits a relay
+   * built without one. The policy is what decides reachability, and a fleet
+   * that configures no Google hosts gets an empty policy: a deny-all proxy,
+   * which refuses by name rather than by connection-refused.
+   */
+  const proxy: RelayProxySpec = {
+    policy: proxyPolicyFor(cfg),
+    port: PROXY_LISTEN_PORT,
+    scriptPath: proxyScriptPath(),
+    policyScriptPath: proxyPolicyScriptPath(),
+  };
+  /**
+   * Drift is now TWO comparisons, and the second is not optional (ISC-263).
+   *
+   * `up` adopts a running relay and several fleets share one, so a relay
+   * launched before a `egress.google_hosts` edit would keep enforcing the old
+   * allowlist: `up` reports success, a `cloud_access` worker gets a 403 for a
+   * destination the config plainly allows, and nothing says the two disagree.
+   * The forwarding table already had this exact problem and ISC-265 fixed it;
+   * adding a second piece of enforced state without extending the check would
+   * have reintroduced it beside the fix.
+   */
   const drifted =
-    existing.exists && existing.running && relayTargetsDrifted(existing.liveTargets, targets);
+    existing.exists &&
+    existing.running &&
+    (relayTargetsDrifted(existing.liveTargets, targets) ||
+      relayPolicyDrifted(existing.livePolicy, proxy.policy));
   if (existing.exists && existing.running && !drifted) {
     return { name: containerName, created: false, replaced: null, scriptSha256, targets };
   }
@@ -1132,7 +1354,7 @@ export async function ensureEgressRelay(
     }
   }
 
-  const runArgv = relayRunArgv(containerName, uplink, targets, relayScriptPath());
+  const runArgv = relayRunArgv(containerName, uplink, targets, relayScriptPath(), proxy);
   const started = await docker(exec, runArgv, 120_000);
   if (started.code !== 0) {
     throw new Error(

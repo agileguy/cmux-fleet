@@ -21,6 +21,14 @@ import {
   writeWorkerEnvFile,
 } from "../../src/run/worker-env.ts";
 import { CREDENTIAL_ENV_VARS } from "../../src/security/adc.ts";
+import { policyFromConfig } from "../../src/security/egress.ts";
+import {
+  LEGACY_RELAY_LISTEN_ALIAS,
+  PROXY_LISTEN_ALIAS,
+  PROXY_LISTEN_PORT,
+  RELAY_LISTEN_ALIAS,
+  proxyPolicyFor,
+} from "../../src/security/relay.ts";
 
 function baseDoc(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -292,4 +300,118 @@ describe("the launch record", () => {
       else process.env["PIFLEET_RUNS_DIR"] = prev;
     }
   }, 30_000);
+});
+
+/**
+ * ISC-263 — the route that makes a `cloud_access` worker's credential usable.
+ *
+ * Before the CONNECT proxy existed, `cloud_access: true` granted ADC and no
+ * path to spend it on: a Docker network alias cannot be a wildcard, so
+ * `*.googleapis.com` had no live route off the `--internal` bridge at all.
+ * These assertions are on the env PLAN, which is what `--env-file` renders, so
+ * they fail if the proxy is configured and no worker is ever told about it —
+ * the "correct module beside a path nothing exercises" shape this repo has
+ * recorded ten times.
+ */
+describe("ISC-263: a cloud_access worker is routed through the CONNECT proxy", () => {
+  test("HTTPS_PROXY names the proxy alias, in both spellings clients read", async () => {
+    const loaded = await load(baseDoc());
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wc"), {});
+    expect(plan.vars["HTTPS_PROXY"]).toBe(`http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`);
+    // Lowercase too: curl and requests read the lowercase form, and a fleet
+    // that set only one spelling would work under some clients and not others.
+    expect(plan.vars["https_proxy"]).toBe(plan.vars["HTTPS_PROXY"]);
+  });
+
+  /**
+   * HTTP_PROXY is deliberately absent, and this asserts the DECISION rather
+   * than merely observing today's behaviour. The proxy answers `405` to
+   * anything that is not CONNECT, so advertising it as an HTTP proxy would
+   * advertise a capability it explicitly refuses.
+   */
+  test("HTTP_PROXY is NOT set — the proxy speaks CONNECT only", async () => {
+    const loaded = await load(baseDoc());
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wc"), {});
+    expect(plan.vars["HTTP_PROXY"]).toBeUndefined();
+    expect(plan.vars["http_proxy"]).toBeUndefined();
+  });
+
+  /**
+   * The footgun, asserted directly.
+   *
+   * `proxyPolicyFor` carries no `llm` rule, so a model request that DID enter
+   * the proxy would be denied `default-deny` — every worker stalling with no
+   * tool calls, which is SRD §5.9's exact quiet-failure shape. Both relay
+   * spellings are required because ISC-264's transition means a config may
+   * still name the legacy alias.
+   */
+  test("NO_PROXY exempts BOTH relay aliases, so model traffic never enters the proxy", async () => {
+    const loaded = await load(baseDoc());
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wc"), {});
+    const exempt = plan.vars["NO_PROXY"]!.split(",");
+    expect(exempt).toContain(RELAY_LISTEN_ALIAS);
+    expect(exempt).toContain(LEGACY_RELAY_LISTEN_ALIAS);
+    expect(plan.vars["no_proxy"]).toBe(plan.vars["NO_PROXY"]);
+  });
+
+  /**
+   * The other half of ISC-45's observability claim: `cloud_access: false` must
+   * be observable as the ABSENCE of the whole set, and the proxy route is now
+   * part of that set. A worker with no credential has nothing to spend at
+   * Google and must not be handed a route there either.
+   */
+  test("a cloud_access: false worker gets no proxy route at all", async () => {
+    const loaded = await load(baseDoc());
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    for (const k of ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"]) {
+      expect(plan.vars[k]).toBeUndefined();
+    }
+  });
+
+  test("the proxy route survives serialization to the env file docker reads", async () => {
+    // `serializeEnvFile` throws on anything that would not round-trip, and a
+    // URL is the shape most likely to carry something it refuses.
+    const loaded = await load(baseDoc());
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wc"), {});
+    const text = serializeEnvFile(plan.vars);
+    expect(text).toContain(`HTTPS_PROXY=http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`);
+  });
+});
+
+/**
+ * The policy the proxy is given, and the one rule it must NOT carry.
+ */
+describe("ISC-263: the proxy's policy", () => {
+  test("carries the configured Google hosts on 443", async () => {
+    const loaded = await load(
+      baseDoc({ egress: { google_hosts: ["*.googleapis.com", "oauth2.googleapis.com"] } }),
+    );
+    const rules = proxyPolicyFor(loaded.config).rules;
+    expect(rules.map((r) => r.host)).toContain("*.googleapis.com");
+    for (const r of rules) expect(r.port).toBe(443);
+  });
+
+  test("carries explicit egress.allow entries with their own ports", async () => {
+    const loaded = await load(
+      baseDoc({ egress: { allow: [{ host: "artifacts.example.com", port: 8443 }] } }),
+    );
+    const rules = proxyPolicyFor(loaded.config).rules;
+    const hit = rules.find((r) => r.host === "artifacts.example.com");
+    expect(hit?.port).toBe(8443);
+  });
+
+  /**
+   * The omission, asserted rather than described. Model traffic reaches the
+   * relay's port-forward listener under a different name; an `llm` rule here
+   * would authorize a destination this path is not meant to serve, in the one
+   * place a reader checks to learn what the proxy can reach.
+   */
+  test("carries NO llm rule, unlike policyFromConfig", async () => {
+    const loaded = await load(baseDoc());
+    const proxyRules = proxyPolicyFor(loaded.config).rules;
+    expect(proxyRules.map((r) => r.name)).not.toContain("llm");
+    // The control: the general policy DOES have one, so the absence above is
+    // this function's doing and not an empty config.
+    expect(policyFromConfig(loaded.config).rules.map((r) => r.name)).toContain("llm");
+  });
 });

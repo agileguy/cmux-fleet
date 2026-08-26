@@ -42,6 +42,8 @@ import {
   ensureEgressRelay,
   inspectRelayContainer,
   relayContainerName,
+  PROXY_LISTEN_ALIAS,
+  PROXY_LISTEN_PORT,
   uplinkNetworkName,
   RELAY_DEFAULT_DIAL_HOST,
   RELAY_IMAGE,
@@ -778,7 +780,7 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
   );
 
   test(
-    "the relay opens exactly one port on the bridge, and every sibling on the bridge is an expected fleet member",
+    "the relay opens exactly its two derived ports on the bridge, and every sibling on the bridge is an expected fleet member",
     async () => {
       /**
        * The other two terms of the reachable set (SRD §12.8; ISC-261):
@@ -795,6 +797,12 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
        * own bridge address is what separates them. A debug listener, a second
        * forward left behind by a config change, or an inherited port from the
        * base image all land here as an extra element.
+       *
+       * ISC-263 makes that set TWO ports, not one: the forward derived from
+       * `llm.base_url` and the CONNECT proxy on PROXY_LISTEN_PORT. Both are
+       * named and derived from constants the production code reads, so the
+       * assertion below stays an equality — widening the expected set by a
+       * sanctioned listener is not the same as relaxing it to "contains".
        *
        * TERM 3 — the siblings. `docker network inspect` is AUTHORITATIVE for
        * bridge membership: a container is on the bridge if and only if it is
@@ -867,8 +875,11 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
           `[enumerated] relay ${relay.name} at ${relayIp} listens on [${relayPorts.join(", ")}].`,
         );
 
-        // EXACTLY the derived listen port. Not "contains", not "at least one".
-        expect(relayPorts).toEqual([listenPort]);
+        // EXACTLY the derived ports. Not "contains", not "at least one".
+        // A third port on the relay still fails this, which is the whole
+        // reason the probe exists.
+        const expectedPorts = [listenPort, PROXY_LISTEN_PORT].sort((a, b) => a - b);
+        expect(relayPorts).toEqual(expectedPorts);
 
         /**
          * Now the LIVE case, because the idle assertion above passes on a
@@ -1005,6 +1016,11 @@ describe.skipIf(!DOCKER)("egress relay", () => {
          *  - a public IP literal and a public name both fail (ISC-51, ISC-57)
          *    — the IP proves the ROUTE is absent, not merely the resolver.
          */
+        // `rc=$?` BEFORE the newline echo, not after. Capturing it later reads
+        // the exit status of `echo` — which is always 0 — and turns both
+        // status assertions below into checks that echo works. That is not a
+        // hypothetical: it happened here, and the deny probe caught it only
+        // because a 403 and a success cannot both be true.
         const after = await onInternalNetwork(
           net,
           `${curlProbe("models", url)}
@@ -1535,5 +1551,125 @@ describe.skipIf(!DOCKER)("changing relay_upstream takes effect on its own (ISC-2
     // succeeds by waiting out a timeout, so unlike the deny-probe tests above,
     // container startup IS the cost and `containerBudget` describes it.
     containerBudget(5),
+  );
+});
+
+/**
+ * ISC-263 — a worker on the deny-all bridge reaches an arbitrary ALLOWED
+ * destination through the CONNECT proxy, and only that one.
+ *
+ * This is the criterion's own sentence, live. Everything in
+ * `connect-proxy.test.ts` runs the proxy on loopback, which proves the proxy
+ * and proves nothing about the two facts Docker decides: that a worker can
+ * reach the proxy across an `--internal` bridge at all, and that the proxy —
+ * and not the bridge — is what makes the destination reachable.
+ *
+ * The BEFORE probe is what makes the AFTER mean something. Without it, a green
+ * `curl` through the proxy is equally consistent with a bridge that was never
+ * denying anything, which is the shape of a containment test that certifies
+ * the absence of the control it is testing.
+ *
+ * A local stub stands in for `*.googleapis.com` deliberately. Whether Google
+ * answers is a property of the internet and no test should assert it; what
+ * this repository owns is whether an allowed destination becomes reachable and
+ * an unlisted one does not. The Google case is this mechanism with a different
+ * rule in the policy.
+ */
+describe.skipIf(!DOCKER)("ISC-263: the CONNECT proxy carries arbitrary allowed destinations", () => {
+  test(
+    "an allowed host is reachable through the proxy and unreachable without it",
+    async () => {
+      const net = testNetName();
+      registerRelayArtifacts(net);
+      await ensureEgressNetwork(net);
+
+      const nonce = `proxy-${process.pid}-${Date.now()}`;
+      const stub = Bun.serve({
+        port: 0,
+        hostname: "0.0.0.0",
+        fetch: () => new Response(nonce),
+      });
+      // `Bun.serve().port` is `number | undefined` in the types; a server that
+      // bound nothing would make every probe below meaningless, so it is
+      // asserted rather than coerced.
+      const stubPort = stub.port!;
+      expect(stubPort).toBeGreaterThan(0);
+
+      try {
+        /**
+         * BEFORE — direct, no proxy. `--internal` means no default route and
+         * no NAT, so this must fail, and it must fail with a non-zero curl
+         * code rather than merely not containing the nonce.
+         */
+        const before = await onInternalNetwork(
+          net,
+          `curl -sS -m 5 http://host.docker.internal:${stubPort}/ >/dev/null 2>&1; echo "pre=$?"`,
+        );
+        expect(before).toMatch(/^pre=[1-9][0-9]*$/m);
+
+        /**
+         * Authorized by a WILDCARD, which is the Google-shaped rule and not an
+         * exact match.
+         *
+         * This matters more than it looks. `decide()` returns the REQUESTED
+         * host on a wildcard match, and the proxy dials that — not the pattern.
+         * A proxy that dialled `rule.host` instead would pass every refusal
+         * test in this repo and every exact-match tunnel test, and would fail
+         * only against `*.googleapis.com`, with an ENOTFOUND for the literal
+         * string `*.googleapis.com`. Using an exact rule here would have left
+         * that whole class untested while looking like end-to-end proof.
+         *
+         * `*.docker.internal` matches `host.docker.internal`, which the relay
+         * resolves on its uplink via `--add-host ...:host-gateway` — so the
+         * dial goes to the real Docker host and the stub answers.
+         */
+        const relay = await ensureEgressRelay(
+          cfg(`http://omlx.pifleet.internal:${stubPort}/v1`, null, [
+            { host: "*.docker.internal", port: stubPort },
+          ]),
+          net,
+        );
+        expect(relay.created).toBe(true);
+
+        /**
+         * AFTER — the same destination, through the proxy, with `--proxytunnel`
+         * so curl issues a real CONNECT rather than an absolute-form GET (which
+         * this proxy answers 405 to, on purpose).
+         */
+        const after = await onInternalNetwork(
+          net,
+          `curl -sS -m 10 --proxytunnel -x http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT} ` +
+            `http://host.docker.internal:${stubPort}/ 2>&1; rc=$?; echo; echo "post=$rc"`,
+        );
+        expect(after).toContain(nonce);
+        expect(after).toMatch(/^post=0$/m);
+
+        /**
+         * And the proxy is an ALLOWLIST, not a hole. An unlisted destination
+         * through the same proxy is refused by name — the 403 is the product
+         * here, and a bare timeout would be indistinguishable from the proxy
+         * being absent.
+         */
+        const denied = await onInternalNetwork(
+          net,
+          `curl -sS -m 10 -v --proxytunnel -x http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT} ` +
+            `http://unlisted.example:80/ 2>&1; rc=$?; echo; echo "deny=$rc"`,
+        );
+        expect(denied).toContain("403");
+        expect(denied).not.toMatch(/^deny=0$/m);
+      } finally {
+        stub.stop(true);
+      }
+    },
+    // ISC-274 audit: stands at 240_000. containerBudget(4) = 80_000 covers the
+    // four container operations — three `docker run` probes on the internal
+    // bridge plus the relay `ensureEgressRelay` creates. It is not what this is
+    // sized for: the BEFORE probe deliberately waits out a `curl -m 5` against
+    // an unreachable destination, and the two proxy probes are `-m 10` each
+    // against a container that has just started. The dominant cost is those
+    // three timeouts elapsing, not process startup, so the literal governs and
+    // the derived value is recorded here as the comparison it was checked
+    // against.
+    240_000,
   );
 });

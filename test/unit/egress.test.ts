@@ -526,3 +526,57 @@ describe("a refusal reports the port as asked, and does not pass as a record", (
     expect(decisionForRecord(v)).not.toBeNull();
   });
 });
+
+/**
+ * ISC-263 — the matcher is SHARED, not duplicated.
+ *
+ * The CONNECT proxy decides inside the container, on the pinned upstream Node
+ * image, which has no `bun` and cannot import a `.ts`. The alternative to
+ * sharing was a second copy of the matcher, and the label-boundary rule that
+ * separates `storage.googleapis.com` from `evil-googleapis.com` is the single
+ * thing here least survivable as two implementations — two copies of a
+ * boundary check drift in the direction of the one nobody re-reads.
+ *
+ * These assertions are what keeps "shared" true rather than aspirational.
+ */
+describe("the shared matcher (ISC-263)", () => {
+  test("egress.ts delegates to the same module the container requires", async () => {
+    const cjs = await import("../../docker/egress-policy.cjs");
+    const policy = { rules: [makeRule("g", "*.googleapis.com", 443)] };
+    // Identity over a corpus that spans every branch: allow, default-deny, the
+    // two boundary attacks, an IP literal, a bad port and a non-host.
+    const corpus: Array<[string, number]> = [
+      ["storage.googleapis.com", 443],
+      ["evil-googleapis.com", 443],
+      ["googleapis.com.evil.test", 443],
+      ["..googleapis.com", 443],
+      ["STORAGE.GoogleAPIs.com.", 443],
+      ["storage.googleapis.com", 22],
+      ["192.168.5.2", 443],
+      ["http://evil.com", 443],
+      ["x.googleapis.com", 0],
+      ["", 443],
+    ];
+    for (const [host, port] of corpus) {
+      expect(decide(host, port, policy)).toEqual(cjs.decide(host, port, policy));
+    }
+  });
+
+  /**
+   * The bound the CJS file has to restate as a literal, because it cannot
+   * import the schema. A silent divergence would let a host far longer than
+   * any decision record can carry reach the matcher on one side only.
+   */
+  test("the CJS copy of MAX_SHORT still equals the contract's", async () => {
+    const cjs = await import("../../docker/egress-policy.cjs");
+    const { MAX_SHORT } = await import("../../src/contracts.ts");
+    expect(cjs.MAX_SHORT).toBe(MAX_SHORT);
+  });
+
+  test("the refusal rule names are one set, not two", async () => {
+    const cjs = await import("../../docker/egress-policy.cjs");
+    expect(RULE_DEFAULT_DENY).toBe(cjs.RULE_DEFAULT_DENY);
+    expect(RULE_INVALID_HOST).toBe(cjs.RULE_INVALID_HOST);
+    expect(RULE_INVALID_PORT).toBe(cjs.RULE_INVALID_PORT);
+  });
+});

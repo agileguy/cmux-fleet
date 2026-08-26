@@ -76,6 +76,38 @@ export interface IsaClaim {
 
 export const ISA_CLAIMS: readonly IsaClaim[] = [
   {
+    isc: "ISC-263",
+    grade: "[~]",
+    claim:
+      "The matcher is SHARED, not copied: `src/security/egress.ts` imports the same " +
+      "`egress-policy.cjs` the in-container proxy requires. Empty here means the two " +
+      "have been split back into separate implementations, and the label-boundary " +
+      "rule is the thing least survivable as two copies.",
+    argv: ["grep", "-rn", "egress-policy.cjs", "src/"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-263",
+    grade: "[~]",
+    claim:
+      "A cloud_access worker is actually TOLD about the proxy. Empty here means the " +
+      "proxy runs and nothing points at it — the credential-granted-for-a-path-that-" +
+      "does-not-exist failure this criterion exists to close, reintroduced.",
+    argv: ["grep", "-rn", "HTTPS_PROXY", "src/run/worker-env.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-263",
+    grade: "[~]",
+    claim:
+      "The relay entrypoint still STARTS the proxy. Listed separately from the two " +
+      "above because every loopback probe spawns connect-proxy.cjs directly: if this " +
+      "call went away they would all stay green while a cloud_access worker got " +
+      "connection-refused.",
+    argv: ["grep", "-rn", "startProxy", "docker/egress-relay.cjs"],
+    expect: "nonempty",
+  },
+  {
     isc: "ISC-243",
     grade: "[~]",
     claim:
