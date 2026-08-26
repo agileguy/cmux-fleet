@@ -301,6 +301,21 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-rn", 'processStartTime(process.pid)) ?? ""', "src/"],
     expect: "empty",
   },
+  {
+    isc: "ISC-191",
+    grade: "[~]",
+    claim:
+      "`--force-identity` is SCOPED to the pids the operator named, at BOTH anchor refusal " +
+      "branches — the identity refusal and the group refusal. Two lines, because there are two " +
+      "ways to be refused and a hatch that covers only one of them is a hatch with a hole. As a " +
+      "boolean this flag authorised the rung-0 self-anchor against every refused pid in the run, " +
+      "which is what held ISC-191 residual (a) and ISC-272's \"never a start time read off the " +
+      "pid at rung 0\" clause open. Fewer than 2 means a branch went back to trusting the flag " +
+      "rather than the pid; more means a third anchor site appeared and this claim needs " +
+      "re-deriving rather than bumping.",
+    argv: ["grep", "-rn", "opts.force.has(pid)", "src/cli/commands/down.ts"],
+    expect: 2,
+  },
 ] as const;
 
 /**
