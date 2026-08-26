@@ -38,6 +38,7 @@ import {
   inspectEgressNetwork,
 } from "../../src/security/network.ts";
 import { removeGatewayBlock } from "../../src/security/gateway-block.ts";
+import { EgressSchema } from "../../src/config/schema.ts";
 import {
   ensureEgressRelay,
   inspectRelayContainer,
@@ -413,10 +414,11 @@ function cfg(
   base_url: string,
   relay_upstream: string | null = null,
   allow: Array<{ host: string; port: number }> = [],
+  google_hosts: string[] = ["oauth2.googleapis.com"],
 ) {
   return {
     llm: { base_url, relay_upstream },
-    egress: { google_hosts: ["oauth2.googleapis.com"], allow },
+    egress: { google_hosts, allow },
   };
 }
 
@@ -1671,5 +1673,230 @@ describe.skipIf(!DOCKER)("ISC-263: the CONNECT proxy carries arbitrary allowed d
     // the derived value is recorded here as the comparison it was checked
     // against.
     240_000,
+  );
+});
+
+/**
+ * ISC-263's CLOSING CONDITION — ISC-51/57's containment evidence, RE-TAKEN
+ * against a relay that accepts arbitrary destinations.
+ *
+ * ## Why the old evidence no longer covers the posture
+ *
+ * ISC-51/57 bound the reachable set of a worker on the deny-all bridge to
+ *
+ *     {relay listen ports} ∪ {gateway ports} ∪ {sibling container ports}
+ *
+ * and each term is enumerated above: the relay's ports by a full-range scan,
+ * the gateway's by a 65535-port scan that must come back EMPTY, the siblings'
+ * by `docker network inspect`, which is authoritative for membership.
+ *
+ * ISC-263 adds a term none of those scans can see. The CONNECT proxy is not a
+ * port — it is a DOOR, and what lies beyond it is decided by policy at request
+ * time, from the relay's NAT'd uplink. A port scan of the relay reports `3128`
+ * open and stops; it cannot report that `3128` leads to `oauth2.googleapis.com`
+ * but not to `example.com`. So the reachable set is now
+ *
+ *     {relay listen port} ∪ {3128 → POLICY} ∪ {sibling container ports}
+ *
+ * and the third term has never been measured live. ISC-263's own entry says
+ * exactly this: `decide()` "is the case it was designed for and has never
+ * actually been exercised against" a relay that accepts arbitrary destinations.
+ * This test is that measurement.
+ *
+ * ## EVERY DENIAL HERE REFUSES SOMETHING THE RELAY CAN ACTUALLY REACH
+ *
+ * That is the whole design of the corpus, and it is the lesson ISC-51 was
+ * downgraded for in the first place: the old evidence probed `1.1.1.1` and
+ * `example.com` from a container with no route and concluded "contained",
+ * when what it had measured was a network that could not have reached
+ * ANYTHING. A denial is only evidence if the thing denied was otherwise
+ * available.
+ *
+ * So each deny target was measured from a NAT'd container on this runtime
+ * before being chosen, and all four answer:
+ *
+ *     googleapis.com:443       OPEN    apex — must NOT match `*.googleapis.com`
+ *     oauth2.googleapis.com:80 OPEN    allowed HOST, unlisted PORT
+ *     example.com:443          OPEN    ordinary public host, no rule
+ *     <bridge gateway>:22      (contained by ISC-51 at the kernel)
+ *
+ * A 403 on any of the first three therefore isolates the POLICY as the cause:
+ * the relay's uplink would have completed that connection. Had the corpus used
+ * unresolvable names, every 403 would have been equally consistent with a
+ * proxy that simply cannot dial, which is a containment test certifying the
+ * absence of the control it tests.
+ *
+ * The gateway case is the ISC-51 re-take specifically. `ensureEgressNetwork`
+ * contains the gateway with an INPUT rule in the HOST's netns, which bounds
+ * what a worker can reach DIRECTLY. The proxy dials from the relay's namespace
+ * on the worker's behalf, so a policy that permitted it would re-open at layer
+ * 7 exactly what ISC-51 closed at layer 3 — a confused deputy with the
+ * containment rule still perfectly in place.
+ *
+ * ## The allow half uses the SHIPPED DEFAULTS, not a rule this test wrote
+ *
+ * `google_hosts` comes from `EgressSchema.parse({})` — the three-entry default
+ * a silent `fleet.yaml` gets. A test that authored its own Google rule would
+ * prove the mechanism and say nothing about whether the fleet a user actually
+ * gets can reach Google. `storage.googleapis.com` is in the corpus because it
+ * matches by WILDCARD: `decide()` returns the REQUESTED host on a wildcard
+ * match and the proxy must dial that, not the pattern.
+ */
+describe.skipIf(!DOCKER)("ISC-263 closing: the proxy's reachable set is the POLICY's set", () => {
+  test(
+    "enumerated over the shipped Google defaults — allowed hosts reach, and every denial refuses a destination the relay could otherwise have reached",
+    async () => {
+      const net = testNetName();
+      registerRelayArtifacts(net);
+      await ensureEgressNetwork(net);
+
+      const gw = (await inspectEgressNetwork(net)).gateway;
+      expect(gw).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+
+      const nonce = `proxy-policy-${process.pid}-${Date.now()}`;
+      const stub = Bun.serve({
+        port: 0,
+        hostname: "0.0.0.0",
+        fetch: () => Response.json({ object: "list", data: [{ id: nonce }] }),
+      });
+      const stubPort = stub.port ?? 0;
+      expect(stubPort).toBeGreaterThan(0);
+
+      try {
+        const shipped = EgressSchema.parse({}).google_hosts;
+        // Pinned, because the corpus below is written against these three
+        // exact rules. If the shipped defaults change, this fails here with a
+        // readable diff rather than as a mystified 403 further down.
+        expect(shipped).toEqual([
+          "oauth2.googleapis.com",
+          "*.googleapis.com",
+          "accounts.google.com",
+        ]);
+
+        const relay = await ensureEgressRelay(
+          cfg(`http://omlx.pifleet.internal:${stubPort}/v1`, null, [], shipped),
+          net,
+        );
+        expect(relay.created).toBe(true);
+
+        /**
+         * THE JOIN — the criterion says a *`cloud_access` worker* reaches
+         * Google, not "a container that was handed the right `-x` flag".
+         *
+         * Everything below drives the proxy explicitly, which measures the
+         * POLICY surface but says nothing about whether a real worker's
+         * environment points at it. So the env under test is the one
+         * `buildWorkerEnv` produces for a `cloud_access: true` role parsed out
+         * of a real `fleet.yaml`, and the `ENVPROXY_ON` probe passes NO `-x`
+         * at all — curl finds the proxy the way gcloud would.
+         */
+        const { parseConfig, resolveWorker } = await import("../../src/config/load.ts");
+        const { buildWorkerEnv } = await import("../../src/run/worker-env.ts");
+        const { stringify } = await import("yaml");
+        const loaded = await parseConfig(
+          stringify({
+            version: 2,
+            name: "proxy-policy-fleet",
+            docker: { pi_version: "0.79.6" },
+            run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+            llm: { model: "TestModel" },
+            roles: { cloudy: { cloud_access: true } },
+            workers: [{ id: "wc", role: "cloudy" }],
+          }),
+          "/tmp/fleet.yaml",
+        );
+        const workerVars = buildWorkerEnv(loaded, resolveWorker(loaded, "wc"), {}).vars;
+        expect(workerVars["HTTPS_PROXY"]).toBe(
+          `http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`,
+        );
+
+        /**
+         * ONE container, one sweep. `rc=$?` is captured on the line after the
+         * assignment and before anything else runs — an intervening `echo`
+         * would capture ECHO's status, which is how a passing assertion was
+         * made vacuous once already in this file.
+         */
+        const sweep = await onInternalNetwork(
+          net,
+          [
+            `P="http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}"`,
+            `probe() {`,
+            `  out=$(curl -sS -m 15 -o /dev/null -w 'http=%{http_code}' --proxytunnel -x "$P" "$2" 2>&1); rc=$?`,
+            `  echo "$1 rc=$rc $(echo "$out" | tr '\\n' ' ')"`,
+            `}`,
+            // `--noproxy '*'` because HTTPS_PROXY is now set in this
+            // container: without it the control would quietly go THROUGH the
+            // proxy and prove nothing.
+            `direct() {`,
+            `  out=$(curl -sS -m 8 --noproxy '*' -o /dev/null -w 'http=%{http_code}' "$2" 2>&1); rc=$?`,
+            `  echo "$1 rc=$rc $(echo "$out" | tr '\\n' ' ')"`,
+            `}`,
+            // No -x, no --noproxy: only the worker's own HTTPS_PROXY.
+            `envproxy() {`,
+            `  out=$(curl -sS -m 15 -o /dev/null -w 'http=%{http_code}' "$2" 2>&1); rc=$?`,
+            `  echo "$1 rc=$rc $(echo "$out" | tr '\\n' ' ')"`,
+            `}`,
+            `direct DIRECT_OAUTH https://oauth2.googleapis.com/`,
+            `envproxy ENVPROXY_ON https://oauth2.googleapis.com/`,
+            `probe ALLOW_EXACT https://oauth2.googleapis.com/`,
+            `probe ALLOW_WILDCARD https://storage.googleapis.com/`,
+            `probe ALLOW_ACCOUNTS https://accounts.google.com/`,
+            `probe DENY_APEX https://googleapis.com/`,
+            `probe DENY_PORT http://oauth2.googleapis.com:80/`,
+            `probe DENY_PUBLIC https://example.com/`,
+            `probe DENY_GATEWAY http://${gw}:22/`,
+            `echo SWEEP_DONE`,
+          ].join("\n"),
+          { HTTPS_PROXY: workerVars["HTTPS_PROXY"]!, NO_PROXY: workerVars["NO_PROXY"]! },
+        );
+        console.log(`[enumerated] proxy policy sweep:\n${sweep.trim()}`);
+
+        // A truncated script would otherwise read as "every deny line absent",
+        // which every `not.toMatch` below would happily accept.
+        expect(sweep).toContain("SWEEP_DONE");
+
+        /**
+         * THE CONTROL. Same container, same destination, no proxy. `--internal`
+         * means no default route and no resolver, so this must fail — and it
+         * is what makes the three ALLOW lines evidence about the PROXY rather
+         * than evidence that the runner has internet.
+         */
+        expect(sweep).toMatch(/^DIRECT_OAUTH rc=[1-9][0-9]* /m);
+
+        /**
+         * The join asserted: the SAME destination that fails with the proxy
+         * bypassed succeeds with nothing but the worker's own environment.
+         */
+        expect(sweep).toMatch(/^ENVPROXY_ON rc=0 /m);
+
+        for (const name of ["ALLOW_EXACT", "ALLOW_WILDCARD", "ALLOW_ACCOUNTS"]) {
+          expect(sweep).toMatch(new RegExp(`^${name} rc=0 `, "m"));
+        }
+
+        /**
+         * Each denial: non-zero curl AND the proxy's own 403 on the line. The
+         * 403 is the product — a bare non-zero exit is what a proxy that had
+         * crashed would also produce, and the ALLOW lines above already rule
+         * that out only for the hosts they name.
+         */
+        for (const name of ["DENY_APEX", "DENY_PORT", "DENY_PUBLIC", "DENY_GATEWAY"]) {
+          const line = sweep.split("\n").find((l) => l.startsWith(`${name} `)) ?? "";
+          expect(line).not.toBe("");
+          expect(line).not.toMatch(/ rc=0 /);
+          expect(line).toContain("403");
+        }
+      } finally {
+        stub.stop(true);
+      }
+    },
+    // ISC-274 audit: stands at 300_000. containerBudget(2) = 40_000 covers the
+    // relay creation and the single sweep container, and is not what this is
+    // sized for. The sweep runs eight curls in series inside one container:
+    // three TLS handshakes to real Google endpoints, one deliberate `-m 8`
+    // timeout on the no-route control, and four refusals that return promptly.
+    // The dominant cost is the control's timeout plus three real handshakes
+    // over whatever link the runner has, so the literal governs and the
+    // derived value is recorded here as the comparison it was checked against.
+    300_000,
   );
 });

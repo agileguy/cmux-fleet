@@ -77,7 +77,7 @@ export interface IsaClaim {
 export const ISA_CLAIMS: readonly IsaClaim[] = [
   {
     isc: "ISC-263",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The matcher is SHARED, not copied: `src/security/egress.ts` imports the same " +
       "`egress-policy.cjs` the in-container proxy requires. Empty here means the two " +
@@ -88,7 +88,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-263",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "A cloud_access worker is actually TOLD about the proxy. Empty here means the " +
       "proxy runs and nothing points at it — the credential-granted-for-a-path-that-" +
@@ -98,13 +98,24 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-263",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The relay entrypoint still STARTS the proxy. Listed separately from the two " +
       "above because every loopback probe spawns connect-proxy.cjs directly: if this " +
       "call went away they would all stay green while a cloud_access worker got " +
       "connection-refused.",
     argv: ["grep", "-rn", "startProxy", "docker/egress-relay.cjs"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-263",
+    grade: "[x]",
+    claim:
+      "The CLOSING probe — the live enumeration of the proxy's destination surface — " +
+      "still exists. This is the criterion's own stated closing condition, and it is " +
+      "the only thing that measures the `{3128 -> POLICY}` term of the reachable set; " +
+      "every port scan in the suite reports `3128 open` and stops.",
+    argv: ["grep", "-rn", "ISC-263 closing", "test/integration/relay.test.ts"],
     expect: "nonempty",
   },
   {
