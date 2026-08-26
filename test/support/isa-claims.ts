@@ -267,6 +267,22 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     exclude: ["src/security/adc.ts", "src/security/refresh.ts"],
     expect: "empty",
   },
+  {
+    isc: "ISC-290",
+    grade: "[x]",
+    claim:
+      "`ci.yml` carries exactly TWO `PIFLEET_OMLX_MODEL:` assignments — GLM-4.5-Air-MLX-4bit " +
+      "for `omlx-live`'s single-call probe, Qwen3.5-35B-A3B-8bit at `container-live`'s JOB " +
+      "level for the whole chain — with the warmup step inheriting the job value rather than " +
+      "repeating it. A THIRD assignment means a step-level pin has been reintroduced and the " +
+      "model that gets loaded can drift from the model that gets graded. That drift is the " +
+      "defect this criterion's 2026-08-26 note exists for: the chain failed intermittently for " +
+      "two days against a model that answers the single-call probe 3/3 and cannot complete a " +
+      "multi-turn agentic turn. Counts ASSIGNMENTS only, so the warmup's `${PIFLEET_OMLX_MODEL:?}` " +
+      "reference is correctly not counted — inheriting is the fix, not the fault.",
+    argv: ["grep", "-En", "^ +PIFLEET_OMLX_MODEL: ", ".github/workflows/ci.yml"],
+    expect: 2,
+  },
 ] as const;
 
 /**
