@@ -44,7 +44,8 @@ import {
   writeWorkerState,
 } from "../../src/run/state.ts";
 import type { FenceSnapshot } from "../../src/rpc/epoch.ts";
-import { mergeLedger } from "../../src/run/ledger.ts";
+import { LedgerWriter, mergeLedger } from "../../src/run/ledger.ts";
+import { abortWedged, eventSilenceMs } from "../../src/run/stall-io.ts";
 import { identityAlive, processStartTime } from "../../src/run/registry.ts";
 import { controlCall, processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
 import { EXPORT_MARKER } from "../fixtures/export-marker.ts";
@@ -2571,5 +2572,183 @@ describe("ISC-299: tool errors plus an unchanged tree is not success", () => {
     },
     // scratchWorktree 5 + 1 launch + 2 epochs x (2 baseline + 2 quiesce).
     cliBudget(14),
+  );
+});
+
+/**
+ * ISC-282: the stall policy's production ACTION, against a live wedged agent.
+ *
+ * ISC-110 and ISC-117 have sat at `[~]` since the stall-wiring commission for
+ * one narrow reason, restated here so this block is judged against it: the
+ * scheduler's handling of a `kill` verdict is proved in
+ * `test/unit/scheduler-stall.test.ts` against an INJECTED clock and a FAKE
+ * `eventSilenceMs`, so what was demonstrated was the policy, not the two
+ * production halves that feed and follow it. `test/unit/stall-io.test.ts` now
+ * covers the input against real files. This covers the other end — the `abort`
+ * RPC `killWedged` sends — because that one cannot be answered without a real
+ * supervisor: the question is literally whether a wedged agent replies.
+ *
+ * **The wedge is real, not asserted.** `aborted.json` emits `agent_start` and
+ * `turn_start` and then says nothing for thirty seconds while holding the
+ * slot. That is the shape ISC-117 names — a LIVE supervisor wrapped around an
+ * agent that has stopped emitting — and it is the case the reaper cannot
+ * reach, because the reaper watches heartbeats and this supervisor's heartbeat
+ * is healthy throughout.
+ *
+ * **Why the thirty seconds is the discriminator.** The scenario settles on its
+ * own at 30 s. The settle gate below is 15 s — half of it — so a run in which
+ * the abort did nothing cannot pass by the scenario simply running out. The
+ * envelope's `deadline_s` is the default 300 s for the same reason, one door
+ * further along: a `timed_out` verdict is impossible here, so it cannot be
+ * mistaken for the RPC working.
+ *
+ * **The real `abortWedged` is called, not `controlCall` directly.** Driving
+ * the RPC by hand would prove the socket answers and leave the criterion
+ * exactly where it was — a correct mechanism beside the path nothing
+ * exercises, which is the RC-1 shape this ISA has now recorded nine times.
+ * `cli/commands/dispatch.ts`'s `killWedged` is a one-line delegation to this
+ * function, so what runs here is what runs in production.
+ */
+describe("ISC-282: the abort rung ends a live wedged agent, and the task settles", () => {
+  test(
+    "a worker silent while holding the slot is aborted, and settles inside its own deadline",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("stall-abort");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        env: { PIFLEET_PI_COMMAND: piCommand("aborted.json") },
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      const reply = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-WEDGE-1"),
+        attempt_id: "wedge-attempt-1",
+        requested_epoch: null,
+      });
+      expect(reply["accepted"]).toBe(true);
+
+      // The wedge begins at `agent_start`: from here the scenario emits
+      // nothing for thirty seconds, so the events file stops moving while the
+      // worker still holds the slot.
+      const started = await waitFor(async () => {
+        // Pi's own stream events arrive WRAPPED — the supervisor's record is
+        // `type: "event"` with the agent's event nested under `event`.
+        return (await readEvents(wp.eventsJsonl)).some((e) => {
+          const inner = e["event"] as { type?: string } | undefined;
+          return e["type"] === "event" && inner?.type === "turn_start";
+        });
+      }, 20_000);
+      expect(started).toBe(true);
+
+      /**
+       * The PRODUCTION input, read off a real supervisor's file (ISC-282's
+       * first half, tied here to a real worker rather than a fixture). Two
+       * readings across a real gap: a constant, a zero, or a `null` would all
+       * satisfy "returns a number" and none of them would be a silence.
+       */
+      const first = await eventSilenceMs(run, "eng-1");
+      expect(first).not.toBeNull();
+      await new Promise((r) => setTimeout(r, 600));
+      const second = await eventSilenceMs(run, "eng-1");
+      expect(second!).toBeGreaterThan(first!);
+      expect(second!).toBeGreaterThanOrEqual(500);
+
+      /**
+       * THE CRITERION. The real function the scheduler's `killWedged` calls,
+       * with the real `LedgerWriter` production hands it.
+       */
+      const ledger = new LedgerWriter(run, `test-stall-${process.pid}`);
+      await abortWedged({ run, worker: "eng-1", taskId: "T-WEDGE-1", ledger });
+
+      // Fifteen seconds — HALF the scenario's own 30 s tail, so a task that
+      // settled because the fixture ran out cannot pass this gate.
+      const settled = await waitFor(
+        async () => (await readTaskRecord(taskRecordPath(wp, "T-WEDGE-1"))) !== null,
+        15_000,
+      );
+      expect(settled).toBe(true);
+
+      const record = await readTaskRecord(taskRecordPath(wp, "T-WEDGE-1"));
+      expect(record?.verdict).toBe("aborted");
+
+      // Nothing else ended this task. A deadline would have produced
+      // `timed_out` at 300 s, which this run never reaches.
+      const events = await readEvents(wp.eventsJsonl);
+      expect(events.some((e) => e["type"] === "deadline_exceeded")).toBe(false);
+
+      // The durable evidence that the policy fired, with its numbers.
+      const { records } = await mergeLedger(run);
+      const kill = records.find((r) => r.event === "worker_stall_kill");
+      expect(kill).toBeDefined();
+      expect(kill?.detail?.["worker"]).toBe("eng-1");
+      expect(kill?.detail?.["task_id"]).toBe("T-WEDGE-1");
+      expect(kill?.detail?.["reason"]).toBe("event_stall_kill");
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    // Gates: idle (20 s), agent_start (20 s), the 600 ms silence sample, the
+    // settle (15 s), shutdown (5 s). No CLI and no container, so neither
+    // `cliBudget` nor `containerBudget` describes this test's cost (ISC-273).
+    gateBudget([20_000, 20_000, 600, 15_000, 5_000]),
+  );
+
+  /**
+   * The control, one condition different: the supervisor is GONE.
+   *
+   * `abortWedged`'s contract is deliberately asymmetric and this is what pins
+   * it. The ledger record is written first and its failure propagates, because
+   * it is the only durable evidence the policy fired; the RPC that follows may
+   * fail freely, because a wedged agent with no working socket is consistent
+   * with the diagnosis rather than evidence against it. Without this test the
+   * `.catch(() => {})` on the `controlCall` is a claim nobody checks — and the
+   * scheduler calls `killWedged` inside its own `.catch`, so a throw here
+   * would be swallowed there and the run would silently stop acting on stalls.
+   */
+  test(
+    "a dead supervisor does not throw, and the kill is recorded anyway",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("stall-dead");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        env: { PIFLEET_PI_COMMAND: piCommand("aborted.json") },
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      // The run tree — and the control secret — survive; only the process
+      // dies. So `controlCall` gets as far as a real socket connect and fails
+      // there, which is the production shape rather than a missing-file error.
+      await killSupervisor(pid, pgid);
+      expect(await waitFor(async () => (await processStartTime(pid)) === null, 5_000)).toBe(true);
+      expect(existsSync(wp.stateJson)).toBe(true);
+
+      const ledger = new LedgerWriter(run, `test-stall-dead-${process.pid}`);
+      await abortWedged({ run, worker: "eng-1", taskId: "T-WEDGE-2", ledger, timeoutMs: 2_000 });
+
+      const { records } = await mergeLedger(run);
+      const kill = records.find((r) => r.event === "worker_stall_kill");
+      expect(kill).toBeDefined();
+      expect(kill?.detail?.["task_id"]).toBe("T-WEDGE-2");
+    },
+    gateBudget([20_000, 5_000, 2_000]),
   );
 });
