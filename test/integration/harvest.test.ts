@@ -464,6 +464,48 @@ beforeAll(async () => {
       await writeFile(join(tw, "background-output.log"), "still writing after quiesce\n");
     }
   }
+
+  /**
+   * T-graded (ISC-243): a diff that puts a real file on a real runner's
+   * resolution surface.
+   *
+   * `bunfig.toml` is the file this repository's own harness list was found
+   * through — `[test] preload` names a module executed ahead of every test
+   * file — so it is the honest choice for the `executes` tier rather than a
+   * contrived one. The acceptance command is `bun test`, which the manifests
+   * recognise; whether that command PASSES in this fixture is beside the
+   * point, since the graded surface is keyed on which runner was resolved and
+   * not on what it returned.
+   */
+  {
+    const worker = "w-graded";
+    const tw = join(repo, ".worktrees", worker);
+    await git(repo, "worktree", "add", "-q", "-b", `fleet/${RUN_ID}/${worker}`, tw, baseSha);
+    await writeFile(join(tw, "bunfig.toml"), '[test]\npreload = ["./setup.ts"]\n');
+    await writeFile(join(tw, "a.txt"), "one\nCHANGED\nthree\n");
+    await git(tw, "add", ".");
+    await git(tw, "commit", "-q", "-m", "harness edit");
+    await writeFile(
+      join(runDir, "inbox", "T-graded.json"),
+      JSON.stringify(taskEnvelope("T-graded", worker, tw, ["bun test"])),
+    );
+    await mkdir(join(runDir, "outbox", worker, "T-graded"), { recursive: true });
+    await writeFile(
+      join(runDir, "outbox", worker, "T-graded", "result.json"),
+      JSON.stringify({
+        schema: "pifleet.result/v1",
+        task_id: "T-graded",
+        epoch: 1,
+        worker,
+        status: "success",
+        summary: "edited the harness and said so",
+        files_changed: [
+          { path: "a.txt", change: "modified" },
+          { path: "bunfig.toml", change: "added" },
+        ],
+      }),
+    );
+  }
 });
 
 afterAll(async () => {
@@ -1021,6 +1063,73 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     const h = HarvestSchema.parse(JSON.parse(r.stdout));
     expect(h.derived.acceptance[0]!.met).toBe(true);
     expect(h.verdict).toBe("success");
+  }, cliBudget(1));
+
+  /**
+   * ISC-243 on the LIVE path — the graded surface is FILLED by the real
+   * harvest, not merely computable by a module beside it.
+   *
+   * This is the whole reason the test exists, and the precedent is this
+   * repository's own: ISC-150's cap was live code reading
+   * `facts.harness.touched`, which nothing filled in, so a criterion with a
+   * correct matcher and a correct adjudicator graded nothing for as long as
+   * anyone looked at it. `resolution-surface.test.ts` proves the manifests are
+   * right and `adjudicate.test.ts` proves the cap acts on the field; only this
+   * proves the harvester writes it.
+   *
+   * `grep` is not a runner anyone will ever implement, which makes T-exam-pass
+   * the honest fixture for the residual half: a real harvest, a real green
+   * exam, a real `success`, and an allowlist that could not classify the
+   * command. If the discrepancy is absent the operator cannot tell that case
+   * apart from a diff the allowlist actually cleared.
+   */
+  test("ISC-243: an unresolvable acceptance command is recorded on the live path", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-exam-pass", "--run-acceptance", "--json"]);
+    expect(r.code).toBe(0);
+    const h = HarvestSchema.parse(JSON.parse(r.stdout));
+    /**
+     * Asserted through `discrepancies` rather than through a raw field, and
+     * that is the stronger instrument here rather than a concession:
+     * `HarvestSchema.derived` is a narrow projection that carries no `harness`
+     * key at all, so reading one would have meant widening a contract to give
+     * a test something to look at. The discrepancy text can only exist if the
+     * harvester computed the surface AND the adjudicator consumed it, which is
+     * the entire chain this test was written to prove.
+     */
+    expect(h.discrepancies.join("\n")).toContain("harness surface could not be resolved");
+    expect(h.discrepancies.join("\n")).toContain("grep");
+    expect(h.verdict).toBe("success");
+  }, cliBudget(1));
+
+  /**
+   * The other half: a RESOLVED runner, on the live path, with a real file on
+   * its manifest in the real derived diff.
+   *
+   * T-graded's worktree commits a `bunfig.toml` — `bun test`'s config, whose
+   * `[test] preload` runs before every test file — and its acceptance command
+   * is `bun test`, which the manifest recognises. The exam itself does not
+   * matter here and is expected to fail (there are no tests in that tree);
+   * what matters is that the harvester keyed a surface on the command and
+   * found the file. A verdict cap is graded from hand-built facts in
+   * `adjudicate.test.ts`; this asserts the INPUT to that cap is real.
+   */
+  test("ISC-243: a resolved runner's surface is computed from the live diff", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-graded", "--run-acceptance", "--json"]);
+    expect(r.code).toBe(0);
+    const h = HarvestSchema.parse(JSON.parse(r.stdout));
+    const reasons = h.reasons.join("\n");
+    // The runner was identified from the command, and named in the record.
+    expect(reasons).toContain("bun-test resolution surface");
+    // The file, its tier, and the reason it is on the surface.
+    expect(reasons).toContain("executes tier");
+    expect(reasons).toContain("bunfig.toml");
+    expect(reasons).toContain("preload");
+    expect(reasons).toContain("ISC-243");
+    // Nothing was left unclassified, so the residual discrepancy is silent.
+    expect(h.discrepancies.join("\n")).not.toContain("could not be resolved");
+    // The DENYLIST also catches bunfig.toml, and its reason is still there.
+    // The overlap is deliberate: the graded surface adds, it never excuses.
+    expect(reasons).toContain("ISC-150");
   }, cliBudget(1));
 
   /**

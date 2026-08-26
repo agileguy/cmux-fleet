@@ -567,12 +567,15 @@ export const HarnessSurfaceSchema = z.object({
    * ISC-150 cap off, i.e. when `touched` is empty and the defaults' surface
    * was not (ISC-232).
    *
-   * The narrow condition is the whole point. Config REPLACES the defaults, so
-   * any `patterns` list that happens to match nothing in a given diff disables
-   * the cap for that diff — and the dangerous shape is not a hostile
-   * `patterns: []` (the schema already refuses that) but an ordinary, honest
-   * `patterns: ["ci/**"]` written by an operator who only cared about CI
-   * files and did not realize it cost them all ~91 built-in globs. `Bun.Glob`
+   * The narrow condition is the whole point. Config REPLACED the defaults
+   * until 2026-08-25 and now EXTENDS them unless `harness.replace: true` says
+   * otherwise, so this field is empty on the default path by construction and
+   * stays load-bearing for the named opt-out. Under replacement any `patterns`
+   * list that happens to match nothing in a given diff disables the cap for
+   * that diff — and the dangerous shape is not a hostile `patterns: []` (the
+   * schema already refuses that) but an ordinary, honest `patterns: ["ci/**"]`
+   * written by an operator who only cared about CI files and did not realize
+   * it cost them all ~91 built-in globs. `Bun.Glob`
    * accepts malformed patterns and simply matches nothing, so a typo is
    * indistinguishable from a deliberate narrowing by any check on the list
    * itself; only comparing the two SURFACES over a real diff tells them apart.
@@ -582,6 +585,52 @@ export const HarnessSurfaceSchema = z.object({
    * difference is not load-bearing), or when no config was in play at all.
    */
   defaults_missed: z.array(shortStr).max(MAX_ITEMS).default([]),
+
+  /**
+   * The GRADED surface (ISC-243): which files are harness according to the
+   * resolution manifest of the runner that actually graded the code, and at
+   * which of the three tiers.
+   *
+   * This is the allowlist half. `patterns`/`touched` above are a denylist and
+   * ISC-243 is the anti-criterion saying a denylist cannot be complete — a
+   * claim re-measured on 2026-08-26 at 38 misses out of 38 probes. The two
+   * coexist rather than one replacing the other, and the direction of the
+   * merge is the safety property: `adjudicate` takes the STRICTER of the two,
+   * so the graded surface can only add files or raise severity and can never
+   * excuse a file the denylist caught. A half-built allowlist that could
+   * subtract would cap ordinary source files, which is the failure mode this
+   * criterion warned about.
+   *
+   * Empty when no acceptance command ran — there is no runner to key a surface
+   * on, and inventing one from the repository's contents would resolve the
+   * surface through the worker's own tree, which is the ISC-148 bug.
+   */
+  graded: z
+    .array(
+      z.object({
+        file: shortStr,
+        tier: z.enum(["dependency", "toolchain", "executes"]),
+        why: shortStr,
+      }),
+    )
+    .max(MAX_ITEMS)
+    .default([]),
+
+  /** Runner ids whose manifests contributed, e.g. `["bun-test"]` (ISC-243). */
+  graded_runners: z.array(shortStr).max(MAX_ITEMS).default([]),
+
+  /**
+   * Acceptance commands whose runner could not be resolved to a surface, with
+   * the reason (ISC-243).
+   *
+   * Recorded rather than dropped because it is the honest half of the
+   * allowlist's completeness claim. An allowlist is complete PER RUNNER; a
+   * command it cannot classify gets no allowlist at all, and the denylist —
+   * known-partial — is all that grades it. Saying so in the run document is
+   * what makes that residual visible instead of indistinguishable from a
+   * clean diff.
+   */
+  graded_unresolved: z.array(text).max(MAX_ITEMS).default([]),
 });
 export type HarnessSurface = z.infer<typeof HarnessSurfaceSchema>;
 

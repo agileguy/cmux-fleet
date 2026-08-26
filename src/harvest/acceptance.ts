@@ -74,8 +74,11 @@ import { HERMETIC_GIT_ENV, hardenedGitArgv } from "./git.ts";
  * what counts as harness.
  *
  * These are the FALLBACK, not the source of truth (ISC-232): `fleet.yaml`'s
- * `harness.patterns` replaces this list outright when it is set, and the
- * defaults are what a config that says nothing gets. The list stays here
+ * `harness.patterns` EXTENDS this list, and `harness.replace: true` is the
+ * named opt-out for an operator who means "start from nothing" — see
+ * `effectiveHarnessPatterns`, which is where that merge happens. (It replaced
+ * outright until 2026-08-25; the asymmetry that settled the change is that
+ * over-capping is loud and under-capping is silent.) The list stays here
  * rather than in the config schema because it is the matcher's contract —
  * `harnessSurface` must have a defined surface with no config in reach, as
  * it does when `artifacts` reads a run whose config is long gone.
@@ -269,14 +272,19 @@ export function harnessSurface(
  *
  * This, not `harnessSurface`, is what `harvestTask` calls. The extra work is
  * the second surface: whenever `configured` is supplied, the defaults are run
- * over the same diff so the two can be compared. `patterns` REPLACES the
- * defaults — that is the documented semantics and it is the right one — but
- * replacement means any configured list that matches nothing in a particular
- * diff silently switches the ISC-150 cap off for that diff, and the realistic
- * way to get there is not malice. `patterns: ["ci/**"]` is the first thing an
- * operator who cares about CI files would write, and it quietly costs all ~91
- * defaults. `Bun.Glob` compiles malformed patterns and matches nothing with
- * them, so a typo lands in the same place with no error anywhere.
+ * over the same diff so the two can be compared.
+ *
+ * `configured` arrives ALREADY MERGED — callers pass the output of
+ * `effectiveHarnessPatterns`, which since 2026-08-25 extends the defaults
+ * rather than replacing them. This function still treats the list it is handed
+ * as authoritative, so on the ordinary path the comparison below cannot find a
+ * discrepancy (an extended list is a superset) and the machinery stays
+ * reachable only for `harness.replace: true`. That is the narrowing ISC-232
+ * exists to catch, and it is now something an operator has to ASK for by name:
+ * `patterns: ["ci/**"]` used to quietly cost all ~91 defaults, which is the
+ * first thing someone who cares about CI files would write. `Bun.Glob`
+ * compiles malformed patterns and matches nothing with them, so a typo landed
+ * in the same place with no error anywhere.
  *
  * The response is to make it VISIBLE, not to refuse it: narrowing is a
  * legitimate operator decision (a repo whose suites do not live under `test/`
