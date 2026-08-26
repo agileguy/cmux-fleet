@@ -161,9 +161,12 @@ describe("a hash that cannot be taken is absent, never wrong", () => {
   }, cliBudget(1));
 
   /**
-   * The failure REASON survives at the lower seam even though the sampler
-   * discards it — `run/worktree.ts` turns it into a `WorktreeError`, and a
-   * shared throw-or-null would have forced that caller to catch and lose it.
+   * The failure REASON survives at the lower seam — `run/worktree.ts` turns it
+   * into a `WorktreeError`, and a shared throw-or-null would have forced that
+   * caller to catch and lose it.
+   *
+   * This used to end "even though the sampler discards it". It did, and that
+   * was the defect: see the `onFailure` tests below.
    */
   test("the underlying snapshot reports which git invocation failed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pifleet-nonrepo-"));
@@ -172,6 +175,72 @@ describe("a hash that cannot be taken is absent, never wrong", () => {
     expect(snap.ok).toBe(false);
     if (!snap.ok) expect(snap.what).toContain(dir);
   }, cliBudget(1));
+
+  /**
+   * WHY THE SAMPLE FAILED, and not merely THAT it did (ISC-154).
+   *
+   * `worktreeContentHash` collapsed three different facts onto one `null` —
+   * git timed out, git failed, or the snapshot threw — one function below the
+   * docstring warning that catch-and-discard is "where the reason for the
+   * failure goes to die". Measured cost, 2026-08-26: a CI run settled
+   * `success`/`quiesced` with a null hash, the ISC-290 chain probe reported
+   * "the supervisor took no quiesce sample", and no artifact anywhere said
+   * whether the 10s bound had been hit or git had refused. The failure was
+   * undiagnosable by construction.
+   *
+   * The RETURN is deliberately unchanged — still `string | null`, a missing
+   * hash still voids nothing. Only the record gains.
+   */
+  test("a git failure reaches onFailure naming the invocation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-nonrepo-"));
+    dirs.push(dir);
+    const reasons: string[] = [];
+    expect(await worktreeContentHash(dir, { onFailure: (r) => reasons.push(r) })).toBeNull();
+    expect(reasons).toHaveLength(1);
+    // Which git invocation, and where — the two facts a reader needs to tell
+    // this apart from a timeout.
+    expect(reasons[0]).toContain("git add -A (snapshot)");
+    expect(reasons[0]).toContain(dir);
+  }, cliBudget(1));
+
+  test("a timeout reaches onFailure naming the bound, not a git error", async () => {
+    const dir = await scratchRepo();
+    const reasons: string[] = [];
+    // 1ms cannot outlast a process spawn. If git ever did beat it this fails
+    // loudly rather than skipping, which is the point of not guarding it.
+    expect(
+      await worktreeContentHash(dir, { timeoutMs: 1, onFailure: (r) => reasons.push(r) }),
+    ).toBeNull();
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toContain("did not answer within 1ms");
+    expect(reasons[0]).toContain("TREE_HASH_TIMEOUT_MS");
+  }, cliBudget(2));
+
+  /**
+   * THE LATCH, and it is not defensive tidying.
+   *
+   * `Promise.race` does not cancel the loser. A timed-out sample leaves the
+   * snapshot running, and its `.then` lands afterwards with git's own verdict
+   * — so without the latch ONE missing hash would emit TWO conflicting
+   * reasons into the record, and a reader would have to guess which one
+   * decided the return value.
+   *
+   * A non-repo directory with a 1ms bound produces exactly that collision:
+   * the timer wins, then the git failure arrives. Exactly one reason must
+   * come out, and it must be the one that decided the answer.
+   */
+  test("a sample that times out AND then fails reports one reason, the deciding one", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-nonrepo-"));
+    dirs.push(dir);
+    const reasons: string[] = [];
+    expect(
+      await worktreeContentHash(dir, { timeoutMs: 1, onFailure: (r) => reasons.push(r) }),
+    ).toBeNull();
+    // Let the losing snapshot land, so a second report would be observable.
+    await new Promise((r) => setTimeout(r, 750));
+    expect(reasons, `two reasons for one missing hash: ${JSON.stringify(reasons)}`).toHaveLength(1);
+    expect(reasons[0]).toContain("did not answer within 1ms");
+  }, cliBudget(2) + 1_500);
 
   /** A hash is a git tree object id — 40 hex characters, nothing else. */
   test("the value is a git tree object id", async () => {

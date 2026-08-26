@@ -101,8 +101,29 @@ import { runGit, type GitResult } from "../harvest/git.ts";
  * which the adjudicator reads as absence of evidence (no verdict change),
  * and that is the correct failure direction: a hash we could not take must
  * never be able to void a task.
+ *
+ * 10s -> 30s ON 2026-08-26, BY OWNER DECISION, and the trade is stated here
+ * rather than in a commit message nobody re-reads.
+ *
+ * WHAT PROMPTED IT: a `container-live` run settled `success`/`quiesced` with a
+ * null hash, and the ISC-290 chain probe failed on "the supervisor took no
+ * quiesce sample". WHAT WAS NOT ESTABLISHED: that the bound is what fired.
+ * The sampler collapsed timeout, git failure and exception onto one `null`,
+ * so no artifact could say which — that gap is closed by `onFailure` below,
+ * but it was closed AFTER this decision, not before it. So this number was
+ * raised on a suspicion, and the evidence that would confirm or refute it
+ * will arrive in the next occurrence's `quiesce_sample_failed` event.
+ *
+ * WHAT IT COSTS: `settle` now waits up to 30s on a wedged git before giving
+ * up, on EVERY settle path — timed out, aborted, or died with its worker.
+ * Three times the old window in which a task that is otherwise finished
+ * cannot write the record `wait` polls for. The failure direction is
+ * unchanged (still `null`, still voids nothing); only the delay grows.
+ *
+ * IF THE NEXT EVENT SAYS "git ... exited": the bound was never the problem
+ * and this should go back to 10s.
  */
-export const TREE_HASH_TIMEOUT_MS = 10_000;
+export const TREE_HASH_TIMEOUT_MS = 30_000;
 
 /** Either the tree object id, or which git invocation failed and how. */
 export type TreeSnapshot =
@@ -161,17 +182,60 @@ export async function writeTreeSnapshot(path: string): Promise<TreeSnapshot> {
  */
 export async function worktreeContentHash(
   path: string,
-  timeoutMs: number = TREE_HASH_TIMEOUT_MS,
+  opts: {
+    timeoutMs?: number;
+    /**
+     * Called with WHY the sample could not be taken, at most once per call.
+     *
+     * The return value stays `string | null` on purpose — the adjudicator's
+     * contract is unchanged and a missing hash still voids nothing. This is a
+     * side channel for the record, not a new verdict.
+     */
+    onFailure?: (reason: string) => void;
+  } = {},
 ): Promise<string | null> {
+  const timeoutMs = opts.timeoutMs ?? TREE_HASH_TIMEOUT_MS;
+  /**
+   * AT MOST ONCE, because `Promise.race` does not cancel the loser.
+   *
+   * When the timer wins, the snapshot promise keeps running and its `.then`
+   * lands later — so without this latch a timed-out sample would ALSO report
+   * whatever git eventually said, and the record would carry two conflicting
+   * reasons for one missing hash. First answer wins, which is the one that
+   * actually decided the return value.
+   */
+  let reported = false;
+  const report = (reason: string): null => {
+    if (!reported) {
+      reported = true;
+      opts.onFailure?.(reason);
+    }
+    return null;
+  };
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expiry = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), timeoutMs);
+    timer = setTimeout(
+      () => resolve(report(`git did not answer within ${timeoutMs}ms (TREE_HASH_TIMEOUT_MS)`)),
+      timeoutMs,
+    );
   });
   try {
     return await Promise.race([
       writeTreeSnapshot(path)
-        .then((snap) => (snap.ok ? snap.tree : null))
-        .catch(() => null),
+        .then((snap) => {
+          if (snap.ok) return snap.tree;
+          // `writeTreeSnapshot` returns the reason rather than throwing
+          // precisely so it can be carried here. Its own header says a shared
+          // throw "would force one of them to catch-and-discard, which is
+          // where the reason for the failure goes to die" — and this function
+          // discarded it anyway until 2026-08-26.
+          const detail = snap.result.stderr.trim();
+          return report(
+            `${snap.what} exited ${snap.result.code}` + (detail === "" ? "" : `: ${detail}`),
+          );
+        })
+        .catch((err) => report(`the snapshot threw: ${String(err)}`)),
       expiry,
     ]);
   } finally {

@@ -6,6 +6,27 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- **The ISC-154 quiesce sample now records WHY it could not be taken, and its bound moves 10s ->
+  30s.** `worktreeContentHash` collapsed three different facts — git timed out, git failed, or the
+  snapshot threw — onto a single `null`, one function below `writeTreeSnapshot`'s own docstring
+  warning that catch-and-discard is *"where the reason for the failure goes to die"*. A CI run
+  settled `success`/`quiesced` with a null hash and the chain probe reported "the supervisor took
+  no quiesce sample"; no artifact anywhere said which failure had fired.
+
+  The sampler takes an optional `onFailure`, called **at most once** with the deciding reason, and
+  the supervisor logs `quiesce_sample_failed` / `live_sample_failed` events carrying it. The latch
+  is load-bearing rather than tidy: `Promise.race` does not cancel the loser, so a timed-out sample
+  would otherwise ALSO report git's later verdict — one missing hash, two conflicting reasons.
+
+  **The return type and the verdict are unchanged**: still `string | null`, and a missing hash still
+  voids nothing.
+
+  `TREE_HASH_TIMEOUT_MS` is raised to 30s by owner decision. The cost is stated at the constant:
+  `settle` now waits up to 30s on a wedged git before giving up, on every settle path. The
+  suspicion that the bound was what fired is **not yet confirmed** — the diagnostic that would
+  confirm it landed after the decision, so the next `quiesce_sample_failed` event is what settles
+  it.
+
 - **SRD §5.9 is retitled "The LLM is a private oMLX instance" — the constraint is PRIVACY, not
   LOCATION.** The section had been chasing its own code through two amendments: it began as "the LLM
   is local — oMLX on the Docker host", became "self-hosted — the Docker host or a trusted LAN peer"
