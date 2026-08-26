@@ -22,6 +22,28 @@ jobs:
         run: bun test test/integration
       - name: E2E tests
         run: bun test test/e2e
+      - name: Coverage lists every src/ module
+        # ISC-22, and PER-PR rather than nightly by owner decision on
+        # 2026-08-25, with the cost noted at the time: a profiled full-suite
+        # run is ~245 s on top of a job already at ~6 minutes.
+        #
+        # What it buys over nightly is that a module added with no importer
+        # cannot MERGE. The criterion's original defect — `tui.ts` absent
+        # because nothing imported it in-process — was found by a human reading
+        # a seventy-row table, which is not a control. Before this step CI ran
+        # `test/unit`, `test/integration` and `test/e2e` and never
+        # `test:coverage`, so the "every module" property was re-checked by
+        # nothing at all.
+        #
+        # The script grades a report; it does not produce one, and it fails in
+        # BOTH directions — an undeclared absence, and a declared exemption
+        # that has become false. Its logic is unit-tested in
+        # `test/unit/coverage-modules.test.ts` at unit speed, because a checker
+        # whose only proof is a green CI job is indistinguishable from one that
+        # returns 0 unconditionally.
+        run: |
+          bun run test:coverage
+          bun scripts/coverage-modules.ts
       - name: The live-oMLX probes, accounted for rather than silently skipped
         # ISC-262. `test/integration/model-probe.test.ts` gates on
         # `PIFLEET_OMLX=1`; before this step, `grep -rn PIFLEET_OMLX .github/`
