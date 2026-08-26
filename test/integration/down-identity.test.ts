@@ -1006,6 +1006,14 @@ describe("--force-identity is the deliberate override, and only that", () => {
    * the target "survived" a ladder that never touched it. Now the flag
    * actually stops it, at the first rung, which is what the flag is for.
    *
+   * IT TAKES THE PID NOW (2026-08-26), and this test passes it. As a bare
+   * boolean the flag meant "re-anchor on whatever holds the recorded pid, for
+   * every worker in the run", which is the rung-0 self-anchor ISC-272's
+   * criterion forbids in as many words — and it was what held both ISC-191
+   * and ISC-272 open. The hatch is unchanged in kind and narrowed in reach:
+   * the operator must name the number. The test below this one is the one
+   * that proves the narrowing is real rather than cosmetic.
+   *
    * Fails if: the flag stops overriding, starts overriding by default, or ever
    * signals a group it could not confirm.
    */
@@ -1025,7 +1033,7 @@ describe("--force-identity is the deliberate override, and only that", () => {
     });
     expect(await processStartTime(victim.pid)).not.toBeNull();
 
-    const forced = await down(root, runId, ["--force-identity"]);
+    const forced = await down(root, runId, ["--force-identity", String(victim.pid)]);
     expect(parse(forced.stdout)).toMatchObject({
       workers: [{ id: "eng-1", stopped: true, how: "sigterm", forced_identity: true }],
     });
@@ -1041,6 +1049,89 @@ describe("--force-identity is the deliberate override, and only that", () => {
   // only to SIGTERM, where the target dies, so it pays the graceful wait and
   // not the two `TERM_WAIT_MS` waits.
   cliBudget(9) + GRACEFUL_WAIT_MS);
+
+  /**
+   * THE NARROWING, and the only test that can tell it from a rename.
+   *
+   * `--force-identity` used to be a boolean, and a boolean has exactly one
+   * blast radius: every refused pid in the run. An operator who typed it to
+   * stop ONE stuck supervisor also authorised the ladder against every other
+   * pid the run recorded — including, on a run whose pids the machine has
+   * reissued, strangers nobody looked at. That is what held ISC-191 residual
+   * (a) and ISC-272's "never a start time read off the pid at rung 0" clause
+   * open.
+   *
+   * So the test is two refusing workers and ONE named pid. What must happen is
+   * not "force works" — the test above already shows that — but that the
+   * unnamed one is still refused and its process is still alive afterwards.
+   *
+   * WHY THE LIVE-PROCESS ASSERTION AND NOT JUST THE REPORT. A report row
+   * saying `stopped: false` is a claim about what `down` decided; the
+   * bystander still breathing is a fact about what it did. The two came apart
+   * before in this very file — an anchor refusal once reported
+   * `stopped: true, already_gone` while signalling nothing — so the side
+   * effect is what this asserts on, and the row is the corroboration.
+   *
+   * Fails if: force ever applies to a pid the operator did not type. Reverting
+   * `opts.force.has(pid)` to a bare truthiness check is enough to fail it,
+   * because a non-empty Set is truthy and both workers are then forced.
+   */
+  test("a refused pid the operator did not name is still refused", async () => {
+    const { root, runId, run } = await rig();
+    const named = bystander();
+    const unnamed = bystander();
+    // Both refuse for the same reason, so the ONLY thing separating their
+    // outcomes is which pid appears on the command line.
+    await plantWorker(run, runId, "eng-1", named.pid);
+    await plantWorker(run, runId, "eng-2", unnamed.pid);
+    await plantRegistry(run, runId, [
+      { id: "eng-1", pid: named.pid, started: LEGACY_START },
+      { id: "eng-2", pid: unnamed.pid, started: LEGACY_START },
+    ]);
+
+    const r = await down(root, runId, ["--force-identity", String(named.pid)]);
+    expect(parse(r.stdout)).toMatchObject({
+      workers: [
+        { id: "eng-1", stopped: true, forced_identity: true },
+        { id: "eng-2", stopped: false, how: "identity_legacy_format" },
+      ],
+    });
+
+    // THE LOAD-BEARING NEGATIVE: the pid nobody typed is still running.
+    expect(
+      await processStartTime(unnamed.pid),
+      "the unnamed worker's process was signalled — --force-identity is still " +
+        "reaching pids the operator never named",
+    ).not.toBeNull();
+    // And the named one really was stopped, so this is not passing because
+    // force stopped working altogether.
+    expect(await processStartTime(named.pid)).toBeNull();
+  },
+  // One `down` spawn, two `processStartTime` reads. The forced worker dies at
+  // the first rung, so this pays one graceful wait.
+  cliBudget(3) + GRACEFUL_WAIT_MS);
+
+  /**
+   * THE BARE SPELLING MUST NOT SURVIVE AS "ALL".
+   *
+   * A flag that used to mean everything and now means "these pids" has one
+   * dangerous failure mode: keeping the old spelling working, silently, with
+   * the old meaning. Commander enforces the argument, and this pins that it
+   * does — a `--force-identity` declared without `<pid>` again would make this
+   * green while re-opening exactly what the narrowing closed.
+   */
+  test("a bare --force-identity is a usage error, not a licence for every pid", async () => {
+    const { root, runId, run } = await rig();
+    const victim = bystander();
+    await plantWorker(run, runId, "eng-1", victim.pid);
+    await plantRegistry(run, runId, [{ id: "eng-1", pid: victim.pid, started: LEGACY_START }]);
+
+    const r = await down(root, runId, ["--force-identity"]);
+    expect(r.code).not.toBe(0);
+    expect(`${r.stderr}${r.stdout}`).toContain("--force-identity");
+    // Nothing was signalled on the way to the error.
+    expect(await processStartTime(victim.pid)).not.toBeNull();
+  }, cliBudget(2));
 });
 
 // ---------------------------------------------------------------------------
