@@ -736,32 +736,21 @@ jobs:
           # ACCOUNTED FOR: rename it, delete it, or let it start running here
           # for a reason nobody intended, and this step goes red and says
           # which. Before this line the criterion had no test at all; after it,
-          # it has a test that one machine can run and CI can only count. That
-          # is a real improvement and it is not coverage, and ISA.md grades
-          # ISC-290 `[~]` accordingly — on the strictness rule, exactly as
-          # ISC-258's live relay probe is graded.
+          # it has a test that one machine can run and CI can only count.
           #
-          # WHY NEITHER EXISTING JOB CAN RUN IT, stated so the gap is
-          # actionable rather than folklore. The two halves this test needs are
-          # split across two jobs and neither has both: THIS job has a Docker
-          # daemon, a built worker image and a pulled relay image, and no
-          # inference server; PR #60's `omlx-live` job has an inference server
-          # — a Cloudflare-tunnelled oMLX behind
-          # `.github/scripts/omlx-shim.ts` — and no Docker daemon. The chain
-          # needs both AT ONCE, so a dedicated job is the fix rather than an
-          # extra step bolted onto either of these.
+          # [UPDATED 2026-08-26.] The paragraph above ended "and ISA.md grades
+          # ISC-290 `[~]` accordingly", and the long section that followed it
+          # specified a job that did not yet exist — "WHY NEITHER EXISTING JOB
+          # CAN RUN IT ... Until such a job exists, this pin is the honest
+          # record." That job now exists: `container-live` below has a Docker
+          # daemon AND a tunnelled oMLX AND the 0.0.0.0-bound shim the old note
+          # warned would be needed, and it RUNS this test with an empty skip
+          # list. ISA.md grades ISC-290 `[x]` on that job, not on this pin.
           #
-          # ONE NON-OBVIOUS REQUIREMENT for whoever builds that job, because it
-          # is invisible until the relay times out and reads as a broken fleet.
-          # The shim binds `127.0.0.1`, which serves the model probes perfectly
-          # — they dial from the HOST. This chain's RELAY dials from a
-          # CONTAINER, through `--add-host host.docker.internal:host-gateway`,
-          # which resolves to the host's BRIDGE address; a loopback-only
-          # listener is unreachable from there. That job needs something
-          # listening on 0.0.0.0 in front of the shim, or the relay leg cannot
-          # connect no matter how healthy the tunnel is.
-          #
-          # Until such a job exists, this pin is the honest record.
+          # THIS PIN IS STILL CORRECT, for this job only: it has Docker and no
+          # inference server, so the test skips here and must stay accounted
+          # for. What changed is that the skip is no longer the best evidence
+          # the repo has — it is the weaker of two, and the other one runs.
           #
           # NO SECRET IS WIRED IN, for the same reason as the relay probes
           # above: a key alone flips nothing, because the reachability check
@@ -825,12 +814,19 @@ jobs:
   #
   # WHAT THIS JOB IS AND IS NOT. It is a real witness for the model-side claims
   # — a real model on real hardware, answering a real tools-bearing probe. It is
-  # NOT yet a witness for ISC-290, which names the whole chain `up` -> supervisor
-  # -> container -> dispatch -> settle -> harvest. No test in this repo asserts
-  # that chain (`grep -rln 'ISC-290' test/` is empty), so there is nothing here
-  # for a runner to re-check yet. This job removes the ENVIRONMENTAL blocker
-  # that made writing one pointless; the test itself is still owed, and ISC-290
-  # stays `[~]` until it exists.
+  # NOT a witness for ISC-290, which names the whole chain `up` -> supervisor
+  # -> container -> dispatch -> settle -> harvest. This job sends ONE call; the
+  # chain needs a Docker daemon this runner does not have.
+  #
+  # [SUPERSEDED 2026-08-26.] This paragraph used to end "No test in this repo
+  # asserts that chain (`grep -rln 'ISC-290' test/` is empty) ... the test
+  # itself is still owed, and ISC-290 stays `[~]` until it exists." That grep
+  # now returns `test/integration/full-chain.test.ts`, and the
+  # `container-live` job below RUNS it rather than pinning it as a skip. The
+  # sentence was true when written and became false without anything
+  # re-reading it — which is the stale-grounds failure mode, in a comment
+  # rather than in ISA.md. The scope limit above still holds; only the "no
+  # such test exists" claim was stale.
   #
   # THE SKIP LIST IS EMPTY ON PURPOSE. `probe-guard.sh` permits exactly the
   # names in EXPECTED_SKIPS and no others, so an empty list means ANY skip is a
@@ -1014,6 +1010,41 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      # ONE name, read by both the warmup step and the probe step below, so the
+      # model that gets LOADED and the model that gets GRADED cannot drift
+      # apart. They used to be two separate hardcoded literals, and the comment
+      # on the second one claimed they agreed "by construction rather than by
+      # coincidence" — but typing the same text twice is exactly coincidence.
+      #
+      # WHY THE 8-BIT 35B, and not the cheaper GLM-4.5-Air-MLX-4bit that the
+      # `omlx-live` job pins. Those two jobs ask a model different questions.
+      # `omlx-live` sends ONE call and wants one native tool call back; GLM
+      # answers that 3/3, cold-loads in 19.4s, and is the cheapest honest
+      # choice for it. This job runs `full-chain.test.ts`, which hands a model
+      # a multi-turn agentic task and grades whether the tree actually changed.
+      #
+      # `full-chain.test.ts`'s own header answered that second question before
+      # this job overrode it: Qwen3.5-35B-A3B-8bit "is the one that has
+      # actually been measured completing THIS chain (run 3: settled `success`
+      # in 13 seconds, 4 turns, 3 tool calls, 0 tool errors)", and naming a
+      # model "that has only been measured on a single-call probe would be a
+      # weaker claim than it looks". This job named GLM anyway, and the chain
+      # then failed intermittently — twice locally on 2026-08-26, in two
+      # DIFFERENT ways, which is what a model-capability problem looks like
+      # from the outside:
+      #
+      #   - one run made its `read` call, then the server returned
+      #     stopReason=error on the follow-up generation and the turn ended
+      #     having edited nothing;
+      #   - the next made zero tool calls at all — `tool_calls >= 1` got 0,
+      #     the ISC-108 `no_tool_calls` shape.
+      #
+      # Against Qwen3.5-35B-A3B-8bit, on the same host, same shim, same
+      # container, the chain settled `success` 7 runs out of 7, 12.3s to 15.8s
+      # each, 42 assertions every time. The probe was never flaky; it was being
+      # pointed at a model that could not do the task.
+      PIFLEET_OMLX_MODEL: Qwen3.5-35B-A3B-8bit
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -1112,6 +1143,14 @@ jobs:
         # budget that is PRODUCTION behaviour, a cold load blows through it
         # (measured 60299.68ms), and raising a real gate to suit a test is the
         # wrong trade. Ungraded — the probes below give the real diagnosis.
+        #
+        # NOT YET MEASURED IN CI: how long Qwen3.5-35B-A3B-8bit takes to cold
+        # load on the operator's server. The 60299.68ms above is GLM's, and an
+        # 8-bit 35B is the larger weight set. The 300s bound below is a guess
+        # with headroom, not a measurement. If this step ever prints a warmup
+        # approaching 300s, that is the number to replace this note with — and
+        # a run where warmup gives up will show as `up` failing its 60s probe
+        # rather than as anything wrong with the chain.
         env:
           OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
         run: |
@@ -1121,21 +1160,17 @@ jobs:
             http://127.0.0.1:8000/v1/chat/completions \
             -H "Authorization: Bearer $OMLX_API_KEY" \
             -H 'Content-Type: application/json' \
-            -d '{"model":"GLM-4.5-Air-MLX-4bit","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+            -d "{\"model\":\"${PIFLEET_OMLX_MODEL:?}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
             || true)
-          echo "warmup HTTP $code after $(( $(date +%s) - start ))s"
+          echo "warmup HTTP $code for $PIFLEET_OMLX_MODEL after $(( $(date +%s) - start ))s"
       - name: The relay probes, RUN rather than pinned
         env:
           LABEL: container-live
           PIFLEET_DOCKER: "1"
           OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
-          # GLM-4.5-Air-MLX-4bit, not the 8-bit 35B. full-chain.test.ts's own
-          # header records both as 3/3 on the tools-bearing probe while
-          # Qwen3-Coder-30B-A3B-Instruct-4bit leaked a tool call as raw text in
-          # 1 of 3 — so either is correct and this is the cheaper one. It is
-          # also the model the warmup above loads, so the two agree by
-          # construction rather than by coincidence.
-          PIFLEET_OMLX_MODEL: GLM-4.5-Air-MLX-4bit
+          # PIFLEET_OMLX_MODEL is NOT set here. It is set once at the job level
+          # and inherited by both this step and the warmup above, which is what
+          # actually makes them agree — see the rationale on the job's `env`.
           # DERIVED by the hand method, not incremented. Re-derived 2026-08-26
           # when ISC-263's CONNECT-proxy probe landed in relay.test.ts, on bun
           # 1.3.11 with PIFLEET_DOCKER unset and no listener on :8000:

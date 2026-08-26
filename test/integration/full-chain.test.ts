@@ -102,6 +102,19 @@
  * seconds, 4 turns, 3 tool calls, 0 tool errors). Naming a model that has only
  * been measured on a single-call probe would be a weaker claim than it looks.
  *
+ * That last sentence was then TESTED, by ignoring it. `ci.yml` pinned
+ * `GLM-4.5-Air-MLX-4bit` for this job anyway, on the reasoning that both were
+ * 3/3 on the tools-bearing probe and GLM is cheaper — which is true, and about
+ * a different question. This chain failed intermittently for two days, and on
+ * 2026-08-26 it failed twice locally in two DIFFERENT ways: once with the
+ * server returning `stopReason: "error"` on the generation after the `read`
+ * tool call, once with zero tool calls emitted at all. Re-pointed at
+ * `Qwen3.5-35B-A3B-8bit` on the same host, shim and container, it settled
+ * `success` 7 runs out of 7 in 12.3-15.8s — 3 of those 7 against the brief
+ * exactly as it ships below, the other 4 against a firmer wording that was
+ * tried and then reverted. So the single-call probe genuinely does not predict
+ * this, and `ci.yml` now names the 35B.
+ *
  * ## Where it runs
  *
  * Nowhere but a machine with both a Docker daemon and a reachable oMLX, which
@@ -363,6 +376,23 @@ async function writeTaskList(rig: Rig): Promise<void> {
         {
           id: "t1",
           title: "Add a subtract function",
+          /**
+           * PLAIN, and deliberately kept that way.
+           *
+           * When this probe failed on 2026-08-26 the first fix attempted was a
+           * firmer brief — one that spelled out "you MUST write to disk" and
+           * restated completion as an on-disk predicate. That fix was aimed at
+           * a cause that did not exist: the captured event stream showed the
+           * model had ALREADY decided to edit, and the turn died because the
+           * server returned `stopReason: "error"` on the follow-up generation.
+           * A second run failed differently again, with zero tool calls.
+           *
+           * The real variable was the model, not the wording (see `ci.yml`'s
+           * `container-live` env). So the brief stays at the difficulty a real
+           * task has. Hardening it would have tuned the prompt until a model
+           * that cannot drive this chain appeared to — which is the same
+           * mistake as retrying until green, spelled differently.
+           */
           brief:
             "In add.js there is an exported `add` function. Add an exported `subtract(a, b)` " +
             "function beside it that returns a - b. Change nothing else in the file.",
@@ -485,6 +515,105 @@ async function toolErrorDigest(eventsJsonl: string): Promise<string> {
   return failed.length === 0
     ? "(no erroring tool_execution_end events found in the log)"
     : failed.join("\n");
+}
+
+/**
+ * EVERYTHING the model did this turn, for the one failure that cannot be
+ * diagnosed from its own assertion message.
+ *
+ * `tool_errors === 0` and `last_event === "agent_end"` can both hold while the
+ * worktree is untouched, and when that happened on 2026-08-26 the failure said
+ * only that the tree hash had not moved. That is the same sentence whether the
+ * model read the file and stopped, wrote to the wrong path, or wrote the
+ * identical bytes back — three different findings, one of which is a fleet
+ * defect and two of which are not.
+ *
+ * Deliberately SHAPE-AGNOSTIC. The event records come from Pi, not from this
+ * repo, so this reads `type` and probes a few plausible name fields rather
+ * than asserting a schema: a digest that throws on an unfamiliar event would
+ * replace the diagnosis with a second mystery.
+ */
+async function turnDigest(eventsJsonl: string): Promise<string> {
+  let raw: string;
+  try {
+    raw = await readFile(eventsJsonl, "utf8");
+  } catch (e) {
+    return `(could not read ${eventsJsonl}: ${e instanceof Error ? e.message : String(e)})`;
+  }
+  const lines: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.trim() === "") continue;
+    let rec: unknown;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const ev = (rec as { event?: Record<string, unknown> }).event;
+    if (ev === undefined || typeof ev["type"] !== "string") continue;
+    const type = ev["type"];
+    if (!type.includes("tool") && !type.includes("text") && !type.includes("message")) {
+      continue;
+    }
+    const name =
+      (ev["name"] as string | undefined) ??
+      (ev["toolName"] as string | undefined) ??
+      (ev["tool"] as string | undefined) ??
+      "";
+    // `message_end` carries `stopReason` and `usage`, which is where an EMPTY
+    // generation announces itself; 300 chars truncated both away.
+    const budget = type === "message_end" || type === "message_start" ? 1_400 : 300;
+    lines.push(`${type}${name === "" ? "" : ` name=${name}`}: ${JSON.stringify(ev).slice(0, budget)}`);
+  }
+  return lines.length === 0
+    ? "(no tool or text events in the log at all — the turn produced nothing to inspect)"
+    : lines.join("\n");
+}
+
+/**
+ * The UPSTREAM's own refusal, if the model server declined a generation.
+ *
+ * This exists because of a misdiagnosis worth not repeating. On 2026-08-26 this
+ * probe failed on main with `agent_end`, one successful tool call, zero tool
+ * errors and an unchanged worktree, and every reading of that said "the model
+ * chose not to edit" — so the first fix attempted was a firmer brief. Captured
+ * locally against the same tunnel CI uses, the events said something else:
+ *
+ *     "stopReason":"error","responseModel":"keepalive",
+ *     "errorMessage":"Prefill context too large for available memory
+ *      (pre-chunk guard at 0 tokens, kv_len=0): predicted peak would exceed
+ *      prefill safety cap 96.8GB (90% of effective ceiling 107.5GB)"
+ *
+ * The generation after the tool result was REFUSED by oMLX — at `kv_len=0`,
+ * predicting a 96.8GB peak for a conversation of a few dozen tokens. Nothing in
+ * the fleet was wrong, and nothing about the brief would have changed it.
+ *
+ * So this is checked BEFORE the tree-hash assertion, and it is the difference
+ * between a probe that says "the turn changed nothing" and one that says which
+ * component refused. A retry or a softer assertion would have buried it.
+ */
+async function upstreamRefusal(eventsJsonl: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await readFile(eventsJsonl, "utf8");
+  } catch {
+    return null; // absence of the log is the tree assertion's problem, not this one.
+  }
+  for (const line of raw.split("\n")) {
+    if (line.trim() === "") continue;
+    let rec: unknown;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const msg = (rec as { event?: { message?: Record<string, unknown> } }).event?.message;
+    if (msg === undefined || msg["stopReason"] !== "error") continue;
+    const detail = typeof msg["errorMessage"] === "string" ? msg["errorMessage"] : "(no errorMessage)";
+    const model = typeof msg["responseModel"] === "string" ? msg["responseModel"] : "(unknown)";
+    return `responseModel=${model}: ${detail}`;
+  }
+  return null;
 }
 
 interface RunJson {
@@ -621,11 +750,31 @@ describe("the whole chain, in one motion (ISC-290)", () => {
           (await toolErrorDigest(wp.eventsJsonl)),
       ).toBe(0);
 
+      /**
+       * UPSTREAM FIRST. If the model server refused a generation, every
+       * assertion below reports a symptom and names the wrong component.
+       */
+      const refusal = await upstreamRefusal(wp.eventsJsonl);
+      expect(
+        refusal,
+        `the model server REFUSED a generation mid-turn. This is an upstream failure, not a ` +
+          `fleet defect — the container launched, the RPC turn ran, and the tool call ` +
+          `succeeded before it. What the server said:\n${refusal}`,
+      ).toBeNull();
+
       // --- REAL WORK: the tree changed, and changed into what was asked for.
+      //
+      // The digest is attached because this assertion CANNOT be diagnosed from
+      // its own message: a turn that read the file and stopped, one that wrote
+      // to the wrong path, and one that wrote identical bytes all fail here
+      // with the same sentence, and only one of the three is a fleet defect.
       expect(
         record!.tree_hash,
         "the worktree at quiesce is byte-identical to the baseline up captured — the turn " +
-          "completed without changing anything",
+          "completed without changing anything. Everything upstream of this line passed, so " +
+          "the container launched, the RPC turn ran, and tools dispatched without error; " +
+          "what the model actually did with them is below.\n" +
+          (await turnDigest(wp.eventsJsonl)),
       ).not.toBe(baselineTree);
 
       const produced = await readFile(join(worktree!.path, "add.js"), "utf8");
