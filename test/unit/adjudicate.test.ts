@@ -22,6 +22,7 @@ import {
   type Verdict,
 } from "../../src/contracts.ts";
 import { acceptanceEvidence, adjudicate, factsHash } from "../../src/harvest/adjudicate.ts";
+import { gradedSurface } from "../../src/harvest/resolution-surface.ts";
 
 const SHA_BASE = "a".repeat(40);
 const SHA_HEAD = "b".repeat(40);
@@ -57,6 +58,51 @@ function facts(over: Partial<z.input<typeof DerivedFactsSchema>> = {}): DerivedF
     tree_hash_quiesce: "tree-1",
     tree_hash_harvest: "tree-1",
     ...over,
+  });
+}
+
+/**
+ * The worker's claim for a `gradedFacts` diff.
+ *
+ * It must list the SAME files the derived diff has, or ISC-92's over/under
+ * claim rule fires first and the case grades that instead of the ISC-243 cap
+ * it was written for — which is exactly what these nine cases did on their
+ * first run.
+ */
+function gradedClaim(file: string, status: Status = "success"): ResultEnvelope {
+  return claim(status, {
+    files_changed: [
+      { path: "src/a.ts", change: "modified" },
+      { path: file, change: "modified" },
+    ],
+  });
+}
+
+/**
+ * Facts whose graded surface is computed by the PRODUCTION `gradedSurface`
+ * (ISC-243), not hand-written.
+ *
+ * Hand-writing the `graded` array would let a case assert a tier no manifest
+ * actually assigns, which is the shape of a test that grades its own fixture.
+ * Here the only inputs are a command and a file, exactly as the harvester has
+ * them, and the tier is whatever the real manifests say it is.
+ */
+function gradedFacts(
+  cmd: string,
+  file: string,
+  denylist: { patterns: string[]; touched: string[] } = { patterns: [], touched: [] },
+): DerivedFacts {
+  const files = ["src/a.ts", file];
+  const surface = gradedSurface([cmd], files);
+  return facts({
+    files_changed: files.map((path) => ({ path, change: "modified" as const })),
+    acceptance: [run("passed", { cmd })],
+    harness: {
+      ...denylist,
+      graded: surface.hits.map((h) => ({ file: h.file, tier: h.tier, why: h.why })),
+      graded_runners: [...surface.runners],
+      graded_unresolved: [...surface.unresolved],
+    },
   });
 }
 
@@ -291,6 +337,99 @@ const CASES: Case[] = [
     claimed: claim("success"),
     want: "unknown",
     wantReason: "ISC-151",
+  },
+
+  /**
+   * ISC-243 — the graded cap.
+   *
+   * These are the cases the DENYLIST lets through today, verbatim from the
+   * measurement in this criterion's ISA entry: each is a diff of one ordinary
+   * source file plus one resolution-surface file, carrying one passing
+   * acceptance run, which certified `success` before the allowlist existed.
+   * The `graded` field is built the way the harvester builds it — by calling
+   * the production `gradedSurface` — so a case cannot assert a tier the
+   * manifests do not actually produce.
+   */
+  {
+    name: "ISC-243: executes tier (vite.config.ts under vitest) caps a green run to unknown",
+    facts: gradedFacts("vitest run", "vite.config.ts"),
+    claimed: gradedClaim("vite.config.ts"),
+    want: "unknown",
+    wantReason: "ISC-243",
+  },
+  {
+    name: "ISC-243: toolchain tier (.python-version under pytest) caps a green run to unknown",
+    facts: gradedFacts("pytest", ".python-version"),
+    claimed: gradedClaim(".python-version"),
+    want: "unknown",
+    wantReason: "toolchain tier",
+  },
+  /**
+   * The grade's whole operational content. If this ever reads `unknown` the
+   * three tiers have collapsed back into the boolean they replaced, and
+   * ISC-243's word "graded" is decoration.
+   */
+  {
+    name: "ISC-243: dependency tier (go.sum under go test) caps to partial, NOT unknown",
+    facts: gradedFacts("go test ./...", "go.sum"),
+    claimed: gradedClaim("go.sum"),
+    want: "partial",
+    wantReason: "dependency tier",
+  },
+  {
+    name: "ISC-243: dependency tier (Cargo.lock) caps to partial under cargo too",
+    facts: gradedFacts("cargo test", "Cargo.lock"),
+    claimed: gradedClaim("Cargo.lock"),
+    want: "partial",
+  },
+  /**
+   * Keyed on the RUNNER, which is the property a denylist cannot have: the
+   * same file, the same diff, a different resolved command, and no cap —
+   * because `bun test` genuinely does not read `vite.config.ts`.
+   */
+  {
+    name: "ISC-243: the same file under a runner that does not read it is not capped",
+    facts: gradedFacts("bun test", "vite.config.ts"),
+    claimed: gradedClaim("vite.config.ts"),
+    want: "success",
+  },
+  /**
+   * The merge direction, which is the safety property. The denylist caps to
+   * `unknown`; a `dependency`-tier graded hit must not lift it back to
+   * `partial`. Fails if the graded cap is ever applied as an assignment rather
+   * than as a ceiling, or is moved above the ISC-150 block.
+   */
+  {
+    name: "ISC-243: a dependency-tier grade cannot lift a verdict the denylist pinned",
+    facts: gradedFacts("go test ./...", "go.sum", { patterns: [], touched: ["test/a_test.go"] }),
+    claimed: gradedClaim("go.sum"),
+    want: "unknown",
+    wantReason: "ISC-150",
+  },
+  /**
+   * The residual made loud (ISC-243). "I could not determine the harness
+   * surface for `npm test`" and "the diff is clean" both certify `success`,
+   * and must not produce the same report.
+   */
+  {
+    name: "ISC-243: an unresolvable runner certifies, but raises a discrepancy",
+    facts: gradedFacts("npm test", "src/b.ts"),
+    claimed: gradedClaim("src/b.ts"),
+    want: "success",
+    wantDiscrepancy: "could not be resolved",
+  },
+  {
+    name: "ISC-243: no discrepancy when something else already refused to certify",
+    facts: gradedFacts("npm test", "src/b.ts", { patterns: [], touched: ["test/a.test.ts"] }),
+    claimed: gradedClaim("src/b.ts"),
+    want: "unknown",
+  },
+  {
+    name: "ISC-243: a clean diff under a resolved runner is untouched and silent",
+    facts: gradedFacts("bun test", "docs/design.md"),
+    claimed: gradedClaim("docs/design.md"),
+    want: "success",
+    noDiscrepancies: true,
   },
 ];
 

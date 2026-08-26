@@ -47,6 +47,7 @@ import {
   type ResultEnvelope,
   type Verdict,
 } from "../contracts.ts";
+import { capFor, peakTier } from "./resolution-surface.ts";
 
 /** What the adjudicator returns; `facts_hash` makes it replayable. */
 export interface Adjudication {
@@ -220,6 +221,81 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
     if (rank(verdict) > rank("blocked")) {
       verdict = "unknown";
     }
+  }
+
+  /**
+   * ISC-243: the GRADED cap, applied after the denylist's and never instead
+   * of it.
+   *
+   * The safety property is the CEILING comparison, and it is worth naming
+   * precisely because the obvious answer — "it runs second" — is wrong. Order
+   * does not matter: run this block first and a `dependency` hit sets
+   * `partial`, after which the ISC-150 block still finds `rank("partial") >
+   * rank("blocked")` and lands on `unknown` exactly as it would have.
+   *
+   * What matters is that the tier imposes a MAXIMUM rather than an
+   * assignment. `verdict = ceiling` would let a `dependency` hit rewrite a
+   * verdict the denylist had already pinned to `unknown` back up to `partial`
+   * — a graded surface that EXCUSES a file the denylist caught. With the
+   * comparison, `rank("unknown")` is -1 and no tier can raise anything. The
+   * merge is one-directional: the allowlist adds files and raises severity and
+   * has no expressible way to subtract. That is what makes a PARTIAL allowlist
+   * safe here, where this criterion's own entry — correctly — warned that a
+   * partial allowlist able to subtract would cap ordinary source files.
+   *
+   * The two upper tiers cap exactly as ISC-150 always did. The point of the
+   * grade is the third:
+   *
+   *  - `executes`   — worker-authored code ran before or around the suite, so
+   *                   the suite proves nothing. Refuse to grade.
+   *  - `toolchain`  — the suite ran under an interpreter the worker selected.
+   *                   Refuse to grade.
+   *  - `dependency` — the base tree's tests ran against the base tree's code
+   *                   and that is real evidence, but a dependency the worker
+   *                   chose is in the loop. `partial`, not `unknown`: a real
+   *                   downgrade that carries the evidence forward.
+   *
+   * A dependency bump collapsing to `unknown` was the all-or-nothing behaviour
+   * that made narrowing the surface tempting, and narrowing is the silent
+   * disable ISC-232 exists to catch. Grading it is how that pressure is
+   * removed without weakening anything.
+   */
+  const peak = peakTier({ runners: [], unresolved: [], hits: facts.harness.graded });
+  if (peak !== null) {
+    const worst = facts.harness.graded.filter((g) => g.tier === peak);
+    reasons.push(
+      `diff touches the ${peak} tier of the ${facts.harness.graded_runners.join("/")} resolution surface ` +
+        `(${worst.map((g) => `${g.file}: ${g.why}`).join("; ")}) — capped to ${capFor(peak)} (ISC-243)`,
+    );
+    const ceiling = capFor(peak);
+    if (ceiling === "unknown") {
+      if (rank(verdict) > rank("blocked")) verdict = "unknown";
+    } else if (rank(verdict) > rank(ceiling)) {
+      verdict = ceiling;
+    }
+  }
+
+  /**
+   * ISC-243: the residual, made visible rather than left indistinguishable
+   * from a clean diff.
+   *
+   * An allowlist is complete PER RUNNER, and a command whose runner it cannot
+   * classify gets no allowlist at all — the known-partial denylist is then the
+   * only thing grading it. That is the honest limit of this mechanism, and the
+   * one shape it must never take is silence: "I could not determine the
+   * harness surface for `npm test`" and "the diff is clean" produce the same
+   * uncapped `success` and must not produce the same report.
+   *
+   * Gated on the verdict not already being capped, mirroring ISC-232's
+   * condition and for the same reason: when something else already refused to
+   * certify, the un-gradeable command did not change the outcome and saying so
+   * is noise.
+   */
+  if (facts.harness.graded_unresolved.length > 0 && rank(verdict) > rank("blocked")) {
+    discrepancies.push(
+      `the harness surface could not be resolved for ${facts.harness.graded_unresolved.join("; ")} — ` +
+        `only the known-partial built-in denylist graded this diff (ISC-243)`,
+    );
   }
 
   /**

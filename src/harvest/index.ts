@@ -18,6 +18,7 @@ import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { adjudicate as adjudicateFacts } from "./adjudicate.ts";
 import { harnessSurfaceFor, resolveFromEnvelope, runAcceptance } from "./acceptance.ts";
+import { gradedSurface } from "./resolution-surface.ts";
 import { networkFromLaunchArgv } from "./acceptance-container.ts";
 import { makeDaemonScratch } from "../container/mounts.ts";
 import { Deadline } from "../util/clock.ts";
@@ -403,6 +404,35 @@ export async function harvestTask(
        */
       if (ownScratch) await rm(scratchRoot, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  /**
+   * ISC-243: the graded resolution surface, keyed on the commands that ran.
+   *
+   * Computed HERE rather than beside `harnessSurfaceFor` above because it
+   * needs an input that does not exist yet up there: the resolved acceptance
+   * commands. That ordering is not an inconvenience to work around — it is the
+   * whole difference between the two mechanisms. The denylist is a fixed list
+   * applied to any diff from no input; the allowlist is keyed on WHICH RUNNER
+   * graded the code, which is knowable only once the exam has been held.
+   *
+   * Driven off `factsWithHarness.acceptance` rather than off the `try` block's
+   * local `result`, so an exam whose runs arrived by any other route is graded
+   * the same way. No runs means no runner, which means an empty graded surface
+   * and the denylist alone — exactly today's behaviour, and the honest answer
+   * when nothing was executed.
+   */
+  {
+    const surface = gradedSurface(
+      factsWithHarness.acceptance.map((r) => r.cmd),
+      factsWithHarness.files_changed.map((f) => f.path),
+    );
+    factsWithHarness.harness = {
+      ...factsWithHarness.harness,
+      graded: surface.hits.map((h) => ({ file: h.file, tier: h.tier, why: h.why })),
+      graded_runners: [...surface.runners],
+      graded_unresolved: [...surface.unresolved],
+    };
   }
 
   /**

@@ -76,6 +76,38 @@ export interface IsaClaim {
 
 export const ISA_CLAIMS: readonly IsaClaim[] = [
   {
+    isc: "ISC-243",
+    grade: "[~]",
+    claim:
+      "The denylist is still the mechanism the graded allowlist was UNIONED with, not " +
+      "one it replaced. This criterion grades `[~]` precisely because `replaces` is " +
+      "unsatisfied, so an empty result here means the denylist was deleted — at which " +
+      "point the grade is wrong in the OTHER direction and the entry needs rewriting, " +
+      "not this line editing.",
+    argv: ["grep", "-rn", "DEFAULT_HARNESS_PATTERNS", "src/"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-243",
+    grade: "[~]",
+    claim:
+      "The graded surface is READ by the adjudicator. Empty here means the allowlist " +
+      "has become a correct module beside a path nothing exercises — the RC-1 shape " +
+      "this ISA has now recorded ten times, and the exact defect ISC-150 shipped as.",
+    argv: ["grep", "-rn", "harness.graded", "src/harvest/adjudicate.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-243",
+    grade: "[~]",
+    claim:
+      "The graded surface is WRITTEN by the harvester. The read above and this write " +
+      "are listed separately on purpose: ISC-150 had a live reader and no writer, and " +
+      "one claim covering both would have gone green on that exact bug.",
+    argv: ["grep", "-rn", "gradedSurface", "src/harvest/index.ts"],
+    expect: "nonempty",
+  },
+  {
     isc: "ISC-74",
     grade: "[x]",
     claim:
