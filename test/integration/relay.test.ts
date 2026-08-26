@@ -780,7 +780,7 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
   );
 
   test(
-    "the relay opens exactly one port on the bridge, and every sibling on the bridge is an expected fleet member",
+    "the relay opens exactly its two derived ports on the bridge, and every sibling on the bridge is an expected fleet member",
     async () => {
       /**
        * The other two terms of the reachable set (SRD §12.8; ISC-261):
@@ -797,6 +797,12 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
        * own bridge address is what separates them. A debug listener, a second
        * forward left behind by a config change, or an inherited port from the
        * base image all land here as an extra element.
+       *
+       * ISC-263 makes that set TWO ports, not one: the forward derived from
+       * `llm.base_url` and the CONNECT proxy on PROXY_LISTEN_PORT. Both are
+       * named and derived from constants the production code reads, so the
+       * assertion below stays an equality — widening the expected set by a
+       * sanctioned listener is not the same as relaxing it to "contains".
        *
        * TERM 3 — the siblings. `docker network inspect` is AUTHORITATIVE for
        * bridge membership: a container is on the bridge if and only if it is
@@ -869,8 +875,11 @@ describe.skipIf(!DOCKER)("what the internal bridge denies — enumerated, not sa
           `[enumerated] relay ${relay.name} at ${relayIp} listens on [${relayPorts.join(", ")}].`,
         );
 
-        // EXACTLY the derived listen port. Not "contains", not "at least one".
-        expect(relayPorts).toEqual([listenPort]);
+        // EXACTLY the derived ports. Not "contains", not "at least one".
+        // A third port on the relay still fails this, which is the whole
+        // reason the probe exists.
+        const expectedPorts = [listenPort, PROXY_LISTEN_PORT].sort((a, b) => a - b);
+        expect(relayPorts).toEqual(expectedPorts);
 
         /**
          * Now the LIVE case, because the idle assertion above passes on a

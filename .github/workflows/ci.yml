@@ -349,8 +349,10 @@ jobs:
           #
           # 77 -> 79 comes from ISC-261 and ISC-258 adding one probe each to
           # relay.test.ts:
-          #   + "the relay opens exactly one port on the bridge, and every
-          #      sibling on the bridge is an expected fleet member" (ISC-261)
+          #   + "the relay opens exactly its two derived ports on the bridge,
+          #      and every sibling on the bridge is an expected fleet member"
+          #      (ISC-261; renamed by ISC-263, which made the relay's
+          #      sanctioned listener set two ports rather than one)
           #   + "a live INFERENCE round-trips through the relay, differentially
           #      against a host control" (ISC-258, skips here)
           # ISC-261 also REWROTE the gateway-residual probe in place — from
