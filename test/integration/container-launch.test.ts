@@ -35,7 +35,7 @@ import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { WorkerLaunchSchema } from "../../src/contracts.ts";
 import { writeJsonAtomic } from "../../src/util/jsonl.ts";
 import { processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, gateBudget } from "../support/budget.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterAll(async () => {
@@ -150,7 +150,24 @@ describe("the supervisor launches from the launch record", () => {
       // argv[0] is the program itself and is not in "$@".
       expect(recorded!.trimEnd().split("\n")).toEqual(argv.slice(1));
     },
-    cliBudget(1),
+    /**
+     * `gateBudget` and NOT `cliBudget(1)`, for every test in this file
+     * (ISC-273/274).
+     *
+     * `cliBudget(1)` is 5700 ms and these tests' `waitForFile` gates are
+     * 10 000 ms each — so the ceiling sat BELOW the gate it was meant to
+     * cover, and bun killed the test at 5700 ms with the declared wait
+     * unspendable. One test below has TWO such gates under that single
+     * ceiling. On a light runner the spawn lands in ~2 s and they pass; under
+     * load they do not, and the failure reads as "the recorder was never
+     * spawned" rather than as a budget that was never large enough.
+     *
+     * Found when ISC-147's twenty-two supervisor launches made the suite heavy
+     * enough to expose it — a latent defect surfaced by unrelated load, which
+     * is ISC-283's shape exactly. The inversion itself is ISC-293's and
+     * ISC-297's: a bound sitting inside what it bounds.
+     */
+    gateBudget([10_000]),
   );
 
   /**
@@ -193,7 +210,7 @@ describe("the supervisor launches from the launch record", () => {
       // And the double was never touched.
       expect(await readFile(decoy, "utf8").catch(() => null)).toBeNull();
     },
-    cliBudget(1),
+    gateBudget([10_000]),
   );
 
   /**
@@ -231,7 +248,7 @@ describe("the supervisor launches from the launch record", () => {
       expect(state.container!.name).toBe("pifleet-r-cl-eng-1");
       expect(state.container!.image).toBe("pifleet/pi-worker:test");
     },
-    cliBudget(1),
+    gateBudget([10_000]),
   );
 
   /**
@@ -264,7 +281,7 @@ describe("the supervisor launches from the launch record", () => {
       const state = JSON.parse(text!) as { container: unknown };
       expect(state.container).toBeNull();
     },
-    cliBudget(1),
+    gateBudget([10_000, 10_000]),
   );
 });
 
