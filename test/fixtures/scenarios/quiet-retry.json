@@ -1,0 +1,58 @@
+{
+  "scenario": "quiet-retry",
+  "_why": "The hostile case no other fixture reaches: Pi answers get_state with isStreaming:false while a retry is still outstanding. Every other scenario lets the double's own streaming model do the defending \u2014 it stays true through a retry because it reads willRetry, the very field CompletionTracker exists to interpret \u2014 so a broken tracker is masked and the completion property cannot fail. Here Pi is quiet in the gap between attempts, which is what real Pi genuinely is, and the tracker's refusal to treat agent_end{willRetry:true} as terminal is the only thing between the supervisor and a false completion. MEASURED: with this fixture absent, ignoring willRetry entirely and treating turn_end as terminal both leave the whole scenario set green, in process and against a real supervisor.",
+  "_comment_timing": "Two quiet windows, both waited OUT rather than raced (ISC-283). The first (1500ms, after turn_end and before the willRetry end) is where a tracker that treated a turn ending as terminal would settle. The second (2000ms, after the willRetry end) is where one that ignored willRetry would. Neither is a race: a slower runner only widens them, and the correct machine settles in neither.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        {
+          "type": "agent_start"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "delay_ms": 1500
+        },
+        {
+          "type": "agent_end",
+          "messages": [],
+          "willRetry": true
+        },
+        {
+          "delay_ms": 2000
+        },
+        {
+          "type": "agent_start"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "agent_end",
+          "messages": [],
+          "willRetry": false
+        },
+        {
+          "type": "queue_update",
+          "steering": [],
+          "followUp": []
+        }
+      ]
+    },
+    {
+      "on": "get_state",
+      "respond": {
+        "isStreaming": false,
+        "pendingMessageCount": 0
+      }
+    }
+  ]
+}
