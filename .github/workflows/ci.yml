@@ -1144,13 +1144,24 @@ jobs:
         # (measured 60299.68ms), and raising a real gate to suit a test is the
         # wrong trade. Ungraded — the probes below give the real diagnosis.
         #
-        # NOT YET MEASURED IN CI: how long Qwen3.5-35B-A3B-8bit takes to cold
-        # load on the operator's server. The 60299.68ms above is GLM's, and an
-        # 8-bit 35B is the larger weight set. The 300s bound below is a guess
-        # with headroom, not a measurement. If this step ever prints a warmup
-        # approaching 300s, that is the number to replace this note with — and
-        # a run where warmup gives up will show as `up` failing its 60s probe
-        # rather than as anything wrong with the chain.
+        # STILL NOT MEASURED: how long Qwen3.5-35B-A3B-8bit takes to COLD load
+        # on the operator's server. The 60299.68ms above is GLM's, and an 8-bit
+        # 35B is the larger weight set. The 300s bound below is a guess with
+        # headroom, not a measurement.
+        #
+        # AND THE FIRST READING DOES NOT SETTLE IT, which is the trap worth
+        # naming. Run 33012704567 printed "warmup HTTP 200 for
+        # Qwen3.5-35B-A3B-8bit after 2s" — that is a WARM hit, not a cold load.
+        # The model was already resident because the same operator had just run
+        # this chain seven times locally against the same server while changing
+        # this pin. Reading 2s as the cold-load cost would be reading the
+        # warmup's own effect as its input.
+        #
+        # So the number this note wants comes from a run against a server that
+        # has NOT served this model recently. If that run ever prints a warmup
+        # approaching 300s, replace this note with it. A run where warmup gives
+        # up shows as `up` failing its 60s native-tool-call probe, not as
+        # anything wrong with the chain.
         env:
           OMLX_API_KEY: ${{ secrets.OMLX_API_KEY }}
         run: |
