@@ -935,7 +935,28 @@ export async function startRegistryDaemon(
   run: RunPaths,
   opts: { onShutdown?: () => void; reaper?: ReaperConfig } = {},
 ): Promise<RegistryDaemon> {
-  const started = (await processStartTime(process.pid)) ?? "";
+  /**
+   * CATCHES, for the reason `supervisor/index.ts` catches — same shape, same
+   * measured failure, found in the same pass on 2026-08-26.
+   *
+   * `?? ""` reads as "a failed capture degrades to the sentinel", and since
+   * ISC-192 that is not what happens: `processStartTime` THROWS on a read it
+   * cannot trust, so `??` never sees it and the throw escapes `startRegistryDaemon`
+   * to whoever awaited it. Measured against a `ps` that exits 1 with a
+   * diagnostic on stderr: `DAEMON-THREW: IdentityReadError` — the daemon does
+   * not start, which on a host with no procps means the registry never comes
+   * up at all.
+   *
+   * The docstring above says "one crash cannot take the fleet" about the
+   * daemon's THINNESS. This line was a crash before the fleet existed, which
+   * that sentence does not cover and cannot.
+   *
+   * `""` is the declared capture-failed sentinel — `RegistryWorkerSchema.started`
+   * is a bare `z.string()` and every reader folds `""` into its refusal set
+   * beside `null`, so a daemon recorded this way is refused by the kill path
+   * rather than laddered against on a self-anchor.
+   */
+  const started = (await processStartTime(process.pid).catch(() => null)) ?? "";
   let registry: Registry = (await readRegistry(run)) ?? {
     schema: REGISTRY_SCHEMA,
     run_id: run.runId,
