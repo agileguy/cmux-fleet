@@ -519,7 +519,25 @@ jobs:
           # Independently corroborated: the guard's own parse of the CI run
           # that rejected 103 read `total=104` with `fail=0` -- a derivation
           # and an observation agreeing, not one number copied from the other.
-          TOTAL_EXPECTED: "104"
+          #
+          # 104 -> 105 is ISC-263's CLOSING probe in relay.test.ts -- the live
+          # enumeration of the proxy's destination surface against the shipped
+          # `google_hosts` defaults, which is what re-takes ISC-51/57's
+          # containment evidence against a relay that accepts arbitrary
+          # destinations. One added Docker-gated case; one more skip with the
+          # gate closed, pass unmoved at 6.
+          #
+          # DERIVED by the hand method, NOT by adding 1 to 104. Measured
+          # 2026-08-26 on bun 1.3.11, gate UNSET, against the file list below:
+          #     -> 6 pass, 99 skip, 0 fail. Ran 105 tests across 12 files.
+          #
+          # NOTE ON WHAT THIS PROBE NEEDS, because it is the first one here
+          # that reaches the PUBLIC internet: it dials real Google endpoints
+          # through the relay's NAT'd uplink. It is NOT pinned as a skip and
+          # must RUN -- a runner that cannot reach `oauth2.googleapis.com`
+          # should fail this job loudly rather than self-skip, because
+          # "the proxy carries Google" is exactly the claim ISC-263 closes on.
+          TOTAL_EXPECTED: "105"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -1024,8 +1042,12 @@ jobs:
           # full-chain.test.ts was re-added; the delta against it is exactly
           # the one probe ISC-263 adds. The CI run that rejected 10 parsed
           # `total=11 fail=0` on its own, which is the corroboration.
-          TOTAL_EXPECTED: "11"
-          # EMPTY. All eleven must RUN. The two names pinned as skips in the
+          #
+          # 11 -> 12: ISC-263's CLOSING probe, added the same day the proxy
+          # landed. Re-derived rather than incremented, same conditions:
+          #     -> 0 pass, 12 skip, 0 fail. Ran 12 tests across 2 files.
+          TOTAL_EXPECTED: "12"
+          # EMPTY. All twelve must RUN. The two names pinned as skips in the
           # `container` job -- both live-oMLX relay probes -- are exactly the
           # ones this job exists to execute.
           EXPECTED_CONTAINER_LIVE_SKIPS: ""
