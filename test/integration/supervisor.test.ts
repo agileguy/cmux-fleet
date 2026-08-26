@@ -2752,3 +2752,286 @@ describe("ISC-282: the abort rung ends a live wedged agent, and the task settles
     gateBudget([20_000, 5_000, 2_000]),
   );
 });
+
+/**
+ * ISC-147 gap (3): the completion property against REAL supervisor routing.
+ *
+ * `completion.test.ts`'s scenario table replays fifteen fixtures through
+ * `EpochManager` + `CompletionTracker` in process, and its own entry records
+ * why that is not the criterion's quantifier: `delay_ms`, `noise` and
+ * `partial` entries are SKIPPED as markers, and the harness never issues an
+ * abort — so `aborted.json` and `deaf-abort.json` collapse to natural
+ * completion, and mid-record truncation is not exercised at all. Those are
+ * precisely the hostile conditions the criterion says it quantifies over.
+ *
+ * Here they are real. A real supervisor, a real `fake-pi` child, a real
+ * control socket: `delay_ms` is waited out rather than skipped, `partial`
+ * really truncates a JSON line mid-write, and the abort is a real RPC.
+ *
+ * **THE PROPERTY, stated once and asserted per scenario.** A task that settles
+ * `success` must have a LIVE-attributed terminal `agent_end{willRetry:false}`
+ * behind it. That is ISC-147's sentence turned into something the events file
+ * can answer: a success with no such record is a completion declared while the
+ * agent was still going to emit output, whatever the verdict says. Liveness is
+ * read by exclusion from the supervisor's own `epoch_attribution` records
+ * rather than recomputed here — the point of this block is to stop
+ * re-implementing the routing, so it must not re-implement the attribution
+ * either.
+ *
+ * **`noise` is deliberately not covered here.** `noisy-fleet.json` is a
+ * three-script FLEET fixture and is already driven through real supervisors by
+ * ISC-158's starvation test; replaying it here would duplicate that rig to
+ * assert a weaker property. Named rather than silently omitted.
+ */
+describe("ISC-147 (gap 3): the completion property under real hostile routing", () => {
+  /** Seqs the supervisor itself attributed to a settled epoch. */
+  function priorSeqs(events: Array<Record<string, unknown>>): Set<number> {
+    return new Set(
+      events
+        .filter((e) => e["type"] === "epoch_attribution" && e["attributed"] === "prior")
+        .map((e) => e["seq"] as number),
+    );
+  }
+
+  /**
+   * A terminal `agent_end` that the supervisor routed to the LIVE epoch.
+   * `willRetry:true` is not terminal — that is ISC-82, and a scenario whose
+   * only end carries it must never produce a success.
+   */
+  function hasLiveTerminalEnd(events: Array<Record<string, unknown>>): boolean {
+    const prior = priorSeqs(events);
+    return events.some((e) => {
+      if (e["type"] !== "event" || prior.has(e["seq"] as number)) return false;
+      const inner = e["event"] as { type?: string; willRetry?: unknown } | undefined;
+      return inner?.type === "agent_end" && inner.willRetry === false;
+    });
+  }
+
+  async function runScenario(args: {
+    name: string;
+    scenario: string;
+    deadlineS?: number;
+    abortAfterTurnStart?: boolean;
+    settleBudgetMs: number;
+  }): Promise<{ verdict: string; reason: string; events: Array<Record<string, unknown>> }> {
+    const root = await freshRoot();
+    const runId = testRunId(args.name);
+    const run = runPaths(runId, root);
+    const wp = workerPaths(run, "eng-1");
+    const taskId = `T-${args.name.toUpperCase()}`;
+
+    const { pid, pgid } = await processLauncher.launchDetached({
+      runId,
+      runDir: join(root, runId),
+      workerId: "eng-1",
+      env: { PIFLEET_PI_COMMAND: piCommand(args.scenario) },
+      argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+      logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+    });
+    cleanups.push(() => killSupervisor(pid, pgid));
+    expect(await waitForIdle(wp, pid)).toBe(true);
+
+    const envelope = {
+      ...makeEnvelope(runId, "eng-1", taskId),
+      ...(args.deadlineS === undefined ? {} : { deadline_s: args.deadlineS }),
+    } as TaskEnvelope;
+    const reply = await controlCall(run, "eng-1", {
+      cmd: "dispatch",
+      envelope,
+      attempt_id: `${args.name}-attempt-1`,
+      requested_epoch: null,
+    });
+    expect(reply["accepted"]).toBe(true);
+
+    if (args.abortAfterTurnStart === true) {
+      // Anchored on an OBSERVED event, never a fixed sleep (ISC-283): the
+      // window has to start where the turn does, not where the test launched.
+      const open = await waitFor(async () => {
+        return (await readEvents(wp.eventsJsonl)).some((e) => {
+          const inner = e["event"] as { type?: string } | undefined;
+          return e["type"] === "event" && inner?.type === "turn_start";
+        });
+      }, 20_000);
+      expect(open).toBe(true);
+      await controlCall(run, "eng-1", { cmd: "abort" }, { timeoutMs: 10_000 }).catch(() => {});
+    }
+
+    const settled = await waitFor(
+      async () => (await readTaskRecord(taskRecordPath(wp, taskId))) !== null,
+      args.settleBudgetMs,
+    );
+    expect(settled).toBe(true);
+    const record = await readTaskRecord(taskRecordPath(wp, taskId));
+
+    await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+    await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+
+    return {
+      verdict: record?.verdict ?? "MISSING",
+      reason: record?.reason ?? "",
+      events: await readEvents(wp.eventsJsonl),
+    };
+  }
+
+  test(
+    "happy: a clean turn settles success, behind a live terminal end",
+    async () => {
+      const r = await runScenario({ name: "happy", scenario: "happy.json", settleBudgetMs: 20_000 });
+      expect(r.verdict).toBe("success");
+      expect(hasLiveTerminalEnd(r.events)).toBe(true);
+    },
+    gateBudget([20_000, 20_000, 5_000]),
+  );
+
+  /**
+   * The retry chain, with the intermediate `agent_end{willRetry:true}` really
+   * routed rather than replayed. The property does the work: a supervisor that
+   * settled on the first end would still record `success`, and only the
+   * live-terminal-end check distinguishes that from waiting for the real one.
+   */
+  test(
+    "will-retry: settles only behind the second, terminal end",
+    async () => {
+      const r = await runScenario({
+        name: "willretry",
+        scenario: "will-retry.json",
+        settleBudgetMs: 25_000,
+      });
+      expect(r.verdict).toBe("success");
+      expect(hasLiveTerminalEnd(r.events)).toBe(true);
+    },
+    gateBudget([20_000, 25_000, 5_000]),
+  );
+
+  /**
+   * `delay_ms` WAITED OUT, not skipped — the in-process harness drops it as a
+   * marker, so a settle that arrived instantly would be indistinguishable from
+   * one that waited. Here the child really sleeps five seconds mid-turn.
+   */
+  test(
+    "slow-turn: a real five-second turn settles only after it ends",
+    async () => {
+      const r = await runScenario({
+        name: "slowturn",
+        scenario: "slow-turn.json",
+        settleBudgetMs: 25_000,
+      });
+      expect(r.verdict).toBe("success");
+      expect(hasLiveTerminalEnd(r.events)).toBe(true);
+    },
+    gateBudget([20_000, 25_000, 5_000]),
+  );
+
+  /**
+   * `partial` — the stream dies mid-JSON-line. THE CASE THE IN-PROCESS
+   * HARNESS CANNOT REACH AT ALL: it skips `partial` entries as markers, so the
+   * scenario replays as a turn that simply stops, and the one thing worth
+   * asserting — that an incomplete write is never completed into a record —
+   * is not exercised. The fixture's own comment states the requirement: "the
+   * epoch must fail on worker death, never settle on a fabricated event."
+   */
+  test(
+    "truncated: a half-written agent_end is never completed into a success",
+    async () => {
+      const r = await runScenario({
+        name: "truncated",
+        scenario: "truncated.json",
+        settleBudgetMs: 25_000,
+      });
+      expect(r.verdict).not.toBe("success");
+      // And not by accident of the verdict name: there is no live terminal end
+      // in the stream, because the only one was never finished being written.
+      expect(hasLiveTerminalEnd(r.events)).toBe(false);
+    },
+    gateBudget([20_000, 25_000, 5_000]),
+  );
+
+  /**
+   * THE FIXTURE THAT MAKES THIS BLOCK BITE, and the reason it had to be
+   * written rather than found.
+   *
+   * MEASURED before it existed: ignoring `willRetry` entirely, and treating
+   * `turn_end` as terminal, BOTH left all six real-supervisor scenarios above
+   * green — the same two mutations that had already survived the in-process
+   * table. The cause is the same at both levels: `fake-pi` decides
+   * `isStreaming` by reading `willRetry`, so through a retry it reports the
+   * agent as streaming and the probe refuses to confirm before the tracker's
+   * conditions are ever consulted. Every existing fixture is defended by the
+   * double, not by the code under test.
+   *
+   * `quiet-retry.json` scripts `get_state` to answer `isStreaming: false`
+   * while the retry is outstanding — what real Pi genuinely is in the gap
+   * between attempts. In that window the tracker's refusal to treat
+   * `agent_end{willRetry:true}` as terminal is the only thing left.
+   */
+  test(
+    "quiet-retry: a retry under a quiet probe settles only on the second, terminal end",
+    async () => {
+      const r = await runScenario({
+        name: "quietretry",
+        scenario: "quiet-retry.json",
+        settleBudgetMs: 25_000,
+      });
+      expect(r.verdict).toBe("success");
+      /**
+       * The whole assertion. A supervisor that settled on the FIRST end closes
+       * the window there, so the second turn's real terminal end arrives to a
+       * settled epoch and is attributed `prior` — and this reads false. The
+       * verdict alone cannot tell the two apart: both spell `success`.
+       */
+      expect(hasLiveTerminalEnd(r.events)).toBe(true);
+    },
+    gateBudget([20_000, 25_000, 5_000]),
+  );
+
+  /**
+   * A REAL abort, which the in-process harness never issues — which is why
+   * this scenario "collapses to natural completion" there, settling `success`
+   * off the 30 s tail and testing nothing about abort at all.
+   */
+  test(
+    "aborted: a real abort ends the turn, and not as a success",
+    async () => {
+      const r = await runScenario({
+        name: "abortclean",
+        scenario: "aborted.json",
+        abortAfterTurnStart: true,
+        settleBudgetMs: 15_000,
+      });
+      expect(r.verdict).toBe("aborted");
+      /**
+       * A live terminal end is CORRECT here, and the distinction is the point.
+       * `aborted.json` answers the abort by emitting `agent_end{willRetry:
+       * false}` — the agent really did stop. So the supervisor waited for the
+       * agent's own end rather than declaring the epoch over the instant the
+       * RPC was accepted, which is what this assertion pins: had it settled on
+       * the abort alone, that end would have arrived to a closed window and
+       * been attributed `prior`, and this would read false.
+       */
+      expect(hasLiveTerminalEnd(r.events)).toBe(true);
+    },
+    gateBudget([20_000, 20_000, 15_000, 5_000]),
+  );
+
+  /**
+   * The agent IGNORES the abort. The advisory rung does nothing, so the
+   * deadline ladder is what must end the epoch — and the deadline is
+   * compressed to 8 s so the fixture's 120 s tail is not what ends it, which
+   * would make this test a very slow way of asserting nothing.
+   */
+  test(
+    "deaf-abort: an ignored abort escalates to the deadline, never to success",
+    async () => {
+      const r = await runScenario({
+        name: "deafabort",
+        scenario: "deaf-abort.json",
+        deadlineS: 8,
+        abortAfterTurnStart: true,
+        settleBudgetMs: 40_000,
+      });
+      expect(r.verdict).not.toBe("success");
+      expect(hasLiveTerminalEnd(r.events)).toBe(false);
+    },
+    gateBudget([20_000, 20_000, 40_000, 5_000]),
+  );
+});

@@ -392,6 +392,17 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
    */
   "no-tool-calls.json": [1],
   /**
+   * Settles ONCE, on the second turn's terminal end — never on the first.
+   *
+   * The scenario scripts `get_state` to answer `isStreaming: false` while a
+   * retry is outstanding, which removes the double's streaming model from the
+   * defence and leaves the tracker's `willRetry` discriminator as the only
+   * thing holding the epoch open. `[1]` rather than `[]` because the retry
+   * DOES resolve: this is a scenario about WHEN completion may be declared,
+   * not about a worker that hangs.
+   */
+  "quiet-retry.json": [1],
+  /**
    * Settles once, like `happy.json`. The five fire-and-forget
    * `extension_ui_request` records are not activity events — nothing is
    * waiting on them and the agent does not pause for them — so they neither
