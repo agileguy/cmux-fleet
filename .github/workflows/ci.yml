@@ -234,21 +234,41 @@ jobs:
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_CI_SERVICE_ACCOUNT }}
+      # `mintArgv` shells out to `gcloud auth application-default
+      # print-access-token`, so the binary has to be here. It is NOT on the
+      # ubuntu-24.04 runner image by default, and its absence would surface as
+      # a mint failure inside adc.test.ts rather than as a missing tool.
+      #
+      # ORDER IS LOAD-BEARING: this runs BEFORE the credential is relocated
+      # below. `setup-gcloud` re-reads the path the AUTH step exported into its
+      # own action state, not whatever `GOOGLE_APPLICATION_CREDENTIALS` says
+      # now, so relocating first made it fail with `[Errno 2] No such file or
+      # directory` on the workspace path. Measured, not predicted — that is
+      # exactly how the first run of this job died.
+      - name: Install the gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
       # THE CREDENTIAL MUST NOT SIT IN THE WORKSPACE, and this is a real
       # hazard in THIS repo rather than general hygiene.
       #
       # `google-github-actions/auth` writes its credential file into
-      # `$GITHUB_WORKSPACE` by default — the checkout directory. Several probes
-      # here bind-mount a repo directory into a container as `/workspace`, and
+      # `$GITHUB_WORKSPACE` — the checkout directory. Several probes here
+      # bind-mount a repo directory into a container as `/workspace`, and
       # `run.repo` is operator-configurable, so a live credential parked there
       # is one mount away from being readable inside a worker. That is ISC-44's
       # exposure class, arriving through a path `classifyHostGcloudExposure`
       # does NOT flag: it asks whether a mount source contains the gcloud
       # STORE (`~/.config/gcloud`), and this file is nowhere near it.
       #
-      # Moving it is safe because the file is self-contained: in federated
-      # mode it is an `external_account` config whose `credential_source` is a
-      # URL — GitHub's OIDC endpoint — not a second file left behind.
+      # Moving it is safe because the file is self-contained: in federated mode
+      # it is an `external_account` config whose `credential_source` is a URL —
+      # GitHub's OIDC endpoint — not a second file left behind.
+      #
+      # BOTH stores are re-pointed, because there are two and they are read by
+      # different callers. `GOOGLE_APPLICATION_CREDENTIALS` is what
+      # `hostAdcFile()` and `application-default print-access-token` follow;
+      # gcloud's own account store is what `setup-gcloud` populated with the
+      # old path, and leaving it dangling would break any plain `gcloud`
+      # call the probes make.
       - name: Move the federated credential out of the workspace
         run: |
           set -eu
@@ -256,6 +276,7 @@ jobs:
           dest="${RUNNER_TEMP:?RUNNER_TEMP is not set by actions/runner}/gha-creds.json"
           mv "$src" "$dest"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$dest" >> "$GITHUB_ENV"
+          gcloud --quiet auth login --force --cred-file "$dest"
           # Prove the workspace is clean rather than assuming the mv covered
           # every file the action may have written.
           leftovers="$(find "${GITHUB_WORKSPACE:?}" -maxdepth 1 -name 'gha-creds-*.json' -print)"
@@ -263,12 +284,10 @@ jobs:
             echo "::error::a federated credential is still in the workspace: $leftovers"
             exit 1
           fi
-      # `mintArgv` shells out to `gcloud auth application-default
-      # print-access-token`, so the binary has to be here. It is NOT on the
-      # ubuntu-24.04 runner image by default, and its absence would surface as
-      # a mint failure inside adc.test.ts rather than as a missing tool.
-      - name: Install the gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
+          # And prove the relocation did not break minting, here rather than
+          # 20 minutes later inside adc.test.ts. The token is never printed.
+          gcloud auth application-default print-access-token > /dev/null
+          echo "mint OK from $dest"
       - name: Confirm a Docker daemon is present
         run: docker info
       - name: Build the worker image
