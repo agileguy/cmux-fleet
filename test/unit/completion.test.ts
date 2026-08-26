@@ -59,6 +59,44 @@ describe("CompletionTracker — ISC-82, retries", () => {
     expect(t.eligible).toBe(false);
   });
 
+  /**
+   * A new turn REVOKES a terminal end that has not yet been acted on.
+   *
+   * The window is real rather than theoretical: eligibility is not a settle.
+   * A clean `agent_end` makes the epoch eligible, but the settle only happens
+   * once the double-read probe confirms, and any activity between the two
+   * reads invalidates it. If the agent opens another turn inside that window,
+   * a tracker that kept the stale flag would settle the task with a live turn
+   * running — a completion declared while the agent is demonstrably still
+   * emitting, which is ISC-147's sentence exactly.
+   *
+   * Not covered by the scenario replays and known not to be: deleting the
+   * `#endedClean = false` from the `agent_start` arm leaves all fifteen of
+   * them green, and the three quiet-probe tests too. This is the probe that
+   * kills it.
+   */
+  test("a fresh agent_start revokes an unconsumed terminal end", () => {
+    const t = new CompletionTracker();
+    t.reset();
+    replay(t, [
+      { type: "agent_start" },
+      { type: "agent_end", willRetry: false },
+      { type: "queue_update", steering: [], followUp: [] },
+    ]);
+    expect(t.eligible).toBe(true);
+
+    // The agent speaks again before anything acted on that end.
+    replay(t, [{ type: "agent_start" }]);
+    expect(t.eligible).toBe(false);
+
+    // And it becomes eligible again only on the NEW turn's own clean end.
+    replay(t, [
+      { type: "agent_end", willRetry: false },
+      { type: "queue_update", steering: [], followUp: [] },
+    ]);
+    expect(t.eligible).toBe(true);
+  });
+
   test("the will-retry scenario settles only on the second, real end", () => {
     // Mirrors scenarios/will-retry.json: end{true}, auto retry, end{false}.
     const t = new CompletionTracker();
@@ -489,10 +527,34 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
   "slow-export.json": [1],
 };
 
-function simulate(scenario: ScenarioFile): { settles: number[] } {
+interface SimResult {
+  settles: number[];
+  /**
+   * One entry per settle: whether the live epoch's TERMINAL record — an
+   * `agent_end` the agent did not mark `willRetry` — had already been fed at
+   * the moment completion was declared.
+   *
+   * This is the criterion's own sentence made checkable. `settles` counts
+   * completions and says nothing about WHEN they happened, so a tracker that
+   * settled on the first `message_update` of a turn produces the identical
+   * count as one that waited — which is why prematurity was invisible in the
+   * eleven scenarios that expect a settle, and penalised only in the four that
+   * expect none. The check consults the SCENARIO's remaining script rather
+   * than the machine's own state, deliberately: `em.settle()` closes the
+   * window, so any question asked of `EpochManager` after a settle is answered
+   * by a machine that has already decided, and would be vacuous.
+   */
+  terminalSeen: boolean[];
+}
+
+function simulate(scenario: ScenarioFile): SimResult {
   const em = new EpochManager();
   const tracker = new CompletionTracker();
   const settles: number[] = [];
+  const terminalSeen: boolean[] = [];
+  // Set by `track` when the agent emits an end it did not mark `willRetry`.
+  // Reset per prompt step, because each step is a fresh turn.
+  let sawTerminal = false;
 
   let seq = 0;
   let streaming = false;
@@ -519,7 +581,12 @@ function simulate(scenario: ScenarioFile): { settles: number[] } {
       streaming = true;
       turnsStarted++;
     }
-    if (e["type"] === "agent_end") streaming = e["willRetry"] === true;
+    if (e["type"] === "agent_end") {
+      streaming = e["willRetry"] === true;
+      // The turn's terminal record. `willRetry:true` is NOT terminal — the
+      // agent has said it will speak again, which is the whole of ISC-82.
+      if (e["willRetry"] === false) sawTerminal = true;
+    }
   };
 
   const probe = (): void => {
@@ -534,7 +601,10 @@ function simulate(scenario: ScenarioFile): { settles: number[] } {
       const confirmed = tracker.confirm(token, r1.data, r2.data);
       if (confirmed) {
         const settled = em.settle("success", "sim");
-        if (settled !== null) settles.push(settled.epoch);
+        if (settled !== null) {
+          settles.push(settled.epoch);
+          terminalSeen.push(sawTerminal);
+        }
       }
       for (const ev of r2.after) feed(ev); // lands after the second read
       if (confirmed || !tracker.eligible) break;
@@ -567,6 +637,7 @@ function simulate(scenario: ScenarioFile): { settles: number[] } {
   let task = 0;
   for (const step of promptSteps) {
     task++;
+    sawTerminal = false;
     const decision = em.allocate(`T-${task}`, `sim-a${task}`, null);
     if (!decision.ok) continue; // busy: the previous epoch never settled
     seq++; // the prompt ack occupies a stream position
@@ -588,7 +659,7 @@ function simulate(scenario: ScenarioFile): { settles: number[] } {
     if (dead) break;
   }
 
-  return { settles };
+  return { settles, terminalSeen };
 }
 
 describe("scenario property — never complete while output is still coming (ISC-147)", () => {
@@ -613,10 +684,117 @@ describe("scenario property — never complete while output is still coming (ISC
       const scenario = JSON.parse(
         await Bun.file(join(scenariosDir, file)).text(),
       ) as ScenarioFile;
-      const { settles } = simulate(scenario);
+      const { settles, terminalSeen } = simulate(scenario);
       expect(settles).toEqual(expected);
+      /**
+       * THE POSITION, which is what makes this a test of the criterion's
+       * sentence rather than of a count. Every settle must land at or after
+       * the turn's terminal `agent_end` — a completion declared earlier is one
+       * declared "while the agent will still emit output", which is the thing
+       * ISC-147 forbids in so many words.
+       */
+      expect(terminalSeen).toEqual(settles.map(() => true));
     });
   }
+
+  /**
+   * The probe that makes the tracker's `willRetry` check LOAD-BEARING.
+   *
+   * Everything above replays scenarios whose `get_state` is answered from the
+   * harness's own model of whether a turn is in flight — and that model, like
+   * `fake-pi.ts`'s, reads `willRetry` to decide it. So through a retry the
+   * probe is told `isStreaming: true` and refuses to confirm, and the
+   * tracker's own `willRetry` discriminator never gets to matter. MEASURED,
+   * not supposed: breaking `#endedClean` to ignore `willRetry` entirely leaves
+   * all fifteen scenario replays green, and so does making `turn_end`
+   * terminal. A settle-position assertion over that set therefore cannot fail,
+   * and an assertion that cannot fail is not a guard.
+   *
+   * What this scripts is the race the double exists to create: Pi answers
+   * `isStreaming: false` while a retry is still outstanding. That is not
+   * exotic — `willRetry:true` says the AGENT will speak again, and between the
+   * end of one attempt and the start of the next there is a real window in
+   * which Pi is genuinely not streaming. In that window the ONLY thing
+   * standing between the supervisor and a false completion is the tracker
+   * refusing to treat a `willRetry:true` end as terminal.
+   */
+  test("a retry pending while Pi reports isStreaming:false must NOT settle", async () => {
+    const scenario: ScenarioFile = {
+      scenario: "retry-quiet-probe",
+      steps: [
+        {
+          on: "prompt",
+          emit: [
+            { type: "agent_start" },
+            { type: "turn_start" },
+            { type: "turn_end" },
+            // The agent says it will speak again. Nothing after this point is
+            // terminal, however quiet the process looks from outside.
+            { type: "agent_end", messages: [], willRetry: true },
+          ],
+        },
+        // Pi, answering honestly for the gap between attempts.
+        { on: "get_state", respond: { isStreaming: false, pendingMessageCount: 0 } },
+      ],
+    };
+    const { settles, terminalSeen } = simulate(scenario);
+    expect(settles).toEqual([]);
+    expect(terminalSeen).toEqual([]);
+  });
+
+  /**
+   * The one-condition-different control, so the test above cannot pass by the
+   * harness being unable to settle at all. Same shape, same quiet probe, one
+   * field flipped: `willRetry:false` makes the end terminal and the epoch
+   * settles at once.
+   */
+  test("the same quiet probe DOES settle once the end is terminal", async () => {
+    const scenario: ScenarioFile = {
+      scenario: "clean-quiet-probe",
+      steps: [
+        {
+          on: "prompt",
+          emit: [
+            { type: "agent_start" },
+            { type: "turn_start" },
+            { type: "turn_end" },
+            { type: "agent_end", messages: [], willRetry: false },
+          ],
+        },
+        { on: "get_state", respond: { isStreaming: false, pendingMessageCount: 0 } },
+      ],
+    };
+    const { settles, terminalSeen } = simulate(scenario);
+    expect(settles).toEqual([1]);
+    expect(terminalSeen).toEqual([true]);
+  });
+
+  /**
+   * `turn_end` is not `agent_end`, asserted under the same quiet probe.
+   *
+   * A turn ending means the assistant stopped talking for now; the AGENT is
+   * still live and may open another turn. With Pi reporting quiet, a tracker
+   * that treated `turn_end` as terminal would settle here — and the settle
+   * would be premature by the criterion's own words, with the agent's real end
+   * still to come.
+   */
+  test("turn_end under a quiet probe is not a completion", async () => {
+    const scenario: ScenarioFile = {
+      scenario: "turn-end-quiet-probe",
+      steps: [
+        {
+          on: "prompt",
+          emit: [
+            { type: "agent_start" },
+            { type: "turn_start" },
+            { type: "turn_end" },
+          ],
+        },
+        { on: "get_state", respond: { isStreaming: false, pendingMessageCount: 0 } },
+      ],
+    };
+    expect(simulate(scenario).settles).toEqual([]);
+  });
 
   test("will-retry: no settle is possible before the retry chain resolves", async () => {
     // The sharpened form of ISC-82: truncate the scenario right after the
