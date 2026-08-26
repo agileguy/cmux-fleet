@@ -124,7 +124,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-110",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The scheduler consults `classifyStall` on every poll. This entry claimed the " +
       "opposite for four days after the stall-wiring commission made it false; empty " +

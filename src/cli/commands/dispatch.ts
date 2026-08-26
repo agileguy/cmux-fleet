@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { randomUUID } from "node:crypto";
-import { readdir, stat } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { CliError } from "../index.ts";
 import {
@@ -23,6 +23,7 @@ import {
   workerPaths,
   type RunPaths,
 } from "../../run/paths.ts";
+import { abortWedged, eventSilenceMs } from "../../run/stall-io.ts";
 import { BudgetCeilingError, BudgetManager, resumeBudget } from "../../safety/budget.ts";
 import { readTranscript, reconstruct } from "../../harvest/transcript.ts";
 import { combineUsage, tokensTotal, ZERO_USAGE, type UsageTotals } from "../../harvest/usage.ts";
@@ -635,56 +636,21 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
     },
 
     /**
-     * Milliseconds since `worker` last appended to `events.jsonl`.
+     * The two production halves of the stall policy (ISC-282).
      *
-     * MTIME rather than a parsed last record, deliberately. The file is
-     * append-only and every append moves its mtime, so the mtime IS the last
-     * event's arrival time — and reading it is one `stat` per worker per poll
-     * rather than a tail-and-parse of a file that grows for the whole run.
-     * What the parse would buy is the event's own `ts` field, which is stamped
-     * by the supervisor and would have to be trusted across a clock the
-     * scheduler does not share.
-     *
-     * `null` when the file does not exist: the worker has emitted nothing at
-     * all since launch, so there is no last event to measure from. Reporting a
-     * large silence here would kill workers that are merely still starting,
-     * which inverts the criterion.
-     *
-     * Both readings are taken in THIS function's clock, and only their
-     * difference leaves it — see `SchedulerIO.eventSilenceMs` for why the
-     * scheduler must never subtract an mtime from `io.now()`.
+     * BINDING ONLY — the behaviour is `run/stall-io.ts`, and it lives there
+     * rather than here because this object cannot be constructed outside a CLI
+     * invocation, which left both functions untestable for as long as they sat
+     * in it. Anything a reader wants to know about mtime-vs-parse, the `null`
+     * answer for a worker that has emitted nothing, or why the abort rung is
+     * advisory and never a signal, is documented on those two functions.
      */
     async eventSilenceMs(worker: string): Promise<number | null> {
-      try {
-        const st = await stat(workerPaths(run, worker).eventsJsonl);
-        return Math.max(0, Date.now() - st.mtimeMs);
-      } catch {
-        return null;
-      }
+      return eventSilenceMs(run, worker);
     },
 
-    /**
-     * End a wedged worker (ISC-117).
-     *
-     * The ADVISORY rung only: an `abort` RPC to the supervisor, which is alive
-     * and answering by construction — that is what makes this case different
-     * from the reaper's. Signalling is deliberately NOT done here. The
-     * identity-anchored ladder in `down` is the one place that decides a
-     * process may be signalled, and duplicating any part of that decision on
-     * the scheduler's path is how the two would come to disagree.
-     *
-     * Best-effort: the scheduler settles the task and marks the worker dead
-     * whether or not this resolves, because the classification — not this
-     * call's success — is the finding.
-     */
     async killWedged(worker: string, taskId: string): Promise<void> {
-      await ledger.append("worker_stall_kill", {
-        detail: { worker, task_id: taskId, reason: "event_stall_kill" },
-      });
-      await controlCall(run, worker, { cmd: "abort" }, { timeoutMs: 10_000 }).catch(() => {
-        // A wedged agent may have no working RPC; that is consistent with the
-        // diagnosis rather than evidence against it.
-      });
+      await abortWedged({ run, worker, taskId, ledger });
     },
 
     async taskTokens(worker: string): Promise<number> {
