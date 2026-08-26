@@ -19,9 +19,17 @@
  * a suggestion.
  */
 
-import { isIP } from "node:net";
-import { domainToASCII } from "node:url";
-import { EgressDecisionSchema, MAX_SHORT, type EgressDecision } from "../contracts.ts";
+import {
+  RULE_DEFAULT_DENY as CJS_RULE_DEFAULT_DENY,
+  RULE_INVALID_HOST as CJS_RULE_INVALID_HOST,
+  RULE_INVALID_PORT as CJS_RULE_INVALID_PORT,
+  decide as cjsDecide,
+  hostMatches as cjsHostMatches,
+  makeRule as cjsMakeRule,
+  normalizeHost as cjsNormalizeHost,
+  ruleHostError as cjsRuleHostError,
+} from "../../docker/egress-policy.cjs";
+import { EgressDecisionSchema, type EgressDecision } from "../contracts.ts";
 
 /**
  * What `decide` returns: an `EgressDecision` widened at `port`.
@@ -58,10 +66,15 @@ export function decisionForRecord(v: EgressVerdict): EgressDecision | null {
   return parsed.success ? parsed.data : null;
 }
 
-/** Rule names reserved for refusals; no allow rule may ever carry them. */
-export const RULE_DEFAULT_DENY = "default-deny";
-export const RULE_INVALID_HOST = "invalid-host";
-export const RULE_INVALID_PORT = "invalid-port";
+/**
+ * Rule names reserved for refusals; no allow rule may ever carry them.
+ *
+ * Re-exported from the shared matcher rather than restated, so a name cannot
+ * mean one thing to the host and another to the in-container proxy.
+ */
+export const RULE_DEFAULT_DENY = CJS_RULE_DEFAULT_DENY;
+export const RULE_INVALID_HOST = CJS_RULE_INVALID_HOST;
+export const RULE_INVALID_PORT = CJS_RULE_INVALID_PORT;
 
 /**
  * One allow rule. `host` is stored NORMALIZED (see `normalizeHost`) so that
@@ -79,11 +92,6 @@ export interface EgressRule {
 
 export interface EgressPolicy {
   readonly rules: readonly EgressRule[];
-}
-
-/** True for a TCP port a rule or a decision may legitimately carry. */
-function validPort(port: number): boolean {
-  return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
 /**
@@ -105,29 +113,7 @@ function validPort(port: number): boolean {
  * safe; rules must be written in canonical form.
  */
 export function normalizeHost(raw: string): string | null {
-  // Bound before any work: the decision record is schema-bounded to MAX_SHORT
-  // (contracts.ts) and no real hostname approaches 4 KiB — DNS caps at 253.
-  if (raw.length === 0 || raw.length > MAX_SHORT) return null;
-  let h = raw.trim().toLowerCase();
-  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
-  if (h.endsWith(".")) {
-    h = h.slice(0, -1);
-    // "." and "a.." are not hosts; only a SINGLE root-label dot is grammar.
-    if (h === "" || h.endsWith(".")) return null;
-  }
-  if (h === "") return null;
-  if (isIP(h) !== 0) return h;
-  // Rejects embedded schemes, ports, paths, spaces, and anything else the URL
-  // host grammar forbids — `evil.com:443` and `http://evil.com` are not hosts.
-  const ascii = domainToASCII(h);
-  if (ascii === "") return null;
-  // The URL host grammar PERMITS empty labels; DNS does not. Refusing them is
-  // load-bearing: `..googleapis.com` ends with `.googleapis.com` and is longer
-  // than the suffix, so it would satisfy the wildcard's boundary check with an
-  // EMPTY leftmost label — a name no zone can contain but a naive relay might
-  // still act on.
-  if (ascii.split(".").some((label) => label === "")) return null;
-  return ascii;
+  return cjsNormalizeHost(raw);
 }
 
 /**
@@ -139,24 +125,7 @@ export function normalizeHost(raw: string): string | null {
  * policy until it means nothing.
  */
 export function ruleHostError(host: string): string | null {
-  if (host === "*" || host === "*.") {
-    return "a bare wildcard would allow every destination — the policy is deny-all; list hosts explicitly";
-  }
-  if (host.startsWith("*.")) {
-    const suffix = host.slice(2);
-    if (suffix.includes("*")) return "only a single leading '*.' wildcard is supported";
-    const norm = normalizeHost(suffix);
-    if (norm === null) return `wildcard suffix ${JSON.stringify(suffix)} is not a valid hostname`;
-    if (isIP(norm) !== 0) return "a wildcard cannot have an IP literal as its suffix";
-    if (!norm.includes(".")) {
-      // `*.com` / `*.internal` allowlists an entire TLD, which is never one
-      // destination. If a whole private zone is genuinely needed, list hosts.
-      return `wildcard suffix ${JSON.stringify(suffix)} is a single label — that allowlists a whole TLD`;
-    }
-    return null;
-  }
-  if (host.includes("*")) return "wildcards are only supported as a leading '*.'";
-  return normalizeHost(host) === null ? `${JSON.stringify(host)} is not a valid hostname or IP literal` : null;
+  return cjsRuleHostError(host);
 }
 
 /**
@@ -165,17 +134,7 @@ export function ruleHostError(host: string): string | null {
  * would deny the very destination it was written to allow.
  */
 export function makeRule(name: string, host: string, port: number): EgressRule {
-  const err = ruleHostError(host);
-  if (err !== null) throw new Error(`egress rule ${JSON.stringify(name)}: ${err}`);
-  if (!validPort(port)) throw new Error(`egress rule ${JSON.stringify(name)}: invalid port ${port}`);
-  if (name === RULE_DEFAULT_DENY || name === RULE_INVALID_HOST || name === RULE_INVALID_PORT) {
-    // An allow rule named `default-deny` would make every diagnosis a lie.
-    throw new Error(`egress rule name ${JSON.stringify(name)} is reserved for refusals`);
-  }
-  if (host.startsWith("*.")) {
-    return { name, host: `*.${normalizeHost(host.slice(2))!}`, port };
-  }
-  return { name, host: normalizeHost(host)!, port };
+  return cjsMakeRule(name, host, port);
 }
 
 /**
@@ -189,12 +148,7 @@ export function makeRule(name: string, host: string, port: number): EgressRule {
  * as text, but an IP is not a name in anyone's zone.
  */
 function hostMatches(host: string, ruleHost: string): boolean {
-  if (ruleHost.startsWith("*.")) {
-    if (isIP(host) !== 0) return false;
-    const suffix = ruleHost.slice(2);
-    return host.length > suffix.length + 1 && host.endsWith(`.${suffix}`);
-  }
-  return host === ruleHost;
+  return cjsHostMatches(host, ruleHost);
 }
 
 /**
@@ -209,31 +163,7 @@ function hostMatches(host: string, ruleHost: string): boolean {
  * unexpected port is exactly how a permitted name becomes a tunnel.
  */
 export function decide(host: string, port: number, policy: EgressPolicy): EgressVerdict {
-  // Recorded host is always bounded so the decision can cross the contracts.ts
-  // seam; the RAW prefix is kept for refusals so the log shows what was asked.
-  const asAsked = host.slice(0, MAX_SHORT);
-  if (!validPort(port)) {
-    // The record carries the port AS ASKED — 0, -1, 1.5 and NaN all reach here
-    // — which is why the return type is `EgressVerdict` and not
-    // `EgressDecision`. `EgressDecision` is inferred from a schema requiring a
-    // positive int, so declaring this function as returning one was a claim the
-    // compiler could not check and this branch broke: any caller round-tripping
-    // the result through `EgressDecisionSchema.parse` threw on exactly the
-    // inputs the refusal exists to handle. Naming the wider type is the fix;
-    // the previous version documented the unsoundness in a comment instead,
-    // which left every caller to remember it.
-    return { allowed: false, host: asAsked, port, rule: RULE_INVALID_PORT };
-  }
-  const norm = normalizeHost(host);
-  if (norm === null) {
-    return { allowed: false, host: asAsked, port, rule: RULE_INVALID_HOST };
-  }
-  for (const r of policy.rules) {
-    if (r.port === port && hostMatches(norm, r.host)) {
-      return { allowed: true, host: norm, port, rule: r.name };
-    }
-  }
-  return { allowed: false, host: norm, port, rule: RULE_DEFAULT_DENY };
+  return cjsDecide(host, port, policy);
 }
 
 // ---------------------------------------------------------------------------

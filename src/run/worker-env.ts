@@ -56,6 +56,12 @@ import { writeFile, chmod } from "node:fs/promises";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
 import { ConfigError } from "../config/load.ts";
 import { tokenModeStartupEnv } from "../security/adc.ts";
+import {
+  LEGACY_RELAY_LISTEN_ALIAS,
+  PROXY_LISTEN_ALIAS,
+  PROXY_LISTEN_PORT,
+  RELAY_LISTEN_ALIAS,
+} from "../security/relay.ts";
 
 /**
  * `docker run --env-file` has no quoting and no escapes.
@@ -192,6 +198,50 @@ export function buildWorkerEnv(
     // the record it mirrors — `AdcModeSchema` — is what a probe asserts the
     // mode from, and a second mode returning would need exactly this line.
     if (cloud.adc_mode === "token") Object.assign(vars, tokenModeStartupEnv());
+
+    /**
+     * ISC-263 — the route that makes the credential usable.
+     *
+     * Until the CONNECT proxy existed this branch handed a worker ADC and no
+     * path to spend it on: `egress.google_hosts` rules were matched
+     * exhaustively by `decide()` in unit tests, and a Docker network alias
+     * cannot be a wildcard, so `*.googleapis.com` had no live route off the
+     * `--internal` bridge at all. A credential granted for a path that does
+     * not exist is worse than no credential, because the failure surfaces as a
+     * timeout deep inside a gcloud call rather than as a refusal.
+     *
+     * ## HTTPS_PROXY only — HTTP_PROXY is deliberately NOT set
+     *
+     * The proxy speaks CONNECT and answers `405` to everything else, on
+     * purpose: cleartext forwarding would put it in the business of parsing
+     * and re-emitting requests, a far larger surface than splicing a socket,
+     * and every destination worth reaching here is TLS. Setting `HTTP_PROXY`
+     * would therefore advertise a capability the proxy explicitly refuses, and
+     * the first cleartext request would get a 405 that reads like a bug.
+     *
+     * It also happens to be the safe direction for the model path. This
+     * project's own `llm.base_url` is `http://`, so leaving `HTTP_PROXY` unset
+     * means model traffic cannot be routed here even if `NO_PROXY` were
+     * mishandled by some client — and `NO_PROXY` below is belt to that brace,
+     * not the only thing standing between a worker and a 403 on every
+     * inference call.
+     *
+     * ## Why NO_PROXY names both relay aliases
+     *
+     * `proxyPolicyFor` deliberately carries no `llm` rule, so a model request
+     * that DID enter the proxy would be denied `default-deny` — every worker
+     * stalling with no tool calls, which is §5.9's exact quiet-failure shape.
+     * Both spellings are listed because ISC-264's transition means a config
+     * may still name the legacy alias, and a worker whose `models.json` says
+     * one name while `NO_PROXY` lists the other is the same failure with an
+     * extra step.
+     */
+    vars["HTTPS_PROXY"] = `http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`;
+    vars["https_proxy"] = vars["HTTPS_PROXY"];
+    vars["NO_PROXY"] = [RELAY_LISTEN_ALIAS, LEGACY_RELAY_LISTEN_ALIAS, "localhost", "127.0.0.1"].join(
+      ",",
+    );
+    vars["no_proxy"] = vars["NO_PROXY"];
   }
 
   return { vars, missingApiKey: apiKey === undefined || apiKey === "", apiKeyEnvName };

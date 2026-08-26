@@ -59,6 +59,7 @@
  */
 
 const net = require("node:net");
+const { startProxy, fromEnv, POLICY_ENV } = require("./connect-proxy.cjs");
 
 /**
  * Idle sockets are reaped and total concurrency is capped. Neither bound
@@ -274,8 +275,35 @@ function main() {
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+
+  /**
+   * The CONNECT proxy, in this same process (ISC-263).
+   *
+   * Started only when a policy is configured, and the absence is a real state
+   * rather than a degraded one: a fleet with no `cloud_access` role has no
+   * business running a proxy that accepts arbitrary destinations, and the
+   * host side omits the variable entirely in that case.
+   *
+   * IN-PROCESS rather than a second container because this container is
+   * already the one sanctioned hole in the deny-all bridge — dual-homed onto
+   * the internal bridge and the NAT'd uplink, under `--read-only`,
+   * `--cap-drop ALL`, `no-new-privileges` and `ip_forward=0`. A separate
+   * container would duplicate that entire lifecycle to gain no isolation.
+   *
+   * A failure to start is FATAL rather than logged and continued. The proxy
+   * existing but denying everything and the proxy not existing at all are very
+   * different diagnoses — one is a 403 naming a rule, the other a connection
+   * refused — and a relay that silently came up without its proxy would hand a
+   * `cloud_access` worker the second while the operator believed the first.
+   */
+  let proxyServer = null;
+  if (typeof process.env[POLICY_ENV] === "string") {
+    const { policy, port } = fromEnv(process.env);
+    proxyServer = startProxy(policy, port);
+  }
+
   // Returned so the listeners stay referenced for the life of the process.
-  return servers;
+  return { servers, proxyServer };
 }
 
 main();
