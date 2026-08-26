@@ -41,6 +41,7 @@
 import { loadConfig } from "../config/load.ts";
 import { readRunHarnessPatterns } from "../run/state.ts";
 import type { RunPaths } from "../run/paths.ts";
+import { effectiveHarnessPatterns } from "./acceptance.ts";
 
 export interface ResolvedHarnessPatterns {
   /** `undefined` = the harvester's built-in defaults apply. */
@@ -77,7 +78,11 @@ export async function resolveHarnessPatterns(
 ): Promise<ResolvedHarnessPatterns> {
   if (explicitConfig !== undefined) {
     const loaded = await loadConfig(explicitConfig);
-    const patterns = loaded.config.harness.patterns;
+    // The EFFECTIVE list, not the raw config field: `harness.patterns` extends
+    // the built-in defaults unless `harness.replace` is set (ISC-243), and a
+    // reader that took the raw field would grade a `--config` run against a
+    // narrower surface than the run itself used.
+    const patterns = effectiveHarnessPatterns(loaded.config.harness) ?? undefined;
     return {
       patterns,
       warnings: [],

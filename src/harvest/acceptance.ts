@@ -210,6 +210,42 @@ export const DEFAULT_HARNESS_PATTERNS: readonly string[] = [
 ] as const;
 
 /**
+ * The pattern list a config actually grades against (ISC-243).
+ *
+ * `harness.patterns` used to REPLACE the built-in defaults, and that was the
+ * silent-disable path this criterion records: the surface an operator narrows
+ * is the surface the ISC-150 cap reads, so `patterns: ["ci/**"]` — the first
+ * thing someone writes when they want ONE more file covered — switched the cap
+ * off for every diff that did not touch `ci/`. Measured on the live matcher:
+ * with that list, a diff of `["src/app.ts", "package.json"]` carrying one
+ * passing acceptance run certifies `success`, where the defaults cap it to
+ * `unknown`.
+ *
+ * The asymmetry is what settles the default. Over-capping is LOUD — a run
+ * comes back `unknown` and the operator goes looking. Under-capping is SILENT
+ * — a red suite is certified green and nobody looks at all. So the default
+ * extends, and replacement stays available under its own name for the operator
+ * who genuinely means "start from nothing".
+ *
+ * Returns `null` for "no opinion", which is what `run.json` records when no
+ * patterns are configured — preserved deliberately so a run that predates this
+ * change and one that configures nothing are the same document.
+ */
+export function effectiveHarnessPatterns(harness: {
+  patterns?: readonly string[] | undefined;
+  replace?: boolean | undefined;
+}): readonly string[] | null {
+  const configured = harness.patterns;
+  if (configured === undefined || configured.length === 0) return null;
+  if (harness.replace === true) return [...configured];
+  // Defaults FIRST, so a `report --config` line reads as "the built-ins, plus
+  // what this config adds" in the order someone would say it aloud. Duplicates
+  // are dropped rather than tolerated: `harnessSurface` compiles one Bun.Glob
+  // per entry and a repeated glob is wasted work on every changed file.
+  return [...new Set([...DEFAULT_HARNESS_PATTERNS, ...configured])];
+}
+
+/**
  * Which of the worker's changed files fall on the harness surface.
  *
  * Pure set intersection over globs: the caller supplies the repo-relative

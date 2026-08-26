@@ -280,6 +280,95 @@ export function stallCeilingFor(tasks: readonly TaskSpec[]): number {
 }
 
 /**
+ * Fractions of the SHORTEST task deadline the per-worker stall rungs may sit
+ * at (ISC-297). Both are strictly below 1, which is the whole property.
+ *
+ * `0.5` for the kill rung: a wedged agent is ended halfway through the
+ * deadline it will otherwise blow, leaving the other half for the task to be
+ * retried or for the run to settle on its own terms. `0.2` for the warn so a
+ * warning is actionable rather than simultaneous — and so the band cannot
+ * invert when both are derived, since 0.2 < 0.5 unconditionally.
+ *
+ * Neither number is load-bearing in the way the INEQUALITY is. Any pair with
+ * `0 < warn < kill < 1` satisfies the criterion; these are chosen to leave
+ * usable margin on both sides and are pinned by name in the tests so a change
+ * is a decision rather than a drift.
+ */
+const KILL_FRACTION = 0.5;
+const WARN_FRACTION = 0.2;
+
+/**
+ * The per-worker stall window, BOUNDED BY THE SHORTEST DEADLINE IT COULD ACT
+ * ON (ISC-297) — the mirror image of `stallCeilingFor` above, and it exists
+ * for the mirror-image defect.
+ *
+ * ## The measurement that produced it
+ *
+ * `stallCeilingFor` fixed a backstop that sat INSIDE what it backstopped. This
+ * fixes a rung that sits OUTSIDE what it acts on. `fleet.example.yaml` ships
+ * `event_stall_warn: 3m` / `event_stall_kill: 25m` and `TaskSpecSchema`
+ * defaults `deadline_s` to 1800 s, so the kill rung was reachable only for a
+ * task whose deadline exceeded twenty-five minutes. Two live wedges measured
+ * it: both emitted `worker_stall_warn` at exactly 180 000 ms — the WARN rung
+ * fires correctly in production, which is what made this visible at all —
+ * and neither reached `kill`. Both carried `deadline_s: 900` and settled
+ * `timed_out` at 900 s with TWELVE MINUTES of the kill window unspent.
+ *
+ * A rung that cannot fire is worse than an absent one: it reads as a control
+ * in the config, in the SRD's table and in this module's own docstrings, and
+ * an operator reasonably believes a wedged agent will be ended.
+ *
+ * ## The derivation
+ *
+ * Each rung is the SMALLER of what the operator configured and a fraction of
+ * the shortest deadline in the list. Taking the minimum is what makes this
+ * safe to apply unconditionally: it can only ever TIGHTEN a window, never
+ * loosen one, so an operator who has already chosen aggressive timers keeps
+ * them exactly, and nobody's policy is silently relaxed by an upgrade.
+ *
+ * With the shipped example and default deadlines nothing moves for the warn
+ * rung — `min(180 s, 0.2 × 1800 s) = 180 s`, unchanged — and the kill rung
+ * comes down from an unreachable 25 m to a reachable 15 m. That asymmetry is
+ * the fix, stated numerically.
+ *
+ * ## Why the whole window and not the kill rung alone
+ *
+ * Deriving `killMs` by itself inverts the band on short lists: at
+ * `deadline_s: 300` the kill lands at 150 s, below the configured 180 s warn,
+ * and `readRunStallWindow` documents a `killMs` under `warnMs` as a policy
+ * that cannot be honoured. Scaling both keeps `warn < kill` true by
+ * construction rather than by a check that has to be remembered.
+ *
+ * ## The empty case
+ *
+ * A list with no usable deadline has nothing to be shorter than, so the
+ * configured window is returned untouched — byte-for-byte the previous
+ * behaviour for the one case where the derivation has no input, exactly as
+ * `stallCeilingFor` treats the same shape.
+ */
+export function stallWindowFor(
+  tasks: readonly TaskSpec[],
+  configured: { warnMs: number; killMs: number },
+): { warnMs: number; killMs: number } {
+  let shortestMs = Infinity;
+  for (const t of tasks) {
+    // Defensive for the same reason `stallCeilingFor` is: `runSchedule` is
+    // driven directly by tests and by hand-built TaskSpecs, and one absent or
+    // NaN deadline must not collapse the minimum and tighten every rung to
+    // nothing.
+    const s = t.deadline_s;
+    if (typeof s === "number" && Number.isFinite(s) && s > 0) {
+      shortestMs = Math.min(shortestMs, s * 1000);
+    }
+  }
+  if (!Number.isFinite(shortestMs)) return configured;
+  return {
+    warnMs: Math.min(configured.warnMs, Math.floor(shortestMs * WARN_FRACTION)),
+    killMs: Math.min(configured.killMs, Math.floor(shortestMs * KILL_FRACTION)),
+  };
+}
+
+/**
  * Run the list to completion. `tasks` must already be validated
  * (tasklist.ts): unique ids, known dependencies, no cycles.
  *
@@ -343,6 +432,14 @@ export async function runSchedule(
      * while one of its agents is wedged on the second.
      *
      * Absent, the policy does not engage; see `SchedulerIO.eventSilenceMs`.
+     *
+     * **What is passed here is a CEILING, not the window that runs.** It is
+     * narrowed by `stallWindowFor` against the shortest `deadline_s` in the
+     * list (ISC-297), because a kill rung sitting beyond the deadline it could
+     * act on never fires — the shipped `25m` against a `30m` default deadline
+     * was unreachable for every real task list measured. The narrowing only
+     * ever tightens, so passing a tighter window than the derivation would
+     * choose keeps it exactly.
      */
     stall?: { warnMs: number; killMs: number };
     /** Called once per worker when its silence first crosses `warnMs`. */
@@ -351,6 +448,14 @@ export async function runSchedule(
 ): Promise<ScheduleOutcome> {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
   const stallTimeoutMs = opts.stallTimeoutMs ?? stallCeilingFor(tasks);
+  /**
+   * Bounded by the shortest deadline it could act on (ISC-297). Applied
+   * unconditionally rather than behind an opt-out: `stallWindowFor` only ever
+   * tightens, so there is no configuration this can relax and no caller that
+   * needs to escape it.
+   */
+  const stallWindow =
+    opts.stall === undefined ? undefined : stallWindowFor(tasks, opts.stall);
   /**
    * A non-finite ceiling is refused LOUDLY, because its failure mode is a hang
    * rather than a wrong answer.
@@ -468,7 +573,7 @@ export async function runSchedule(
     worker: string,
     taskId: string,
   ): Promise<"healthy" | "warn" | "kill"> => {
-    const window = opts.stall;
+    const window = stallWindow;
     if (window === undefined || io.eventSilenceMs === undefined) return "healthy";
     if (budget === undefined) return "healthy";
     const silentMs = await io.eventSilenceMs(worker);

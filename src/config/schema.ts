@@ -611,6 +611,20 @@ export const HarnessSchema = z
       )
       .max(MAX_ITEMS)
       .optional(),
+    /**
+     * Whether `patterns` REPLACES the built-in defaults or EXTENDS them.
+     *
+     * Defaults to extending, and the default changed on 2026-08-25 because
+     * replacement was a silent-disable path. ISC-243 measured it: the operator's
+     * only lever was a list that swapped out all 91 built-in globs, so the
+     * realistic first edit — `patterns: ["ci/**"]`, to add one CI file someone
+     * cared about — switched the ISC-150 test-harness cap off for every diff
+     * that did not touch `ci/`. The over-cap that replacement exists to answer
+     * is a LOUD failure (a run capped to `unknown`); the under-cap it causes is
+     * a SILENT one (a red suite certified `success`). Extending makes the
+     * common edit safe and leaves the rare one available by name.
+     */
+    replace: z.boolean().prefault(false),
   })
   .strict()
   .prefault({});

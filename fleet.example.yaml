@@ -68,6 +68,12 @@ run:
     run_timeout: 2h
   timers:
     ui_request_timeout: 5s
+    # A CEILING on the per-worker stall rungs, not the window that runs.
+    # Both are narrowed against the shortest deadline_s in the task list
+    # (ISC-297): with the 30m default deadline the kill rung fires at 15m,
+    # not the 25m below. Left at 25m deliberately — the number is what an
+    # operator may not exceed, and lowering it here would only tighten the
+    # one case the derivation already handles.
     event_stall_warn: 3m
     event_stall_kill: 25m
     heartbeat_interval: 5s

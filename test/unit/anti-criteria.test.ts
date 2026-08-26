@@ -18,6 +18,8 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
+import { stripComments } from "../support/source-structure.ts";
+
 const ROOT = new URL("../../", import.meta.url).pathname;
 
 async function filesUnder(pattern: string): Promise<string[]> {
@@ -267,6 +269,113 @@ describe("no headless acceptance test needs provider spend or a cloud endpoint (
             `run on an air-gapped machine with no account attached.`,
         ).toEqual([]);
       }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISC-74 — no FleetBackend implementation launches or signals a supervisor
+// ---------------------------------------------------------------------------
+
+/**
+ * The RESTATED form of ISC-74, and the restatement is the interesting part.
+ *
+ * As originally worded — *"closing a worker's pane does not stop the worker in
+ * rpc mode; the task still settles"* — the criterion could not be tested on
+ * this platform, and that was MEASURED rather than assumed. A probe was
+ * written: a real tmux server on a private `-L` socket, the supervisor
+ * launched from inside the pane, a task dispatched, the session killed
+ * mid-turn. It passed in 6 s. It was then DELETED, because removing
+ * `detached: true` from `processLauncher.launchDetached` left it GREEN — a
+ * `Bun.spawn` child of a pane command shares the pane's pgid and tty, but
+ * `tmux kill-session` terminates only the pane's IMMEDIATE process, so the
+ * child was orphaned and survived either way. The probe asserted a property
+ * that holds unconditionally here, and a guard nobody has seen fail is
+ * indistinguishable from one that cannot fail.
+ *
+ * So the criterion is restated as the ANTI it always structurally was, in
+ * ISC-137's shape: the supervisor's lifecycle does not belong to the view
+ * layer, and no backend can reach it. `src/backends/types.ts` already says so
+ * in its own header — `SupervisorLauncher` is a SEPARATE, backend-independent
+ * interface precisely because an earlier design made the supervisor a pane
+ * child — and this is what turns that comment into something that can fail.
+ *
+ * WHAT THIS DOES AND DOES NOT BUY, stated because the trade is real: it grades
+ * the MECHANISM (nothing in the view layer can signal a supervisor) rather
+ * than the OUTCOME (a closed pane leaves the task settling). The outcome needs
+ * a backend arrangement in which pane teardown CAN reach a worker, and none
+ * exists. ISC-77/78 own the process-tree facts that make the outcome true.
+ */
+describe("no FleetBackend implementation launches or signals a supervisor (ISC-74)", () => {
+  /**
+   * The vocabulary, and why it is this list rather than the word "supervisor".
+   *
+   * Backends legitimately DISCUSS the supervisor — `tmux/index.ts` explains in
+   * its header that supervisors are launched elsewhere, and `cmux/index.ts`
+   * writes a shell script whose own comment says a dying viewer must not
+   * affect one. Banning the noun would fail on the three files that document
+   * the boundary most carefully. What is banned is the machinery: the launcher
+   * seam, the kill ladder, and raw signalling.
+   */
+  const LIFECYCLE = [
+    "launchDetached",
+    "processLauncher",
+    "supervisorArgv",
+    "SupervisorLauncher",
+    "runKillLadder",
+    "killWedged",
+    "process.kill",
+    "SIGKILL",
+    "SIGTERM",
+    "safety/kill",
+    "safety/reaper",
+    "supervisor/launch",
+  ] as const;
+
+  test("no backend implementation names any supervisor-lifecycle machinery", async () => {
+    // types.ts is DECLARATION, not implementation: it is where
+    // `SupervisorLauncher` is defined as separate from `FleetBackend`, which
+    // is the very separation under test. Excluding it is the point, not a
+    // hole — the implementations are what must not reach the seam.
+    const files = (await filesUnder("src/backends/**/*.ts")).filter(
+      (f) => f !== "src/backends/types.ts",
+    );
+    expect(files.length, "no backend files found; the guard is pointing at nothing").toBeGreaterThan(
+      3,
+    );
+    for (const rel of files) {
+      const text = stripComments(await read(rel));
+      for (const token of LIFECYCLE) {
+        expect(
+          text.includes(token),
+          `${rel} names \`${token}\`. A backend is the VIEW of the fleet; the ` +
+            `supervisor's lifecycle belongs to SupervisorLauncher, which is a ` +
+            `separate interface for exactly this reason (src/backends/types.ts).`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  /**
+   * The other half, and without it the guard above is satisfied by a backends
+   * tree that has no supervisor machinery because it has nothing at all: the
+   * `FleetBackend` INTERFACE must not grow a lifecycle method either. A future
+   * `launchWorker(spec)` on this interface would pass the source scan in every
+   * existing file while making the criterion false for every backend written
+   * afterwards.
+   */
+  test("the FleetBackend interface declares no lifecycle method", async () => {
+    const types = stripComments(await read("src/backends/types.ts"));
+    const body = types.slice(types.indexOf("interface FleetBackend"));
+    const iface = body.slice(0, body.indexOf("\n}"));
+    expect(iface).toContain("createPane"); // the guard is reading the right block
+    for (const token of ["launch", "kill", "signal", "spawn"]) {
+      expect(
+        iface.toLowerCase().includes(token),
+        `FleetBackend declares a method naming "${token}". The supervisor ` +
+          `lifecycle is SupervisorLauncher's; putting it here makes every ` +
+          `backend able to end a worker, which is what ISC-74 forbids.`,
+      ).toBe(false);
     }
   });
 });
