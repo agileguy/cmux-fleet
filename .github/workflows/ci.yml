@@ -275,6 +275,13 @@ jobs:
           src="${GOOGLE_APPLICATION_CREDENTIALS:?the auth step did not export it}"
           dest="${RUNNER_TEMP:?RUNNER_TEMP is not set by actions/runner}/gha-creds.json"
           mv "$src" "$dest"
+          # BOTH forms, and both are needed. `$GITHUB_ENV` takes effect in
+          # LATER steps only, so without the export the verification at the
+          # bottom of THIS step still resolves the old workspace path — which
+          # is precisely how the second attempt at this job failed:
+          #   ERROR: (gcloud.auth.application-default.print-access-token)
+          #   File .../gha-creds-<id>.json was not found.
+          export GOOGLE_APPLICATION_CREDENTIALS="$dest"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$dest" >> "$GITHUB_ENV"
           gcloud --quiet auth login --force --cred-file "$dest"
           # Prove the workspace is clean rather than assuming the mv covered
