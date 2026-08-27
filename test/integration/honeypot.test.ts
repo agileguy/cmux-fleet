@@ -142,6 +142,20 @@ async function runWorker(
   return { code, out: `${stdout}${stderr}` };
 }
 
+/** Like `runWorker`, but keeps the two streams apart. See the probe that uses it. */
+async function runWorkerSplit(
+  outbox: string,
+  script: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const p = Bun.spawn(launchArgv(outbox, true, script), { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(p.stdout).text(),
+    new Response(p.stderr).text(),
+    p.exited,
+  ]);
+  return { code, stdout, stderr };
+}
+
 /** Take host custody of the worker's ledger, then build the run report. */
 async function reportFor(run: RunPaths) {
   await new VerbgateCollector(run).collectOnce();
@@ -277,6 +291,44 @@ describe.skipIf(!DOCKER)("a seeded escape attempt is detected and reported (ISC-
       expect(w.code).toBe(71);
       expect(w.out).toContain("ending the worker (ISC-125)");
       expect(w.out).not.toContain("SURVIVED");
+    },
+    containerBudget(2),
+  );
+
+  /**
+   * NOTHING THE SUPERVISOR OR THE DETECTOR PRINTS MAY REACH STDOUT.
+   *
+   * The worker container's stdout IS the RPC stream — JSONL over
+   * stdin/stdout, `src/rpc/client.ts`. Both the entrypoint and the honeypot
+   * inherit that descriptor, so one stray line lands in the middle of the
+   * stream ahead of Pi's first message and the worker dies during startup
+   * with nothing anywhere saying why.
+   *
+   * THIS PROBE EXISTS BECAUSE THAT SHIPPED. `pifleet-honeypot: armed at …`
+   * went to stdout, and every probe in this file passed: they all run
+   * `PIFLEET_WORKER_BIN=/bin/bash` and read the two streams MERGED, which is
+   * precisely the reading that cannot see the defect. `container-live` — the
+   * only job that drives a real `up` through the real RPC path — caught it,
+   * seven minutes into a run, as `worker eng-1 died during startup`.
+   *
+   * `toBe`, not `toContain`. The claim is that stdout carries the worker's
+   * bytes and NOTHING ELSE, and `toContain` is satisfied by a stream with
+   * arbitrary extra lines in it — which is the exact failure.
+   *
+   * The stderr half is asserted too, and it is not decoration: it is what
+   * distinguishes "the detector's output moved to the right stream" from "the
+   * detector stopped announcing itself", and only the first is the fix.
+   */
+  test(
+    "the supervisor keeps its own output off the RPC stream",
+    async () => {
+      const { outbox } = await plantRun("hprpc");
+      const w = await runWorkerSplit(outbox, `printf '{"jsonrpc":"2.0"}\\n'`);
+      expect(w.code).toBe(0);
+      expect(w.stdout).toBe('{"jsonrpc":"2.0"}\n');
+      // The listener really did come up — otherwise this probe would pass on a
+      // container with no detector in it at all.
+      expect(w.stderr).toContain("armed at /var/run/docker.sock");
     },
     containerBudget(2),
   );

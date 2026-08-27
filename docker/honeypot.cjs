@@ -193,5 +193,24 @@ server.listen(SOCKET_PATH, () => {
    * sentence that means nothing.
    */
   record({ ts: now(), event: "honeypot_armed", target: SOCKET_PATH });
-  process.stdout.write(`pifleet-honeypot: armed at ${SOCKET_PATH}\n`);
+  /**
+   * STDERR, NEVER STDOUT, and this is not a style preference.
+   *
+   * The worker container's STDOUT IS THE RPC STREAM — JSONL over
+   * stdin/stdout, per `src/rpc/client.ts`. This process is started by
+   * `docker/entrypoint.sh` and inherits its descriptors, so a single line
+   * written here lands in the middle of that stream, ahead of Pi's first
+   * message, and the worker dies during startup with nothing anywhere saying
+   * why.
+   *
+   * It shipped that way. `container-live` — the only job that drives a real
+   * `up` through the real RPC path — is what caught it, seven minutes into a
+   * run, as `worker eng-1 died during startup`. Every probe in
+   * `test/integration/honeypot.test.ts` passed on the broken code: they all
+   * run `PIFLEET_WORKER_BIN=/bin/bash` and read the two streams MERGED, which
+   * is exactly the reading that cannot see this. There is now a case there
+   * that reads stdout ALONE and asserts it carries the worker's bytes and
+   * nothing else.
+   */
+  process.stderr.write(`pifleet-honeypot: armed at ${SOCKET_PATH}\n`);
 });
