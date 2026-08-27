@@ -238,6 +238,21 @@ interface Step {
   respond?: Record<string, unknown>;
   respond_delay_ms?: number;
   emit?: EmitEntry[];
+  /**
+   * Events streamed BEFORE this step's ack, awaited so they really do land
+   * ahead of it in the stream (ISC-141).
+   *
+   * `emit` and `emit_after_respond` both run after the ack, so neither can
+   * place a record at a seq BELOW `ack_seq` — and that is the only region in
+   * which `EpochManager.attribute` can answer `prior` for a live epoch. Without
+   * this field the pre-ack window is unreachable from a scenario, which is why
+   * no test drove it before.
+   *
+   * A real worker produces this shape whenever a previous turn's events are
+   * still draining as the next prompt arrives: the drain and the ack share one
+   * pipe, and the drain got there first.
+   */
+  emit_before_ack?: EmitEntry[];
   emit_after_respond?: EmitEntry[];
   late?: { delay_ms: number; success: boolean; error?: string };
   cancel_active?: boolean;
@@ -706,6 +721,16 @@ async function handle(msg: Record<string, unknown>): Promise<void> {
       if (ack !== undefined && ack.success === false) {
         respond(id, command, false, undefined, ack.error ?? "rejected by scenario");
         return;
+      }
+      /**
+       * Pre-ack emissions, AWAITED (ISC-141). The await is the whole point: a
+       * `void` here would race the `respond` below and the events could land
+       * on either side of the ack, which is the one thing this field exists to
+       * pin. `cancelled: false` because these belong to the epoch that is
+       * still draining, not to the one being acked.
+       */
+      if (step?.emit_before_ack !== undefined) {
+        await runEmissions(step.emit_before_ack, { cancelled: false });
       }
       // Ack IMMEDIATELY — accepted, not started (SRD §7.5).
       respond(id, command, true, {});

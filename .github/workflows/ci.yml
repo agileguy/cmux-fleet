@@ -736,7 +736,27 @@ jobs:
           # stop` (without the trap the container still dies, on Docker's
           # SIGKILL, ten seconds later) — both Linux process-supervision
           # properties that no host-side unit test can stand in for.
-          TOTAL_EXPECTED: "119"
+          #
+          # 119 -> 122: ISC-119's three probes, in a NEW file
+          # test/integration/hostile-pi.test.ts. They are the first anywhere in
+          # this repo to run REAL Pi against a hostile checkout: a positive
+          # control in which Pi discovers and EXECUTES a planted extension, the
+          # criterion's own observation in which `buildPiArgv`'s denial flags
+          # stop it, and the armed clone reaching nothing. Until now the
+          # guarantee was structural — a grep proving the flags were EMITTED,
+          # with nobody checking that Pi honours them. DERIVED by the hand
+          # method, same conditions (bun 1.3.11, PIFLEET_DOCKER unset,
+          # PIFLEET_IMPERSONATION_TARGET unset, no listener on :8000):
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container,honeypot,hostile-pi}.test.ts
+          #     -> 6 pass, 116 skip, 0 fail. Ran 122 tests across 14 files.
+          # Three added gated cases, three more skips, pass unmoved at 6.
+          #
+          # They are SLOW for what they assert (~37 s for the file) and that is
+          # inherent: two of the three are NEGATIVE — they assert an extension
+          # never runs — so each has to spend a real deadline before it can say
+          # so. The positive control answers in about a second. Polling rather
+          # than a flat sleep is what keeps the bill to the negatives alone.
+          TOTAL_EXPECTED: "122"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -914,7 +934,8 @@ jobs:
               test/integration/control-socket-uid.test.ts \
               test/integration/full-chain.test.ts \
               test/integration/acceptance-container.test.ts \
-              test/integration/honeypot.test.ts
+              test/integration/honeypot.test.ts \
+              test/integration/hostile-pi.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every
