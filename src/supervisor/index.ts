@@ -206,9 +206,36 @@ async function main(): Promise<void> {
    * `process.pid`, not a pid handed in — so unlike `launchDetached` there is no
    * reissue window to close here. A process asking the OS about itself cannot
    * be told about a stranger.
+   *
+   * BOTH LINES CATCH, and the second one did not until 2026-08-26. The
+   * paragraph above described the pair as degrading together to values "every
+   * reader already handles" — and `started` did no such thing. Since ISC-192
+   * `processStartTime` THROWS on a read it cannot trust rather than reporting
+   * absence, `?? ""` never sees the failure, and `main` is awaited at top
+   * level with no catch. Measured, not reasoned: a `ps` on PATH that exits 1
+   * with a diagnostic killed the supervisor outright —
+   *
+   *     IdentityReadError: could not read the start time of pid 92280:
+   *     ps: broken instrument
+   *       at async main (src/supervisor/index.ts:211:26)
+   *
+   * — before registration, before any state file, on the exact environment
+   * `processStartTime`'s own header names as the likely one: "a minimal
+   * container image with no procps". `pifleet up` could not start a run there
+   * at all. ISC-272's residual (1) said this writer's sentinel was "vacuous —
+   * no test makes its `ps` fail"; making it fail showed the sentinel was not
+   * merely untested but unreachable.
+   *
+   * WHAT DEGRADING COSTS, stated rather than buried. `started: ""` is the
+   * writers' declared capture-failed sentinel and every reader refuses it, so
+   * `down` reports `identity_unrecorded`, signals NOTHING and keeps the
+   * checkout. A supervisor recorded this way is therefore live and not
+   * cleanly stoppable except by `--force-identity`. That is a worse run than
+   * a healthy one and a better one than no run at all — and it is fail-CLOSED
+   * in the direction that matters, because the refusal is on the kill path.
    */
   const pgid = (await processGroupId(process.pid).catch(() => null)) ?? 0;
-  const started = (await processStartTime(process.pid)) ?? "";
+  const started = (await processStartTime(process.pid).catch(() => null)) ?? "";
 
   // Serialize events.jsonl appends so two async writes cannot interleave.
   let eventsChain: Promise<unknown> = Promise.resolve();
@@ -611,9 +638,27 @@ async function main(): Promise<void> {
      * this line would not degrade the evidence, it would hang the task
      * forever. Failure yields null, which the adjudicator reads as no
      * evidence and which changes no verdict.
+     *
+     * AND THE REASON IS NOW WRITTEN DOWN (2026-08-26). `null` is three
+     * different facts wearing one face — git timed out, git failed, or the
+     * snapshot threw — and until this callback existed none of them reached
+     * the record. A CI run on 2026-08-26 settled `success`/`quiesced` with a
+     * null hash and the chain probe reported "the supervisor took no quiesce
+     * sample"; nothing anywhere said whether the 10s bound had been hit or
+     * git had refused, so the failure was undiagnosable from the artifacts by
+     * design rather than by accident.
+     *
+     * The verdict is UNCHANGED by this: a missing hash still voids nothing.
+     * What changes is that the next occurrence can be read rather than
+     * guessed at.
      */
     const treeHash =
-      settledWorkdir === null ? null : await worktreeContentHash(settledWorkdir);
+      settledWorkdir === null
+        ? null
+        : await worktreeContentHash(settledWorkdir, {
+            onFailure: (reason) =>
+              logEvent({ type: "quiesce_sample_failed", task: settled.task_id, reason }),
+          });
 
     /**
      * THE ISC-299 READER. The epoch ended cleanly; this decides whether it
@@ -1371,7 +1416,12 @@ async function main(): Promise<void> {
          * silently inert reader is the failure this criterion is about.
          */
         liveWorkdirBaseline =
-          liveWorkdir === null ? null : await worktreeContentHash(liveWorkdir);
+          liveWorkdir === null
+            ? null
+            : await worktreeContentHash(liveWorkdir, {
+                // Same side channel as the quiesce sample above, same reason.
+                onFailure: (reason) => logEvent({ type: "live_sample_failed", reason }),
+              });
         liveToolErrorsAtStart = state.tool_errors;
 
         const message = renderPrompt(envelope);
