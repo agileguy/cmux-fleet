@@ -17,7 +17,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, unlink, writeFile, mkdir } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rm, unlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runGit } from "../../src/harvest/git.ts";
@@ -198,8 +198,14 @@ describe("a hash that cannot be taken is absent, never wrong", () => {
     expect(await worktreeContentHash(dir, { onFailure: (r) => reasons.push(r) })).toBeNull();
     expect(reasons).toHaveLength(1);
     // Which git invocation, and where — the two facts a reader needs to tell
-    // this apart from a timeout.
-    expect(reasons[0]).toContain("git add -A (snapshot)");
+    // this apart from a timeout. The invocation NAMED here changed on
+    // 2026-08-27 and the change is the assertion working: the snapshot now
+    // asks git where the object store is BEFORE staging anything, so on a
+    // directory that is not a repository the first thing to fail is the
+    // `rev-parse`, not the `add`. Pinning the old name would have been
+    // pinning a stale account of what ran.
+    expect(reasons[0]).toContain("git rev-parse --git-path objects");
+    expect(reasons[0]).toContain("not a git repository");
     expect(reasons[0]).toContain(dir);
   }, cliBudget(1));
 
@@ -257,7 +263,7 @@ describe("a hash that cannot be taken is absent, never wrong", () => {
       reasons[0],
       `neither side reported a whole reason: ${JSON.stringify(reasons)}`,
     ).toMatch(
-      /^git did not answer within 1ms \(TREE_HASH_TIMEOUT_MS\)$|^git add -A \(snapshot\) in .+ exited 128: .*not a git repository/,
+      /^git did not answer within 1ms \(TREE_HASH_TIMEOUT_MS\)$|^git rev-parse --git-path objects in .+ exited 128: .*not a git repository/,
     );
   }, cliBudget(2) + 1_500);
 
@@ -288,4 +294,138 @@ describe("the snapshot leaves the checkout it measured alone", () => {
     expect(after.stdout).toContain("?? fresh.txt");
     expect(after.stdout).toContain(" M tracked.txt");
   }, cliBudget(3));
+});
+
+/**
+ * The permission case, which is the one that actually fired in CI.
+ *
+ * ISC-290's chain probe failed with `the supervisor took no quiesce sample`,
+ * and — because PR #91 taught the sampler to say WHY — the artifact named it:
+ *
+ *     quiesce_sample_failed: git add -A (snapshot) in .../worktrees/eng-1
+ *     exited 128: insufficient permission for adding an object to repository
+ *     database .git/objects
+ *
+ * The worker container runs as uid 10001 and writes into the host worktree
+ * through a bind mount, so it leaves `.git/objects/<xx>/` owned by 10001 and
+ * the host-side sampler can no longer add to the store.
+ *
+ * THE UID FORM OF THIS CANNOT BE REPRODUCED ON macOS, which is why it went
+ * undiagnosed: the bind mount squashes file ownership there, so the defect
+ * exists only on the Linux runner. `chmod` reaches the SAME git code path on
+ * both — git's failure is "the object store refused my write", and it does not
+ * care which mechanism refused it — so these probes reproduce the CI failure
+ * on a developer machine, which the real cause does not allow.
+ */
+describe("the snapshot survives an object store it cannot write to", () => {
+  /** Every directory git could need to create a loose object in, made read-only. */
+  async function freezeObjectStore(dir: string): Promise<void> {
+    const objects = join(dir, ".git", "objects");
+    const entries = await readdir(objects, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory()) await chmod(join(objects, e.name), 0o555);
+    }
+    await chmod(objects, 0o555);
+  }
+
+  async function thawObjectStore(dir: string): Promise<void> {
+    const objects = join(dir, ".git", "objects");
+    await chmod(objects, 0o755);
+    const entries = await readdir(objects, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory()) await chmod(join(objects, e.name), 0o755).catch(() => {});
+    }
+  }
+
+  /**
+   * Root ignores the mode bits entirely, so on a root runner this probe would
+   * pass while measuring nothing. Announced rather than silently skipped —
+   * a self-skipping test that reads as coverage is the exact failure this
+   * repo's probe guard exists to catch.
+   */
+  const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  if (asRoot) {
+    console.warn(
+      "[skip] the unwritable-object-store probes are running as root, which ignores the mode " +
+        "bits they depend on — they can only measure something as an unprivileged user",
+    );
+  }
+  const it = test.skipIf(asRoot);
+
+  it(
+    "a worktree whose object store refuses writes is still sampled, with the same hash",
+    async () => {
+      const dir = await scratchRepo();
+      /**
+       * THE TWIN IS NOT TIDINESS — it is what keeps this test from being
+       * vacuous, and the first version of it WAS.
+       *
+       * That version took the expected hash from `dir` itself and then froze
+       * the store. Hashing writes `add.js`'s blob, so by the time the store
+       * was frozen the object the sample needed was already IN it, `git add`
+       * had nothing to write, and the unredirected code passed happily. The
+       * mutation that removes the redirection caught it: only the sibling
+       * probe went red.
+       *
+       * A tree id is a content hash, so a second repository with identical
+       * content produces the identical id — the expected value comes from
+       * there instead, and `dir`'s store never sees `add.js`.
+       */
+      const twin = await scratchRepo();
+      const baseline = await hash(dir);
+      const NEW_CONTENT = "// what the worker left behind\n";
+      await writeFile(join(dir, "add.js"), NEW_CONTENT);
+      await writeFile(join(twin, "add.js"), NEW_CONTENT);
+
+      await freezeObjectStore(dir);
+      try {
+        const reasons: string[] = [];
+        const got = await worktreeContentHash(dir, { onFailure: (r) => reasons.push(r) });
+        expect(
+          got,
+          `the sample failed on an unwritable object store — this is the CI defect, not a ` +
+            `new one. What git said: ${JSON.stringify(reasons)}`,
+        ).not.toBeNull();
+        expect(reasons).toEqual([]);
+        // It really did see the new file, so a blob really did have to be
+        // written somewhere. Without this the probe would also pass against an
+        // implementation that quietly ignored `add.js`.
+        expect(got, "the sample did not observe the new file at all").not.toBe(baseline);
+        // And the SAME tree the twin produces: redirecting where objects are
+        // written must not change what the content hashes to.
+        expect(got).toBe(await hash(twin));
+      } finally {
+        await thawObjectStore(dir);
+      }
+    },
+    cliBudget(12),
+  );
+
+  /**
+   * The property the module header now claims outright, and it was false
+   * before this fix: "harvest is a pure read" was true of the working tree and
+   * the refs but not of every byte under `.git`. Loose objects are counted
+   * because that is what `add`/`write-tree` create; a hash whose parts landed
+   * in the checkout would move this number.
+   */
+  it(
+    "sampling writes nothing into the checkout's own object store",
+    async () => {
+      const dir = await scratchRepo();
+      await writeFile(join(dir, "brand-new.txt"), "content git has never seen\n");
+      const count = async (): Promise<number> => {
+        const r = await runGit(dir, ["count-objects", "-v"]);
+        const m = /^count: (\d+)$/m.exec(r.stdout);
+        expect(m, `could not read the loose object count from: ${r.stdout}`).not.toBeNull();
+        return Number(m![1]);
+      };
+      const before = await count();
+      await hash(dir);
+      expect(
+        await count(),
+        "the sample left loose objects in the checkout it was supposed to only read",
+      ).toBe(before);
+    },
+    cliBudget(5),
+  );
 });

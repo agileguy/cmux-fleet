@@ -66,13 +66,39 @@
  * someone deleted the check. The cost is real and worth naming: a worker that
  * confines its backgrounded writing to ignored paths is not detected here.
  *
- * **This WRITES to the object database.** `add` and `write-tree` create loose
- * blob and tree objects under `.git/objects`. Nothing referenced, no ref
- * moved, no index touched, and `git gc` prunes them — but "harvest is a pure
- * read" is now true of the working tree and the refs rather than of every
- * byte under `.git`. It is stated here because the alternative (redirecting
- * `GIT_OBJECT_DIRECTORY` and re-pointing alternates) buys a smaller property
- * than it costs in ways to be wrong.
+ * **This no longer writes to the object database, and the reason it changed
+ * is a failure rather than a preference.** Until 2026-08-27 `add` and
+ * `write-tree` created loose blob and tree objects under the checkout's own
+ * `.git/objects`, and this paragraph said so while explicitly rejecting the
+ * alternative — "redirecting `GIT_OBJECT_DIRECTORY` and re-pointing alternates
+ * buys a smaller property than it costs in ways to be wrong". That judgement
+ * was about PURITY. It did not survive contact with the permission case.
+ *
+ * The worker container runs as uid 10001 and writes into the host worktree
+ * through a bind mount, so it creates `.git/objects/<xx>/` directories owned
+ * by 10001. The supervisor then samples as the host user and cannot write
+ * into them:
+ *
+ *     git add -A (snapshot) in .../worktrees/eng-1 exited 128:
+ *     insufficient permission for adding an object to repository database
+ *     .git/objects
+ *
+ * Intermittent, because it fires only once the worker's own writing has
+ * created the directory the sampler needs; and INVISIBLE ON macOS, where the
+ * bind mount squashes file ownership — so it reproduces on the Linux runner
+ * and cannot reproduce on a developer Mac. It was diagnosed only because the
+ * sampler learned to report WHY it returned null (see `onFailure` below);
+ * before that it was a bare `Received: null` and the bound was blamed.
+ *
+ * So the objects go to a throwaway directory the sampler owns, with the
+ * checkout's real object store attached as an ALTERNATE so existing objects
+ * still resolve. The tree id is content-derived and therefore identical —
+ * measured on real git, not argued: the same worktree hashes to
+ * `6640fb01ffae1cdd778a3fe65b469f62a5230def` either way, the real store's
+ * loose-object count does not move, and with `.git/objects` made unwritable
+ * the old form reproduces the error above verbatim while this one still
+ * answers. The property the old paragraph called too small to buy came free
+ * with the fix: harvest is now a pure read of every byte under `.git`.
  *
  * **Inherited exposure.** `git add` runs `filter.<name>.clean` if the tree's
  * own `.gitattributes` assigns one and the repository config defines it —
@@ -85,9 +111,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { runGit, type GitResult } from "../harvest/git.ts";
 
 /**
@@ -102,28 +128,32 @@ import { runGit, type GitResult } from "../harvest/git.ts";
  * and that is the correct failure direction: a hash we could not take must
  * never be able to void a task.
  *
- * 10s -> 30s ON 2026-08-26, BY OWNER DECISION, and the trade is stated here
- * rather than in a commit message nobody re-reads.
+ * 10s -> 30s ON 2026-08-26 BY OWNER DECISION, and 30s -> 10s ON 2026-08-27
+ * BY THE CONDITION THAT DECISION WROTE DOWN. Both are kept here, because the
+ * pair is the useful record: a number was moved on a suspicion, the suspicion
+ * was named as a suspicion, a falsifying condition was stated in advance, and
+ * the condition then fired.
  *
- * WHAT PROMPTED IT: a `container-live` run settled `success`/`quiesced` with a
- * null hash, and the ISC-290 chain probe failed on "the supervisor took no
- * quiesce sample". WHAT WAS NOT ESTABLISHED: that the bound is what fired.
- * The sampler collapsed timeout, git failure and exception onto one `null`,
- * so no artifact could say which — that gap is closed by `onFailure` below,
- * but it was closed AFTER this decision, not before it. So this number was
- * raised on a suspicion, and the evidence that would confirm or refute it
- * will arrive in the next occurrence's `quiesce_sample_failed` event.
+ * WHAT PROMPTED THE RAISE: a `container-live` run settled `success`/`quiesced`
+ * with a null hash, and the ISC-290 chain probe failed on "the supervisor took
+ * no quiesce sample". WHAT WAS NOT ESTABLISHED: that the bound is what fired.
+ * The sampler collapsed timeout, git failure and exception onto one `null`, so
+ * no artifact could say which. That gap was closed by `onFailure` below, but
+ * AFTER the decision rather than before it — so the entry ended: "IF THE NEXT
+ * EVENT SAYS `git ... exited`: the bound was never the problem and this should
+ * go back to 10s."
  *
- * WHAT IT COSTS: `settle` now waits up to 30s on a wedged git before giving
- * up, on EVERY settle path — timed out, aborted, or died with its worker.
- * Three times the old window in which a task that is otherwise finished
- * cannot write the record `wait` polls for. The failure direction is
- * unchanged (still `null`, still voids nothing); only the delay grows.
- *
- * IF THE NEXT EVENT SAYS "git ... exited": the bound was never the problem
- * and this should go back to 10s.
+ * THE NEXT EVENT SAID EXACTLY THAT. Run 33087285912, `container-live`:
+ * `quiesce_sample_failed: git add -A (snapshot) in .../worktrees/eng-1 exited
+ * 128: insufficient permission for adding an object to repository database
+ * .git/objects`. Not a timeout. Not slow. A permission failure that returns in
+ * milliseconds, whose real cause is the uid collision documented in this
+ * module's header and fixed there. So the bound goes back to 10s: it was never
+ * load-bearing for this failure, and three times the window in which a
+ * finished task cannot write the record `wait` polls for was bought with
+ * nothing.
  */
-export const TREE_HASH_TIMEOUT_MS = 30_000;
+export const TREE_HASH_TIMEOUT_MS = 10_000;
 
 /** Either the tree object id, or which git invocation failed and how. */
 export type TreeSnapshot =
@@ -142,14 +172,54 @@ export type TreeSnapshot =
  * goes to die.
  */
 export async function writeTreeSnapshot(path: string): Promise<TreeSnapshot> {
-  const tmpIndex = join(tmpdir(), `pifleet-snapshot-${randomUUID()}.index`);
+  const id = randomUUID();
+  const tmpIndex = join(tmpdir(), `pifleet-snapshot-${id}.index`);
+  const tmpObjects = join(tmpdir(), `pifleet-snapshot-${id}.objects`);
   try {
-    // The throwaway index is what keeps this a read as far as the checkout is
-    // concerned: nothing is staged that a `git status` in the same worktree
-    // would ever see, and the index lock taken is this temp file's, not
-    // `.git/index`'s — so concurrent harvests of tasks sharing one worktree
-    // do not contend (the F23 hazard `harvestAll` serializes against).
-    const env = { GIT_INDEX_FILE: tmpIndex };
+    /**
+     * ASKED, NOT ASSUMED. `.git` is a FILE rather than a directory in a linked
+     * worktree, and a plain `join(path, ".git", "objects")` would name a path
+     * that does not exist there — so the alternate would attach nothing, every
+     * existing blob would be re-created in the throwaway store, and the sample
+     * would still produce the right tree while doing many times the work. git
+     * knows where its object store is; one cheap spawn is the honest way to
+     * find out. Failure here is reported like any other, because a snapshot
+     * that cannot locate the object store is one whose result nobody should
+     * trust.
+     */
+    const objectsPath = await runGit(path, ["rev-parse", "--git-path", "objects"]);
+    if (objectsPath.code !== 0) {
+      return { ok: false, what: `git rev-parse --git-path objects in ${path}`, result: objectsPath };
+    }
+    const said = objectsPath.stdout.trim();
+    const realObjects = isAbsolute(said) ? said : resolve(path, said);
+
+    await mkdir(tmpObjects, { recursive: true });
+    /**
+     * Three redirections, and each one is load-bearing.
+     *
+     * The throwaway INDEX keeps this a read as far as the checkout is
+     * concerned: nothing is staged that a `git status` in the same worktree
+     * would ever see, and the index lock taken is this temp file's, not
+     * `.git/index`'s — so concurrent harvests of tasks sharing one worktree do
+     * not contend (the F23 hazard `harvestAll` serializes against).
+     *
+     * The throwaway OBJECT DIRECTORY is what makes the sample survive a
+     * worktree the worker has already written to. See this module's header:
+     * the container writes as uid 10001 and leaves `.git/objects/<xx>/` owned
+     * by it, and the host-side sampler then cannot add to the store at all.
+     * Writing somewhere it owns removes that dependency entirely.
+     *
+     * The ALTERNATE is what keeps the redirection cheap and correct: every
+     * object the checkout already has still resolves, so only genuinely new
+     * content is written, and `write-tree` yields the identical id it always
+     * did — the tree is a content hash and does not know where its parts live.
+     */
+    const env = {
+      GIT_INDEX_FILE: tmpIndex,
+      GIT_OBJECT_DIRECTORY: tmpObjects,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: realObjects,
+    };
     const added = await runGit(path, ["add", "-A"], env);
     if (added.code !== 0) {
       return { ok: false, what: `git add -A (snapshot) in ${path}`, result: added };
@@ -161,6 +231,11 @@ export async function writeTreeSnapshot(path: string): Promise<TreeSnapshot> {
     return { ok: true, tree: tree.stdout.trim() };
   } finally {
     await rm(tmpIndex, { force: true });
+    // The objects in here are this sample's alone and are referenced by
+    // nothing. Removing them is why the header can now say harvest writes
+    // nothing under `.git` — leaving them would move the litter rather than
+    // stop making it.
+    await rm(tmpObjects, { recursive: true, force: true });
   }
 }
 

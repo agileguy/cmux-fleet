@@ -4,6 +4,43 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The ISC-154 quiesce sample was failing outright on Linux, and the fix reverses a documented
+  rejection.** `container-live` failed the ISC-290 chain probe with `the supervisor took no quiesce
+  sample`, and — because the sampler now reports WHY — the artifact named it: `git add -A (snapshot)
+  ... exited 128: insufficient permission for adding an object to repository database .git/objects`.
+
+  The worker container runs as uid 10001 and writes into the host worktree through a bind mount, so
+  it leaves `.git/objects/<xx>/` owned by 10001; the supervisor then samples as the host user and
+  cannot add to the object store. Intermittent, because it fires only once the worker's own writing
+  created the directory the sampler needs — and **invisible on macOS**, where the bind mount squashes
+  file ownership, so it exists only on the Linux runner and no amount of local running would have
+  found it.
+
+  `treehash.ts` had rejected redirecting `GIT_OBJECT_DIRECTORY` in as many words — it "buys a smaller
+  property than it costs in ways to be wrong" — but that was a judgement about purity, made when
+  nothing was failing. The snapshot now writes into a throwaway object directory it owns, with the
+  checkout's real store attached as an alternate, and asks git where that store is
+  (`rev-parse --git-path objects`) rather than assuming `.git/objects`, which is a *file* in a linked
+  worktree. The tree id is content-derived and unchanged — measured, not argued: the same worktree
+  hashes to `6640fb01ffae1cdd778a3fe65b469f62a5230def` either way and the real store's loose-object
+  count does not move. The property the old paragraph called too small to buy came free: harvest is
+  now a pure read of every byte under `.git`.
+
+- **`TREE_HASH_TIMEOUT_MS` back to 10s**, on the condition the 2026-08-26 raise wrote down for itself
+  rather than on a fresh argument. That entry said "if the next event reads `git ... exited`, the
+  bound was never the problem". It did. Both halves of the decision are kept at the constant, because
+  the pair is the useful record.
+
+  Two probes reproduce on a Mac what the real cause cannot: `chmod` reaches the same git code path as
+  the uid mismatch, so the suite freezes `.git/objects` and asserts the sample still succeeds with the
+  same hash a twin repository produces, and that `count-objects` does not move. Mutation-proved — and
+  the mutation first caught a **vacuous probe of my own**: the original took its expected hash from the
+  frozen repository, which wrote the blob before freezing, so the unfixed code passed. With the
+  expected value taken from an identical-content twin, the same mutation reddens both probes and the
+  first reproduces the CI failure verbatim, down to `error: unable to index file 'add.js'`.
+
 ### Added
 
 - **ISC-48 closed: the minted token's identity is asked of GOOGLE, not asserted from the argv.** The
