@@ -691,7 +691,7 @@ jobs:
           #     -> 6 pass, 105 skip, 0 fail. Ran 111 tests across 12 files.
           # Four added gated cases, four more skips, pass unmoved at 6.
           #
-          # 111 -> 115: ISC-125's four escape-honeypot probes, in a NEW file
+          # 111 -> 117: ISC-125's six escape-honeypot probes, in a NEW file
           # test/integration/honeypot.test.ts added to the list below. They are
           # the first probes in this repo to drive a worker through the REAL
           # entrypoint rather than `--entrypoint bash`, which is what starts and
@@ -703,17 +703,28 @@ jobs:
           # (bun 1.3.11, PIFLEET_DOCKER unset, PIFLEET_IMPERSONATION_TARGET
           # unset, no listener on :8000):
           #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container,honeypot}.test.ts
-          #     -> 6 pass, 109 skip, 0 fail. Ran 115 tests across 13 files.
-          # Four added gated cases, four more skips, pass unmoved at 6.
+          #     -> 6 pass, 111 skip, 0 fail. Ran 117 tests across 13 files.
+          # Six added gated cases, six more skips, pass unmoved at 6.
           #
-          # NOT PINNED as skips, deliberately: all four need a daemon and the
+          # TWO of the six are not about the honeypot at all, and they are
+          # here because this criterion is what put them at risk:
+          # `docker/entrypoint.sh` stopped being a bare `exec`, so a worker's
+          # exit code now travels through a supervisor rather than through
+          # process replacement, and SIGTERM now reaches the supervisor rather
+          # than the worker. Every other container probe in this repo runs
+          # `--entrypoint bash`, and `down reaps the container` runs
+          # `alpine:latest`, so nothing else re-checks either.
+          #
+          # NOT PINNED as skips, deliberately: all six need a daemon and the
           # worker image and nothing else — no Google credential, no inference
-          # server — so all four RUN here. One of them can ONLY discriminate on
-          # this runner in the way that matters: the fatal-supervision probe
-          # kills a background process inside the container and asserts the
-          # worker dies with it, which is a Linux process-supervision property
-          # that no host-side unit test can stand in for.
-          TOTAL_EXPECTED: "115"
+          # server — so all six RUN here. Two can ONLY discriminate on this
+          # runner in the way that matters: the fatal-supervision probe kills a
+          # background process inside the container and asserts the worker dies
+          # with it, and the stop probe bounds the ELAPSED time of a `docker
+          # stop` (without the trap the container still dies, on Docker's
+          # SIGKILL, ten seconds later) — both Linux process-supervision
+          # properties that no host-side unit test can stand in for.
+          TOTAL_EXPECTED: "117"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

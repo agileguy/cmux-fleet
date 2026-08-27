@@ -282,6 +282,99 @@ describe.skipIf(!DOCKER)("a seeded escape attempt is detected and reported (ISC-
   );
 
   /**
+   * The supervisor REPORTS the worker rather than replacing it.
+   *
+   * This is not about the honeypot at all; it is about what turning a bare
+   * `exec` into a supervisor put at risk. Every other container probe in this
+   * repo runs `--entrypoint bash`, so nothing else re-checks that a worker's
+   * own exit code still reaches Docker — and pifleet's whole verdict ladder
+   * reads it: `WORKER_DIED`, the budget halt, and every `failed` in a run
+   * report descend from this number.
+   *
+   * A distinctive code, not 1: a supervisor that collapsed every failure to 1
+   * would pass an assertion written against it, and so would one that lost the
+   * code entirely and inherited bash's own last status.
+   *
+   * The specific hazard measured here: `[ -n "${honeypot_pid}" ] && kill …`
+   * sits immediately before the `exit "${rc}"` on this path. Under `set -e` a
+   * failing `&&` list can end a script, and bash exempts it only because the
+   * failing command is not the last in the list. That is a rule, not an
+   * intention, and a future edit that reorders those two lines would silently
+   * turn every non-zero worker into a 1.
+   */
+  test(
+    "a worker's own exit code survives the supervisor",
+    async () => {
+      const { outbox } = await plantRun("hprc");
+      const w = await runWorker(outbox, `echo "about to fail"; exit 42`);
+      expect(w.out).toContain("about to fail");
+      expect(w.code).toBe(42);
+    },
+    containerBudget(2),
+  );
+
+  /**
+   * `docker stop` still stops it, promptly, through the worker's own handler.
+   *
+   * The bare `exec` this file replaced made signal delivery free: tini was PID
+   * 1 and the worker was its direct child. A supervisor breaks that — tini now
+   * signals the SUPERVISOR — so the trap that forwards SIGTERM is load-bearing
+   * and nothing else exercises it. `down reaps the container` in
+   * container-launch.test.ts is the nearest thing and it runs `alpine:latest`,
+   * which has none of this in it.
+   *
+   * The elapsed-time bound is the assertion that matters. Without the trap the
+   * container still dies — Docker SIGKILLs it after the grace period — so a
+   * probe that only checked "it stopped" would pass on the broken code and
+   * take ten seconds doing it. `--time 5` with a bound well under it separates
+   * "handled" from "timed out".
+   */
+  test(
+    "docker stop reaches the worker through the supervisor's trap",
+    async () => {
+      const { outbox } = await plantRun("hpstop");
+      const name = `pifleet-hp-stop-${process.pid.toString(36)}`;
+      const argv = launchArgv(outbox, true, `trap 'echo GOT_TERM; exit 0' TERM
+         for i in $(seq 1 300); do sleep 1; done`);
+      // Detached, and `--rm` dropped so the logs and exit code survive the stop.
+      const detached = [...argv];
+      detached.splice(detached.indexOf("--rm"), 1, "-d", "--name", name);
+
+      const start = Bun.spawn(detached, { stdout: "ignore", stderr: "pipe" });
+      const startErr = await new Response(start.stderr).text();
+      expect(await start.exited, `docker run failed: ${startErr}`).toBe(0);
+      try {
+        // The listener has to be up before the stop, or this measures the
+        // arming wait rather than the trap.
+        await Bun.sleep(1500);
+        const began = performance.now();
+        await Bun.spawn(["docker", "stop", "--time", "5", name], {
+          stdout: "ignore",
+          stderr: "ignore",
+        }).exited;
+        const elapsed = performance.now() - began;
+
+        const logs = Bun.spawn(["docker", "logs", name], { stdout: "pipe", stderr: "pipe" });
+        const text = `${await new Response(logs.stdout).text()}${await new Response(logs.stderr).text()}`;
+        await logs.exited;
+        const inspect = Bun.spawn(["docker", "inspect", "-f", "{{.State.ExitCode}}", name], {
+          stdout: "pipe",
+          stderr: "ignore",
+        });
+        const code = (await new Response(inspect.stdout).text()).trim();
+        await inspect.exited;
+
+        expect(text).toContain("GOT_TERM");
+        expect(code).toBe("0");
+        expect(elapsed).toBeLessThan(4000);
+      } finally {
+        await Bun.spawn(["docker", "rm", "-f", name], { stdout: "ignore", stderr: "ignore" }).exited;
+      }
+    },
+    containerBudget(3),
+  );
+
+  /**
    * The THIRD state, which is the one an operator would otherwise never learn
    * about: a container nothing was watching.
    *
