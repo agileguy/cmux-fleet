@@ -678,7 +678,19 @@ jobs:
           #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container}.test.ts
           #     -> 6 pass, 101 skip, 0 fail. Ran 107 tests across 12 files.
           # One added gated case, one more skip, pass unmoved at 6.
-          TOTAL_EXPECTED: "107"
+          #
+          # 107 -> 111: ISC-189's four launch-gate probes in image.test.ts,
+          # which take the REAL worker image, file it under a tag whose
+          # config-hash is not its own, and require the gate to refuse it —
+          # plus the label round-trip `docker build --label` -> image store ->
+          # `docker image inspect`, which no test read back until now. That
+          # file's term in the arithmetic above moves 20 -> 24. DERIVED by the
+          # hand method, same conditions (bun 1.3.11, PIFLEET_DOCKER unset,
+          # PIFLEET_IMPERSONATION_TARGET unset, no listener on :8000):
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container}.test.ts
+          #     -> 6 pass, 105 skip, 0 fail. Ran 111 tests across 12 files.
+          # Four added gated cases, four more skips, pass unmoved at 6.
+          TOTAL_EXPECTED: "111"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

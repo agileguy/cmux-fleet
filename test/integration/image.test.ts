@@ -9,10 +9,22 @@
  */
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
-import { buildImage, imageTag, verifyImage } from "../../src/container/image.ts";
+import {
+  assertImagesReady,
+  buildImage,
+  imageIdentityDrift,
+  ImageGateError,
+  imagePresent,
+  imageTag,
+  parseImageTag,
+  requiredImages,
+  verifyImage,
+} from "../../src/container/image.ts";
 import { makeDaemonScratch, makeWorkerAccessible } from "../../src/container/mounts.ts";
 import { realExec } from "../../src/container/run.ts";
 import { cliBudget } from "../support/budget.ts";
@@ -307,4 +319,220 @@ describe("verbgate (SRD §5.10)", () => {
     });
     expect(r.code).toBe(77);
   }, PROBE_TIMEOUT);
+});
+
+/**
+ * ISC-32 / ISC-189 — the launch gate, against REAL bytes on a REAL daemon.
+ *
+ * ## What was already proved, and why it was not enough
+ *
+ * `up-wiring.test.ts` drives the real `pifleet up` process through a `docker`
+ * PATH shim and proves the WIRING: the gate is on the launch path, it refuses
+ * with the right diagnosis, and the refusal happens before anything is cloned,
+ * before any remote is registered, and before any supervisor starts. That is
+ * the half a shim can prove, and it is the half about `up`.
+ *
+ * It cannot prove the half about DOCKER. Every fact the gate depends on came
+ * from a shim that answered `{{json .Config.Labels}}` by taking the tag string
+ * apart — so the round trip `docker build --label` -> image store ->
+ * `docker image inspect` had no automated reader anywhere in the suite, and
+ * nothing would have noticed if `buildImage` stopped stamping those labels
+ * tomorrow. Every rig would have kept answering as though it had. The same gap
+ * covered the fails-verify half: it was a shimmed verdict, never a real image
+ * that really fails.
+ *
+ * These four probes are that half. Composed with `up-wiring.test.ts`, the
+ * criterion's sentence is covered end to end — and the composition is stated
+ * here rather than left to be inferred, because neither file proves it alone.
+ *
+ * ## Why the exit code is not the discriminator anywhere below
+ *
+ * Recorded because it already caught a vacuous assertion once: `up` has
+ * several preflights that refuse with `EXIT.BACKEND_UNAVAILABLE`, so a
+ * mutation that neuters the image gate entirely can still produce exit 3 from
+ * a LATER check. The load-bearing assertions are the refusal's `reason`, the
+ * values it quotes, and — in the mismatch case — the fact that the two checks
+ * it stands in front of both said yes.
+ */
+describe("the launch gate against real images (ISC-32, ISC-189)", () => {
+  /** One worker's demand on the store, in the shape `renderWorker` produces. */
+  const demand = (image: string) => requiredImages([{ workerId: "w1", role: "eng", toolchain: "node" as const, image }]);
+
+  /** Run the gate and return the refusal, failing loudly if it did not refuse. */
+  async function refusal(required: ReturnType<typeof demand>): Promise<ImageGateError> {
+    try {
+      await assertImagesReady(required, PI_VERSION);
+    } catch (err) {
+      if (err instanceof ImageGateError) return err;
+      throw err;
+    }
+    throw new Error(`the gate ACCEPTED ${required[0]?.tag ?? "?"} — it was supposed to refuse`);
+  }
+
+  /**
+   * ISC-189, residual one: the labels a REAL daemon reports on a REAL image.
+   *
+   * `imageIdentityDrift` is built entirely on these three labels, and until
+   * this probe existed nothing read them back from an actual image store. The
+   * comparison is against `parseImageTag`'s reading of the tag the image was
+   * BUILT under, which is the exact equality the gate depends on — so if
+   * `buildImage` stopped stamping a label, or stamped a different value, this
+   * fails here with a readable diff instead of silently turning the gate into
+   * a check that always passes.
+   */
+  it("the daemon reports the build labels exactly as buildImage stamped them", async () => {
+    const claim = parseImageTag(tag);
+    expect(claim, `the built tag ${tag} is not in imageTag's own format`).not.toBeNull();
+
+    const r = await realExec(
+      ["docker", "image", "inspect", tag, "--format", "{{json .Config.Labels}}"],
+      { timeoutMs: PROBE_TIMEOUT },
+    );
+    expect(r.code, `docker could not inspect ${tag}: ${r.stderr.trim()}`).toBe(0);
+    // `{{json .Config.Labels}}` answers the literal `null` for an image with no
+    // labels at all, which would otherwise blow up on the first index with a
+    // TypeError instead of saying what went wrong.
+    const labels = (JSON.parse(r.stdout.trim()) as Record<string, string> | null) ?? {};
+    expect(
+      Object.keys(labels),
+      `the image under ${tag} carries no labels whatsoever — buildImage stopped stamping them`,
+    ).not.toEqual([]);
+
+    expect(labels["pifleet.pi-version"]).toBe(claim!.piVersion);
+    expect(labels["pifleet.toolchain"]).toBe(claim!.toolchain);
+    expect(labels["pifleet.config-hash"]).toBe(claim!.configHash);
+    // And the tag's own claim is the config's, not merely self-consistent.
+    expect(claim!.piVersion).toBe(PI_VERSION);
+  }, PROBE_TIMEOUT);
+
+  /**
+   * ISC-189, the case the whole criterion is graded against: a stale-but-
+   * present image.
+   *
+   * ONE `docker tag` puts the real worker image — the one this suite just
+   * built, that passes every check `verifyImage` makes — under a tag whose
+   * config-hash is not its own. A registry pull does this whenever two builds
+   * ever shared a name; an operator does it by hand more often than anyone
+   * admits.
+   *
+   * The two assertions BEFORE the refusal are what make the third mean
+   * anything: the old gate's presence check says PRESENT, and the old gate's
+   * verification says OK, on this exact tag, against this exact daemon. Both
+   * halves of the pre-identity gate pass on the wrong image. Without them this
+   * would only show that some gate refused something.
+   */
+  it("a real image filed under another tag passes presence AND verify, and is still refused", async () => {
+    const claim = parseImageTag(tag)!;
+    // Derived from the real hash so it is deterministic, and asserted distinct
+    // rather than assumed — a collision here would silently vacate the test.
+    const otherHash = createHash("sha256").update(claim.configHash).digest("hex").slice(0, 12);
+    expect(otherHash).not.toBe(claim.configHash);
+    const stranger = `${loaded.config.docker.image_prefix}:${claim.piVersion}-${claim.toolchain}-${otherHash}`;
+
+    const tagged = await realExec(["docker", "tag", tag, stranger], { timeoutMs: PROBE_TIMEOUT });
+    expect(tagged.code, `docker tag failed: ${tagged.stderr.trim()}`).toBe(0);
+    try {
+      const presence = await imagePresent(stranger);
+      expect(
+        presence.present,
+        `the retagged image is not present, so this probe is not testing what it claims: ${presence.detail}`,
+      ).toBe(true);
+
+      const verified = await verifyImage(stranger, PI_VERSION);
+      expect(
+        verified.ok,
+        `verifyImage REFUSED the retagged image, so the mismatch below would be caught by the ` +
+          `behavioural half anyway and this probe proves nothing about identity. Failed checks: ` +
+          JSON.stringify(verified.checks.filter((c) => !c.ok)),
+      ).toBe(true);
+
+      const err = await refusal(demand(stranger));
+      expect(err.reason).toBe("mismatched");
+      expect(err.tag).toBe(stranger);
+      expect(err.roles).toEqual(["eng"]);
+      // The diagnosis must carry BOTH values, or an operator cannot tell which
+      // way the drift runs and has nothing to rebuild against.
+      expect(err.message).toContain(claim.configHash);
+      expect(err.message).toContain(otherHash);
+      expect(err.message).toContain("pifleet.config-hash");
+    } finally {
+      await realExec(["docker", "rmi", stranger], { timeoutMs: PROBE_TIMEOUT });
+    }
+  }, PROBE_TIMEOUT * 3);
+
+  /**
+   * ISC-189, the pre-existing residual: a real image that really FAILS
+   * verification, rather than a shimmed verdict.
+   *
+   * Built `FROM` the real image with nothing changed but the user, and stamped
+   * with identity labels that MATCH its tag — so presence passes and the
+   * identity check passes, and the run reaches the verification stage under
+   * its own power. `verifyImage`'s uid-10001 check is what refuses: this image
+   * runs as root, which is the deterministic-bind-mount-ownership property of
+   * SRD §5.2 and not an incidental one.
+   *
+   * The identity labels matching is the load-bearing detail. Without them the
+   * gate would refuse at `imageIdentityDrift` one step earlier, this test
+   * would pass, and the fails-verify path would still never have run against a
+   * real daemon.
+   */
+  it("a real image that fails verification is refused at the verify stage", async () => {
+    const claim = parseImageTag(tag)!;
+    const badHash = createHash("sha256").update(`${claim.configHash}-root`).digest("hex").slice(0, 12);
+    expect(badHash).not.toBe(claim.configHash);
+    const badTag = `${loaded.config.docker.image_prefix}:${claim.piVersion}-${claim.toolchain}-${badHash}`;
+
+    const ctx = await mkdtemp(join(tmpdir(), "pifleet-badimage-"));
+    try {
+      const dockerfile = join(ctx, "Dockerfile");
+      await writeFile(dockerfile, `FROM ${tag}\nUSER root\n`);
+      const built = await realExec(
+        [
+          "docker", "build", "-f", dockerfile,
+          "--label", `pifleet.pi-version=${claim.piVersion}`,
+          "--label", `pifleet.toolchain=${claim.toolchain}`,
+          "--label", `pifleet.config-hash=${badHash}`,
+          "-t", badTag, ctx,
+        ],
+        { timeoutMs: PROBE_TIMEOUT * 2 },
+      );
+      expect(built.code, `building the root-user image failed: ${built.stderr.slice(-2000)}`).toBe(0);
+
+      // It really is present, and its identity really does match its tag —
+      // otherwise the refusal below would be the mismatch case in disguise.
+      expect((await imagePresent(badTag)).present).toBe(true);
+      const drift = await imageIdentityDrift(badTag);
+      expect(drift, `the labels do not match the tag, so this refuses one stage too early`).toBeNull();
+
+      const err = await refusal(demand(badTag));
+      expect(err.reason).toBe("unverified");
+      expect(err.tag).toBe(badTag);
+      expect(err.message).toContain("uid-10001");
+    } finally {
+      await realExec(["docker", "rmi", "-f", badTag], { timeoutMs: PROBE_TIMEOUT });
+      await rm(ctx, { recursive: true, force: true });
+    }
+  }, PROBE_TIMEOUT * 4);
+
+  /**
+   * The positive control, and it is not optional: a gate that refused
+   * EVERYTHING would pass both refusal probes above.
+   *
+   * This runs the real gate — real presence check, real identity check, real
+   * `verifyImage` starting real containers — against the tag the image was
+   * actually built under, and requires it to advance: no throw, and `onReady`
+   * called exactly once with the daemon's own image id.
+   */
+  it("the same gate accepts the tag the image was built under", async () => {
+    const ready: Array<{ tag: string; id: string }> = [];
+    await assertImagesReady(demand(tag), PI_VERSION, {
+      onReady: (img) => {
+        ready.push({ tag: img.tag, id: img.id });
+      },
+    });
+    expect(ready).toHaveLength(1);
+    expect(ready[0]!.tag).toBe(tag);
+    // A real image id, not an empty string a `--format` miss would produce.
+    expect(ready[0]!.id).toMatch(/^sha256:[0-9a-f]{64}$/);
+  }, PROBE_TIMEOUT * 3);
 });
