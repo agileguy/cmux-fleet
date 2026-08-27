@@ -117,9 +117,12 @@ export function register(program: Command): void {
     .option("--prune", "remove worktrees and branches")
     .option("--force", "prune a checkout that still holds work")
     .option(
-      "--force-identity",
-      "signal a supervisor whose recorded launch identity or process group could not be " +
-        "confirmed; the signal goes to that process alone, never to an unconfirmed group",
+      "--force-identity <pid>",
+      "signal the supervisor holding THIS pid even though its recorded launch identity or " +
+        "process group could not be confirmed; the signal goes to that process alone, never " +
+        "to an unconfirmed group. Repeatable. The pid is required: see the note in the action",
+      (value: string, prev: string[]) => [...prev, value],
+      [] as string[],
     )
     .option("--json", "emit machine-readable output")
     .action(async (opts: {
@@ -128,7 +131,7 @@ export function register(program: Command): void {
       keepPanes?: boolean;
       prune?: boolean;
       force?: boolean;
-      forceIdentity?: boolean;
+      forceIdentity?: string[];
     }) => {
       if (opts.force === true && opts.prune !== true) {
         throw new CliError("--force has no meaning without --prune", EXIT.USAGE);
@@ -138,8 +141,46 @@ export function register(program: Command): void {
        * `--force`. It changes what gets SIGNALLED, not what gets deleted, so
        * it has a meaning on its own: an operator whose run predates the
        * pinned identity rendering needs it to stop the run at all.
+       *
+       * IT TAKES A PID, AND THAT IS THE WHOLE POINT (2026-08-26).
+       *
+       * As a bare boolean this flag meant "re-anchor on whatever holds the
+       * recorded pid, for every worker in the run" — the rung-0 self-anchor,
+       * which is the one thing ISC-272's criterion forbids in as many words
+       * ("never a start time read off the pid at rung 0"). Both ISC-191 and
+       * ISC-272 were held open on it, and the reason it could not simply be
+       * deleted is that it is the only way to stop a run whose record predates
+       * the pinned rendering.
+       *
+       * So the hatch stays and the blast radius shrinks to what the operator
+       * typed. `down` refuses every pid it cannot confirm, prints each one,
+       * and forcing requires naming those numbers back. Killing a stranger is
+       * still reachable — it always was, that is what a force flag IS — but it
+       * now requires the operator to have looked at a pid and typed it, rather
+       * than to have typed a flag that meant "all of them, whatever they are".
+       *
+       * A SET, not a boolean, threaded to `anchorIdentity` rather than
+       * evaluated at each call site: the check then lives in the one function
+       * that decides whether to refuse, so there is no way to add a third
+       * anchor site later and forget to scope it.
+       *
+       * The bare spelling is now a commander usage error ("option
+       * '--force-identity <pid>' argument missing") rather than a silently
+       * accepted "all". A flag that used to mean everything must not keep
+       * meaning everything by omission.
        */
-      const forceIdentity = opts.forceIdentity === true;
+      const forcePids = new Set<number>();
+      for (const raw of opts.forceIdentity ?? []) {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n <= 0) {
+          throw new CliError(
+            `--force-identity expects a pid, got '${raw}'. Run \`down\` without it first: ` +
+              `every refusal it prints names the pid to pass back.`,
+            EXIT.USAGE,
+          );
+        }
+        forcePids.add(n);
+      }
       const root = runsRoot();
       const runId = opts.run ?? (await latestRunId(root));
       if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
@@ -211,7 +252,20 @@ export function register(program: Command): void {
        */
       const registry = await readRegistry(run).catch(() => null);
 
-      const report: Array<{ id: string; stopped: boolean; how: string; forced_identity?: true }> = [];
+      /**
+       * `pid` is OPTIONAL and set only on refusal rows, which is the only
+       * place it is read: the prune reasons below hand the operator the
+       * `--force-identity <pid>` they would have to type. A row for a worker
+       * with no state file has no pid to give, and a `gone` row has one that
+       * means nothing.
+       */
+      const report: Array<{
+        id: string;
+        stopped: boolean;
+        how: string;
+        pid?: number;
+        forced_identity?: true;
+      }> = [];
       for (const id of workerIds.sort()) {
         const wp = workerPaths(run, id);
         const state = await readWorkerState(wp);
@@ -267,7 +321,7 @@ export function register(program: Command): void {
            * and `signalIfSame` asks again at every rung.
            */
           state.pgid,
-          { force: forceIdentity },
+          { force: forcePids },
         );
         /**
          * The container rung, shared by the two paths that are entitled to it.
@@ -318,7 +372,7 @@ export function register(program: Command): void {
          * touch for the same reason.
          */
         if (anchor.kind === "refused") {
-          report.push({ id, stopped: false, how: anchor.how });
+          report.push({ id, stopped: false, how: anchor.how, pid: state.pid });
           await ledger.append("worker_down_refused", {
             worker: id,
             detail: { how: anchor.how, reason: anchor.detail, pid: state.pid },
@@ -326,7 +380,11 @@ export function register(program: Command): void {
           if (opts.json !== true) {
             process.stderr.write(
               `  ${id}: refused to signal pid ${state.pid} — ${anchor.detail}; ` +
-                `re-run with --force-identity to signal it anyway\n`,
+                // The pid, not just the flag. Typing this number back IS the
+                // authorisation now, so the message has to carry the number —
+                // an operator who has to go and find it will reach for
+                // something blunter.
+                `re-run with --force-identity ${state.pid} to signal it anyway\n`,
             );
           }
           continue;
@@ -493,7 +551,7 @@ export function register(program: Command): void {
           // back `0`, which means a capture that should have happened failed
           // (ISC-272).
           null,
-          { force: forceIdentity },
+          { force: forcePids },
         );
         if (anchor.kind === "refused") {
           daemonReport = { stopped: false, how: anchor.how };
@@ -503,7 +561,7 @@ export function register(program: Command): void {
           if (opts.json !== true) {
             process.stderr.write(
               `  daemon: refused to signal pid ${pidFile.pid} — ${anchor.detail}; ` +
-                `re-run with --force-identity to signal it anyway\n`,
+                `re-run with --force-identity ${pidFile.pid} to signal it anyway\n`,
             );
           }
         } else if (anchor.kind === "gone") {
@@ -656,12 +714,13 @@ export function register(program: Command): void {
                 ? `its supervisor was identified, but the process group 'down' would have signalled ` +
                   `could not be shown to be that supervisor's own (${row.how}), so no signal was sent ` +
                   `and it cannot be shown to have stopped writing here; a live container writing here ` +
-                  `would be corrupted by a delete (--force-identity signals the supervisor alone, ` +
-                  `never an unconfirmed group)`
+                  `would be corrupted by a delete (--force-identity ${row.pid} signals that supervisor ` +
+                  `alone, never an unconfirmed group)`
                 : isAnchorRefusal(row.how)
                   ? `its supervisor could not be identified (${row.how}), so 'down' refused to signal it ` +
                     `and cannot show it is not still writing here; a live container writing here would be ` +
-                    `corrupted by a delete (--force-identity anchors on whatever holds the pid)`
+                    `corrupted by a delete (--force-identity ${row.pid} anchors on whatever holds that pid, ` +
+                    `which is why it names the pid rather than meaning "all of them")`
                   : "its supervisor survived the kill ladder; a live container writing here would be corrupted by a delete",
             });
             pruneRefusals++;
@@ -862,8 +921,8 @@ export function register(program: Command): void {
             `${refused.length} were never signalled because their recorded launch identity or ` +
               `process group could not be confirmed (${hows.join(", ")})` +
               (forcible.length > 0
-                ? `; --force-identity signals the supervisor alone, never an unconfirmed group`
-                : `; \`ps\` could not be read on this machine — --force-identity cannot help, ` +
+                ? `; --force-identity <pid> signals one named supervisor alone, never an unconfirmed group`
+                : `; \`ps\` could not be read on this machine — --force-identity <pid> cannot help, ` +
                   `because it re-anchors using the same reading that failed`),
           );
         }
@@ -1131,7 +1190,14 @@ async function anchorIdentity(
   pid: number,
   recorded: string | null,
   recordedPgid: number | null,
-  opts: { force: boolean },
+  /**
+   * The pids the operator NAMED on `--force-identity`, not a boolean.
+   *
+   * Scoped here rather than at the call sites so the rule has one home: a
+   * third anchor site added later inherits the narrowing instead of having to
+   * remember it. `has(pid)` is the entire authorisation check.
+   */
+  opts: { force: ReadonlySet<number> },
 ): Promise<Anchor> {
   /*
    * THE FIRST READ IN THE WHOLE COMMAND, and therefore the first place a
@@ -1186,8 +1252,9 @@ async function anchorIdentity(
 
   const target: ProcId = { pid, started: current };
   if (refusal !== null) {
-    // Forced: the leader, and never a group. See the header above.
-    if (opts.force) return { kind: "target", target, group: null, forced: true };
+    // Forced: the leader, never a group, and ONLY if the operator typed this
+    // pid. See the `forcePids` note in the action above.
+    if (opts.force.has(pid)) return { kind: "target", target, group: null, forced: true };
     return { kind: "refused", ...refusal };
   }
 
@@ -1213,7 +1280,7 @@ async function anchorIdentity(
    */
   const why: string = group.why;
   if (why === "gone") return { kind: "gone" };
-  if (opts.force) return { kind: "target", target, group: null, forced: true };
+  if (opts.force.has(pid)) return { kind: "target", target, group: null, forced: true };
   return { kind: "refused", ...groupRefusal(why, pid, recordedPgid) };
 }
 

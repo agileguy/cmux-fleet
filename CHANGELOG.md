@@ -6,6 +6,30 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- **BREAKING: `pifleet down --force-identity` now takes a pid, and is repeatable.** As a bare
+  boolean the flag meant "re-anchor on whatever holds the recorded pid, **for every worker in the
+  run**" — the rung-0 self-anchor that ISC-272's criterion forbids in as many words ("never a start
+  time read off the pid at rung 0"). An operator who typed it to stop ONE stuck supervisor also
+  authorised the kill ladder against every other pid the run recorded, including — on a run whose
+  pids the machine has since reissued — strangers nobody had looked at.
+
+  The hatch is unchanged in kind and narrowed in reach. `down` still refuses every pid it cannot
+  confirm and still prints each one; forcing now requires naming those numbers back:
+
+  ```
+  eng-1: refused to signal pid 41337 — …; re-run with --force-identity 41337 to signal it anyway
+  ```
+
+  Killing a stranger remains reachable — that is what a force flag *is* — but it now requires
+  having looked at a pid and typed it, rather than typing a flag that meant "all of them, whatever
+  they are". The refusal messages and `--prune` reasons carry the exact pid so the next command is
+  handed to the operator rather than left to be assembled.
+
+  **The bare spelling is now a usage error**, deliberately: a flag that used to mean everything must
+  not keep meaning everything by omission. Scripts passing bare `--force-identity` will fail loudly
+  rather than silently authorise the old blast radius.
+
+  This closes ISC-191 residual (a) and the `--force-identity` half of ISC-272's open clause.
 - **The ISC-154 quiesce sample now records WHY it could not be taken, and its bound moves 10s ->
   30s.** `worktreeContentHash` collapsed three different facts — git timed out, git failed, or the
   snapshot threw — onto a single `null`, one function below `writeTreeSnapshot`'s own docstring
