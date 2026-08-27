@@ -691,7 +691,7 @@ jobs:
           #     -> 6 pass, 105 skip, 0 fail. Ran 111 tests across 12 files.
           # Four added gated cases, four more skips, pass unmoved at 6.
           #
-          # 111 -> 118: ISC-125's seven escape-honeypot probes, in a NEW file
+          # 111 -> 119: ISC-125's eight escape-honeypot probes, in a NEW file
           # test/integration/honeypot.test.ts added to the list below. They are
           # the first probes in this repo to drive a worker through the REAL
           # entrypoint rather than `--entrypoint bash`, which is what starts and
@@ -703,10 +703,10 @@ jobs:
           # (bun 1.3.11, PIFLEET_DOCKER unset, PIFLEET_IMPERSONATION_TARGET
           # unset, no listener on :8000):
           #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container,honeypot}.test.ts
-          #     -> 6 pass, 112 skip, 0 fail. Ran 118 tests across 13 files.
-          # Seven added gated cases, seven more skips, pass unmoved at 6.
+          #     -> 6 pass, 113 skip, 0 fail. Ran 119 tests across 13 files.
+          # Eight added gated cases, eight more skips, pass unmoved at 6.
           #
-          # THREE of the seven are not about the honeypot at all, and they are
+          # FOUR of the eight are not about the honeypot at all, and they are
           # here because this criterion is what put them at risk:
           # `docker/entrypoint.sh` stopped being a bare `exec`, so a worker's
           # exit code now travels through a supervisor rather than through
@@ -719,18 +719,24 @@ jobs:
           # stray line kills the worker during startup. That one SHIPPED and
           # `container-live` caught it; the probe reads stdout alone, because
           # every other probe in that file reads the two streams merged and
-          # none of them could see it.
+          # none of them could see it. The fourth is the same shape again and
+          # cost a second CI round trip: a bash BACKGROUND job's stdin is
+          # /dev/null when job control is off, and `pi --mode rpc` is a JSONL
+          # protocol ON STDIN, so the worker read instant EOF and died. Both
+          # halves of the entrypoint's real contract — the stream in and the
+          # stream out — were invisible to a seam that substitutes
+          # `/bin/bash -c '<script>'` for the worker.
           #
-          # NOT PINNED as skips, deliberately: all seven need a daemon and the
+          # NOT PINNED as skips, deliberately: all eight need a daemon and the
           # worker image and nothing else — no Google credential, no inference
-          # server — so all seven RUN here. Two can ONLY discriminate on this
+          # server — so all eight RUN here. Two can ONLY discriminate on this
           # runner in the way that matters: the fatal-supervision probe kills a
           # background process inside the container and asserts the worker dies
           # with it, and the stop probe bounds the ELAPSED time of a `docker
           # stop` (without the trap the container still dies, on Docker's
           # SIGKILL, ten seconds later) — both Linux process-supervision
           # properties that no host-side unit test can stand in for.
-          TOTAL_EXPECTED: "118"
+          TOTAL_EXPECTED: "119"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

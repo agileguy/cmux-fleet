@@ -156,6 +156,25 @@ async function runWorkerSplit(
   return { code, stdout, stderr };
 }
 
+/** Like `runWorkerSplit`, but writes `input` to the container's stdin first. */
+async function runWorkerWithStdin(
+  outbox: string,
+  script: string,
+  input: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  // `-i`, exactly as `buildDockerArgv` emits it: without it the daemon does not
+  // attach stdin at all and this probe would be testing Docker, not the shell.
+  const argv = launchArgv(outbox, true, script);
+  argv.splice(argv.indexOf("run") + 1, 0, "-i");
+  const p = Bun.spawn(argv, { stdin: new TextEncoder().encode(input), stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(p.stdout).text(),
+    new Response(p.stderr).text(),
+    p.exited,
+  ]);
+  return { code, stdout, stderr };
+}
+
 /** Take host custody of the worker's ledger, then build the run report. */
 async function reportFor(run: RunPaths) {
   await new VerbgateCollector(run).collectOnce();
@@ -291,6 +310,38 @@ describe.skipIf(!DOCKER)("a seeded escape attempt is detected and reported (ISC-
       expect(w.code).toBe(71);
       expect(w.out).toContain("ending the worker (ISC-125)");
       expect(w.out).not.toContain("SURVIVED");
+    },
+    containerBudget(2),
+  );
+
+  /**
+   * THE WORKER KEEPS THE CONTAINER'S STDIN.
+   *
+   * `pi --mode rpc` is a JSONL protocol on stdin. The bare `exec` this
+   * supervisor replaced handed it the container's stdin by construction; a
+   * background job does not, because POSIX assigns `/dev/null` to an
+   * asynchronous list's stdin when job control is off — which it always is in
+   * a non-interactive shell. So `pi "$@" &` reads instant EOF and exits, and
+   * `up` reports `worker <id> died during startup` with no other symptom
+   * anywhere in the system.
+   *
+   * THIS SHIPPED, and it is the SECOND defect of this exact shape: every other
+   * probe in this file runs `PIFLEET_WORKER_BIN=/bin/bash -c '<script>'`, which
+   * neither reads stdin nor writes the RPC stream, so the seam that makes the
+   * entrypoint testable at all is blind to both halves of its real contract.
+   * `container-live` caught this one too.
+   *
+   * The script is `cat`, because `cat` is the smallest thing that fails when
+   * stdin is `/dev/null`: it produces empty output and exits 0, which is
+   * indistinguishable from success unless the assertion is on the BYTES.
+   */
+  test(
+    "the worker still reads the container's stdin",
+    async () => {
+      const { outbox } = await plantRun("hpstdin");
+      const w = await runWorkerWithStdin(outbox, "cat", '{"jsonrpc":"2.0","id":1}\n');
+      expect(w.code).toBe(0);
+      expect(w.stdout).toBe('{"jsonrpc":"2.0","id":1}\n');
     },
     containerBudget(2),
   );

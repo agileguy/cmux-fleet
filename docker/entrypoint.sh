@@ -129,8 +129,30 @@ if [ "${PIFLEET_HONEYPOT:-}" = "1" ]; then
   done
 fi
 
-"${PIFLEET_WORKER_BIN:-pi}" "$@" &
+# THE WORKER MUST KEEP THE CONTAINER'S STDIN, and getting this wrong is the
+# single most expensive mistake available in this file.
+#
+# POSIX: "if job control is disabled, the standard input for an asynchronous
+# list, before any explicit redirections, shall be assigned to /dev/null."
+# Job control is off in a non-interactive shell, so a bare `pi "$@" &` hands
+# the worker /dev/null — and `pi --mode rpc` IS a JSONL protocol on stdin, so
+# it reads instant EOF and exits. `up` then reports `worker <id> died during
+# startup` with no other symptom anywhere. This shipped; `container-live` is
+# what caught it.
+#
+# `exec 3<&0` then `<&3` is an EXPLICIT redirection, which is exactly what the
+# rule above exempts. `<&0` alone is not reliable here — the default is applied
+# to the asynchronous list before redirections are processed, so the saved
+# duplicate is the form that survives it. Measured both ways in the real image:
+# `cat &` reads nothing, `exec 3<&0; cat <&3 &` reads the piped line.
+#
+# The parent's copy is closed immediately after. It is not needed again, and a
+# stray duplicate of the read end is the kind of thing that quietly changes who
+# holds a pipe open.
+exec 3<&0
+"${PIFLEET_WORKER_BIN:-pi}" "$@" <&3 &
 worker_pid=$!
+exec 3<&-
 
 # `wait -n -p` returns as soon as EITHER child exits and names which one. A
 # return above 128 with no pid is a trapped signal, not an exit, so the loop
