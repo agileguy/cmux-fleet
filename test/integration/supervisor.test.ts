@@ -3051,3 +3051,138 @@ describe("ISC-147: the completion property across every hostile scenario", () =>
     );
   }
 });
+
+/**
+ * ISC-141 — the epoch fence, at the only site where it decides anything.
+ *
+ * ## What this closes, and the correction it rests on
+ *
+ * The criterion asks that "epoch attribution uses the RPC stream offset". The
+ * previous grade recorded that the supervisor could be made to IGNORE the
+ * offset entirely — `em.attribute(seq)` rewritten to
+ * `em.attribute(Number.MAX_SAFE_INTEGER)` — and every suite stayed green, and
+ * concluded that a supervisor-level test was missing.
+ *
+ * It is not missing; it is IMPOSSIBLE at that site, and reading three files
+ * says why. `RpcClient` dispatches records synchronously and in stream order
+ * (`client.ts`: `pending.onAck?.(seq)` and `onEvent(msg, seq)` in one loop).
+ * `EpochManager.attribute` answers `live` only when `ack_seq !== null && seq >
+ * ack_seq`. `windowOpen` only becomes true through `bindStart`, which itself
+ * requires `attribute(seq) === "live"`. So the window opens at some
+ * `seq_start > ack_seq`, and every record after it has a still higher seq —
+ * the COMPARISON `seq > ack_seq` is therefore never evaluated with a seq that
+ * could fail it. It is dead for an in-order stream.
+ *
+ * What is NOT dead, and what this test drives, is the other conjunct:
+ * `ack_seq !== null`. Before the live epoch's prompt is acknowledged there is
+ * no fence post, and everything in that region must be `prior` — including an
+ * `agent_start`, which would otherwise BIND the window and hand a settled
+ * epoch's straggler the power to complete the new one.
+ *
+ * That region was unreachable from a scenario until now: `emit` and
+ * `emit_after_respond` both run after the ack. `emit_before_ack` (new, in
+ * `fake-pi.ts`) is what puts a record below `ack_seq`, and it is the shape a
+ * real worker produces whenever a previous turn is still draining as the next
+ * prompt arrives — the drain and the ack share one pipe and the drain got
+ * there first.
+ */
+describe("ISC-141: a stale agent_start before the ack cannot open the epoch's window", () => {
+  test(
+    "the pre-ack start is attributed prior, and the post-ack start is what binds",
+    async () => {
+      const root = await freshRoot();
+      const runId = testRunId("fence");
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+
+      const { pid, pgid } = await processLauncher.launchDetached({
+        runId,
+        runDir: join(root, runId),
+        workerId: "eng-1",
+        env: { PIFLEET_PI_COMMAND: piCommand("stale-start.json") },
+        argv: supervisorArgv({ runsRoot: root, runId, workerId: "eng-1" }),
+        logPath: join(root, runId, "workers", "eng-1", "supervisor.log"),
+      });
+      cleanups.push(() => killSupervisor(pid, pgid));
+      expect(await waitForIdle(wp, pid)).toBe(true);
+
+      // Epoch 1: starts and ends immediately, so it is SETTLED before the
+      // second dispatch. Without that the second prompt would be refused by
+      // the double's own worker-side high-water-mark and nothing below would
+      // be about the supervisor at all.
+      const first = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-FENCE-1"),
+        attempt_id: "fence-attempt-1",
+        requested_epoch: null,
+      });
+      expect(first["accepted"]).toBe(true);
+      expect(
+        await waitFor(
+          async () => (await readTaskRecord(taskRecordPath(wp, "T-FENCE-1"))) !== null,
+          20_000,
+        ),
+      ).toBe(true);
+
+      // Epoch 2. The double emits one `agent_start` BEFORE acking this prompt.
+      const second = await controlCall(run, "eng-1", {
+        cmd: "dispatch",
+        envelope: makeEnvelope(runId, "eng-1", "T-FENCE-2"),
+        attempt_id: "fence-attempt-2",
+        requested_epoch: null,
+      });
+      expect(second["accepted"]).toBe(true);
+      expect(
+        await waitFor(
+          async () => (await readTaskRecord(taskRecordPath(wp, "T-FENCE-2"))) !== null,
+          20_000,
+        ),
+      ).toBe(true);
+
+      const events = await readEvents(wp.eventsJsonl);
+
+      /**
+       * THE CRITERION. The pre-ack `agent_start` is recorded as prior, with
+       * the stream's true seq on the record — not merely dropped, and not
+       * merely counted.
+       */
+      const refused = events.filter(
+        (e) => e["type"] === "epoch_attribution" && e["event_type"] === "agent_start",
+      );
+      expect(refused).toHaveLength(1);
+      expect(refused[0]?.["attributed"]).toBe("prior");
+      const refusedSeq = refused[0]?.["seq"];
+      expect(typeof refusedSeq).toBe("number");
+
+      /**
+       * THE POSITIVE CONTROL, and the half that stops this passing on a fence
+       * that refuses everything: epoch 2's window DID open, exactly once, on
+       * the `agent_start` that came after the ack — at a strictly higher seq
+       * than the one refused above. Both numbers come from the supervisor's
+       * own records, so this is the stream's true offsets being compared, not
+       * a pair this test chose.
+       */
+      const started2 = events.filter(
+        (e) => e["type"] === "epoch_started" && e["epoch"] === 2,
+      );
+      expect(started2).toHaveLength(1);
+      expect(started2[0]?.["seq"] as number).toBeGreaterThan(refusedSeq as number);
+
+      /**
+       * And the run still works. A fence that refused the post-ack start too
+       * would leave T-FENCE-2 unsettled or settled by the wrong path, so the
+       * verdict is asserted rather than assumed — it is what separates "the
+       * stale start was refused" from "nothing was accepted".
+       */
+      const record = await readTaskRecord(taskRecordPath(wp, "T-FENCE-2"));
+      expect(record?.verdict).toBe("success");
+
+      await controlCall(run, "eng-1", { cmd: "shutdown" }).catch(() => {});
+      await waitFor(async () => (await processStartTime(pid)) === null, 5_000);
+    },
+    // Four gates: idle (20 s), two settle waits (20 s each), shutdown (5 s).
+    // No CLI and no container, so neither cliBudget nor containerBudget
+    // describes this test's cost (ISC-273).
+    gateBudget([20_000, 20_000, 20_000, 5_000]),
+  );
+});

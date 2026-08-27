@@ -1,0 +1,22 @@
+{
+  "scenario": "stale-start",
+  "_comment": "ISC-141: a stale agent_start reaches the supervisor BEFORE the ack of the prompt that allocated the live epoch. That is the only region of the stream in which EpochManager.attribute can answer `prior` for a live epoch — everything after the ack has a higher seq by construction, because RpcClient dispatches records in order and synchronously. bindStart must refuse to open epoch 2's window on it, and the REAL agent_start that follows the ack must open it: without that second half the scenario is satisfied by a fence that refuses everything.",
+  "steps": [
+    {
+      "on": "prompt",
+      "emit": [
+        { "type": "agent_start" },
+        { "type": "agent_end", "messages": [], "willRetry": false }
+      ]
+    },
+    {
+      "on": "prompt",
+      "emit_before_ack": [{ "type": "agent_start" }],
+      "emit": [
+        { "type": "agent_start" },
+        { "delay_ms": 300 },
+        { "type": "agent_end", "messages": [], "willRetry": false }
+      ]
+    }
+  ]
+}
