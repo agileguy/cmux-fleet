@@ -471,19 +471,77 @@ describe("scanOutboxFiles — containment holds at the roots (§12.5)", () => {
     }
   });
 
+  /**
+   * The attack, asserted as an OUTCOME — because which defence catches it is
+   * not ours to choose.
+   *
+   * This test used to claim "realpath resolves this INSIDE the outbox — the
+   * inode's other name is invisible from here", and pinned the `nlink`
+   * refusal on the strength of it. That premise is only USUALLY true.
+   * `realpath(3)` may return ANY of a hard-linked inode's names, and on
+   * macOS/APFS it periodically returns the ORIGINAL one — at which point the
+   * containment check fires first and the reason reads
+   * `file escapes the outbox (→ …/private/id_rsa)`, which contains no
+   * "link" at all. Measured, not inferred: over 60 fresh scans of this exact
+   * fixture, 17 took the containment branch and 43 took `nlink` — 28%, which
+   * is the ~25% suite flake this test had been contributing.
+   *
+   * Both branches are correct refusals of the same attack, so the outcome is
+   * what is asserted here: nothing accepted, and the reason is one of the two
+   * legitimate defences rather than an unrelated failure (EMFILE, "vanished",
+   * the descriptor cap) that would refuse it for reasons that are not
+   * security properties at all.
+   *
+   * The `nlink` check itself is NOT left unpinned — pinning it needs a
+   * fixture where containment cannot fire, which is the test immediately
+   * below.
+   */
   test("a hard link to a file outside the outbox is refused", async () => {
     const { tmp, loc, secret } = await outboxWithSecret();
     try {
       const files = join(loc.workerOutboxDir, "T-1", "files");
       await mkdir(files, { recursive: true });
-      // realpath resolves this INSIDE the outbox — the inode's other name is
-      // invisible from here, which is exactly why nlink is the check.
       await link(secret, join(files, "innocent.txt"));
       const scan = await scanHeld(loc);
       expect(scan.safe).toEqual([]);
-      expect(scan.refused.map((r) => r.reason).join(" ")).toContain("link");
+      expect(scan.refused).toHaveLength(1);
+      expect(
+        scan.refused[0]!.reason,
+        `refused, but by neither containment nor nlink: ${JSON.stringify(scan.refused)}`,
+      ).toMatch(/^file has \d+ links;|^file escapes the outbox \(/);
     } finally {
       await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The `nlink` check, pinned on its own — the half the test above cannot
+   * hold on to.
+   *
+   * Both names live INSIDE the outbox, so `realpath` resolves to a contained
+   * path whichever one APFS hands back and the containment check CANNOT be
+   * what refuses this. Only link count is left. Deleting the `nlink > 1`
+   * branch turns both entries green here, which is the property the previous
+   * single test was reaching for and dropped whenever the race went the other
+   * way.
+   *
+   * That a second name inside the outbox is a less alarming scenario than a
+   * stolen key is the point: `nlink` cannot tell the two apart, and this is
+   * the fixture that proves the check reads link count rather than location.
+   */
+  test("link count alone refuses, with containment unable to fire", async () => {
+    const files = join(loc.workerOutboxDir, "T-1", "files");
+    await mkdir(files, { recursive: true });
+    await writeFile(join(files, "artifact.txt"), "content\n");
+    await link(join(files, "artifact.txt"), join(files, "second-name.txt"));
+
+    const scan = await scanHeld(loc);
+    expect(scan.safe).toEqual([]);
+    expect(scan.refused).toHaveLength(2);
+    for (const r of scan.refused) {
+      expect(r.reason, `not the nlink refusal: ${JSON.stringify(scan.refused)}`).toMatch(
+        /^file has 2 links;/,
+      );
     }
   });
 
