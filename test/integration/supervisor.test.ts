@@ -21,7 +21,7 @@
 import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, mkdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -2211,6 +2211,43 @@ describe("the supervisor records a quiesce tree hash at settle (ISC-154)", () =>
       const record = await readTaskRecord(taskRecordPath(wp, "T-TREE-NONE"));
       expect(record?.verdict).toBe("success");
       expect(record?.tree_hash).toBeNull();
+
+      /**
+       * And the null SAYS WHY — which the null alone never did.
+       *
+       * A null `tree_hash` has three origins: the sampler ran and could not
+       * answer (`quiesce_sample_failed`), the epoch owned no workdir so
+       * nothing was sampled (this case), or the sampler was never reached.
+       * ISC-154 gave the first one a reason and left the other two sharing
+       * one silence — so a reader who found no failure event could not tell
+       * "correctly skipped" from "silently broken".
+       *
+       * That was not hypothetical: on 2026-08-27 a `container-live` run
+       * failed on a null quiesce hash and the cause could not be recovered,
+       * because the only diagnostic that existed had nothing to show and no
+       * way to say whether that meant anything.
+       *
+       * Polled rather than read once: `logEvent` queues appends on a chain
+       * shared with the worker's stderr, so the record can be enqueued before
+       * the task record and land after it.
+       */
+      const skipped = await waitFor(async () => {
+        const raw = await readFile(wp.eventsJsonl, "utf8").catch(() => "");
+        return raw.includes('"quiesce_sample_skipped"');
+      }, 5_000);
+      const events = await readFile(wp.eventsJsonl, "utf8").catch(() => "");
+      expect(
+        skipped,
+        `no quiesce_sample_skipped event in ${wp.eventsJsonl}:\n${events.slice(-2000)}`,
+      ).toBe(true);
+      const reasons = events
+        .split("\n")
+        .filter((l) => l.includes('"quiesce_sample_skipped"'))
+        .map((l) => (JSON.parse(l) as { reason?: string }).reason ?? "");
+      expect(reasons).toHaveLength(1);
+      // The REASON, not merely the event: an event type with an empty reason
+      // is the same silence wearing a name.
+      expect(reasons[0]).toContain("no host workdir");
     },
     // 1 supervisor launch + 1 dispatch. No worktree by construction, so
     // `worktreeContentHash` is never reached and costs no git spawns.

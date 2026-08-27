@@ -492,6 +492,64 @@ function json<T>(r: CliResult, what: string): T {
  * failure with its own, so an unreadable or malformed log degrades to a note
  * saying so.
  */
+/**
+ * WHY the quiesce sample produced no hash — read from the log the supervisor
+ * actually writes it to.
+ *
+ * ISC-154 added `quiesce_sample_failed` so that "the supervisor took no
+ * quiesce sample" would stop being a bare `null`. It half worked: the reason
+ * is written to `events.jsonl` inside the run directory, and a CI runner is
+ * thrown away with that file on it. On 2026-08-27 the assertion below failed
+ * in `container-live` and the reason was, in practice, unrecoverable — the
+ * diagnostic existed and could not be read, which is the same defect it was
+ * written to remove, one layer out.
+ *
+ * So the reason travels in the FAILURE MESSAGE, the same way `toolErrorDigest`
+ * already carries the model's erroring tool calls. Same file, same shape,
+ * different event type.
+ *
+ * The three origins are reported distinctly, because they are three different
+ * bugs: `quiesce_sample_failed` (the sampler ran and could not answer),
+ * `quiesce_sample_skipped` (the epoch owned no workdir, so nothing was
+ * sampled), and neither (the sampler was never reached at all).
+ *
+ * It POLLS rather than reading once. `logEvent` queues appends on a chain
+ * shared with the worker's stderr, so under a flood the record can be
+ * enqueued before the task record is written and land on disk after it. A
+ * single read that lost that race would report "no event" and send a reader
+ * looking for a third bug that is not there.
+ */
+async function quiesceSampleDigest(eventsJsonl: string): Promise<string> {
+  const deadline = performance.now() + 3_000;
+  for (;;) {
+    let raw = "";
+    try {
+      raw = await readFile(eventsJsonl, "utf8");
+    } catch (e) {
+      return `(could not read ${eventsJsonl}: ${e instanceof Error ? e.message : String(e)})`;
+    }
+    const found: string[] = [];
+    for (const line of raw.split("\n")) {
+      if (line.trim() === "") continue;
+      let rec: { type?: string; reason?: string; ts?: string };
+      try {
+        rec = JSON.parse(line) as typeof rec;
+      } catch {
+        continue; // a torn last line is not worth failing the diagnostic over.
+      }
+      if (rec.type !== "quiesce_sample_failed" && rec.type !== "quiesce_sample_skipped") continue;
+      found.push(`${rec.ts ?? "(no ts)"} ${rec.type}: ${rec.reason ?? "(no reason recorded)"}`);
+    }
+    if (found.length > 0) return found.join("\n");
+    if (performance.now() > deadline) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return (
+    "(no quiesce_sample_failed or quiesce_sample_skipped event within 3s of the task record. " +
+    "The sampler was not reached at all — look above `worktreeContentHash` in settle, not inside it.)"
+  );
+}
+
 async function toolErrorDigest(eventsJsonl: string): Promise<string> {
   let raw: string;
   try {
@@ -723,7 +781,11 @@ describe("the whole chain, in one motion (ISC-290)", () => {
        */
       expect(record!.reason).toBe("quiesced");
       expect(record!.epoch).toBe(1);
-      expect(record!.tree_hash, "the supervisor took no quiesce sample").not.toBeNull();
+      expect(
+        record!.tree_hash,
+        "the supervisor took no quiesce sample. What the supervisor said about it:\n" +
+          (await quiesceSampleDigest(wp.eventsJsonl)),
+      ).not.toBeNull();
 
       // --- the container the chain actually ran in is REAL and still up.
       const state = await readWorkerState(wp);

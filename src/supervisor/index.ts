@@ -783,9 +783,36 @@ async function main(): Promise<void> {
      * What changes is that the next occurrence can be read rather than
      * guessed at.
      */
+    /**
+     * THE THIRD CAUSE, named — because "no failure event" was ambiguous.
+     *
+     * A null `tree_hash` has three origins and the diagnostic above covered
+     * only one of them. `worktreeContentHash` failing emits
+     * `quiesce_sample_failed` with a reason; but `settledWorkdir === null`
+     * emits NOTHING and produces the identical null, so a reader who found no
+     * failure event could not tell "the sampler ran and could not answer"
+     * from "the sampler was never called" from "the event has not flushed
+     * yet". Three different bugs behind one silence.
+     *
+     * Measured, not hypothetical: on 2026-08-27 a `container-live` run failed
+     * `expect(record.tree_hash).not.toBeNull()` and the reason was
+     * unrecoverable — the diagnostic added for exactly that moment had no
+     * event to show, and nothing said whether that meant it had not fired or
+     * had not been reached.
+     *
+     * A skip is not a failure and is not logged as one: a task dispatched
+     * with no worktree is a legitimate shape (`"unset"` and `""` are the
+     * envelope's two spellings of it), so this records WHY the sample was not
+     * taken rather than complaining that it wasn't.
+     */
     const treeHash =
       settledWorkdir === null
-        ? null
+        ? (logEvent({
+            type: "quiesce_sample_skipped",
+            task: settled.task_id,
+            reason: "the epoch owns no host workdir, so there is no tree to sample",
+          }),
+          null)
         : await worktreeContentHash(settledWorkdir, {
             onFailure: (reason) =>
               logEvent({ type: "quiesce_sample_failed", task: settled.task_id, reason }),
