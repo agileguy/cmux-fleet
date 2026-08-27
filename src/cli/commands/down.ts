@@ -1062,9 +1062,20 @@ type Anchor =
  *    `null` (no registry entry, or one whose pid disagrees with `state.json`)
  *    AND the empty string, which is NOT a neutral value: `""` is precisely
  *    what both writers persist when their own capture failed
- *    (`(await processStartTime(process.pid)) ?? ""` in `startRegistryDaemon`
- *    and in `supervisor/index.ts`), and `RegistryWorkerSchema.started` is a
- *    bare `z.string()` so a truncated or hand-edited file yields it too —
+ *    (`(await processStartTime(process.pid).catch(() => null)) ?? ""` in
+ *    `startRegistryDaemon` and in `supervisor/index.ts`), and
+ *    `RegistryWorkerSchema.started` is a bare `z.string()` so a truncated or
+ *    hand-edited file yields it too —
+ *
+ *    THE `.catch` IS LOAD-BEARING AND WAS ADDED 2026-08-26. This paragraph
+ *    used to quote both writers as plain `(await processStartTime(…)) ?? ""`,
+ *    and that form never produced `""` at all: since ISC-192
+ *    `processStartTime` THROWS on a read it cannot trust, so `??` never saw
+ *    the failure and both writers DIED instead of degrading. The refusal
+ *    described here was therefore unreachable from a real broken-`ps` writer
+ *    — it could only be reached from a truncated or hand-edited file. See
+ *    `test/integration/writer-identity-capture.test.ts`, which makes each
+ *    writer's `ps` fail and asserts the sentinel it is supposed to persist.
  *    and stale files of unknown provenance are the entire premise of `down`.
  *    Treating `""` as "no constraint" made a failed capture DOWNGRADE to the
  *    rung-0 self-anchor, which on the daemon rung means `signalGuarded(…,
