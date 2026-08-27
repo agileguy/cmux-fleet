@@ -288,6 +288,24 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-48",
+    grade: "[x]",
+    claim:
+      "The impersonation target reaches the probe from CI. The grade rests on that probe RUNNING " +
+      "in the container job, and it self-skips when the variable is empty — so a workflow that " +
+      "stopped passing the secret would skip it and look green.",
+    // The ASSIGNMENT, not any mention: a TOTAL_EXPECTED derivation comment
+    // names the variable too, and a claim that counted both would stay green
+    // if the assignment were deleted and the comment left behind.
+    argv: [
+      "grep",
+      "-nE",
+      "^ +PIFLEET_IMPERSONATION_TARGET: \\$\\{\\{ secrets\\.GCP_IMPERSONATION_TARGET \\}\\}$",
+      ".github/workflows/ci.yml",
+    ],
+    expect: 1,
+  },
+  {
     isc: "ISC-290",
     grade: "[x]",
     claim:

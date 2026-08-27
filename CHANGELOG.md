@@ -4,6 +4,40 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **ISC-48 closed: the minted token's identity is asked of GOOGLE, not asserted from the argv.** The
+  criterion names a TOKEN, and until ISC-248 no `up` path minted one — so the previous close-out
+  could only check the PLAN (every grant line names the SA, the operator's account never consulted),
+  which is a real property and not this one.
+
+  Both of the entry's stated blockers turned out to be false, and neither was removed by anything
+  done to this criterion. *"`gcloudMinter` has NO CALLER ANYWHERE IN `src/cli/**`"* died with
+  ISC-248. *"No real granted SA was available to test against"* was environmental: the old refusal
+  was correct on its facts — the only discoverable service accounts belonged to a live production
+  project — but a target now exists in the SAME personal project as the CI identity, with
+  `roles/iam.serviceAccountTokenCreator` already granted to `cmux-fleet-ci`. **Nothing was created
+  to close this**; the SA, the IAM binding and the `GCP_IMPERSONATION_TARGET` secret all already
+  existed and were simply wired nowhere.
+
+  The probe mints through the production `gcloudMinter` with impersonation and sends the token to
+  the standard introspection endpoint — in a POST **body**, since a bearer token in a query string
+  lands in logs and proxy history — then asserts the identity returned is the SA. Asserting that
+  `mintArgv` carried `--impersonate-service-account` would prove we *asked* for impersonation, not
+  that we got it. The contrast case is the load-bearing half: the same minter WITHOUT impersonation
+  must not come back as the SA, or a tokeninfo that named the SA unconditionally would read as
+  success.
+
+  **The delegation caveat stands and is not closed by this.** At real mint time the operator's ADC
+  IS used to obtain the SA token, so "the launching user's account is never consulted" is true of
+  planning and cannot be true of the mint itself. What the criterion claims, and all it claims, is
+  that the issued token's identity is the SA.
+
+  **CI-only, stated rather than hidden:** the `tokenCreator` binding is granted to `cmux-fleet-ci`
+  alone, so minting impersonated from a developer host returns `IAM_PERMISSION_DENIED` and the probe
+  self-skips with a message naming what it needs. Granting the role to a human account to make it
+  locally runnable was deliberately not done.
+
 ### Changed
 
 - **The chain probe tolerates ONE tool flail the model recovers from, instead of demanding zero.**

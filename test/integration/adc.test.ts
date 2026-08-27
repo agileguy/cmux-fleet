@@ -809,3 +809,90 @@ describe.skipIf(!DOCKER)("ISC-46: gcloud fails without a credential, succeeds wi
     120_000,
   );
 });
+
+/**
+ * ISC-48 — with `impersonate_service_account` set, the token's identity is
+ * the SA, not the launching user's account.
+ *
+ * The criterion names a TOKEN, and until ISC-248 no `up` path minted one, so
+ * the previous close-out could only check the PLAN: `up-wiring.test.ts` proves
+ * every grant line names the configured SA and that the operator's account is
+ * never even asked for. That is a real property and it is not this one.
+ *
+ * Two things had to become true before this could be probed, and both did
+ * without anything being done to this criterion:
+ *
+ *   1. `gcloudMinter` gained a production caller (ISC-248), so a token exists
+ *      whose identity can be asked about.
+ *   2. A service account this suite may legitimately impersonate exists. The
+ *      old entry said none was available and that the only discoverable ones
+ *      belonged to a live production project — impersonating those for a
+ *      personal project's suite was correctly refused. The target here lives
+ *      in the SAME personal project as the CI identity and exists for this.
+ *
+ * IDENTITY IS ASKED OF GOOGLE, not asserted from the argv. Checking that
+ * `mintArgv` carried `--impersonate-service-account` would prove we asked for
+ * impersonation, not that we GOT it — and the whole criterion is about which
+ * identity the issued token actually carries. The token goes to the standard
+ * introspection endpoint in a POST BODY rather than a query string, because a
+ * bearer token in a URL lands in logs and proxy history.
+ *
+ * The contrast case is the load-bearing half: an UN-impersonated mint through
+ * the same function must NOT come back as the SA. Without it, a tokeninfo
+ * response that named the SA for every token — or a target string that
+ * happened to equal the operator's own account — would read as success.
+ */
+const IMPERSONATION_TARGET = process.env["PIFLEET_IMPERSONATION_TARGET"] ?? "";
+if (HOST_ADC_PRESENT && IMPERSONATION_TARGET === "") {
+  console.warn(
+    "[skip] the ISC-48 impersonation probe needs PIFLEET_IMPERSONATION_TARGET set to a service " +
+      "account this identity may impersonate. CI supplies it from GCP_IMPERSONATION_TARGET.",
+  );
+}
+
+/** The identity Google says a token carries. Never logs the token. */
+async function tokenIdentity(token: string): Promise<string> {
+  const res = await fetch("https://oauth2.googleapis.com/tokeninfo", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ access_token: token }),
+  });
+  if (!res.ok) throw new Error(`tokeninfo returned HTTP ${res.status}`);
+  const body = (await res.json()) as { email?: string; sub?: string };
+  return body.email ?? body.sub ?? "(tokeninfo named no identity)";
+}
+
+describe.skipIf(!HOST_ADC_PRESENT || IMPERSONATION_TARGET === "")(
+  "the minted token's identity (ISC-48)",
+  () => {
+    test(
+      "with impersonate_service_account set, the token is the SA's, not the operator's (ISC-48)",
+      async () => {
+        const impersonated = await gcloudMinter(realExec, {
+          impersonateServiceAccount: IMPERSONATION_TARGET,
+          identity: IMPERSONATION_TARGET,
+        })();
+        expect(impersonated.token.length).toBeGreaterThan(0);
+        expect(await tokenIdentity(impersonated.token)).toBe(IMPERSONATION_TARGET);
+
+        /*
+         * The contrast, and it is what makes the assertion above mean
+         * something: the same production minter WITHOUT impersonation must
+         * come back as somebody else. A tokeninfo that named the SA
+         * unconditionally would satisfy the first assertion alone.
+         */
+        const plain = await mintReal();
+        expect(await tokenIdentity(plain)).not.toBe(IMPERSONATION_TARGET);
+      },
+      /**
+       * ISC-274: literal KEPT. Two spawn sites are reachable (`gcloud` twice),
+       * so `cliBudget(2)` is the mechanical answer and it does NOT govern —
+       * the wait is two real mints plus two round-trips to Google's
+       * introspection endpoint, none of which is process startup. Same
+       * derivation and same ceiling as this file's other live-credential
+       * probes, which wait on the identical round-trip.
+       */
+      120_000,
+    );
+  },
+);

@@ -640,7 +640,15 @@ jobs:
           # empty precisely because the auth step above makes HOST_ADC_PRESENT
           # true here, so an ADC-gated probe that SKIPPED in this job would be
           # the self-skipping test the guard exists to catch.
-          TOTAL_EXPECTED: "106"
+          #
+          # 106 -> 107: ISC-48's identity probe in adc.test.ts, which asks
+          # Google which identity an impersonated token carries. DERIVED by
+          # the hand method, same conditions (bun 1.3.11, PIFLEET_DOCKER unset,
+          # PIFLEET_IMPERSONATION_TARGET unset, no listener on :8000):
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container}.test.ts
+          #     -> 6 pass, 101 skip, 0 fail. Ran 107 tests across 12 files.
+          # One added gated case, one more skip, pass unmoved at 6.
+          TOTAL_EXPECTED: "107"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -689,6 +697,17 @@ jobs:
           # self-skipping again fails the job BY NAME instead of by arithmetic,
           # which is the whole reason skips are pinned by name here.
           EXPECTED_HOST_ADC_MINT_SKIPS: ""
+          # ISC-48's probe asks GOOGLE which identity a minted token carries,
+          # which needs a service account this CI identity may impersonate.
+          # The secret holds an SA EMAIL, not a credential: `cmux-fleet-ci`
+          # already holds `roles/iam.serviceAccountTokenCreator` on it, and
+          # that binding — not this string — is what grants anything.
+          #
+          # Absent locally, so the probe self-skips on a developer host and
+          # says so. It is NOT pinned in EXPECTED_HOST_ADC_MINT_SKIPS because
+          # here the variable IS set, so skipping in this job would mean the
+          # secret went missing — which must fail the build, not pass quietly.
+          PIFLEET_IMPERSONATION_TARGET: ${{ secrets.GCP_IMPERSONATION_TARGET }}
           # The relay suite's TWO live-oMLX probes, pinned by name for the same
           # reason and by the same mechanism (ISC-257, and now ISC-258).
           #
