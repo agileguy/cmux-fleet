@@ -6,6 +6,26 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- **The `scanOutboxFiles` hard-link test stops pinning WHICH defence catches the attack, and the
+  `nlink` check gains a fixture that can pin it.** `test/unit/harvest-outbox.test.ts` asserted the
+  refusal reason contained `"link"`, on a stated premise that "realpath resolves this INSIDE the
+  outbox — the inode's other name is invisible from here". That premise is only usually true.
+  `realpath(3)` may return ANY of a hard-linked inode's names, and on macOS/APFS it periodically
+  returns the ORIGINAL one — the containment check then fires first with
+  `file escapes the outbox (→ …/private/id_rsa)`, which contains no `"link"` at all.
+
+  **Measured, not inferred:** over 60 fresh scans of that exact fixture, 17 took the containment
+  branch and 43 took `nlink` — 28%, which accounts for the intermittent unit-suite failure seen at
+  roughly one run in four. Both branches are correct refusals of the same attack; only the
+  assertion was wrong.
+
+  The attack test now asserts the OUTCOME — nothing accepted, and the reason is one of the two
+  legitimate defences rather than an unrelated failure (EMFILE, "vanished", the descriptor cap)
+  that would refuse it for reasons that are not security properties. Pinning `nlink` specifically
+  needs a fixture where containment CANNOT fire, so a second test hard-links two names that both
+  live inside the outbox: `realpath` resolves to a contained path whichever name APFS returns, and
+  link count is the only check left. Deleting the `nlink > 1` branch fails both tests.
+
 - **BREAKING: `pifleet down --force-identity` now takes a pid, and is repeatable.** As a bare
   boolean the flag meant "re-anchor on whatever holds the recorded pid, **for every worker in the
   run**" — the rung-0 self-anchor that ISC-272's criterion forbids in as many words ("never a start
