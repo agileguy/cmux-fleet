@@ -22,11 +22,29 @@ All notable changes to this project are documented here.
 
   The probe mints through the production `gcloudMinter` with impersonation and sends the token to
   the standard introspection endpoint — in a POST **body**, since a bearer token in a query string
-  lands in logs and proxy history — then asserts the identity returned is the SA. Asserting that
-  `mintArgv` carried `--impersonate-service-account` would prove we *asked* for impersonation, not
-  that we got it. The contrast case is the load-bearing half: the same minter WITHOUT impersonation
-  must not come back as the SA, or a tokeninfo that named the SA unconditionally would read as
-  success.
+  lands in logs and proxy history. Asserting that `mintArgv` carried `--impersonate-service-account`
+  would prove we *asked* for impersonation, not that we got it.
+
+  **It took two attempts to ask correctly.** The first version asserted `email === <SA>` and failed
+  in CI with `(tokeninfo named no identity)`. That was a wrong assumption, not a product defect: an
+  impersonated token is minted with `cloud-platform` scope **alone** — no `openid`, no
+  `userinfo.email` — so tokeninfo does not report `email` for it, while an operator's ADC token
+  (whose scopes include both) does. The fallback string was a second defect in its own right, a
+  diagnostic that reported only its own inability to answer; the helper now returns the claims
+  whole, which is safe because the response echoes claims and never the credential.
+
+  Three assertions, in order: a **control** — the un-impersonated mint reports an `email`, without
+  which the method cannot see identity at all and nothing after it means anything; **substitution**
+  — the impersonated token does not carry the operator's email, which is the criterion's literal
+  *"not the launching user's account"*; and **positively the SA** — `sub` equals the service
+  account's numeric `uniqueId`, resolved from the SA itself rather than hardcoded, so the comparison
+  is between two things Google said.
+
+  **One IAM change was made**, recorded here rather than left to be discovered: `cmux-fleet-ci` held
+  no project-level roles and no permission to READ the SA it may impersonate, so `service-accounts
+  describe` would have failed in CI. It was granted `roles/iam.serviceAccountViewer` on that single
+  service account — read-only, one resource. The alternative was hardcoding the `uniqueId` into the
+  test, which would compare a constant against itself the day the SA is recreated.
 
   **The delegation caveat stands and is not closed by this.** At real mint time the operator's ADC
   IS used to obtain the SA token, so "the launching user's account is never consulted" is true of

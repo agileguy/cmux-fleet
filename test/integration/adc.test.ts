@@ -850,16 +850,37 @@ if (HOST_ADC_PRESENT && IMPERSONATION_TARGET === "") {
   );
 }
 
-/** The identity Google says a token carries. Never logs the token. */
-async function tokenIdentity(token: string): Promise<string> {
+/**
+ * What Google says about a token. Never logs the token itself.
+ *
+ * Returns the claims rather than one string, because the FIRST version of
+ * this returned `email ?? sub ?? "(tokeninfo named no identity)"` and the
+ * probe failed in CI with exactly that fallback — a diagnostic that reported
+ * only its own inability to answer. The response has no token material in it
+ * (it echoes claims, not the credential), so returning it whole costs nothing
+ * and is the difference between "something is wrong" and knowing what.
+ */
+interface TokenClaims {
+  email?: string;
+  sub?: string;
+  azp?: string;
+  aud?: string;
+  scope?: string;
+}
+
+async function tokenClaims(token: string): Promise<TokenClaims> {
   const res = await fetch("https://oauth2.googleapis.com/tokeninfo", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ access_token: token }),
   });
   if (!res.ok) throw new Error(`tokeninfo returned HTTP ${res.status}`);
-  const body = (await res.json()) as { email?: string; sub?: string };
-  return body.email ?? body.sub ?? "(tokeninfo named no identity)";
+  return (await res.json()) as TokenClaims;
+}
+
+/** The claims, safe to print: identity fields only, never scope-bearing secrets. */
+function describeClaims(c: TokenClaims): string {
+  return JSON.stringify({ email: c.email, sub: c.sub, azp: c.azp, scope: c.scope });
 }
 
 describe.skipIf(!HOST_ADC_PRESENT || IMPERSONATION_TARGET === "")(
@@ -873,24 +894,68 @@ describe.skipIf(!HOST_ADC_PRESENT || IMPERSONATION_TARGET === "")(
           identity: IMPERSONATION_TARGET,
         })();
         expect(impersonated.token.length).toBeGreaterThan(0);
-        expect(await tokenIdentity(impersonated.token)).toBe(IMPERSONATION_TARGET);
+        const saClaims = await tokenClaims(impersonated.token);
 
         /*
-         * The contrast, and it is what makes the assertion above mean
-         * something: the same production minter WITHOUT impersonation must
-         * come back as somebody else. A tokeninfo that named the SA
-         * unconditionally would satisfy the first assertion alone.
+         * The control FIRST, because it is what proves the method can see an
+         * identity at all. An un-impersonated mint through the same function
+         * carries the operator's own ADC scopes, which include `openid` and
+         * `userinfo.email` — so tokeninfo reports `email`. If this assertion
+         * ever fails, the method is broken and nothing below means anything.
          */
-        const plain = await mintReal();
-        expect(await tokenIdentity(plain)).not.toBe(IMPERSONATION_TARGET);
+        const operatorClaims = await tokenClaims(await mintReal());
+        expect(
+          operatorClaims.email,
+          `the control mint reported no email, so tokeninfo cannot see identity here: ` +
+            describeClaims(operatorClaims),
+        ).toBeDefined();
+
+        /*
+         * SUBSTITUTION, which is what the criterion says: "the SA, NOT the
+         * launching user's account". If impersonation had silently fallen
+         * back to the operator, this token would carry the operator's email
+         * exactly as the control does. It does not.
+         */
+        expect(
+          saClaims.email,
+          `the impersonated token carries the OPERATOR's identity — impersonation did not ` +
+            `take effect: ${describeClaims(saClaims)}`,
+        ).not.toBe(operatorClaims.email);
+
+        /*
+         * And POSITIVELY the SA. An impersonated token is minted with
+         * cloud-platform scope alone — no `openid`, no `userinfo.email` — so
+         * tokeninfo omits `email` and identifies the principal by `sub`, the
+         * service account's numeric unique id. That id is resolved from the
+         * SA itself rather than hardcoded, so this compares two things Google
+         * told us rather than one thing we assumed.
+         */
+        const described = await realExec([
+          "gcloud",
+          "iam",
+          "service-accounts",
+          "describe",
+          IMPERSONATION_TARGET,
+          "--format=value(uniqueId)",
+        ]);
+        expect(
+          described.code,
+          `could not resolve the SA's uniqueId: ${described.stderr.trim()}`,
+        ).toBe(0);
+        expect(
+          saClaims.sub,
+          `the impersonated token's principal is not the SA. token claims: ` +
+            `${describeClaims(saClaims)}; SA uniqueId: ${described.stdout.trim()}`,
+        ).toBe(described.stdout.trim());
       },
       /**
-       * ISC-274: literal KEPT. Two spawn sites are reachable (`gcloud` twice),
-       * so `cliBudget(2)` is the mechanical answer and it does NOT govern —
-       * the wait is two real mints plus two round-trips to Google's
-       * introspection endpoint, none of which is process startup. Same
-       * derivation and same ceiling as this file's other live-credential
-       * probes, which wait on the identical round-trip.
+       * ISC-274: literal KEPT. THREE spawn sites are reachable (the
+       * impersonated mint, the control mint, and `service-accounts
+       * describe`), so `cliBudget(3)` is the mechanical answer and it does
+       * NOT govern — the wait is two real mints plus two round-trips to
+       * Google's introspection endpoint and one IAM read, none of which is
+       * process startup. Same derivation and same ceiling as this file's
+       * other live-credential probes, which wait on the identical round-trip.
        */
       120_000,
     );
