@@ -71,11 +71,9 @@
  * control socket, so neither can be moved by how busy this test RUNNER is.
  *
  * They CAN be moved by how busy the SUPERVISOR is, which is a different thing
- * and is not a flaw in the choice of endpoints — it is the residual error that
- * `QUIET_SKEW_MS` below exists to absorb. See the comment on that constant.
- * A floor on `min(quiet)` is kept as a cheap backstop: it is close to the
- * arithmetic floor the scenario guarantees, and it FAILED on the measurement
- * this replaces.
+ * and is not a flaw in the choice of endpoints — it is a residual error, and
+ * the backstop below is shaped around it rather than fudged for it. See
+ * `QUIET_LATENCY_FLOOR_MS`.
  *
  * Two guards keep that from passing vacuously. The floods are verified to have
  * actually happened — the drained bytes are counted out of `events.jsonl`, so
@@ -148,47 +146,59 @@ const QUIET_DEADLINE_MS = 10_000;
 const QUIET_TURN_DELAY_MS = 50;
 
 /**
- * Processing-time skew allowed under the floor, and why the floor is not 50.
+ * The backstop on the measurement, and why it reads the MAXIMUM rather than
+ * every worker.
  *
  * The scripted 50 ms sleep happens in the CHILD, between writing `agent_start`
  * and writing `agent_end`. Both ends of the measured interval are stamped when
- * the SUPERVISOR processes those events, not when the child emitted them, so
- * the measurement is the child's 50 ms plus (or minus) however differently the
- * supervisor was delayed reaching each end.
+ * the SUPERVISOR processes those events, so the measurement is the child's
+ * 50 ms plus (or minus) however differently the supervisor was delayed
+ * reaching each end. That difference is not symmetric here, and this test is
+ * what makes it so: at the moment a quiet turn starts the supervisor is
+ * draining ~1.6 MB from two flooding workers, so it can reach `agent_start`
+ * LATE and `agent_end` promptly. A late start and a prompt end shorten the
+ * interval, and the measurement comes in UNDER the sleep that really happened.
  *
- * That difference is not symmetric here, and this test is what makes it so: at
- * the moment a quiet turn starts, the supervisor is draining ~1.6 MB from two
- * flooding workers, so it can reach `agent_start` LATE; by the time
- * `agent_end` lands 50 ms later it may have caught up and reach that one
- * promptly. A late start and a prompt end shorten the interval, and the
- * measurement comes in a few milliseconds UNDER the sleep that really happened.
+ * WHY THE PREVIOUS SHAPE HAD TO GO, stated as the measurement that killed it.
+ * This was `QUIET_TURN_DELAY_MS - QUIET_SKEW_MS` (50 - 10 = 40), asserted on
+ * EVERY quiet worker and again on `min(quiet)`. It was chosen believing the
+ * three samples that motivated it — 35 ms, 35 ms, 49 ms — all came from the
+ * OLD defect, which stamped the start after the dispatch subprocess had
+ * exited. On 2026-08-26 CI produced **35 ms from the current supervisor-side
+ * measurement**, on a run whose only new content was an unrelated test file.
  *
- * This is not hypothetical and was not found by reasoning: CI measured
- * **47 ms** against a floor of 50 and failed, on a run whose only new content
- * was an unrelated test file. Nothing was wrong with the fleet — the turn slept
- * its 50 ms, and the assertion was reading the clock at two moments the
- * scenario deliberately loads.
+ * So 35 ms is both a value the guard must REJECT (the old defect returning)
+ * and a value it must ACCEPT (skew this scenario deliberately induces). A
+ * threshold whose accept-set and reject-set overlap does not discriminate; it
+ * reports runner load as a product failure. Widening it instead — 18 ms of
+ * skew needs a floor near 25 — would stop catching the defect's 35s at all
+ * and leave a guard that cannot fail.
  *
- * 10 ms is chosen to be far wider than that skew and still tight enough to keep
- * the backstop's job. State the cost plainly rather than round it off: the
- * measurement this file replaced reported 35 ms, 35 ms and 49 ms, and a 40 ms
- * floor catches the first two where a 50 ms floor caught all three. The floor
- * is therefore genuinely WEAKER against a near-miss understatement, and that is
- * the price of not reporting this test's own load as a product failure.
+ * WHAT DISCRIMINATES, from 42 measured samples. Three local runs of this file
+ * produced quiet latencies of
  *
- * It is an acceptable price here only because the floor is a backstop and not
- * the measurement: the defect those three numbers came from was stamping the
- * start AFTER the dispatch subprocess had exited, and that spelling is gone —
- * both endpoints are now supervisor-side and cannot include a CLI's teardown at
- * all. The floor guards against a future regression re-introducing a shortened
- * window, and two of the three known samples still trip it. If a 49 ms-class
- * regression is ever a live worry, the fix is a tighter measurement, not a
- * floor tuned so finely that runner load decides whether main is green.
+ *     [53,53,53,53,53,53,53,53,53,54,54,54,54,63]
+ *     [48,53,53,53,53,54,54,54,54,54,54,55,55,59]
+ *     [52,52,52,53,53,53,53,53,53,53,54,54,54,54]
+ *
+ * — min 48, max 63, median 53, i.e. the 50 ms sleep plus a few ms of settle
+ * cost, with at worst 2 ms of skew. Skew shortens SOME intervals. The old
+ * defect shortened EVERY one, systematically, because it added a CLI teardown
+ * to each measurement alike. That is a difference in SHAPE, and the samples
+ * separate on it cleanly: the defect's own three readings have a maximum of
+ * 49, and every honest run above has a maximum of 54 or more.
+ *
+ * So the floor is the TRUE arithmetic floor — the sleep itself, no fudge
+ * constant — applied to the maximum. `QUIET_SKEW_MS` is gone rather than
+ * enlarged: there is no longer a number to tune, and therefore no number that
+ * runner load can tune against us.
+ *
+ * THE PRICE, stated rather than rounded off: one worker reading 35 ms no
+ * longer fails on its own. That is deliberate. Per-worker, 35 ms is
+ * indistinguishable from honest skew — which is precisely why asserting on it
+ * made main's greenness a function of CI contention.
  */
-const QUIET_SKEW_MS = 10;
-
-/** The floor an honest quiet latency clears even at worst-case stamping skew. */
-const QUIET_LATENCY_FLOOR_MS = QUIET_TURN_DELAY_MS - QUIET_SKEW_MS;
+const QUIET_LATENCY_FLOOR_MS = QUIET_TURN_DELAY_MS;
 
 /** Budget for the flooded `events.jsonl` to finish draining before it is counted. */
 const DRAIN_BUDGET_MS = 30_000;
@@ -777,19 +787,24 @@ describe("ISC-158: sixteen live workers, two of them flooding a pipe", () => {
       /**
        * The arithmetic floor, as a backstop on the measurement itself.
        *
-       * A quiet turn contains a scripted 50ms sleep before its `agent_end`, and
-       * settling costs two further `get_state` round trips, so no honest quiet
-       * latency can be meaningfully below 50ms — less `QUIET_SKEW_MS` for the
-       * supervisor-side stamping error that this test's own floods induce, for
-       * which see that constant. This assertion is not decorative: on the
-       * measurement it replaces it FAILED, reporting 35ms — which is how the
-       * old timing was shown to be wrong rather than merely fragile, and which
-       * still fails at this floor.
+       * A quiet turn contains a scripted 50ms sleep before its `agent_end` and
+       * settling costs two further `get_state` round trips, so no honestly
+       * measured quiet latency can come in under the sleep — and at least one
+       * of fourteen must not, because supervisor stamping skew shortens SOME
+       * intervals and not all of them. The defect this stands guard over
+       * shortened every one alike, which is why its own three readings had a
+       * maximum of 49 against the 54+ every honest run produces.
+       *
+       * Asserted on the MAXIMUM and on nothing else. See
+       * `QUIET_LATENCY_FLOOR_MS` for the 42 samples that settled the shape,
+       * and for why the per-worker form had to go rather than be retuned.
        */
-      for (const worker of QUIET) {
-        expect(latency(worker)).toBeGreaterThanOrEqual(QUIET_LATENCY_FLOOR_MS);
-      }
-      expect(Math.min(...quiet)).toBeGreaterThanOrEqual(QUIET_LATENCY_FLOOR_MS);
+      expect(
+        slowestQuiet,
+        `every one of ${QUIET.length} quiet workers measured under the ${QUIET_TURN_DELAY_MS}ms ` +
+          `sleep its own scenario performs. Skew shortens some intervals; only a systematically ` +
+          `wrong measurement shortens all of them. Latencies: ${JSON.stringify(quiet)}`,
+      ).toBeGreaterThanOrEqual(QUIET_LATENCY_FLOOR_MS);
 
       // The flooders were genuinely still flooding. Without this, the ordering
       // below could be satisfied by two workers that emitted nothing and
