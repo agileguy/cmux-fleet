@@ -163,6 +163,19 @@ RUN git config --system --add safe.directory /workspace
 # Pi reads oMLX provider config from that file, NOT from env (SRD Q9).
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/pifleet-entrypoint
 
+# The escape-attempt honeypot (ISC-125) — an AF_UNIX listener bound at
+# /var/run/docker.sock, so that a worker reaching for the Docker socket is
+# RECORDED rather than merely refused. node, not python3: the base image IS
+# node:*-bookworm-slim so it is present in every toolchain variant, while
+# python3 is only a transitive dependency of google-cloud-cli and would vanish
+# with a packaging change nobody here would notice.
+#
+# ADDING THIS COPY MEANS ADDING "honeypot.cjs" TO `BUILD_CONTEXT_ASSETS` in
+# src/container/image.ts. That list is what the image tag's config hash walks;
+# a COPY source missing from it is ISC-270's fail-open, where an edited build
+# context leaves the tag unchanged and a stale image is silently reused.
+COPY --chmod=0755 docker/honeypot.cjs /usr/local/bin/pifleet-honeypot
+
 USER 10001:10001
 WORKDIR /workspace
 ENV PI_OFFLINE=0 \

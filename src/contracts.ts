@@ -930,6 +930,55 @@ export const RepoHazardSchema = z.object({
 export type RepoHazard = z.infer<typeof RepoHazardSchema>;
 
 /**
+ * What the escape-attempt honeypot saw in one worker's container (ISC-125).
+ *
+ * ## Why `armed` is a field and not an assumption
+ *
+ * Every other control in the §5.6 posture PREVENTS, and prevention that works
+ * leaves no record — so a run report with nothing in it cannot distinguish
+ * "no worker ever reached for the Docker socket" from "a worker reached for it
+ * every minute and the flags held". The honeypot exists to close that, and it
+ * opens a second ambiguity of exactly the same shape the moment you write it
+ * down: `attempts: 0` means nothing unless something was listening.
+ *
+ * So this record carries THREE states, not two:
+ *
+ *   armed && attempts === 0    watched, and nothing tried
+ *   armed && attempts > 0      something tried, N times, first and last stamped
+ *   !armed                     NOT WATCHED — no claim about this container
+ *
+ * The third is a finding, not a default. `docker/entrypoint.sh` refuses to
+ * start a worker whose listener will not bind, and the listener's death ends
+ * the container, so an unarmed worker in a finished run means the evidence
+ * channel itself failed — which an operator must be told, in the same place
+ * they would have read the reassuring answer.
+ */
+export const EscapeWatchSchema = z.object({
+  worker: shortStr,
+  /**
+   * An `honeypot_armed` record was collected for this worker — i.e. a listener
+   * bound `/var/run/docker.sock` inside the container and said so through a
+   * channel the worker cannot edit (ISC-172's collected copy).
+   */
+  armed: z.boolean(),
+  /**
+   * Connects observed. Capped rows do not cap this only in the sense that
+   * `flooded` says the true figure is at least this large; see below.
+   */
+  attempts: z.number().int().nonnegative().default(0),
+  /**
+   * The listener stopped emitting per-attempt rows at its cap, so `attempts`
+   * is a FLOOR rather than a count. A worker that connects in a loop would
+   * otherwise bury the rest of the audit trail in its own noise.
+   */
+  flooded: z.boolean().default(false),
+  /** Host-collected timestamps of the first and last recorded attempt. */
+  first_attempt_at: z.string().nullable().default(null),
+  last_attempt_at: z.string().nullable().default(null),
+});
+export type EscapeWatch = z.infer<typeof EscapeWatchSchema>;
+
+/**
  * Control-socket authentication (§12).
  *
  * The socket is filesystem-permission protected today, which is sufficient
@@ -1067,6 +1116,24 @@ export const RunReportSchema = z.object({
   generated_at: z.string(),
   schedule: z.array(ScheduledTaskSchema).max(MAX_ITEMS).default([]),
   merge: z.array(MergePrecheckSchema).max(MAX_ITEMS).default([]),
+  /**
+   * The run's security surface (ISC-125).
+   *
+   * The report carried NO security field at all until this one, which meant a
+   * containment control could fire inside a container and reach no
+   * operator-visible surface anywhere — the detection half and the reporting
+   * half of "detected and reported" were separately absent, and only the first
+   * looked like the hard one.
+   *
+   * `escape_watch` is per-worker rather than a run-level count on purpose: an
+   * unwatched worker beside three watched ones is a specific, actionable fact,
+   * and a run-level "0 attempts" would erase it.
+   */
+  security: z
+    .object({
+      escape_watch: z.array(EscapeWatchSchema).max(MAX_ITEMS).default([]),
+    })
+    .default({ escape_watch: [] }),
   /** Counts by verdict, so a caller need not re-derive them from `schedule`. */
   totals: z
     .object({

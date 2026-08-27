@@ -139,6 +139,24 @@ describe("the --env-file contract with docker/entrypoint.sh", () => {
   });
 
   /**
+   * The escape-attempt honeypot is armed for EVERY worker (ISC-125), with no
+   * role, config or role-override path that can turn it off.
+   *
+   * Asserted across both workers and asserted as the literal `"1"`, because
+   * `docker/entrypoint.sh` compares against that string: any other truthy
+   * spelling ("true", "yes") leaves the listener unstarted, the worker running
+   * perfectly, and the run reported as NOT WATCHED — a failure whose only
+   * symptom is a line in a report nobody reads until something has gone wrong.
+   */
+  test("every worker's env arms the escape-attempt honeypot (ISC-125)", async () => {
+    const loaded = await load(baseDoc());
+    for (const id of ["w1", "wc"]) {
+      const plan = buildWorkerEnv(loaded, resolveWorker(loaded, id), {});
+      expect(plan.vars["PIFLEET_HONEYPOT"]).toBe("1");
+    }
+  });
+
+  /**
    * `models_allowlist` is a GATE on what a worker may be configured with
    * (ISC-190), not a list to register. Registering it would hand every worker
    * a provider entry for models it is not permitted to use.

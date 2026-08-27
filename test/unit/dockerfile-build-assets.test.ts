@@ -61,13 +61,18 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
     expect(sources.length).toBeGreaterThanOrEqual(6);
 
     const names = new Set(sources.map((s) => assetNameOf(s.source)));
-    expect(names).toEqual(new Set(["verbgate", "entrypoint.sh"]));
+    expect(names).toEqual(new Set(["verbgate", "entrypoint.sh", "honeypot.cjs"]));
   });
 
   test("the enrolled names are the measured ones, so a silent shrink of the array is visible", () => {
     // Pinned to what was measured rather than derived from the array itself:
     // deriving it would make the assertion agree with any array at all.
-    expect([...BUILD_CONTEXT_ASSETS]).toEqual(["Dockerfile", "verbgate", "entrypoint.sh"]);
+    expect([...BUILD_CONTEXT_ASSETS]).toEqual([
+      "Dockerfile",
+      "verbgate",
+      "entrypoint.sh",
+      "honeypot.cjs",
+    ]);
   });
 
   test("every enrolled asset exists on disk, so the hash cannot be over a name nobody ships", () => {

@@ -1265,6 +1265,43 @@ describe("docker argv (SRD §5.6)", () => {
     }
   });
 
+  /**
+   * The escape-attempt honeypot's bait needs a writable `/run` (ISC-125).
+   *
+   * Every clause is asserted separately because each has its own silent
+   * failure. Without the mount, `pifleet-honeypot` cannot create the socket
+   * and `docker/entrypoint.sh` refuses to start the worker at all — loud.
+   * Without the `uid`/`gid` options the tmpfs mounts root-owned 0755 and the
+   * bind fails EACCES — also loud, but for a reason that reads as a Docker
+   * problem rather than a missing flag, which is exactly how long it would
+   * take to find. Both were measured against the real image before the flag
+   * was written.
+   *
+   * `WORKER_UID` on both sides rather than a literal 10001: a drift between
+   * the flag and the uid the container runs as has no other symptom.
+   */
+  test("every worker's argv carries the writable /run tmpfs (ISC-125)", async () => {
+    const { loaded } = await fixture();
+    for (const id of ["eng-1", "rev-1"]) {
+      const r = await renderWorker(loaded, id);
+      const runSpec = valuesOf(r.docker, "--tmpfs").find((v) => v.startsWith("/run:"));
+      expect(runSpec, `worker ${id} has no /run tmpfs`).toBeDefined();
+      expect(runSpec).toContain(`uid=${WORKER_UID},gid=${WORKER_UID}`);
+      expect(runSpec).toContain("noexec");
+      expect(runSpec).toContain("nosuid");
+      expect(valueOf(r.docker, "--user")).toBe(`${WORKER_UID}:${WORKER_UID}`);
+
+      // A tmpfs and NOT a bind mount, for the same reason the gcloud config
+      // dir is one: a bind mount would add a `.Mounts` entry and perturb
+      // ISC-44's mount-table claim.
+      for (const s of allBindMountSources(r.docker)) expect(s).not.toBe("/run");
+
+      // Small on purpose. A generous cap would hand a worker a second
+      // writable scratch area no other control accounts for.
+      expect(runSpec).toContain("size=1m");
+    }
+  });
+
   test("pi argv equals the docker argv tail after the image", async () => {
     const { loaded } = await fixture();
     const r = await renderWorker(loaded, "eng-1");

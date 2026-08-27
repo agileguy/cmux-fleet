@@ -14,7 +14,13 @@
  *   footnote the operator has scrolled past by the time they matter.
  */
 
-import type { AttendedRecord, MergePrecheck, RunReport, ScheduledTask } from "../contracts.ts";
+import type {
+  AttendedRecord,
+  EscapeWatch,
+  MergePrecheck,
+  RunReport,
+  ScheduledTask,
+} from "../contracts.ts";
 
 /** Render the whole report as markdown-flavoured text. */
 export function renderRunReport(
@@ -49,6 +55,16 @@ export function renderRunReport(
     lines.push("    Treat this run as attended: the voided guarantees are unknown.");
   }
   if (attended.length > 0 || attendedUnverified.length > 0) lines.push("");
+
+  /**
+   * The security surface comes before the totals for the same reason ATTENDED
+   * does: a worker that reached for the Docker socket, or one nothing was
+   * watching, changes what every number below it is worth. Only FINDINGS are
+   * printed here — a run where every worker was armed and nothing tried gets
+   * one quiet line at the bottom, because a security section that shouts on
+   * every clean run is a section operators learn to skip.
+   */
+  lines.push(...renderEscapeWatch(report.security.escape_watch));
 
   const t = report.totals;
   lines.push(
@@ -95,6 +111,67 @@ function renderAttended(a: AttendedRecord): string[] {
     out.push(`- ${a.voided.length} guarantee(s) do not hold for this run:`);
     for (const v of a.voided) out.push(`    ${v.isc}: ${v.because}`);
   }
+  return out;
+}
+
+/**
+ * The escape-attempt honeypot's findings (ISC-125).
+ *
+ * Three outcomes, and the third is why this function is not a one-liner over
+ * `attempts > 0`:
+ *
+ *   - a worker that tried            → ESCAPE ATTEMPT, capitalized, up top
+ *   - a worker nothing watched       → NOT WATCHED, equally prominent
+ *   - every worker armed and quiet   → one line, at the end, saying so
+ *
+ * The last one is a CLAIM and is worded as one. "no escape attempts" on its
+ * own is the sentence that means nothing — it reads identically whether the
+ * detector was running or absent — so the clean line names the number of
+ * containers that were actually watched. That is what makes it evidence
+ * rather than reassurance.
+ */
+function renderEscapeWatch(watch: readonly EscapeWatch[]): string[] {
+  if (watch.length === 0) return [];
+  const out: string[] = [];
+  const tried = watch.filter((w) => w.attempts > 0);
+  const unwatched = watch.filter((w) => !w.armed);
+
+  for (const w of tried) {
+    const count = w.flooded ? `at least ${w.attempts}` : `${w.attempts}`;
+    out.push(`## ESCAPE ATTEMPT — worker ${w.worker} reached for the Docker socket`);
+    out.push(`- ${count} connect(s) to /var/run/docker.sock, refused and recorded`);
+    if (w.first_attempt_at !== null) {
+      const span =
+        w.last_attempt_at !== null && w.last_attempt_at !== w.first_attempt_at
+          ? `${w.first_attempt_at} through ${w.last_attempt_at}`
+          : w.first_attempt_at;
+      out.push(`    ${span}`);
+    }
+    if (w.flooded) {
+      // Saying the cap out loud, because otherwise the number reads as exact
+      // and an operator would size the incident from it.
+      out.push("    per-attempt recording hit its cap; the true count is higher");
+    }
+  }
+
+  for (const w of unwatched) {
+    out.push(`## NOT WATCHED — worker ${w.worker} has no armed escape detector`);
+    out.push("    No listener reported itself armed in this container, so this");
+    out.push("    run makes NO claim either way about escape attempts in it.");
+  }
+
+  if (out.length > 0) {
+    out.push("");
+    return out;
+  }
+
+  // The clean case. Deliberately the LAST thing in this block and deliberately
+  // not a heading: it is the absence of a finding, and it should not compete
+  // for attention with the verdicts below it.
+  out.push(
+    `escape detector armed in ${watch.length} container(s); no attempt on /var/run/docker.sock observed`,
+  );
+  out.push("");
   return out;
 }
 
