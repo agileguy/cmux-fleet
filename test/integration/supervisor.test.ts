@@ -2951,6 +2951,10 @@ describe("ISC-147: the completion property across every hostile scenario", () =>
       kind: "elsewhere",
       why: "a three-script FLEET fixture — eng-1 floods stderr, eng-2 floods stdout, the rest run 50ms turns. Driven through real supervisors by ISC-158's starvation test, whose assertion (quiet workers settle WHILE the flood is in flight) is strictly stronger than this property. Replaying it against one worker here would duplicate that rig to assert less.",
     },
+    "stale-start.json": {
+      kind: "elsewhere",
+      why: "ISC-141's fixture, driven by the fence test at the bottom of this file. It needs TWO dispatches — epoch 1 must settle before epoch 2 is allocated — and its whole point is a record placed BELOW ack_seq via `emit_before_ack`, a region the single-dispatch harness here cannot reach. Replayed through this loop it would settle `success` off step 1 alone and assert nothing about the fence.",
+    },
     "interleave.json": {
       kind: "elsewhere",
       why: "ISC-84's fixture, driven through a real worker by lifecycle.test.ts, which lands an abort inside a scripted window and asserts the epoch-attribution outcome. ISC-283 records what that timing cost to get right; a second copy here would reintroduce the race it fixed.",

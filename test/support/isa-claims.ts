@@ -120,19 +120,19 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-243",
-    grade: "[~]",
+    grade: "[x]",
     claim:
-      "The denylist is still the mechanism the graded allowlist was UNIONED with, not " +
-      "one it replaced. This criterion grades `[~]` precisely because `replaces` is " +
-      "unsatisfied, so an empty result here means the denylist was deleted — at which " +
-      "point the grade is wrong in the OTHER direction and the entry needs rewriting, " +
+      "The denylist is still the mechanism the graded allowlist is UNIONED with, and the " +
+      "criterion was RESTATED on 2026-08-27 to say so rather than to claim it was " +
+      "replaced. An empty result here means the denylist was deleted — at which point the " +
+      "restated wording is wrong in the OTHER direction and the entry needs rewriting, " +
       "not this line editing.",
     argv: ["grep", "-rn", "DEFAULT_HARNESS_PATTERNS", "src/"],
     expect: "nonempty",
   },
   {
     isc: "ISC-243",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The graded surface is READ by the adjudicator. Empty here means the allowlist " +
       "has become a correct module beside a path nothing exercises — the RC-1 shape " +
@@ -142,7 +142,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-243",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The graded surface is WRITTEN by the harvester. The read above and this write " +
       "are listed separately on purpose: ISC-150 had a live reader and no writer, and " +
@@ -271,6 +271,42 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "independently and the second failing is the silent one.",
     argv: ["grep", "-En", "/var/run/docker.sock|ending the worker", "docker/honeypot.cjs", "docker/entrypoint.sh"],
     expect: "nonempty",
+  },
+  /**
+   * ISC-119's closing evidence is a Docker-gated probe, so nothing here can
+   * re-run it. What CAN be re-checked is the coupling that makes it
+   * non-vacuous: the probe takes its denial flags from `buildPiArgv` rather
+   * than spelling them out, so production dropping a flag reddens the probe
+   * instead of leaving it proving that a flag nobody uses works.
+   */
+  {
+    isc: "ISC-119",
+    grade: "[x]",
+    claim:
+      "The real-Pi probe derives the denial flags from production. A literal list here " +
+      "would go green on a `buildPiArgv` that had stopped emitting `--no-extensions`.",
+    argv: ["grep", "-n", "buildPiArgv", "test/integration/hostile-pi.test.ts"],
+    expect: "nonempty",
+  },
+  /**
+   * ISC-141 rests on a scenario capability that did not exist: `emit_before_ack`
+   * is the only way to place a record BELOW `ack_seq`, which is the only region
+   * where `attribute` can answer `prior` for a live epoch. Delete it and the
+   * supervisor probe stops testing the fence while still passing on the
+   * post-ack half.
+   */
+  {
+    isc: "ISC-141",
+    grade: "[x]",
+    claim:
+      "The pre-ack region is reachable from a scenario. `emit_before_ack` in the double " +
+      "and the fixture that uses it are what put a record below `ack_seq`; without both, " +
+      "no test can drive the conjunct this criterion closed on.",
+    argv: [
+      "grep", "-rl", "emit_before_ack",
+      "test/fixtures/fake-pi.ts", "test/fixtures/scenarios/stale-start.json",
+    ],
+    expect: 2,
   },
   {
     isc: "ISC-157",
