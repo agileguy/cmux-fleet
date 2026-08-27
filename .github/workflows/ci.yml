@@ -283,6 +283,31 @@ jobs:
           #   File .../gha-creds-<id>.json was not found.
           export GOOGLE_APPLICATION_CREDENTIALS="$dest"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$dest" >> "$GITHUB_ENV"
+          # THE ACCOUNT STORE HAS AN ENV OVERRIDE THAT BEATS `auth login`, and
+          # this step used to leave it dangling. `google-github-actions/auth`
+          # exports CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE (and
+          # GOOGLE_GHA_CREDS_PATH) naming the WORKSPACE file; gcloud reads that
+          # variable in preference to whatever `auth login --cred-file` wrote,
+          # so re-pointing only the store below left every plain `gcloud <api>`
+          # call resolving a path this step had just moved:
+          #   ERROR: (gcloud.iam.service-accounts.describe) Failed to load
+          #   credential file: [.../gha-creds-<id>.json]. File ... not found.
+          # It stayed invisible because nothing in the suite made a plain
+          # gcloud API call — the ADC mints follow GOOGLE_APPLICATION_CREDENTIALS
+          # and were fine — until ISC-48's identity probe asked IAM for a
+          # service account's uniqueId. Re-pointed by COMPARISON with `$src`,
+          # so a variable naming something else is reported rather than
+          # silently overwritten.
+          for var in CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE GOOGLE_GHA_CREDS_PATH; do
+            eval "cur=\${$var:-}"
+            if [ "$cur" = "$src" ]; then
+              export "$var=$dest"
+              echo "$var=$dest" >> "$GITHUB_ENV"
+              echo "re-pointed $var at the relocated credential"
+            elif [ -n "$cur" ]; then
+              echo "::warning::$var names $cur, which is not the credential this step moved"
+            fi
+          done
           gcloud --quiet auth login --force --cred-file "$dest"
           # Prove the workspace is clean rather than assuming the mv covered
           # every file the action may have written.
@@ -294,7 +319,12 @@ jobs:
           # And prove the relocation did not break minting, here rather than
           # 20 minutes later inside adc.test.ts. The token is never printed.
           gcloud auth application-default print-access-token > /dev/null
-          echo "mint OK from $dest"
+          # And the OTHER store, separately, because they fail independently:
+          # the line above follows GOOGLE_APPLICATION_CREDENTIALS and passed
+          # for months while every plain `gcloud` call was broken. Neither
+          # token is printed.
+          gcloud auth print-access-token > /dev/null
+          echo "mint OK from $dest — both the ADC store and the account store"
       - name: Confirm a Docker daemon is present
         run: docker info
       - name: Build the worker image

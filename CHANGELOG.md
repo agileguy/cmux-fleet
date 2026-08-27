@@ -52,6 +52,19 @@ All notable changes to this project are documented here.
   resolved from the SA itself rather than hardcoded, appears among the token's claims. Disjointness
   alone would also be satisfied by some third principal, which is why the positive half exists.
 
+  **The probe found a hole in the CI credential setup, which is worth more than the criterion it
+  was written for.** `gcloud iam service-accounts describe` failed with `Failed to load credential
+  file: [.../gha-creds-<id>.json]` — a path the "Move the federated credential out of the
+  workspace" step had relocated minutes earlier. That step re-points
+  `GOOGLE_APPLICATION_CREDENTIALS` and calls `gcloud auth login --force --cred-file` precisely so
+  that "leaving it dangling would break any plain `gcloud` call the probes make". It did not:
+  `google-github-actions/auth` also exports `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, which gcloud
+  reads in preference to the account store and which still named the workspace path. Every plain
+  `gcloud <api>` call in that job was broken, invisibly, because nothing made one — the ADC mints
+  follow a different variable and were fine, and the step's own verification only exercised that
+  half. Both stores are re-pointed now, by comparison with the source path rather than
+  unconditionally, and the step proves both mints before the job proceeds.
+
   **One IAM change was made**, recorded here rather than left to be discovered: `cmux-fleet-ci` held
   no project-level roles and no permission to READ the SA it may impersonate, so `service-accounts
   describe` would have failed in CI. It was granted `roles/iam.serviceAccountViewer` on that single
