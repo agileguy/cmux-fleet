@@ -476,6 +476,20 @@ const EXPECTED_SETTLES: Record<string, number[]> = {
    * its own rather than inheriting the first one's.
    */
   "refused-then-clean.json": [1, 2],
+  /**
+   * ISC-141's fixture. Two prompts, each with a terminal `agent_end`, so both
+   * epochs settle — the same shape as `refused-then-clean.json` above.
+   *
+   * The `emit_before_ack` `agent_start` that gives this scenario its name is
+   * INVISIBLE here, and that is correct rather than a gap: this simulator
+   * replays a scenario's emissions against `EpochManager` +
+   * `CompletionTracker`, and the pre-ack region only exists in a real stream
+   * where an ack occupies a record of its own. The property the fixture was
+   * built for is a supervisor fact and is asserted in
+   * `test/integration/supervisor.test.ts`; what this table asserts is the
+   * narrower claim that adding it changed no settle count.
+   */
+  "stale-start.json": [1, 2],
   "late-failure.json": [], // no terminal event: the late response fails it elsewhere
   "late-response.json": [], // nothing is ever dispatched or emitted
   "truncated.json": [], // the stream dies mid-record; no settle is fabricated
