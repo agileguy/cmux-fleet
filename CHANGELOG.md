@@ -4,6 +4,125 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **ISC-48 closed: the minted token's identity is asked of GOOGLE, not asserted from the argv.** The
+  criterion names a TOKEN, and until ISC-248 no `up` path minted one — so the previous close-out
+  could only check the PLAN (every grant line names the SA, the operator's account never consulted),
+  which is a real property and not this one.
+
+  Both of the entry's stated blockers turned out to be false, and neither was removed by anything
+  done to this criterion. *"`gcloudMinter` has NO CALLER ANYWHERE IN `src/cli/**`"* died with
+  ISC-248. *"No real granted SA was available to test against"* was environmental: the old refusal
+  was correct on its facts — the only discoverable service accounts belonged to a live production
+  project — but a target now exists in the SAME personal project as the CI identity, with
+  `roles/iam.serviceAccountTokenCreator` already granted to `cmux-fleet-ci`. **Nothing was created
+  to close this**; the SA, the IAM binding and the `GCP_IMPERSONATION_TARGET` secret all already
+  existed and were simply wired nowhere.
+
+  The probe mints through the production `gcloudMinter` with impersonation and sends the token to
+  the standard introspection endpoint — in a POST **body**, since a bearer token in a query string
+  lands in logs and proxy history. Asserting that `mintArgv` carried `--impersonate-service-account`
+  would prove we *asked* for impersonation, not that we got it.
+
+  **It took three attempts to ask correctly, and both failures were mine rather than the product's.**
+  The first asserted `email === <SA>` on the impersonated token and failed in CI with the literal
+  string `(tokeninfo named no identity)` — a fallback that was a second defect in its own right, a
+  diagnostic reporting only its own inability to answer. The second returned the claims whole (safe:
+  the response echoes claims, never the credential) but moved the same assumption onto the CONTROL,
+  asserting the un-impersonated mint reports an `email`. It does not, in CI.
+
+  **Which claim carries the identity depends on the credential, and both reachable shapes were
+  introspected rather than assumed.** A user credential — the operator's local ADC — returns `email`
+  + `sub` + `azp` with `openid` and `userinfo.email` among its scopes. The CI credential is
+  federated and already a service account: it returns `azp=106755930525734032049` and **nothing
+  else** — no `email`, no `sub`, scope `cloud-platform` alone. That number is `cmux-fleet-ci`'s
+  `uniqueId`, confirmed by `gcloud iam service-accounts describe`, so tokeninfo does name the
+  principal there; it just uses a different field. An access token carries `email` only when its
+  scopes include `openid`/`userinfo.email`, and a service-account token is minted with
+  cloud-platform alone.
+
+  So every assertion is now over the **set** of identity-bearing claims (`email`, `sub`, `azp`;
+  `aud` excluded, since it names the token's audience rather than its presenter) and none of them
+  names a field. Three, in order: a **control** — the un-impersonated mint names *somebody*, without
+  which tokeninfo cannot see identity here and nothing after it means anything; **substitution** —
+  the impersonated token's claim set is **disjoint** from the control's, which is the criterion's
+  literal *"not the launching user's account"* and cannot be dodged by surfacing the same principal
+  under a different key; and **positively the SA** — the service account's numeric `uniqueId`,
+  resolved from the SA itself rather than hardcoded, appears among the token's claims. Disjointness
+  alone would also be satisfied by some third principal, which is why the positive half exists.
+
+  **The probe found a hole in the CI credential setup, which is worth more than the criterion it
+  was written for.** `gcloud iam service-accounts describe` failed with `Failed to load credential
+  file: [.../gha-creds-<id>.json]` — a path the "Move the federated credential out of the
+  workspace" step had relocated minutes earlier. That step re-points
+  `GOOGLE_APPLICATION_CREDENTIALS` and calls `gcloud auth login --force --cred-file` precisely so
+  that "leaving it dangling would break any plain `gcloud` call the probes make". It did not:
+  `google-github-actions/auth` also exports `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, which gcloud
+  reads in preference to the account store and which still named the workspace path. Every plain
+  `gcloud <api>` call in that job was broken, invisibly, because nothing made one — the ADC mints
+  follow a different variable and were fine, and the step's own verification only exercised that
+  half. Both stores are re-pointed now, by comparison with the source path rather than
+  unconditionally, and the step proves both mints before the job proceeds.
+
+  **One IAM change was made**, recorded here rather than left to be discovered: `cmux-fleet-ci` held
+  no project-level roles and no permission to READ the SA it may impersonate, so `service-accounts
+  describe` would have failed in CI. It was granted `roles/iam.serviceAccountViewer` on that single
+  service account — read-only, one resource. The alternative was hardcoding the `uniqueId` into the
+  test, which would compare a constant against itself the day the SA is recreated.
+
+  **The delegation caveat stands and is not closed by this.** At real mint time the operator's ADC
+  IS used to obtain the SA token, so "the launching user's account is never consulted" is true of
+  planning and cannot be true of the mint itself. What the criterion claims, and all it claims, is
+  that the issued token's identity is the SA.
+
+  **CI-only, stated rather than hidden:** the `tokenCreator` binding is granted to `cmux-fleet-ci`
+  alone, so minting impersonated from a developer host returns `IAM_PERMISSION_DENIED` and the probe
+  self-skips with a message naming what it needs. Granting the role to a human account to make it
+  locally runnable was deliberately not done.
+
+### Changed
+
+- **The chain probe tolerates ONE tool flail the model recovers from, instead of demanding zero.**
+  `full-chain.test.ts` asserted `tool_errors === 0` while its own failure message argued the
+  opposite — *"a model that flails once and recovers is not the same failure as a chain whose tool
+  dispatch is broken"* — and then graded the two identically. Measured on 2026-08-27: four
+  `container-live` reruns in one day (#84 twice, #89, #91), every one the same shape, a single
+  `edit` whose `old_text` did not match followed by a corrected call that landed. Roughly eight
+  minutes each, no product defect among them.
+
+  The bar is now `tool_errors <= 1` **and** an error ratio under one third, and a loosened bar is
+  only defensible if it still fails what the strict one caught. Checked against the record — this
+  job's one real find was the uid defect in `ci.yml`, 17 tool calls with 11 failing on `EACCES`:
+
+  | case | err/calls | ratio | `<= 1`? | `< 1/3`? | verdict |
+  |---|---|---|---|---|---|
+  | #84 / #89 flail | 1/6 | 0.17 | yes | yes | pass |
+  | #91 flail | 1/4 | 0.25 | yes | yes | pass |
+  | the uid defect | 11/17 | 0.65 | **no** | **no** | **fail** |
+  | 1 error in a 2-call turn | 1/2 | 0.50 | yes | **no** | **fail** |
+
+  Every flake that cost a rerun passes, the defect still fails on **both** guards, and a lone error
+  in a turn too thin to have recovered from it still fails on the ratio. Recovery is not assumed
+  either: `last_event === "agent_end"` and the ISC-290 file-edit assertion already rule out a model
+  that errored once and gave up.
+
+- **ISC-41 and ISC-47 re-graded `[~]` -> `[x]`. Neither criterion's code changed; their GROUNDS had
+  become false.** ISC-41 said its deciding probe was *"LOCAL ONLY, not re-checked anywhere
+  automated"*; ISC-47 said it *"SKIPS IN CI; nothing automated re-checks it"*. PR #82's keyless
+  federated credential made `HOST_ADC_PRESENT` true through the production `hostAdcFile()` lookup
+  rather than a test-only branch, and both probes un-skipped without a line of them changing.
+  Verified by **reading the CI log**, not inferring from config: run 33032039999 shows both passing.
+
+  ISC-47's two stated gaps are also closed, both by other work: *"nothing in `src/cli/**` mints or
+  injects at all yet"* is false as of ISC-248, and the elapsed-interval gap is closed by ISC-248's
+  probe, which compresses `token_refresh` in config and lets it genuinely elapse.
+
+  A new `isa-claims` entry pins `EXPECTED_HOST_ADC_MINT_SKIPS: ""`, because both grades now depend
+  on those probes being **required** to run — an operator who pinned them as expected skips would
+  rot two grades silently. Mutation-proved: changing the pin fails the registry with
+  `RE-GRADE ISC-41`.
+
 ### Fixed
 
 - **The ISC-154 quiesce diagnostic is now READABLE, and the null it explains no longer has an
