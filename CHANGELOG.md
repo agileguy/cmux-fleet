@@ -4,6 +4,48 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The chain probe tolerates ONE tool flail the model recovers from, instead of demanding zero.**
+  `full-chain.test.ts` asserted `tool_errors === 0` while its own failure message argued the
+  opposite — *"a model that flails once and recovers is not the same failure as a chain whose tool
+  dispatch is broken"* — and then graded the two identically. Measured on 2026-08-27: four
+  `container-live` reruns in one day (#84 twice, #89, #91), every one the same shape, a single
+  `edit` whose `old_text` did not match followed by a corrected call that landed. Roughly eight
+  minutes each, no product defect among them.
+
+  The bar is now `tool_errors <= 1` **and** an error ratio under one third, and a loosened bar is
+  only defensible if it still fails what the strict one caught. Checked against the record — this
+  job's one real find was the uid defect in `ci.yml`, 17 tool calls with 11 failing on `EACCES`:
+
+  | case | err/calls | ratio | `<= 1`? | `< 1/3`? | verdict |
+  |---|---|---|---|---|---|
+  | #84 / #89 flail | 1/6 | 0.17 | yes | yes | pass |
+  | #91 flail | 1/4 | 0.25 | yes | yes | pass |
+  | the uid defect | 11/17 | 0.65 | **no** | **no** | **fail** |
+  | 1 error in a 2-call turn | 1/2 | 0.50 | yes | **no** | **fail** |
+
+  Every flake that cost a rerun passes, the defect still fails on **both** guards, and a lone error
+  in a turn too thin to have recovered from it still fails on the ratio. Recovery is not assumed
+  either: `last_event === "agent_end"` and the ISC-290 file-edit assertion already rule out a model
+  that errored once and gave up.
+
+- **ISC-41 and ISC-47 re-graded `[~]` -> `[x]`. Neither criterion's code changed; their GROUNDS had
+  become false.** ISC-41 said its deciding probe was *"LOCAL ONLY, not re-checked anywhere
+  automated"*; ISC-47 said it *"SKIPS IN CI; nothing automated re-checks it"*. PR #82's keyless
+  federated credential made `HOST_ADC_PRESENT` true through the production `hostAdcFile()` lookup
+  rather than a test-only branch, and both probes un-skipped without a line of them changing.
+  Verified by **reading the CI log**, not inferring from config: run 33032039999 shows both passing.
+
+  ISC-47's two stated gaps are also closed, both by other work: *"nothing in `src/cli/**` mints or
+  injects at all yet"* is false as of ISC-248, and the elapsed-interval gap is closed by ISC-248's
+  probe, which compresses `token_refresh` in config and lets it genuinely elapse.
+
+  A new `isa-claims` entry pins `EXPECTED_HOST_ADC_MINT_SKIPS: ""`, because both grades now depend
+  on those probes being **required** to run — an operator who pinned them as expected skips would
+  rot two grades silently. Mutation-proved: changing the pin fails the registry with
+  `RE-GRADE ISC-41`.
+
 ### Fixed
 
 - **The ISC-154 quiesce diagnostic is now READABLE, and the null it explains no longer has an

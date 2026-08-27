@@ -278,6 +278,16 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-41",
+    grade: "[x]",
+    claim:
+      "The ADC-gated probes are REQUIRED to run in the `container` job, not merely allowed to. " +
+      "ISC-41 and ISC-47 are graded on those probes executing in CI; an operator who pinned them " +
+      "as expected skips would rot both grades silently, so the empty pin is what this checks.",
+    argv: ["grep", "-n", 'EXPECTED_HOST_ADC_MINT_SKIPS: ""', ".github/workflows/ci.yml"],
+    expect: 1,
+  },
+  {
     isc: "ISC-290",
     grade: "[x]",
     claim:

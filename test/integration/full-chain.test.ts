@@ -804,13 +804,60 @@ describe("the whole chain, in one motion (ISC-290)", () => {
       expect(state!.last_event, "the turn never ended naturally").toBe("agent_end");
       expect(state!.turns).toBeGreaterThanOrEqual(1);
       expect(state!.tool_calls, "the model completed a turn without calling a tool").toBeGreaterThanOrEqual(1);
+      /**
+       * ONE flail is tolerated; a pattern of them is not — and the recovery
+       * has to be real.
+       *
+       * This asserted `=== 0` and its own message argued against itself: "a
+       * model that flails once and recovers is not the same failure as a
+       * chain whose tool dispatch is broken", then graded the two the same.
+       * MEASURED on 2026-08-27: four `container-live` reruns in one day
+       * (#84 twice, #89, #91), every one the identical shape — a single
+       * `edit` whose `old_text` did not match, followed by a corrected call
+       * that landed. Each cost roughly eight minutes and none revealed a
+       * product defect.
+       *
+       * The bar is now the one the message always described. What it still
+       * catches, unchanged: dispatch that is broken (several errors, or a
+       * ratio that says most calls fail), and a flail that was never
+       * recovered from. That second guard is why this is not simply `<= 1` —
+       * a single error that ENDED the turn is a real failure, and it is the
+       * surrounding assertions that rule it out: `last_event === "agent_end"`
+       * above, and the file edit that ISC-290 checks below. A model that
+       * errored once and gave up satisfies neither.
+       *
+       * The ratio guard matters at low call counts too: 1 error in 2 calls is
+       * not the same evidence as 1 in 6, so the allowance is a fraction of
+       * what the model actually did rather than a flat number.
+       *
+       * CHECKED AGAINST THE RECORD, because a loosened bar is only defensible
+       * if it still fails what the strict one caught. This job's ONE real
+       * find was the uid defect documented in `ci.yml`: 17 native tool calls,
+       * 11 of them failing with `EACCES` on `/workspace/add.js`.
+       *
+       *   case                err/calls  ratio  <=1?   <1/3?   verdict
+       *   #84 / #89 flail          1/6    0.17  yes    yes     pass
+       *   #91 flail                1/4    0.25  yes    yes     pass
+       *   the uid defect          11/17   0.65  NO     NO      FAIL
+       *   1 error in a 2-call turn 1/2    0.50  yes    NO      FAIL
+       *
+       * So every flake that cost a rerun passes, the defect still fails on
+       * BOTH guards, and a lone error in a turn too thin to have recovered
+       * from it still fails on the ratio.
+       */
+      const errorRatio = state!.tool_calls === 0 ? 1 : state!.tool_errors / state!.tool_calls;
       expect(
         state!.tool_errors,
-        `${state!.tool_errors} of ${state!.tool_calls} tool call(s) errored. ` +
-          `The ratio matters as much as the count — a model that flails once and recovers ` +
-          `is not the same failure as a chain whose tool dispatch is broken. What they said:\n` +
+        `${state!.tool_errors} of ${state!.tool_calls} tool call(s) errored — more than the ` +
+          `single flail this tolerates. What they said:\n` +
           (await toolErrorDigest(wp.eventsJsonl)),
-      ).toBe(0);
+      ).toBeLessThanOrEqual(1);
+      expect(
+        errorRatio,
+        `${state!.tool_errors} of ${state!.tool_calls} tool call(s) errored — a third or more ` +
+          `of every call this turn, which is dispatch failing rather than one miss. ` +
+          `What they said:\n` + (await toolErrorDigest(wp.eventsJsonl)),
+      ).toBeLessThan(1 / 3);
 
       /**
        * UPSTREAM FIRST. If the model server refused a generation, every
