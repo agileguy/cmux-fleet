@@ -638,9 +638,27 @@ async function main(): Promise<void> {
      * this line would not degrade the evidence, it would hang the task
      * forever. Failure yields null, which the adjudicator reads as no
      * evidence and which changes no verdict.
+     *
+     * AND THE REASON IS NOW WRITTEN DOWN (2026-08-26). `null` is three
+     * different facts wearing one face — git timed out, git failed, or the
+     * snapshot threw — and until this callback existed none of them reached
+     * the record. A CI run on 2026-08-26 settled `success`/`quiesced` with a
+     * null hash and the chain probe reported "the supervisor took no quiesce
+     * sample"; nothing anywhere said whether the 10s bound had been hit or
+     * git had refused, so the failure was undiagnosable from the artifacts by
+     * design rather than by accident.
+     *
+     * The verdict is UNCHANGED by this: a missing hash still voids nothing.
+     * What changes is that the next occurrence can be read rather than
+     * guessed at.
      */
     const treeHash =
-      settledWorkdir === null ? null : await worktreeContentHash(settledWorkdir);
+      settledWorkdir === null
+        ? null
+        : await worktreeContentHash(settledWorkdir, {
+            onFailure: (reason) =>
+              logEvent({ type: "quiesce_sample_failed", task: settled.task_id, reason }),
+          });
 
     /**
      * THE ISC-299 READER. The epoch ended cleanly; this decides whether it
@@ -1398,7 +1416,12 @@ async function main(): Promise<void> {
          * silently inert reader is the failure this criterion is about.
          */
         liveWorkdirBaseline =
-          liveWorkdir === null ? null : await worktreeContentHash(liveWorkdir);
+          liveWorkdir === null
+            ? null
+            : await worktreeContentHash(liveWorkdir, {
+                // Same side channel as the quiesce sample above, same reason.
+                onFailure: (reason) => logEvent({ type: "live_sample_failed", reason }),
+              });
         liveToolErrorsAtStart = state.tool_errors;
 
         const message = renderPrompt(envelope);
