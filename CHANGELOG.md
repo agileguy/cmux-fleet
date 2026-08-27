@@ -25,20 +25,32 @@ All notable changes to this project are documented here.
   lands in logs and proxy history. Asserting that `mintArgv` carried `--impersonate-service-account`
   would prove we *asked* for impersonation, not that we got it.
 
-  **It took two attempts to ask correctly.** The first version asserted `email === <SA>` and failed
-  in CI with `(tokeninfo named no identity)`. That was a wrong assumption, not a product defect: an
-  impersonated token is minted with `cloud-platform` scope **alone** — no `openid`, no
-  `userinfo.email` — so tokeninfo does not report `email` for it, while an operator's ADC token
-  (whose scopes include both) does. The fallback string was a second defect in its own right, a
-  diagnostic that reported only its own inability to answer; the helper now returns the claims
-  whole, which is safe because the response echoes claims and never the credential.
+  **It took three attempts to ask correctly, and both failures were mine rather than the product's.**
+  The first asserted `email === <SA>` on the impersonated token and failed in CI with the literal
+  string `(tokeninfo named no identity)` — a fallback that was a second defect in its own right, a
+  diagnostic reporting only its own inability to answer. The second returned the claims whole (safe:
+  the response echoes claims, never the credential) but moved the same assumption onto the CONTROL,
+  asserting the un-impersonated mint reports an `email`. It does not, in CI.
 
-  Three assertions, in order: a **control** — the un-impersonated mint reports an `email`, without
-  which the method cannot see identity at all and nothing after it means anything; **substitution**
-  — the impersonated token does not carry the operator's email, which is the criterion's literal
-  *"not the launching user's account"*; and **positively the SA** — `sub` equals the service
-  account's numeric `uniqueId`, resolved from the SA itself rather than hardcoded, so the comparison
-  is between two things Google said.
+  **Which claim carries the identity depends on the credential, and both reachable shapes were
+  introspected rather than assumed.** A user credential — the operator's local ADC — returns `email`
+  + `sub` + `azp` with `openid` and `userinfo.email` among its scopes. The CI credential is
+  federated and already a service account: it returns `azp=106755930525734032049` and **nothing
+  else** — no `email`, no `sub`, scope `cloud-platform` alone. That number is `cmux-fleet-ci`'s
+  `uniqueId`, confirmed by `gcloud iam service-accounts describe`, so tokeninfo does name the
+  principal there; it just uses a different field. An access token carries `email` only when its
+  scopes include `openid`/`userinfo.email`, and a service-account token is minted with
+  cloud-platform alone.
+
+  So every assertion is now over the **set** of identity-bearing claims (`email`, `sub`, `azp`;
+  `aud` excluded, since it names the token's audience rather than its presenter) and none of them
+  names a field. Three, in order: a **control** — the un-impersonated mint names *somebody*, without
+  which tokeninfo cannot see identity here and nothing after it means anything; **substitution** —
+  the impersonated token's claim set is **disjoint** from the control's, which is the criterion's
+  literal *"not the launching user's account"* and cannot be dodged by surfacing the same principal
+  under a different key; and **positively the SA** — the service account's numeric `uniqueId`,
+  resolved from the SA itself rather than hardcoded, appears among the token's claims. Disjointness
+  alone would also be satisfied by some third principal, which is why the positive half exists.
 
   **One IAM change was made**, recorded here rather than left to be discovered: `cmux-fleet-ci` held
   no project-level roles and no permission to READ the SA it may impersonate, so `service-accounts
