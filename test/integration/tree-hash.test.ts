@@ -219,27 +219,46 @@ describe("a hash that cannot be taken is absent, never wrong", () => {
   /**
    * THE LATCH, and it is not defensive tidying.
    *
-   * `Promise.race` does not cancel the loser. A timed-out sample leaves the
-   * snapshot running, and its `.then` lands afterwards with git's own verdict
-   * — so without the latch ONE missing hash would emit TWO conflicting
-   * reasons into the record, and a reader would have to guess which one
-   * decided the return value.
+   * `Promise.race` does not cancel the loser. A sample that gives up leaves
+   * the snapshot running, and the losing side lands afterwards with its own
+   * verdict — so without the latch ONE missing hash would emit TWO
+   * conflicting reasons into the record, and a reader would have to guess
+   * which one decided the return value.
    *
    * A non-repo directory with a 1ms bound produces exactly that collision:
-   * the timer wins, then the git failure arrives. Exactly one reason must
-   * come out, and it must be the one that decided the answer.
+   * both sides become ready, and both would report.
+   *
+   * WHICH side wins is scheduling, not a property, and this test does not
+   * assert it. `setTimeout(…, 1)` fires when the event loop next reaches its
+   * timers phase; on a loaded runner the loop can stall long enough that
+   * git's exit is already queued when it resumes, and the ordering flips.
+   * That is exactly how this test failed in CI after passing locally — it
+   * had pinned the timer as the winner, which is a fact about one machine's
+   * scheduler rather than about the latch.
+   *
+   * What IS a property, and what is asserted: exactly one reason comes out,
+   * and it is a whole well-formed one rather than two spliced together. The
+   * "deciding one" part needs no assertion because it holds by construction
+   * — `report()` is called synchronously by whichever side settles first, so
+   * the reason that latches and the reason that decides the return value are
+   * the same event, and no test could observe them differing.
    */
-  test("a sample that times out AND then fails reports one reason, the deciding one", async () => {
+  test("a sample that times out AND then fails reports one reason, never two", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pifleet-nonrepo-"));
     dirs.push(dir);
     const reasons: string[] = [];
     expect(
       await worktreeContentHash(dir, { timeoutMs: 1, onFailure: (r) => reasons.push(r) }),
     ).toBeNull();
-    // Let the losing snapshot land, so a second report would be observable.
+    // Let the losing side land, so a second report would be observable.
     await new Promise((r) => setTimeout(r, 750));
     expect(reasons, `two reasons for one missing hash: ${JSON.stringify(reasons)}`).toHaveLength(1);
-    expect(reasons[0]).toContain("did not answer within 1ms");
+    expect(
+      reasons[0],
+      `neither side reported a whole reason: ${JSON.stringify(reasons)}`,
+    ).toMatch(
+      /^git did not answer within 1ms \(TREE_HASH_TIMEOUT_MS\)$|^git add -A \(snapshot\) in .+ exited 128: .*not a git repository/,
+    );
   }, cliBudget(2) + 1_500);
 
   /** A hash is a git tree object id — 40 hex characters, nothing else. */

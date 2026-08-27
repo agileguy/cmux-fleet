@@ -18,6 +18,14 @@ All notable changes to this project are documented here.
   is load-bearing rather than tidy: `Promise.race` does not cancel the loser, so a timed-out sample
   would otherwise ALSO report git's later verdict — one missing hash, two conflicting reasons.
 
+  The latch test asserts that ONE reason comes out, not which one. Which side of the race wins is
+  scheduling: `setTimeout(…, 1)` fires when the loop next reaches its timers phase, and on a loaded
+  runner git's exit can already be queued when it resumes. The first draft pinned the timer as the
+  winner, passed locally seven times, and failed in CI — it had encoded one machine's scheduler as
+  a property of the code. "The deciding reason" needs no assertion anyway: `report()` is called
+  synchronously by whichever side settles first, so the reason that latches and the reason that
+  decides the return value are the same event.
+
   **The return type and the verdict are unchanged**: still `string | null`, and a missing hash still
   voids nothing.
 
