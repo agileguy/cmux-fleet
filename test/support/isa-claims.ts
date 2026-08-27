@@ -308,6 +308,39 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     ],
     expect: 2,
   },
+  /**
+   * A claim against the WIRING, added 2026-08-27 because nothing here defended
+   * it and the entry's own headline bracket had gone stale describing its
+   * absence.
+   *
+   * These are the two lines that make the rule's antecedent reachable, and they
+   * are pinned rather than the FIELDS because the inert state assigned those
+   * same field names a literal `null`. A grep for the assignment would have
+   * matched the broken code and stayed green through exactly the regression
+   * that caused the original filing. It is the SAMPLING that is load-bearing:
+   * measured 2026-08-27, reverting both lines to `= null` reddens all three
+   * ISC-154 probes in `harvest.test.ts`.
+   *
+   * The entry's residual was a LEVEL, not a mutation — every probe was a
+   * host-process test — and `full-chain.test.ts` now drives the rule through a
+   * real containerised backgrounded writer, which is what moved the grade.
+   */
+  {
+    isc: "ISC-154",
+    grade: "[x]",
+    claim:
+      "Both tree hashes are really SAMPLED — the quiesce one read from an epoch-matched " +
+      "task record, the harvest one hashed off the live worktree. Without these two the " +
+      "fields are null on every run, the comparison can never differ, and the criterion's " +
+      "rule is decorative. This pins the antecedent as reachable; it does not close the " +
+      "criterion, whose residual is an end-to-end containerised run.",
+    argv: [
+      "grep", "-En",
+      "record\\.tree_hash : null|worktreeContentHash\\(envelope\\.host_workdir\\)",
+      "src/harvest/index.ts",
+    ],
+    expect: 2,
+  },
   {
     isc: "ISC-157",
     grade: "[x]",
