@@ -4,6 +4,45 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **The supervisor now runs the credential refresher (ISC-248) — and, it turned out, injects the
+  initial token at all.** `TokenRefresher` had been unit-proved and callerless for two phases:
+  `grep -rn 'security/refresh' src/` returned nothing, so the criterion's verb — *runs* — had no
+  evidence and could have none. The recorded reason was honest (it attaches to a running container;
+  the headless path started none) and stopped being true when the container launcher landed
+  (ISC-286/287).
+
+  **The gap was larger than the entry claimed.** `injectToken` and `gcloudMinter` had no production
+  callers either. So there was no refresh loop AND no initial injection: the container got the
+  gcloud tmpfs and the env pointing at `TOKEN_FILE`, and nothing ever wrote a token there. A
+  `cloud_access: true` worker had a credential-shaped hole, not a stale credential.
+
+  The credential PLAN now rides in `WorkerLaunch` — `planCredential`'s output, written by
+  `run/materialize.ts` where config is known and read where the container is known, on the launch
+  record's own argument that a detached supervisor does not share the cwd and environment `up`
+  resolved in. The supervisor constructs a `TokenRefresher` after the container spawn and drives
+  `run(signal)`, which ticks due-at-0, so ONE path serves both the initial injection and the loop
+  rather than two places for the mint, the record and the failure handling to drift.
+  `refreshAbort.abort()` on shutdown tears it down — without it the process holds a live loop and a
+  pending timer and does not exit.
+
+  **A failed mint degrades the worker loudly; it does not kill it.** An owner decision: a transient
+  `gcloud` hiccup must not destroy a worker mid-task, but a worker configured for cloud access that
+  silently has none is indistinguishable from a healthy one until a later task fails naming the
+  wrong component. `state.credential.degraded` is set where `status` reads it, and is cleared by the
+  next success rather than by time. `credentials.jsonl` is a new append-only sibling carrying every
+  `CredentialInjection` — which has no token field by construction.
+
+  **Probed against the real thing.** The 23 unit tests drive `tick()` on a fake clock, which is the
+  right way to pin a schedule and structurally cannot answer "does a real supervisor start one".
+  The closing probe uses a real supervisor, a real container and a real federated credential with
+  `token_refresh` compressed to 2s — the only faked value, faked in the field an operator sets.
+  Mutation-proved on both limbs: disabling the wiring fails it with `Received: 0`, and swapping
+  `run()` for a single `injectNow()` fails it with `Received: 1`. Deliberately NOT asserted: that
+  the token VALUE changed between generations — gcloud serves a cached token until near expiry, so
+  that would pin gcloud's cache rather than this loop.
+
 ### Changed
 
 - **The `scanOutboxFiles` hard-link test stops pinning WHICH defence catches the attack, and the

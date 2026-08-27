@@ -36,6 +36,7 @@ import { WorkerLaunchSchema } from "../../src/contracts.ts";
 import { writeJsonAtomic } from "../../src/util/jsonl.ts";
 import { processLauncher, supervisorArgv } from "../../src/supervisor/launch.ts";
 import { cliBudget, gateBudget } from "../support/budget.ts";
+import { hostAdcFile, TOKEN_FILE } from "../../src/security/adc.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterAll(async () => {
@@ -372,5 +373,147 @@ describe.skipIf(!DOCKER)("down reaps the container", () => {
       expect(await alive(), "down left the container running").toBe(false);
     },
     cliBudget(2),
+  );
+});
+
+/**
+ * ISC-248 — the refresher RUNS on the supervisor's lifecycle and RE-INJECTS.
+ *
+ * `TokenRefresher` was unit-proved and callerless for two phases: the class
+ * knew when to fire and what to do, and nothing ever constructed one, so the
+ * criterion's verb had no evidence and could have none. Its unit tests drive
+ * `tick()` against a fake clock — which is the right way to pin the schedule
+ * and structurally cannot answer "does a real supervisor start one".
+ *
+ * So this probe uses a real supervisor process, a real container, and a real
+ * federated credential, with `token_refresh` compressed to seconds. The
+ * compression is the only thing faked, and it is faked in CONFIG — the same
+ * field an operator sets — rather than by reaching into the refresher.
+ *
+ * WHAT IS ASSERTED, and why not the obvious thing: NOT that the token VALUE
+ * changed between generations. `gcloud auth application-default
+ * print-access-token` serves a cached token until it nears expiry, so two
+ * mints seconds apart legitimately return identical bytes, and asserting
+ * inequality would be asserting a property of gcloud's cache rather than of
+ * this loop. What is asserted is that a SECOND injection happened at all —
+ * generation 1 in `credentials.jsonl` — which is the fact no unit test and no
+ * single state field can carry. ISC-47 separately proves a fresh token
+ * reaches gcloud inside the container.
+ */
+const ADC_PRESENT = await Bun.file(hostAdcFile()).exists();
+if (DOCKER && !ADC_PRESENT) {
+  console.warn(
+    `[skip] the ISC-248 refresh-loop probe needs ${hostAdcFile()}. ` +
+      `Run 'gcloud auth application-default login' to include it.`,
+  );
+}
+
+describe.skipIf(!DOCKER || !ADC_PRESENT)("the supervisor runs the credential refresher", () => {
+  test(
+    "a compressed token_refresh produces a SECOND injection, not just an initial one (ISC-248)",
+    async () => {
+      const { root, runId } = await plantRun();
+      const run = runPaths(runId, root);
+      const wp = workerPaths(run, "eng-1");
+      const name = `pifleet-${runId}-cred`;
+
+      // The container is started here rather than by the supervisor because
+      // this probe is about the REFRESHER, not about launching: the launch
+      // record's argv below is a long-lived no-op child, so a failure here
+      // cannot be a container that never came up.
+      const start = Bun.spawn(
+        ["docker", "run", "-d", "--rm", "--name", name, "alpine:latest", "sleep", "300"],
+        { stdout: "ignore", stderr: "pipe" },
+      );
+      const startErr = await new Response(start.stderr).text();
+      expect(await start.exited, `docker run failed: ${startErr}`).toBe(0);
+      cleanups.push(async () => {
+        Bun.spawn(["docker", "rm", "-f", name], { stdout: "ignore", stderr: "ignore" });
+      });
+
+      const dir = await mkdtemp(join(tmpdir(), "cl-cred-"));
+      cleanups.push(() => rm(dir, { recursive: true, force: true }));
+      const { bin } = await plantRecorder(dir);
+
+      await writeJsonAtomic(
+        wp.launchJson,
+        WorkerLaunchSchema.parse({
+          kind: "container",
+          argv: [bin],
+          container: name,
+          image: "alpine:latest",
+          // Two seconds, so a second injection is due almost immediately.
+          // The interval is the ONLY compressed value; mint and inject are
+          // the production functions against a live credential.
+          credential: {
+            mode: "token",
+            impersonate_service_account: null,
+            quota_project: null,
+            refresh_s: 2,
+          },
+        }),
+      );
+
+      await launch(root, runId, { ...process.env, PIFLEET_RUNS_DIR: root } as Record<string, string>);
+
+      // Generation 1 is the whole assertion: generation 0 alone would prove
+      // only that something injected once at startup.
+      const deadline = performance.now() + 60_000;
+      let records: Array<Record<string, unknown>> = [];
+      for (;;) {
+        const text = await readFile(wp.credentialsJsonl, "utf8").catch(() => "");
+        records = text
+          .split("\n")
+          .filter((l) => l.trim() !== "")
+          .map((l) => JSON.parse(l) as Record<string, unknown>);
+        if (records.length >= 2) break;
+        if (performance.now() > deadline) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      const log = await readFile(wp.supervisorLog, "utf8").catch(() => "(no supervisor log)");
+      expect(
+        records.length,
+        `fewer than two injections in ${wp.credentialsJsonl}. supervisor log:\n${log}`,
+      ).toBeGreaterThanOrEqual(2);
+      expect(records.map((r) => r["generation"])).toEqual([0, 1]);
+      // The record must never be able to carry the token itself.
+      for (const r of records) {
+        expect(Object.keys(r)).not.toContain("token");
+        expect(r["refresh_token_absent"]).toBe(true);
+      }
+
+      // The state file is what `status` reads, and it must agree.
+      const state = JSON.parse(await readFile(wp.stateJson, "utf8")) as {
+        credential: { generation: number; injections: number; degraded: boolean } | null;
+      };
+      expect(state.credential, "state.json carries no credential health").not.toBeNull();
+      expect(state.credential!.generation).toBeGreaterThanOrEqual(1);
+      expect(state.credential!.degraded).toBe(false);
+
+      // And the token actually reached the container's tmpfs.
+      const cat = Bun.spawn(["docker", "exec", name, "cat", TOKEN_FILE], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const body = (await new Response(cat.stdout).text()).trim();
+      expect(await cat.exited, `no token file in the container`).toBe(0);
+      expect(body.length, "the injected token file is empty").toBeGreaterThan(0);
+    },
+    /**
+     * ISC-274: the literal is KEPT, and here is what it was compared against.
+     *
+     * Four spawn call sites are reachable (`docker run`, the supervisor
+     * launch, `docker exec cat`, and the recorder child), so `cliBudget(4)`
+     * would be the mechanical answer — and it does NOT govern, because
+     * process startup is not what this probe waits on. The wait is two REAL
+     * `gcloud auth application-default print-access-token` round-trips to
+     * Google, separated by the 2s refresh interval, plus the container's own
+     * start. Measured warm at 4.0s end to end; the ceiling covers a slow or
+     * retrying token endpoint on a cold CI runner, the same derivation and
+     * the same 120_000 as adc.test.ts's live-credential probes, which wait on
+     * the identical round-trip.
+     */
+    120_000,
   );
 });

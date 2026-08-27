@@ -276,6 +276,39 @@ export const WorkerStateSchema = z.object({
     })
     .default({ input_tokens: 0, output_tokens: 0, usd: 0, priced: false }),
   compactions: z.number().int().nonnegative().default(0),
+  /**
+   * Live credential health, or `null` when this worker was given none.
+   *
+   * ISC-248's failure policy in one field, and it exists because the
+   * alternative was measured to be indistinguishable from success. A worker
+   * whose first mint fails still runs — a transient `gcloud` hiccup must not
+   * kill it — so without a flag HERE a worker with no cloud access at all
+   * looks exactly like a healthy one until some task fails for a reason that
+   * names the wrong component. `degraded` is what `status` reads.
+   *
+   * `generation` mirrors `CredentialInjection.generation`: 0 is the initial
+   * injection, and a value above 0 is the only on-disk proof that the refresh
+   * loop RAN rather than merely having been constructed — which is the half
+   * of ISC-248 the unit tests cannot reach.
+   *
+   * Nullable AND defaulted: `null` means "no credential planned", which is a
+   * decision, while a state file written before this field existed also reads
+   * `null` and is describing the same world — nothing was ever injected.
+   */
+  credential: z
+    .object({
+      /** Injections that SUCCEEDED. 0 means the initial one never landed. */
+      injections: z.number().int().nonnegative().default(0),
+      /** Generation of the last successful injection; 0 is the initial. */
+      generation: z.number().int().nonnegative().default(0),
+      /** True while the last attempt failed — cleared by the next success. */
+      degraded: z.boolean().default(false),
+      /** Why the last attempt failed. Never carries a token. */
+      last_failure: shortStr.nullable().default(null),
+      last_injected_at: z.string().nullable().default(null),
+    })
+    .nullable()
+    .default(null),
   retries: z.number().int().nonnegative().default(0),
   /** Distinguishes SIGKILL from a clean exit — Pi exits 0 in every case. */
   exit: z
@@ -298,6 +331,31 @@ export type WorkerState = z.infer<typeof WorkerStateSchema>;
  * while harvesting nothing. So the supervisor appends to one and not the
  * other, and the presence of this record is what tells it which.
  */
+/**
+ * How a container is given Google identity (§5.8).
+ *
+ * `token` is the only mode: a ~1h ACCESS token, which expires on its own.
+ *
+ * `file` was removed with the config field (ISC-268). It would have written a
+ * credentials file the container can read, and a credentials file containing a
+ * `refresh_token` is a permanent grant — the container could mint new access
+ * tokens forever, long after the run ended, and the blast radius of one
+ * escaped worker would stop being time-boxed.
+ *
+ * The mode still appears in the injected record, so a probe can assert which
+ * one was actually used rather than which one was configured. Narrowed here
+ * as well as in the config schema deliberately: a two-valued type whose second
+ * value nothing can produce is the same "accepted and inert" shape ISC-268
+ * exists to remove, one layer down. If `file` is ever built, both come back
+ * together — which is the point.
+ */
+export const AdcModeSchema = z.enum(["token"]);
+export type AdcMode = z.infer<typeof AdcModeSchema>;
+
+// Defined HERE rather than beside the credential record it also types:
+// `WorkerLaunchSchema` below is its FIRST user in module-evaluation order,
+// and a `const` referenced above its declaration is a temporal-dead-zone
+// ReferenceError at import time, not a lint nit. tsc caught it as TS2448.
 export const WorkerLaunchSchema = z
   .object({
     /**
@@ -311,6 +369,36 @@ export const WorkerLaunchSchema = z
     /** `--name` — how `down` finds the container without parsing argv. */
     container: shortStr,
     image: shortStr,
+    /**
+     * What Google credential this container gets, or `null` for a
+     * `cloud_access: false` worker — decided by `up` and recorded HERE
+     * rather than re-derived by the supervisor.
+     *
+     * The argv above carries this file's own argument for the placement:
+     * `up` resolves config in a cwd and environment a detached supervisor
+     * does not share, so a second derivation could differ with nothing
+     * looking wrong. The credential plan is the same kind of value — it
+     * folds run-level `cloud.*` with the per-worker `cloud_access` flag, and
+     * `planCredential` is the one function allowed to make that decision.
+     * Recording its OUTPUT means the container that starts and the
+     * credential it is given cannot disagree.
+     *
+     * `null` is a real answer and not an absence: `cloud_access: false` is a
+     * decision `up` prints per worker (§5.8), and a supervisor reading
+     * `null` starts no refresher rather than guessing whether one was
+     * intended. Defaulted so launch records written before this field
+     * existed parse as "no credential" instead of failing the run.
+     */
+    credential: z
+      .object({
+        mode: AdcModeSchema,
+        impersonate_service_account: shortStr.nullable().default(null),
+        quota_project: shortStr.nullable().default(null),
+        /** `cloud.token_refresh`, seconds. Drives `TokenRefresher`. */
+        refresh_s: z.number().int().positive(),
+      })
+      .nullable()
+      .default(null),
   })
   .strict();
 
@@ -764,27 +852,6 @@ export function sameProc(a: ProcId | null, b: ProcId | null): boolean {
 // define locally is how a phase ends up with two incompatible halves that both
 // pass their own tests.
 // ---------------------------------------------------------------------------
-
-/**
- * How a container is given Google identity (§5.8).
- *
- * `token` is the only mode: a ~1h ACCESS token, which expires on its own.
- *
- * `file` was removed with the config field (ISC-268). It would have written a
- * credentials file the container can read, and a credentials file containing a
- * `refresh_token` is a permanent grant — the container could mint new access
- * tokens forever, long after the run ended, and the blast radius of one
- * escaped worker would stop being time-boxed.
- *
- * The mode still appears in the injected record, so a probe can assert which
- * one was actually used rather than which one was configured. Narrowed here
- * as well as in the config schema deliberately: a two-valued type whose second
- * value nothing can produce is the same "accepted and inert" shape ISC-268
- * exists to remove, one layer down. If `file` is ever built, both come back
- * together — which is the point.
- */
-export const AdcModeSchema = z.enum(["token"]);
-export type AdcMode = z.infer<typeof AdcModeSchema>;
 
 /**
  * One credential injection into a running container.
