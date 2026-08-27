@@ -283,6 +283,24 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-En", "^ +PIFLEET_OMLX_MODEL: ", ".github/workflows/ci.yml"],
     expect: 2,
   },
+  {
+    isc: "ISC-272",
+    grade: "[~]",
+    claim:
+      "Neither identity WRITER spells its capture-failed degrade as a bare " +
+      "`(await processStartTime(process.pid)) ?? \"\"`. That form does not degrade: since " +
+      "ISC-192 `processStartTime` THROWS on a read it cannot trust, so `??` never sees the " +
+      "failure and the writer dies instead. Measured 2026-08-26 against a `ps` on PATH that " +
+      "exits 1 with a diagnostic — `supervisor/index.ts` died at startup before writing any " +
+      "state file, and `startRegistryDaemon` threw out of the call, so on a host with no " +
+      "procps `pifleet up` could not start a run at all. NONEMPTY here means the unguarded " +
+      "form is back somewhere in `src/` and the `identity_unrecorded` refusal that `down.ts` " +
+      "documents is once again unreachable from a real broken-`ps` writer. The pattern also " +
+      "matches the form quoted in prose, deliberately: a comment that teaches the broken " +
+      "spelling is how it comes back.",
+    argv: ["grep", "-rn", 'processStartTime(process.pid)) ?? ""', "src/"],
+    expect: "empty",
+  },
 ] as const;
 
 /**
