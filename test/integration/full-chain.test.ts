@@ -128,6 +128,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { spawnCli, type CliResult } from "../support/spawn-cli.ts";
 import { seedGitRepo } from "../fixtures/synthetic-repo.ts";
@@ -201,6 +202,13 @@ const TASK_DEADLINE_S = 300;
 const UP_GATE_MS = 300_000;
 const DISPATCH_GATE_MS = TASK_DEADLINE_S * 1_000 + 120_000;
 const HARVEST_GATE_MS = 60_000;
+/**
+ * The ISC-154 leg: a detached `docker exec`, a bounded wait for its bytes to
+ * cross the bind mount (30s of it, at worst), and one more harvest. Given its
+ * own gate rather than folded into `HARVEST_GATE_MS`, so the budget states
+ * what was added instead of quietly absorbing it into a neighbour's slack.
+ */
+const TREE_MOVED_GATE_MS = 60_000;
 const DOWN_GATE_MS = 120_000;
 
 interface Rig {
@@ -932,6 +940,114 @@ describe("the whole chain, in one motion (ISC-290)", () => {
         "harvest observed a different tree than the supervisor quiesced on",
       ).toBe(harvest.facts.tree_hash_quiesce);
 
+      /**
+       * --- ISC-154, on the ONLY evidence that closes it: a real container's
+       * backgrounded write, caught end to end.
+       *
+       * ## Why this leg lives inside the ISC-290 test rather than in a file of
+       * its own
+       *
+       * ISC-154's residual was never a missing assertion — `harvest.test.ts`
+       * already drives the moved tree through the real CLI and proves the
+       * verdict CHANGES, with a control that proves it does not change
+       * spuriously. What it could not do was let the writer be a containerised
+       * process: every one of those probes moves the tree from the host, so
+       * what they establish is that the fleet's own two samples disagree, not
+       * that work escaping a container's epoch is noticed. The entry said so
+       * itself and named this file's territory as where that would be settled.
+       *
+       * Standing the chain up costs minutes; re-harvesting it costs one
+       * process. A separate file would have paid for a second `up` to reach a
+       * state this test is already sitting in, so the leg is here — and the
+       * harvest above is not merely a neighbour, it is this leg's CONTROL.
+       * Same run, same task, same epoch, one write apart.
+       *
+       * ## Why this is deterministic in a test that otherwise refuses to
+       * assert `verdict`
+       *
+       * The file header explains at length why `harvest_status` and not
+       * `verdict` is asserted above: a real model's turn is not a fixed point,
+       * so its grade is not one either. ISC-154 escapes that because its check
+       * sits FIRST in `adjudicate`, ahead of even the ISC-151 ancestor gate,
+       * and returns before any model-dependent fact is weighed. Whatever the
+       * model did, a tree that moved after quiesce is `unknown`. That
+       * ordering is the reason this assertion can be exact here.
+       */
+      const writerMark = ".pifleet-backgrounded-writer";
+      const writerPath = join(worktree!.path, writerMark);
+      expect(
+        existsSync(writerPath),
+        "the fixture file existed before the writer ran, so a hash change would prove nothing",
+      ).toBe(false);
+
+      /**
+       * DETACHED (`-d`) and looping, because the criterion's subject is work
+       * that OUTLIVES the epoch the supervisor closed. A single synchronous
+       * `docker exec` would move the tree just as well and would be a weaker
+       * fixture: it models an operator touching the worktree, not a process
+       * the fleet believes it has already finished with.
+       *
+       * It runs as the image's baked uid, inherited rather than passed, so a
+       * regression that made `/workspace` unwritable to the worker's own user
+       * surfaces here instead of being papered over with `-u 0`.
+       */
+      const writer = Bun.spawn(
+        [
+          "docker", "exec", "-d", launch.container,
+          "sh", "-c",
+          `for i in 1 2 3 4 5; do echo $i >> /workspace/${writerMark}; sleep 0.2; done`,
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const writerErr = await new Response(writer.stderr).text();
+      expect(await writer.exited, `docker exec -d failed: ${writerErr}`).toBe(0);
+
+      /**
+       * Waited for on the HOST side of the bind mount, never slept on. The
+       * assertion that follows is only meaningful once the container's bytes
+       * are visible to the harvester, and that crossing is the thing being
+       * waited for — a fixed sleep would either be flaky or slow, and would
+       * prove nothing about the mount.
+       */
+      const writerDeadline = Date.now() + 30_000;
+      while (!existsSync(writerPath) && Date.now() < writerDeadline) {
+        await Bun.sleep(100);
+      }
+      expect(
+        existsSync(writerPath),
+        `the backgrounded writer never reached ${writerPath} through the bind mount`,
+      ).toBe(true);
+
+      const after = await cli(rig, [
+        "artifacts",
+        "--run",
+        rig.runId,
+        "--task",
+        "t1",
+        "--json",
+      ]);
+      expect(after.code, `second artifacts failed:\n${after.stdout}\n${after.stderr}`).toBe(0);
+      const moved = json<{
+        verdict: string;
+        reasons: string[];
+        facts: { tree_hash_quiesce: string | null; tree_hash_harvest: string | null };
+      }>(after, "artifacts --json (after the backgrounded write)");
+
+      /**
+       * The quiesce sample is UNCHANGED across the two harvests. Without this,
+       * a bug that re-sampled both moments at harvest time would produce two
+       * equal-and-moved hashes and satisfy the inequality below for a reason
+       * that has nothing to do with the epoch boundary.
+       */
+      expect(moved.facts.tree_hash_quiesce).toBe(harvest.facts.tree_hash_quiesce);
+      expect(moved.facts.tree_hash_harvest).toMatch(/^[0-9a-f]{40}$/);
+      expect(
+        moved.facts.tree_hash_harvest,
+        "the harvester hashed the same tree it did before a container wrote to it",
+      ).not.toBe(harvest.facts.tree_hash_harvest);
+      expect(moved.verdict).toBe("unknown");
+      expect(moved.reasons.join(" ")).toContain("ISC-154");
+
       // --- down: the container the chain created is reaped.
       const down = await cli(rig, ["down", "--run", rig.runId, "--json"]);
       expect(down.code, `down failed:\n${down.stdout}\n${down.stderr}`).toBe(0);
@@ -940,6 +1056,6 @@ describe("the whole chain, in one motion (ISC-290)", () => {
         `down left ${launch.container} behind`,
       ).not.toBe("true");
     },
-    gateBudget([UP_GATE_MS, DISPATCH_GATE_MS, HARVEST_GATE_MS, DOWN_GATE_MS]),
+    gateBudget([UP_GATE_MS, DISPATCH_GATE_MS, HARVEST_GATE_MS, TREE_MOVED_GATE_MS, DOWN_GATE_MS]),
   );
 });
