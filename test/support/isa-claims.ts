@@ -306,6 +306,20 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-189",
+    grade: "[x]",
+    claim:
+      "`buildImage` stamps all THREE identity labels. The whole launch-gate identity check reads " +
+      "them back, so dropping one silently converts `imageIdentityDrift` into a check that " +
+      "compares two fields instead of three — and dropping all three converts it into one that " +
+      "fails closed on every image, which is the loud direction but still not the graded one. " +
+      "The real-daemon probe in `image.test.ts` reads these back from a built image and would " +
+      "catch it, but ONLY in the Docker-gated container job; this re-reads the claim in every " +
+      "job, in milliseconds, without a daemon.",
+    argv: ["grep", "-nE", '"--label", `pifleet\\.', "src/container/image.ts"],
+    expect: 3,
+  },
+  {
     isc: "ISC-290",
     grade: "[x]",
     claim:

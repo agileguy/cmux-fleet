@@ -43,6 +43,46 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **ISC-189 closed: the launch gate is proved against REAL bytes on a REAL daemon.** The criterion's
+  own TO CLOSE was specific — one probe in the Docker-gated `container` job that builds a real image
+  and files it under another image's tag, asserting both that the labels come back as `buildImage`
+  wrote them and that `assertImagesReady` refuses. That, plus the older residual it was carrying
+  separately: the fails-verify half was a `docker` PATH shim, never a real image that really fails.
+
+  Four probes in `test/integration/image.test.ts`, and the two that refuse are worthless without
+  the two that do not:
+
+  1. **The label round trip.** `docker image inspect` on the freshly built image must report
+     `pifleet.pi-version`, `pifleet.toolchain` and `pifleet.config-hash` exactly as `parseImageTag`
+     reads them off the tag it was built under. That is the equality `imageIdentityDrift` is built
+     on, and no test read it back from an actual image store until now — the shim answered
+     `{{json .Config.Labels}}` by taking the tag string apart, so nothing would have noticed if
+     `buildImage` stopped stamping the labels tomorrow.
+  2. **The stale-but-present case.** One `docker tag` files the real worker image under a tag whose
+     config-hash is not its own. The probe asserts, in order, that `imagePresent` says PRESENT,
+     that `verifyImage` says OK, and that the gate refuses anyway with `reason: "mismatched"`
+     naming both hash values. The first two are the load-bearing ones: they establish that both
+     halves of the pre-identity gate pass on the wrong image.
+  3. **Fails-verify on real bytes.** An image built `FROM` the real one with nothing changed but
+     `USER root`, stamped with identity labels that MATCH its own tag — so presence passes, the
+     identity check passes, and the run reaches verification under its own power, where
+     `verifyImage`'s `uid-10001` check refuses it.
+  4. **The positive control**, which is not optional: a gate that refused everything would pass
+     both refusal probes.
+
+  Composed with `up-wiring.test.ts` — which proves the half about `up` (on the launch path, right
+  diagnosis, before any clone, remote or supervisor) — the criterion is covered end to end. Neither
+  file proves it alone, and that is stated in the ISA rather than left to be inferred.
+
+  Mutation-proved, one probe reddened per mutation: neutering `imageIdentityDrift` reddens only the
+  retag case (`the gate ACCEPTED pifleet/pi-worker:0.79.6-node-74f1f971d3b2`); neutering the verify
+  verdict reddens only the fails-verify case. Both restored byte-identical under `shasum -c`. The
+  exit code is deliberately the discriminator nowhere: this criterion already recorded a mutation
+  that still exited 3 because a later preflight refuses with the same code.
+
+  `TOTAL_EXPECTED` 107 → 111, **derived** by the hand method rather than incremented:
+  `6 pass, 105 skip, 0 fail. Ran 111 tests across 12 files.`
+
 - **ISC-48 closed: the minted token's identity is asked of GOOGLE, not asserted from the argv.** The
   criterion names a TOKEN, and until ISC-248 no `up` path minted one — so the previous close-out
   could only check the PLAN (every grant line names the SA, the operator's account never consulted),
