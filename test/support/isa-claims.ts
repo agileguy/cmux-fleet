@@ -249,23 +249,33 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-248",
-    grade: "[ ]",
+    grade: "[x]",
     claim:
-      "`TokenRefresher` has zero callers anywhere in `src/`, so it does not run on the " +
-      "supervisor's lifecycle or on any other.",
-    argv: ["grep", "-rn", "security/refresh", "src/"],
-    expect: "empty",
+      "The supervisor CONSTRUCTS a `TokenRefresher` and drives its production loop — the " +
+      "criterion's verb. Both lines, because either alone is the defect the other hides: a " +
+      "refresher nobody runs, or a `run()` on something else.",
+    argv: ["grep", "-En", "new TokenRefresher\\(|refresher\\.run\\(", "src/supervisor/index.ts"],
+    expect: 2,
   },
   {
     isc: "ISC-248",
-    grade: "[ ]",
+    grade: "[x]",
     claim:
-      "There is no credential RUNTIME path to attach a refresher to: nothing in " +
-      "production mints a token and nothing injects one, outside `security/adc.ts` and " +
-      "`security/refresh.ts`'s own options interface.",
-    argv: ["grep", "-rEn", "injectToken|gcloudMinter|: Minter", "src/"],
-    exclude: ["src/security/adc.ts", "src/security/refresh.ts"],
-    expect: "empty",
+      "The refresher is torn down on the supervisor's shutdown path. Without this the " +
+      "process kept a live loop and a pending timer and would not exit — which is a wiring " +
+      "defect that looks exactly like a hang.",
+    argv: ["grep", "-n", "refreshAbort.abort()", "src/supervisor/index.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-248",
+    grade: "[x]",
+    claim:
+      "The credential PLAN travels in the launch record rather than being re-derived by " +
+      "the supervisor, so the container that starts and the credential it is given cannot " +
+      "disagree.",
+    argv: ["grep", "-n", "credential:", "src/run/materialize.ts"],
+    expect: 1,
   },
   {
     isc: "ISC-290",

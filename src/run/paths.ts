@@ -239,6 +239,21 @@ export interface WorkerPaths {
    */
   attendedJson: string;
   /**
+   * Append-only log of `CredentialInjection` records — every token this
+   * worker was given, in order (ISC-248).
+   *
+   * A JSONL sibling rather than a field in `state.json` because the interesting
+   * fact is the SEQUENCE: `state.credential` says what is true now, and one
+   * value cannot distinguish "the initial injection worked" from "the refresh
+   * loop has been running for six hours". Generation 1 appearing here is the
+   * only durable evidence that the loop RE-INJECTED rather than merely having
+   * been constructed, which is the half of the criterion no unit test reaches.
+   *
+   * Safe to keep: `CredentialInjection` has no token field by construction —
+   * `recordInjection` takes the token's LABELS and never its value.
+   */
+  credentialsJsonl: string;
+  /**
    * The four per-worker container INPUTS (SRD §5.5): the `--env-file`, the
    * concatenated briefing, the verbgate policy, and the filtered kubeconfig.
    *
@@ -323,6 +338,7 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     controlSock: socketPath(run.runId, workerId),
     tasksDir: join(dir, "tasks"),
     attendedJson: join(dir, "attended.json"),
+    credentialsJsonl: join(dir, "credentials.jsonl"),
     envFile: join(dir, "env"),
     systemAppendMd: join(dir, "system-append.md"),
     cloudAllow: join(dir, "cloud-allow"),

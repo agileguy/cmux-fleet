@@ -62,6 +62,10 @@ import { LedgerWriter } from "../run/ledger.ts";
 import { worktreeContentHash } from "../run/treehash.ts";
 import { processStartTime, registryCall, serveJsonlSocket } from "../run/registry.ts";
 import { ensureControlAuth } from "../security/control-auth.ts";
+import { gcloudMinter, injectToken, resolveIdentity } from "../security/adc.ts";
+import { TokenRefresher, type RefreshFailure } from "../security/refresh.ts";
+import { realExec } from "../container/run.ts";
+import type { CredentialInjection } from "../contracts.ts";
 import { processGroupId } from "../safety/procgroup.ts";
 import {
   NO_TOOL_CALLS_REASON,
@@ -582,6 +586,133 @@ async function main(): Promise<void> {
       void onChildExit(exitCode, signalCode === null ? null : String(signalCode));
     },
   });
+
+  /**
+   * ISC-248 — the credential refresher, on THIS supervisor's lifecycle.
+   *
+   * `TokenRefresher` has existed and been unit-proved since Phase 1 with zero
+   * callers: `grep -rn 'security/refresh' src/` returned nothing, so the
+   * criterion's verb — *runs* — had no evidence and could have none. The
+   * reason it was left unwired was recorded and honest: the refresher attaches
+   * to a RUNNING container, and the headless path starts none. That stopped
+   * being true when the container launcher landed (ISC-286/287), and `cmd`
+   * above is that container's argv.
+   *
+   * Started here rather than before the spawn because there is nothing to
+   * inject INTO until the container exists. Nothing is awaited: minting shells
+   * out to gcloud and a supervisor that blocked on it would not read its
+   * child's first event until Google answered.
+   */
+  const refreshAbort = new AbortController();
+
+  if (launch !== null && launch.credential !== null) {
+    const cred = launch.credential;
+    const containerName = launch.container;
+
+    /**
+     * Reflect one injection into `state.credential` and the append-only log.
+     *
+     * Both, not either: `state` answers "is this worker's credential healthy
+     * NOW" for `status`, and the JSONL answers "did the loop re-inject" —
+     * which one value cannot, because generation 1 overwrites generation 0.
+     */
+    const onInjected = (record: CredentialInjection): void => {
+      state.credential = {
+        injections: (state.credential?.injections ?? 0) + 1,
+        generation: record.generation,
+        degraded: false,
+        last_failure: null,
+        last_injected_at: record.injected_at,
+      };
+      void flushState();
+      // Sequenced behind the same chain as events so two injections cannot
+      // interleave a partial line into the log.
+      eventsChain = eventsChain
+        .then(() => appendJsonl(wp.credentialsJsonl, record))
+        .catch((err) => logEvent({ type: "credential_record_failed", message: String(err) }));
+      logEvent({
+        type: "credential_injected",
+        generation: record.generation,
+        identity: record.identity,
+      });
+    };
+
+    /**
+     * A failed refresh degrades the worker LOUDLY; it does not kill it.
+     *
+     * The owner's decision, and the reasoning is that the two failures are not
+     * the same size: a transient `gcloud` hiccup must not destroy a worker
+     * mid-task, but a worker configured `cloud_access: true` that silently has
+     * no credential is indistinguishable from a healthy one until some later
+     * task fails naming the wrong component. So the flag goes in `state`,
+     * where `status` reads it, rather than only into a log nobody opens.
+     *
+     * `degraded` is cleared by the next SUCCESS (see `onInjected`), not by
+     * time — a credential is healthy again when one lands, not when the
+     * complaint gets old.
+     */
+    const onFailure = (failure: RefreshFailure): void => {
+      state.credential = {
+        injections: state.credential?.injections ?? 0,
+        generation: state.credential?.generation ?? 0,
+        degraded: true,
+        last_failure: failure.error.slice(0, 200),
+        last_injected_at: state.credential?.last_injected_at ?? null,
+      };
+      void flushState();
+      logEvent({
+        type: "credential_refresh_failed",
+        generation_attempted: failure.generation_attempted,
+        message: failure.error,
+      });
+    };
+
+    void (async () => {
+      /**
+       * The identity is resolved ONCE, here, and not per mint.
+       *
+       * `resolveIdentity` returns the SA verbatim when impersonating and
+       * otherwise reads the host's ADC principal — a local file and at worst
+       * one `gcloud config get-value`. Doing it per mint would put that on
+       * the 45-minute path for a value that cannot change within a run.
+       *
+       * Failing to resolve it is NOT fatal and NOT silent: the mint itself is
+       * what needs a working gcloud, and it is about to say so far more
+       * precisely. The worker id stands in so the record has a non-empty
+       * `identity` field rather than an invented account name.
+       */
+      let identity = argv.workerId;
+      try {
+        identity = await resolveIdentity(realExec, cred.impersonate_service_account);
+      } catch (err) {
+        logEvent({ type: "credential_identity_unresolved", message: String(err) });
+      }
+
+      const refresher = new TokenRefresher({
+        worker: argv.workerId,
+        mode: cred.mode,
+        intervalS: cred.refresh_s,
+        mint: gcloudMinter(realExec, {
+          impersonateServiceAccount: cred.impersonate_service_account,
+          identity,
+        }),
+        // Bound to the container NAME from the launch record, never a name
+        // this process derived: `down` removes by that name too, and two
+        // spellings of one container is the ISC-188 shape.
+        inject: (token: string) => injectToken(realExec, containerName, token),
+        onInjected,
+        onFailure,
+      });
+      /**
+       * `run` ticks immediately — a worker with no token yet is due at 0 — so
+       * this IS the initial injection as well as the loop. One code path for
+       * both is deliberate: an initial injection written separately is a
+       * second place for the mint, the record and the failure handling to
+       * drift, and the refresher already treats generation 0 as the initial.
+       */
+      await refresher.run(refreshAbort.signal);
+    })().catch((err) => logEvent({ type: "credential_loop_failed", message: String(err) }));
+  }
 
   const settle = async (verdict: Verdict, reason: string): Promise<void> => {
     const settled = em.settle(verdict, new Date().toISOString());
@@ -1656,6 +1787,17 @@ async function main(): Promise<void> {
      * incidents into it.
      */
     clearUiDeadlines();
+    /**
+     * Stop the refresher BEFORE the container goes away.
+     *
+     * `run()` races each tick against this signal and passes it into its
+     * sleep, so abort is observed immediately rather than at the next
+     * 45-minute wake — without which the process had a pending timer and a
+     * live loop and would not exit at all (recorded at `defaultSleep`). An
+     * in-flight mint is not cancelled, only stopped being waited on: nothing
+     * here can safely unwind a half-finished injection.
+     */
+    refreshAbort.abort();
     // Graceful stop per §13 F3: abort → give the turn a moment to settle →
     // THEN close stdin. Closing stdin first destroys in-flight responses.
     if (em.live !== null) {

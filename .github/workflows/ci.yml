@@ -628,7 +628,19 @@ jobs:
           # must RUN -- a runner that cannot reach `oauth2.googleapis.com`
           # should fail this job loudly rather than self-skip, because
           # "the proxy carries Google" is exactly the claim ISC-263 closes on.
-          TOTAL_EXPECTED: "105"
+          #
+          # 105 -> 106: ISC-248's closing probe in container-launch.test.ts —
+          # the supervisor's credential refresher, which needs a real container
+          # AND the federated credential, so this job is the only one that can
+          # run it. DERIVED by the hand method, not incremented; same conditions
+          # (bun 1.3.11, PIFLEET_DOCKER unset, no listener on :8000):
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container}.test.ts
+          #     -> 6 pass, 100 skip, 0 fail. Ran 106 tests across 12 files.
+          # It needs no EXPECTED_SKIPS entry: `EXPECTED_HOST_ADC_MINT_SKIPS` is
+          # empty precisely because the auth step above makes HOST_ADC_PRESENT
+          # true here, so an ADC-gated probe that SKIPPED in this job would be
+          # the self-skipping test the guard exists to catch.
+          TOTAL_EXPECTED: "106"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

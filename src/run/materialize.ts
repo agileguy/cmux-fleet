@@ -78,6 +78,7 @@ import {
   type ResolvedWorker,
 } from "../config/load.ts";
 import { renderWorker } from "../config/render.ts";
+import { planCredential } from "../security/adc.ts";
 import { makeWorkerAccessible, makeWorkerReadable } from "../container/mounts.ts";
 import {
   EXIT,
@@ -907,11 +908,39 @@ export async function materializeWorkerInputs(
       );
     }
 
+    /**
+     * The credential decision travels WITH the argv, for the reason stated
+     * above it: `up` resolves config in a cwd and environment the detached
+     * supervisor does not share, so a supervisor that re-derived this could
+     * disagree with the container that was actually launched, and nothing
+     * would look wrong. `planCredential` is the single function allowed to
+     * decide, and this records its output rather than its inputs.
+     *
+     * ISC-248 is what makes this load-bearing rather than tidy: the
+     * supervisor now STARTS a `TokenRefresher` from this field, so a wrong
+     * value here is a worker minting the wrong identity — not merely a
+     * mislabelled report line.
+     */
+    const credPlan = planCredential({
+      cloudAccess: w.cloudAccess,
+      adcMode: loaded.config.cloud.adc_mode,
+      impersonateServiceAccount: loaded.config.cloud.impersonate_service_account,
+      quotaProject: loaded.config.cloud.quota_project,
+    });
     const launch: WorkerLaunch = {
       kind: "container",
       argv: rendered.docker,
       container: workerContainerName(run.runId, workerId),
       image: rendered.image,
+      credential:
+        credPlan.kind === "none"
+          ? null
+          : {
+              mode: credPlan.mode,
+              impersonate_service_account: credPlan.impersonateServiceAccount,
+              quota_project: credPlan.quotaProject,
+              refresh_s: loaded.config.cloud.token_refresh,
+            },
     };
     if (opts.writeLaunchRecord === true) {
       await establishing(`the launch record for ${workerId}`, async () => {
