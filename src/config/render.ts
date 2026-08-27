@@ -174,6 +174,28 @@ export function buildDockerArgv(
   // noexec /tmp blocks "download a binary and run it" while /workspace and
   // /outbox stay writable (SRD §5.6).
   argv.push("--tmpfs", "/tmp:rw,noexec,nosuid,size=256m");
+  // The escape-attempt honeypot's bait needs somewhere to live (ISC-125).
+  //
+  // `/var/run` is a symlink to `/run`, the root is read-only, and the tmpfs
+  // above covers `/tmp` ONLY — so without this line `pifleet-honeypot` cannot
+  // create `/var/run/docker.sock` and the entrypoint refuses to start the
+  // worker at all.
+  //
+  // `uid`/`gid` are NOT optional and their absence is silent in the worst way:
+  // a tmpfs with no uid option mounts root-owned 0755, the bind fails EACCES,
+  // and the failure surfaces as a container that will not come up rather than
+  // as a mount that is wrong. Measured both ways against the real image under
+  // the full production shape before this line was written. `WORKER_UID` for
+  // the same reason the gcloud tmpfs uses it — a drift between the flag and
+  // the image's baked uid has no other symptom.
+  //
+  // 1m, and small on purpose. The socket inode needs almost nothing, and a
+  // generous cap would hand a worker a second writable scratch area that no
+  // other control accounts for.
+  argv.push(
+    "--tmpfs",
+    `/run:rw,noexec,nosuid,size=1m,uid=${WORKER_UID},gid=${WORKER_UID}`,
+  );
   // The image's baked CLOUDSDK_CONFIG is an ordinary directory on the root
   // filesystem, so `--read-only` above made it unwritable and every gcloud
   // call in a worker crashed with `[Errno 30] Read-only file system` — with a

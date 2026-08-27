@@ -99,7 +99,16 @@ export class BuildContextError extends Error {
  * digest record's own keys, so the tag cannot move because someone reordered
  * an object literal.
  */
-export const BUILD_CONTEXT_ASSETS = ["Dockerfile", "verbgate", "entrypoint.sh"] as const;
+export const BUILD_CONTEXT_ASSETS = [
+  "Dockerfile",
+  "verbgate",
+  "entrypoint.sh",
+  // The escape-attempt honeypot (ISC-125). It is the DETECTOR — an image whose
+  // listener is stale is one that reports "no escape attempt" from a run
+  // nothing was watching, which is the highest-consequence staleness this hash
+  // exists to prevent, alongside a stale verb gate.
+  "honeypot.cjs",
+] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 
 /**

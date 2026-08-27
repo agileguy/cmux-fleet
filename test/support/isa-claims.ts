@@ -218,15 +218,59 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     exclude: ["src/safety/kill.ts"],
     expect: "empty",
   },
+  /**
+   * REPLACED 2026-08-27, and the replacement is the point rather than a
+   * bookkeeping detail.
+   *
+   * The old claim was `grep -rn hazard src/report/` -> empty, worded as "the
+   * run report carries no security field at all … any hit means the reporting
+   * half of this criterion has been built". ISC-125 then built the reporting
+   * half — as `security.escape_watch`, not as hazards — so that command STILL
+   * returns empty and the claim would have gone on passing while the sentence
+   * it defends had become false. A grep that cannot fail when the thing it
+   * describes changes is the stale-grounds shape this whole file exists to
+   * catch, arriving through the one direction the two-direction design does
+   * not cover: a claim whose SUBJECT moved.
+   *
+   * `RepoHazard` remains unwired to any report surface. That is now stated in
+   * the ISA entry as an explicitly unclosed residual rather than carried here
+   * as a claim about ISC-125, because it never was one.
+   */
   {
     isc: "ISC-125",
-    grade: "[ ]",
+    grade: "[x]",
     claim:
-      "The run report carries no security field at all, so a detected hazard reaches " +
-      "no operator-visible surface. Any hit means the reporting half of this criterion " +
-      "has been built and the entry's cost estimate is out of date.",
-    argv: ["grep", "-rn", "hazard", "src/report/"],
-    expect: "empty",
+      "The report's security surface exists and is REACHED: `security.escape_watch` in " +
+      "the schema, filled by `collectEscapeWatch`, rendered by `renderEscapeWatch`. All " +
+      "three, because any one alone is the defect the others hide — a field nothing " +
+      "fills, a collector nothing reads, or a renderer for a field that is always empty.",
+    // `-l` rather than `-n`: the claim is "all THREE surfaces reference it",
+    // which is one output line per file. A line count would also move when a
+    // comment mentioning the field is reworded, so it would be brittle about
+    // the wrong thing.
+    argv: ["grep", "-rEl", "escape_watch", "src/contracts.ts", "src/report/collect.ts", "src/report/render.ts"],
+    expect: 3,
+  },
+  /**
+   * The detector's two halves, which are shell and node rather than
+   * TypeScript and so are invisible to every other check in this repo.
+   *
+   * The socket path is what makes the seed the one the criterion names, and
+   * the fatal branch is the owner decision the whole guarantee rests on: a
+   * honeypot whose listener has silently died reports "no escape attempt"
+   * when it was simply not watching. An entrypoint that went back to a bare
+   * `exec` would leave every probe in honeypot.test.ts still passing except
+   * one, and this line makes the removal visible by itself.
+   */
+  {
+    isc: "ISC-125",
+    grade: "[x]",
+    claim:
+      "The bait is bound at /var/run/docker.sock and the entrypoint ends the worker if " +
+      "the listener dies. Both files, because the detector and its supervisor fail " +
+      "independently and the second failing is the silent one.",
+    argv: ["grep", "-En", "/var/run/docker.sock|ending the worker", "docker/honeypot.cjs", "docker/entrypoint.sh"],
+    expect: "nonempty",
   },
   {
     isc: "ISC-157",

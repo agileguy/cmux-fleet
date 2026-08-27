@@ -127,6 +127,23 @@ export function buildWorkerEnv(
      * the opposite of what that check is for. One worker runs one model.
      */
     PIFLEET_LLM_MODELS: w.model,
+    /*
+     * Arms the escape-attempt honeypot (ISC-125). Unconditional: every worker
+     * is watched, and there is no config switch to turn it off, because an
+     * operator-visible "this run was not watched" state that an operator can
+     * cause on purpose is a state nobody will ever look at.
+     *
+     * It travels here rather than as a `-e` flag for the reason the block
+     * below gives at length: `buildDockerArgv` emits NO `-e` at all and
+     * `test/unit/container-env.test.ts` asserts the count is ZERO, so that
+     * adding one of any name has to be a deliberate act.
+     *
+     * A worker cannot unset this. The env file is written on the host, under
+     * the run directory, and is not on any mount the container can reach; by
+     * the time the worker exists, `docker/entrypoint.sh` has already read the
+     * variable and started the listener.
+     */
+    PIFLEET_HONEYPOT: "1",
   };
 
   /*

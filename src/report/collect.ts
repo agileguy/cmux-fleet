@@ -29,8 +29,13 @@ import {
   type TaskEnvelope,
   type Verdict,
 } from "../contracts.ts";
-import type { AttendedRecord } from "../contracts.ts";
+import type { AttendedRecord, EscapeWatch } from "../contracts.ts";
 import { mergeLedger } from "../run/ledger.ts";
+import {
+  readCollectedVerbgate,
+  type CollectedVerbgateRecord,
+} from "../run/verbgate-collect.ts";
+import { summarizeEscapeWatch } from "../security/honeypot.ts";
 import { taskRecordPath, workerPaths, type RunPaths } from "../run/paths.ts";
 import { readTaskRecord, readWorkerState, StateReadError } from "../run/state.ts";
 import { readAttended } from "../attended/mode.ts";
@@ -198,6 +203,8 @@ export async function collectRunReport(
    * report is always produced. The cap is a sane wire limit; treating it as
    * an assertion about reality was the mistake.
    */
+  const escapeWatch = await collectEscapeWatch(run, notes);
+
   const capped = capForSchema(schedule, merge, notes);
   const report = RunReportSchema.parse({
     schema: "pifleet.report/v1",
@@ -205,6 +212,7 @@ export async function collectRunReport(
     generated_at: new Date().toISOString(),
     schedule: capped.schedule,
     merge: capped.merge,
+    security: { escape_watch: escapeWatch },
     totals: {
       tasks: schedule.length,
       done: schedule.filter((s) => s.state === "done").length,
@@ -213,6 +221,43 @@ export async function collectRunReport(
     },
   });
   return { report, notes, attended, attendedUnverified };
+}
+
+/**
+ * What the escape-attempt honeypot saw, per worker (ISC-125).
+ *
+ * Enumerates `workersDir` rather than the audit directory, and the difference
+ * is the entire finding this function can produce. Walking the audit files
+ * would only ever describe workers whose evidence ARRIVED — a container whose
+ * listener never armed, or whose ledger was never collected, would simply not
+ * appear, and its absence would read as a clean run. Starting from the workers
+ * that exist means an unwatched one gets a row saying so.
+ *
+ * Degrades like everything else here: an unreadable audit file becomes a note
+ * plus an `armed: false` row, never an exception. `readCollectedVerbgate`
+ * answers `[]` for a worker with no audit file at all, which is the same
+ * answer for the same reason — no evidence of watching is not evidence of
+ * nothing to see.
+ */
+async function collectEscapeWatch(run: RunPaths, notes: string[]): Promise<EscapeWatch[]> {
+  let workers: string[];
+  try {
+    workers = await readdir(run.workersDir);
+  } catch {
+    return []; // no workers ever started; there is no container to have watched
+  }
+  const out: EscapeWatch[] = [];
+  for (const id of workers.sort()) {
+    if (id.startsWith(".")) continue;
+    let records: CollectedVerbgateRecord[] = [];
+    try {
+      records = await readCollectedVerbgate(run, id);
+    } catch (err) {
+      notes.push(`worker ${id}: collected audit trail is unreadable: ${firstLine(err)}`);
+    }
+    out.push(summarizeEscapeWatch(id, records));
+  }
+  return out;
 }
 
 /**
