@@ -4,6 +4,38 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The ISC-154 quiesce diagnostic is now READABLE, and the null it explains no longer has an
+  unnamed third cause.** The diagnostic shipped days earlier wrote its reason to `events.jsonl`
+  inside the run directory — and a CI runner is destroyed with that file on it. On 2026-08-27 a
+  `container-live` run failed `expect(record.tree_hash).not.toBeNull()` with the message *"the
+  supervisor took no quiesce sample"*, and the reason was in practice unrecoverable. The diagnostic
+  existed and could not be read, which is the same defect it was written to remove, one layer out.
+
+  Two halves, because there were two problems.
+
+  **The reason now travels in the failure message.** `quiesceSampleDigest` reads the same
+  `events.jsonl` and prints what the supervisor said, exactly as `toolErrorDigest` already does for
+  the model's erroring tool calls two assertions above it. It POLLS rather than reading once:
+  `logEvent` queues appends on a chain shared with the worker's stderr, so under a flood the record
+  can be enqueued before the task record is written and land on disk after it — a single read that
+  lost that race would report "no event" and send a reader hunting a bug that is not there.
+
+  **A null hash had THREE origins and only one of them said anything.** `worktreeContentHash`
+  failing emits `quiesce_sample_failed` with a reason; `settledWorkdir === null` emitted NOTHING and
+  produced the identical null. So "no failure event" was ambiguous between *the sampler ran and
+  could not answer*, *the epoch owned no workdir so nothing was sampled*, and *the sampler was never
+  reached* — three different bugs behind one silence. The skipped case now logs
+  `quiesce_sample_skipped` with its reason. It is deliberately not logged as a failure: a task
+  dispatched with no worktree is a legitimate shape, so the event records why no sample was taken
+  rather than complaining that none was.
+
+  Mutation-proved: removing the `quiesce_sample_skipped` call fails
+  `supervisor.test.ts`'s "a task with no worktree settles with a null hash, not a guess" with
+  `Expected: true / Received: false`. The test asserts the REASON, not merely the event type — an
+  event type with an empty reason is the same silence wearing a name.
+
 ### Added
 
 - **The supervisor now runs the credential refresher (ISC-248) — and, it turned out, injects the
