@@ -122,7 +122,16 @@ export interface ReapTarget {
   worker: string;
   /** Recorded identity of the supervisor — pid AND start time, never pid alone. */
   proc: { pid: number; started: string };
-  /** Supervisor's process group; the child tree dies with it. */
+  /**
+   * Supervisor's process group AS RECORDED, not as resolved.
+   *
+   * `null` means this target genuinely has no group. Zero or negative is the
+   * CAPTURE-FAILED SENTINEL and is passed through deliberately: the decision to
+   * narrow it to the leader now lives in `reapSupervisor` alone, so ISC-300 has
+   * exactly one line to flip whenever its trade is settled, and exactly one
+   * place that reports which way it went. Callers previously narrowed it
+   * themselves on the way in, which is why the report could not describe it.
+   */
   pgid: number | null;
   /** Container name to `docker rm -f` once the supervisor cannot object. */
   container: string | null;
@@ -158,6 +167,24 @@ export interface ReapReport {
    * this module now refuses as if no container had ever existed.
    */
   container: "removed" | "absent" | "failed" | "none" | "spared";
+  /**
+   * WHICH ACTION the ladder took about the process group (ISC-300).
+   *
+   * `none` and `narrowed_to_leader` are different facts and must not be
+   * collapsed, for the same reason `none` and `spared` above are not: one means
+   * this target never had a group to address, the other means it HAD a recorded
+   * one, that record was the capture-failed sentinel, and the reaper signalled
+   * the leader alone instead — a narrower action than a group signal, taken
+   * without the caller asking for it.
+   *
+   * The narrowing itself is deliberate and is ISC-300's open question: `down`
+   * REFUSES in this case, on the doctrine in `signalIfSame`'s docstring, and the
+   * reaper does not because it is unattended and refusing would leave the orphan
+   * it exists to collect. What was NOT deliberate is that the report said
+   * nothing either way, so an operator reading it could not tell which of the
+   * two had happened. That half needed no decision and is closed here.
+   */
+  group: "addressed" | "narrowed_to_leader" | "none";
 }
 
 /**
@@ -232,9 +259,18 @@ export async function reapSupervisor(
 ): Promise<ReapReport> {
   const ops = opts.ops ?? realReaperOps;
 
+  /*
+   * ISC-300, in one place. A recorded pgid of zero or less is the
+   * capture-failed sentinel; the reaper signals the leader alone rather than
+   * refusing, and now SAYS so. `down` resolves the same input the other way.
+   */
+  const narrowed = target.pgid !== null && target.pgid <= 0;
+  const group: ReapReport["group"] =
+    target.pgid === null ? "none" : narrowed ? "narrowed_to_leader" : "addressed";
+
   const supervisor = await runKillLadder({
     target: { pid: target.proc.pid, started: target.proc.started },
-    pgid: target.pgid,
+    pgid: narrowed ? null : target.pgid,
     abort: null, // wedged means the RPC is gone; there is nothing to ask.
     termGraceMs: opts.termGraceMs,
     killGraceMs: opts.killGraceMs,
@@ -250,7 +286,7 @@ export async function reapSupervisor(
       ? await ops.removeContainer(target.container)
       : "spared";
   }
-  return { worker: target.worker, supervisor, container };
+  return { worker: target.worker, supervisor, container, group };
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +333,19 @@ export async function reapStale(opts: ReapCycleOpts): Promise<ReapReport[]> {
         worker: name,
         proc: { pid: entry.pid, started: entry.started },
         /*
-         * ISC-300: this NARROWS TO THE LEADER where `down` REFUSES.
+         * ISC-300: the RECORDED value, passed through unnarrowed.
+         *
+         * This line used to narrow the sentinel to the leader with a ternary
+         * HERE (the exact form is deliberately not quoted: a claim greps for it,
+         * and prose that spells it out makes that claim match a comment instead
+         * of code) — before
+         * `reapSupervisor` could see that a group had been recorded at all, and
+         * therefore before anything could report which action was taken. The
+         * narrowing still happens and is still deliberate; it now happens in one
+         * place that also describes it. See `ReapReport.group`.
+         *
+         * The ORIGINAL disagreement is unchanged and still open: this NARROWS
+         * where `down` REFUSES.
          *
          * `signalIfSame`'s docstring calls a zero-or-negative recorded pgid a
          * capture-failed sentinel and says silently narrowing to the leader
@@ -313,7 +361,7 @@ export async function reapStale(opts: ReapCycleOpts): Promise<ReapReport[]> {
          * What is NOT in dispute is that the report says nothing about which
          * action was taken. See ISC-300.
          */
-        pgid: entry.pgid > 0 ? entry.pgid : null,
+        pgid: entry.pgid,
         container: state?.container?.name ?? null,
       },
       opts,
