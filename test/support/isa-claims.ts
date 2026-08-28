@@ -422,6 +422,23 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-n", "group: r.group", "src/cli/commands/daemon.ts"],
     expect: 1,
   },
+  /**
+   * The release site, pinned in the file that leaked rather than in `outbox.ts`.
+   *
+   * `closeOutboxScan` has always EXISTED; what it lacked was a caller. Greping
+   * for its definition would have been green throughout the leak, which is the
+   * distinction this claim exists to make.
+   */
+  {
+    isc: "ISC-301",
+    grade: "[~]",
+    claim:
+      "harvestTask still releases the outbox scan it opened. A miss means the descriptors " +
+      "are leaking again, one per accepted artifact per task, with nothing reading the field " +
+      "that would show it.",
+    argv: ["grep", "-n", "await closeOutboxScan(scan)", "src/harvest/index.ts"],
+    expect: 1,
+  },
   {
     isc: "ISC-157",
     grade: "[x]",
