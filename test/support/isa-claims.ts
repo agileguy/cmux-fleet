@@ -505,14 +505,40 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-246",
-    grade: "[~]",
+    grade: "[x]",
     claim:
-      "`scan.safe` has no production consumer — `harvest/index.ts` reads `scan.refused` " +
-      "and never touches it. That is precisely why this stays `[~]`: the descriptor " +
-      "work is a module nothing calls. A hit here is the E3 consumer arriving, and the " +
-      "grade can move.",
-    argv: ["grep", "-rn", "scan.safe", "src/"],
-    exclude: ["src/harvest/outbox.ts"],
+      "The consumer exists and it is production: `harvestTask` reconciles the envelope's " +
+      "artifact claims against the scan inside its own ownership window. This replaced an " +
+      "absence-claim that expected `scan.safe` to have no reader at all — it went red when " +
+      "the reconciler landed, which is what it was written to do.",
+    argv: [
+      "grep",
+      "-nF",
+      "await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc)",
+      "src/harvest/index.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-246",
+    grade: "[x]",
+    claim:
+      "The bytes come off the DESCRIPTOR the scan validated, not off the name. Pinned as " +
+      "the positional read rather than as a mention of `handle`, because the whole " +
+      "criterion is that the inode which passed realpath/nlink/O_NOFOLLOW is the inode a " +
+      "consumer reads.",
+    argv: ["grep", "-nF", "await f.handle.read(buf, 0, want, total)", "src/harvest/reconcile.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-246",
+    grade: "[x]",
+    claim:
+      "The reconciler cannot dereference a worker-authored path even by accident: it " +
+      "imports no filesystem module. §12.5 calls opening a claimed path an exfiltration " +
+      "primitive, and the guarantee here is structural rather than a convention a later " +
+      "edit could forget — an import is what such an edit would have to add first.",
+    argv: ["grep", "-n", "node:fs", "src/harvest/reconcile.ts"],
     expect: "empty",
   },
   {
@@ -681,6 +707,23 @@ const SELF = ["test/support/isa-claims.ts", "test/unit/isa-claims.test.ts"] as c
  */
 let maskedTree: Promise<string> | null = null;
 
+/**
+ * The repo-relative paths the masked mirror is built from.
+ *
+ * Exported for one reason: the flags below are the whole content of ISC-303,
+ * and a fix that lives inside a memoised private function cannot be re-checked
+ * by anything. The mirror is built once per process, so a probe that creates an
+ * untracked file after the first claim has run would be testing the cache
+ * rather than the listing.
+ */
+export async function listMirroredFiles(): Promise<string[]> {
+  const ls = Bun.spawn(["git", "ls-files", "--cached", "--others", "--exclude-standard"], {
+    stdout: "pipe",
+  });
+  const [listing] = await Promise.all([new Response(ls.stdout).text(), ls.exited]);
+  return listing.split("\n").filter((l) => l.trim() !== "");
+}
+
 function buildMaskedTree(): Promise<string> {
   return (async () => {
     const { mkdtemp, mkdir, writeFile, copyFile } = await import("node:fs/promises");
@@ -688,9 +731,31 @@ function buildMaskedTree(): Promise<string> {
     const { dirname, join } = await import("node:path");
     const { maskComments } = await import("./mask-comments.ts");
     const root = await mkdtemp(join(tmpdir(), "pifleet-isa-masked-"));
-    const ls = Bun.spawn(["git", "ls-files"], { stdout: "pipe" });
-    const [listing] = await Promise.all([new Response(ls.stdout).text(), ls.exited]);
-    for (const rel of listing.split("\n").filter((l) => l.trim() !== "")) {
+    /*
+     * `--others --exclude-standard` as well as the index, and the reason is a
+     * near-miss rather than a tidiness preference.
+     *
+     * A plain `git ls-files` lists TRACKED files only. Every absence-claim —
+     * the ones that assert a spelling appears nowhere in `src/` — is therefore
+     * vacuously green for exactly as long as the code that would falsify it
+     * sits untracked. Measured: `src/harvest/reconcile.ts` was written, wired
+     * into `harvestTask` and passing its own tests while ISC-246's claim went
+     * on reporting that no production consumer existed. It went red on `git
+     * add`, not on the code arriving.
+     *
+     * That is the worst possible window for the guard to be blind in, because
+     * it is precisely the window in which someone is deciding whether the work
+     * is done.
+     *
+     * This changes nothing in CI, and that is the point rather than a caveat: a
+     * clean checkout has no untracked files, so the listing is byte-identical
+     * there (measured: 353 paths either way). The fix buys back only the local
+     * signal, which is the only place it was ever lost.
+     *
+     * `--exclude-standard` keeps `.gitignore` authoritative, so build output
+     * and `node_modules` stay out of the mirror.
+     */
+    for (const rel of await listMirroredFiles()) {
       const dest = join(root, rel);
       await mkdir(dirname(dest), { recursive: true });
       if (rel.endsWith(".ts")) {
