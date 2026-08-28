@@ -27,6 +27,7 @@ import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
 import { BackendSchema, parseDuration } from "../../src/config/schema.ts";
+import { omlxRelayTarget } from "../../src/security/relay.ts";
 import { EXIT } from "../../src/contracts.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -807,6 +808,54 @@ describe("config validate CLI (ISC-58)", () => {
     const r = await runCli(["config", "validate", "--config", join(REPO_ROOT, "fleet.example.yaml")]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("ok");
+  });
+
+  /**
+   * The shipped example does not teach the alias this repo deprecated (ISC-264).
+   *
+   * `base_url` was renamed `host.docker.internal` -> `omlx.pifleet.internal`
+   * because the old name claimed the relay was the Docker host, which stopped
+   * being true once `relay_upstream` could name a LAN peer. The old spelling
+   * still resolves and is still accepted WITH A WARNING — and this file is what
+   * every new fleet is COPIED FROM, so shipping the old spelling here meant each
+   * fresh config began life emitting that warning. `relay.ts` says why that
+   * matters in its own words: "silently accepting a spelling that is on its way
+   * out is how a transition becomes permanent."
+   *
+   * ## Driven through `omlxRelayTarget`, and NOT through `config validate`
+   *
+   * Measured, and it is the reason this test is shaped the way it is. A first
+   * attempt asserted on `config validate --config fleet.example.yaml`'s stderr,
+   * and putting the deprecated spelling back left it GREEN: that command never
+   * reaches the warning. Nothing outside `relay.ts` calls `relayListenPort`, and
+   * the alias is only read when a relay is actually being built. A probe that
+   * cannot observe the thing it is named after is worth nothing, so this one
+   * calls the function that emits it.
+   *
+   * Asserted on the WARNING rather than on the file's text, because the warning
+   * is what an operator sees and what the rename exists to retire; a grep for
+   * the new spelling would also pass on a config carrying both.
+   *
+   * The DIAL side is deliberately not covered: `relay_upstream`'s default is
+   * still `host.docker.internal` and still correct, because that one names the
+   * real Docker host rather than an alias on the bridge.
+   */
+  test("the shipped example raises no deprecated-alias warning", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const written: string[] = [];
+    const real = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      omlxRelayTarget(loaded.config);
+    } finally {
+      process.stderr.write = real;
+    }
+    const stderr = written.join("");
+    expect(stderr).not.toContain("OLD listen alias");
+    expect(stderr).not.toContain("ISC-264");
   });
 
   test("exits 2 with a field-level error on a malformed config", async () => {
