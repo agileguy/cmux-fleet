@@ -6,6 +6,25 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **The shipped example config still taught the alias the code deprecated (ISC-264).**
+  `base_url` was renamed `host.docker.internal` -> `omlx.pifleet.internal` because the old name
+  claimed the relay was the Docker host, which stopped being true once `relay_upstream` could name a
+  LAN peer. The rename landed in the schema and the code; `fleet.example.yaml` kept the old spelling
+  and its comment said the host "must stay" that name. Since that file is what every new fleet is
+  copied from, the repository's own template guaranteed the transition would never finish — the
+  warning's own text calls that out: "silently accepting a spelling that is on its way out is how a
+  transition becomes permanent."
+
+  The dial side is deliberately untouched: `relay_upstream`'s default is still
+  `host.docker.internal`, which names the real Docker host rather than an alias on the bridge, and
+  the comment now says so.
+
+  The guard for this was vacuous on the first attempt and the mutation caught it. It asserted on
+  `config validate`'s stderr, and restoring the deprecated spelling left it green — that command
+  never reaches the warning, because nothing outside `relay.ts` calls `relayListenPort` and the
+  alias is only read when a relay is actually built. The probe now drives `omlxRelayTarget` and
+  captures `process.stderr.write`.
+
 - **The egress relay bind-mounted three files from the checkout with nothing checking they were
   visible (ISC-292).** `up` asserts bind-mount visibility over the finished worker argvs, and none
   of the relay's sources appear on those: `relayScriptPath()`, `proxyScriptPath()` and

@@ -80,11 +80,22 @@ run:
 
 llm:                         # ALWAYS self-hosted oMLX, never a provider — see §5.9
   provider: omlx
-  # What a WORKER dials, from inside the egress bridge. The host must stay
-  # `host.docker.internal` — that is the relay's listen-side alias on that
+  # What a WORKER dials, from inside the egress bridge. The host must be
+  # `omlx.pifleet.internal` — that is the relay's listen-side alias on that
   # bridge, so a base_url naming anything else is a listener no worker can
   # resolve. It does NOT say where the model server runs; relay_upstream does.
-  base_url: http://host.docker.internal:8000/v1
+  #
+  # Renamed from `host.docker.internal` by ISC-264: that name claimed the relay
+  # was the Docker host, which stopped being true once relay_upstream could name
+  # a LAN peer. The old spelling still resolves, and `up` still accepts it with a
+  # deprecation warning — but this file is what a new fleet is copied FROM, so
+  # shipping the old one here meant every fresh config started life emitting that
+  # warning, which is exactly how a transition becomes permanent.
+  #
+  # Note the DIAL side below keeps `host.docker.internal` deliberately. The two
+  # used to be one string and are now two different things: this line is a name
+  # inside the bridge, that one is the real Docker host.
+  base_url: http://omlx.pifleet.internal:8000/v1
   #
   # What the RELAY dials — host:port, explicit port required (§5.9).
   #
