@@ -897,6 +897,103 @@ describe("ISC-116: deadline exhaustion is a diagnosed exit-4 failure", () => {
  * SUCCEEDS while the target survives, which the escalation test above already
  * drives.
  */
+/**
+ * Mid-climb group revocation, driven through the LADDER (ISC-272 residual 3).
+ *
+ * ## What was already covered, and why it was not this
+ *
+ * `signalIfSame` re-confirms the group before every signal, and
+ * "the group is re-confirmed at every rung, not carried forward" above proves
+ * it — by calling `signalIfSame` twice BY HAND with the world changed in
+ * between. That establishes the primitive. It cannot establish that
+ * `runKillLadder` honours the refusal when the change happens inside a climb it
+ * is driving, because the climb never yields to the test.
+ *
+ * The ISA recorded this residual as "correct-by-construction but unreachable
+ * and untested", and the unreachability was real for the default fixtures: the
+ * harness's `groupId` is a resolved map lookup, so between the ladder's own
+ * rungs there is no moment a test owns. The way in is the `sleep` hook. The
+ * ladder waits out its term grace through the injected clock, so a `sleep` that
+ * mutates the world IS the mid-climb moment, and it needs no new seam in
+ * production code to reach.
+ *
+ * ## Why the negative assertion carries the test
+ *
+ * `group_unconfirmed` alone would pass on a ladder that refused for any reason
+ * at all. What matters is WHICH signals went out: SIGTERM to the group that was
+ * still ours, and then nothing. A ladder that carried the confirmation forward
+ * would deliver SIGKILL to `-100` — a group the OS had already stopped agreeing
+ * was this process's — and that is the strictly-wider blast radius the whole
+ * ISC-272 fix exists to prevent.
+ */
+describe("a group revoked mid-climb stops the ladder (ISC-272)", () => {
+  test("SIGTERM goes to the confirmed group, SIGKILL is never sent", async () => {
+    const h = harness();
+    h.alive();
+
+    /*
+     * The revocation happens during the ladder's OWN term grace, which is the
+     * only moment that makes this a mid-climb test rather than a restatement of
+     * the primitive. Once, so the SIGTERM rung sees the group intact and the
+     * SIGKILL rung does not.
+     */
+    let revoked = false;
+    const sleep = (ms: number): Promise<void> => {
+      if (!revoked) {
+        revoked = true;
+        // Still itself, no longer leading 100 — a supervisor re-parented, or a
+        // record that has gone stale under it.
+        h.groups.set(TARGET.pid, 55);
+      }
+      return h.sleep(ms);
+    };
+
+    const outcome = await runKillLadder({
+      target: TARGET,
+      pgid: TARGET.pid,
+      // Never dies, so the ladder is obliged to escalate and therefore to make
+      // a second group decision.
+      dead: () => Promise.resolve(false),
+      ...FAST,
+      ops: h.ops,
+      now: h.now,
+      sleep,
+    });
+
+    expect(revoked, "the ladder never slept, so nothing was revoked mid-climb").toBe(true);
+    expect(outcome).toBe("group_unconfirmed");
+    // The load-bearing half: one signal, to the group that was still ours.
+    expect(h.signals).toEqual([{ pid: -TARGET.pid, sig: "SIGTERM" }]);
+  });
+
+  /**
+   * The control. Same fixture, same escalation, group left alone — the ladder
+   * must climb all the way and send BOTH signals.
+   *
+   * Without it, a ladder that had simply stopped escalating would satisfy the
+   * test above: one SIGTERM and no SIGKILL is exactly what "gave up early"
+   * looks like, and the verdict string is the only thing separating them.
+   */
+  test("with the group left alone the same ladder escalates to SIGKILL", async () => {
+    const h = harness();
+    h.alive();
+    const outcome = await runKillLadder({
+      target: TARGET,
+      pgid: TARGET.pid,
+      dead: () => Promise.resolve(false),
+      ...FAST,
+      ops: h.ops,
+      now: h.now,
+      sleep: h.sleep,
+    });
+    expect(outcome).toBe("unconfirmed");
+    expect(h.signals).toEqual([
+      { pid: -TARGET.pid, sig: "SIGTERM" },
+      { pid: -TARGET.pid, sig: "SIGKILL" },
+    ]);
+  });
+});
+
 describe("EPERM is an outcome, not an escape (ISC-272)", () => {
   /** Ops whose signal always refuses with the given errno. */
   function refusing(code: string) {

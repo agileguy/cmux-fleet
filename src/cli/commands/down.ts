@@ -265,6 +265,23 @@ export function register(program: Command): void {
         how: string;
         pid?: number;
         forced_identity?: true;
+        /**
+         * The process group a forced stop DID NOT signal (ISC-191 residual).
+         *
+         * `--force-identity` narrows to the leader on purpose — see
+         * `anchorIdentity` for why widening on an unverified identity would be
+         * the worst possible reading of "signal it anyway". The consequence is
+         * that a supervisor's own children, which a group signal would have
+         * taken, survive it.
+         *
+         * That consequence was true and unreported. `stopped: true` with
+         * nothing else said invites an operator to believe the teardown is
+         * complete, which is the same shape of falsehood as reporting a ladder
+         * that was never climbed. Present ONLY when a group was recorded and
+         * the forced path declined to address it, so its absence is not an
+         * assurance about a run that never had a group.
+         */
+        group_spared?: number;
       }> = [];
       for (const id of workerIds.sort()) {
         const wp = workerPaths(run, id);
@@ -483,10 +500,24 @@ export function register(program: Command): void {
         const held = await identityHolds(target);
         const stopped = held === false;
         if (held === null) how = LADDER_IDENTITY_UNCONFIRMED;
-        report.push({ id, stopped, how, ...(anchor.forced ? { forced_identity: true } : {}) });
+        /*
+         * Reported from the RECORD rather than from the anchor, because the
+         * anchor's group is `null` on this path by construction — that is the
+         * whole point of it — so asking the anchor what was spared always
+         * answers "nothing". The record is the only place that still knows a
+         * group existed to be spared.
+         */
+        const spared = anchor.forced && state.pgid > 0 ? state.pgid : undefined;
+        report.push({
+          id,
+          stopped,
+          how,
+          ...(anchor.forced ? { forced_identity: true } : {}),
+          ...(spared !== undefined ? { group_spared: spared } : {}),
+        });
         await ledger.append("worker_down", {
           worker: id,
-          detail: { how, stopped, forced_identity: anchor.forced },
+          detail: { how, stopped, forced_identity: anchor.forced, group_spared: spared ?? null },
         });
         /**
          * The container, and why `--rm` does not already cover this.

@@ -1214,3 +1214,79 @@ describe("an unverifiable supervisor blocks its own prune", () => {
     // anchor before Phase 1.
   }, cliBudget(2));
 });
+
+/**
+ * A forced stop ORPHANS the leader's own children (ISC-191 residual).
+ *
+ * ## What this pins, and why it is not a duplicate
+ *
+ * "it stops what a bare `down` refused to, and never signals an unconfirmed
+ * group" above already proves the flag NARROWS: it plants a FOREIGN group and
+ * shows every member of it survives. Sparing somebody else's processes is
+ * unambiguously right, so that test can only ever argue for the narrowing.
+ *
+ * This one aims at the case where narrowing COSTS something. The recorded group
+ * is the target's OWN, its members are the supervisor's own children, and a
+ * group signal — the one every non-forced path sends — would have taken them.
+ * The forced path does not, so they outlive the run. `anchorIdentity` argues
+ * that asymmetry at length and it is deliberate: the operator asserted the run
+ * directory is theirs, not that some integer in it names a group they are
+ * willing to destroy, and `confirmGroup` derives a group's identity FROM the
+ * validated leader, which on this path there is none of.
+ *
+ * So this is not a bug report. It is the consequence, pinned, so that a future
+ * change which quietly restores the group on the forced path has to argue with
+ * a red test instead of a paragraph.
+ *
+ * ## The reporting half, which WAS a gap
+ *
+ * The orphan was true and unsaid. `stopped: true, forced_identity: true` with
+ * nothing else invites an operator to read the teardown as complete, which is
+ * the same shape of falsehood as reporting a ladder that was never climbed.
+ * `group_spared` names the group that was left alone, so "I forced it and it
+ * stopped" and "I forced it and its children are still running" stop looking
+ * identical on stdout.
+ */
+describe("--force-identity leaves the leader's own children running (ISC-191)", () => {
+  test("the leader is stopped, its group is named as spared, and its children survive", async () => {
+    const { root, runId, run } = await rig();
+    const g = await groupLeader();
+
+    /*
+     * The target IS the group leader, and the recorded pgid is its own — the
+     * configuration in which a group signal would have swept the children.
+     * A legacy `started` is what makes the anchor refuse, so the forced path is
+     * the only way through and the test cannot pass by taking the normal one.
+     */
+    await plantWorker(run, runId, "eng-1", g.pid, undefined, g.pgid);
+    await plantRegistry(run, runId, [{ id: "eng-1", pid: g.pid, started: LEGACY_START }]);
+
+    const before = await groupMembers(g.pgid);
+    expect(
+      before.length,
+      "the fixture leader had no children, so nothing could be orphaned and this test proves nothing",
+    ).toBeGreaterThan(1);
+
+    const forced = await down(root, runId, ["--force-identity", String(g.pid)]);
+    expect(parse(forced.stdout)).toMatchObject({
+      workers: [{ id: "eng-1", stopped: true, forced_identity: true, group_spared: g.pgid }],
+    });
+
+    // The leader really is stopped — without this the survival below would be
+    // explained by the ladder having done nothing at all.
+    expect(await processStartTime(g.pid)).toBeNull();
+
+    /*
+     * THE ORPHAN. Every child the leader had is still running, because the
+     * forced ladder addressed the leader and nothing else. This is the
+     * assertion that would go red if the flag were widened back to the group.
+     */
+    const after = await groupMembers(g.pgid);
+    const survivors = after.filter((p) => p !== g.pid);
+    expect(survivors.length).toBeGreaterThan(0);
+    for (const child of before.filter((p) => p !== g.pid)) {
+      expect(after, `child ${child} was taken by a forced stop that must not address the group`)
+        .toContain(child);
+    }
+  }, cliBudget(3));
+});
