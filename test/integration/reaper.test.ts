@@ -1113,3 +1113,90 @@ describe("a reap pass survives a worker it is not allowed to signal (ISC-272)", 
     expect(monitor.sinceChangeMs("w-perm")).toBe(60_000);
   }, cliBudget(1));
 });
+
+/**
+ * The reap report says WHICH action it took about the group (ISC-300).
+ *
+ * ## What this closes, and what it deliberately does not
+ *
+ * ISC-300 is filed and unstarted: whether an UNATTENDED reaper should refuse a
+ * capture-failed group the way `down` does, or narrow to the leader and keep
+ * collecting the orphan it exists for, is a product decision and is not made
+ * here. Nothing about the reaper's behaviour changes in this file.
+ *
+ * What was never in dispute is that the report said nothing either way.
+ * `ReapReport` carried `supervisor: KillOutcome` and a container disposition,
+ * and an operator reading it could not tell "signalled the recorded group" from
+ * "signalled the leader alone because the record held the capture-failed
+ * sentinel". Those are different actions with different blast radii, and the
+ * second is strictly narrower than the one the caller asked for.
+ *
+ * That is the same gap `--force-identity` had until `group_spared` (ISC-191),
+ * and the same argument `container: "none" | "spared"` already makes one field
+ * up: two facts that must not be collapsed.
+ *
+ * ## Why all three cases, and why `none` is not `narrowed_to_leader`
+ *
+ * A two-valued field would have been enough to satisfy the sentence and would
+ * have merged the two cases that matter most to a reader: a target that never
+ * had a group, and a target that HAD one whose record could not be trusted. The
+ * first is an ordinary shape; the second is the one ISC-300 is about.
+ */
+describe("a reap report names the action it took about the group (ISC-300)", () => {
+  /** Ops that stop the target dead on the first signal and record where it went. */
+  function tracking(pid: number): { ops: ReaperOps; signals: number[] } {
+    const signals: number[] = [];
+    const dead = new Set<number>();
+    const ops: ReaperOps = {
+      startTime: (p) => Promise.resolve(dead.has(p) ? null : `utc1 started-${p}`),
+      groupId: (p) => Promise.resolve(dead.has(p) ? null : p),
+      signal(p) {
+        signals.push(p);
+        dead.add(Math.abs(p));
+      },
+      removeContainer: () => Promise.resolve("removed"),
+    };
+    return { ops, signals };
+  }
+
+  const target = (pid: number, pgid: number | null): ReapTarget => ({
+    worker: "w-1",
+    proc: { pid, started: `utc1 started-${pid}` },
+    pgid,
+    container: "c-w-1",
+  });
+
+  test("a recorded group is reported as addressed, and the signal goes to it", async () => {
+    const { ops, signals } = tracking(4242);
+    const report = await reapSupervisor(target(4242, 4242), { ops, ...FAST });
+    expect(report.group).toBe("addressed");
+    // The negative that makes the label mean something: a GROUP signal.
+    expect(signals).toEqual([-4242]);
+  });
+
+  /**
+   * THE ISC-300 CASE. A recorded pgid of zero is the capture-failed sentinel:
+   * a group WAS recorded and cannot be trusted. The reaper narrows — `down`
+   * refuses on the same input — and the report now says which happened.
+   */
+  test("a capture-failed group is reported as narrowed, and only the leader is signalled", async () => {
+    const { ops, signals } = tracking(4243);
+    const report = await reapSupervisor(target(4243, 0), { ops, ...FAST });
+    expect(report.group).toBe("narrowed_to_leader");
+    // Positive, not negative: the leader alone, which is the narrower action.
+    expect(signals).toEqual([4243]);
+  });
+
+  /**
+   * The control that keeps `narrowed_to_leader` honest. This target never had a
+   * group, so signalling the leader is the action that was ASKED for rather
+   * than a narrowing of it — same signal, different fact, and collapsing them
+   * would make the field unable to answer the only question it exists for.
+   */
+  test("no recorded group at all is reported as none, not as a narrowing", async () => {
+    const { ops, signals } = tracking(4244);
+    const report = await reapSupervisor(target(4244, null), { ops, ...FAST });
+    expect(report.group).toBe("none");
+    expect(signals).toEqual([4244]);
+  });
+});

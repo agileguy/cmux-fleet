@@ -378,17 +378,29 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   /**
    * ISC-300 is FILED, not started, and this is what keeps that honest. The
    * criterion is about a disagreement between two sites; if the reaper's side
-   * of it changes, the entry describing the trade is no longer describing the
-   * code, and the grade has to move one way or the other.
+   * of it changes, the entry describing the trade stops describing the code and
+   * the grade has to move one way or the other.
+   *
+   * THIS CLAIM WAS VACUOUS FOR ONE COMMIT AND THE FAILURE IS WORTH KEEPING. It
+   * first pinned the narrowing at its old call site. When the decision moved
+   * into `reapSupervisor` — same behaviour, one place instead of two — the old
+   * spelling survived only inside a COMMENT explaining the move, and the grep
+   * went on passing against prose while the code it was defending had gone.
+   * Green, and defending nothing. `ISC-272`'s writer claim in this same file
+   * warns about exactly this ("a comment that teaches the broken spelling is
+   * how it comes back") and the warning turned out to cut both ways: prose can
+   * keep a claim ALIVE as easily as it can reintroduce a defect. The comment
+   * at that site now deliberately declines to quote the form.
    */
   {
     isc: "ISC-300",
-    grade: "[ ]",
+    grade: "[~]",
     claim:
-      "The reaper still narrows a capture-failed group to the leader — the side of the " +
-      "disagreement this criterion was filed to decide. A miss here means somebody resolved " +
-      "it without regrading.",
-    argv: ["grep", "-n", "entry.pgid > 0 ? entry.pgid : null", "src/safety/reaper.ts"],
+      "The reaper still NARROWS a capture-failed group to the leader rather than refusing — " +
+      "the side of the disagreement this criterion was filed to decide, pinned at the one " +
+      "line that now makes the decision. A miss means somebody resolved ISC-300 without " +
+      "regrading it.",
+    argv: ["grep", "-n", "narrowed ? null : target.pgid", "src/safety/reaper.ts"],
     expect: 1,
   },
   {
