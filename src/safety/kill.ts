@@ -381,6 +381,11 @@ export type SignalOutcome =
  *    group signal and no group exists to send it to, so NOTHING is signalled
  *    and the caller is told why. Silently narrowing to the leader would be a
  *    different action than the one requested, reported as if it were the same.
+ *
+ *    THIS DOCTRINE IS NOT UNIFORMLY APPLIED, and a reader should meet that
+ *    here rather than discover it. `down` obeys it; `reaper.ts` narrows to the
+ *    leader in exactly this case, deliberately, because it is unattended and
+ *    refusing would leave the orphan it exists to collect. Filed as ISC-300.
  */
 export async function signalIfSame(
   target: ProcId,

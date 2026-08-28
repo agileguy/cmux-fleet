@@ -296,6 +296,23 @@ export async function reapStale(opts: ReapCycleOpts): Promise<ReapReport[]> {
       {
         worker: name,
         proc: { pid: entry.pid, started: entry.started },
+        /*
+         * ISC-300: this NARROWS TO THE LEADER where `down` REFUSES.
+         *
+         * `signalIfSame`'s docstring calls a zero-or-negative recorded pgid a
+         * capture-failed sentinel and says silently narrowing to the leader
+         * "would be a different action than the one requested, reported as if
+         * it were the same". `down` obeys that. This line does the opposite,
+         * and the disagreement is deliberate rather than an oversight: the
+         * reaper is UNATTENDED, so refusing here would leave a wedged
+         * supervisor uncollected and its container burning tokens — the very
+         * orphan this module exists to take. Which failure an unattended loop
+         * should prefer is a product decision, so it is filed as its own
+         * criterion rather than settled in passing.
+         *
+         * What is NOT in dispute is that the report says nothing about which
+         * action was taken. See ISC-300.
+         */
         pgid: entry.pgid > 0 ? entry.pgid : null,
         container: state?.container?.name ?? null,
       },
