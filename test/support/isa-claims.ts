@@ -428,14 +428,38 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
    * for its definition would have been green throughout the leak, which is the
    * distinction this claim exists to make.
    */
+  /**
+   * TWO claims, because either alone is the defect the other hides: a
+   * combinator that releases but nothing calls, or a caller that takes
+   * ownership from something that does not give the descriptors back.
+   *
+   * This pair replaced a single claim pinned at `harvest/index.ts`, which went
+   * red the moment the release moved into the combinator. That was the guard
+   * working: the release had genuinely moved, and a claim that survived the
+   * move would have been pinning a location rather than a property.
+   */
   {
     isc: "ISC-301",
-    grade: "[~]",
+    grade: "[x]",
     claim:
-      "harvestTask still releases the outbox scan it opened. A miss means the descriptors " +
-      "are leaking again, one per accepted artifact per task, with nothing reading the field " +
-      "that would show it.",
-    argv: ["grep", "-n", "await closeOutboxScan(scan)", "src/harvest/index.ts"],
+      "The scan combinator releases in a `finally`, so the descriptors come back on the " +
+      "throwing path too — the path `harvestAll` catches and loops past, which is the one " +
+      "that would accumulate the most of them.",
+    argv: ["grep", "-n", "await closeOutboxScan(scan);", "src/harvest/outbox.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-301",
+    grade: "[x]",
+    claim:
+      "harvestTask takes its scan FROM that combinator rather than opening one it must " +
+      "remember to close. A miss means ownership went back to being a contract in a comment.",
+    argv: [
+      "grep",
+      "-nF",
+      "return await withOutboxScan(loc, async (scan) =>",
+      "src/harvest/index.ts",
+    ],
     expect: 1,
   },
   /**

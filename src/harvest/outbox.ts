@@ -149,6 +149,50 @@ export async function closeOutboxScan(scan: OutboxFileScan): Promise<void> {
 }
 
 /**
+ * Scan an outbox, hand the result to `fn`, and give the descriptors back.
+ *
+ * ## Why this exists rather than a `try`/`finally` at each call site
+ *
+ * `OutboxFile` says the caller owns the descriptors and must close them, and
+ * for one release that contract was enforced by nothing at all:
+ * `closeOutboxScan` had no caller anywhere in `src/`, so every harvest leaked
+ * one descriptor per accepted artifact (ISC-301). The repair was a `finally`
+ * written by hand in the one place that scans — correct, and still a contract
+ * a second call site has to remember.
+ *
+ * Here the release is STRUCTURAL. A caller cannot obtain a scan from this
+ * helper without also handing back the point at which it ends, so the leak is
+ * not a thing to remember not to do.
+ *
+ * ## What it buys the evidence, which is the other half
+ *
+ * `harvestTask`'s own `finally` covered the throwing path and NOTHING COULD
+ * SHOW IT. Measured: moving the release onto the success path alone left every
+ * probe green, because inducing a throw inside `harvestTask` needs a seam it
+ * does not have — its acceptance block swallows its own errors. The throwing
+ * path is trivially reachable HERE, by passing a body that throws, so the half
+ * of ISC-301 that rested on reading the code now rests on a test.
+ *
+ * The release is in a `finally` rather than after the `await`, and the
+ * distinction is the whole point: `harvestAll` CATCHES a failing harvest and
+ * keeps looping, so the throwing path is the one that would accumulate the most
+ * descriptors, not the least.
+ */
+export async function withOutboxScan<T>(
+  loc: OutboxLocation,
+  fn: (scan: OutboxFileScan) => Promise<T>,
+): Promise<T> {
+  const scan = await scanOutboxFiles(loc);
+  try {
+    return await fn(scan);
+  } finally {
+    // Idempotent: `closeOutboxScan` empties the accepted list as it closes, so
+    // a body that released the scan itself cannot be double-closed here.
+    await closeOutboxScan(scan);
+  }
+}
+
+/**
  * True when `candidate` resolves lexically inside `root`.
  *
  * A prefix string check is NOT sufficient and must never come back:
