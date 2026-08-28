@@ -100,6 +100,10 @@ if (!DIND) {
  * conflict that reads like a product bug. The pid makes the collision
  * impossible instead of unlikely.
  */
+/** Consecutive successful `docker info` answers before the daemon is trusted. */
+const DAEMON_READY_STREAK = 2;
+/** Attempts at the image pull, which shares the daemon's warm-up window. */
+const PULL_ATTEMPTS = 3;
 const DIND_NAME = `pifleet-isc292-dind-${process.pid}`;
 
 /** A host directory this checkout really has, with regular files in it. */
@@ -201,14 +205,45 @@ describe("ISC-292 against a remote daemon (docker-in-docker)", () => {
     dockerHost = `tcp://${mapped}`;
 
     const env = { DOCKER_HOST: dockerHost };
+
+    /** Whatever the inner daemon has said about itself, for a failure message. */
+    const dindLogs = async (): Promise<string> => {
+      const l = await docker(["logs", "--tail", "40", DIND_NAME]);
+      return `${l.stdout.trim()}\n${l.stderr.trim()}`.trim();
+    };
+
+    /**
+     * Readiness means CONSECUTIVE answers, and the repetition is the point.
+     *
+     * MEASURED on a GitHub runner, not anticipated: a single successful
+     * `docker info` is not enough. `dockerd-entrypoint.sh` brings the daemon up,
+     * answers, and then restarts it once while it finishes setting itself up —
+     * so a poll that breaks on the first success hands back a socket that is
+     * about to be closed underneath the caller. That failure surfaced as
+     * `connection reset by peer` from 127.0.0.1 during the image pull below,
+     * which reads like a network fault and is not one: the reset came from the
+     * inner daemon, not from any registry.
+     *
+     * Requiring two answers separated by a poll interval costs one interval on
+     * a healthy start and rules out the restart window.
+     */
     const deadline = Date.now() + DAEMON_READY_MS;
     let last = "";
+    let consecutive = 0;
     for (;;) {
       const info = await docker(["info", "--format", "{{.ServerVersion}}"], env);
-      if (info.code === 0) break;
-      last = info.stderr.trim();
+      if (info.code === 0) {
+        consecutive += 1;
+        if (consecutive >= DAEMON_READY_STREAK) break;
+      } else {
+        consecutive = 0;
+        last = info.stderr.trim();
+      }
       if (Date.now() > deadline) {
-        throw new Error(`the dind daemon never answered within ${DAEMON_READY_MS}ms: ${last}`);
+        throw new Error(
+          `the dind daemon never answered ${DAEMON_READY_STREAK} times within ` +
+            `${DAEMON_READY_MS}ms: ${last}\n--- dind logs ---\n${await dindLogs()}`,
+        );
       }
       await Bun.sleep(DAEMON_POLL_MS);
     }
@@ -220,9 +255,20 @@ describe("ISC-292 against a remote daemon (docker-in-docker)", () => {
      * correctly reports the refusal, and test 1 passes for entirely the wrong
      * reason — which is the failure test 2 exists to catch.
      */
-    const pulled = await docker(["pull", PROBE_BUN_IMAGE], env);
+    let pulled = await docker(["pull", PROBE_BUN_IMAGE], env);
+    for (let attempt = 1; pulled.code !== 0 && attempt < PULL_ATTEMPTS; attempt += 1) {
+      // Bounded, and NOT a way of wishing a broken daemon into working: the
+      // streak above already rules out the restart window, so a reset here is
+      // the rarer tail of the same warm-up. Three attempts either succeed or
+      // produce a message carrying the daemon's own logs.
+      await Bun.sleep(DAEMON_POLL_MS * 4);
+      pulled = await docker(["pull", PROBE_BUN_IMAGE], env);
+    }
     if (pulled.code !== 0) {
-      throw new Error(`could not pull ${PROBE_BUN_IMAGE} into the dind daemon: ${pulled.stderr.trim()}`);
+      throw new Error(
+        `could not pull ${PROBE_BUN_IMAGE} into the dind daemon after ${PULL_ATTEMPTS} ` +
+          `attempts: ${pulled.stderr.trim()}\n--- dind logs ---\n${await dindLogs()}`,
+      );
     }
   }, containerBudget(40));
 
