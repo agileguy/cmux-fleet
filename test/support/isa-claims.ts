@@ -448,7 +448,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
    */
   {
     isc: "ISC-292",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The relay probes its own bind-mount sources before it launches. A miss means a " +
       "checkout outside the runtime's shared set silently mounts three empty directories " +
@@ -466,7 +466,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-292",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "`doctor` reports the CHECKOUT as a mount root, not just the runs and scratch roots — " +
       "the half an operator can run BEFORE up rather than after it.",
