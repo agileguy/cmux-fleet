@@ -393,6 +393,13 @@ jobs:
       - name: Container, verbgate, egress, relay, and ADC probes, verified rather than merely run
         env:
           PIFLEET_DOCKER: "1"
+          # ISC-292's remote-daemon reproducer. Its own gate, not
+          # PIFLEET_DOCKER, because it needs something the other files here do
+          # not: permission to run a PRIVILEGED container, so it can stand up a
+          # second Docker daemon whose filesystem differs from this runner's.
+          # A separate name means a runner that refuses --privileged fails one
+          # named probe rather than making ten look broken.
+          PIFLEET_DIND: "1"
           LABEL: container
           # All ten PIFLEET_DOCKER-gated files, run ONCE by this step, which
           # both prints their output and grades it. This used to be two
@@ -756,7 +763,33 @@ jobs:
           # never runs — so each has to spend a real deadline before it can say
           # so. The positive control answers in about a second. Polling rather
           # than a flat sleep is what keeps the bill to the negatives alone.
-          TOTAL_EXPECTED: "122"
+          #
+          # 122 -> 125: ISC-292's three probes, in a NEW file
+          # test/integration/mount-preflight-remote.test.ts. They are the first
+          # anywhere to read the criterion's NEGATIVE direction reproducibly: a
+          # bind-mount source the daemon genuinely cannot see. The hazard was
+          # recorded for months as macOS-only and therefore unrunnable on a
+          # runner; it is not. Any daemon whose filesystem differs from the
+          # client's reproduces it, and docker-in-docker is one on Linux —
+          # MEASURED on the maintainer's machine before this was wired:
+          # `docker run -v <client-only-path>:/probe:ro` against a dind daemon
+          # exits 0 and presents an EMPTY directory, and
+          # `assertBindMountsVisible` refuses it with exit 3.
+          #
+          # DERIVED by the hand method, same conditions (bun 1.3.11,
+          # PIFLEET_DOCKER unset, PIFLEET_DIND unset,
+          # PIFLEET_IMPERSONATION_TARGET unset, no listener on :8000):
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container,honeypot,hostile-pi,mount-preflight-remote}.test.ts
+          #     -> 6 pass, 119 skip, 0 fail. Ran 125 tests across 15 files.
+          # Three added gated cases, three more skips, pass unmoved at 6.
+          #
+          # The new file gates PER TEST rather than on its `describe`, and that
+          # is load-bearing for this number rather than a style choice:
+          # `describe.skipIf` reports the block's `beforeAll` and `afterAll` as
+          # skipped tests too, so the file counted 5 with the gate closed and 3
+          # with it open — a file whose count moves with the gate makes this
+          # derivation disagree with the run it is grading.
+          TOTAL_EXPECTED: "125"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -935,7 +968,8 @@ jobs:
               test/integration/full-chain.test.ts \
               test/integration/acceptance-container.test.ts \
               test/integration/honeypot.test.ts \
-              test/integration/hostile-pi.test.ts
+              test/integration/hostile-pi.test.ts \
+              test/integration/mount-preflight-remote.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every
