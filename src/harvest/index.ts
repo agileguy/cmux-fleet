@@ -42,6 +42,7 @@ import {
   type OutboxLocation,
   type OutboxRead,
 } from "./outbox.ts";
+import { reconcileArtifactClaims } from "./reconcile.ts";
 
 export interface HarvestOptions {
   /** Attach the full diff text to `derived.diff` (`--include diff`, §8.4). */
@@ -288,6 +289,51 @@ export async function harvestTask(
     }
 
     const claimed = outbox.kind === "ok" ? outbox.envelope : null;
+
+    /**
+     * THE OUTBOX'S ARTIFACTS, RECONCILED AGAINST WHAT THE ENVELOPE CLAIMED.
+     *
+     * This is the first thing in `src/` that reads outbox artifact CONTENT at
+     * all. Until now the scan's accepted entries were opened, validated and
+     * handed back, and the only half of the result anything consumed was its
+     * refusals — so a worker could name an artifact it never wrote, or write
+     * one it never named, and the harvest had no opinion either way.
+     *
+     * WHY IT IS INSIDE THIS BLOCK AND NOT AFTER IT. The reconciler reads
+     * through the descriptors the scan is holding, and those descriptors are
+     * alive only for the duration of this body — `withOutboxScan` hands them
+     * back in its `finally`. This call site is exactly the "consumer that reads
+     * validated bytes DURING this task's processing" the ownership window above
+     * was deliberately kept wide for. It is not a coincidence that it fits; the
+     * window was shaped for it.
+     *
+     * WHAT IT IS NOT ALLOWED TO DO, and the reason the reconciler owns the
+     * comparison rather than this function: a claimed path is worker-authored
+     * and §12.5 calls dereferencing one an exfiltration primitive. Nothing here
+     * or there opens a claimed path. Claims are translated through the mount
+     * table and matched AS STRINGS against host paths the scan already
+     * validated; bytes come only from the held descriptors.
+     *
+     * The findings go into `discrepancies` — the channel §8.4 already
+     * publishes — and the digested inventory goes into `derived.artifacts`,
+     * assembled below.
+     *
+     * PUBLISHING THE INVENTORY IS THE POINT, and this comment used to argue
+     * the opposite: that inventing a `Harvest` field before something read it
+     * would repeat the adjudicator's "tested mechanism with no live call site"
+     * mistake. That reasoning does not transfer, and ISC-153 is the closer
+     * precedent. `facts_hash` was computed and dropped on the floor, "which
+     * satisfies neither half of what it is for" — because for a CONTENT HASH
+     * the field IS the consumer. Identifying the evidence is the entire use:
+     * an operator disputing a verdict needs to know whether the bytes have
+     * changed since, and a report that says which artifacts a worker produced
+     * while unable to say what they were is materially weaker than one that
+     * can. The adjudicator's defect was a computation nothing INVOKED; this
+     * would have been a measurement nothing RECORDED, which is the ISC-153
+     * defect rather than that one.
+     */
+    const reconciled = await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc);
+    discrepancies.push(...reconciled.discrepancies);
 
     if (outbox.kind === "ok" && git.ok && git.facts.base_is_ancestor) {
       if (
@@ -572,6 +618,17 @@ export async function harvestTask(
           met: r.outcome === "passed",
           evidence: `${r.outcome}${r.exit_code === null ? "" : ` (exit ${r.exit_code})`}`,
         })),
+        /**
+         * The outbox's own artifacts, digested from the descriptors the scan
+         * held — passed through unchanged rather than re-projected.
+         *
+         * `acceptance` above is projected because the adjudicator reads a
+         * richer shape than the report publishes. There is no such second
+         * shape here: `HarvestedArtifactSchema` and `ReconciledArtifact` are
+         * the same three fields, and mapping between them would only create a
+         * place for them to drift apart.
+         */
+        artifacts: reconciled.artifacts,
       },
       discrepancies,
       session_path: state?.session_path ?? null,

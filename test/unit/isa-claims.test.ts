@@ -15,9 +15,11 @@
  * failure mode, not the fix.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 
-import { ISA_CLAIMS, runIsaClaim, type IsaClaim } from "../support/isa-claims.ts";
+import { ISA_CLAIMS, listMirroredFiles, runIsaClaim, type IsaClaim } from "../support/isa-claims.ts";
 
 const ISA = await Bun.file("ISA.md").text();
 
@@ -100,5 +102,50 @@ describe("the registry itself stays honest", () => {
         `${c.isc}: \`${c.argv.join(" ")}\` uses | without -E, so grep reads it literally`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * ISC-303: the mirror the claims search must include UNTRACKED files.
+ *
+ * The defect these pin was measured, not imagined. `src/harvest/reconcile.ts`
+ * was written, imported by `harvestTask` and passing its own tests while
+ * ISC-246's absence-claim went on reporting that no production consumer
+ * existed. The claim went red on `git add` — on the file being tracked, not on
+ * the code arriving — so the guard was blind for the entire window in which
+ * someone was deciding whether the work was done.
+ *
+ * These probe `listMirroredFiles` rather than a built mirror because the mirror
+ * is memoised per process: by the time any claim has run once, a file created
+ * later cannot change it, and a probe that appeared to pass would be reading
+ * the cache.
+ */
+describe("the masked mirror sees work in progress (ISC-303)", () => {
+  const PROBE = "src/__isa-untracked-probe.ts";
+  const IGNORED = "node_modules/__isa-ignored-probe.ts";
+
+  afterEach(async () => {
+    // Belt and braces: a probe file left in `src/` would fail `tsc` for
+    // everyone afterwards, so removal must not depend on the test body.
+    await Promise.all([rm(PROBE, { force: true }), rm(IGNORED, { force: true })]);
+  });
+
+  test("an untracked file in src/ is in the listing before it is ever added", async () => {
+    await writeFile(PROBE, "export const isaUntrackedProbe = 1;\n");
+    expect(await listMirroredFiles()).toContain(PROBE);
+
+    // The pre-fix behaviour, asserted directly rather than described: plain
+    // `git ls-files` is what the mirror used to run, and it cannot see this.
+    const bare = Bun.spawn(["git", "ls-files"], { stdout: "pipe" });
+    const [listing] = await Promise.all([new Response(bare.stdout).text(), bare.exited]);
+    expect(listing.split("\n")).not.toContain(PROBE);
+  });
+
+  test("an ignored file is still excluded, so .gitignore stays authoritative", async () => {
+    if (!existsSync("node_modules")) {
+      await mkdir("node_modules", { recursive: true });
+    }
+    await writeFile(IGNORED, "export const isaIgnoredProbe = 1;\n");
+    expect(await listMirroredFiles()).not.toContain(IGNORED);
   });
 });
