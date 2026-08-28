@@ -6,6 +6,29 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **Every harvest leaked one open file descriptor per accepted artifact (ISC-301).**
+  `scanOutboxFiles` hands back entries that each hold an open descriptor — that is the point of the
+  ISC-246 restatement, and `OutboxFile` says "THE CALLER OWNS IT AND MUST CLOSE IT". `harvestTask`
+  opened a scan, read its refusals, and dropped the object. `closeOutboxScan` had no caller anywhere
+  in `src/` except `outbox.ts`'s own throw path.
+
+  `MAX_HELD_DESCRIPTORS` is 128 because that is "half of that 256 floor, so the scan leaves headroom
+  for the rest of the process". That reasoning is per scan. Nothing released between scans, and
+  `harvestAll` loops `harvestTask` over every task in a run, so two tasks with full outboxes reach
+  the exact soft limit the cap was sized against — defeated not by a scan that exceeded it but by
+  scans that never handed anything back.
+
+  `harvestTask` now owns the scan for its whole body and releases it in a `finally`, which also
+  covers the throwing paths that `harvestAll` catches and loops past. `test/unit/harvest-fd-lifetime.test.ts`
+  counts the process's open descriptors around five harvests of a five-artifact outbox, carries a
+  control proving the fixture really does hold descriptors, and fails loudly rather than skipping
+  where neither `/proc/self/fd` nor `/dev/fd` exists. Removing the release reproduces the leak at
+  exactly the predicted size: 83 descriptors before, 108 after.
+
+  Filed at `[~]`, not `[x]`, and the reason is measured: a second mutation moved the release onto
+  the success path alone and both probes stayed green, because nothing induces a throw between the
+  scan and the return. The leak is fixed on every path; the evidence covers one.
+
 - **A reap's group action never reached the ledger, so the field added to report it was
   unreadable by the operator it was added for (ISC-300).** `ReapReport.group` — `addressed`,
   `narrowed_to_leader`, or `none` — was introduced so a reap could say which action it took about

@@ -37,6 +37,7 @@ import { readTaskRecord, readWorkerLaunch, readWorkerState } from "../run/state.
 import { worktreeContentHash } from "../run/treehash.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
+  closeOutboxScan,
   readResultEnvelope,
   scanOutboxFiles,
   type OutboxLocation,
@@ -217,320 +218,374 @@ export async function harvestTask(
     reasons.push("no result envelope; verdict rests on derived facts alone");
   }
 
+  /**
+   * From here to the end of the function, this scan is THIS function's to own.
+   *
+   * (The field's dotted spelling is deliberately not written out anywhere in
+   * this file: ISC-246's claim greps `src/` for it to prove the descriptor
+   * work still has no production consumer, and prose that spells it would
+   * fail that claim from a comment. The same collision, in the opposite
+   * direction, is recorded under ISC-300.)
+   *
+   * Every ACCEPTED entry of the scan is holding an OPEN DESCRIPTOR — that is the
+   * documented contract at `OutboxFile` ("THE CALLER OWNS IT AND MUST CLOSE
+   * IT"), and `closeOutboxScan` is the only thing that gives those descriptors
+   * back. There is no finalizer behind it: a scan dropped without closing
+   * leaks one descriptor per accepted artifact, silently, for the life of the
+   * process.
+   *
+   * WHY THE `finally`, AND NOT A CLOSE AFTER THE `refused` LOOP BELOW. Today
+   * nothing in this function reads the scan's accepted list; only its refusals are
+   * consumed, three lines down. Closing immediately after that loop would
+   * therefore release the descriptors and pass every test that exists. It is
+   * still the wrong shape, because it would make this function's ownership
+   * window NARROWER THAN THE CONTRACT `OutboxFile` documents. The descriptors
+   * exist precisely so a consumer can read validated bytes DURING this task's
+   * processing — that is the entire reason `scanOutboxFiles` hands back
+   * handles instead of paths: a path is a NAME, re-resolved on every use, so
+   * whatever `realpath` and `nlink` proved at scan time would have to be taken
+   * on trust at read time; a held descriptor pins the inode that passed the
+   * checks. An early close would put the release BEFORE the adjudication that
+   * a future consumer of those bytes would naturally sit inside, so the first
+   * such consumer would find itself reading through a closed handle and would
+   * have to relocate the close as part of its own change. The `finally` keeps
+   * the window correct for the whole body — today, when it is only `refused`
+   * that is read, and later, when it is not.
+   *
+   * WHY THIS IS NOT OPTIONAL HOUSEKEEPING. `MAX_HELD_DESCRIPTORS` is 128
+   * because that is "half of that 256 floor, so the scan leaves headroom for
+   * the rest of the process" — and that bound is PER SCAN. Nothing releases
+   * descriptors BETWEEN scans. `harvestAll` below loops this function over
+   * every task in the run, and `report/collect.ts` and
+   * `cli/commands/artifacts.ts` do the same, one call per task. Without the
+   * release below, two tasks with full outboxes reach 256 held descriptors and
+   * exhaust the very soft limit the cap was sized against — the cap's own
+   * stated rationale defeated not by a scan that exceeded it, but by scans
+   * that each stayed under it and never handed anything back.
+   */
   const scan = await scanOutboxFiles(loc);
-  for (const r of scan.refused) {
-    reasons.push(`outbox file refused: ${r.path}: ${r.reason}`);
-    discrepancies.push(`outbox file refused: ${r.path}: ${r.reason}`);
-  }
-
-  // --- Adjudication (§7.3). Supervisor-terminal verdicts enter on the
-  // derived side because `adjudicate` lets them win outright — a task the
-  // supervisor aborted must not be reported by what its half-finished diff
-  // happens to look like.
-  let derivedVerdict = deriveRepoVerdict(git);
-  const record = await readTaskRecord(taskRecordPath(workerPaths(run, envelope.worker), taskId));
-  if (record !== null && record.epoch === envelope.epoch) {
-    if (record.verdict === "aborted" || record.verdict === "timed_out") {
-      derivedVerdict = record.verdict;
-      reasons.push(`supervisor settled epoch ${record.epoch} as ${record.verdict}`);
+  try {
+    for (const r of scan.refused) {
+      reasons.push(`outbox file refused: ${r.path}: ${r.reason}`);
+      discrepancies.push(`outbox file refused: ${r.path}: ${r.reason}`);
     }
-  }
 
-  const claimed = outbox.kind === "ok" ? outbox.envelope : null;
-
-  if (outbox.kind === "ok" && git.ok && git.facts.base_is_ancestor) {
-    if (
-      outbox.envelope.branch !== undefined &&
-      git.facts.branch !== null &&
-      outbox.envelope.branch !== git.facts.branch
-    ) {
-      discrepancies.push(
-        `envelope names branch ${outbox.envelope.branch}; worktree is on ${git.facts.branch}`,
-      );
+    // --- Adjudication (§7.3). Supervisor-terminal verdicts enter on the
+    // derived side because `adjudicate` lets them win outright — a task the
+    // supervisor aborted must not be reported by what its half-finished diff
+    // happens to look like.
+    let derivedVerdict = deriveRepoVerdict(git);
+    const record = await readTaskRecord(taskRecordPath(workerPaths(run, envelope.worker), taskId));
+    if (record !== null && record.epoch === envelope.epoch) {
+      if (record.verdict === "aborted" || record.verdict === "timed_out") {
+        derivedVerdict = record.verdict;
+        reasons.push(`supervisor settled epoch ${record.epoch} as ${record.verdict}`);
+      }
     }
-  }
 
-  /**
-   * Adjudication runs through `harvest/adjudicate.ts` — the module that owns
-   * the evidence rules — not through the two-argument lattice combinator in
-   * contracts.ts.
-   *
-   * This wiring is the point. The rich adjudicator, and every criterion it
-   * implements (the ISC-150 harness cap, the ISC-153 replay hash, the ISC-154
-   * moved-tree void, the ISC-230 inconclusive-exam cap), had a full passing
-   * test suite and ZERO production callers: `artifacts` reached the lattice
-   * combinator instead, so those criteria were satisfied only inside tests of
-   * a module nothing ran. A tested mechanism with no live call site is
-   * indistinguishable at runtime from one that was never written, and the
-   * green suite is what made it look done.
-   *
-   * It also settles a contradiction between the two implementations of F5.
-   * The version here treated under-claiming as "sloppy, not falsifying" and
-   * only floored the verdict for over-claiming; SRD §880 says *disagreement*
-   * between the envelope's `files_changed` and the diff is a hard failure
-   * class, unqualified. The stricter module — which calls under-claiming
-   * concealment — is the one that matches the spec, and now the one that runs.
-   */
-  /**
-   * The harness surface is derived HERE, from the diff, before adjudication.
-   *
-   * It is computable from facts the harvester already holds — no acceptance
-   * execution required — and leaving it at the schema default meant
-   * `facts.harness.touched` was permanently empty, so the ISC-150 cap could
-   * never fire no matter what the worker edited. The cap was live code
-   * guarding a field nothing filled in.
-   *
-   * The changed-file list comes from the DERIVED diff, never from the
-   * envelope: the envelope is the actor being graded, and a worker asked to
-   * self-declare whether it touched the tests has an obvious answer.
-   *
-   * WHICH globs count is the caller's to say (ISC-232): `harness.patterns`
-   * from `fleet.yaml` when the operator set it, and only otherwise the
-   * built-in defaults.
-   *
-   * `harnessSurfaceFor` owns that fallback rather than a `??` here, and the
-   * difference is not stylistic. `opts.harnessPatterns ?? DEFAULT_...` rescues
-   * `undefined` and `null` but NOT `[]`, so every caller assembling
-   * `HarvestOptions` by hand — a test, `report/collect.ts`, anything future —
-   * could hand in an empty list and get `touched: []` with no error, which
-   * disables the ISC-150 cap outright. The schema refuses `patterns: []` at
-   * the YAML boundary; the in-process path needs the same stance, and it also
-   * needs the wider check the config-aware helper performs, since a NON-empty
-   * list that simply matches nothing disables the cap just as completely.
-   */
-  const factsWithHarness: DerivedFacts = {
-    ...git.facts,
-    harness: harnessSurfaceFor(
-      git.facts.files_changed.map((f) => f.path),
-      opts.harnessPatterns,
-    ),
-  };
+    const claimed = outbox.kind === "ok" ? outbox.envelope : null;
 
-  /**
-   * The exam (§8.2): the harvester re-runs the acceptance commands itself.
-   *
-   * Commands are resolved from the BASE SHA, never from the worker's tree —
-   * independence is a property of where the command is resolved from, not of
-   * who runs it, because the command string routes through `package.json`
-   * scripts, `conftest.py` and the Makefile, all of which the worker can
-   * edit. The envelope's own `acceptance` array is a CLAIM and is never
-   * executed; the task envelope's is the fleet-authored one.
-   *
-   * Requires a real head SHA and a worktree to clone from. Without either
-   * there is nothing to examine, and the runs stay empty rather than being
-   * filled with a guess.
-   */
-  if (opts.runAcceptance === true && git.ok && git.facts.head_ref !== null && hasWorktree) {
-    /**
-     * ISC-277: the scratch root moves off `os.tmpdir()`.
-     *
-     * It was `mkdtemp(join(tmpdir(), "pifleet-accept-"))` — literally the path
-     * `container/mounts.ts:51` marks "Deliberately NOT `os.tmpdir()`", in the
-     * table it measured on this machine, next to the words "not shared,
-     * silently empty". That was harmless for as long as nothing mounted it,
-     * and it becomes a false PASS the moment something does: an unshared path
-     * bind-mounts as an empty directory, the exam finds no tests to fail, and
-     * a worker that changed nothing is certified. `makeDaemonScratch` is the
-     * existing answer — it allocates under `$HOME/.pifleet/scratch`,
-     * overridable with `PIFLEET_SCRATCH_DIR`, and opens the mode for the
-     * baked worker uid.
-     *
-     * The move is made even on the HOST path (no container in reach), rather
-     * than only when containerizing. A scratch root whose visibility depends
-     * on which branch the harvester happens to take is a root that is right by
-     * coincidence, and `runAcceptance`'s probe would then be asserting a
-     * property the caller could withdraw.
-     */
-    const ownScratch = opts.acceptanceScratch === undefined;
-    const scratchRoot = opts.acceptanceScratch ?? (await makeDaemonScratch("accept"));
+    if (outbox.kind === "ok" && git.ok && git.facts.base_is_ancestor) {
+      if (
+        outbox.envelope.branch !== undefined &&
+        git.facts.branch !== null &&
+        outbox.envelope.branch !== git.facts.branch
+      ) {
+        discrepancies.push(
+          `envelope names branch ${outbox.envelope.branch}; worktree is on ${git.facts.branch}`,
+        );
+      }
+    }
 
     /**
-     * ISC-233: which image graded the code, taken from what the run RECORDED.
+     * Adjudication runs through `harvest/adjudicate.ts` — the module that owns
+     * the evidence rules — not through the two-argument lattice combinator in
+     * contracts.ts.
      *
-     * `launch.json` already carries the tag the supervisor actually spawned —
-     * `WorkerLaunchSchema.image`, written by `materializeWorkerInputs` — so no
-     * new persistence is needed and, more to the point, no second derivation
-     * exists to disagree with the first. That matters here for the same reason
-     * `up`'s image gate gives about taking its tags from `renderAllWorkers`
-     * rather than calling `imageTag` again: a grader that recomputed the tag
-     * could certify an image the run never used.
+     * This wiring is the point. The rich adjudicator, and every criterion it
+     * implements (the ISC-150 harness cap, the ISC-153 replay hash, the ISC-154
+     * moved-tree void, the ISC-230 inconclusive-exam cap), had a full passing
+     * test suite and ZERO production callers: `artifacts` reached the lattice
+     * combinator instead, so those criteria were satisfied only inside tests of
+     * a module nothing ran. A tested mechanism with no live call site is
+     * indistinguishable at runtime from one that was never written, and the
+     * green suite is what made it look done.
      *
-     * `null` is a real answer, not a degraded one. It means the run had no
-     * container at all — `PIFLEET_PI_COMMAND`, which is how this repo's entire
-     * e2e and integration suite runs — so there is no image to hold the exam
-     * in and the host path is the only honest option. `readWorkerLaunch`
-     * returns exactly that, and the supervisor already branches on it.
+     * It also settles a contradiction between the two implementations of F5.
+     * The version here treated under-claiming as "sloppy, not falsifying" and
+     * only floored the verdict for over-claiming; SRD §880 says *disagreement*
+     * between the envelope's `files_changed` and the diff is a hard failure
+     * class, unqualified. The stricter module — which calls under-claiming
+     * concealment — is the one that matches the spec, and now the one that runs.
      */
-    const launch = await readWorkerLaunch(workerPaths(run, envelope.worker));
-    try {
-      const result = await runAcceptance({
-        repo: envelope.host_workdir,
-        head_sha: git.facts.head_ref,
-        scratch_dir: scratchRoot,
-        commands: resolveFromEnvelope([...envelope.acceptance], envelope.base_ref),
-        deadline: new Deadline(opts.acceptanceBudgetMs ?? 600_000),
-        per_command_timeout_ms: opts.acceptancePerCommandMs ?? 120_000,
-        container:
-          launch === null
-            ? undefined
-            : { image: launch.image, network: networkFromLaunchArgv(launch.argv) },
-      });
-      factsWithHarness.acceptance = result.runs;
-      factsWithHarness.acceptance_context = result.context;
-    } catch (err) {
-      // An exam that could not be held is not an exam the worker failed
-      // (ISC-152). Recorded as a reason so the verdict stays uncertifiable.
-      reasons.push(`acceptance could not be run: ${String(err)}`);
-    } finally {
-      /**
-       * Remove the scratch root, and ONLY one this function allocated.
-       *
-       * The leak predates this change — nothing ever removed the old
-       * `mkdtemp(tmpdir())` root either — but it was survivable there because
-       * the OS reaps its temp directory. Moving to `$HOME/.pifleet/scratch`
-       * for ISC-277 makes the same leak DURABLE: every `artifacts
-       * --run-acceptance` would leave a full clone of the repository behind
-       * forever, under the operator's home directory, and this feature's own
-       * test run left six of them in a single afternoon.
-       *
-       * `ownScratch` is the whole condition. A caller that supplied
-       * `acceptanceScratch` owns that directory — it is a fixture root in the
-       * suite and could be a directory an operator cares about — and deleting
-       * it would be tidying someone else's state rather than cleaning up after
-       * this function.
-       *
-       * Failures are swallowed. The harvest result is already assembled; a
-       * cleanup error must not replace a real verdict with a housekeeping one.
-       */
-      if (ownScratch) await rm(scratchRoot, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-
-  /**
-   * ISC-243: the graded resolution surface, keyed on the commands that ran.
-   *
-   * Computed HERE rather than beside `harnessSurfaceFor` above because it
-   * needs an input that does not exist yet up there: the resolved acceptance
-   * commands. That ordering is not an inconvenience to work around — it is the
-   * whole difference between the two mechanisms. The denylist is a fixed list
-   * applied to any diff from no input; the allowlist is keyed on WHICH RUNNER
-   * graded the code, which is knowable only once the exam has been held.
-   *
-   * Driven off `factsWithHarness.acceptance` rather than off the `try` block's
-   * local `result`, so an exam whose runs arrived by any other route is graded
-   * the same way. No runs means no runner, which means an empty graded surface
-   * and the denylist alone — exactly today's behaviour, and the honest answer
-   * when nothing was executed.
-   */
-  {
-    const surface = gradedSurface(
-      factsWithHarness.acceptance.map((r) => r.cmd),
-      factsWithHarness.files_changed.map((f) => f.path),
-    );
-    factsWithHarness.harness = {
-      ...factsWithHarness.harness,
-      graded: surface.hits.map((h) => ({ file: h.file, tier: h.tier, why: h.why })),
-      graded_runners: [...surface.runners],
-      graded_unresolved: [...surface.unresolved],
+    /**
+     * The harness surface is derived HERE, from the diff, before adjudication.
+     *
+     * It is computable from facts the harvester already holds — no acceptance
+     * execution required — and leaving it at the schema default meant
+     * `facts.harness.touched` was permanently empty, so the ISC-150 cap could
+     * never fire no matter what the worker edited. The cap was live code
+     * guarding a field nothing filled in.
+     *
+     * The changed-file list comes from the DERIVED diff, never from the
+     * envelope: the envelope is the actor being graded, and a worker asked to
+     * self-declare whether it touched the tests has an obvious answer.
+     *
+     * WHICH globs count is the caller's to say (ISC-232): `harness.patterns`
+     * from `fleet.yaml` when the operator set it, and only otherwise the
+     * built-in defaults.
+     *
+     * `harnessSurfaceFor` owns that fallback rather than a `??` here, and the
+     * difference is not stylistic. `opts.harnessPatterns ?? DEFAULT_...` rescues
+     * `undefined` and `null` but NOT `[]`, so every caller assembling
+     * `HarvestOptions` by hand — a test, `report/collect.ts`, anything future —
+     * could hand in an empty list and get `touched: []` with no error, which
+     * disables the ISC-150 cap outright. The schema refuses `patterns: []` at
+     * the YAML boundary; the in-process path needs the same stance, and it also
+     * needs the wider check the config-aware helper performs, since a NON-empty
+     * list that simply matches nothing disables the cap just as completely.
+     */
+    const factsWithHarness: DerivedFacts = {
+      ...git.facts,
+      harness: harnessSurfaceFor(
+        git.facts.files_changed.map((f) => f.path),
+        opts.harnessPatterns,
+      ),
     };
-  }
 
-  /**
-   * ISC-154: the two worktree hashes, and the reason they are two.
-   *
-   * The check is "did the tree move between quiesce and harvest end", and it
-   * only means anything if the two samples are taken at genuinely different
-   * moments by genuinely different code. They are:
-   *
-   *   - QUIESCE is sampled by the SUPERVISOR, inside `settle`, in a different
-   *     process, at the instant it declares the epoch over. It survives to
-   *     here only because it was written into the task record — the same
-   *     durable channel this function already reads supervisor-terminal
-   *     verdicts from a few lines above.
-   *   - HARVEST END is sampled HERE, last, after the diff has been derived
-   *     and after any acceptance exam has been held. Deliberately the final
-   *     measurement in the function: sampling it earlier would leave a window
-   *     at the end of harvest that the check is blind to, which is precisely
-   *     the window a backgrounded writer occupies.
-   *
-   * Had both been taken by this function they would be two calls microseconds
-   * apart against one tree, always equal, and the criterion would be closed
-   * by a comparison that cannot fail.
-   *
-   * The quiesce hash is accepted ONLY from a record matching this envelope's
-   * epoch. A record from a different epoch describes a different dispatch of
-   * this task; comparing its tree against today's harvest would void the task
-   * for the entirely legitimate act of having been retried.
-   */
-  factsWithHarness.tree_hash_quiesce =
-    record !== null && record.epoch === envelope.epoch ? record.tree_hash : null;
-  factsWithHarness.tree_hash_harvest = hasWorktree
-    ? await worktreeContentHash(envelope.host_workdir)
-    : null;
-
-  const adj = adjudicateFacts(factsWithHarness, claimed);
-  let verdict = adj.verdict;
-  reasons.push(...adj.reasons);
-  discrepancies.push(...adj.discrepancies);
-
-  // The supervisor's terminal verdicts outrank derived evidence: `aborted`
-  // and `timed_out` are facts about the RUN, not inferences from the tree
-  // (§7.3), and no amount of clean diff makes an aborted task complete.
-  if (derivedVerdict === "aborted" || derivedVerdict === "timed_out") {
-    verdict = derivedVerdict;
-  }
-
-  // --- Harvest trustworthiness (§8.4), orthogonal to the verdict.
-  const envelopeDegraded = outbox.kind === "refused" || scan.refused.length > 0;
-  const harvestStatus: HarvestStatus =
-    !git.ok && outbox.kind !== "ok"
-      ? "unavailable"
-      : git.ok && !envelopeDegraded
-        ? "complete"
-        : "partial";
-
-  const state = await readWorkerState(workerPaths(run, envelope.worker)).catch(() => null);
-
-  const harvest = HarvestSchema.parse({
-    schema: "pifleet.artifacts/v1",
-    task_id: taskId,
-    worker: envelope.worker,
-    epoch: envelope.epoch,
-    verdict,
-    reasons,
-    claimed,
-    derived: {
-      branch: git.facts.branch,
-      base_ref: git.facts.base_ref,
-      commits: git.facts.commits,
-      files_changed: git.facts.files_changed,
-      diff: opts.includeDiff === true ? git.diffText : null,
+    /**
+     * The exam (§8.2): the harvester re-runs the acceptance commands itself.
+     *
+     * Commands are resolved from the BASE SHA, never from the worker's tree —
+     * independence is a property of where the command is resolved from, not of
+     * who runs it, because the command string routes through `package.json`
+     * scripts, `conftest.py` and the Makefile, all of which the worker can
+     * edit. The envelope's own `acceptance` array is a CLAIM and is never
+     * executed; the task envelope's is the fleet-authored one.
+     *
+     * Requires a real head SHA and a worktree to clone from. Without either
+     * there is nothing to examine, and the runs stay empty rather than being
+     * filled with a guess.
+     */
+    if (opts.runAcceptance === true && git.ok && git.facts.head_ref !== null && hasWorktree) {
       /**
-       * The harvester's OWN exam results, projected into the report's claim
-       * shape (criterion / met / evidence). Empty unless `--run-acceptance`
-       * asked for the exam to be held.
+       * ISC-277: the scratch root moves off `os.tmpdir()`.
        *
-       * `met` is true only for `passed`. A timed-out or unrun command is not
-       * a met criterion and is not a failed one either (ISC-152) — the
-       * distinction survives in `evidence`, and the verdict cap that acts on
-       * it lives in the adjudicator, which reads the full runs rather than
-       * this projection.
+       * It was `mkdtemp(join(tmpdir(), "pifleet-accept-"))` — literally the path
+       * `container/mounts.ts:51` marks "Deliberately NOT `os.tmpdir()`", in the
+       * table it measured on this machine, next to the words "not shared,
+       * silently empty". That was harmless for as long as nothing mounted it,
+       * and it becomes a false PASS the moment something does: an unshared path
+       * bind-mounts as an empty directory, the exam finds no tests to fail, and
+       * a worker that changed nothing is certified. `makeDaemonScratch` is the
+       * existing answer — it allocates under `$HOME/.pifleet/scratch`,
+       * overridable with `PIFLEET_SCRATCH_DIR`, and opens the mode for the
+       * baked worker uid.
+       *
+       * The move is made even on the HOST path (no container in reach), rather
+       * than only when containerizing. A scratch root whose visibility depends
+       * on which branch the harvester happens to take is a root that is right by
+       * coincidence, and `runAcceptance`'s probe would then be asserting a
+       * property the caller could withdraw.
        */
-      acceptance: factsWithHarness.acceptance.map((r) => ({
-        criterion: r.cmd,
-        met: r.outcome === "passed",
-        evidence: `${r.outcome}${r.exit_code === null ? "" : ` (exit ${r.exit_code})`}`,
-      })),
-    },
-    discrepancies,
-    session_path: state?.session_path ?? null,
-    facts_hash: adj.facts_hash,
-  });
+      const ownScratch = opts.acceptanceScratch === undefined;
+      const scratchRoot = opts.acceptanceScratch ?? (await makeDaemonScratch("accept"));
 
-  // The returned facts are the ones the verdict was actually reached from —
-  // harness surface included. Returning `git.facts` here would hand callers a
-  // bundle whose hash does not match the `facts_hash` beside it.
-  return { harvest, facts: factsWithHarness, harvestStatus };
+      /**
+       * ISC-233: which image graded the code, taken from what the run RECORDED.
+       *
+       * `launch.json` already carries the tag the supervisor actually spawned —
+       * `WorkerLaunchSchema.image`, written by `materializeWorkerInputs` — so no
+       * new persistence is needed and, more to the point, no second derivation
+       * exists to disagree with the first. That matters here for the same reason
+       * `up`'s image gate gives about taking its tags from `renderAllWorkers`
+       * rather than calling `imageTag` again: a grader that recomputed the tag
+       * could certify an image the run never used.
+       *
+       * `null` is a real answer, not a degraded one. It means the run had no
+       * container at all — `PIFLEET_PI_COMMAND`, which is how this repo's entire
+       * e2e and integration suite runs — so there is no image to hold the exam
+       * in and the host path is the only honest option. `readWorkerLaunch`
+       * returns exactly that, and the supervisor already branches on it.
+       */
+      const launch = await readWorkerLaunch(workerPaths(run, envelope.worker));
+      try {
+        const result = await runAcceptance({
+          repo: envelope.host_workdir,
+          head_sha: git.facts.head_ref,
+          scratch_dir: scratchRoot,
+          commands: resolveFromEnvelope([...envelope.acceptance], envelope.base_ref),
+          deadline: new Deadline(opts.acceptanceBudgetMs ?? 600_000),
+          per_command_timeout_ms: opts.acceptancePerCommandMs ?? 120_000,
+          container:
+            launch === null
+              ? undefined
+              : { image: launch.image, network: networkFromLaunchArgv(launch.argv) },
+        });
+        factsWithHarness.acceptance = result.runs;
+        factsWithHarness.acceptance_context = result.context;
+      } catch (err) {
+        // An exam that could not be held is not an exam the worker failed
+        // (ISC-152). Recorded as a reason so the verdict stays uncertifiable.
+        reasons.push(`acceptance could not be run: ${String(err)}`);
+      } finally {
+        /**
+         * Remove the scratch root, and ONLY one this function allocated.
+         *
+         * The leak predates this change — nothing ever removed the old
+         * `mkdtemp(tmpdir())` root either — but it was survivable there because
+         * the OS reaps its temp directory. Moving to `$HOME/.pifleet/scratch`
+         * for ISC-277 makes the same leak DURABLE: every `artifacts
+         * --run-acceptance` would leave a full clone of the repository behind
+         * forever, under the operator's home directory, and this feature's own
+         * test run left six of them in a single afternoon.
+         *
+         * `ownScratch` is the whole condition. A caller that supplied
+         * `acceptanceScratch` owns that directory — it is a fixture root in the
+         * suite and could be a directory an operator cares about — and deleting
+         * it would be tidying someone else's state rather than cleaning up after
+         * this function.
+         *
+         * Failures are swallowed. The harvest result is already assembled; a
+         * cleanup error must not replace a real verdict with a housekeeping one.
+         */
+        if (ownScratch) await rm(scratchRoot, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+
+    /**
+     * ISC-243: the graded resolution surface, keyed on the commands that ran.
+     *
+     * Computed HERE rather than beside `harnessSurfaceFor` above because it
+     * needs an input that does not exist yet up there: the resolved acceptance
+     * commands. That ordering is not an inconvenience to work around — it is the
+     * whole difference between the two mechanisms. The denylist is a fixed list
+     * applied to any diff from no input; the allowlist is keyed on WHICH RUNNER
+     * graded the code, which is knowable only once the exam has been held.
+     *
+     * Driven off `factsWithHarness.acceptance` rather than off the `try` block's
+     * local `result`, so an exam whose runs arrived by any other route is graded
+     * the same way. No runs means no runner, which means an empty graded surface
+     * and the denylist alone — exactly today's behaviour, and the honest answer
+     * when nothing was executed.
+     */
+    {
+      const surface = gradedSurface(
+        factsWithHarness.acceptance.map((r) => r.cmd),
+        factsWithHarness.files_changed.map((f) => f.path),
+      );
+      factsWithHarness.harness = {
+        ...factsWithHarness.harness,
+        graded: surface.hits.map((h) => ({ file: h.file, tier: h.tier, why: h.why })),
+        graded_runners: [...surface.runners],
+        graded_unresolved: [...surface.unresolved],
+      };
+    }
+
+    /**
+     * ISC-154: the two worktree hashes, and the reason they are two.
+     *
+     * The check is "did the tree move between quiesce and harvest end", and it
+     * only means anything if the two samples are taken at genuinely different
+     * moments by genuinely different code. They are:
+     *
+     *   - QUIESCE is sampled by the SUPERVISOR, inside `settle`, in a different
+     *     process, at the instant it declares the epoch over. It survives to
+     *     here only because it was written into the task record — the same
+     *     durable channel this function already reads supervisor-terminal
+     *     verdicts from a few lines above.
+     *   - HARVEST END is sampled HERE, last, after the diff has been derived
+     *     and after any acceptance exam has been held. Deliberately the final
+     *     measurement in the function: sampling it earlier would leave a window
+     *     at the end of harvest that the check is blind to, which is precisely
+     *     the window a backgrounded writer occupies.
+     *
+     * Had both been taken by this function they would be two calls microseconds
+     * apart against one tree, always equal, and the criterion would be closed
+     * by a comparison that cannot fail.
+     *
+     * The quiesce hash is accepted ONLY from a record matching this envelope's
+     * epoch. A record from a different epoch describes a different dispatch of
+     * this task; comparing its tree against today's harvest would void the task
+     * for the entirely legitimate act of having been retried.
+     */
+    factsWithHarness.tree_hash_quiesce =
+      record !== null && record.epoch === envelope.epoch ? record.tree_hash : null;
+    factsWithHarness.tree_hash_harvest = hasWorktree
+      ? await worktreeContentHash(envelope.host_workdir)
+      : null;
+
+    const adj = adjudicateFacts(factsWithHarness, claimed);
+    let verdict = adj.verdict;
+    reasons.push(...adj.reasons);
+    discrepancies.push(...adj.discrepancies);
+
+    // The supervisor's terminal verdicts outrank derived evidence: `aborted`
+    // and `timed_out` are facts about the RUN, not inferences from the tree
+    // (§7.3), and no amount of clean diff makes an aborted task complete.
+    if (derivedVerdict === "aborted" || derivedVerdict === "timed_out") {
+      verdict = derivedVerdict;
+    }
+
+    // --- Harvest trustworthiness (§8.4), orthogonal to the verdict.
+    const envelopeDegraded = outbox.kind === "refused" || scan.refused.length > 0;
+    const harvestStatus: HarvestStatus =
+      !git.ok && outbox.kind !== "ok"
+        ? "unavailable"
+        : git.ok && !envelopeDegraded
+          ? "complete"
+          : "partial";
+
+    const state = await readWorkerState(workerPaths(run, envelope.worker)).catch(() => null);
+
+    const harvest = HarvestSchema.parse({
+      schema: "pifleet.artifacts/v1",
+      task_id: taskId,
+      worker: envelope.worker,
+      epoch: envelope.epoch,
+      verdict,
+      reasons,
+      claimed,
+      derived: {
+        branch: git.facts.branch,
+        base_ref: git.facts.base_ref,
+        commits: git.facts.commits,
+        files_changed: git.facts.files_changed,
+        diff: opts.includeDiff === true ? git.diffText : null,
+        /**
+         * The harvester's OWN exam results, projected into the report's claim
+         * shape (criterion / met / evidence). Empty unless `--run-acceptance`
+         * asked for the exam to be held.
+         *
+         * `met` is true only for `passed`. A timed-out or unrun command is not
+         * a met criterion and is not a failed one either (ISC-152) — the
+         * distinction survives in `evidence`, and the verdict cap that acts on
+         * it lives in the adjudicator, which reads the full runs rather than
+         * this projection.
+         */
+        acceptance: factsWithHarness.acceptance.map((r) => ({
+          criterion: r.cmd,
+          met: r.outcome === "passed",
+          evidence: `${r.outcome}${r.exit_code === null ? "" : ` (exit ${r.exit_code})`}`,
+        })),
+      },
+      discrepancies,
+      session_path: state?.session_path ?? null,
+      facts_hash: adj.facts_hash,
+    });
+
+    // The returned facts are the ones the verdict was actually reached from —
+    // harness surface included. Returning `git.facts` here would hand callers a
+    // bundle whose hash does not match the `facts_hash` beside it.
+    return { harvest, facts: factsWithHarness, harvestStatus };
+  } finally {
+    // Idempotent and unconditional. `closeOutboxScan` empties the accepted list as it
+    // closes, so this cannot double-close, and being in a `finally` means the
+    // descriptors come back on the throwing paths too — which matters because
+    // `harvestAll` CATCHES those throws and keeps looping, so a leak here would
+    // survive exactly the failure mode that produces the most of them.
+    await closeOutboxScan(scan);
+  }
 }
 
 /** Every dispatched task in the run — the single end-of-fanout call (§8.4). */
