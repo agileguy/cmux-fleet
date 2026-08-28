@@ -6,6 +6,29 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **ISC-292 closes, and what closed it was refuting the entry's own premise rather than writing more
+  code.** The criterion has recorded for months that its negative direction — a bind-mount source the
+  runtime genuinely cannot see — has no reproducible reader, because the hazard is macOS-only. It is
+  not macOS-only. It belongs to any daemon whose filesystem differs from the client's, and
+  docker-in-docker is one on Linux, so it was reachable from a CI runner the whole time it was
+  recorded as unreachable from one.
+
+  `test/integration/mount-preflight-remote.test.ts` stands up a dind daemon and asserts three things:
+  a source it cannot see is refused with exit 3; a source it really has is not refused; and the raw
+  hazard still holds, `docker run -v` exiting 0 onto an empty directory. The third pins the premise
+  rather than the guard — a Docker that starts erroring turns it red and reports that the guard's
+  justification changed, which is different news from the guard breaking.
+
+  Two CI failures preceded the green one and both were informative. The first was not a
+  `--privileged` refusal, as it first appeared: the daemon started and published a port, and the pull
+  into it was reset from 127.0.0.1. Hardening readiness to two consecutive answers did not fix it,
+  which is what killed the restart hypothesis and forced the second failure to be read from the
+  daemon's own logs. Those named it: Docker 28 deliberately stalls startup on TCP without TLS, and
+  during the stall the listener accepts connections before resetting them — so `docker info` answers
+  while the daemon is not yet serving. `--tls=false`, the override the daemon's message itself names,
+  fixed it. The local run fell from 28.9s to 10.3s, confirming the same delay had been paid on the
+  maintainer's machine all along and was merely survivable there.
+
 - **The shipped example config still taught the alias the code deprecated (ISC-264).**
   `base_url` was renamed `host.docker.internal` -> `omlx.pifleet.internal` because the old name
   claimed the relay was the Docker host, which stopped being true once `relay_upstream` could name a
