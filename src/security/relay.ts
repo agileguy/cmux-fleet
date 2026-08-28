@@ -125,6 +125,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join } from "node:path";
+import { assertBindMountsVisible } from "../container/mount-preflight.ts";
 import { realExec, repoRoot, type Exec } from "../container/run.ts";
 import {
   decide,
@@ -1334,6 +1335,67 @@ export async function ensureEgressRelay(
   }
   const replaced = drifted ? existing.liveTargets : null;
 
+  /**
+   * The finished launch argv, built before anything is created so its mounts
+   * can be checked while a refusal is still free (ISC-292).
+   *
+   * It is the SAME array `docker run` is handed below — not a reconstruction —
+   * because a guard that inspects an argv the launch does not use is a guard
+   * that agrees with itself and nothing else.
+   */
+  const runArgv = relayRunArgv(containerName, uplink, targets, relayScriptPath(), proxy);
+  /**
+   * ISC-292 at the relay's own launch, because `up`'s guard cannot reach it.
+   *
+   * `up` asserts bind-mount visibility over the finished WORKER argvs, and not
+   * one of the relay's `-v` sources appears on those: `relayScriptPath`,
+   * `proxyScriptPath` and `proxyPolicyScriptPath` all resolve under
+   * `repoRoot()` — wherever this checkout happens to live — while the worker
+   * mounts come from `run.repo`, the runs root and the scratch root. `up` also
+   * calls `ensureEgressRelay` some five hundred lines BEFORE that assertion,
+   * so even a source the workers did share would be mounted here first.
+   *
+   * On a VM-backed runtime a checkout outside the shared set does not fail the
+   * `docker run` below; it mounts THREE invented empty directories where the
+   * relay script, the CONNECT proxy and the shared matcher belong. `docker run
+   * -d` exits 0 and the relay dies on `Cannot find module` milliseconds later,
+   * which `ensureEgressRelay` then reports as "exited immediately after start"
+   * — a message that blames the listen port for a mount problem and sends the
+   * operator looking in the wrong place entirely.
+   *
+   * The finished argv is the only place these values are knowable, for the
+   * reason `mount-preflight.ts` states about its own siblings: the offending
+   * path is not a literal any reviewer can audit, it arrives from where the
+   * operator cloned.
+   *
+   * ## Only on the LAUNCH path, never on adoption
+   *
+   * Every early return above this line leaves having mounted nothing: a running
+   * relay whose targets and policy have not drifted is adopted as-is and
+   * `created: false`. Probing there would charge EVERY `up` a probe container's
+   * cold start — the cost `probeBindMountSources` goes to the trouble of paying
+   * once per fleet rather than once per mount — for a mount nothing is about to
+   * make. So this sits past the last early return, on the launch path only.
+   *
+   * ## …and BEFORE the first thing that changes the machine
+   *
+   * Past the early return but ahead of `ensureUplinkNetwork` and the `rm -f`,
+   * which is the one placement decision here worth arguing about. Both of those
+   * MUTATE: the first creates a bridge network, and the second destroys a relay
+   * a concurrent fleet may still be forwarding through. A refusal issued after
+   * them would leave the operator with no relay at all, an orphan network, and
+   * a message about bind mounts — the guard would have done more damage than
+   * the fault it declined. Nothing between here and `docker run` can change
+   * this argv's mount sources, so checking early costs no accuracy.
+   *
+   * `RELAY_IMAGE` is the probe tag for the same reason `up` uses the worker
+   * image rather than a probe-specific one: a preflight that pulls an image of
+   * its own is slow on a cold machine and fails outright on an offline one.
+   * This is the image the relay itself is about to run, so it is either already
+   * local or the launch was never going to succeed regardless.
+   */
+  await assertBindMountsVisible([runArgv], RELAY_IMAGE, exec);
+
   await ensureUplinkNetwork(uplink);
 
   if (existing.exists) {
@@ -1354,7 +1416,6 @@ export async function ensureEgressRelay(
     }
   }
 
-  const runArgv = relayRunArgv(containerName, uplink, targets, relayScriptPath(), proxy);
   const started = await docker(exec, runArgv, 120_000);
   if (started.code !== 0) {
     throw new Error(

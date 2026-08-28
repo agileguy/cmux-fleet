@@ -50,6 +50,7 @@ import {
   type RelayTarget,
 } from "../../src/security/relay.ts";
 import { hostReachableBaseUrl } from "../../src/security/model-probe.ts";
+import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
 
 const NET = "pifleet-egress";
 
@@ -995,12 +996,22 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
      * A fake daemon that answers `inspect` with a chosen payload and reports
      * success for everything else, so the DECISION is what gets asserted —
      * which docker verbs ran, in which order.
+     *
+     * It answers the ISC-292 mount preflight TRUTHFULLY, from the very files
+     * the relay argv mounts, rather than with a blanket success. `success for
+     * everything else` used to send every create-path test below into a
+     * `MountNotVisibleError`, because a probe container that says nothing is
+     * refused by design. Answering from the host keeps these tests about the
+     * drift decision they were written for, and — unlike a fake that replies
+     * "visible" to anything — it would still go red if the guard started
+     * probing the wrong paths.
      */
     const daemon = (inspectStdout: string) => {
       const calls: string[][] = [];
       let inspects = 0;
       const exec = async (argv: string[]) => {
         calls.push(argv);
+        if (isMountProbe(argv)) return answerMountProbe(argv);
         if (argv[1] === "inspect" && argv[2] !== NET) {
           inspects += 1;
           // The post-start re-inspect must report a RUNNING relay, or `ensure`
@@ -1015,8 +1026,21 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       return { calls, exec: exec as unknown as Parameters<typeof ensureEgressRelay>[2] };
     };
 
+    /**
+     * The lifecycle verbs, with the ISC-292 preflight named as `probe` rather
+     * than swallowed.
+     *
+     * Its argv IS a `docker run`, so leaving it unlabelled would make the
+     * sequences below read `["inspect", "run", "rm", "run", …]` with the two
+     * `run`s meaning different things. Naming it keeps every assertion an
+     * exact whole-array comparison — the property this file's header insists
+     * on — and makes a preflight that stopped running visible as a MISSING
+     * element instead of as nothing at all.
+     */
     const verbs = (calls: string[][]) =>
-      calls.filter((c) => c[0] === "docker").map((c) => `${c[1]}${c[1] === "network" ? ` ${c[2]}` : ""}`);
+      calls
+        .filter((c) => c[0] === "docker")
+        .map((c) => (isMountProbe(c) ? "probe" : `${c[1]}${c[1] === "network" ? ` ${c[2]}` : ""}`));
 
     test("a relay already forwarding what the config wants is adopted untouched", async () => {
       const { calls, exec } = daemon(liveRelay([T(RELAY_DEFAULT_DIAL_HOST)]));
@@ -1079,7 +1103,10 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       expect(status.targets).toEqual([T(RELAY_DEFAULT_DIAL_HOST)]);
       // The old posture is carried out, so the ledger can say what was displaced.
       expect(status.replaced).toEqual([T(LAN_OMLX)]);
-      expect(verbs(calls)).toEqual(["inspect", "rm", "run", "network connect", "inspect"]);
+      // `probe` sits between the inspect and the rm on purpose: the ISC-292
+      // preflight refuses BEFORE anything is removed, so a bad checkout never
+      // costs the operator the relay they already had.
+      expect(verbs(calls)).toEqual(["inspect", "probe", "rm", "run", "network connect", "inspect"]);
       // Asserted as an argv, not as a verb: `rm` without `-f` leaves a running
       // container in place and the whole change becomes a no-op.
       expect(calls.find((c) => c[1] === "rm")).toEqual([
@@ -1113,7 +1140,10 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       const status = await ensureEgressRelay(cfg(DEFAULT_BASE_URL), NET, exec);
       expect(status.created).toBe(true);
       expect(status.replaced).toBeNull();
-      expect(verbs(calls)).toEqual(["inspect", "rm", "run", "network connect", "inspect"]);
+      // `probe` sits between the inspect and the rm on purpose: the ISC-292
+      // preflight refuses BEFORE anything is removed, so a bad checkout never
+      // costs the operator the relay they already had.
+      expect(verbs(calls)).toEqual(["inspect", "probe", "rm", "run", "network connect", "inspect"]);
     });
 
     test("the drift removal names both postures when the daemon refuses it", async () => {
@@ -1121,6 +1151,10 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       const calls: string[][] = [];
       const exec = (async (argv: string[]) => {
         calls.push(argv);
+        // The ISC-292 preflight runs ahead of the `rm`, so it has to be
+        // answered truthfully here or the refusal under test never happens —
+        // this test would then pass or fail on the wrong error entirely.
+        if (isMountProbe(argv)) return answerMountProbe(argv);
         if (argv[1] === "inspect") return { code: 0, stdout: liveRelay([T(LAN_OMLX)]), stderr: "" };
         if (argv[1] === "rm") return { code: 1, stdout: "", stderr: "daemon said no" };
         return { code: 0, stdout: "[]", stderr: "" };
