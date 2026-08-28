@@ -6,6 +6,36 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **An ISA claim's grep could not tell code from prose, and it had already failed in both
+  directions (ISC-302).** A claim is a text search over bytes. ISC-300's went vacuously GREEN when
+  the decision it pinned moved and the old spelling survived inside a comment explaining the move;
+  ISC-246's went falsely RED two days later when three lines of new docstring named the field it
+  greps for. The convention that followed — comments deliberately decline to spell greppable forms —
+  is real, documented in three places, and unenforceable: it asks every future author to know which
+  strings some other file searches for.
+
+  Claims now run against a comment-MASKED mirror of the tracked tree. Every comment byte becomes a
+  space and every newline is kept, so lengths and line numbers are unchanged and a claim's `grep -n`
+  still names the line a reader will find in the real file. Both original failures were replayed as
+  proof: re-adding a comment naming the field leaves ISC-246's claim green, and respelling the code
+  so the pinned form survives only in a comment turns ISC-301's claim red.
+
+  Files that are not `.ts` are mirrored verbatim, and that limit is stated rather than hidden —
+  masking them means a second comment syntax whose marker is also an ordinary character inside shell
+  strings and YAML values.
+
+### Changed
+
+- **ISC-300, ISC-259 and ISC-57 restated on the owner's decisions, and each closes on evidence that
+  already runs.** ISC-300's reaper keeps narrowing a capture-failed process group and the criterion
+  now requires the action be reported rather than that both paths take the same one — the objection
+  in `signalIfSame`'s docstring was to narrowing "reported as if it were the same", and that silence
+  is gone. ISC-259 asked whether the serving oMLX is the Docker host; it is not, and that is
+  conformant, because SRD §5.9 was amended twice to make the constraint privacy rather than
+  location, leaving the criterion as the stale half. ISC-57's gateway term was fixed rather than
+  reworded; only sibling reachability on the shared bridge is scoped out, recorded as accepted risk,
+  and the criterion now states what is actually denied.
+
 - **ISC-292 closes, and what closed it was refuting the entry's own premise rather than writing more
   code.** The criterion has recorded for months that its negative direction — a bind-mount source the
   runtime genuinely cannot see — has no reproducible reader, because the hazard is macOS-only. It is
