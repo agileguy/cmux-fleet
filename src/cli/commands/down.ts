@@ -433,19 +433,19 @@ export function register(program: Command): void {
            * here, exactly as it is for a group refused at the anchor.
            */
           const termOutcome = await signalGuarded(target, "SIGTERM", anchor.group);
-          if (termOutcome === "group_unconfirmed") {
-            how = LADDER_GROUP_UNCONFIRMED;
-          } else if (termOutcome === "identity_unconfirmed") {
-            /*
-             * The identity read FAILED at the rung — `ps` could not be read at
-             * all, so nothing is known about the target and nothing was sent.
-             * Kept apart from the group refusal above because the two send an
-             * operator somewhere different: one says the recorded group could
-             * not be vouched for, this one says the measuring instrument is
-             * broken. Collapsing them would tell somebody to edit a record
-             * that is fine.
-             */
-            how = LADDER_IDENTITY_UNCONFIRMED;
+          /*
+           * Each non-signalling answer keeps its OWN `how`, and that is the
+           * point of the table rather than a single "refused". They send an
+           * operator to different places: a group refusal says the record could
+           * not be vouched for and `--force-identity` is the answer; a broken
+           * `ps` says the measuring instrument failed; an EPERM says the machine
+           * understood and said no. Collapsing them would tell somebody to edit
+           * a record that is fine, or to force past a permission they do not
+           * have.
+           */
+          const termRefusal = noSignalSent(termOutcome);
+          if (termRefusal !== null) {
+            how = termRefusal;
           } else if (!(await waitGone(target, TERM_WAIT_MS))) {
             // Phase 3: SIGKILL — the same confirmed group, no survivors.
             how = "sigkill";
@@ -459,12 +459,12 @@ export function register(program: Command): void {
              * ladder `down` runs by hand.
              */
             const killOutcome = await signalGuarded(target, "SIGKILL", anchor.group);
-            if (killOutcome === "group_unconfirmed") {
-              how = LADDER_GROUP_UNCONFIRMED;
-            } else if (killOutcome === "identity_unconfirmed") {
-              // Same reasoning as the SIGTERM rung, and the same stop: a `ps`
-              // that cannot be read at SIGTERM will not read at SIGKILL.
-              how = LADDER_IDENTITY_UNCONFIRMED;
+            // Same reasoning as the SIGTERM rung and the same stop: whatever
+            // sent nothing there sends nothing here. A `ps` that cannot be read
+            // at SIGTERM will not read at SIGKILL, and an EPERM does not lapse.
+            const killRefusal = noSignalSent(killOutcome);
+            if (killRefusal !== null) {
+              how = killRefusal;
             } else {
               await waitGone(target, TERM_WAIT_MS);
             }
@@ -581,8 +581,8 @@ export function register(program: Command): void {
              * removed for workers, left standing three hundred lines down.
              */
             const outcome = await signalGuarded(target, "SIGTERM", anchor.group);
-            if (outcome === "group_unconfirmed") how = LADDER_GROUP_UNCONFIRMED;
-            else if (outcome === "identity_unconfirmed") how = LADDER_IDENTITY_UNCONFIRMED;
+            const refusal = noSignalSent(outcome);
+            if (refusal !== null) how = refusal;
             else await waitGone(target, TERM_WAIT_MS);
           }
           const daemonHeld = await identityHolds(target);
@@ -916,7 +916,18 @@ export function register(program: Command): void {
            * are actually present.
            */
           const hows = [...new Set(refused.map((r) => r.how))].sort();
-          const forcible = refused.filter((r) => r.how !== LADDER_IDENTITY_UNCONFIRMED);
+          /*
+           * Neither new value is forcible either, for the same reason the
+           * broken-`ps` one is not: EPERM means the machine understood and
+           * refused, so re-anchoring the identity changes nothing about who
+           * owns the process, and the next signal is refused identically.
+           */
+          const unforcible = new Set([
+            LADDER_IDENTITY_UNCONFIRMED,
+            LADDER_SIGNAL_REFUSED,
+            LADDER_SIGNAL_ERRORED,
+          ]);
+          const forcible = refused.filter((r) => !unforcible.has(r.how));
           parts.push(
             `${refused.length} were never signalled because their recorded launch identity or ` +
               `process group could not be confirmed (${hows.join(", ")})` +
@@ -1053,6 +1064,54 @@ const IDENTITY_REFUSALS = new Set<string>([
  * the type describe less than it does now.
  */
 const LADDER_GROUP_UNCONFIRMED = "group_unconfirmed";
+
+/**
+ * The kernel REFUSED to deliver (EPERM): the target is alive and owned by
+ * somebody else.
+ *
+ * Distinct from both twins above, and the distinction is about where it sends
+ * an operator. A group refusal says the record could not be vouched for, and
+ * `--force-identity` is the answer. A broken `ps` says the instrument failed.
+ * This says the machine understood us perfectly and said no, so neither remedy
+ * applies: forcing re-anchors an identity that was never in doubt, and the
+ * next signal EPERMs exactly as this one did.
+ */
+const LADDER_SIGNAL_REFUSED = "signal_refused";
+
+/**
+ * `signalGuarded` caught something that was not EPERM or ESRCH.
+ *
+ * It had no `how` of its own and that was a live falsehood rather than an
+ * omission: `signalGuarded` has returned `"errored"` since it was written,
+ * NOTHING ever matched the value, so it fell through to the `else` on every
+ * rung and `how` kept saying `sigterm`/`sigkill` — `down` reporting a ladder it
+ * had not climbed. This file's own comment at the daemon rung describes that
+ * exact bug being fixed for workers and "left standing three hundred lines
+ * down"; it was still standing on both rungs for this value.
+ */
+const LADDER_SIGNAL_ERRORED = "signal_errored";
+
+/**
+ * The answers that mean NO SIGNAL WAS SENT, mapped to what `down` reports.
+ *
+ * A TABLE rather than another if-chain, because the chain is how the gap
+ * happened: three sites each had to remember the same growing list, and each
+ * time a `SignalOutcome` was added the ones nobody edited went on silently
+ * reporting a climb. Anything absent here is an answer that DID signal
+ * (`signalled`) or that means the target is already gone (`gone`), and both
+ * fall through to the caller's own liveness check.
+ */
+const NO_SIGNAL_SENT: Readonly<Record<string, string>> = {
+  group_unconfirmed: LADDER_GROUP_UNCONFIRMED,
+  identity_unconfirmed: LADDER_IDENTITY_UNCONFIRMED,
+  signal_refused: LADDER_SIGNAL_REFUSED,
+  errored: LADDER_SIGNAL_ERRORED,
+};
+
+/** The `how` for an outcome that sent nothing, or `null` if a signal went out. */
+function noSignalSent(outcome: SignalOutcome | "errored"): string | null {
+  return NO_SIGNAL_SENT[outcome] ?? null;
+}
 
 const GROUP_REFUSALS = new Set<string>([
   "group_unrecorded",

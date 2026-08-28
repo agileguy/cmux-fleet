@@ -870,3 +870,92 @@ describe("ISC-116: deadline exhaustion is a diagnosed exit-4 failure", () => {
     expect(err.message).toContain("timed_out");
   });
 });
+
+/**
+ * EPERM: the kernel understood and said no (ISC-272 residual 2).
+ *
+ * ## What was measured before these were written
+ *
+ * `signalIfSame` swallowed ESRCH and re-threw everything else, so an EPERM
+ * escaped BOTH it and `runKillLadder`:
+ *
+ *     ESRCH  signalIfSame -> gone            runKillLadder -> already_gone
+ *     EPERM  signalIfSame -> THREW EPERM     runKillLadder -> THREW EPERM
+ *     none   signalIfSame -> signalled       runKillLadder -> unconfirmed
+ *
+ * That escape was not symmetrical in its consequences. `down` had wrapped
+ * itself — `signalGuarded` catches and reports, with EPERM named in its comment
+ * as the likely cause — but `reapSupervisor` calls `runKillLadder` bare, so a
+ * single unsignallable worker took `reapStale`'s whole loop with it and every
+ * report already collected in that pass was lost. That is the harm the SIGKILL
+ * rung's own comment describes for an escaping identity read: it was fixed
+ * there, and left standing on the signal path.
+ *
+ * The ISA recorded this residual as "the ladder-survivor branch is only
+ * EPERM-reachable"; the measurement above refutes that. EPERM never reached
+ * `unconfirmed` — it threw first. `unconfirmed` is reached by a signal that
+ * SUCCEEDS while the target survives, which the escalation test above already
+ * drives.
+ */
+describe("EPERM is an outcome, not an escape (ISC-272)", () => {
+  /** Ops whose signal always refuses with the given errno. */
+  function refusing(code: string) {
+    const h = harness();
+    h.alive();
+    const ops: ProcessOps = {
+      ...h.ops,
+      signal() {
+        const err = new Error(code) as Error & { code?: string };
+        err.code = code;
+        throw err;
+      },
+    };
+    return { ...h, ops };
+  }
+
+  /**
+   * Fails if: EPERM is folded into `gone`. That would be the destructive
+   * direction — `gone` is a caller's licence to remove the container, and this
+   * target is alive and owned by somebody else.
+   */
+  test("signalIfSame answers signal_refused rather than throwing", async () => {
+    const h = refusing("EPERM");
+    expect(await signalIfSame(TARGET, "SIGTERM", { pgid: TARGET.pid, ops: h.ops })).toBe(
+      "signal_refused",
+    );
+  });
+
+  /**
+   * Fails if: the ladder climbs past a rung that sent nothing. A refusal at
+   * SIGTERM will be a refusal at SIGKILL — permission does not lapse over a
+   * grace period — so paying the wait would be time spent on a signal that was
+   * never delivered.
+   */
+  test("the ladder stops at the refusing rung and reports it", async () => {
+    const h = refusing("EPERM");
+    const outcome = await runKillLadder({
+      target: TARGET,
+      pgid: TARGET.pid,
+      dead: () => Promise.resolve(false),
+      ...FAST,
+      ops: h.ops,
+      now: h.now,
+      sleep: h.sleep,
+    });
+    expect(outcome).toBe("signal_refused");
+  });
+
+  /**
+   * The control, and the half that keeps the change honest.
+   *
+   * Only EPERM is an answer. Anything else is a programming error rather than a
+   * fact about the world, and swallowing those would hide bugs behind a
+   * refusal — so an unexpected errno must still escape.
+   */
+  test("a non-EPERM error still escapes rather than being swallowed", async () => {
+    const h = refusing("EINVAL");
+    await expect(
+      signalIfSame(TARGET, "SIGTERM", { pgid: TARGET.pid, ops: h.ops }),
+    ).rejects.toThrow("EINVAL");
+  });
+});

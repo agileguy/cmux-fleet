@@ -995,3 +995,121 @@ describe("the daemon reaps and deregisters", () => {
     }
   }, cliBudget(3));
 });
+
+/**
+ * One unsignallable worker must not cost the whole reap pass (ISC-272).
+ *
+ * ## The bug this pins, which was an ESCAPE rather than a wrong answer
+ *
+ * `signalIfSame` swallowed ESRCH and re-threw everything else, so an EPERM —
+ * the ordinary way a signal fails when somebody else owns the process — left
+ * `runKillLadder` as an exception. `down` had wrapped itself against exactly
+ * that (`signalGuarded`, whose comment names EPERM), but `reapSupervisor` calls
+ * the ladder bare and `reapStale` loops over every registered worker with no
+ * try inside it. So the throw unwound the LOOP: reports already collected were
+ * discarded, and the workers whose reaps had succeeded lost their ledger rows
+ * and registry entries while their staleness clocks had already been dropped.
+ *
+ * That is not a hypothetical harm — it is the one `kill.ts`'s SIGKILL-rung
+ * comment spells out for an escaping identity read, which was fixed there and
+ * left standing one code path over.
+ *
+ * ## Why the pass has two workers and they are ordered
+ *
+ * The refusing worker is registered FIRST. A single-worker probe would prove
+ * only that the outcome is reported; it takes a SECOND worker behind the
+ * refusal to show the loop kept going, and putting the refusal first is what
+ * makes the old code lose something observable. With the order reversed the
+ * pre-fix behaviour would still have collected one report and the test would
+ * pass against the bug.
+ */
+describe("a reap pass survives a worker it is not allowed to signal (ISC-272)", () => {
+  test("the refusal is reported and the next worker is still reaped", async () => {
+    const PERM = 90_001; // signals to this pid are refused with EPERM
+    const OK = 90_002; // signals to this pid work, and it dies
+    const dead = new Set<number>();
+
+    const removed: string[] = [];
+    const ops: ReaperOps = {
+      startTime: (pid) => Promise.resolve(dead.has(pid) ? null : `utc1 started-${pid}`),
+      groupId: (pid) => Promise.resolve(dead.has(pid) ? null : pid),
+      signal(pid) {
+        // A group signal addresses `-pgid`; both spellings reach the same owner.
+        const target = Math.abs(pid);
+        if (target === PERM) {
+          const err = new Error("EPERM") as Error & { code?: string };
+          err.code = "EPERM";
+          throw err;
+        }
+        dead.add(target);
+      },
+      removeContainer(name) {
+        removed.push(name);
+        return Promise.resolve("removed");
+      },
+    };
+
+    const entry = (worker: string, pid: number) => ({
+      worker,
+      pid,
+      pgid: pid,
+      started: `utc1 started-${pid}`,
+      registered_at: "2026-07-27T09:00:00Z",
+    });
+    const registry = RegistrySchema.parse({
+      schema: "pifleet.registry/v1",
+      run_id: "r-1",
+      daemon: { pid: process.pid, started: "x" },
+      workers: { "w-perm": entry("w-perm", PERM), "w-ok": entry("w-ok", OK) },
+    });
+
+    const state = (worker: string): WorkerState =>
+      WorkerStateSchema.parse({
+        schema: "pifleet.state/v1",
+        worker,
+        run_id: "r-1",
+        pid: 1,
+        pgid: 0,
+        started_at: "2026-07-27T09:00:00Z",
+        phase: "busy",
+        epoch: 1,
+        heartbeat_at: "2026-07-27T10:00:00Z",
+        container: { name: `c-${worker}`, id: "abc", image: "img" },
+      });
+
+    let t = 0;
+    const monitor = new HeartbeatMonitor(() => t);
+    const cycle = () =>
+      reapStale({
+        registry,
+        readState: (w) => Promise.resolve(state(w)),
+        monitor,
+        heartbeatIntervalMs: 1_000,
+        ops,
+        ...FAST,
+      });
+
+    expect(await cycle()).toEqual([]); // first scan only observes
+    t += 60_000;
+
+    // BEFORE THE FIX this call threw EPERM and returned nothing at all.
+    const reports = await cycle();
+    expect(reports.map((r) => r.worker)).toEqual(["w-perm", "w-ok"]);
+
+    const perm = reports.find((r) => r.worker === "w-perm")!;
+    const ok = reports.find((r) => r.worker === "w-ok")!;
+
+    // Refused, and specifically NOT a stop: the target is alive and owned by
+    // someone else, so its container must be spared.
+    expect(perm.supervisor).toBe("signal_refused");
+    expect(perm.container).toBe("spared");
+
+    // And the worker BEHIND the refusal was reaped normally — the whole point.
+    expect(["terminated", "killed"]).toContain(ok.supervisor);
+    expect(removed).toEqual(["c-w-ok"]);
+
+    // The refused worker keeps its clock, so the next scan retries it rather
+    // than starting its 3x interval over.
+    expect(monitor.sinceChangeMs("w-perm")).toBe(60_000);
+  }, cliBudget(1));
+});

@@ -317,7 +317,8 @@ export type SignalOutcome =
   | "signalled"
   | "gone"
   | "group_unconfirmed"
-  | "identity_unconfirmed";
+  | "identity_unconfirmed"
+  | "signal_refused";
 
 /**
  * Re-validate identity AND group, then signal — the ISC-191/272 primitive.
@@ -424,7 +425,29 @@ export async function signalIfSame(
   try {
     ops.signal(addr, sig);
   } catch (err) {
-    if ((err as { code?: string }).code === "ESRCH") return "gone";
+    const code = (err as { code?: string }).code;
+    if (code === "ESRCH") return "gone";
+    /*
+     * EPERM IS AN ANSWER, NOT AN ACCIDENT, and it used to escape.
+     *
+     * The kernel refused to deliver: the target is alive and someone else owns
+     * it. That is the same SHAPE as `group_unconfirmed` — alive, deliberately
+     * not stopped — and it is emphatically not `gone`, which is a caller's
+     * licence to remove a container.
+     *
+     * Letting it throw was not merely untidy. `down` had wrapped itself
+     * (`signalGuarded` catches and reports `errored`, naming EPERM as the
+     * likely cause), but `reapSupervisor` calls `runKillLadder` bare, so one
+     * unsignallable worker aborted `reapStale`'s whole loop and every report it
+     * had already collected went with it — the exact harm the SIGKILL-rung
+     * comment below describes for an escaping identity read, which was fixed
+     * there and left standing here. Measured before the change: EPERM threw out
+     * of both `signalIfSame` and `runKillLadder`.
+     *
+     * Only EPERM. Anything else is a programming error rather than a fact about
+     * the world, and swallowing those would hide bugs behind a refusal.
+     */
+    if (code === "EPERM") return "signal_refused";
     throw err;
   }
   return "signalled";
@@ -459,7 +482,8 @@ export type KillOutcome =
   | "already_gone"
   | "unconfirmed"
   | "group_unconfirmed"
-  | "identity_unconfirmed";
+  | "identity_unconfirmed"
+  | "signal_refused";
 
 export interface KillLadderOpts {
   /** The recorded identity to kill. Never a bare pid. */
@@ -596,6 +620,7 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
   const term = await signalIfSame(target, "SIGTERM", { pgid: opts.pgid, ops });
   if (term === "group_unconfirmed") return "group_unconfirmed";
   if (term === "identity_unconfirmed") return "identity_unconfirmed";
+  if (term === "signal_refused") return "signal_refused";
   if (term === "gone") return opts.abort != null ? "aborted" : "already_gone";
   if (await awaitDead(dead, opts.termGraceMs ?? DEFAULT_TERM_GRACE_MS, pollMs, now, sleep)) {
     return "terminated";
@@ -610,6 +635,7 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
   const kill = await signalIfSame(target, "SIGKILL", { pgid: opts.pgid, ops });
   if (kill === "group_unconfirmed") return "group_unconfirmed";
   if (kill === "identity_unconfirmed") return "identity_unconfirmed";
+  if (kill === "signal_refused") return "signal_refused";
   if (kill === "gone") return "terminated";
   if (await awaitDead(dead, opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS, pollMs, now, sleep)) {
     return "killed";
