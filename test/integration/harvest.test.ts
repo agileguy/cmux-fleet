@@ -11,6 +11,7 @@
 
 import { spawnCliProcess } from "../support/spawn-cli.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -584,6 +585,42 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     expect(h.discrepancies).toEqual([]);
     expect(obj["harvest_status"]).toBe("complete");
   }, cliBudget(1));
+
+  /**
+   * The digested outbox inventory reaches BOTH of the CLI's two surfaces.
+   *
+   * The human renderer had no coverage at all before this — not for reasons,
+   * not for discrepancies, not for `files_changed` — so a line added to it was
+   * indistinguishable from a line never written, which is the exact shape of
+   * defect this repo keeps finding in code that no caller exercises. The JSON
+   * half is asserted in the same test because the two are one decision: a
+   * digest is published so it can be compared, and a value that appears in
+   * only one of the two outputs cannot be.
+   *
+   * The digest is compared against one computed here from the fixture's own
+   * bytes, so a placeholder or a stale constant is red rather than present.
+   */
+  test("the harvested outbox artifacts reach both the human and JSON output", async () => {
+    const digest = createHash("sha256").update("artifact\n").digest("hex");
+
+    const human = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-1"]);
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain("artifact: ");
+    expect(human.stdout).toContain("note.md");
+    expect(human.stdout).toContain("9 bytes");
+    // Whole, not abbreviated: the value's only use is being compared.
+    expect(human.stdout).toContain(`sha256 ${digest}`);
+
+    const json = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-1", "--json"]);
+    const h = HarvestSchema.parse(JSON.parse(json.stdout));
+    expect(h.derived.artifacts).toHaveLength(1);
+    expect(h.derived.artifacts[0]!.bytes).toBe("artifact\n".length);
+    expect(h.derived.artifacts[0]!.sha256).toBe(digest);
+    // Derived side carries the HOST path; the worker's container spelling
+    // stays on the claimed side, so the report holds both without translating.
+    expect(h.derived.artifacts[0]!.path.startsWith("/outbox/")).toBe(false);
+    expect(h.claimed!.artifacts[0]!.path).toBe("/outbox/T-1/files/note.md");
+  }, cliBudget(2));
 
   // ISC-90 at the CLI: --include diff must carry git's diff, not a summary
   // of it. Would fail if the include plumbing dropped or reformatted it.

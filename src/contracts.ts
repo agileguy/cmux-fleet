@@ -25,6 +25,17 @@ export const MAX_ITEMS = 1_000;
 const shortStr = z.string().max(MAX_SHORT);
 const text = z.string().max(MAX_TEXT);
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/, "must be a full 40-char SHA");
+/**
+ * A sha256 in lowercase hex — 64 characters, not 40.
+ *
+ * Separate from `sha40` rather than a widened version of it, because the two
+ * name different things and a schema that accepted either would accept a git
+ * SHA in a content-digest field. Git object ids are 40; a content digest over
+ * artifact bytes is 64, and the regex is what makes a truncated digest a
+ * schema violation rather than a shorter answer — which matters here, since
+ * the producer refuses to publish a partial digest at all.
+ */
+const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/, "must be a 64-char lowercase sha256");
 
 /**
  * Pi's session-id grammar, verified against 0.79.6. Worker ids are used as
@@ -439,6 +450,54 @@ export type LedgerRecord = z.infer<typeof LedgerRecordSchema>;
 // Harvested artifact (SRD §8.4) — what `pifleet artifacts --json` returns.
 // ---------------------------------------------------------------------------
 
+/**
+ * One artifact the harvester found in the outbox and read, as a DERIVED fact.
+ *
+ * The distinction from `ArtifactRefSchema` is the whole reason this is a
+ * second type rather than a reuse of the first. `ArtifactRefSchema` is what
+ * the WORKER said — a kind and a container path, advisory and untrusted. This
+ * is what the harvester MEASURED: a file that passed the outbox scan's
+ * containment checks, opened, and digested from the descriptor it was
+ * validated on. §12.6 asks for derived facts to be structurally separated from
+ * claimed ones, and two schemas is what that separation looks like at the wire.
+ *
+ * `kind` is deliberately absent. Kind is a worker's label for its own output
+ * and there is nothing on disk to derive it from; carrying it here would let a
+ * claim ride into the derived half of the report wearing a fact's clothes.
+ */
+export const HarvestedArtifactSchema = z.object({
+  /**
+   * HOST path, escaped for display.
+   *
+   * Host and not container, for three reasons that point the same way. It
+   * matches how refused outbox entries already surface — those are host paths
+   * too — so one report does not spell the same directory two ways. It is
+   * resolvable at the moment someone reads the report, which a container path
+   * is not: the container is gone by harvest time and `pifleet artifacts` runs
+   * on the host. And the worker's own spelling is not lost by choosing it,
+   * because `claimed.artifacts[].path` carries the container path verbatim in
+   * the same document — so the report holds both, each on the side that
+   * authored it, and neither side has to be trusted to translate the other.
+   *
+   * Escaped because a filename is worker-controlled: a file named with a
+   * newline and an ANSI sequence would otherwise forge lines in the report
+   * that is judging it (§12.6). The escaping is safe precisely because this
+   * string is never the way the bytes were reached — the descriptor was.
+   */
+  path: shortStr,
+  bytes: z.number().int().nonnegative(),
+  /**
+   * sha256 over the WHOLE file, or the artifact is absent from the list.
+   *
+   * A digest over a truncated prefix, published in a field called `sha256`, is
+   * not a partial answer — it is a wrong one, and it would compare unequal to
+   * the same file's digest computed anywhere else. An artifact past either
+   * byte cap is therefore reported as a discrepancy and left out entirely.
+   */
+  sha256: sha256Hex,
+});
+export type HarvestedArtifact = z.infer<typeof HarvestedArtifactSchema>;
+
 export const HarvestSchema = z.object({
   schema: z.literal("pifleet.artifacts/v1"),
   task_id: shortStr,
@@ -455,6 +514,27 @@ export const HarvestSchema = z.object({
     files_changed: z.array(FileChangeSchema).max(MAX_ITEMS).default([]),
     diff: text.nullable().default(null),
     acceptance: z.array(AcceptanceClaimSchema).max(MAX_ITEMS).default([]),
+    /**
+     * What the outbox actually held, read and digested (ISC-246's consumer).
+     *
+     * Inside `derived` and not beside `claimed`, for the same reason
+     * `files_changed` is: this is the harvester's own measurement of the
+     * filesystem, and the worker's claim about the same files sits opposite it
+     * in `claimed.artifacts` where a reader can compare the two.
+     *
+     * Published rather than computed and discarded, on the ISC-153 precedent
+     * recorded at `facts_hash` below: a digest that is calculated and dropped
+     * "satisfies neither half of what it is for". Identifying the evidence IS
+     * the use of a content hash — a report that says which artifacts a worker
+     * produced but cannot say what they were is not reviewable, and an
+     * operator disputing a verdict has no way to tell whether the bytes have
+     * changed since.
+     *
+     * Ordered by path, so two harvests of one outbox produce the same list and
+     * a diff between two reports is about the artifacts rather than about
+     * `readdir`.
+     */
+    artifacts: z.array(HarvestedArtifactSchema).max(MAX_ITEMS).default([]),
   }),
   /** Claims contradicted by derived facts, e.g. a file the worker did not touch. */
   discrepancies: z.array(text).max(MAX_ITEMS).default([]),

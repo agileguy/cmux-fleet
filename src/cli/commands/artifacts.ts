@@ -27,6 +27,23 @@ function printHuman(t: TaskHarvest): void {
   for (const f of h.derived.files_changed) {
     process.stdout.write(`  ${f.change}: ${f.path}\n`);
   }
+  /**
+   * The outbox artifacts the harvester read, beside the other derived facts.
+   *
+   * Rendered HERE and not in `report/collect.ts`, which is the other place a
+   * harvest is consumed: that module takes `verdict` and nothing else — not
+   * reasons, not discrepancies, not `files_changed` — so adding artifacts to
+   * it would be inventing a surface rather than following one. This function
+   * is where every derived fact already surfaces.
+   *
+   * The digest is printed WHOLE. An abbreviation would be the same
+   * truncated-digest-under-an-honest-label problem the producer refuses to
+   * create, one layer up, and the value's whole use is being compared against
+   * another copy of itself.
+   */
+  for (const a of h.derived.artifacts) {
+    process.stdout.write(`  artifact: ${a.path} (${a.bytes} bytes, sha256 ${a.sha256})\n`);
+  }
 }
 
 /**

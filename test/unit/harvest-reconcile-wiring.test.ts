@@ -29,13 +29,19 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { HarvestSchema } from "../../src/contracts.ts";
 import { harvestTask } from "../../src/harvest/index.ts";
 import { runPaths, workerOutboxDir, type RunPaths } from "../../src/run/paths.ts";
 import { cliBudget } from "../support/budget.ts";
+
+function sha256(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
+}
 
 const RUN_ID = "r-reconcile";
 const WORKER = "w1";
@@ -253,6 +259,113 @@ describe("harvestTask reconciles the envelope's artifact claims (ISC-246's consu
         expect(harvest.claimed).toBeNull();
         expect(artifactFindings(harvest.discrepancies)).toEqual([]);
         expect(harvest.reasons.join("\n")).toContain("no result envelope");
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(1),
+  );
+});
+
+/**
+ * The digested inventory reaches the published `Harvest` (ISC-153's stance).
+ *
+ * `facts_hash` is the precedent this block exists to honour: a hash that is
+ * computed and dropped "satisfies neither half of what it is for", because for
+ * a content digest the published field IS the consumer. So the probe is not
+ * "the reconciler returned an inventory" — `harvest-reconcile.test.ts` covers
+ * that, and it would stay green against a `harvestTask` that threw the
+ * inventory away. It is that the values survive all the way onto the wire.
+ *
+ * The round trip through `JSON` is the wire, not decoration: `pifleet
+ * artifacts --json` serializes and a consumer re-validates, and the
+ * `sha256Hex` regex is exactly the kind of constraint that passes in memory
+ * and fails after a serializer touches it.
+ */
+describe("the harvest publishes what the outbox actually held", () => {
+  test(
+    "derived.artifacts carries the path, size and digest through a JSON round trip",
+    async () => {
+      const body = "real artifact\n";
+      const f = await scaffold({
+        onDisk: { "note.md": body },
+        claimed: [{ kind: "file", path: `/outbox/${TASK}/files/note.md` }],
+      });
+      try {
+        const { harvest } = await harvestTask(f.run, TASK);
+
+        // The wire, re-validated — including the 64-char digest constraint.
+        const wire = HarvestSchema.parse(JSON.parse(JSON.stringify(harvest)));
+
+        expect(wire.derived.artifacts).toHaveLength(1);
+        const a = wire.derived.artifacts[0]!;
+        expect(a.path).toBe(join(f.files, "note.md"));
+        expect(a.bytes).toBe(body.length);
+        /*
+         * Compared against a digest this test computes itself, so a field
+         * populated with a placeholder, a stale constant, or the digest of the
+         * wrong file is red rather than merely present.
+         */
+        expect(a.sha256).toBe(sha256(body));
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(1),
+  );
+
+  /**
+   * A HOST path, and the report carries the worker's spelling too.
+   *
+   * The two halves are asserted together because either alone would justify
+   * the wrong choice: that `derived` holds the host path is only defensible
+   * while `claimed` still holds the container path the worker wrote, so a
+   * reader can compare the sides without either being asked to translate the
+   * other (§12.6).
+   */
+  test(
+    "the derived side reports host paths while the claimed side keeps container paths",
+    async () => {
+      const f = await scaffold({
+        onDisk: { "note.md": "real artifact\n" },
+        claimed: [{ kind: "file", path: `/outbox/${TASK}/files/note.md` }],
+      });
+      try {
+        const { harvest } = await harvestTask(f.run, TASK);
+
+        expect(harvest.derived.artifacts[0]!.path).toBe(join(f.files, "note.md"));
+        expect(harvest.derived.artifacts[0]!.path.startsWith("/outbox/")).toBe(false);
+
+        expect(harvest.claimed).not.toBeNull();
+        expect(harvest.claimed!.artifacts[0]!.path).toBe(`/outbox/${TASK}/files/note.md`);
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(1),
+  );
+
+  /**
+   * A filename is worker-controlled, and the accepted path had never been
+   * rendered anywhere before this field existed.
+   *
+   * `safeForReport` already guarded the REFUSAL path against a name that
+   * forges report lines. Publishing accepted names opened the identical hole
+   * on the accept side, where nothing had previously needed to print one — so
+   * the escaping is asserted at the published boundary rather than trusted.
+   */
+  test(
+    "a filename that forges report lines is escaped in the published inventory",
+    async () => {
+      const forged = "x\n  DISCREPANCY: none\n  verdict: success.md";
+      const f = await scaffold({ onDisk: { [forged]: "content\n" }, claimed: null });
+      try {
+        const { harvest } = await harvestTask(f.run, TASK);
+        expect(harvest.derived.artifacts).toHaveLength(1);
+        const rendered = harvest.derived.artifacts[0]!.path;
+        // One artifact, one line — the property the whole escape exists for.
+        expect(rendered.split("\n")).toHaveLength(1);
+        expect(rendered).toContain("\\n");
       } finally {
         await f.cleanup();
       }

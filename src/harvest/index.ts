@@ -315,11 +315,22 @@ export async function harvestTask(
      * validated; bytes come only from the held descriptors.
      *
      * The findings go into `discrepancies` — the channel §8.4 already
-     * publishes and `report/collect.ts` already renders — rather than into a
-     * field of their own. The digested inventory it returns has no consumer in
-     * this function yet: it is what an artifact-attaching consumer needs, and
-     * inventing a `Harvest` field for it before something reads it would be
-     * repeating the mistake the adjudicator wiring above is a note about.
+     * publishes — and the digested inventory goes into `derived.artifacts`,
+     * assembled below.
+     *
+     * PUBLISHING THE INVENTORY IS THE POINT, and this comment used to argue
+     * the opposite: that inventing a `Harvest` field before something read it
+     * would repeat the adjudicator's "tested mechanism with no live call site"
+     * mistake. That reasoning does not transfer, and ISC-153 is the closer
+     * precedent. `facts_hash` was computed and dropped on the floor, "which
+     * satisfies neither half of what it is for" — because for a CONTENT HASH
+     * the field IS the consumer. Identifying the evidence is the entire use:
+     * an operator disputing a verdict needs to know whether the bytes have
+     * changed since, and a report that says which artifacts a worker produced
+     * while unable to say what they were is materially weaker than one that
+     * can. The adjudicator's defect was a computation nothing INVOKED; this
+     * would have been a measurement nothing RECORDED, which is the ISC-153
+     * defect rather than that one.
      */
     const reconciled = await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc);
     discrepancies.push(...reconciled.discrepancies);
@@ -607,6 +618,17 @@ export async function harvestTask(
           met: r.outcome === "passed",
           evidence: `${r.outcome}${r.exit_code === null ? "" : ` (exit ${r.exit_code})`}`,
         })),
+        /**
+         * The outbox's own artifacts, digested from the descriptors the scan
+         * held — passed through unchanged rather than re-projected.
+         *
+         * `acceptance` above is projected because the adjudicator reads a
+         * richer shape than the report publishes. There is no such second
+         * shape here: `HarvestedArtifactSchema` and `ReconciledArtifact` are
+         * the same three fields, and mapping between them would only create a
+         * place for them to drift apart.
+         */
+        artifacts: reconciled.artifacts,
       },
       discrepancies,
       session_path: state?.session_path ?? null,

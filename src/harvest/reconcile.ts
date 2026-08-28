@@ -110,7 +110,21 @@ const READ_CHUNK_BYTES = 64 * 1024;
 
 /** One accepted artifact, with the content facts read off its held inode. */
 export interface ReconciledArtifact {
-  /** Host path the scan accepted it at — the same spelling `refused` reports. */
+  /**
+   * Host path the scan accepted it at, ESCAPED for display — the same
+   * treatment, and the same spelling, that refused entries already get.
+   *
+   * A filename is worker-controlled, and this string is published: it reaches
+   * `derived.artifacts` in the harvest and from there an operator's terminal.
+   * An artifact named with a newline and an ANSI sequence would otherwise
+   * forge lines in the report that is judging it (§12.6) — the same attack
+   * `safeForReport` exists for on the refusal path, arriving through the
+   * ACCEPTED path instead, where nothing had previously needed to render a
+   * name.
+   *
+   * Escaping it costs nothing precisely because it is not the way to reach the
+   * content. The bytes below came from the descriptor; this is a label.
+   */
   path: string;
   bytes: number;
   /** sha256 over the whole file, computed from the descriptor. */
@@ -345,7 +359,10 @@ export async function reconcileArtifactClaims(
     switch (outcome.kind) {
       case "ok":
         spent += outcome.bytes;
-        artifacts.push({ path: f.path, bytes: outcome.bytes, sha256: outcome.sha256 });
+        // The raw path stays the matching key above; only the PUBLISHED copy
+        // is escaped, so a hostile filename cannot both evade the comparison
+        // and reach the report intact.
+        artifacts.push({ path: safeForReport(f.path), bytes: outcome.bytes, sha256: outcome.sha256 });
         if (outcome.bytes === 0 && matched.has(resolve(f.path))) {
           // A claim is the worker offering this file as evidence. Offering an
           // empty one is an over-claim in miniature, and it is only visible
