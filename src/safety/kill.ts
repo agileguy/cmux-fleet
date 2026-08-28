@@ -70,7 +70,7 @@
  */
 
 import { EXIT, type ExitCoded, type ProcId } from "../contracts.ts";
-import { processStartTime } from "../run/registry.ts";
+import { processStartTime } from "./procstart.ts";
 import { processGroupId } from "./procgroup.ts";
 import { Deadline, monotonicMs } from "../util/clock.ts";
 
