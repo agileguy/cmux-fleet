@@ -394,12 +394,11 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
    */
   {
     isc: "ISC-300",
-    grade: "[~]",
+    grade: "[x]",
     claim:
-      "The reaper still NARROWS a capture-failed group to the leader rather than refusing — " +
-      "the side of the disagreement this criterion was filed to decide, pinned at the one " +
-      "line that now makes the decision. A miss means somebody resolved ISC-300 without " +
-      "regrading it.",
+      "The reaper NARROWS a capture-failed group to the leader rather than refusing — the arm " +
+      "the owner chose, pinned at the one line that makes the decision. A miss means somebody " +
+      "flipped the trade without revisiting the entry that records why it was settled this way.",
     argv: ["grep", "-n", "narrowed ? null : target.pgid", "src/safety/reaper.ts"],
     expect: 1,
   },
@@ -414,7 +413,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
    */
   {
     isc: "ISC-300",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The reap ledger row carries the group action, not just the in-process report. " +
       "A miss means the daemon is back to writing a row an operator cannot read the " +
