@@ -194,6 +194,25 @@ describe("ISC-292 against a remote daemon (docker-in-docker)", () => {
       // sends resolves inside the inner daemon.
       "-v", `${sharedDir}:${sharedDir}`,
       PROBE_DIND_IMAGE,
+      /*
+       * Everything past the image is an argument to `dockerd` itself, and this
+       * one is not a preference — it is the daemon's own escape hatch, quoted
+       * from the message it prints without it:
+       *
+       *   "Binding to an IP address without --tlsverify is deprecated. Startup
+       *    is intentionally being slowed down to show this message"
+       *   "You can override this by explicitly specifying '--tls=false'"
+       *
+       * MEASURED on a GitHub runner: without it the TCP listener is bound and
+       * ACCEPTS connections during that deliberate delay, then resets them. So
+       * `docker info` answers — twice in a row, even — and the image pull that
+       * follows dies with `connection reset by peer` from 127.0.0.1. The reset
+       * reads like a network fault and is the daemon declining to serve yet.
+       *
+       * There is no TLS to weaken here: the listener is on 127.0.0.1 with an
+       * ephemeral port, inside a container this test creates and destroys.
+       */
+      "--tls=false",
     ]);
     if (started.code !== 0) {
       throw new Error(`could not start the dind daemon: ${started.stderr.trim()}`);
