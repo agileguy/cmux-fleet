@@ -30,16 +30,17 @@
  * quietly declines to measure is worth less than no test, because it reports
  * the same green as one that measured and found nothing wrong.
  *
- * ## What this does NOT cover, stated rather than implied
+ * ## The throwing path, and how it stopped being unreachable
  *
- * Only the SUCCESSFUL harvest path. Measured, not assumed: moving the release
- * out of the `finally` and onto the success path alone leaves both probes
- * green, because nothing here induces a throw between the scan and the return.
- * The `finally` is still the right shape — `harvestAll` CATCHES a failing
- * harvest and keeps looping, so the throwing path is the one that would
- * accumulate the most descriptors — but that half rests on reading the code,
- * not on this file. Inducing a reliable throw at that point needs a seam
- * `harvestTask` does not currently have.
+ * This file used to say the throwing half rested on reading the code rather
+ * than on a test, and that inducing a throw inside `harvestTask` needed a seam
+ * it did not have. Measured, so it was not a guess: moving the release out of
+ * the `finally` and onto the success path alone left both probes above green.
+ *
+ * The seam was the wrong thing to want. The scan's ownership now lives in
+ * `withOutboxScan`, so the throwing path is reachable by passing a body that
+ * throws — no hook exists in production whose only purpose is to make a test
+ * possible. The last `describe` drives it.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -48,7 +49,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { harvestTask } from "../../src/harvest/index.ts";
-import { closeOutboxScan, scanOutboxFiles } from "../../src/harvest/outbox.ts";
+import { closeOutboxScan, scanOutboxFiles, withOutboxScan } from "../../src/harvest/outbox.ts";
 import { runPaths, workerOutboxDir, type RunPaths } from "../../src/run/paths.ts";
 import { cliBudget } from "../support/budget.ts";
 
@@ -196,5 +197,82 @@ describe("harvestTask releases the descriptors its outbox scan holds (ISC-301)",
       }
     },
     cliBudget(2),
+  );
+});
+
+describe("withOutboxScan gives the descriptors back however the body ends (ISC-301)", () => {
+  /** The location `harvestTask` builds for this fixture, so both agree. */
+  const locFor = (run: RunPaths) => ({
+    workerOutboxDir: workerOutboxDir(run.root, WORKER),
+    taskId: TASK,
+    epoch: 1,
+    containerWorkdir: "/workspace",
+    hostWorkdir: null,
+  });
+
+  /**
+   * THE PROBE THIS CRITERION WAS SHORT OF.
+   *
+   * `harvestAll` catches a failing harvest and keeps looping, so the throwing
+   * path is the one that would accumulate the MOST descriptors, and until the
+   * ownership moved into a combinator nothing could reach it: a mutation that
+   * released only on success left every other probe in this file green.
+   */
+  test(
+    "a body that throws still releases every descriptor",
+    async () => {
+      const { run, cleanup } = await scaffold();
+      try {
+        await withOutboxScan(locFor(run), async () => undefined);
+        const before = openDescriptorCount();
+        for (let i = 0; i < CALLS; i++) {
+          await expect(
+            withOutboxScan(locFor(run), async () => {
+              throw new Error("the body failed after the scan was open");
+            }),
+          ).rejects.toThrow("the body failed");
+        }
+        expect(
+          openDescriptorCount() - before,
+          `${CALLS} throwing bodies must release as surely as returning ones`,
+        ).toBeLessThanOrEqual(4);
+      } finally {
+        await cleanup();
+      }
+    },
+    cliBudget(2),
+  );
+
+  test(
+    "the body's value comes back, and the scan really held descriptors",
+    async () => {
+      const { run, cleanup } = await scaffold();
+      try {
+        const held = await withOutboxScan(locFor(run), async (scan) => scan.safe.length);
+        // The control again, at this layer: a body handed an empty scan would
+        // make the release probe above pass having released nothing.
+        expect(held).toBe(ARTIFACTS);
+      } finally {
+        await cleanup();
+      }
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "a body that closes the scan itself is not double-closed",
+    async () => {
+      const { run, cleanup } = await scaffold();
+      try {
+        const n = await withOutboxScan(locFor(run), async (scan) => {
+          await closeOutboxScan(scan);
+          return scan.safe.length;
+        });
+        expect(n).toBe(0);
+      } finally {
+        await cleanup();
+      }
+    },
+    cliBudget(1),
   );
 });

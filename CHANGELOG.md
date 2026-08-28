@@ -6,6 +6,20 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **The outbox scan's ownership is now structural, which closes ISC-301's uncovered half.**
+  `OutboxFile` has always documented that the caller owns the descriptors and must close them, and
+  that contract was carried by a comment and one hand-written `finally` — the same shape whose
+  absence caused the leak in the first place. `withOutboxScan(loc, fn)` scans, runs the body and
+  releases in a `finally`, so a caller cannot obtain a scan without also handing back the point at
+  which it ends.
+
+  It also reaches the evidence the criterion was short of. The throwing path — the one `harvestAll`
+  catches and loops past, and therefore the one that would accumulate the most descriptors — was
+  covered by the code and by no test: a mutation releasing only on success left every probe green,
+  and inducing a throw inside `harvestTask` was impossible because its acceptance block swallows its
+  own errors. Passing a body that throws reaches it directly, with no production hook existing only
+  to make a test possible. The same previously-invisible mutation now reddens exactly one probe.
+
 - **An ISA claim's grep could not tell code from prose, and it had already failed in both
   directions (ISC-302).** A claim is a text search over bytes. ISC-300's went vacuously GREEN when
   the decision it pinned moved and the old spelling survived inside a comment explaining the move;

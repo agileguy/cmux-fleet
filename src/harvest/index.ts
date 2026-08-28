@@ -37,9 +37,8 @@ import { readTaskRecord, readWorkerLaunch, readWorkerState } from "../run/state.
 import { worktreeContentHash } from "../run/treehash.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
-  closeOutboxScan,
   readResultEnvelope,
-  scanOutboxFiles,
+  withOutboxScan,
   type OutboxLocation,
   type OutboxRead,
 } from "./outbox.ts";
@@ -263,8 +262,13 @@ export async function harvestTask(
    * stated rationale defeated not by a scan that exceeded it, but by scans
    * that each stayed under it and never handed anything back.
    */
-  const scan = await scanOutboxFiles(loc);
-  try {
+  /*
+   * The scan is owned by this call and released when it ends, whichever way
+   * it ends. `withOutboxScan` is what makes that structural rather than a
+   * `finally` somebody has to remember to write; see its docstring for what
+   * the hand-written version could not be shown to do.
+   */
+  return await withOutboxScan(loc, async (scan) => {
     for (const r of scan.refused) {
       reasons.push(`outbox file refused: ${r.path}: ${r.reason}`);
       discrepancies.push(`outbox file refused: ${r.path}: ${r.reason}`);
@@ -578,14 +582,7 @@ export async function harvestTask(
     // harness surface included. Returning `git.facts` here would hand callers a
     // bundle whose hash does not match the `facts_hash` beside it.
     return { harvest, facts: factsWithHarness, harvestStatus };
-  } finally {
-    // Idempotent and unconditional. `closeOutboxScan` empties the accepted list as it
-    // closes, so this cannot double-close, and being in a `finally` means the
-    // descriptors come back on the throwing paths too — which matters because
-    // `harvestAll` CATCHES those throws and keeps looping, so a leak here would
-    // survive exactly the failure mode that produces the most of them.
-    await closeOutboxScan(scan);
-  }
+  });
 }
 
 /** Every dispatched task in the run — the single end-of-fanout call (§8.4). */
