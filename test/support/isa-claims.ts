@@ -403,6 +403,25 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-n", "narrowed ? null : target.pgid", "src/safety/reaper.ts"],
     expect: 1,
   },
+  /**
+   * The REPORTING half, pinned where it was actually broken.
+   *
+   * The claim above pins the decision. This one pins the fact that the decision
+   * reaches the permanent record, because for one commit it did not: `group`
+   * was on `ReapReport`, asserted by three probes, and dropped by the daemon
+   * callback that builds the ledger row. Pinning the field on the type would
+   * have stayed green throughout — the type was never the broken part.
+   */
+  {
+    isc: "ISC-300",
+    grade: "[~]",
+    claim:
+      "The reap ledger row carries the group action, not just the in-process report. " +
+      "A miss means the daemon is back to writing a row an operator cannot read the " +
+      "narrowing out of.",
+    argv: ["grep", "-n", "group: r.group", "src/cli/commands/daemon.ts"],
+    expect: 1,
+  },
   {
     isc: "ISC-157",
     grade: "[x]",

@@ -8,6 +8,7 @@ import { LedgerWriter } from "../../run/ledger.ts";
 // reaches back into `run/registry.ts`, so a value import would close the
 // documented module cycle from another direction. `import type` is erased.
 import type { KillOutcome } from "../../safety/kill.ts";
+import type { ReapReport } from "../../safety/reaper.ts";
 import { readRunHeartbeatIntervalMs } from "../../run/state.ts";
 
 /**
@@ -66,6 +67,57 @@ function reapEventName(outcome: KillOutcome): string {
   }
 }
 
+/**
+ * Write one ledger row per reap attempt, and RETURN the promise.
+ *
+ * ## Why this is a named export and not the closure it used to be
+ *
+ * SRD-COMPLETION §8 rule 3, and the failure shape
+ * `verbgate-collect-wiring.test.ts` names in its own header: "correct code,
+ * green tests, and no worker's ledger ever actually collected". A mapping that
+ * only an inline hook can reach is a mapping nothing re-checks, and this one
+ * had already failed that way once.
+ *
+ * `ReapReport.group` was added for ISC-300 so an operator could tell a group
+ * signal from a narrowing to the leader. It was computed, it was asserted by
+ * three probes, and it stopped HERE: the row written to the permanent record
+ * carried `supervisor` and `container` only. The field existed everywhere
+ * except the file the operator reads it in. Nothing was red, because nothing
+ * could see this object — the unit probes assert `reapSupervisor`'s return
+ * value, and the detail was built inside a callback passed to a daemon that no
+ * test starts.
+ *
+ * So the mapping is a function, the hook is one line, and a test drives THIS
+ * with a real `LedgerWriter` and reads the row back off disk.
+ *
+ * ## Why it awaits, where the hook did not
+ *
+ * The hook fired every append at once and voided them. Sequential is both
+ * simpler to check and safer for a shard that several writers append to; the
+ * scan loop is still never stalled, because the caller voids the whole call
+ * rather than each write inside it. `seq` ordering is unaffected either way —
+ * `LedgerWriter.append` takes its sequence number synchronously.
+ *
+ * Errors are reported, never thrown: a ledger write must not stop a scan, and
+ * a swallowed rejection would be an invisible reap.
+ */
+export async function recordReaps(
+  ledger: LedgerWriter,
+  reports: readonly ReapReport[],
+  onError: (message: string) => void,
+): Promise<void> {
+  for (const r of reports) {
+    try {
+      await ledger.append(reapEventName(r.supervisor), {
+        worker: r.worker,
+        detail: { supervisor: r.supervisor, container: r.container, group: r.group },
+      });
+    } catch (err: unknown) {
+      onError(`ledger: reap of ${r.worker} unrecorded: ${String(err)}`);
+    }
+  }
+}
+
 export function register(program: Command): void {
   program
     .command("daemon")
@@ -100,18 +152,12 @@ export function register(program: Command): void {
         reaper: {
           heartbeatIntervalMs,
           onReap: (reports) => {
-            // Fire-and-forget: a ledger write must never stall the scan loop,
-            // but a swallowed rejection here would be an invisible reap.
-            for (const r of reports) {
-              void ledger
-                .append(reapEventName(r.supervisor), {
-                  worker: r.worker,
-                  detail: { supervisor: r.supervisor, container: r.container },
-                })
-                .catch((err: unknown) => {
-                  process.stderr.write(`ledger: reap of ${r.worker} unrecorded: ${String(err)}\n`);
-                });
-            }
+            // Fire-and-forget: a ledger write must never stall the scan loop.
+            // The mapping itself lives in `recordReaps` so something other than
+            // this callback can reach it; see its docstring.
+            void recordReaps(ledger, reports, (message) => {
+              process.stderr.write(`${message}\n`);
+            });
           },
         },
       });

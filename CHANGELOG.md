@@ -6,6 +6,32 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **A reap's group action never reached the ledger, so the field added to report it was
+  unreadable by the operator it was added for (ISC-300).** `ReapReport.group` — `addressed`,
+  `narrowed_to_leader`, or `none` — was introduced so a reap could say which action it took about
+  a capture-failed process group. It was computed correctly and asserted by three probes. The
+  daemon then built its ledger row inside the `onReap` callback, copied `supervisor` and
+  `container` across, and dropped `group` on the floor. `worker_reap_refused`, the row somebody
+  reads when a worker will not die, could not distinguish a narrowing from a target that never had
+  a group at all.
+
+  Nothing was red, and nothing could have been: the probes assert `reapSupervisor`'s return value,
+  and the mapping that discarded it lived in a closure handed to a daemon no test starts — the
+  failure shape `verbgate-collect-wiring.test.ts` already names in its header as "correct code,
+  green tests, and no worker's ledger ever actually collected".
+
+  The mapping is now `recordReaps`, a named export the daemon calls in one line, and
+  `test/integration/reap-ledger-wiring.test.ts` drives it with a real `LedgerWriter` and reads the
+  rows back off disk. Re-introducing the defect reddens three of its four probes; hard-coding the
+  value reddens only the probe written to catch that. One line — the hook's call — is still
+  unreachable from any test, and the new file says so rather than implying otherwise.
+
+  The criterion itself does not move. `down` still refuses where the reaper narrows, and an
+  attempt to show that trade was illusory failed in both directions: refusing genuinely spares the
+  container (removal is gated on the supervisor being stopped), and refusing is genuinely not
+  silent (the staleness clock is kept deliberately, so every scan retries and writes another row).
+  Both arms cost something real, so the choice stays an owner's.
+
 - **The ISC-154 quiesce sample was failing outright on Linux, and the fix reverses a documented
   rejection.** `container-live` failed the ISC-290 chain probe with `the supervisor took no quiesce
   sample`, and — because the sampler now reports WHY — the artifact named it: `git add -A (snapshot)
