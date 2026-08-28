@@ -8,6 +8,14 @@ run-*/
 coverage/
 fleet.yaml
 
+# The mount probe's sentinel (MOUNT_PROBE_SENTINEL). `doctor` now probes the
+# CHECKOUT as well as the runs and scratch roots, because the relay bind-mounts
+# three scripts out of it, and `probeMountVisibility` writes this file into the
+# directory it is measuring and removes it in a `finally`. Interrupt the command
+# between those two and the file survives — untracked, in the operator's own
+# working tree. Ignored so a stray one can never become a commit.
+.pifleet-mount-probe
+
 # Federated credential written by google-github-actions/auth. The container
 # job moves it out of the workspace and fails if any remain, but a stray file
 # must never become a commit.

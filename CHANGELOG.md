@@ -6,6 +6,27 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- **The egress relay bind-mounted three files from the checkout with nothing checking they were
+  visible (ISC-292).** `up` asserts bind-mount visibility over the finished worker argvs, and none
+  of the relay's sources appear on those: `relayScriptPath()`, `proxyScriptPath()` and
+  `proxyPolicyScriptPath()` all resolve under `repoRoot()`, wherever the operator cloned, while the
+  worker mounts come from `run.repo` and the runs and scratch roots. `up` also calls
+  `ensureEgressRelay` some five hundred lines before that assertion.
+
+  On a VM-backed runtime a checkout outside the shared set does not fail the `docker run`; it mounts
+  three invented empty directories where the relay script, the CONNECT proxy and the shared matcher
+  belong. The container exits 0 and the relay dies on a missing module, reported as "exited
+  immediately after start" — a message that sends the operator looking at the listen port.
+
+  The relay now probes its own sources before launching, over the same argv `docker run` is handed,
+  on the launch path only, and ahead of `ensureUplinkNetwork` and the `rm -f` so a refusal cannot
+  leave the operator with no relay and an orphan network. `doctor` reports the checkout as a third
+  mount root, which is the half that can be run before `up` rather than after it.
+
+  The grade does not move. The new probes substitute the injected runtime, so they re-check that the
+  guard fires when a runtime reports a source invisible — not that a genuinely unshared path on a
+  real runtime is caught. That direction still has no reproducible reader.
+
 - **Every harvest leaked one open file descriptor per accepted artifact (ISC-301).**
   `scanOutboxFiles` hands back entries that each hold an open descriptor — that is the point of the
   ISC-246 restatement, and `OutboxFile` says "THE CALLER OWNS IT AND MUST CLOSE IT". `harvestTask`

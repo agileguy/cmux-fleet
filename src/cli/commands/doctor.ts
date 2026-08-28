@@ -10,7 +10,7 @@ import { resolveAllWorkers } from "../../config/load.ts";
 import type { FleetConfig, Toolchain } from "../../config/schema.ts";
 import { imageTag } from "../../container/image.ts";
 import { daemonScratchRoot, probeMountVisibility } from "../../container/mounts.ts";
-import { EXEC_NOT_FOUND, realExec, type Exec } from "../../container/run.ts";
+import { EXEC_NOT_FOUND, realExec, repoRoot, type Exec } from "../../container/run.ts";
 import { chatProbeModel, hostReachableBaseUrl } from "../../security/model-probe.ts";
 import {
   LEGACY_RELAY_LISTEN_ALIAS,
@@ -809,13 +809,38 @@ function vantageNote(baseUrl: string, network: string | null): string {
  *
  * `env` is carried because it is the ACTIONABLE half. A finding that named only
  * the path would leave the operator to work out which knob put it there, and
- * both of these default to a safe location under `$HOME` — so a path outside
- * the shared set is always something a specific environment variable did.
+ * the two settable roots default to a safe location under `$HOME` — so a path
+ * outside the shared set is always something a specific environment variable
+ * did.
+ *
+ * `null` is the honest answer for a root NO variable sets — the checkout the
+ * relay mounts its scripts from, whose location was decided by `git clone`.
+ * A sentinel string here would have been cheaper and would have read in the
+ * report exactly like a variable the operator could go and change; the union
+ * makes every consumer decide what to print, which is the point. See
+ * `mountRootKnob`.
  */
 interface MountRoot {
   name: string;
-  env: string;
+  env: string | null;
   dir: string;
+}
+
+/**
+ * How a report names the knob that put a root where it is.
+ *
+ * One function rather than two `??`s at the two call sites, so the human line
+ * and the JSON diagnosis can never disagree about what "no variable" looks
+ * like.
+ *
+ * Deliberately NEUTRAL rather than an instruction. Every root is listed
+ * whatever its verdict, and a label reading "move the checkout" beside a root
+ * that is perfectly visible tells a healthy operator to go and break something.
+ * The remedy belongs in the diagnosis, which is emitted only when the probe
+ * actually failed.
+ */
+function mountRootKnob(root: MountRoot): string {
+  return root.env ?? "no environment variable — the checkout's own location";
 }
 
 interface MountRootReport extends MountRoot {
@@ -1161,10 +1186,30 @@ export function register(program: Command): void {
        * for one member of it; checking the runs root alone left the scratch
        * root, whose own docstring names this probe as the way to find out
        * whether it is visible, unchecked.
+       *
+       * ## …and the CHECKOUT, which no environment variable sets
+       *
+       * The two roots above were the only ones an operator could point
+       * somewhere unshared with a variable, and that framing is what left the
+       * third one out. `ensureEgressRelay` bind-mounts three files from
+       * `repoRoot()` — the relay script, the CONNECT proxy and the shared
+       * matcher — so a checkout under, say, `/opt` or an external volume on a
+       * runtime that shares only `$HOME` mounts three invented empty
+       * directories and the relay dies claiming its listen port is taken.
+       * `relay.ts` now refuses that launch outright; this entry is the other
+       * half of the criterion, the "reported" one, and it is the half an
+       * operator can run BEFORE `up` rather than after it.
+       *
+       * Its `env` is `null` and deliberately not a plausible-looking string.
+       * The field is documented as the ACTIONABLE half — the knob that put the
+       * path there — and for the checkout there is no knob: the remedy is to
+       * move the clone or to share its parent with the runtime. Naming a
+       * variable that does not exist would send an operator to change nothing.
        */
       const mountRoots: MountRoot[] = [
         { name: "runs_dir", env: "PIFLEET_RUNS_DIR", dir: runsRoot() },
         { name: "scratch_dir", env: "PIFLEET_SCRATCH_DIR", dir: daemonScratchRoot() },
+        { name: "checkout", env: null, dir: repoRoot() },
       ];
       /**
        * An image to run the probe INSIDE, preferring one the fleet actually
@@ -1212,8 +1257,16 @@ export function register(program: Command): void {
             name: `${root.name.replace(/_/g, "-")}-not-mountable`,
             class: "misconfigured",
             message:
-              `${root.dir} (${root.env}) is not visible inside a container: ${r.detail} ` +
-              `A bind mount of this path would silently present an EMPTY directory to the worker.`,
+              `${root.dir} (${mountRootKnob(root)}) is not visible inside a container: ${r.detail} ` +
+              `A bind mount of this path would silently present an EMPTY directory to the worker.` +
+              // The remedy differs in kind for the checkout, and saying so is
+              // the difference between a finding and a dead end: no variable
+              // redirects it, so the only fixes are to move the clone or to
+              // widen what the runtime shares.
+              (root.env === null
+                ? ` No environment variable can point this one elsewhere — move the checkout under a ` +
+                  `path the runtime shares, or share this one with it.`
+                : ""),
           });
         }
       }
@@ -1397,7 +1450,7 @@ export function register(program: Command): void {
         for (const i of images) console.log(`image ${i.present ? "present" : "ABSENT "}: ${i.tag}`);
         for (const m of mounts) {
           const verdict = !m.probed ? "not probed " : m.visible ? "visible    " : "NOT VISIBLE";
-          console.log(`mount ${verdict} ${m.name} (${m.env}) ${m.dir} — ${m.detail}`);
+          console.log(`mount ${verdict} ${m.name} (${mountRootKnob(m)}) ${m.dir} — ${m.detail}`);
         }
         // Named only when a derivation actually happened, so the common case
         // stays one line and the uncommon one cannot be missed (ISC-291).

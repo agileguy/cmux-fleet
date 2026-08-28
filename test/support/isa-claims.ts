@@ -439,6 +439,40 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-n", "await closeOutboxScan(scan)", "src/harvest/index.ts"],
     expect: 1,
   },
+  /**
+   * The relay's own preflight, pinned at the CALL and not at the import.
+   *
+   * An import survives the call being deleted, and the call is the entire
+   * guarantee: `up`'s assertion runs some five hundred lines later and over the
+   * worker argvs, none of which carry the relay's sources.
+   */
+  {
+    isc: "ISC-292",
+    grade: "[~]",
+    claim:
+      "The relay probes its own bind-mount sources before it launches. A miss means a " +
+      "checkout outside the runtime's shared set silently mounts three empty directories " +
+      "where the relay's scripts belong, and the relay dies blaming its listen port.",
+    argv: [
+      "grep",
+      // -F, because the call carries square brackets and a BRE would read
+      // them as a character class — matching any one of r, u, n, A, g, v, and
+      // so passing against almost any line in the file.
+      "-nF",
+      "assertBindMountsVisible([runArgv], RELAY_IMAGE, exec)",
+      "src/security/relay.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-292",
+    grade: "[~]",
+    claim:
+      "`doctor` reports the CHECKOUT as a mount root, not just the runs and scratch roots — " +
+      "the half an operator can run BEFORE up rather than after it.",
+    argv: ["grep", "-n", 'name: "checkout"', "src/cli/commands/doctor.ts"],
+    expect: 1,
+  },
   {
     isc: "ISC-157",
     grade: "[x]",

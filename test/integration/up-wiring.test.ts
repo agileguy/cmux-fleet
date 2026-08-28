@@ -300,6 +300,59 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       "    ;;",
       "  run)",
       // ---------------------------------------------------------------
+      // ISC-292's bind-mount preflight, stood in for.
+      //
+      // `ensureEgressRelay` now probes its own `-v` sources before it
+      // launches, because a checkout outside the runtime's shared set gets
+      // three invented empty directories instead of the relay's scripts. The
+      // probe is a real container on a real daemon; here there is neither, so
+      // without this branch every `up` in this file exits 3 on a mount that
+      // is in fact perfectly visible.
+      //
+      // FIRST among the `run` branches deliberately: the probe argv carries
+      // `--read-only`, which the image-verification branch below also keys
+      // on, and a probe answered by that branch would report success without
+      // ever having looked at a mount.
+      //
+      // It answers by running PRODUCTION'S OWN probe script — lifted out of
+      // the argv, not reimplemented — with each `/probe/<i>` rewritten to the
+      // host path that `-v` was about to mount there. That is the same
+      // liberty the ISC-260 branch takes and it stands in for a real
+      // mechanism: on a shared path, what the container sees IS what the host
+      // has, so answering from the host is the faithful stand-in rather than
+      // a hard-coded success. A source that genuinely does not exist still
+      // reports `x`, and the guard still refuses.
+      //
+      // The rewrite requires the trailing quote or slash so `/probe/1` cannot
+      // match inside `/probe/10`.
+      '    case " $* " in',
+      '      *":/probe/0:ro "*)',
+      "        script=''",
+      "        sedexpr=''",
+      "        prev=''",
+      '        for a in "$@"; do',
+      '          if [ "$prev" = "-c" ]; then script="$a"; fi',
+      '          if [ "$prev" = "-v" ]; then',
+      '            case "$a" in',
+      "              *:/probe/*:ro)",
+      '                src="${a%%:/probe/*}"',
+      '                rest="${a#*:/probe/}"',
+      '                idx="${rest%%:ro}"',
+      `                sedexpr="$sedexpr s#/probe/$idx'#$src'#g; s#/probe/$idx/#$src/#g;"`,
+      "                ;;",
+      "            esac",
+      "          fi",
+      '          prev="$a"',
+      "        done",
+      '        if [ -z "$script" ]; then',
+      '          echo "docker shim: mount probe carried no -c script: $*" >&2',
+      "          exit 1",
+      "        fi",
+      `        printf '%s\\n' "$script" | sed "$sedexpr" | sh`,
+      "        exit $?",
+      "        ;;",
+      "    esac",
+      // ---------------------------------------------------------------
       // ISC-51's containment call, stood in for WITH STATE.
       //
       // `ensureEgressNetwork` writes the bridge-gateway DROP rule through a
