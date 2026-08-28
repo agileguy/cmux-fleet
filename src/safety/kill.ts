@@ -70,7 +70,7 @@
  */
 
 import { EXIT, type ExitCoded, type ProcId } from "../contracts.ts";
-import { processStartTime } from "../run/registry.ts";
+import { processStartTime } from "./procstart.ts";
 import { processGroupId } from "./procgroup.ts";
 import { Deadline, monotonicMs } from "../util/clock.ts";
 
@@ -317,7 +317,8 @@ export type SignalOutcome =
   | "signalled"
   | "gone"
   | "group_unconfirmed"
-  | "identity_unconfirmed";
+  | "identity_unconfirmed"
+  | "signal_refused";
 
 /**
  * Re-validate identity AND group, then signal — the ISC-191/272 primitive.
@@ -380,6 +381,11 @@ export type SignalOutcome =
  *    group signal and no group exists to send it to, so NOTHING is signalled
  *    and the caller is told why. Silently narrowing to the leader would be a
  *    different action than the one requested, reported as if it were the same.
+ *
+ *    THIS DOCTRINE IS NOT UNIFORMLY APPLIED, and a reader should meet that
+ *    here rather than discover it. `down` obeys it; `reaper.ts` narrows to the
+ *    leader in exactly this case, deliberately, because it is unattended and
+ *    refusing would leave the orphan it exists to collect. Filed as ISC-300.
  */
 export async function signalIfSame(
   target: ProcId,
@@ -424,7 +430,29 @@ export async function signalIfSame(
   try {
     ops.signal(addr, sig);
   } catch (err) {
-    if ((err as { code?: string }).code === "ESRCH") return "gone";
+    const code = (err as { code?: string }).code;
+    if (code === "ESRCH") return "gone";
+    /*
+     * EPERM IS AN ANSWER, NOT AN ACCIDENT, and it used to escape.
+     *
+     * The kernel refused to deliver: the target is alive and someone else owns
+     * it. That is the same SHAPE as `group_unconfirmed` — alive, deliberately
+     * not stopped — and it is emphatically not `gone`, which is a caller's
+     * licence to remove a container.
+     *
+     * Letting it throw was not merely untidy. `down` had wrapped itself
+     * (`signalGuarded` catches and reports `errored`, naming EPERM as the
+     * likely cause), but `reapSupervisor` calls `runKillLadder` bare, so one
+     * unsignallable worker aborted `reapStale`'s whole loop and every report it
+     * had already collected went with it — the exact harm the SIGKILL-rung
+     * comment below describes for an escaping identity read, which was fixed
+     * there and left standing here. Measured before the change: EPERM threw out
+     * of both `signalIfSame` and `runKillLadder`.
+     *
+     * Only EPERM. Anything else is a programming error rather than a fact about
+     * the world, and swallowing those would hide bugs behind a refusal.
+     */
+    if (code === "EPERM") return "signal_refused";
     throw err;
   }
   return "signalled";
@@ -459,7 +487,8 @@ export type KillOutcome =
   | "already_gone"
   | "unconfirmed"
   | "group_unconfirmed"
-  | "identity_unconfirmed";
+  | "identity_unconfirmed"
+  | "signal_refused";
 
 export interface KillLadderOpts {
   /** The recorded identity to kill. Never a bare pid. */
@@ -596,6 +625,7 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
   const term = await signalIfSame(target, "SIGTERM", { pgid: opts.pgid, ops });
   if (term === "group_unconfirmed") return "group_unconfirmed";
   if (term === "identity_unconfirmed") return "identity_unconfirmed";
+  if (term === "signal_refused") return "signal_refused";
   if (term === "gone") return opts.abort != null ? "aborted" : "already_gone";
   if (await awaitDead(dead, opts.termGraceMs ?? DEFAULT_TERM_GRACE_MS, pollMs, now, sleep)) {
     return "terminated";
@@ -610,6 +640,7 @@ export async function runKillLadder(opts: KillLadderOpts): Promise<KillOutcome> 
   const kill = await signalIfSame(target, "SIGKILL", { pgid: opts.pgid, ops });
   if (kill === "group_unconfirmed") return "group_unconfirmed";
   if (kill === "identity_unconfirmed") return "identity_unconfirmed";
+  if (kill === "signal_refused") return "signal_refused";
   if (kill === "gone") return "terminated";
   if (await awaitDead(dead, opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS, pollMs, now, sleep)) {
     return "killed";

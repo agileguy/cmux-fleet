@@ -341,6 +341,56 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     ],
     expect: 2,
   },
+  /**
+   * ISC-191's residual is closed as a PINNED CONSEQUENCE rather than a fix, and
+   * a pin nobody can see is not a pin. `group_spared` is the whole reporting
+   * half: without it `down` says `stopped: true, forced_identity: true` and
+   * leaves an operator to infer that the supervisor's children went with it.
+   *
+   * The production site is pinned, not the test, because the test asserting a
+   * field production has stopped emitting is the failure this registry exists
+   * to catch elsewhere in this file.
+   */
+  {
+    isc: "ISC-191",
+    grade: "[~]",
+    claim:
+      "A forced stop REPORTS the group it declined to signal. Losing this line makes the " +
+      "orphaned children silent again, which is the state the residual was closed out of.",
+    argv: ["grep", "-n", "group_spared", "src/cli/commands/down.ts"],
+    expect: 3,
+  },
+  /**
+   * ISC-272's residual (2) turned on EPERM ceasing to be an exception. The
+   * grep is for the MAPPING, not for the string: `signal_refused` appears in
+   * the type, in three consumers and in `down`'s table, so any of those would
+   * satisfy a looser search while the one line that produces it was gone.
+   */
+  {
+    isc: "ISC-272",
+    grade: "[~]",
+    claim:
+      "EPERM is answered, not thrown. Without this line the ladder escapes again and one " +
+      "unsignallable worker takes `reapStale`'s whole pass with it.",
+    argv: ["grep", "-n", 'code === "EPERM"', "src/safety/kill.ts"],
+    expect: 1,
+  },
+  /**
+   * ISC-300 is FILED, not started, and this is what keeps that honest. The
+   * criterion is about a disagreement between two sites; if the reaper's side
+   * of it changes, the entry describing the trade is no longer describing the
+   * code, and the grade has to move one way or the other.
+   */
+  {
+    isc: "ISC-300",
+    grade: "[ ]",
+    claim:
+      "The reaper still narrows a capture-failed group to the leader — the side of the " +
+      "disagreement this criterion was filed to decide. A miss here means somebody resolved " +
+      "it without regrading.",
+    argv: ["grep", "-n", "entry.pgid > 0 ? entry.pgid : null", "src/safety/reaper.ts"],
+    expect: 1,
+  },
   {
     isc: "ISC-157",
     grade: "[x]",

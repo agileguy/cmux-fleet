@@ -53,6 +53,11 @@ function reapEventName(outcome: KillOutcome): string {
     case "unconfirmed":
     case "group_unconfirmed":
     case "identity_unconfirmed":
+    // The kernel refused to deliver the signal (EPERM): alive, owned by
+    // someone else, and therefore not a stop. Grouped with the other three
+    // refusals rather than given its own branch, because every consumer here
+    // asks the same yes/no question and the answer is the same.
+    case "signal_refused":
       return "worker_reap_refused";
     default: {
       const unhandled: never = outcome;
