@@ -628,13 +628,82 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
  */
 const SELF = ["test/support/isa-claims.ts", "test/unit/isa-claims.test.ts"] as const;
 
+/**
+ * A comment-masked mirror of the tracked tree, built once per process.
+ *
+ * ## Why the claims no longer search the real files (ISC-302)
+ *
+ * A claim is a `grep`, and a `grep` cannot tell code from prose. Both failure
+ * directions were measured here within two days:
+ *
+ *   - ISC-300 went VACUOUSLY GREEN. Its pinned decision moved to a new call
+ *     site and the old spelling survived in a comment explaining the move, so
+ *     the claim passed against a sentence while the code it defended was gone.
+ *   - ISC-246 went FALSELY RED. Three lines of new docstring named the field it
+ *     greps for, so it reported a production consumer that did not exist.
+ *
+ * Every `.ts` file is mirrored with its comment bytes replaced by spaces, so a
+ * claim searches code only. Lengths and newlines are preserved, which keeps
+ * every reported line number pointing at the right line of the REAL file — the
+ * number a reader is going to act on.
+ *
+ * ## What is mirrored verbatim, and why the limit is stated rather than hidden
+ *
+ * Everything that is not `.ts`: `ci.yml`, `docker/entrypoint.sh`, JSON
+ * fixtures. Masking those means a second comment syntax — `#`, which is also an
+ * ordinary character inside shell strings and YAML values — and no claim's
+ * correctness currently rests on it. The one claim that greps `ci.yml` already
+ * pins an ASSIGNMENT rather than a mention, precisely because it could not rely
+ * on this.
+ */
+let maskedTree: Promise<string> | null = null;
+
+function buildMaskedTree(): Promise<string> {
+  return (async () => {
+    const { mkdtemp, mkdir, writeFile, copyFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { dirname, join } = await import("node:path");
+    const { maskComments } = await import("./mask-comments.ts");
+    const root = await mkdtemp(join(tmpdir(), "pifleet-isa-masked-"));
+    const ls = Bun.spawn(["git", "ls-files"], { stdout: "pipe" });
+    const [listing] = await Promise.all([new Response(ls.stdout).text(), ls.exited]);
+    for (const rel of listing.split("\n").filter((l) => l.trim() !== "")) {
+      const dest = join(root, rel);
+      await mkdir(dirname(dest), { recursive: true });
+      if (rel.endsWith(".ts")) {
+        await writeFile(dest, maskComments(await Bun.file(rel).text()));
+      } else {
+        await copyFile(rel, dest).catch(() => {});
+      }
+    }
+    return root;
+  })();
+}
+
+/**
+ * Argument prefixes treated as PATHS to rewrite into the masked mirror.
+ *
+ * An allowlist rather than a filesystem check, because a claim's search STRING
+ * can itself look like a path — `grep -rn "src/" …` is a legitimate pattern —
+ * and rewriting that would change what is searched FOR rather than where. A new
+ * top-level directory therefore needs a deliberate edit here instead of
+ * silently starting or stopping to be masked.
+ */
+const TRACKED_PREFIXES = ["src/", "test/", "docker/", ".github/", "Docs/", "docs/"] as const;
+
 /** What one claim's command actually returns now. */
 export async function runIsaClaim(c: IsaClaim): Promise<string[]> {
-  const p = Bun.spawn([...c.argv], { stdout: "pipe", stderr: "pipe" });
+  maskedTree ??= buildMaskedTree();
+  const root = await maskedTree;
+  const argv = c.argv.map((a) =>
+    TRACKED_PREFIXES.some((prefix) => a.startsWith(prefix)) ? `${root}/${a}` : a,
+  );
+  const p = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
   const [out] = await Promise.all([new Response(p.stdout).text(), p.exited]);
   const drop = [...SELF, ...(c.exclude ?? [])];
   return out
     .split("\n")
+    .map((l) => (l.startsWith(`${root}/`) ? l.slice(root.length + 1) : l))
     .filter((l) => l.trim() !== "")
     .filter((l) => !drop.some((prefix) => l.startsWith(prefix)));
 }
