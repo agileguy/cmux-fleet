@@ -42,6 +42,7 @@ import {
   type OutboxLocation,
   type OutboxRead,
 } from "./outbox.ts";
+import { reconcileArtifactClaims } from "./reconcile.ts";
 
 export interface HarvestOptions {
   /** Attach the full diff text to `derived.diff` (`--include diff`, §8.4). */
@@ -288,6 +289,40 @@ export async function harvestTask(
     }
 
     const claimed = outbox.kind === "ok" ? outbox.envelope : null;
+
+    /**
+     * THE OUTBOX'S ARTIFACTS, RECONCILED AGAINST WHAT THE ENVELOPE CLAIMED.
+     *
+     * This is the first thing in `src/` that reads outbox artifact CONTENT at
+     * all. Until now the scan's accepted entries were opened, validated and
+     * handed back, and the only half of the result anything consumed was its
+     * refusals — so a worker could name an artifact it never wrote, or write
+     * one it never named, and the harvest had no opinion either way.
+     *
+     * WHY IT IS INSIDE THIS BLOCK AND NOT AFTER IT. The reconciler reads
+     * through the descriptors the scan is holding, and those descriptors are
+     * alive only for the duration of this body — `withOutboxScan` hands them
+     * back in its `finally`. This call site is exactly the "consumer that reads
+     * validated bytes DURING this task's processing" the ownership window above
+     * was deliberately kept wide for. It is not a coincidence that it fits; the
+     * window was shaped for it.
+     *
+     * WHAT IT IS NOT ALLOWED TO DO, and the reason the reconciler owns the
+     * comparison rather than this function: a claimed path is worker-authored
+     * and §12.5 calls dereferencing one an exfiltration primitive. Nothing here
+     * or there opens a claimed path. Claims are translated through the mount
+     * table and matched AS STRINGS against host paths the scan already
+     * validated; bytes come only from the held descriptors.
+     *
+     * The findings go into `discrepancies` — the channel §8.4 already
+     * publishes and `report/collect.ts` already renders — rather than into a
+     * field of their own. The digested inventory it returns has no consumer in
+     * this function yet: it is what an artifact-attaching consumer needs, and
+     * inventing a `Harvest` field for it before something reads it would be
+     * repeating the mistake the adjudicator wiring above is a note about.
+     */
+    const reconciled = await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc);
+    discrepancies.push(...reconciled.discrepancies);
 
     if (outbox.kind === "ok" && git.ok && git.facts.base_is_ancestor) {
       if (
