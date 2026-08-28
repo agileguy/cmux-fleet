@@ -353,7 +353,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
    */
   {
     isc: "ISC-191",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "A forced stop REPORTS the group it declined to signal. Losing this line makes the " +
       "orphaned children silent again, which is the state the residual was closed out of.",
@@ -368,7 +368,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
    */
   {
     isc: "ISC-272",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "EPERM is answered, not thrown. Without this line the ladder escapes again and one " +
       "unsignallable worker takes `reapStale`'s whole pass with it.",
@@ -500,7 +500,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-272",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "Neither identity WRITER spells its capture-failed degrade as a bare " +
       "`(await processStartTime(process.pid)) ?? \"\"`. That form does not degrade: since " +
@@ -518,7 +518,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-191",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "`--force-identity` is SCOPED to the pids the operator named, at BOTH anchor refusal " +
       "branches — the identity refusal and the group refusal. Two lines, because there are two " +
