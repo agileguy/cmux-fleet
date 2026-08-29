@@ -95,6 +95,41 @@ export const RoleFieldsSchema = z
     /** Skill names; `pifleet-worker` is re-injected post-merge (§6.1 rule 1). */
     skills: z.array(shortStr).max(64).optional(),
     cloud_access: z.boolean().optional(),
+    /**
+     * The ROUTE, split off from the GRANT (SRD §5.9, §12.4).
+     *
+     * `cloud_access` used to mean two things at once, because one `if` carried
+     * both: "holds a Google identity" and "may reach an allowed host through
+     * the CONNECT proxy". Nothing needs those welded together — a worker that
+     * must fetch a package index or call a ticketing API needs the second and
+     * has no business with the first — and welding them meant the only way to
+     * grant the route was to grant an identity with it. That is the more
+     * expensive half being handed out to buy the cheaper one.
+     *
+     * This key buys the route alone. It does NOT widen `egress.allow`: the
+     * proxy's policy is fleet-wide and unchanged, so this decides whether a
+     * worker is TOLD about a proxy that already refuses everything the fleet
+     * did not list. A worker with `egress_access: true` and an empty
+     * `egress.allow` reaches exactly the Google hosts the default carries and
+     * nothing else — and, holding no credential, can spend nothing there.
+     */
+    egress_access: z.boolean().optional(),
+    /**
+     * Host environment variables this worker is to be handed, BY NAME.
+     *
+     * A REQUEST, not a grant. The fleet-wide `secrets.env_allowlist` is the
+     * ceiling and this is the draw against it; a name must appear in both or
+     * `up` refuses. Splitting it this way means a role file — which is the
+     * thing most likely to be copied between fleets — can ask for a variable
+     * without being able to widen what the fleet permits.
+     *
+     * NEVER a provider key and never a Google credential. Those have their own
+     * paths (`llm.api_key_env`, `security/adc.ts`), and `run/worker-env.ts`
+     * REFUSES any name this fleet already owns rather than trusting the
+     * operator not to write one — see `RESERVED_PREFIXES` there. This key must
+     * not become a second route to §12.4's Class 2 material.
+     */
+    secrets: z.array(shortStr).max(64).optional(),
     isolation: IsolationSchema.optional(),
     pane_mode: z.enum(["rpc", "tui"]).optional(),
     kind: z.enum(["persistent", "oneshot"]).optional(),

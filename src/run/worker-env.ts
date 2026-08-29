@@ -55,7 +55,7 @@
 import { writeFile, chmod } from "node:fs/promises";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
 import { ConfigError } from "../config/load.ts";
-import { tokenModeStartupEnv } from "../security/adc.ts";
+import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
 import {
   LEGACY_RELAY_LISTEN_ALIAS,
   PROXY_LISTEN_ALIAS,
@@ -98,7 +98,135 @@ export interface WorkerEnvPlan {
   missingApiKey: boolean;
   /** The var name that was missing, for a diagnostic that can name it. */
   apiKeyEnvName: string;
+  /**
+   * The host variables delivered under `secrets:`, BY NAME, in request order.
+   *
+   * A `string[]` of names and not a map, and that is a type-level guarantee
+   * rather than a convention: every reporting surface in this repo — the
+   * stderr note in `materialize.ts`, anything a future ledger row would carry
+   * — reads THIS field, and it is structurally incapable of holding a value.
+   * A caller that wants to log what a worker was granted cannot reach a secret
+   * by accident, because the object it is handed does not contain one.
+   */
+  secretNames: string[];
 }
+
+// ---------------------------------------------------------------------------
+// secrets.env_allowlist ∩ the worker's request (SRD §5.6, §12.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * A worker asked for a name the fleet's ceiling does not carry.
+ *
+ * REFUSED, not dropped. A silently-omitted variable is the §5.9 quiet-failure
+ * shape in its purest form: the worker starts, runs, and dies inside whatever
+ * network call needed the value, minutes later and nowhere near the config
+ * line that caused it. The refusal costs a second at `up`.
+ */
+export class SecretNotAllowlistedError extends ConfigError {
+  constructor(
+    readonly workerId: string,
+    /** `varName`, not `name`: `name` is `Error`'s own field and this would shadow it. */
+    readonly varName: string,
+    readonly allowlist: readonly string[],
+  ) {
+    super(
+      `worker "${workerId}" requests secret ${varName}, which secrets.env_allowlist does not ` +
+        `carry [${allowlist.join(", ") || "empty"}] — the fleet-wide allowlist is a ceiling, ` +
+        `so add ${varName} there as well, or drop it from the worker's secrets:`,
+    );
+    this.name = "SecretNotAllowlistedError";
+  }
+}
+
+/**
+ * A name cleared the intersection and the host environment has no value for it.
+ *
+ * Scoped to the INTERSECTION and deliberately not to the whole allowlist. The
+ * ceiling is a statement about what the fleet PERMITS, not a promise that
+ * every permitted name is set on every machine — reading it the other way
+ * would refuse a run because of a variable nobody asked for, which is the
+ * dead-rule shape `assertModelAllowed` already declines to ship ("an empty
+ * list constrains nothing... refusing fleets nobody asked to refuse"). What is
+ * refused here is the case that actually produces a broken worker: a value a
+ * worker asked for, was permitted, and will not get.
+ *
+ * Empty counts as absent, on the `missingApiKey` precedent one block up:
+ * writing `NAME=` hands the container an empty string, and every `[ -n ... ]`
+ * guard downstream then behaves as if the variable were set.
+ */
+export class SecretMissingFromHostError extends ConfigError {
+  constructor(
+    readonly workerId: string,
+    readonly missing: readonly string[],
+  ) {
+    super(
+      `worker "${workerId}" is allowed secrets [${missing.join(", ")}] which are unset or ` +
+        `empty in this environment — the worker would launch without them and fail inside ` +
+        `whatever call needs them, so set them before \`up\` or remove them from its secrets:`,
+    );
+    this.name = "SecretMissingFromHostError";
+  }
+}
+
+/**
+ * A requested name is one THIS MODULE already owns.
+ *
+ * `secrets.env_allowlist`'s own comment says "NEVER provider keys — see §12.4",
+ * and a comment is not a control. Without this refusal the key is a second
+ * route to exactly the material §12.4 keeps on separate paths: allowlist
+ * `CLOUDSDK_AUTH_ACCESS_TOKEN`, request it from a role, and a worker with
+ * `cloud_access: false` is handed a Google credential out of the operator's
+ * shell — through a file that lands in the run directory and is read back by
+ * `status` and `report`, which is precisely what this module's header forbids.
+ *
+ * REFUSED rather than shadowed. Assignment order alone would already protect
+ * the fleet's variables (secrets are applied last and could be made to lose),
+ * but "your config line did nothing" is the silent half of the same failure.
+ * An operator who wrote it meant it, and needs to be told it cannot happen.
+ */
+export class SecretReservedNameError extends ConfigError {
+  constructor(
+    readonly workerId: string,
+    /** See `SecretNotAllowlistedError.varName` on why this is not `name`. */
+    readonly varName: string,
+  ) {
+    super(
+      `worker "${workerId}" requests secret ${varName}, which the fleet itself assigns — ` +
+        `provider keys, Google credentials, the proxy route and PIFLEET_*/GIT_CONFIG_* ` +
+        `have their own paths (SRD §12.4) and secrets: must not become a second one`,
+    );
+    this.name = "SecretReservedNameError";
+  }
+}
+
+/**
+ * Namespaces the fleet owns outright. Prefixes rather than a name list because
+ * the list is the part that drifts: `PIFLEET_HONEYPOT` arrived after the other
+ * three `PIFLEET_*` vars and would have had to be remembered here.
+ *
+ * `CLOUDSDK_`/`GOOGLE_` are wider than `CREDENTIAL_ENV_VARS` on purpose — that
+ * set names four variables and gcloud reads dozens, so pinning only the four
+ * would leave `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` refused and its neighbours
+ * open.
+ */
+const RESERVED_PREFIXES = ["PIFLEET_", "GIT_CONFIG_", "CLOUDSDK_", "GOOGLE_"] as const;
+
+/**
+ * The proxy route, in every spelling — including `HTTP_PROXY`, which this
+ * module deliberately never sets. Listing an unset variable is the point: a
+ * worker that could set `HTTP_PROXY` through `secrets:` would advertise a
+ * cleartext capability the proxy answers `405` to, undoing the reasoning in
+ * the ISC-263 block by way of a config key.
+ */
+const RESERVED_PROXY_VARS = [
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "NO_PROXY",
+  "no_proxy",
+] as const;
 
 /**
  * Build the env plan for one resolved worker. Pure — the host environment is a
@@ -207,6 +335,23 @@ export function buildWorkerEnv(
    * CREDENTIAL_ENV_VARS set, not merely of whichever var the current default
    * mode happens to use (adc.ts). Gating the entire block on `w.cloudAccess`
    * is what keeps that assertion non-vacuous.
+   *
+   * ## The proxy route LEFT this block on 2026-08-28, and the invariant above
+   * ## is exactly what decided where it went
+   *
+   * `HTTPS_PROXY` and friends used to be assigned inside this `if`, which made
+   * one flag mean two things: "holds a Google identity" AND "may reach an
+   * allowed host through the CONNECT proxy". A worker needing only the second
+   * could not have it without being handed the first, so the cheap capability
+   * was sold at the price of the expensive one.
+   *
+   * They are now under `w.cloudAccess || w.egressAccess`, below. Everything
+   * Google — `CLOUDSDK_CORE_PROJECT` and `tokenModeStartupEnv()` — stayed
+   * here, gated on `w.cloudAccess` ALONE, and that is the whole of what
+   * protects the invariant this comment opens with: the CREDENTIAL_ENV_VARS
+   * set is still absent for every worker without the grant, including one that
+   * now holds the route. The route was never part of that set; ISC-263 added
+   * it to the same `if` because at the time no other flag could reach it.
    */
   if (w.cloudAccess) {
     if (cloud.quota_project !== null) vars["CLOUDSDK_CORE_PROJECT"] = cloud.quota_project;
@@ -215,7 +360,9 @@ export function buildWorkerEnv(
     // the record it mirrors — `AdcModeSchema` — is what a probe asserts the
     // mode from, and a second mode returning would need exactly this line.
     if (cloud.adc_mode === "token") Object.assign(vars, tokenModeStartupEnv());
+  }
 
+  if (w.cloudAccess || w.egressAccess) {
     /**
      * ISC-263 — the route that makes the credential usable.
      *
@@ -226,6 +373,21 @@ export function buildWorkerEnv(
      * `--internal` bridge at all. A credential granted for a path that does
      * not exist is worse than no credential, because the failure surfaces as a
      * timeout deep inside a gcloud call rather than as a refusal.
+     *
+     * ## What `egress_access` buys, stated as what it does NOT buy
+     *
+     * These four variables and nothing else. The proxy's DESTINATION SURFACE
+     * is fleet-wide and untouched: `proxyPolicyFor` and `relayGatePolicy` both
+     * read `egress.allow` in full (`security/relay.ts`), so the set of
+     * reachable host:port pairs is a property of the fleet's config, identical
+     * for every worker, and this flag decides only WHO IS TOLD the route
+     * exists. It cannot widen a policy and cannot narrow one.
+     *
+     * That is the honest limit and it is a real one: two workers with
+     * `egress_access: true` reach the same hosts, so the grant is per-worker
+     * and the reach is not. A fleet that needs one worker to reach a host
+     * another must not still has no way to express that; `egress.allow` is the
+     * union, and everything routed sees all of it.
      *
      * ## HTTPS_PROXY only — HTTP_PROXY is deliberately NOT set
      *
@@ -261,7 +423,58 @@ export function buildWorkerEnv(
     vars["no_proxy"] = vars["NO_PROXY"];
   }
 
-  return { vars, missingApiKey: apiKey === undefined || apiKey === "", apiKeyEnvName };
+  /*
+   * The intersection, applied LAST, and the position is load-bearing.
+   *
+   * `reserved` is built from `Object.keys(vars)` as it stands right here —
+   * every variable the fleet has already decided on — plus the sets that must
+   * be refused whether or not THIS worker got them. A structural read beats a
+   * hand-maintained list: a variable added to the block above is reserved the
+   * day it is added, with nobody having to remember this line exists.
+   *
+   * The explicit additions cover what the structural read cannot see: a worker
+   * without `cloud_access` has no `CLOUDSDK_*` in `vars` to collide with, and
+   * one without `egress_access` has no proxy variables, so both would be
+   * requestable on exactly the workers that must never have them.
+   */
+  const reserved = new Set<string>([
+    ...Object.keys(vars),
+    ...CREDENTIAL_ENV_VARS,
+    ...RESERVED_PROXY_VARS,
+    apiKeyEnvName,
+  ]);
+  const allowlist = loaded.config.secrets.env_allowlist;
+  const secretNames: string[] = [];
+  const missing: string[] = [];
+  for (const requested of w.secrets) {
+    // Dedupe silently: `secrets: [X, X]` is a typo with one obvious meaning,
+    // and there is no second value for the two entries to disagree about.
+    if (secretNames.includes(requested)) continue;
+    if (reserved.has(requested) || RESERVED_PREFIXES.some((p) => requested.startsWith(p))) {
+      throw new SecretReservedNameError(w.id, requested);
+    }
+    if (!allowlist.includes(requested)) {
+      throw new SecretNotAllowlistedError(w.id, requested, allowlist);
+    }
+    const value = hostEnv[requested];
+    // Collected rather than thrown on first sight: an operator with three
+    // unset variables should get all three names in one refusal, not learn
+    // them one `up` at a time.
+    if (value === undefined || value === "") {
+      missing.push(requested);
+      continue;
+    }
+    secretNames.push(requested);
+    vars[requested] = value;
+  }
+  if (missing.length > 0) throw new SecretMissingFromHostError(w.id, missing);
+
+  return {
+    vars,
+    missingApiKey: apiKey === undefined || apiKey === "",
+    apiKeyEnvName,
+    secretNames,
+  };
 }
 
 /**
