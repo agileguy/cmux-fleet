@@ -166,6 +166,38 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-343",
+    grade: "[x]",
+    claim:
+      "The credential sweep's needle supplier reads the SECRET STORE, which is where the " +
+      "values live once ISC-337..342 moved them out of the environment. Empty here is the " +
+      "supplier reading only the env file again — which after that move carries `<NAME>_FILE` " +
+      "pointers and no values, so every grant resolves to nothing and the sweep runs empty. " +
+      "That is ISC-333's defect restored by its own sibling, and it fails GREEN: the delivery " +
+      "tests assert the value is absent from the env file, which is the same fact that blinds " +
+      "the sweep.",
+    argv: ["grep", "-nF", "valuesFromStore(wp, granted)", "src/harvest/needles.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-343",
+    grade: "[x]",
+    claim:
+      "The sweep's fixture builds its store with the PRODUCTION writer rather than " +
+      "hand-writing the layout. Empty here means the fixture has gone back to encoding a " +
+      "layout of its own, which is what let the delivery change and the supplier disagree " +
+      "while both their test suites stayed green. Sourcing it from the writer is what makes " +
+      "a future change to delivery a red build here instead of a quiet zero on the next " +
+      "real harvest.",
+    argv: [
+      "grep",
+      "-nF",
+      "writeWorkerSecretFiles(wp.secretsDir, plan)",
+      "test/unit/harvest-credential-sweep-wiring.test.ts",
+    ],
+    expect: 1,
+  },
+  {
     isc: "ISC-263",
     grade: "[x]",
     claim:
