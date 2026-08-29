@@ -960,6 +960,21 @@ export async function materializeWorkerInputs(
               quota_project: credPlan.quotaProject,
               refresh_s: loaded.config.cloud.token_refresh,
             },
+      /*
+       * The grant travels with the argv for the same reason the credential
+       * plan does, and closes ISC-333's missing half: the harvest needs to
+       * know WHICH variables this worker was handed before it can sweep the
+       * worker's own output for their values, and `up` is the only place that
+       * knows. Re-deriving it at harvest would mean resolving `fleet.yaml`
+       * from the harvester's cwd, which `harvest/patterns.ts` forbids for
+       * exactly the reason it would be wrong here too: a run outlives the
+       * config that produced it.
+       *
+       * `envPlan.secretNames` and NOT `envPlan.vars`, the same discipline the
+       * stderr line above keeps. The field being copied cannot contain a
+       * value, so there is no redaction to remember.
+       */
+      secret_names: envPlan.secretNames,
     };
     if (opts.writeLaunchRecord === true) {
       await establishing(`the launch record for ${workerId}`, async () => {
