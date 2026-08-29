@@ -198,6 +198,41 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-344",
+    grade: "[~]",
+    claim:
+      "The mounted skill tells the worker to filter on the SERVER rather than download a " +
+      "collection and grep it. Empty here means the guidance was dropped from the bundle a " +
+      "worker actually receives. This claim is deliberately weak and the grade says so: it " +
+      "verifies the fleet SHIPS the instruction, and verifies nothing about whether a worker " +
+      "followed it. A run that grepped pages out of 59,616 objects reported zero tickets for " +
+      "a user who had thirty, and no mechanism here would catch that recurring.",
+    argv: ["grep", "-nF", "Filter on the server", "skills/ticket-ops/SKILL.md"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-344",
+    grade: "[~]",
+    claim:
+      "The canonical call in the mounted skill carries `--max-time`, so the shape a worker " +
+      "copies is a bounded one. Empty here means the documented example went back to an " +
+      "unbounded request — which inside a container does not fail but HANGS, leaving the " +
+      "supervisor nothing but silence and killing the run with no reason recorded. Still " +
+      "`[~]`: this pins the EXAMPLE, not the calls a worker actually issues.",
+    // The pattern deliberately starts at `curl` rather than at `--max-time`:
+    // a pattern leading with `-` is consumed by grep as an OPTION, which is how
+    // this claim failed the first time it ran. It failed loudly, which is the
+    // guard doing its job — but a claim that cannot express its own subject is
+    // worth a comment so the next one is not written the same way.
+    argv: [
+      "grep",
+      "-nF",
+      "curl -sS --fail-with-body --max-time 60 --config",
+      "skills/ticket-ops/SKILL.md",
+    ],
+    expect: 1,
+  },
+  {
     isc: "ISC-263",
     grade: "[x]",
     claim:
