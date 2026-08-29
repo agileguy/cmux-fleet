@@ -139,7 +139,53 @@ cloud:
   token_refresh: 45m
 
 secrets:
-  env_allowlist: []          # NEVER provider keys — see §12.4
+  # The CEILING, not a grant. A worker draws against this list with its own
+  # `secrets: [NAME]`, and a variable is delivered only when it is in BOTH — so
+  # a role file copied in from another fleet can ASK for a variable without
+  # being able to widen what this fleet permits.
+  #
+  # These two are what the `ticketing` role draws against. Listing a name here
+  # permits it; it does not deliver it. A worker that never asks for
+  # TICKET_API_TOKEN never receives it, and a worker that asks for a name absent
+  # from this list is refused at launch rather than started without it.
+  #
+  # NEVER provider keys — see §12.4. That is enforced, not merely asked: names
+  # the fleet assigns itself are reserved, so allowlisting a credential variable
+  # cannot be used to route ADC into a `cloud_access: false` worker.
+  env_allowlist:
+    - TICKET_API_TOKEN       # the ticket system's write credential
+    - TICKET_BASE_URL        # not secret; this is the only env delivery channel
+
+# Extra holes in the deny-all bridge. Empty by default, and every entry here is
+# a decision rather than a detail.
+#
+# READ THIS BEFORE ADDING ONE: `egress.allow` is FLEET-WIDE. There is one
+# bridge and one policy on it, so the rule below does not open the ticket system
+# "for the ticketing worker" — it opens it for EVERY worker in this file,
+# including the ones running untrusted model output with a bash tool. That is a
+# real cost and it is not recoverable by scoping something else; the per-worker
+# `egress_access` key decides who gets a route to the proxy AT ALL, not which
+# destinations they may reach through it.
+#
+# The narrowest thing available is therefore the rule itself: one exact host,
+# one port. Prefer that to a `*.` wildcard every time.
+egress:
+  allow:
+    # An OBVIOUS EXAMPLE VALUE, and it must stay one. `tickets.example.com` is
+    # reserved for documentation and resolves nowhere, so a copy of this file
+    # that is never edited fails closed instead of reaching a real host.
+    #
+    # Your real hostname belongs in `fleet.yaml`, which is gitignored. It does
+    # not belong here: this file is committed to a public repository, and an
+    # internal hostname is an infrastructure disclosure that no amount of
+    # later editing takes back.
+    #
+    # A placeholder like `<TICKET_HOST>` is NOT an option — `egressRuleHost`
+    # validates every rule at load time with the same predicate the matcher
+    # uses, and refuses that string as "not a valid hostname or IP literal".
+    # That refusal is correct and deliberate: a rule the matcher can never
+    # match silently denies the destination it was written for.
+    - {host: tickets.example.com, port: 443}
 
 # Which changed files count as the EXAM rather than the answer (§8.2). A diff
 # touching one caps the verdict: a worker that can rewrite the suite cannot be
@@ -233,6 +279,40 @@ roles:
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/tester.md
 
+  # ---- ticketing: holds a write credential for a system OUTSIDE the fleet ----
+  ticketing:
+    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    # `base` is deliberate and sufficient. The worker talks to the ticket API as
+    # plain REST with `curl` and parses with `jq`, both of which are in every
+    # image (`docker/Dockerfile:25`). There is NO vendor CLI and there is not
+    # going to be one: baking one would put a vendor's name into the image hash
+    # of a public repository and pin the fleet to that CLI's release cadence.
+    toolchain: base
+    # `write` for the outbox artifact, `bash` for curl/jq. Note what this
+    # combination actually is — a shell and a live write credential for a system
+    # of record — and see `roles/ticketing.md` on why scope discipline, not the
+    # container boundary, is the control that binds here.
+    tools: [read, write, edit, bash, grep, find, ls]
+    skills: [pifleet-worker, ticket-ops]
+    # NO Google identity. This role has no reason to hold one, and `egress`
+    # below is a separate decision from `cloud_access` precisely so that
+    # "reach one external host" does not have to be bought with ADC.
+    cloud_access: false
+    # Nothing it does lands in the repo, so it gets no worktree: its whole
+    # output is the artifact in its outbox.
+    isolation: none
+    append_system_prompt_file: ./roles/ticketing.md
+    # A REQUEST drawn against `secrets.env_allowlist`, never a grant. A name the
+    # fleet allowlist does not carry is refused at launch, loudly, rather than
+    # quietly omitted — a credential that fails to arrive otherwise surfaces as
+    # a timeout deep inside an HTTP call.
+    secrets: [TICKET_API_TOKEN, TICKET_BASE_URL]
+    # Sets HTTPS_PROXY so this worker has a ROUTE to the bridge proxy. It grants
+    # no destination by itself — `egress.allow` above decides those, fleet-wide —
+    # and it grants no Google identity. That separation is the whole point of the
+    # key: reaching one external host does not have to be bought with ADC.
+    egress_access: true
+
 workers:
   # 6 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
   # admission control does the queuing against the single oMLX server.
@@ -242,3 +322,7 @@ workers:
   - {id: ver-1,  role: verifier}
   - {id: eng-1,  role: engineer}
   - {id: rev-1,  role: reviewer}
+  # One, not two. A second concurrent writer against the same ticket system is
+  # a way to interleave two workers' edits on one object, and nothing in the
+  # fleet serialises them.
+  - {id: tick-1, role: ticketing}

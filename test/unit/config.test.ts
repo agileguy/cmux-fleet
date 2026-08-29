@@ -81,15 +81,49 @@ async function expectIssue(doc: unknown, path: string, messageFragment?: string)
 
 describe("worked example", () => {
   // ISC-67: all six SRD roles load from the shipped default config.
-  test("fleet.example.yaml loads with all six SRD roles", async () => {
+  test("fleet.example.yaml loads with all seven shipped roles", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
-      ["engineer", "investigator", "reviewer", "sre", "tester", "verifier"].sort(),
+      ["engineer", "investigator", "reviewer", "sre", "tester", "ticketing", "verifier"].sort(),
     );
-    expect(loaded.config.workers).toHaveLength(6);
+    expect(loaded.config.workers).toHaveLength(7);
     // Every worker resolves without error.
     const resolved = resolveAllWorkers(loaded);
-    expect(resolved.map((w) => w.id)).toEqual(["sre-1", "sre-2", "inv-1", "ver-1", "eng-1", "rev-1"]);
+    expect(resolved.map((w) => w.id)).toEqual([
+      "sre-1",
+      "sre-2",
+      "inv-1",
+      "ver-1",
+      "eng-1",
+      "rev-1",
+      "tick-1",
+    ]);
+  });
+
+  test("the ticketing role gets no Google identity and no worktree (ISC-326)", async () => {
+    // The two properties that make this role's blast radius what the ISA says
+    // it is. Asserted on the RESOLVED worker rather than the role block,
+    // because `defaults <- roles <- worker` is where either could be undone.
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const tick = resolveAllWorkers(loaded).find((w) => w.id === "tick-1");
+    expect(tick).toBeDefined();
+    expect(tick!.cloudAccess).toBe(false);
+    expect(tick!.isolation).toBe("none");
+    expect(tick!.toolchain).toBe("base");
+    expect(tick!.skills).toContain("ticket-ops");
+    // It needs a shell for curl and a writer for the outbox artifact.
+    expect(tick!.tools).toContain("bash");
+    expect(tick!.tools).toContain("write");
+  });
+
+  test("the fleet-wide egress rule names an example host, never a real one (ISC-327)", async () => {
+    // This file is committed to a PUBLIC repository. A real internal hostname
+    // here is an infrastructure disclosure that editing it later does not take
+    // back, so the shipped value is pinned to a reserved documentation domain.
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    for (const rule of loaded.config.egress.allow) {
+      expect(rule.host).toMatch(/(^|\.)example\.(com|net|org)$|(^|\.)(test|invalid|localhost)$/);
+    }
   });
 
   test("durations in the example are parsed to seconds", async () => {
