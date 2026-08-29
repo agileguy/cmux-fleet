@@ -57,6 +57,7 @@
 import { open } from "node:fs/promises";
 import { readWorkerLaunch } from "../run/state.ts";
 import type { WorkerPaths } from "../run/paths.ts";
+import { safeForReport } from "./outbox.ts";
 
 /**
  * The shortest value that may be used as a needle.
@@ -214,7 +215,17 @@ export async function resolveWorkerNeedles(wp: WorkerPaths): Promise<NeedleSuppl
     note:
       unresolved.length === 0
         ? null
-        : `the run records secrets granted to ${wp.workerId} that its env file does not carry ` +
-          `(${unresolved.join(", ")}); those were not swept for`,
+        : /*
+           * ESCAPED, though this is control-plane text rather than worker
+           * text. `launch.json` sits in the run directory, which no mount in
+           * `container/mounts.ts` names, so a worker cannot author these
+           * names — but this string is published into the harvest report, and
+           * a run directory that has been hand-edited or moved between
+           * machines is the case where a name carrying a newline would forge
+           * a line in the report that is judging it (SRD 12.6). The same
+           * treatment `reconcile.ts` gives every other name it prints.
+           */
+          `the run records secrets granted to ${safeForReport(wp.workerId)} that its env file ` +
+          `does not carry (${safeForReport(unresolved.join(", "), 256)}); those were not swept for`,
   };
 }
