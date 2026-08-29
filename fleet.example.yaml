@@ -144,16 +144,17 @@ secrets:
   # a role file copied in from another fleet can ASK for a variable without
   # being able to widen what this fleet permits.
   #
-  # Still `[]` here. The two names below are what the `ticketing` role needs,
-  # and they are commented for the same reason its `secrets:` key is (see that
-  # role): the reader for this field is not on this branch yet. Uncomment both
-  # halves together.
+  # These two are what the `ticketing` role draws against. Listing a name here
+  # permits it; it does not deliver it. A worker that never asks for
+  # TICKET_API_TOKEN never receives it, and a worker that asks for a name absent
+  # from this list is refused at launch rather than started without it.
   #
-  #   - TICKET_API_TOKEN     # the ticket system's write credential
-  #   - TICKET_BASE_URL      # not secret; this is the only env delivery channel
-  #
-  # NEVER provider keys — see §12.4.
-  env_allowlist: []
+  # NEVER provider keys — see §12.4. That is enforced, not merely asked: names
+  # the fleet assigns itself are reserved, so allowlisting a credential variable
+  # cannot be used to route ADC into a `cloud_access: false` worker.
+  env_allowlist:
+    - TICKET_API_TOKEN       # the ticket system's write credential
+    - TICKET_BASE_URL        # not secret; this is the only env delivery channel
 
 # Extra holes in the deny-all bridge. Empty by default, and every entry here is
 # a decision rather than a detail.
@@ -301,26 +302,16 @@ roles:
     # output is the artifact in its outbox.
     isolation: none
     append_system_prompt_file: ./roles/ticketing.md
-    #
-    # THE TWO KEYS BELOW ARE COMMENTED OUT BECAUSE THEY DO NOT PARSE YET, not
-    # because they are optional. Both land on the `worker-secrets-and-egress-access`
-    # branch and have not merged; every config schema here is `.strict()`, so
-    # shipping them live would make this example — and `pifleet up` on any copy
-    # of it — fail with "unrecognized key" instead of starting a fleet.
-    #
-    # This is the same shape as `backend.kind` at the top of this file: a value
-    # documented in place, with its domain stated, and deliberately not BINDING
-    # until the code that reads it exists. Uncomment both, together with the two
-    # names under `secrets.env_allowlist`, once that branch is in `main`.
-    #
-    #   secrets: [TICKET_API_TOKEN, TICKET_BASE_URL]
-    #     A REQUEST drawn against `secrets.env_allowlist`, never a grant. A name
-    #     the fleet allowlist does not carry is refused at launch, loudly.
-    #
-    #   egress_access: true
-    #     Sets HTTPS_PROXY so this worker has a ROUTE to the bridge proxy. It
-    #     grants no destination by itself — `egress.allow` above decides those,
-    #     fleet-wide — and it grants no Google identity.
+    # A REQUEST drawn against `secrets.env_allowlist`, never a grant. A name the
+    # fleet allowlist does not carry is refused at launch, loudly, rather than
+    # quietly omitted — a credential that fails to arrive otherwise surfaces as
+    # a timeout deep inside an HTTP call.
+    secrets: [TICKET_API_TOKEN, TICKET_BASE_URL]
+    # Sets HTTPS_PROXY so this worker has a ROUTE to the bridge proxy. It grants
+    # no destination by itself — `egress.allow` above decides those, fleet-wide —
+    # and it grants no Google identity. That separation is the whole point of the
+    # key: reaching one external host does not have to be bought with ADC.
+    egress_access: true
 
 workers:
   # 6 panes, 2 generating at a time (§9.3) — panes stay warm and visible,

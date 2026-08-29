@@ -18,8 +18,9 @@
  * observable without a container.
  */
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { stringify } from "yaml";
-import { parseConfig, resolveWorker, ConfigError } from "../../src/config/load.ts";
+import { loadConfig, parseConfig, resolveWorker, ConfigError } from "../../src/config/load.ts";
 import {
   buildWorkerEnv,
   serializeEnvFile,
@@ -495,5 +496,65 @@ describe("ISC-311: both new keys honour defaults <- roles <- worker", () => {
     expect(w.secrets).toEqual([]);
     const plan = buildWorkerEnv(loaded, w, { TICKET_TOKEN: CANARY });
     expect(plan.vars["TICKET_TOKEN"]).toBeUndefined();
+  });
+});
+
+/**
+ * The SHIPPED EXAMPLE's ticketing worker, and the reason this block exists at
+ * all (ISC-330).
+ *
+ * Everything above drives synthetic config documents, which is the right way
+ * to probe the intersection rule — a hand-built doc can hold the exact shape a
+ * criterion is about. But it cannot answer the question ISC-330 actually asks,
+ * which is not "does the mechanism work" but "does the worker an operator
+ * copies out of this repo receive what the role needs, and nothing else".
+ *
+ * That question is only answerable against `fleet.example.yaml` itself, and it
+ * was unanswerable on the branch that wrote the role: `secrets:` and
+ * `egress_access` did not parse yet, so the example shipped them commented and
+ * ISC-330 was graded `[~]` with the uncommenting named as what would close it.
+ * This is that closure, so the assertions are deliberately the two the entry
+ * named — the token arrives, the Google credentials do not — plus the route,
+ * because a credential granted for a path that does not exist is the failure
+ * the ISC-263 comment in `worker-env.ts` was written about.
+ */
+describe("the shipped example's ticketing worker (ISC-330)", () => {
+  const EXAMPLE = join(import.meta.dir, "..", "..", "fleet.example.yaml");
+  const TOKEN = "tok-example-not-a-real-credential";
+
+  async function ticketingPlan() {
+    const loaded = await loadConfig(EXAMPLE);
+    return buildWorkerEnv(loaded, resolveWorker(loaded, "tick-1"), {
+      TICKET_API_TOKEN: TOKEN,
+      TICKET_BASE_URL: "https://tickets.example.com",
+    });
+  }
+
+  test("it receives the ticket credential it asked for", async () => {
+    const plan = await ticketingPlan();
+    expect(plan.vars["TICKET_API_TOKEN"]).toBe(TOKEN);
+    expect(plan.secretNames).toEqual(["TICKET_API_TOKEN", "TICKET_BASE_URL"]);
+  });
+
+  /**
+   * THE ANTI-CRITERION, and the one worth breaking on purpose.
+   *
+   * `cloud_access: false` on this worker has to remain observable as the
+   * absence of the WHOLE credential set, not merely of whichever variable the
+   * current ADC mode happens to use. Asserting over `CREDENTIAL_ENV_VARS`
+   * rather than naming `GOOGLE_APPLICATION_CREDENTIALS` is what keeps that
+   * non-vacuous when a mode is added.
+   */
+  test("it receives no Google credential of any kind", async () => {
+    const plan = await ticketingPlan();
+    for (const name of CREDENTIAL_ENV_VARS) expect(plan.vars[name]).toBeUndefined();
+    expect(plan.vars["CLOUDSDK_CORE_PROJECT"]).toBeUndefined();
+  });
+
+  test("it receives a route to the proxy despite holding no cloud grant", async () => {
+    const plan = await ticketingPlan();
+    expect(plan.vars["HTTPS_PROXY"]).toBeDefined();
+    expect(plan.vars["https_proxy"]).toBe(plan.vars["HTTPS_PROXY"] as string);
+    expect(plan.vars["HTTP_PROXY"]).toBeUndefined();
   });
 });
