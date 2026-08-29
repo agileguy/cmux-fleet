@@ -1144,7 +1144,33 @@ jobs:
           # This costs the maintainer's GPU roughly half a minute per push.
           # That is the price of the witness; a cheaper model that cannot emit a
           # tool call would buy a green tick and no evidence.
-          PIFLEET_OMLX_MODEL: GLM-4.5-Air-MLX-4bit
+          #
+          # [RE-MEASURED 2026-08-29] `GLM-4.5-Air-MLX-4bit` no longer answers
+          # this probe and the 3/3 above is stale. It is a REASONING model: it
+          # streams its chain of thought as `reasoning_content` deltas and, on
+          # this probe's shape, never reaches `content` or `tool_calls` at all.
+          # The probe sees HTTP 200 with a body it cannot parse, which is why
+          # the failure reads as "unreadable body" rather than "wrong answer".
+          # Measured over five consecutive runs against the same server:
+          #
+          #   GLM-4.5-Air-MLX-4bit               0/5   unparseable every time
+          #   Qwen3-Coder-30B-A3B-Instruct-4bit  5/5   native tool_calls
+          #   Qwen3.5-35B-A3B-8bit               5/5   native tool_calls
+          #
+          # Three CI runs failed on this before it was diagnosed, and each was
+          # re-run as a suspected flake — which is what an intermittent-looking
+          # deterministic failure costs when nobody reads the body.
+          #
+          # `Qwen3.5-35B-A3B-8bit` is chosen over the other passing candidate
+          # because the `container-live` job below already names it, so the two
+          # jobs share one cold load instead of paying for two. The GPU cost in
+          # the paragraph above is the reason that tie-breaker matters.
+          #
+          # This does NOT mean the fleet cannot use reasoning models. It means
+          # the probe cannot currently READ one, which is a real limitation of
+          # `model-probe.ts` and is filed separately rather than papered over
+          # by this line.
+          PIFLEET_OMLX_MODEL: Qwen3.5-35B-A3B-8bit
           # Same eighteen the `test` job collects. Unchanged here on purpose:
           # if this number and that one ever disagree, one of the two jobs has
           # stopped seeing the file.
