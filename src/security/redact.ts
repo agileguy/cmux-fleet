@@ -73,6 +73,25 @@
 export const MIN_REDACTABLE_LENGTH = 8;
 
 /**
+ * Shortest LEADING FRAGMENT of a value that is still scrubbed.
+ *
+ * Twelve, and the number is a trade rather than a preference. The incident
+ * that produced this module ended in `head -c 20`, so anything above twenty
+ * would have missed the actual leak; anything much below twelve starts to
+ * matter for a LOW-ENTROPY secret, whose first eight characters may be an
+ * ordinary English word that then gets scrubbed out of every line of the log.
+ * Twelve characters of a random token is a fragment worth removing and twelve
+ * characters of prose is rare enough not to carpet the file.
+ *
+ * THE RESIDUAL, SAID OUT LOUD: a fragment shorter than this is NOT scrubbed,
+ * and neither is a fragment taken from the middle or the END of a value
+ * (`tail -c 20`). Only leading runs are matched. Covering arbitrary substrings
+ * means a needle per window, which is the log-eating failure at scale and the
+ * cost this whole module is shaped around avoiding.
+ */
+export const TRUNCATION_FLOOR = 12;
+
+/**
  * What replaces a match when the redactor cannot name what it matched.
  *
  * Unreachable through `buildRedactor`, which always has a name for every form
@@ -130,29 +149,72 @@ function escapeRe(s: string): string {
 }
 
 /**
+ * A pattern matching any leading run of `value` at least `floor` long,
+ * preferring the longest.
+ *
+ * ## The measurement that added this
+ *
+ * The first version of this module matched whole values, and the wiring test
+ * that drives a real supervisor caught it on the first run. The command in the
+ * 2026-08-28 incident was not `echo $TICKET_API_TOKEN`. It was
+ *
+ *     echo $TICKET_API_TOKEN | head -c 20
+ *
+ * — the model truncated the value *because it had been told not to echo it*.
+ * A whole-value scrubber sails past that and leaves twenty characters of a
+ * live credential in the log while reporting itself armed. Truncation is not
+ * an exotic case to defend against; it is the FIRST thing a model told "do not
+ * print the secret" reaches for, so a control that a one-word pipe defeats is
+ * not a control.
+ *
+ * ## Why nested optionals rather than an alternation of every prefix
+ *
+ * Listing all 30 prefixes of a 41-character token as alternatives is simpler
+ * to read and unusable in this position: alternation backtracks, so a
+ * `stderr_line` flood of 8MB lines would be scanned once per alternative. This
+ * emits ONE alternative per form —
+ *
+ *     abcdefghijkl(?:m(?:n(?:o)?)?)?
+ *
+ * — which the engine walks in a single linear pass, and which is greedy by
+ * construction (`?` prefers to match), so the LONGEST surviving fragment is
+ * what gets replaced rather than the shortest.
+ */
+function truncationSource(value: string, floor: number): string {
+  const stem = escapeRe(value.slice(0, floor));
+  let tail = "";
+  for (let i = value.length - 1; i >= floor; i--) {
+    tail = `(?:${escapeRe(value[i] as string)}${tail})?`;
+  }
+  return stem + tail;
+}
+
+/**
  * Compile a redactor from `(name, value)` pairs.
  *
  * The marker NAMES the variable: `[redacted:TICKET_API_TOKEN]`. That is a
  * deliberate call and the argument for it is rotation. A leak that has been
  * scrubbed still happened — the worker did echo the token — and the operator's
- * next action is to rotate the credential that was exposed to model output. An
+ * next action is to rotate the credential that reached model output. An
  * unnamed marker in a fleet holding four grants tells them to rotate four
- * things or none. The name itself is not the secret and is not new here:
+ * things or none. The name is not the secret and is not new here:
  * `materialize.ts` already prints `secretNames` to stderr at `up` by design,
  * and `WorkerEnvPlan` splits names from values into two fields precisely so a
- * reporting surface can carry the name without being able to reach the value.
+ * reporting surface can carry a name without being able to reach a value.
  *
- * The name is sanitised into the marker anyway (`[^A-Za-z0-9_]` → `_`). Names
+ * The name is sanitised into the marker anyway (`[^A-Za-z0-9_]` -> `_`). Names
  * reaching here have passed `ENV_KEY_RE`, so nothing should change; a marker
- * that could carry a quote or a backslash would be a way to break the JSON
- * this function's whole purpose is to write intact, and that is not a property
- * worth resting on a validator two modules away.
+ * able to carry a quote or a backslash would be a way to break the JSON this
+ * function exists to leave intact, and that is not a property worth resting on
+ * a validator two modules away.
  */
 export function buildRedactor(
   secrets: Iterable<readonly [string, string]>,
   source: RedactorSource = "env-file",
 ): Redactor {
-  const byForm = new Map<string, string>();
+  /** `(regex source, marker)` in compile order; one capture group each. */
+  const forms: Array<{ src: string; marker: string; len: number }> = [];
+  const seen = new Set<string>();
   const armed: string[] = [];
   const skipped: string[] = [];
 
@@ -164,34 +226,48 @@ export function buildRedactor(
     const marker = `[redacted:${name.replace(NAME_UNSAFE, "_")}]`;
     const inner = jsonInner(value);
     for (const form of [inner, jsonInner(inner)]) {
-      // A form can only shrink below the floor if the floor changed under it;
-      // re-checking costs nothing and keeps the guard true of what is compiled
-      // rather than of what was handed in.
-      if (form.length < MIN_REDACTABLE_LENGTH) continue;
-      if (!byForm.has(form)) byForm.set(form, marker);
+      if (form.length < MIN_REDACTABLE_LENGTH || seen.has(form)) continue;
+      seen.add(form);
+      /*
+       * `min` and not `TRUNCATION_FLOOR` outright: a secret SHORTER than the
+       * floor gets whole-value matching and no fragment matching at all. That
+       * is the direction the guard has to fail in — the shorter the value, the
+       * likelier a leading run of it is ordinary text, and a needle that
+       * matches ordinary text eats the log it was meant to protect.
+       */
+      const floor = Math.min(TRUNCATION_FLOOR, form.length);
+      forms.push({ src: truncationSource(form, floor), marker, len: form.length });
     }
     armed.push(name);
   }
 
-  if (byForm.size === 0) {
+  if (forms.length === 0) {
     return { armed, skipped, source, redact: (s) => s };
   }
 
   /*
-   * LONGEST FIRST. Regex alternation is first-match-wins, so two secrets where
-   * one is a prefix of the other would otherwise leave the tail of the longer
-   * one in the log beside a marker — a partial credential and a false sense
-   * that it was handled.
+   * LONGEST FIRST. Regex alternation is first-match-wins across alternatives,
+   * so two secrets where one begins with the other would otherwise leave the
+   * tail of the longer one in the log beside a marker — a partial credential
+   * and a false impression that it was handled.
    */
-  const forms = [...byForm.keys()].sort((a, b) => b.length - a.length);
-  const pattern = new RegExp(forms.map(escapeRe).join("|"), "g");
+  forms.sort((a, b) => b.len - a.len);
+  const markers = forms.map((f) => f.marker);
+  const pattern = new RegExp(forms.map((f) => `(${f.src})`).join("|"), "g");
 
   return {
     armed,
     skipped,
     source,
     redact(serialised: string): string {
-      return serialised.replace(pattern, (m) => byForm.get(m) ?? UNNAMED_MARKER);
+      return serialised.replace(pattern, (...args: unknown[]): string => {
+        // args = [match, g1..gN, offset, whole, (groups)]. Exactly one group
+        // participates in any match, and its index names the variable.
+        for (let i = 0; i < markers.length; i++) {
+          if (typeof args[i + 1] === "string") return markers[i] as string;
+        }
+        return UNNAMED_MARKER;
+      });
     },
   };
 }
