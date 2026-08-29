@@ -377,10 +377,33 @@ describe("ISC-263: a cloud_access worker is routed through the CONNECT proxy", (
    * be observable as the ABSENCE of the whole set, and the proxy route is now
    * part of that set. A worker with no credential has nothing to spend at
    * Google and must not be handed a route there either.
+   *
+   * ## RESTATED 2026-08-28 (ISC-309), and the rename is the whole point
+   *
+   * This test was called "a cloud_access: false worker gets no proxy route at
+   * all". That sentence is now FALSE as a general claim: `egress_access: true`
+   * grants the route with `cloud_access: false`, deliberately, because the two
+   * were welded together by one `if` and a worker needing only a network route
+   * had to be handed a Google identity to get it.
+   *
+   * The ASSERTION is unchanged and still passes, because `w1` in this fixture
+   * sets neither flag — which is exactly why the rename matters rather than
+   * being cosmetic. A test whose name claims more than its fixture exercises
+   * is the shape that reads as coverage and is not; anyone grepping for the
+   * old sentence would have concluded the route was unreachable without
+   * `cloud_access`, and been wrong. The condition that carries the meaning is
+   * NEITHER grant, and it says so now.
+   *
+   * The route-with-no-grant case, and the anti-criterion that the Google
+   * variables stay absent in it, live in `test/unit/worker-secrets.test.ts`
+   * (ISC-309, ISC-310).
    */
-  test("a cloud_access: false worker gets no proxy route at all", async () => {
+  test("a worker with NEITHER grant gets no proxy route at all", async () => {
     const loaded = await load(baseDoc());
-    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const w = resolveWorker(loaded, "w1");
+    expect(w.cloudAccess).toBe(false);
+    expect(w.egressAccess).toBe(false);
+    const plan = buildWorkerEnv(loaded, w, {});
     for (const k of ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"]) {
       expect(plan.vars[k]).toBeUndefined();
     }
