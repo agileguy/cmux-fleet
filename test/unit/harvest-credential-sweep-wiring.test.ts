@@ -189,11 +189,18 @@ async function scaffold(opts: {
     // its values would prove the reader against a format nothing produces.
     const lines = [
       ...Object.entries(opts.granted).map(([k, v]) => `${k}=${v}`),
-      // A fleet-set variable, present so the reader has something it must NOT
-      // treat as a needle. `t1` appears in every artifact legitimately; a
-      // supplier that swept the whole env file would report a leak on the
-      // clean fixture below and every real harvest forever.
+      // TWO fleet-set variables the reader must NOT treat as needles, and the
+      // second one is the load-bearing decoy.
+      //
+      // A supplier that swept the whole env file instead of the recorded
+      // grant would take `tickets.example.invalid` as a needle — and that
+      // string appears in the artifact's own `ticket_host` and `commands`
+      // fields, legitimately, in every ticket-ops document ever written. So
+      // that mistake reports a credential leak on the CLEAN fixture below,
+      // and on every real harvest forever. It is long enough to clear the
+      // length floor, so the floor cannot mask it either.
       `PI_TASK_ID=${TASK}`,
+      "PI_TICKET_HOST=tickets.example.invalid",
     ];
     await writeFile(wp.envFile, `${lines.join("\n")}\n`, { mode: 0o600 });
   }
