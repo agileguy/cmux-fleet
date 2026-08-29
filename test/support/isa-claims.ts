@@ -723,6 +723,57 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-rn", "assertSecretsResolvable", "src/cli/commands/up.ts"],
     expect: "nonempty",
   },
+  {
+    isc: "ISC-332",
+    grade: "[~]",
+    claim:
+      "`parseTicketOpsArtifact` is reachable from TESTS ONLY — its sole occurrence in `src/` " +
+      "is its own definition, which is exactly why ISC-332 is graded `[~]` and not `[x]`. " +
+      "This is the ISC-115/ISC-193 shape: a schema whose grade rests on a consumer that does " +
+      "not exist. More than 1 means the harvester (or anything else) now parses a ticket-ops " +
+      "artifact it finds — which is the wiring ISC-332 asks for, so the correct response to " +
+      "this going red is to RE-GRADE the criterion to `[x]` and then update this line, never " +
+      "to bump the number and leave the entry saying the wiring is absent.",
+    argv: ["grep", "-rn", "parseTicketOpsArtifact", "src/"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-330",
+    grade: "[~]",
+    claim:
+      "The per-worker `egress_access` key is NOT on this branch — that is the whole reason " +
+      "ISC-330 is `[~]` and the reason `fleet.example.yaml` ships `egress_access:` and " +
+      "`secrets:` commented out rather than live. Every config schema is `.strict()`, so the " +
+      "keys would refuse the example outright. NONEMPTY here means " +
+      "`worker-secrets-and-egress-access` has merged and the blockage is gone: uncomment both " +
+      "halves in the example (the worker keys AND the two names under `secrets.env_allowlist`), " +
+      "assert on the materialized env file, and re-grade ISC-330 to `[x]`.",
+    argv: ["grep", "-rn", "egress_access", "src/config/schema.ts"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-320",
+    grade: "[x]",
+    claim:
+      "The `ticket-ops` bundle POINTS AT its renderer: the skill tells the worker to pipe a " +
+      "block list through `render-blocks.mjs`, which is the structural control behind " +
+      "'the model does not author markup'. Empty means the prose and the script have been " +
+      "split apart, leaving a role instructed to use a renderer it is never told how to reach " +
+      "— which degrades silently to hand-written HTML rather than failing.",
+    argv: ["grep", "-rn", "render-blocks.mjs", "skills/ticket-ops/"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-328",
+    grade: "[x]",
+    claim:
+      "The shipped example's role briefings are checked against the DISK, not just parsed as " +
+      "strings. Empty means the guard was removed and a role whose " +
+      "`append_system_prompt_file` was never committed goes back to parsing clean and failing " +
+      "at `up`, on the operator's machine.",
+    argv: ["grep", "-rn", "append_system_prompt_file", "test/unit/role-briefings.test.ts"],
+    expect: "nonempty",
+  },
 ] as const;
 
 /**
