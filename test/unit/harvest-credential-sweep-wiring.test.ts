@@ -20,6 +20,28 @@
  * shape `harvest-reconcile-wiring.test.ts` established, applied to the layer
  * that was still missing.
  *
+ * ## THE FIXTURE WRITES THE STORE WITH THE PRODUCTION WRITER, and that is the
+ * ## part this file got wrong the first time
+ *
+ * The reader is not imported; the WRITER is — `writeWorkerSecretFiles`, the
+ * same function `materializeWorkerInputs` calls. That asymmetry is the whole
+ * control, and it was bought with a near miss worth writing down.
+ *
+ * Before ISC-343, this fixture hand-wrote `KEY=value` into the env file. That
+ * encoded the delivery layout of the day into the test, so when ISC-337..342
+ * moved granted secrets out of the environment and into 0444 files, the
+ * supplier went blind against every real run — and this file stayed GREEN,
+ * because its fixture was still producing the old layout for it to read. Two
+ * sibling changes, each correct alone, each fully tested, and the detector
+ * between them silently switched off.
+ *
+ * Sourcing the fixture from the writer closes that by construction. The layout
+ * on disk is now whatever the production writer decides it is, so a future
+ * change to delivery moves the fixture with it, and a supplier that did not
+ * follow is a red build here rather than a quiet zero on the next real
+ * harvest. A fixture that hand-writes what the code under test expects to find
+ * proves the two agree with the fixture, not with each other.
+ *
  * ## The control comes first, and it is doing real work here
  *
  * A leak assertion over a fixture whose artifact the outbox scan refuses, or
@@ -56,6 +78,12 @@ import { join } from "node:path";
 
 import { harvestTask } from "../../src/harvest/index.ts";
 import { runPaths, workerOutboxDir, workerPaths, type RunPaths } from "../../src/run/paths.ts";
+import {
+  secretContainerPath,
+  secretPointerName,
+  writeWorkerSecretFiles,
+  type WorkerEnvPlan,
+} from "../../src/run/worker-env.ts";
 import { cliBudget } from "../support/budget.ts";
 
 const RUN_ID = "r-sweep";
@@ -130,6 +158,19 @@ async function sh(argv: string[], cwd: string): Promise<string> {
 async function scaffold(opts: {
   notes: string;
   granted: Record<string, string> | null;
+  /**
+   * How the run directory DELIVERED the grant, defaulting to what `up` writes
+   * today.
+   *
+   * `"files"` builds the store through `writeWorkerSecretFiles` and gives the
+   * env file only the `<NAME>_FILE` pointers, exactly as `buildWorkerEnv`
+   * does. `"env"` reproduces a run directory written BEFORE delivery moved:
+   * values in the env file, no store at all. Both must sweep, because
+   * `pifleet report` is pointed at a run directory rather than at a version of
+   * this CLI, and the runs that carry credentials in their env files are
+   * precisely the ones written before the credentials moved out of them.
+   */
+  delivery?: "files" | "env";
 }): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "pifleet-sweep-wiring-"));
   const repo = join(root, "repo");
@@ -184,25 +225,58 @@ async function scaffold(opts: {
         secret_names: Object.keys(opts.granted),
       }),
     );
-    // Written the way `serializeEnvFile` writes it: `KEY=value`, no quoting,
-    // no escapes — docker's `--env-file` has none, and a fixture that quoted
-    // its values would prove the reader against a format nothing produces.
-    const lines = [
-      ...Object.entries(opts.granted).map(([k, v]) => `${k}=${v}`),
-      // TWO fleet-set variables the reader must NOT treat as needles, and the
-      // second one is the load-bearing decoy.
-      //
-      // A supplier that swept the whole env file instead of the recorded
-      // grant would take `tickets.example.invalid` as a needle — and that
-      // string appears in the artifact's own `ticket_host` and `commands`
-      // fields, legitimately, in every ticket-ops document ever written. So
-      // that mistake reports a credential leak on the CLEAN fixture below,
-      // and on every real harvest forever. It is long enough to clear the
-      // length floor, so the floor cannot mask it either.
-      `PI_TASK_ID=${TASK}`,
-      "PI_TICKET_HOST=tickets.example.invalid",
-    ];
-    await writeFile(wp.envFile, `${lines.join("\n")}\n`, { mode: 0o600 });
+    const delivery = opts.delivery ?? "files";
+    /*
+     * TWO fleet-set variables the reader must NOT treat as needles, present in
+     * BOTH layouts, and the second one is the load-bearing decoy.
+     *
+     * A supplier that swept the whole env file instead of the recorded grant
+     * would take `tickets.example.invalid` as a needle — and that string
+     * appears in the artifact's own `ticket_host` and `commands` fields,
+     * legitimately, in every ticket-ops document ever written. So that mistake
+     * reports a credential leak on the CLEAN fixture below, and on every real
+     * harvest forever. It is long enough to clear the length floor, so the
+     * floor cannot mask it either.
+     */
+    const fleetVars = [`PI_TASK_ID=${TASK}`, "PI_TICKET_HOST=tickets.example.invalid"];
+
+    if (delivery === "files") {
+      /*
+       * THE STORE, WRITTEN BY THE PRODUCTION WRITER. The fixture states the
+       * grant; `writeWorkerSecretFiles` decides the filenames, the modes and
+       * the bytes. Only the two fields it reads are populated, and the cast is
+       * confined to this line so that adding a field the writer needs is a
+       * compile error here rather than a silent no-op on disk.
+       */
+      const plan = {
+        secretNames: Object.keys(opts.granted),
+        secretFiles: Object.entries(opts.granted).map(([name, value]) => ({ name, value })),
+      } as unknown as WorkerEnvPlan;
+      await writeWorkerSecretFiles(wp.secretsDir, plan);
+      /*
+       * And the env file as `buildWorkerEnv` renders it once delivery moved:
+       * the POINTER under `<NAME>_FILE`, never the value. A supplier that kept
+       * reading this file finds nothing under the bare granted name, which is
+       * exactly the blindness ISC-343 exists to catch.
+       */
+      const lines = [
+        ...Object.keys(opts.granted).map(
+          (k) => `${secretPointerName(k)}=${secretContainerPath(k)}`,
+        ),
+        ...fleetVars,
+      ];
+      await writeFile(wp.envFile, `${lines.join("\n")}\n`, { mode: 0o600 });
+    } else {
+      // The LEGACY layout, written the way `serializeEnvFile` wrote it before
+      // delivery moved: `KEY=value`, no quoting, no escapes — docker's
+      // `--env-file` has none, and a fixture that quoted its values would
+      // prove the reader against a format nothing ever produced.
+      const lines = [
+        ...Object.entries(opts.granted).map(([k, v]) => `${k}=${v}`),
+        ...fleetVars,
+      ];
+      await writeFile(wp.envFile, `${lines.join("\n")}\n`, { mode: 0o600 });
+    }
   }
 
   const taskOutbox = join(workerOutboxDir(run.root, WORKER), TASK);
@@ -383,5 +457,110 @@ describe("the harvest sweeps a worker's own output for the credentials it was gr
       }
     },
     cliBudget(6),
+  );
+
+  /**
+   * ISC-343. THE SUPPLIER FOLLOWED THE STORE WHEN THE STORE MOVED.
+   *
+   * Every probe above runs on the CURRENT layout by default, so they already
+   * assert the supplier reads the store. This one asserts the other half —
+   * that moving delivery did not orphan the run directories written before it
+   * moved — and it is the half that fails silently, because a harvest of an
+   * old run produces a clean report either way.
+   *
+   * `pifleet report` takes a run directory, not a version of this CLI. The
+   * runs whose env files still carry credentials are exactly the ones written
+   * before the credentials moved out of env files, which makes them exactly
+   * the history worth sweeping.
+   */
+  test(
+    "a run directory written before delivery moved is still swept (ISC-343)",
+    async () => {
+      const f = await scaffold({
+        notes: `called the API with ${SECRET} to read T-9`,
+        granted: { [SECRET_NAME]: SECRET },
+        delivery: "env",
+      });
+      try {
+        const { harvest } = await harvestTask(f.run, TASK);
+        const found = ticketFindings(harvest.discrepancies);
+        expect(found, "the legacy env-file layout must still supply needles").toHaveLength(1);
+        expect(found[0]).toContain("contains a credential");
+        expect(harvest.verdict).toBe(CEILING);
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(3),
+  );
+
+  /**
+   * The control for the probe above, and the one that would have caught the
+   * near miss on its own.
+   *
+   * A legacy fixture proves the fallback; it does NOT prove the primary, and a
+   * supplier that read only the env file would pass the legacy probe while
+   * being blind on every current run. So this builds a run in the CURRENT
+   * layout and REMOVES the env file entirely. Nothing but the store can supply
+   * a needle, so a supplier that never learned to read it has no second source
+   * to hide behind.
+   *
+   * It also pins the direction: the env file that is present in the real
+   * current layout carries `<NAME>_FILE=/secrets/<NAME>`, and a reader that
+   * took that pointer as the value would sweep for a path. Deleting the file
+   * makes that impossible to pass by accident.
+   */
+  test(
+    "with only the secret store on disk, the sweep still fires (ISC-343)",
+    async () => {
+      const f = await scaffold({
+        notes: `called the API with ${SECRET} to read T-9`,
+        granted: { [SECRET_NAME]: SECRET },
+      });
+      try {
+        await rm(join(workerPaths(f.run, WORKER).envFile), { force: true });
+        const { harvest } = await harvestTask(f.run, TASK);
+        const found = ticketFindings(harvest.discrepancies);
+        expect(found, "the secret store alone must supply needles").toHaveLength(1);
+        expect(found[0]).toContain("contains a credential");
+        expect(harvest.verdict).toBe(CEILING);
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(3),
+  );
+
+  /**
+   * The pointer is not a needle.
+   *
+   * In the current layout the env file carries `TICKET_API_TOKEN_FILE` whose
+   * value is `/secrets/TICKET_API_TOKEN` — a path, long enough to clear the
+   * length floor, sitting under a name derived from a granted one. A supplier
+   * that fell back to the env file WHILE a store existed, or that matched
+   * granted names by prefix, would sweep for that string.
+   *
+   * The artifact below names the container path in its `commands` field, which
+   * is an entirely honest thing for a ticket-ops document to do — the skill's
+   * documented call reads the credential from exactly that path. So the wrong
+   * supplier reports a credential leak on a CLEAN artifact, and it reports it
+   * on every real harvest of every worker holding a secret.
+   */
+  test(
+    "the container path a worker legitimately names is not treated as a needle (ISC-343)",
+    async () => {
+      const f = await scaffold({
+        notes: `read the token from ${secretContainerPath(SECRET_NAME)} and queried T-9`,
+        granted: { [SECRET_NAME]: SECRET },
+      });
+      try {
+        const { harvest } = await harvestTask(f.run, TASK);
+        expect(ticketFindings(harvest.discrepancies)).toEqual([]);
+        expect(harvest.verdict).toBe("success");
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(3),
   );
 });
