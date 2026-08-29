@@ -1083,6 +1083,90 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-rn", "security/redact", "test/integration/secret-redaction-wiring.test.ts"],
     expect: "empty",
   },
+  {
+    isc: "ISC-346",
+    grade: "[x]",
+    claim:
+      "The layout check is WIRED into the harvest, at the one call site that reaches every " +
+      "consumer. Pinned on the CALL rather than on a count of mentions, because `layout.ts` " +
+      "names its own exports and an editor tidying prose must not be able to turn this red. " +
+      "Empty means the detector became a module nothing runs — which is the ISC-332 and " +
+      "ISC-333 defect exactly, and no checkbox anywhere would notice, because every direct " +
+      "test of the listing would keep passing over a function no harvest calls.",
+    argv: [
+      "grep",
+      "-nF",
+      "discrepancies.push(...(await unexplainedOutboxDirs(run, envelope.worker)));",
+      "src/harvest/index.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-346",
+    grade: "[x]",
+    claim:
+      "The verbgate ledger's exemption is DERIVED from the path `run/paths.ts` owns, not " +
+      "spelled a second time. NONEMPTY here means someone hard-coded the directory name, " +
+      "after which a ledger that moved would leave the harvest reporting every worker that " +
+      "ran a gated verb as having written a stray directory — a finding that fires on correct " +
+      "behaviour, which this repo treats as worse than no finding. Comments are masked before " +
+      "this runs, so the prose that explains the rule cannot satisfy or falsify it.",
+    argv: ["grep", "-nE", "\"ledger\"|'ledger'", "src/harvest/layout.ts"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-346",
+    grade: "[x]",
+    claim:
+      "The layout check reads NAMES and never content: no `open`, no `realpath`, no " +
+      "`Bun.file`. The same structural argument ISC-333 pins on `reconcile.ts`, for a module " +
+      "whose whole subject is worker-authored directories. NONEMPTY means something started " +
+      "dereferencing a path the WORKER chose, which is the §12.5 primitive this module was " +
+      "written the long way round to avoid.",
+    argv: ["grep", "-nE", "[^a-zA-Z]open\\(|realpath|Bun\\.file", "src/harvest/layout.ts"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-347",
+    grade: "[x]",
+    claim:
+      "A dispatched task with no envelope reaches `discrepancies`, the channel §8.4 publishes " +
+      "for contract violations — not only `reasons`, where it always was and where it read " +
+      "like the procedural note it sat among. Pinned on the finding's own words. Empty means " +
+      "the statement was removed or moved back, and moving it back is precisely the defect: " +
+      "the harvest still says it, in the channel nobody scans for problems.",
+    argv: ["grep", "-nF", "has no result envelope at", "src/harvest/index.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-348",
+    grade: "[x]",
+    claim:
+      "The document name that must accompany the validated artifact is DERIVED from it, so " +
+      "the pair cannot drift: renaming one renames the other in the same edit. Empty means " +
+      "someone wrote `\"ticket-ops.md\"` as a second literal, after which a rename of the " +
+      "JSON leaves the pairing check looking for a file no skill tells a worker to write.",
+    argv: [
+      "grep",
+      "-nF",
+      "export const TICKET_OPS_DOCUMENT_NAME = `${basename(TICKET_OPS_ARTIFACT_NAME, \".json\")}.md`;",
+      "src/harvest/reconcile.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-348",
+    grade: "[x]",
+    claim:
+      "The finding states what DID NOT RUN, in those words. The whole criterion is that " +
+      "'nothing was reported' becomes 'nothing was checked, and here is why' — a finding that " +
+      "said only 'no ticket-ops.json' would be a filing complaint an operator can shrug at, " +
+      "and the credential sweep having been skipped is the part that matters. Empty means the " +
+      "wording was softened, which costs the criterion its entire point while leaving a " +
+      "discrepancy in place to look like coverage.",
+    argv: ["grep", "-nF", "credential sweep DID NOT RUN on it", "src/harvest/reconcile.ts"],
+    expect: 1,
+  },
 ] as const;
 
 /**
