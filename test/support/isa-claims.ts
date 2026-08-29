@@ -275,6 +275,87 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-349",
+    grade: "[~]",
+    claim:
+      "The mounted worker skill names the ONE place a task id is readable — the prompt's `#` " +
+      "heading, which `dispatch.ts` defaults to the task id. Empty here means the binding was " +
+      "dropped and `<task-id>` is an unbindable placeholder again, which is the state that " +
+      "produced `/outbox/list-tickets-2026-08-29/` for a task dispatched as `my-iteration-2`. " +
+      "`[~]` and not `[x]`: this proves the sentence is SHIPPED. Nothing here observes a " +
+      "worker resolving its id, and nothing can, because the value is still not sent to it.",
+    argv: [
+      "grep",
+      "-nF",
+      "defaults to its id, so unless an operator wrote a separate human title",
+      "skills/pifleet-worker/SKILL.md",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-349",
+    grade: "[~]",
+    claim:
+      "The skill states the COST of a guessed outbox directory in mechanism terms, not as a " +
+      "bare imperative: `harvest/outbox.ts` scans `join(workerOutboxDir, taskId)` and only " +
+      "that, so a wrongly-named directory is invisible rather than merely untidy. Empty here " +
+      "means the rule went back to an instruction with no stated consequence — the form it was " +
+      "in when a worker disregarded it.",
+    argv: [
+      "grep",
+      "-nF",
+      "not scanned, not reported, and not swept for credentials",
+      "skills/pifleet-worker/SKILL.md",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-349",
+    grade: "[~]",
+    claim:
+      "`result.json` is stated as the LAST action with the cost of omitting it — a missing " +
+      "envelope does not fail a task, it removes the worker from the grading (ISC-94), which " +
+      "for work driven through a remote API leaves no diff to grade in its place. Empty here " +
+      "means the requirement went back to being one bullet in the middle of the document.",
+    argv: ["grep", "-nF", "it removes you from the grading", "skills/pifleet-worker/SKILL.md"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-350",
+    grade: "[~]",
+    claim:
+      "The mounted skill states that the harvester selects on the FILENAME `ticket-ops.json` " +
+      "and on nothing else — the fact that makes writing only the `.md` skip both schema " +
+      "validation and the credential sweep while reporting clean. Empty here means the pair " +
+      "rule went back to 'the same content, once for a machine and once for a person', which " +
+      "reads as redundancy and is what a worker dropped.",
+    argv: [
+      "grep",
+      "-nF",
+      "The harvester selects on the filename",
+      "skills/ticket-ops/SKILL.md",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-350",
+    grade: "[~]",
+    claim:
+      "The ticketing ROLE no longer tells the worker its artifact is written for the human " +
+      "operator and not for the orchestrator. This claim is an ABSENCE and points at the role " +
+      "rather than the skill on purpose: the standing prompt outranks a reference skill at the " +
+      "moment of deciding what to write, so that one sentence overruled the skill's pair rule " +
+      "and a worker produced a single `.md` exactly as its role described. Nonempty here means " +
+      "the sentence is back, and the pair rule is overruled again.",
+    argv: [
+      "grep",
+      "-nF",
+      "for the human operator, not for the orchestrator",
+      "roles/ticketing.md",
+    ],
+    expect: "empty",
+  },
+  {
     isc: "ISC-263",
     grade: "[x]",
     claim:
