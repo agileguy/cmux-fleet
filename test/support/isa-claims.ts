@@ -763,19 +763,38 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-333",
-    grade: "[~]",
+    grade: "[x]",
     claim:
-      "The credential sweep has a caller but NO NEEDLE SUPPLIER, which is why ISC-333 is " +
-      "`[~]` and not `[x]`. `HarvestOptions.secrets` is plumbed from `harvestTask` into the " +
-      "reconciler and on into `parseTicketOpsArtifact`, and every production call site " +
-      "leaves it unset, so `findCredentialLeaks` runs over an empty list and cannot fire. " +
-      "This is an ABSENCE claim in the ISC-115/ISC-193 direction: it expects exactly the " +
-      "one declaration of the option and no supplier beside it. Going red means something " +
-      "now passes real secret values into a harvest — which is the wiring ISC-333 asks for, " +
-      "so the correct response is to RE-GRADE the criterion and then rewrite this line, " +
-      "never to adjust the number and leave the entry saying the supplier is missing.",
-    argv: ["grep", "-rnF", "secrets: opts.secrets", "src/"],
-    expect: 1,
+      "The credential sweep HAS A NEEDLE SUPPLIER, and it is wired into the harvest. This " +
+      "line replaced an ABSENCE claim: while ISC-333 was `[~]` it asserted `secrets: " +
+      "opts.secrets` appeared exactly once in `src/` and that no supplier sat beside it, " +
+      "and the guard going red on this branch is precisely what reported that the wiring " +
+      "had arrived. Flipped to `nonempty` with the direction reversed for the same reason " +
+      "ISC-332's did: what can go wrong now is the supplier being SILENTLY DISCONNECTED — " +
+      "someone restoring the `[]` default, or deleting the resolve — and no checkbox " +
+      "anywhere would notice, because every direct test of `findCredentialLeaks` hands the " +
+      "function its own needles and stays green through exactly that regression. Pinned on " +
+      "the CALL that hands the resolved values to the reconciler rather than on a count of " +
+      "mentions, so an editor tidying the prose around it cannot turn this claim red. " +
+      "Mutating it to `secrets: []` is one of the five proofs recorded in the entry.",
+    argv: ["grep", "-nF", "secrets: supply.needles", "src/harvest/index.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-333",
+    grade: "[x]",
+    claim:
+      "The harvester holds the granted VALUES, and `reconcile.ts` still imports no " +
+      "filesystem API — the half of ISC-333 that is a promise about what did NOT change. " +
+      "The needles arrive as an argument from `harvestTask`, which already holds the run " +
+      "directory, so the module that reads artifact bytes keeps reading them solely " +
+      "through descriptors the scan is holding. That structural absence is ISC-246's " +
+      "anti-exfiltration guarantee, and supplying the sweep would have been the obvious " +
+      "place to trade it away for a one-line convenience. Empty is the required answer: " +
+      "any `node:fs`, `Bun.file` or bare `open(` in that file means a credential sweep " +
+      "bought its needles with the guarantee the module exists to make checkable.",
+    argv: ["grep", "-nE", "node:fs|Bun\\.file|[^a-zA-Z]open\\(", "src/harvest/reconcile.ts"],
+    expect: "empty",
   },
   {
     isc: "ISC-330",
