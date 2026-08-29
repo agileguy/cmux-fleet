@@ -662,6 +662,67 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-rn", "opts.force.has(pid)", "src/cli/commands/down.ts"],
     expect: 2,
   },
+  {
+    isc: "ISC-304",
+    grade: "[x]",
+    claim:
+      "`secrets.env_allowlist` HAS A READER. This criterion exists because the field " +
+      "shipped with exactly one occurrence in the tree — its own declaration — so an " +
+      "operator could write it and no variable reached any container. Empty here means " +
+      "the selector was deleted and the field is documentation again.",
+    argv: ["grep", "-rn", "env_allowlist", "src/run/worker-env.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-307",
+    grade: "[~]",
+    claim:
+      "The stderr grant line interpolates the NAMES field and not the values map. This is " +
+      "the grep the [~] grade rests on: nothing reads that line back, so it is the only " +
+      "thing standing between an operator-facing log and a secret inside it.",
+    argv: ["grep", "-rn", "secretNames", "src/run/materialize.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-308",
+    grade: "[x]",
+    claim:
+      "The reserved-name refusal still consults the REAL credential set rather than a " +
+      "hand-copied list. Empty means worker-env.ts stopped importing it, at which point a " +
+      "variable added to that set is silently requestable through `secrets:`.",
+    argv: ["grep", "-rn", "CREDENTIAL_ENV_VARS", "src/run/worker-env.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-308",
+    grade: "[x]",
+    claim:
+      "The namespaces the fleet owns outright are still enforced by prefix. Empty means " +
+      "that arm was dropped and only explicitly-named variables are refused, which " +
+      "reopens PIFLEET_* and GIT_CONFIG_* to a config line.",
+    argv: ["grep", "-rn", "RESERVED_PREFIXES", "src/run/worker-env.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-309",
+    grade: "[x]",
+    claim:
+      "The proxy gate names the egress grant, not the cloud grant alone. Empty here means " +
+      "the route was welded back onto `cloud_access` and a worker needing only a network " +
+      "path must again be handed a Google identity to get one.",
+    argv: ["grep", "-rn", "egressAccess", "src/run/worker-env.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-305",
+    grade: "[x]",
+    claim:
+      "`up` still refuses an unresolvable `secrets:` BEFORE the run directory exists. " +
+      "Empty means the hoisted gate went away and the refusal moved back to materialize, " +
+      "after the clones and the remotes in the operator's own repository.",
+    argv: ["grep", "-rn", "assertSecretsResolvable", "src/cli/commands/up.ts"],
+    expect: "nonempty",
+  },
 ] as const;
 
 /**
