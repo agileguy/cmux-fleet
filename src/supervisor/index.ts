@@ -276,7 +276,7 @@ async function main(): Promise<void> {
    * "this log was not scrubbed" is something an operator can read off the log
    * itself instead of inferring from an absence.
    */
-  const redactor = await redactorForWorkerEnv(wp.envFile);
+  const redactor = await redactorForWorkerEnv(wp.envFile, wp.secretsDir);
 
   // Serialize events.jsonl appends so two async writes cannot interleave.
   let eventsChain: Promise<unknown> = Promise.resolve();
@@ -324,7 +324,32 @@ async function main(): Promise<void> {
     source: redactor.source,
     armed: redactor.armed,
     skipped: redactor.skipped,
+    unresolved: redactor.unresolved,
   });
+
+  /*
+   * A GRANTED NAME THIS REDACTOR CANNOT SEE IS SHOUTED ABOUT, on stderr, where
+   * an operator is already looking at `up` output.
+   *
+   * `unresolved` is not `skipped`. Skipped means the value was found and
+   * judged not worth a needle; this means the run granted a credential and the
+   * redactor cannot reach it — so every event this supervisor writes about
+   * that variable is unprotected while the log's own first line says the
+   * redactor is running.
+   *
+   * It is deliberately NOT fatal. Refusing to start would trade a degraded log
+   * for no fleet at all, which is the same trade the absent-env-file branch
+   * declines. But it is also deliberately not just a field in a JSON line: the
+   * defect that produced this field went unnoticed precisely because its only
+   * symptom was a value quietly missing from a structure nobody re-read.
+   */
+  if (redactor.unresolved.length > 0) {
+    process.stderr.write(
+      `pifleet: WARNING — ${wp.workerId} granted secret(s) the event-log redactor could not ` +
+        `value: ${redactor.unresolved.join(", ")}. Events mentioning them are NOT scrubbed. ` +
+        `This usually means secret delivery moved and a reader did not follow.\n`,
+    );
+  }
 
   /**
    * The launch record is read BEFORE state is assembled, not at the spawn.

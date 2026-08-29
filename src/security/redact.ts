@@ -101,13 +101,26 @@ export const TRUNCATION_FLOOR = 12;
 export const UNNAMED_MARKER = "[redacted]";
 
 /** Where a redactor's needles came from, so an unarmed one can say why. */
-export type RedactorSource = "env-file" | "absent" | "unreadable" | "none";
+export type RedactorSource = "store" | "env-file" | "absent" | "unreadable" | "none";
 
 export interface Redactor {
   /** Names whose values are being scrubbed. NAMES ONLY — see `armed` below. */
   readonly armed: readonly string[];
   /** Names skipped for being empty or under `MIN_REDACTABLE_LENGTH`. */
   readonly skipped: readonly string[];
+  /**
+   * Names the run GRANTED that could not be valued from any layout.
+   *
+   * Distinct from `skipped`, and the distinction is the one this field was
+   * added for. `skipped` means "found it, it is not worth redacting" — a short
+   * region name, an empty flag. This means "was told to protect it and cannot
+   * see it", which is not a policy decision but a BLINDING, and it is the
+   * state a live credential reached an event log in while the redactor
+   * reported itself armed for that exact variable.
+   *
+   * Non-empty here should be treated as a defect in the run, not a note.
+   */
+  readonly unresolved: readonly string[];
   /** Where the values came from. */
   readonly source: RedactorSource;
   /** Scrub every occurrence of every armed value out of a serialised record. */
@@ -211,6 +224,13 @@ function truncationSource(value: string, floor: number): string {
 export function buildRedactor(
   secrets: Iterable<readonly [string, string]>,
   source: RedactorSource = "env-file",
+  /**
+   * Granted names that could not be VALUED at all — passed through to the
+   * result rather than computed here, because this function is handed pairs
+   * and by then the unresolvable ones are already gone. The caller that
+   * resolved them is the only one that can still see them.
+   */
+  unresolved: readonly string[] = [],
 ): Redactor {
   /** `(regex source, marker)` in compile order; one capture group each. */
   const forms: Array<{ src: string; marker: string; len: number }> = [];
@@ -242,7 +262,7 @@ export function buildRedactor(
   }
 
   if (forms.length === 0) {
-    return { armed, skipped, source, redact: (s) => s };
+    return { armed, skipped, unresolved, source, redact: (s) => s };
   }
 
   /*
@@ -258,6 +278,7 @@ export function buildRedactor(
   return {
     armed,
     skipped,
+    unresolved,
     source,
     redact(serialised: string): string {
       return serialised.replace(pattern, (...args: unknown[]): string => {
@@ -274,7 +295,7 @@ export function buildRedactor(
 
 /** A redactor that scrubs nothing, for a worker granted nothing. */
 export function noRedaction(source: RedactorSource = "none"): Redactor {
-  return { armed: [], skipped: [], source, redact: (s) => s };
+  return { armed: [], skipped: [], unresolved: [], source, redact: (s) => s };
 }
 
 /**
@@ -287,16 +308,8 @@ export function noRedaction(source: RedactorSource = "none"): Redactor {
  * on the one file where a wrong value means the redactor arms a needle that
  * never matches and reports itself armed.
  */
-export function parseEnvFile(text: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const line of text.split("\n")) {
-    if (line === "" || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    out.set(line.slice(0, eq), line.slice(eq + 1));
-  }
-  return out;
-}
+export { parseEnvFile } from "./secret-values.ts";
+import { parseEnvFile, resolveGrantedSecretValues } from "./secret-values.ts";
 
 /**
  * Build the redactor for one worker from its own 0600 env file.
@@ -316,7 +329,21 @@ export function parseEnvFile(text: string): Map<string, string> {
  * holding them adds no reach, whereas the harvester is a separate process that
  * would have to acquire plaintext credentials it does not otherwise touch.
  */
-export async function redactorForWorkerEnv(envFilePath: string): Promise<Redactor> {
+export async function redactorForWorkerEnv(
+  envFilePath: string,
+  /**
+   * The per-worker secret store, which is where granted values ACTUALLY live
+   * since ISC-337..342 moved them out of the environment.
+   *
+   * A SECOND parameter and not a replacement, and required rather than
+   * optional. Optional would have let every existing call site keep compiling
+   * unchanged while silently continuing to read a file that no longer holds
+   * what it is looking for — which is exactly how this defect shipped. Making
+   * it required turns the delivery change into a compile error at each caller,
+   * so the next person who moves the values is told where to look.
+   */
+  secretsDir: string,
+): Promise<Redactor> {
   let text: string;
   try {
     text = await Bun.file(envFilePath).text();
@@ -324,19 +351,35 @@ export async function redactorForWorkerEnv(envFilePath: string): Promise<Redacto
     const code = (err as { code?: string }).code;
     return noRedaction(code === "ENOENT" ? "absent" : "unreadable");
   }
-  const vars = parseEnvFile(text);
-  const names = (vars.get(SECRET_NAMES_VAR) ?? "")
+  /*
+   * The NAMES still come from the env file, and only the names. That is the
+   * half of `SECRET_NAMES_VAR`'s original design which survived delivery
+   * moving: a worker holding `TICKET_API_TOKEN` already knows it holds
+   * `TICKET_API_TOKEN`, so the list costs nothing to expose, and the
+   * `PIFLEET_` prefix is reserved so no worker can substitute its own.
+   */
+  const names = (parseEnvFile(text).get(SECRET_NAMES_VAR) ?? "")
     .split(",")
     .map((n) => n.trim())
     .filter((n) => n !== "");
-  const pairs: Array<readonly [string, string]> = [];
-  for (const name of names) {
-    const value = vars.get(name);
-    // A name with no value in the same file is a rotation or an edit between
-    // the two halves of one write, which cannot happen while they share a
-    // file. Skipped rather than thrown, and it shows up as an armed-name gap.
-    if (value === undefined) continue;
-    pairs.push([name, value]);
-  }
-  return buildRedactor(pairs, "env-file");
+  if (names.length === 0) return buildRedactor([], "env-file");
+
+  /*
+   * The VALUES come from the shared resolver, which reads the store first and
+   * the env file second. Shared and not reimplemented here: this module and
+   * `harvest/needles.ts` both need the same answer, they were written
+   * separately, and when delivery moved BOTH went blind while each one's tests
+   * stayed green. One function is what stops the next move from having to be
+   * remembered in two places.
+   */
+  const resolved = await resolveGrantedSecretValues(secretsDir, envFilePath, names);
+  const source: RedactorSource = resolved.source === "none" ? "env-file" : resolved.source;
+  /*
+   * `unresolved` is CARRIED, not dropped. The line this replaced was
+   * `if (value === undefined) continue;`, justified on the reasoning that a
+   * name without a value in the same file "cannot happen while they share a
+   * file". They stopped sharing a file, the impossible case became the normal
+   * one, and a `continue` turned a blinded redactor into a silent one.
+   */
+  return buildRedactor([...resolved.values], source, resolved.unresolved);
 }
