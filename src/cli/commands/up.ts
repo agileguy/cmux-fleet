@@ -317,13 +317,40 @@ export function register(program: Command): void {
       await mkdir(run.root, { recursive: true });
       await mkdir(run.ledgerDir, { recursive: true });
       await mkdir(run.inboxDir, { recursive: true });
-      await mkdir(run.sessionsDir, { recursive: true });
+      /*
+       * `sessions` is born OWNER-ONLY, and is widened only when a container is
+       * actually going to need it (ISC-335).
+       *
+       * What is under here is every worker's entire conversation — each tool
+       * call, each result, and on 2026-08-28 the 41-character API token a
+       * worker echoed on its second command. The directory used to be created
+       * at the umask default and chmod-ed to 0777 one line later, so it was
+       * world-traversable from `mkdir` onward and stayed 0777 for every run,
+       * whether or not anything needed it to be.
+       *
+       * `mode` is applied by `mkdir(2)` itself, so there is no window: the
+       * first state this directory is ever in is 0700.
+       *
+       * THE WIDEN IS NOT REMOVED, because for a containerised run it is not
+       * optional. Workers run as uid 10001 (`WORKER_UID`), a Linux bind mount
+       * passes host ownership through, and a 0700 directory owned by the
+       * operator leaves the worker unable to create its own transcript at all.
+       * The macOS VM squashes ownership and hides that completely, so a
+       * Mac-green proof of "0700 works" is exactly the evidence not to trust
+       * here. What changes is that the widen is CONDITIONAL: a double run is
+       * one uid end to end and has no reason to open this to the whole box.
+       *
+       * WHAT THIS DOES NOT CLAIM. The transcript FILE is written by Pi, not by
+       * pifleet, so its mode is Pi's umask — and 0600 on it is not merely
+       * unimplemented here, it is unreachable for a containerised run: the
+       * host harvester must READ that file while the container uid must WRITE
+       * it, the two share no group, so any mode denying other users denies one
+       * of the two. Containment for that file is therefore the directory,
+       * which is the whole reason this line is worth getting right.
+       */
+      await mkdir(run.sessionsDir, { recursive: true, mode: 0o700 });
       await mkdir(run.workersDir, { recursive: true });
-      // `sessions` is bind-mounted rw into every worker, which runs as uid
-      // 10001. A Linux bind mount passes host ownership through, so the default
-      // 0755 leaves the worker unable to write its own transcript; the macOS VM
-      // squashes ownership and hides this entirely.
-      await makeWorkerAccessible(run.sessionsDir, true);
+      if (!useDouble) await makeWorkerAccessible(run.sessionsDir, true);
 
       // Mint the run's control-socket secret (SRD §12.7) before launching
       // anything that listens or calls: the daemon and every supervisor read

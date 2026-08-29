@@ -166,7 +166,18 @@ async function main(): Promise<void> {
   const wp = workerPaths(run, argv.workerId);
   await mkdir(wp.dir, { recursive: true });
   await mkdir(wp.tasksDir, { recursive: true });
-  await mkdir(run.sessionsDir, { recursive: true });
+  /*
+   * 0700, matching `up`'s creation of the same directory (ISC-335).
+   *
+   * A no-op on the normal path — `up` made this directory before any
+   * supervisor existed, and `mkdir` does not re-chmod what is already there.
+   * It matters on the OTHER path, a supervisor pointed straight at a bare run
+   * directory, which is how every integration test starts one and which is
+   * supported for the double. Two creators of one directory with two different
+   * modes is the divergence `run/paths.ts` opens by warning about, expressed
+   * in permission bits instead of in path strings.
+   */
+  await mkdir(run.sessionsDir, { recursive: true, mode: 0o700 });
 
   // The run's control secret (SRD §12.7), before ANY socket work: the control
   // server refuses requests without it, and registration with the daemon
