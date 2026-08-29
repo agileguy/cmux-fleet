@@ -16,36 +16,71 @@ repository, and it would pin you to whatever that CLI decided an update was.
 
 | Name | Where from | What it is |
 |---|---|---|
-| `TICKET_API_TOKEN` | env, via the worker's `secrets:` selector | the write credential |
-| `TICKET_BASE_URL` | env | `https://<TICKET_HOST>/api/v2` |
+| `TICKET_API_TOKEN_FILE` | env | the **path** to a read-only file holding the write credential |
+| `TICKET_BASE_URL_FILE` | env | the path to a file holding `https://<TICKET_HOST>/api/v2` |
 | ticket ids | the task envelope, and **only** there | the objects you may touch |
+
+**There is no `TICKET_API_TOKEN` variable.** `echo $TICKET_API_TOKEN` prints an empty line, and
+so does `env | grep TOKEN`. The value is not in your environment at all — it is in a file at
+`$TICKET_API_TOKEN_FILE`, mounted read-only, and the sections below are about getting it into a
+request without it passing through your shell on the way.
 
 `HTTPS_PROXY` is set for you if the fleet routes egress through one. You do not set it, and you
 do not need a Google identity — this role is configured without one.
 
-If `TICKET_API_TOKEN` is unset or empty, that is `blocked`, not `failed`, and not something to
-work around. It means the worker's `secrets:` selector did not name it or the fleet's
-`secrets.env_allowlist` did not permit it.
+If `TICKET_API_TOKEN_FILE` is unset, or names a file you cannot read, that is `blocked`, not
+`failed`, and not something to work around. It means the worker's `secrets:` selector did not
+name the credential, or the fleet's `secrets.env_allowlist` did not permit it.
 
-## Calling the API
+## Getting the credential into a request without holding it
+
+Build a `curl` config file once, at the start of your work. `curl --config` reads request
+options out of a file, so a `header` line in it reaches the request without the value ever
+being an argument, an environment variable, or a shell variable:
 
 ```bash
-curl -sS --fail-with-body \
-     -H "Authorization: Token ${TICKET_API_TOKEN}" \
-     -H 'Accept: application/json' \
-     "${TICKET_BASE_URL}/issue/${ID}" -o /tmp/issue.json
+umask 077
+{ printf 'header = "Authorization: Token '
+  cat "$TICKET_API_TOKEN_FILE"
+  printf '"\n'
+} > /tmp/ticket.curlrc
 ```
 
-Four rules about that command, each of which has a failure behind it:
+Read that construction carefully, because the obvious shorter forms are the ones that leak:
+
+- **`cat` writes to the redirect, not to your terminal.** Its output goes into the file and is
+  never rendered, so nothing about this lands in the transcript.
+- **No command substitution.** `printf '...%s...' "$(cat "$TICKET_API_TOKEN_FILE")"` looks
+  tidier and is worse: the value becomes a shell word, which puts it in `printf`'s argv where
+  `ps` can see it, and one `set -x` away from your own transcript.
+- **`umask 077` first.** The file you are creating holds the credential in a writable tmpfs.
+- **Never assign it to a variable.** Not `TOKEN=$(cat ...)`, not for "just this one call". A
+  variable is what `env`, `set` and an accidental `echo` all reach.
+
+Then every call uses the config and never mentions the credential:
+
+```bash
+BASE_URL="$(cat "$TICKET_BASE_URL_FILE")"   # not a credential — a variable is fine
+
+curl -sS --fail-with-body --config /tmp/ticket.curlrc \
+     -H 'Accept: application/json' \
+     "${BASE_URL}/issue/${ID}" -o /tmp/issue.json
+```
+
+Five rules about that command, each of which has a failure behind it:
 
 - **`--fail-with-body`, never bare `-s`.** Without it `curl` exits 0 on a 401 and you parse the
   error page as a ticket. With it you get the non-zero exit *and* the body that explains it.
 - **The token goes in a header, never in the URL.** A query string is logged by every proxy on
   the path, lands in the server's access log, and appears in your own shell history. There is no
   endpoint here worth reaching that requires it.
-- **Never `echo` the token, and never `set -x` a block that uses it.** Your session transcript is
-  read by the orchestrator and by a human. Expand it inside the `curl` invocation and nowhere
-  else.
+- **Never `cat` the credential file to your own output, and never `set -x` a block that touches
+  it.** The delivery change above removes the *accidental* disclosure — the variable swept up by
+  `env`, the expansion into a command you did not think of as sensitive. It cannot stop a
+  deliberate one. `cat "$TICKET_API_TOKEN_FILE"` on its own line puts the value in the
+  transcript exactly as `echo $TICKET_API_TOKEN` used to.
+- **Do not copy the file.** One `/tmp/ticket.curlrc` is the working copy; a second copy is a
+  second thing to reason about and nothing needs it.
 - **Write bodies to a file, not to a variable you later echo.** It keeps large payloads out of
   the transcript, and it gives you the exact bytes to diff against the read-back.
 
@@ -145,8 +180,10 @@ what was asked for, what went out, what came back, and how the two compared — 
 credential for the API and without opening the ticket.
 
 **The credential never appears in either file.** Not in a recorded command, not in a header
-dump, not in a URL. When you record the `curl` you ran, record it with the header value elided
-as `Authorization: Token <redacted>`. This is checked.
+dump, not in a URL. When you record the `curl` you ran, record it as the `--config` form you
+actually ran — `curl --config /tmp/ticket.curlrc ...` — which names no header value at all. If
+you record an expanded header for any reason, elide it as `Authorization: Token <redacted>`.
+This is checked.
 
 If the tickets already said what the task wanted, write the artifact with `no_change_needed:
 true`, an empty `updates` array, and report `success`. That is a real outcome, not a failure to

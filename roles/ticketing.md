@@ -41,8 +41,12 @@ treats a write as proof of work will produce writes that were not asked for, int
 other people read.
 
 **Never echo the credential.** Not into a log line, not into the artifact, not into a URL query
-string, not into the result envelope. It is read from the environment at the moment of the call
-and goes nowhere else.
+string, not into the result envelope. It is **not in your environment** — the environment holds
+a PATH, and the value sits in a read-only file at the end of it. `ticket-ops` shows how to get
+that file into a request without the value passing through a shell variable or an argument.
+
+That delivery makes an accidental disclosure hard and a deliberate one still possible: reading
+the file aloud puts the value in the transcript exactly as echoing a variable used to. Do not.
 
 Report as the `pifleet-worker` skill describes, with `success` only when the read-back
 confirmed every write you made.
