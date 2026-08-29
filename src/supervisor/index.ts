@@ -62,6 +62,7 @@ import { LedgerWriter } from "../run/ledger.ts";
 import { worktreeContentHash } from "../run/treehash.ts";
 import { processStartTime, registryCall, serveJsonlSocket } from "../run/registry.ts";
 import { ensureControlAuth } from "../security/control-auth.ts";
+import { redactorForWorkerEnv } from "../security/redact.ts";
 import { gcloudMinter, injectToken, resolveIdentity } from "../security/adc.ts";
 import { TokenRefresher, type RefreshFailure } from "../security/refresh.ts";
 import { realExec } from "../container/run.ts";
@@ -241,6 +242,42 @@ async function main(): Promise<void> {
   const pgid = (await processGroupId(process.pid).catch(() => null)) ?? 0;
   const started = (await processStartTime(process.pid).catch(() => null)) ?? "";
 
+  /**
+   * The event log's secret scrubber, armed from this worker's OWN 0600 env
+   * file before the first append (SRD §12.4).
+   *
+   * ## Why it is armed here and applied at `logEvent`
+   *
+   * `logEvent` is the single funnel every `events.jsonl` append passes
+   * through — it already serialises the writes through `eventsChain`, so there
+   * is exactly one place where a record becomes a line. A scrubber anywhere
+   * else is a scrubber a future caller can forget, and the failure of
+   * forgetting it is silent: the event lands, the log looks normal, and the
+   * credential is in it. Putting the control at the seam makes "scrubbed" a
+   * property of writing rather than of remembering.
+   *
+   * ## Why it exists at all
+   *
+   * A `ticketing` worker was instructed twice — role prompt and mounted
+   * skill — never to echo `TICKET_API_TOKEN`. Its second command was
+   * `echo $TICKET_API_TOKEN | head -c 20`, and the full 41-character value
+   * reached this file, the session transcript, and nothing else that was not
+   * meant to hold it. A prompt-level prohibition is not a control. This is.
+   *
+   * ## Awaited, before the chain exists
+   *
+   * Deliberately serial with the rest of startup rather than fired off: an
+   * async arm would leave a window of events written unscrubbed, and the
+   * events written earliest are the ones from the worker's first turns —
+   * exactly when `echo $TOKEN` happened. One read of one small file.
+   *
+   * An unarmed redactor is a supported state (a supervisor pointed at a bare
+   * run directory has no env file) and is REPORTED rather than assumed, so
+   * "this log was not scrubbed" is something an operator can read off the log
+   * itself instead of inferring from an absence.
+   */
+  const redactor = await redactorForWorkerEnv(wp.envFile);
+
   // Serialize events.jsonl appends so two async writes cannot interleave.
   let eventsChain: Promise<unknown> = Promise.resolve();
   const logEvent = (record: Record<string, unknown>): void => {
@@ -262,9 +299,32 @@ async function main(): Promise<void> {
      */
     const ts = new Date().toISOString();
     eventsChain = eventsChain
-      .then(() => appendJsonl(wp.eventsJsonl, { ts, ...record }))
+      .then(() =>
+        appendJsonl(wp.eventsJsonl, { ts, ...record }, { transform: (line) => redactor.redact(line) }),
+      )
       .catch(() => {});
   };
+
+  /*
+   * The FIRST line of every event log says what it is and is not protecting.
+   *
+   * Names only — `armed` and `skipped` are name lists by construction, the
+   * same type-level guarantee `WorkerEnvPlan.secretNames` carries — and it is
+   * itself scrubbed on the way out, because it goes through `logEvent` like
+   * everything else rather than around it.
+   *
+   * `skipped` is the one that earns its place. A value under
+   * `MIN_REDACTABLE_LENGTH` is NOT scrubbed, on purpose (a one-character
+   * needle matches everywhere and would eat the log), and an operator whose
+   * token is short has no other way to discover that it is travelling
+   * unprotected.
+   */
+  logEvent({
+    type: "redaction_armed",
+    source: redactor.source,
+    armed: redactor.armed,
+    skipped: redactor.skipped,
+  });
 
   /**
    * The launch record is read BEFORE state is assembled, not at the spawn.
