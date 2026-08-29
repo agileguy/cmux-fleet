@@ -510,11 +510,16 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "The consumer exists and it is production: `harvestTask` reconciles the envelope's " +
       "artifact claims against the scan inside its own ownership window. This replaced an " +
       "absence-claim that expected `scan.safe` to have no reader at all — it went red when " +
-      "the reconciler landed, which is what it was written to do.",
+      "the reconciler landed, which is what it was written to do. RE-PINNED for ISC-332: " +
+      "the call grew a fourth argument (the `secrets` needle list the ticket-ops validation " +
+      "takes), so the old fixed string stopped matching a call that was still there. The " +
+      "new pattern is the same pin one argument wider — it still names the scan, the " +
+      "claim list and the location positionally, so it fails if the call is deleted, if the " +
+      "reconciler stops being handed the scan, or if the claims stop being handed to it.",
     argv: [
       "grep",
       "-nF",
-      "await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc)",
+      "await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc, {",
       "src/harvest/index.ts",
     ],
     expect: 1,
@@ -725,16 +730,51 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-332",
+    grade: "[x]",
+    claim:
+      "The schema HAS a production caller, and this line is the far side of a tripwire that " +
+      "fired as designed. It previously read `expect: 1` on `grep -rn parseTicketOpsArtifact " +
+      "src/` — an absence-claim asserting the definition was the only occurrence — and it " +
+      "went red the moment the harvester began parsing a `ticket-ops.json` it finds, which " +
+      "is precisely what it was written to detect. The criterion was then RE-GRADED to `[x]` " +
+      "and this entry rewritten; the number was not bumped with the entry left saying the " +
+      "wiring is absent. It flipped to `nonempty` with the direction reversed for the same " +
+      "reason: what can go wrong now is the wiring being SILENTLY REMOVED, and no checkbox " +
+      "would notice. Pinned on the CALL rather than on a count of mentions, because two of " +
+      "the five occurrences in `src/` are prose in comments and an editor tidying those " +
+      "must not be able to turn this claim red.",
+    argv: ["grep", "-nF", "parseTicketOpsArtifact(raw, secrets)", "src/harvest/reconcile.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-332",
+    grade: "[x]",
+    claim:
+      "A failed ticket-ops validation still DEGRADES THE VERDICT, which is the half of the " +
+      "criterion a discrepancy alone does not satisfy: the finding without the clamp is a " +
+      "`success` task with 'this artifact is malformed' printed underneath it, which is the " +
+      "surprise at read time relocated rather than removed. Pinned in `harvest/index.ts` " +
+      "because the adjudicator structurally cannot do this — it is handed derived facts and " +
+      "a claim, never a descriptor, so artifact CONTENT is the one class of evidence it " +
+      "never sees. Empty means the clamp was dropped and the reconciler's ceiling is " +
+      "computed and discarded, which is the ISC-153 defect exactly.",
+    argv: ["grep", "-nF", "verdict = reconciled.verdictCeiling;", "src/harvest/index.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-333",
     grade: "[~]",
     claim:
-      "`parseTicketOpsArtifact` is reachable from TESTS ONLY — its sole occurrence in `src/` " +
-      "is its own definition, which is exactly why ISC-332 is graded `[~]` and not `[x]`. " +
-      "This is the ISC-115/ISC-193 shape: a schema whose grade rests on a consumer that does " +
-      "not exist. More than 1 means the harvester (or anything else) now parses a ticket-ops " +
-      "artifact it finds — which is the wiring ISC-332 asks for, so the correct response to " +
-      "this going red is to RE-GRADE the criterion to `[x]` and then update this line, never " +
-      "to bump the number and leave the entry saying the wiring is absent.",
-    argv: ["grep", "-rn", "parseTicketOpsArtifact", "src/"],
+      "The credential sweep has a caller but NO NEEDLE SUPPLIER, which is why ISC-333 is " +
+      "`[~]` and not `[x]`. `HarvestOptions.secrets` is plumbed from `harvestTask` into the " +
+      "reconciler and on into `parseTicketOpsArtifact`, and every production call site " +
+      "leaves it unset, so `findCredentialLeaks` runs over an empty list and cannot fire. " +
+      "This is an ABSENCE claim in the ISC-115/ISC-193 direction: it expects exactly the " +
+      "one declaration of the option and no supplier beside it. Going red means something " +
+      "now passes real secret values into a harvest — which is the wiring ISC-333 asks for, " +
+      "so the correct response is to RE-GRADE the criterion and then rewrite this line, " +
+      "never to adjust the number and leave the entry saying the supplier is missing.",
+    argv: ["grep", "-rnF", "secrets: opts.secrets", "src/"],
     expect: 1,
   },
   {
