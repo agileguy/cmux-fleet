@@ -76,7 +76,7 @@ export interface IsaClaim {
 
 export const ISA_CLAIMS: readonly IsaClaim[] = [
   {
-    isc: "ISC-334",
+    isc: "ISC-337",
     grade: "[x]",
     claim:
       "The env plan assigns the POINTER and never the value. This is the single line the whole " +
@@ -85,12 +85,12 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "Pinned on the ASSIGNMENT rather than on a count of mentions, because `secretContainerPath` " +
       "appears in prose in this repo's comments and an editor tidying those must not be able to " +
       "turn the claim red. It goes red if someone restores `vars[requested] = value`, which is " +
-      "exactly the mutation ISC-334 was proved against.",
+      "exactly the mutation ISC-337 was proved against.",
     argv: ["grep", "-nF", "vars[pointer] = secretContainerPath(requested);", "src/run/worker-env.ts"],
     expect: 1,
   },
   {
-    isc: "ISC-334",
+    isc: "ISC-337",
     grade: "[x]",
     claim:
       "NO name under `secrets:` is assigned into the env plan by its own name. An ABSENCE claim, " +
@@ -103,7 +103,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: "empty",
   },
   {
-    isc: "ISC-337",
+    isc: "ISC-340",
     grade: "[x]",
     claim:
       "The secret store's mount is emitted READ-ONLY, from the path `run/paths.ts` names, and " +
@@ -121,7 +121,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
-    isc: "ISC-336",
+    isc: "ISC-339",
     grade: "[~]",
     claim:
       "The worker directory holding the store is TIGHTENED to 0700, which is what makes the " +
@@ -136,7 +136,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
-    isc: "ISC-338",
+    isc: "ISC-341",
     grade: "[x]",
     claim:
       "The anti-criterion is proved by SPAWNING a shell, not by inspecting an object. `/bin/sh` " +
@@ -154,7 +154,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: "nonempty",
   },
   {
-    isc: "ISC-339",
+    isc: "ISC-342",
     grade: "[x]",
     claim:
       "The secret writer VERIFIES by reading back, rather than trusting `writeFile` to have " +

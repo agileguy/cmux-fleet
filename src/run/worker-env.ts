@@ -669,7 +669,7 @@ export function buildWorkerEnv(
     }
     secretNames.push(requested);
     /*
-     * The POINTER, never the value. This one line is the whole of ISC-334:
+     * The POINTER, never the value. This one line is the whole of ISC-337:
      * `vars` is what `serializeEnvFile` renders and what `--env-file` carries,
      * so a value that is never assigned into it cannot reach the environment
      * of any process in the container — and `echo $TICKET_API_TOKEN` prints an

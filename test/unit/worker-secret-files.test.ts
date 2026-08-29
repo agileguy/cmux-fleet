@@ -1,6 +1,6 @@
 /**
  * Granted secrets are FILES, and the environment carries only the path
- * (ISC-334 .. ISC-339).
+ * (ISC-337 .. ISC-342).
  *
  * ## The measurement that caused this
  *
@@ -22,7 +22,7 @@
  * a JavaScript object. The criterion is a statement about what a worker's
  * SHELL prints, and the two are only the same thing if `--env-file` delivers
  * exactly `plan.vars` — which is the assumption most worth not making. So
- * ISC-338 runs a real `/bin/sh` with `plan.vars` as its ENTIRE environment and
+ * ISC-341 runs a real `/bin/sh` with `plan.vars` as its ENTIRE environment and
  * asserts on stdout. The plan under it is built from `fleet.example.yaml`, the
  * document an operator actually copies, not from a fixture written to pass.
  *
@@ -83,7 +83,7 @@ async function examplePlan() {
   });
 }
 
-describe("ISC-334: the VALUE is absent from the rendered env file", () => {
+describe("ISC-337: the VALUE is absent from the rendered env file", () => {
   /**
    * The criterion stated directly, against the bytes docker reads.
    *
@@ -117,7 +117,7 @@ describe("ISC-334: the VALUE is absent from the rendered env file", () => {
   });
 });
 
-describe("ISC-335: the environment carries the PATH", () => {
+describe("ISC-338: the environment carries the PATH", () => {
   test("the pointer names the container path, under the mount", async () => {
     const plan = await examplePlan();
     const pointer = plan.vars[secretPointerName("TICKET_API_TOKEN")];
@@ -142,7 +142,7 @@ describe("ISC-335: the environment carries the PATH", () => {
   });
 });
 
-describe("ISC-338 [ANTI-CRITERION]: a worker that runs `echo $NAME` gets an empty string", () => {
+describe("ISC-341 [ANTI-CRITERION]: a worker that runs `echo $NAME` gets an empty string", () => {
   /**
    * A real shell, with the plan as its ENTIRE environment.
    *
@@ -202,7 +202,7 @@ describe("ISC-338 [ANTI-CRITERION]: a worker that runs `echo $NAME` gets an empt
   });
 });
 
-describe("ISC-336: the file the value went to", () => {
+describe("ISC-339: the file the value went to", () => {
   async function written(): Promise<{ dir: string; file: string }> {
     const dir = await mkdtemp(join(tmpdir(), "pifleet-secretfiles-"));
     cleanups.push(dir);
@@ -259,7 +259,7 @@ describe("ISC-336: the file the value went to", () => {
   });
 });
 
-describe("ISC-337: the mount is read-only", () => {
+describe("ISC-340: the mount is read-only", () => {
   async function ticketingArgv(): Promise<{ argv: string[]; secretsDir: string }> {
     const loaded = await loadConfig(EXAMPLE);
     const rendered = await renderWorker(loaded, "tick-1", { runId: "secfiles-run" });
@@ -306,7 +306,7 @@ describe("ISC-337: the mount is read-only", () => {
   });
 });
 
-describe("ISC-339: a secret file that did not land refuses the launch", () => {
+describe("ISC-342: a secret file that did not land refuses the launch", () => {
   /**
    * The verification is a RE-READ, not a trusted return value.
    *
@@ -387,7 +387,7 @@ describe("ISC-339: a secret file that did not land refuses the launch", () => {
 });
 
 /**
- * The host-side half of ISC-336, and the reason 0444 is not a regression
+ * The host-side half of ISC-339, and the reason 0444 is not a regression
  * against the 0600 env file it replaces.
  *
  * World-readable bytes under a world-traversable run directory would be
@@ -399,7 +399,7 @@ describe("ISC-339: a secret file that did not land refuses the launch", () => {
  * the path at its MOUNTPOINT in its own namespace, never walking the host
  * chain.
  */
-describe("ISC-336: the worker directory holding the store is operator-only", () => {
+describe("ISC-339: the worker directory holding the store is operator-only", () => {
   test("materialize leaves <run>/workers/<id> at 0700", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pifleet-secretdir-"));
     cleanups.push(dir);

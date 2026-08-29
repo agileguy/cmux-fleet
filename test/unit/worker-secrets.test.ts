@@ -77,7 +77,7 @@ async function load(d: Record<string, unknown>) {
 
 describe("ISC-304: a secret arrives only when BOTH lists name it", () => {
   /**
-   * The DELIVERY moved under this criterion (ISC-334) and the RULE did not,
+   * The DELIVERY moved under this criterion (ISC-337) and the RULE did not,
    * which is why the assertion is rewritten here rather than deleted. What
    * ISC-304 is about — a value reaches a worker only through the intersection
    * — is unchanged; what changed is that "reaches" now means a file plus a
@@ -268,7 +268,7 @@ describe("ISC-307: a secret's VALUE reaches the env file and no other surface", 
     for (const entry of plan.secretNames) expect(entry).not.toContain(CANARY);
     // The CONTROL. Without it this passes for a build that delivered nothing,
     // which is the one reason a "the value is absent" assertion proves nothing.
-    // It reads `secretFiles` since ISC-334, because that is now the only field
+    // It reads `secretFiles` since ISC-337, because that is now the only field
     // of the plan a value can be in.
     expect(plan.secretFiles).toEqual([{ name: "TICKET_TOKEN", value: CANARY }]);
   });
@@ -305,7 +305,7 @@ describe("ISC-307: a secret's VALUE reaches the env file and no other surface", 
   });
 
   /**
-   * SUPERSEDED BY ISC-334, and the direction of the change is the point.
+   * SUPERSEDED BY ISC-337, and the direction of the change is the point.
    *
    * This assertion used to read `expect(text).toContain(CANARY)` and then
    * `exactly once` — the env file was where a secret was SUPPOSED to be, and
@@ -577,7 +577,7 @@ describe("the shipped example's ticketing worker (ISC-330)", () => {
   }
 
   /**
-   * "Receives" means a POINTER since ISC-334. The grant is unchanged and the
+   * "Receives" means a POINTER since ISC-337. The grant is unchanged and the
    * shape of it is not: the worker is handed `TICKET_API_TOKEN_FILE` naming a
    * path, and the value travels to that path instead of into its environment.
    * Both halves are asserted so this cannot pass for a worker that was granted
