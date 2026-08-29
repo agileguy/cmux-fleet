@@ -304,15 +304,32 @@ describe("ISC-307: a secret's VALUE reaches the env file and no other surface", 
     }
   });
 
-  test("the value appears in the serialized env file exactly once", async () => {
+  /**
+   * SUPERSEDED BY ISC-334, and the direction of the change is the point.
+   *
+   * This assertion used to read `expect(text).toContain(CANARY)` and then
+   * `exactly once` — the env file was where a secret was SUPPOSED to be, and
+   * the count guarded against it being copied into a second variable. File
+   * delivery removes the premise: the value is not in the env file at all, so
+   * "exactly once" became "exactly zero" and the guard became the criterion.
+   *
+   * Rewritten rather than deleted because ISC-307's OTHER half — that no
+   * reporting surface carries a value — is unchanged and still graded, and
+   * because a count assertion that flipped from one to zero is the clearest
+   * available record that the delivery moved. The definitive form of this,
+   * driven by `fleet.example.yaml` rather than by a synthetic document, is in
+   * `test/unit/worker-secret-files.test.ts`.
+   */
+  test("the value appears in the serialized env file ZERO times, and the pointer once", async () => {
     const loaded = await load(doc());
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), { TICKET_TOKEN: CANARY });
     const text = serializeEnvFile(plan.vars);
-    expect(text).toContain(CANARY);
-    // Exactly once: a second occurrence means the value was copied into some
-    // other variable, which is how a 0600 file's protection gets undone by
-    // something that reads a different one.
-    expect(text.split(CANARY).length - 1).toBe(1);
+    expect(text).not.toContain(CANARY);
+    // The CONTROL for the line above: without it, a build that delivered
+    // NOTHING would satisfy the absence assertion perfectly.
+    const pointer = `${secretPointerName("TICKET_TOKEN")}=${secretContainerPath("TICKET_TOKEN")}`;
+    expect(text).toContain(pointer);
+    expect(text.split(pointer).length - 1).toBe(1);
     expect(JSON.stringify(plan.secretNames)).not.toContain(CANARY);
   });
 });
@@ -559,9 +576,19 @@ describe("the shipped example's ticketing worker (ISC-330)", () => {
     });
   }
 
-  test("it receives the ticket credential it asked for", async () => {
+  /**
+   * "Receives" means a POINTER since ISC-334. The grant is unchanged and the
+   * shape of it is not: the worker is handed `TICKET_API_TOKEN_FILE` naming a
+   * path, and the value travels to that path instead of into its environment.
+   * Both halves are asserted so this cannot pass for a worker that was granted
+   * nothing.
+   */
+  test("it receives the ticket credential it asked for, as a path", async () => {
     const plan = await ticketingPlan();
-    expect(plan.vars["TICKET_API_TOKEN"]).toBe(TOKEN);
+    expect(plan.vars[secretPointerName("TICKET_API_TOKEN")]).toBe(
+      secretContainerPath("TICKET_API_TOKEN"),
+    );
+    expect(plan.secretFiles).toContainEqual({ name: "TICKET_API_TOKEN", value: TOKEN });
     expect(plan.secretNames).toEqual(["TICKET_API_TOKEN", "TICKET_BASE_URL"]);
   });
 
