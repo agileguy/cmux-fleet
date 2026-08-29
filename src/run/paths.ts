@@ -270,6 +270,27 @@ export interface WorkerPaths {
   cloudAllow: string;
   kubeconfig: string;
   /**
+   * The per-worker secret store: one file per granted `secrets:` name, holding
+   * that name's raw host value, bind-mounted read-only at `SECRETS_MOUNT`.
+   *
+   * A FIFTH container input, and a DIRECTORY rather than a fifth exact-path
+   * file mount, because the set is per-worker and open-ended — `secrets:` is a
+   * config list, so the mount cannot be a fixed name the way `cloud-allow` and
+   * `kubeconfig` are.
+   *
+   * Named here for the reason the four above are (ISC-188): `config/render.ts`
+   * emits the `-v` and `run/materialize.ts` writes the files, and a bind mount
+   * whose two sides disagree does not fail — Docker creates the missing source
+   * and the worker comes up with an empty `/secrets`, which is the quiet
+   * failure this whole delivery change exists to remove rather than relocate.
+   *
+   * A SIBLING of `env`, not a child of anything else: the run directory is
+   * where this worker's inputs live, and the secret store is an input. It is
+   * `materialize.ts` that tightens `dir` to 0700 once this exists — see the
+   * note there on why the container is unaffected by that.
+   */
+  secretsDir: string;
+  /**
    * The LAUNCH RECORD: the exact `docker run` argv this worker's container is
    * started from, plus the container name and image (`WorkerLaunchSchema`).
    *
@@ -343,6 +364,7 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     systemAppendMd: join(dir, "system-append.md"),
     cloudAllow: join(dir, "cloud-allow"),
     kubeconfig: join(dir, "kubeconfig"),
+    secretsDir: join(dir, "secrets"),
     launchJson: join(dir, "launch.json"),
     exportsDir: join(dir, "exports"),
   };

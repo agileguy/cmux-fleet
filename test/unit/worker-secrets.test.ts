@@ -27,6 +27,8 @@ import {
   SecretMissingFromHostError,
   SecretNotAllowlistedError,
   SecretReservedNameError,
+  secretContainerPath,
+  secretPointerName,
 } from "../../src/run/worker-env.ts";
 import { CREDENTIAL_ENV_VARS } from "../../src/security/adc.ts";
 import {
@@ -74,10 +76,22 @@ async function load(d: Record<string, unknown>) {
 }
 
 describe("ISC-304: a secret arrives only when BOTH lists name it", () => {
+  /**
+   * The DELIVERY moved under this criterion (ISC-334) and the RULE did not,
+   * which is why the assertion is rewritten here rather than deleted. What
+   * ISC-304 is about — a value reaches a worker only through the intersection
+   * — is unchanged; what changed is that "reaches" now means a file plus a
+   * pointer rather than a variable holding the value. Asserting on all three
+   * of `secretNames`, the pointer and `secretFiles` keeps this non-vacuous in
+   * both directions: a build that stopped delivering entirely would fail on
+   * `secretFiles`, and one that regressed to putting the value back in the
+   * environment would fail on the pointer.
+   */
   test("a name in the worker's request AND the fleet ceiling is delivered", async () => {
     const loaded = await load(doc());
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), { TICKET_TOKEN: CANARY });
-    expect(plan.vars["TICKET_TOKEN"]).toBe(CANARY);
+    expect(plan.vars[secretPointerName("TICKET_TOKEN")]).toBe(secretContainerPath("TICKET_TOKEN"));
+    expect(plan.secretFiles).toEqual([{ name: "TICKET_TOKEN", value: CANARY }]);
     expect(plan.secretNames).toEqual(["TICKET_TOKEN"]);
   });
 
@@ -98,35 +112,48 @@ describe("ISC-304: a secret arrives only when BOTH lists name it", () => {
       UNREQUESTED_TOKEN: CANARY,
     });
     expect(plan.vars["UNREQUESTED_TOKEN"]).toBeUndefined();
+    expect(plan.vars[secretPointerName("UNREQUESTED_TOKEN")]).toBeUndefined();
     expect(plan.secretNames).not.toContain("UNREQUESTED_TOKEN");
+    expect(plan.secretFiles.map((f) => f.name)).not.toContain("UNREQUESTED_TOKEN");
   });
 
   test("a worker that requests nothing gets nothing, with the ceiling non-empty", async () => {
     const loaded = await load(doc());
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), { TICKET_TOKEN: CANARY });
     expect(plan.secretNames).toEqual([]);
+    expect(plan.secretFiles).toEqual([]);
     expect(plan.vars["TICKET_TOKEN"]).toBeUndefined();
+    expect(plan.vars[secretPointerName("TICKET_TOKEN")]).toBeUndefined();
   });
 
-  test("the delivered value survives serialization to the file docker reads", async () => {
+  test("the delivered POINTER survives serialization to the file docker reads", async () => {
     const loaded = await load(doc());
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), { TICKET_TOKEN: CANARY });
-    expect(serializeEnvFile(plan.vars)).toContain(`TICKET_TOKEN=${CANARY}`);
+    expect(serializeEnvFile(plan.vars)).toContain("TICKET_TOKEN_FILE=/secrets/TICKET_TOKEN");
   });
 
   /**
-   * `serializeEnvFile`'s existing refusals still govern the new path, and a
-   * secret is the value MOST likely to trip them: it comes from a shell where
-   * a stray `$(cat key.pem)` is one keystroke away. Docker's `--env-file` has
-   * no escaping, so the remainder of such a value would become a separate
-   * variable declaration — env-var injection through a config value.
+   * The newline refusal SURVIVED the delivery change, and this test is what
+   * proves it did rather than lapsing quietly.
+   *
+   * It used to be `serializeEnvFile`'s: a secret is the value most likely to
+   * carry a newline, because it comes from a shell where a stray
+   * `$(cat key.pem)` is one keystroke away, and docker's `--env-file` has no
+   * escaping — so the remainder became a separate variable declaration. Under
+   * file delivery the value never enters `vars` at all, so the serializer
+   * would never see it and the guarantee would have disappeared silently along
+   * with the path that carried it. `buildWorkerEnv` refuses it one step
+   * earlier now, and the refusal matters for a second reason as well:
+   * `skills/ticket-ops/SKILL.md` concatenates the file's bytes into a curl
+   * `header = "..."` line, which a newline would end mid-quote.
    */
-  test("a secret carrying a newline is still refused by the serializer", async () => {
+  test("a secret carrying a newline is still refused, now before it reaches a file", async () => {
     const loaded = await load(doc());
-    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), {
-      TICKET_TOKEN: "line1\nINJECTED=1",
-    });
-    expect(() => serializeEnvFile(plan.vars)).toThrow(ConfigError);
+    expect(() =>
+      buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), {
+        TICKET_TOKEN: "line1\nINJECTED=1",
+      }),
+    ).toThrow(ConfigError);
   });
 });
 
@@ -221,7 +248,7 @@ describe("ISC-306: a permitted name the host environment lacks is refused", () =
   test("an allowlisted name NOBODY requested may be absent without refusing", async () => {
     const loaded = await load(doc());
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), { TICKET_TOKEN: CANARY });
-    expect(plan.vars["TICKET_TOKEN"]).toBe(CANARY);
+    expect(plan.vars[secretPointerName("TICKET_TOKEN")]).toBe(secretContainerPath("TICKET_TOKEN"));
     expect(plan.secretNames).toEqual(["TICKET_TOKEN"]);
   });
 });
@@ -241,7 +268,9 @@ describe("ISC-307: a secret's VALUE reaches the env file and no other surface", 
     for (const entry of plan.secretNames) expect(entry).not.toContain(CANARY);
     // The CONTROL. Without it this passes for a build that delivered nothing,
     // which is the one reason a "the value is absent" assertion proves nothing.
-    expect(plan.vars["TICKET_TOKEN"]).toBe(CANARY);
+    // It reads `secretFiles` since ISC-334, because that is now the only field
+    // of the plan a value can be in.
+    expect(plan.secretFiles).toEqual([{ name: "TICKET_TOKEN", value: CANARY }]);
   });
 
   test("no refusal message quotes the value it refused", async () => {

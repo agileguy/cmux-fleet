@@ -40,6 +40,7 @@ import {
   type RunPaths,
   type WorkerPaths,
 } from "../run/paths.ts";
+import { SECRETS_MOUNT } from "../run/worker-env.ts";
 import { ConfigError, expandPath, resolveWorker, type LoadedConfig, type ResolvedWorker } from "./load.ts";
 import type { Toolchain } from "./schema.ts";
 
@@ -151,6 +152,17 @@ export function buildDockerArgv(
     image: string;
     piFlags: string[];
     hasBriefing: boolean;
+    /**
+     * Whether this worker asked for any secret at all.
+     *
+     * `w.secrets.length > 0` at every call site, and NOT the count of values
+     * actually resolved: `buildWorkerEnv` refuses the launch when a requested
+     * name is unallowlisted or unset, so a worker that reaches a container has
+     * every name it asked for. Deriving the mount from the REQUEST rather than
+     * from a resolved plan is what lets `render` — which never reads the host
+     * environment — describe the same mount `up` will make.
+     */
+    hasSecrets: boolean;
   },
 ): string[] {
   // `loaded.config.run` is deliberately NOT destructured here, and no local is
@@ -258,6 +270,24 @@ export function buildDockerArgv(
   // the policy could rewrite the policy, and the task-scoped cloud grant was a
   // suggestion rather than a control.
   argv.push("-v", `${opts.worker.cloudAllow}:/policy/cloud-allow:ro`);
+  /*
+   * The secret store, `:ro` like every other input the worker only reads.
+   *
+   * READ-ONLY is doing real work here and is not decoration. The host file is
+   * 0444, and the macOS Docker VM squashes bind-mount ownership to the
+   * container user — so inside the container that file reads as OWNED by uid
+   * 10001, and the mount flag is what stops a worker rewriting its own
+   * credential store and then reporting on what it wrote. Exactly the argument
+   * `/policy/cloud-allow:ro` above already makes about the verbgate policy.
+   *
+   * Emitted only for a worker that asked for something, on the same rule the
+   * briefing mount follows: a mount that appears unconditionally is one nobody
+   * notices has stopped tracking the thing it exists for, and an empty
+   * `/secrets` in a worker granted nothing says less than its absence does.
+   */
+  if (opts.hasSecrets) {
+    argv.push("-v", `${opts.worker.secretsDir}:${SECRETS_MOUNT}:ro`);
+  }
   // Container-local Pi state — NEVER the host ~/.pi/agent, which holds real
   // auth and sessions (SRD §5.5).
   argv.push("-v", `pifleet-piagent-${w.id}:/home/pi/.pi/agent`);
@@ -365,6 +395,7 @@ export async function renderWorker(
       image,
       piFlags: pi.slice(1),
       hasBriefing,
+      hasSecrets: w.secrets.length > 0,
     }),
     `docker argv for ${w.id}`,
   );
