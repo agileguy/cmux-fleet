@@ -739,17 +739,17 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-330",
-    grade: "[~]",
+    grade: "[x]",
     claim:
-      "The per-worker `egress_access` key is NOT on this branch — that is the whole reason " +
-      "ISC-330 is `[~]` and the reason `fleet.example.yaml` ships `egress_access:` and " +
-      "`secrets:` commented out rather than live. Every config schema is `.strict()`, so the " +
-      "keys would refuse the example outright. NONEMPTY here means " +
-      "`worker-secrets-and-egress-access` has merged and the blockage is gone: uncomment both " +
-      "halves in the example (the worker keys AND the two names under `secrets.env_allowlist`), " +
-      "assert on the materialized env file, and re-grade ISC-330 to `[x]`.",
-    argv: ["grep", "-rn", "egress_access", "src/config/schema.ts"],
-    expect: "empty",
+      "The shipped example's ticketing worker is asserted against the ENV PLAN it would " +
+      "actually be launched with, not against a synthetic document. This claim replaced a " +
+      "tripwire: while the reader was on an unmerged branch the probe asserted `egress_access` " +
+      "was ABSENT from the schema, and the guard going red on the rebase is precisely what " +
+      "reported that the blockage had lifted. Empty here means the example's ticketing worker " +
+      "stopped being probed against `fleet.example.yaml` itself, which is the only thing that " +
+      "can answer whether an operator's copy receives the token and no Google credential.",
+    argv: ["grep", "-n", "the shipped example's ticketing worker (ISC-330)", "test/unit/worker-secrets.test.ts"],
+    expect: "nonempty",
   },
   {
     isc: "ISC-320",
