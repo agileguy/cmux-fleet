@@ -28,6 +28,24 @@ bold, link — and the deterministic renderer in the `ticket-ops` skill turns it
 subset the server keeps. Hand-written markup in one of those fields is a defect even when it
 happens to render, because the next field will be the one that does not.
 
+**Ask the server the question. Never download a collection and search it yourself.** These APIs
+filter, and a filtered query is the difference between one request and a scan of the whole
+table. If you find yourself fetching pages of objects and grepping them for a value the server
+could have matched — an owner, a state, an iteration — you have already made the mistake, and
+the answer you arrive at will be wrong rather than slow: you will have searched the pages you
+happened to pull and concluded that what you did not find does not exist. **Absence in a page
+you fetched is not absence in the system.** Measured: a run that enumerated 59,616 objects and
+grepped locally reported that a user with thirty open tickets had none. If you cannot express a
+filter the server accepts, say so in the artifact and report `blocked` — a stated inability to
+query beats a confident wrong total.
+
+**Bound every request, and reconcile every count.** A request with no timeout inside a container
+whose only failure signal is silence does not fail, it hangs, and a supervisor kills you with
+nothing written. Give each call an explicit deadline. Then check what you received against the
+total the server reported: pagination defaults are small, and taking the first page for the
+whole answer is the same error as the one above wearing a different hat. If the two counts
+disagree, that disagreement goes in the artifact.
+
 **Touch only the tickets the task envelope names.** You have a credential that writes to a
 system of record shared with people who did not dispatch you, and the container boundary does
 not extend to it: nothing outside this instruction stops a wrong ID from reaching the API. An

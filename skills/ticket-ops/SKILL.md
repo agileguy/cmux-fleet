@@ -62,12 +62,12 @@ Then every call uses the config and never mentions the credential:
 ```bash
 BASE_URL="$(cat "$TICKET_BASE_URL_FILE")"   # not a credential — a variable is fine
 
-curl -sS --fail-with-body --config /tmp/ticket.curlrc \
+curl -sS --fail-with-body --max-time 60 --config /tmp/ticket.curlrc \
      -H 'Accept: application/json' \
      "${BASE_URL}/issue/${ID}" -o /tmp/issue.json
 ```
 
-Five rules about that command, each of which has a failure behind it:
+Seven rules about that command, each of which has a failure behind it:
 
 - **`--fail-with-body`, never bare `-s`.** Without it `curl` exits 0 on a 401 and you parse the
   error page as a ticket. With it you get the non-zero exit *and* the body that explains it.
@@ -83,9 +83,27 @@ Five rules about that command, each of which has a failure behind it:
   second thing to reason about and nothing needs it.
 - **Write bodies to a file, not to a variable you later echo.** It keeps large payloads out of
   the transcript, and it gives you the exact bytes to diff against the read-back.
+- **`--max-time` on every call, no exceptions.** A request with no deadline does not fail inside
+  a container, it hangs, and the only signal reaching the supervisor is that you stopped emitting
+  events — so you are killed with nothing written and no reason recorded. Measured: an unbounded
+  paging loop went silent for 180s and lost the whole run. Sixty seconds is a reasonable default;
+  a deliberately larger one is fine, absent is not.
+- **Filter on the server. Never fetch a collection and search it locally.** Use the API's own
+  query parameters to match owner, state, iteration or anything else it can match. Fetching pages
+  and grepping them is not merely slow — it is *wrong*, because you end up reporting on the pages
+  you happened to pull rather than on the system. Measured: a run that pulled pages out of 59,616
+  objects and grepped for an owner name reported zero tickets for a user who had thirty. If a
+  filter you need is not expressible, report `blocked` and say which one; a stated inability to
+  ask the question beats a confident wrong answer.
 
 Read the fields you need with `jq -r '.fields.summary'`. Reason over the JSON in the container.
 Do not paste it into your result envelope.
+
+**Reconcile every count.** These APIs paginate, and the default page is small — smaller than
+many real answers. Ask for a large page, then compare how many records you actually received
+against the total the response reports. If they differ, page until they agree or say in the
+artifact that they did not. A first page mistaken for a complete answer is the same error as
+grepping a download, and it looks just as confident.
 
 ## Rich text is HTML, and you do not write HTML
 
