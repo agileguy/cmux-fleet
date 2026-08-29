@@ -445,9 +445,14 @@ export interface ReconcileOptions {
    * normally recorded IN — an unelided `Authorization` header and a
    * credential-bearing query parameter — and they need no needles, so they run
    * whatever this holds. This list is what catches the token pasted somewhere
-   * a schema cannot anticipate, and it is empty by default: the harvester runs
-   * on the host and deliberately does not hold the values `up` wrote into a
-   * worker's 0600 env file, so a caller that has them must pass them in.
+   * a schema cannot anticipate.
+   *
+   * STILL AN ARGUMENT AND NOT A LOOKUP, now that a supplier exists (ISC-333).
+   * `harvestTask` resolves the worker's granted values from the run directory
+   * and hands them down; this module does not go and get them, because this
+   * module imports no filesystem API at all and that absence is what makes its
+   * §12.5 argument checkable rather than asserted. Empty by default, which is
+   * what a caller with no run context gets and what the unit suite pins.
    */
   secrets?: readonly string[];
 }

@@ -43,6 +43,7 @@ import {
   type OutboxLocation,
   type OutboxRead,
 } from "./outbox.ts";
+import { resolveWorkerNeedles } from "./needles.ts";
 import { reconcileArtifactClaims, TICKET_OPS_ARTIFACT_NAME } from "./reconcile.ts";
 
 export interface HarvestOptions {
@@ -98,16 +99,34 @@ export interface HarvestOptions {
   /** Per-command ceiling, itself bounded by the run budget. */
   acceptancePerCommandMs?: number;
   /**
-   * Secret VALUES to sweep a ticket-ops artifact for, as literal needles.
+   * Secret VALUES to sweep a ticket-ops artifact for, as literal needles — an
+   * OVERRIDE, not the supply.
    *
-   * Passed in for the same reason `harnessPatterns` is: harvest is handed a
-   * run directory and must not resolve config from the cwd. It is also passed
-   * in rather than read here for a second reason that is about the values
-   * themselves — `up` writes a worker's credentials into a 0600 env file and
-   * nothing else, and a harvester that went looking for them would put
-   * plaintext credentials into the process that renders the report. A caller
-   * that legitimately holds them can supply them; the default is none, and the
-   * schema's own credential-hygiene rules run either way.
+   * ## What changed, and why the old default was the bug
+   *
+   * This used to be the only way needles could ever arrive, and no production
+   * caller passed any: `artifacts`, `report` and `harvestAll` all left it
+   * unset, so `findCredentialLeaks` swept an empty list and could not fire.
+   * That is ISC-333, and it is worse than an unimplemented check — the
+   * mechanism was present, tested and invoked, so the harvest reported a clean
+   * sweep of nothing and read as coverage. A worker echoed its credential and
+   * this said nothing.
+   *
+   * The needles now come from the run itself when this is `undefined`: the
+   * grant `up` recorded in the worker's launch record, valued from the 0600
+   * env file `up` wrote beside it (`harvest/needles.ts`). Scoped to what THIS
+   * worker was actually granted — never a scan of the host environment, and
+   * never re-derived from a `fleet.yaml` in the harvester's cwd, which
+   * `harvest/patterns.ts` forbids for a reason that applies here identically.
+   *
+   * ## When to set it
+   *
+   * A caller that legitimately holds values the run does not — a probe, or a
+   * harvest of a run assembled by hand — supplies them here and REPLACES the
+   * run's supply rather than adding to it, so a test can also pin the sweep to
+   * exactly nothing by passing `[]`. The schema's own credential-hygiene rules
+   * (an unelided `Authorization` header, a token-bearing query parameter) need
+   * no needles and run either way.
    */
   secrets?: readonly string[];
 }
@@ -305,6 +324,35 @@ export async function harvestTask(
     const claimed = outbox.kind === "ok" ? outbox.envelope : null;
 
     /**
+     * THE CREDENTIAL SWEEP'S NEEDLES (ISC-333).
+     *
+     * `opts.secrets` still wins when a caller supplies it — that is the escape
+     * hatch `HarvestOptions` documents, and a caller that legitimately holds
+     * the values is entitled to say so. What changed is the DEFAULT: it was
+     * `[]` at every production call site, so the sweep ran over an empty
+     * needle set and could never hit, and the mechanism read as coverage while
+     * detecting nothing.
+     *
+     * Resolved HERE rather than in `reconcile.ts`, and that placement is a
+     * hard constraint rather than taste. That module imports no filesystem API
+     * at all — only `node:crypto`, `node:path`, `zod` and two local modules —
+     * and reads solely through descriptors the scan already holds. The
+     * structural absence of an `open` is what makes its §12.5 anti-exfiltration
+     * argument checkable, and ISC-246's registered claim asserts it. A supplier
+     * that reached the filesystem from inside the reconciler would trade a
+     * guarantee for a feature.
+     *
+     * So the values arrive as an argument, from the function that is already
+     * holding the run directory and the worker id, and the reconciler stays a
+     * pure function of a scan, a claim list, and a needle list.
+     */
+    const supply =
+      opts.secrets === undefined
+        ? await resolveWorkerNeedles(workerPaths(run, envelope.worker))
+        : { needles: [...opts.secrets], names: [], note: null };
+    if (supply.note !== null) reasons.push(supply.note);
+
+    /**
      * THE OUTBOX'S ARTIFACTS, RECONCILED AGAINST WHAT THE ENVELOPE CLAIMED.
      *
      * This is the first thing in `src/` that reads outbox artifact CONTENT at
@@ -347,7 +395,7 @@ export async function harvestTask(
      * defect rather than that one.
      */
     const reconciled = await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc, {
-      secrets: opts.secrets,
+      secrets: supply.needles,
     });
     discrepancies.push(...reconciled.discrepancies);
 

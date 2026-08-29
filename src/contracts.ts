@@ -410,6 +410,44 @@ export const WorkerLaunchSchema = z
       })
       .nullable()
       .default(null),
+    /**
+     * The host variables `up` delivered to this worker under `secrets:`, BY
+     * NAME — the durable copy of `WorkerEnvPlan.secretNames` (ISC-333).
+     *
+     * ## Why this field exists, and why NAMES are all it may ever hold
+     *
+     * The harvester owns a credential sweep (`findCredentialLeaks`) that had a
+     * caller and no needle supplier: the VALUES live only in the worker's 0600
+     * env file, and `harvest/patterns.ts` forbids the harvester resolving
+     * config from the cwd, so there was no route from "what this worker was
+     * granted" to "what to look for in its output". This is that route's first
+     * half — the grant, recorded where the run keeps it, so a harvest months
+     * later reads the same answer `up` decided rather than re-deriving one from
+     * whatever `fleet.yaml` is in front of it.
+     *
+     * A `string[]` of names, exactly as `WorkerEnvPlan.secretNames` is, and for
+     * the same type-level reason: this record is read by the supervisor, by
+     * `down`, and by anything that renders a launch, so it is structurally
+     * incapable of putting a credential in front of any of them. The values are
+     * fetched separately, at harvest, from the 0600 file that already holds
+     * them — see `harvest/needles.ts`.
+     *
+     * ## Why HERE and not in a file of its own
+     *
+     * `launch.json` is already the per-worker record of what `up` decided, it
+     * is already written by the one function that holds `envPlan`, and
+     * `harvestTask` already reads it. A new file would need a new name in
+     * `run/paths.ts`, and a second `join()` computing a run-dir path is the
+     * ISC-188 defect this repo has closed once already.
+     *
+     * Its ABSENCE is meaningful and is not a gap: no launch record means the
+     * run was started against the `PIFLEET_PI_COMMAND` double, which starts no
+     * container and never hands the env file to anything — so the worker that
+     * has no recorded grant is the same worker that was given no secret to
+     * leak. Defaulted, so records written before this field existed parse as
+     * "nothing granted" rather than failing a harvest.
+     */
+    secret_names: z.array(shortStr).max(MAX_ITEMS).default([]),
   })
   .strict();
 
