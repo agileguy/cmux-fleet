@@ -474,6 +474,45 @@ describe("ISC-346: an outbox directory no dispatch explains is named", () => {
   );
 
   /**
+   * THE FINDING CANNOT DESTROY THE REPORT IT APPEARS IN.
+   *
+   * `HarvestSchema` caps `discrepancies` at `MAX_ITEMS` and REFUSES a longer
+   * array, and `harvestAll` catches a throwing harvest into a single
+   * `unavailable` row. So a one-finding-per-directory loop would hand a worker
+   * that created a thousand directories the power to delete its own report —
+   * a detector whose output suppresses the report is worse than no detector,
+   * and the bug would only ever show up on the runs that misbehaved most.
+   *
+   * Twelve directories against a cap of eight, so both halves are visible in
+   * one probe: eight named, one line declaring its own truncation, and a
+   * harvest that still parses. Asserting the truncation line SAYS SO matters
+   * as much as the count — a silently short list reads as a complete one.
+   */
+  test(
+    "a flood of unexplained directories is capped and declares its own truncation",
+    async () => {
+      const many = Array.from({ length: 12 }, (_, i) => `stray-${String(i).padStart(2, "0")}`);
+      const f = await scaffold({ tasks: { [TASK_A]: { files: {} } }, extraOutboxDirs: many });
+      try {
+        const { harvest } = await harvestTask(f.run, TASK_A);
+        const found = layoutFindings(harvest.discrepancies);
+        expect(found).toHaveLength(8);
+        // The first eight by name, so the cap is not deciding by readdir order.
+        for (const [i, name] of many.slice(0, 8).entries()) {
+          expect(found[i]).toContain(name);
+        }
+        const truncation = harvest.discrepancies.filter((d) => d.includes("further director"));
+        expect(truncation).toHaveLength(1);
+        expect(truncation[0]).toContain("4 further directories");
+        expect(truncation[0]).toContain("not named");
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(3),
+  );
+
+  /**
    * THE LIMIT, ASSERTED RATHER THAN LEFT IMPLICIT.
    *
    * The misnamed directory holds a `ticket-ops.md`, and the pairing check in
