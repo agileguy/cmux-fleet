@@ -24,7 +24,7 @@ import {
   SECRET_NAMES_VAR,
   TRUNCATION_FLOOR,
 } from "../../src/security/redact.ts";
-import { buildWorkerEnv } from "../../src/run/worker-env.ts";
+import { buildWorkerEnv, writeWorkerSecretFiles } from "../../src/run/worker-env.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
 import { stringify } from "yaml";
 
@@ -212,17 +212,152 @@ describe("the names and the values travel in one file", () => {
   });
 
   test("a missing env file is an unarmed redactor that says why, not a throw", async () => {
-    const r = await redactorForWorkerEnv(join(tmpdir(), "pifleet-no-such-env-file-xyz"));
+    const r = await redactorForWorkerEnv(
+      join(tmpdir(), "pifleet-no-such-env-file-xyz"),
+      join(tmpdir(), "pifleet-no-such-secrets-dir-xyz"),
+    );
     expect(r.source).toBe("absent");
     expect(r.armed).toEqual([]);
   });
 
-  test("the redactor arms from the env file the supervisor already has", async () => {
+  /**
+   * ISC-345. THE REDACTOR FOLLOWS THE VALUES WHEN THE VALUES MOVE.
+   *
+   * ## This is a regression probe for a leak that actually happened
+   *
+   * ISC-337..342 moved granted secrets out of the environment and into one
+   * 0444 file each. This function kept reading the env file, where the granted
+   * name now resolves to nothing, and its `if (value === undefined) continue`
+   * dropped every grant in silence. The redactor then reported itself ARMED
+   * for names it could not see.
+   *
+   * It was not caught by review and it was not caught by CI. It was caught by
+   * a live worker running `cat` on the curl config it had just built, putting
+   * a real 41-character credential into `events.jsonl` five times, on a run
+   * whose own first log line named that variable as protected.
+   *
+   * ## The store is built by the PRODUCTION writer
+   *
+   * `writeWorkerSecretFiles`, the same call `materializeWorkerInputs` makes, so
+   * the layout under test is whatever the writer decides it is. A fixture that
+   * hand-wrote the file names would prove this reader agrees with the fixture
+   * rather than with the writer — which is the precise reason the original
+   * defect survived: every test involved was green against its own idea of
+   * where values live.
+   *
+   * THE CANARY IS SYNTHETIC. Nothing here touches a real credential store.
+   */
+  test("a secret delivered as a FILE is still scrubbed (ISC-345)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-redact-store-"));
+    try {
+      const envPath = join(dir, "env");
+      const secretsDir = join(dir, "secrets");
+      // The env file exactly as `buildWorkerEnv` renders it once delivery
+      // moved: the names list, a POINTER, and no value anywhere.
+      await writeFile(
+        envPath,
+        `${SECRET_NAMES_VAR}=TICKET_API_TOKEN\nTICKET_API_TOKEN_FILE=/secrets/TICKET_API_TOKEN\n`,
+      );
+      await writeWorkerSecretFiles(secretsDir, {
+        secretNames: ["TICKET_API_TOKEN"],
+        secretFiles: [{ name: "TICKET_API_TOKEN", value: CANARY }],
+      } as never);
+
+      const r = await redactorForWorkerEnv(envPath, secretsDir);
+      expect(r.source, "the value must come from the store").toBe("store");
+      expect(r.armed).toEqual(["TICKET_API_TOKEN"]);
+      expect(r.unresolved, "nothing may be left unvalued").toEqual([]);
+      // The assertion the leak would have failed.
+      expect(r.redact(JSON.stringify({ out: CANARY }))).not.toContain(CANARY);
+      // Not a truncated prefix either — `head -c 20` is how the first leak
+      // reached the log, and a redactor that only matched whole values would
+      // pass the line above while leaving that fragment behind.
+      expect(r.redact(JSON.stringify({ out: CANARY.slice(0, 20) }))).not.toContain(
+        CANARY.slice(0, 20),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * A FLEET-SET credential and a GRANTED one, delivered by different means,
+   * must BOTH be scrubbed (ISC-345).
+   *
+   * This probe exists because the first version of the fix failed it. The
+   * store and the env file do not hold two copies of one set: the store holds
+   * `secrets:` grants, while the env file additionally carries fleet-set
+   * credentials that were never grants and are still real variables —
+   * `OMLX_API_KEY` chief among them, which is armed because it is a credential
+   * but has no file in the store because it is not a `secrets:` entry.
+   *
+   * A resolver that took the store wholesale whenever the store was non-empty
+   * therefore dropped the LLM key from redaction while fixing the grants. That
+   * is a fix that trades one silent leak for another, and only a probe holding
+   * both kinds at once can tell the difference.
+   */
+  test("a store-delivered grant and an env-delivered fleet key both scrub (ISC-345)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-redact-both-"));
+    try {
+      const envPath = join(dir, "env");
+      const secretsDir = join(dir, "secrets");
+      const FLEET_KEY = "omlx-FAKE-fleet-key-8f3a91c0";
+      await writeFile(
+        envPath,
+        `${SECRET_NAMES_VAR}=OMLX_API_KEY,TICKET_API_TOKEN\n` +
+          `OMLX_API_KEY=${FLEET_KEY}\n` +
+          `TICKET_API_TOKEN_FILE=/secrets/TICKET_API_TOKEN\n`,
+      );
+      await writeWorkerSecretFiles(secretsDir, {
+        secretNames: ["TICKET_API_TOKEN"],
+        secretFiles: [{ name: "TICKET_API_TOKEN", value: CANARY }],
+      } as never);
+
+      const r = await redactorForWorkerEnv(envPath, secretsDir);
+      expect(r.unresolved, "neither delivery may be dropped").toEqual([]);
+      expect([...r.armed].sort()).toEqual(["OMLX_API_KEY", "TICKET_API_TOKEN"]);
+      const line = JSON.stringify({ a: CANARY, b: FLEET_KEY });
+      expect(r.redact(line)).not.toContain(CANARY);
+      expect(r.redact(line), "the env-delivered key must not be lost").not.toContain(FLEET_KEY);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The half that makes the probe above more than a happy path.
+   *
+   * A granted name with no value in EITHER layout must not be silently
+   * dropped. That `continue` is what turned a blinded redactor into a quiet
+   * one: the run said "protect TICKET_API_TOKEN", the redactor could not, and
+   * nothing anywhere said so.
+   */
+  test("a granted name that cannot be valued is reported, not skipped (ISC-345)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-redact-blind-"));
+    try {
+      const envPath = join(dir, "env");
+      // Armed by name, pointer only, and an EMPTY store — the exact on-disk
+      // shape of the run that leaked.
+      await writeFile(
+        envPath,
+        `${SECRET_NAMES_VAR}=TICKET_API_TOKEN\nTICKET_API_TOKEN_FILE=/secrets/TICKET_API_TOKEN\n`,
+      );
+      const r = await redactorForWorkerEnv(envPath, join(dir, "secrets"));
+      expect(r.unresolved, "the blinding must be visible").toEqual(["TICKET_API_TOKEN"]);
+      expect(r.armed, "and it must not claim to be armed for it").toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the redactor arms from a legacy env file that still carries values", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pifleet-redact-unit-"));
     try {
       const p = join(dir, "env");
       await writeFile(p, `OTHER=plain\n${SECRET_NAMES_VAR}=TICKET_API_TOKEN\nTICKET_API_TOKEN=${CANARY}\n`);
-      const r = await redactorForWorkerEnv(p);
+      // No secret store beside it: a run directory written before delivery
+      // moved. The fallback is what keeps those runs scrubbing.
+      const r = await redactorForWorkerEnv(p, join(dir, "secrets"));
       expect(r.source).toBe("env-file");
       expect(r.armed).toEqual(["TICKET_API_TOKEN"]);
       expect(r.redact(JSON.stringify({ t: CANARY }))).not.toContain(CANARY);
