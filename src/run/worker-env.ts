@@ -50,9 +50,33 @@
  * 10001 — this file is never opened by the worker and does not go through
  * `container/mounts.ts`. Nothing is lost by keeping it operator-only, and a
  * file holding even a Class 1 key should not be 0644 in a run directory.
+ *
+ * ## `secrets:` values are NOT in the environment at all — they are FILES
+ *
+ * The measurement that caused this. A worker was told, in its role prompt AND
+ * in its mounted skill, never to echo its credential. Its second command was
+ * `echo $TICKET_API_TOKEN | head -c 20`, and the full value landed in the
+ * host's `events.jsonl`, in the session transcript, and — because tool output
+ * is fed back to the model — on the wire to the inference server.
+ *
+ * Redacting those records stops the value PERSISTING. It does not stop it
+ * EXISTING: while the value is an environment variable, `echo $NAME`, `env`
+ * and `set` are all ordinary things for an agent to do, and each of them is
+ * one token away at every turn. So the value stops being an environment
+ * variable. `buildWorkerEnv` emits `<NAME>_FILE=<container path>` and the
+ * value is written to that path — a 0444 file under the run directory,
+ * bind-mounted read-only at `SECRETS_MOUNT`.
+ *
+ * WHAT THIS DOES NOT PREVENT, stated plainly because the gap is real: a worker
+ * can still `cat` the file, and anything it cats lands in exactly the same
+ * transcript. This converts an ACCIDENTAL disclosure — a variable swept up by
+ * `env`, or expanded into a command the agent did not think of as sensitive —
+ * into a DELIBERATE one that has to name the file. That is a narrower blast
+ * radius, not a seal, and it is not described here as if it were.
  */
 
-import { writeFile, chmod } from "node:fs/promises";
+import { writeFile, chmod, mkdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
 import { ConfigError } from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
@@ -83,6 +107,54 @@ const NEWLINE = /[\r\n]/;
 /** A key Docker will accept as an identifier; anything else is a bug upstream. */
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * Container path the per-worker secret store is mounted at, READ-ONLY.
+ *
+ * A root-level directory in the shape of `/skills:ro`, deliberately NOT under
+ * `/run`: `config/render.ts` mounts a 1 MiB `--tmpfs` at `/run` for the
+ * honeypot's socket, and a bind mount nested inside a tmpfs is an ordering
+ * question with a silent wrong answer. `/policy` was the other candidate and
+ * was declined because that directory means "rules ABOUT this worker"; this
+ * one means "material this worker holds", and one word of the container's
+ * layout is cheaper than a reader having to know which.
+ */
+export const SECRETS_MOUNT = "/secrets";
+
+/**
+ * The environment variable that POINTS AT a granted secret, given its name.
+ *
+ * `<NAME>_FILE`, the Docker-secrets convention, and one function rather than a
+ * template literal at each of the three sites that needs it — `buildWorkerEnv`
+ * emits it, the collision check tests it, and the skill documentation is
+ * written against it. Two spellings of this would diverge in the direction
+ * where the worker is handed a pointer under one name and looks for another,
+ * which surfaces as an unset variable deep inside an HTTP call.
+ */
+export function secretPointerName(name: string): string {
+  return `${name}_FILE`;
+}
+
+/** Where inside the container that name's value will be readable. */
+export function secretContainerPath(name: string): string {
+  return `${SECRETS_MOUNT}/${name}`;
+}
+
+/**
+ * One granted secret on its way to a file — the ONLY place in this plan a
+ * value can be.
+ *
+ * `secretNames` below is a `string[]` precisely so that no reporting surface
+ * can reach a value; this field is the deliberate exception, and it exists so
+ * that the value has exactly ONE path through the process: host environment →
+ * this array → a 0444 file. It is never merged into `vars`, so
+ * `serializeEnvFile` structurally cannot render it and the `--env-file` cannot
+ * contain it.
+ */
+export interface SecretFile {
+  name: string;
+  value: string;
+}
+
 export interface WorkerEnvPlan {
   /** The variables, in insertion order — the file is written in this order. */
   vars: Record<string, string>;
@@ -110,6 +182,20 @@ export interface WorkerEnvPlan {
    * by accident, because the object it is handed does not contain one.
    */
   secretNames: string[];
+  /**
+   * The same grants WITH their values, for the one consumer that needs them:
+   * `writeWorkerSecretFiles`.
+   *
+   * Parallel to `secretNames` rather than replacing it, and that is the whole
+   * design. Every REPORTING path — the stderr note in `materialize.ts`, a
+   * future ledger row — reads `secretNames` and is structurally incapable of
+   * reaching a value. Exactly one path reads this, and it writes bytes to a
+   * file rather than to any surface a human or a model reads.
+   *
+   * `readonly` because a caller that wanted to add a secret here would be
+   * adding one the intersection never approved.
+   */
+  secretFiles: readonly SecretFile[];
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +284,70 @@ export class SecretReservedNameError extends ConfigError {
         `have their own paths (SRD §12.4) and secrets: must not become a second one`,
     );
     this.name = "SecretReservedNameError";
+  }
+}
+
+/**
+ * The `<NAME>_FILE` pointer would land on a variable the fleet already owns.
+ *
+ * A refusal that exists only because the delivery changed. While a granted
+ * secret was written as `<NAME>=<value>` the reserved check on the REQUESTED
+ * name was complete; now each grant also writes a SECOND, derived name, and
+ * nothing about `secrets: [X]` tells an operator that `X_FILE` is being
+ * claimed too. Without this, a request whose derived name collided with a
+ * fleet variable would silently overwrite it — the fleet's own value replaced
+ * by a path, with no line anywhere saying so.
+ *
+ * Constructible today only by a fleet whose `llm.api_key_env` ends in `_FILE`
+ * — `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` and every other reserved spelling is
+ * already refused a step earlier by prefix. It is here because the cost is one
+ * comparison and the failure it prevents is invisible, not because the case is
+ * common.
+ */
+export class SecretPointerCollisionError extends ConfigError {
+  constructor(
+    readonly workerId: string,
+    /** See `SecretNotAllowlistedError.varName` on why this is not `name`. */
+    readonly varName: string,
+    readonly pointer: string,
+  ) {
+    super(
+      `worker "${workerId}" requests secret ${varName}, whose file pointer ${pointer} is a ` +
+        `variable the fleet already assigns — a granted secret is delivered as ` +
+        `${pointer}=<path>, so this request would overwrite the fleet's own value; rename ` +
+        `the secret or drop it from the worker's secrets:`,
+    );
+    this.name = "SecretPointerCollisionError";
+  }
+}
+
+/**
+ * A granted secret could not be written to, or read back from, its file.
+ *
+ * REFUSED at `up`, in the same shape as the two refusals above, and for the
+ * identical reason: a worker that starts with a credential file missing,
+ * truncated, or unreadable by its own uid does not fail at launch — it fails
+ * minutes later, inside whatever HTTP call needed the value, which is §5.9's
+ * quiet-failure shape exactly. The env file would be pointing at it and the
+ * pointer would look perfectly correct.
+ *
+ * Thrown by `writeWorkerSecretFiles` AFTER the write, from a re-read rather
+ * than from the write's own return: `writeFile` resolving is not evidence that
+ * the bytes are on disk at the right size and the right mode, and every one of
+ * those three is separately capable of producing a worker that starts and
+ * cannot authenticate.
+ */
+export class SecretFileWriteError extends Error {
+  constructor(
+    readonly varName: string,
+    readonly path: string,
+    reason: string,
+  ) {
+    super(
+      `the secret file for ${varName} at ${path} ${reason} — the worker's environment would ` +
+        `point at it and the credential would fail inside the first call that needed it`,
+    );
+    this.name = "SecretFileWriteError";
   }
 }
 
@@ -470,6 +620,7 @@ export function buildWorkerEnv(
   ]);
   const allowlist = loaded.config.secrets.env_allowlist;
   const secretNames: string[] = [];
+  const secretFiles: SecretFile[] = [];
   const missing: string[] = [];
   for (const requested of w.secrets) {
     // Dedupe silently: `secrets: [X, X]` is a typo with one obvious meaning,
@@ -481,6 +632,10 @@ export function buildWorkerEnv(
     if (!allowlist.includes(requested)) {
       throw new SecretNotAllowlistedError(w.id, requested, allowlist);
     }
+    const pointer = secretPointerName(requested);
+    if (reserved.has(pointer) || RESERVED_PREFIXES.some((p) => pointer.startsWith(p))) {
+      throw new SecretPointerCollisionError(w.id, requested, pointer);
+    }
     const value = hostEnv[requested];
     // Collected rather than thrown on first sight: an operator with three
     // unset variables should get all three names in one refusal, not learn
@@ -489,8 +644,39 @@ export function buildWorkerEnv(
       missing.push(requested);
       continue;
     }
+    /*
+     * A newline is refused HERE now, and this is a refusal PRESERVED rather
+     * than a refusal added.
+     *
+     * `serializeEnvFile` below already rejects a newline in any value, because
+     * docker's `--env-file` has no escaping and the remainder of the line
+     * becomes a second variable declaration. A granted secret used to pass
+     * through that check on its way into `vars`; it no longer enters `vars` at
+     * all, so without this line the guarantee would have quietly lapsed with
+     * the delivery change.
+     *
+     * It also happens to be what the documented `curl --config` call depends
+     * on: `skills/ticket-ops/SKILL.md` concatenates this file's bytes into a
+     * `header = "..."` line, and a newline in the middle of it would end the
+     * header and start a curl config directive from a credential store.
+     */
+    if (NEWLINE.test(value)) {
+      throw new ConfigError(
+        `the value of ${requested} contains a newline — it is delivered as a file whose bytes ` +
+          `are concatenated into a request header, so the remainder would become a separate ` +
+          `directive`,
+      );
+    }
     secretNames.push(requested);
-    vars[requested] = value;
+    /*
+     * The POINTER, never the value. This one line is the whole of ISC-337:
+     * `vars` is what `serializeEnvFile` renders and what `--env-file` carries,
+     * so a value that is never assigned into it cannot reach the environment
+     * of any process in the container — and `echo $TICKET_API_TOKEN` prints an
+     * empty line rather than a credential.
+     */
+    vars[pointer] = secretContainerPath(requested);
+    secretFiles.push({ name: requested, value });
   }
   if (missing.length > 0) throw new SecretMissingFromHostError(w.id, missing);
 
@@ -516,6 +702,7 @@ export function buildWorkerEnv(
     missingApiKey: apiKey === undefined || apiKey === "",
     apiKeyEnvName,
     secretNames,
+    secretFiles,
   };
 }
 
@@ -560,4 +747,133 @@ export async function writeWorkerEnvFile(
   // it world-readable.
   await chmod(path, 0o600);
   return text;
+}
+
+/**
+ * The mode a delivered secret file is left at, and the number is the one part
+ * of this change that does NOT match the brief it was built from.
+ *
+ * The brief asked for 0400. 0400 is owner-read-only, and the owner is the
+ * OPERATOR — while the process that has to read the file runs as uid
+ * `WORKER_UID` (10001), baked into the image. On a Linux Docker host a bind
+ * mount passes host ownership through untouched, so a 0400 file owned by the
+ * operator is simply unreadable to the worker: `cat "$TICKET_API_TOKEN_FILE"`
+ * returns EACCES, and the credential fails inside the first call that needed
+ * it. Matching the uids is not available — `container/mounts.ts` says so at
+ * length — and `chown` needs a privilege the CLI does not have.
+ *
+ * That failure is INVISIBLE on this machine and only on this machine, which is
+ * the recorded gotcha this repo has already paid for twice: the macOS Docker
+ * VM squashes bind-mount ownership to the container user, so 0400 reads back
+ * perfectly here and fails on the first Linux runner. `makeWorkerReadable`'s
+ * own docstring records the identical measurement for 0600, and CI is
+ * `ubuntu-latest`. Shipping 0400 would be re-committing a bug the repo has
+ * written down.
+ *
+ * So the file is 0444 — the tightest mode uid 10001 can actually read — and
+ * what 0400 was reaching for is bought a level up instead: `materialize.ts`
+ * tightens the WORKER DIRECTORY to 0700, which is what keeps another user on
+ * the host out. That works because a container never walks the host's
+ * directory chain (it enters at the mountpoint in its own namespace, measured
+ * and written up in `materialize.ts`), so a 0700 ancestor costs the worker
+ * nothing and costs a host-side snooper everything.
+ *
+ * The WRITE bit is withheld from everyone, including the owner, for the reason
+ * `makeWorkerReadable(file, false)` exists: the macOS squash makes a 0644 file
+ * read as owner-writable INSIDE the container, leaving only the `:ro` mount
+ * flag between a worker and its own credential store.
+ */
+export const SECRET_FILE_MODE = 0o444;
+
+/** Mode of the mounted directory itself — see `makeWorkerAccessible(dir, false)`. */
+export const SECRET_DIR_MODE = 0o755;
+
+/**
+ * Write one file per granted secret, then PROVE each one, refusing loudly if
+ * any part of that did not happen.
+ *
+ * The verification is not defensive padding. `writeFile` resolving says the
+ * syscalls returned; it does not say the file is the right size (a full disk
+ * truncates), is a regular file (a symlink planted between `mkdir` and
+ * `writeFile`), or carries a mode the worker can read (a `chmod` that raced an
+ * unusual filesystem). Each of those produces a container that starts, looks
+ * healthy, and cannot authenticate — so each is checked by reading the result
+ * back rather than by trusting the call.
+ *
+ * The values are consumed from `plan.secretFiles` and returned as PATHS. No
+ * value crosses this function's return boundary.
+ */
+export async function writeWorkerSecretFiles(
+  dir: string,
+  plan: WorkerEnvPlan,
+): Promise<string[]> {
+  await mkdir(dir, { recursive: true });
+  // The mounted inode's own mode is the only one the container consults, and
+  // it needs the execute bit to traverse into the files below.
+  await chmod(dir, SECRET_DIR_MODE);
+  const written: string[] = [];
+  for (const secret of plan.secretFiles) {
+    const path = join(dir, secret.name);
+    const bytes = Buffer.byteLength(secret.value, "utf8");
+    /*
+     * chmod-write-chmod, exactly as `materialize.ts` prescribes for the
+     * verbgate policy and for the same measured reason: on POSIX the owner of
+     * a 0444 file cannot open it for writing either, so a second pass over the
+     * same worker id — which `up` has produced before — would abort the launch
+     * over a mode this function set itself.
+     *
+     * Written IN PLACE (truncate + write), never tmp + rename: a bind mount
+     * pins the INODE, so a rename would swap the file the host sees while a
+     * running container kept reading the old one, with both sides believing
+     * the secret had been replaced.
+     */
+    await chmod(path, 0o600).catch(() => {});
+    /*
+     * The RAW value and NOTHING ELSE — no trailing newline, deliberately.
+     *
+     * The documented call in `skills/ticket-ops/SKILL.md` concatenates these
+     * bytes into a `header = "..."` line for `curl --config`, so a trailing
+     * newline would terminate the header mid-quote. It is also what makes the
+     * file's byte length equal to the value's, which is what the size check
+     * below is able to assert.
+     *
+     * Raw rather than a pre-formed curl config fragment: `secrets:` is a list
+     * of NAMES with no schema, so the fleet does not know whether a given one
+     * is a bearer token, a basic-auth password, or (as the shipped example
+     * shows) a base URL that is not a credential at all. Inventing a header
+     * format for it would be the delivery layer guessing at the vendor.
+     */
+    await writeFile(path, secret.value);
+    /*
+     * Tolerated, because the VERIFICATION below is the authority and this call
+     * is not. A `chmod` that cannot apply — the destination turned out to be a
+     * device node, a filesystem that does not carry POSIX modes — would
+     * otherwise escape as a raw errno thrown from the line that knows least
+     * about what went wrong. Swallowing it costs nothing: the mode is read
+     * back three lines down and a file the worker uid could not read is
+     * refused there, by name, with both modes in the message.
+     */
+    await chmod(path, SECRET_FILE_MODE).catch(() => {});
+
+    const st = await stat(path).catch(() => null);
+    if (st === null) throw new SecretFileWriteError(secret.name, path, "is not there after writing");
+    if (!st.isFile()) throw new SecretFileWriteError(secret.name, path, "is not a regular file");
+    if (st.size !== bytes) {
+      throw new SecretFileWriteError(
+        secret.name,
+        path,
+        `is ${st.size} bytes where the value is ${bytes}`,
+      );
+    }
+    if ((st.mode & 0o777) !== SECRET_FILE_MODE) {
+      throw new SecretFileWriteError(
+        secret.name,
+        path,
+        `is mode ${(st.mode & 0o777).toString(8)} where the worker uid needs ` +
+          `${SECRET_FILE_MODE.toString(8)}`,
+      );
+    }
+    written.push(path);
+  }
+  return written;
 }

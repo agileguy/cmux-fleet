@@ -67,7 +67,7 @@
  * reaches-no-model worker the old comment describes.
  */
 
-import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -96,7 +96,12 @@ import {
   workerContainerName,
 } from "./paths.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
-import { buildWorkerEnv, writeWorkerEnvFile } from "./worker-env.ts";
+import {
+  SECRETS_MOUNT,
+  buildWorkerEnv,
+  writeWorkerEnvFile,
+  writeWorkerSecretFiles,
+} from "./worker-env.ts";
 
 /**
  * Bounds on the skill-tree walk, matching the shape `security/repo-hazards.ts`
@@ -886,6 +891,64 @@ export async function materializeWorkerInputs(
      * property of there being one object, not of two computations agreeing.
      */
     const envPlan = buildWorkerEnv(loaded, w, process.env);
+
+    /**
+     * The secret store, written BEFORE the env file that points at it.
+     *
+     * The order is the point rather than an accident of where the code sits.
+     * The env file carries `<NAME>_FILE=/secrets/<NAME>` and nothing else about
+     * the credential, so an env file that exists while its files do not is a
+     * worker that starts, reads a perfectly well-formed pointer, and gets
+     * ENOENT inside its first authenticated call — §5.9's quiet-failure shape
+     * with an extra layer of plausibility on top. Writing the values first
+     * means the pointer never exists before the thing it points at.
+     *
+     * Gated on `w.secrets.length > 0`, which is the IDENTICAL predicate
+     * `render.ts` uses to decide whether to emit the `-v`. Two conditions that
+     * merely agree today would eventually not, and the failure is silent in
+     * the usual direction: Docker creates a missing bind-mount source rather
+     * than refusing, so a mount without a directory yields an empty `/secrets`
+     * and a worker that cannot explain itself.
+     */
+    if (w.secrets.length > 0) {
+      await establishing(`the secret files for ${workerId}`, async () => {
+        await refuseSymlinkDestination(paths.secretsDir);
+        for (const secret of envPlan.secretNames) {
+          await refuseSymlinkDestination(join(paths.secretsDir, secret));
+        }
+        /*
+         * TIGHTENING the worker directory to 0700, and the direction is what
+         * makes it safe.
+         *
+         * The secret files themselves must be 0444 — a Linux bind mount passes
+         * host ownership through and the worker runs as a baked uid, so an
+         * owner-only mode is unreadable exactly where the macOS squash is not
+         * there to hide it (see `SECRET_FILE_MODE`). World-readable bytes under
+         * a world-traversable run directory is a real host-side regression
+         * against the 0600 env file this replaces, so the protection moves up
+         * one level: at 0700 no other user on the host can traverse into
+         * `<run>/workers/<id>` at all.
+         *
+         * It costs the container NOTHING, and that is measured rather than
+         * assumed — the note on the outbox block above records it: a bind mount
+         * is established by the privileged runtime and the containerized
+         * process reaches the path at its MOUNTPOINT inside its own namespace.
+         * It never walks the host chain. The same block records that an
+         * operator running under `umask 077` has had this directory at 0700 all
+         * along, with every mount under it working, which is direct evidence
+         * for this line rather than an argument for it.
+         *
+         * That earlier block removed chmods which WIDENED ancestors for no
+         * container-side benefit. This is the opposite operation on the same
+         * insight, and it has a benefit those did not: it is the only thing
+         * standing between a 0444 credential file and every account on the box.
+         */
+        await chmod(paths.dir, 0o700);
+        await writeWorkerSecretFiles(paths.secretsDir, envPlan);
+        await makeWorkerAccessible(paths.secretsDir, false);
+      });
+    }
+
     await establishing(`the env file for ${workerId}`, async () => {
       await refuseSymlinkDestination(paths.envFile);
       await writeWorkerEnvFile(paths.envFile, envPlan);
@@ -915,15 +978,17 @@ export async function materializeWorkerInputs(
        * where the operator is already reading, rather than being inferable
        * only from a 0600 file they would have to go and open.
        *
-       * `envPlan.secretNames` and NOT `envPlan.vars`: the plan carries names
-       * and values in two different fields precisely so that a reporting line
-       * like this one cannot reach a value. There is no formatting discipline
-       * to get wrong here, because the field being interpolated does not
-       * contain the secret.
+       * `envPlan.secretNames` and NOT `envPlan.vars` or `envPlan.secretFiles`:
+       * the plan carries names and values in separate fields precisely so that
+       * a reporting line like this one cannot reach a value. There is no
+       * formatting discipline to get wrong here, because the field being
+       * interpolated does not contain the secret.
        */
       process.stderr.write(
         `pifleet: ${workerId} is granted host secrets by name: ` +
-          `${envPlan.secretNames.join(", ")} (values are written only to its 0600 env file)\n`,
+          `${envPlan.secretNames.join(", ")} (values are written to 0444 files under ` +
+          `${paths.secretsDir}, mounted read-only at ${SECRETS_MOUNT}; the worker's ` +
+          `environment carries only the paths)\n`,
       );
     }
 

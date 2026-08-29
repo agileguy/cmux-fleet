@@ -149,12 +149,26 @@ secrets:
   # TICKET_API_TOKEN never receives it, and a worker that asks for a name absent
   # from this list is refused at launch rather than started without it.
   #
+  # HOW A GRANTED NAME IS DELIVERED: as a FILE, never as its value. The value
+  # is written to a 0444 file under the worker's run directory and mounted
+  # read-only at /secrets, and the worker's environment gets `<NAME>_FILE`
+  # holding that path. So `echo $TICKET_API_TOKEN` inside a worker prints an
+  # empty line — the value is not an environment variable, which is what stops
+  # `env`, `set` and a stray expansion sweeping it into a transcript. A worker
+  # can still read the file deliberately; this narrows the accident, not the
+  # capability.
+  #
   # NEVER provider keys — see §12.4. That is enforced, not merely asked: names
   # the fleet assigns itself are reserved, so allowlisting a credential variable
   # cannot be used to route ADC into a `cloud_access: false` worker.
   env_allowlist:
     - TICKET_API_TOKEN       # the ticket system's write credential
-    - TICKET_BASE_URL        # not secret; this is the only env delivery channel
+    # NOT a secret, and it is here only because `secrets:` is the one per-worker
+    # delivery channel that exists. It rides the same file path as the
+    # credential — `TICKET_BASE_URL_FILE` names a file the worker `cat`s — which
+    # is harmless but is not what this list is for. A plain non-secret `env:`
+    # selector is the right home for it and does not exist yet.
+    - TICKET_BASE_URL
 
 # Extra holes in the deny-all bridge. Empty by default, and every entry here is
 # a decision rather than a detail.
@@ -305,7 +319,14 @@ roles:
     # A REQUEST drawn against `secrets.env_allowlist`, never a grant. A name the
     # fleet allowlist does not carry is refused at launch, loudly, rather than
     # quietly omitted — a credential that fails to arrive otherwise surfaces as
-    # a timeout deep inside an HTTP call.
+    # a timeout deep inside an HTTP call. So is a name that is set nowhere in
+    # the operator's environment, and so is a file that cannot be written.
+    #
+    # This worker therefore receives TICKET_API_TOKEN_FILE and
+    # TICKET_BASE_URL_FILE, each naming a path under /secrets. It receives
+    # neither value in its environment. `skills/ticket-ops/SKILL.md` documents
+    # the `curl --config` form that turns the first of those files into a
+    # request header without the value passing through a shell variable.
     secrets: [TICKET_API_TOKEN, TICKET_BASE_URL]
     # Sets HTTPS_PROXY so this worker has a ROUTE to the bridge proxy. It grants
     # no destination by itself — `egress.allow` above decides those, fleet-wide —
