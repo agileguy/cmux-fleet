@@ -26,6 +26,7 @@ import {
   DerivedFactsSchema,
   HarvestSchema,
   TaskEnvelopeSchema,
+  rank,
   type DerivedFacts,
   type Harvest,
   type HarvestStatus,
@@ -42,7 +43,7 @@ import {
   type OutboxLocation,
   type OutboxRead,
 } from "./outbox.ts";
-import { reconcileArtifactClaims } from "./reconcile.ts";
+import { reconcileArtifactClaims, TICKET_OPS_ARTIFACT_NAME } from "./reconcile.ts";
 
 export interface HarvestOptions {
   /** Attach the full diff text to `derived.diff` (`--include diff`, §8.4). */
@@ -96,6 +97,19 @@ export interface HarvestOptions {
   acceptanceBudgetMs?: number;
   /** Per-command ceiling, itself bounded by the run budget. */
   acceptancePerCommandMs?: number;
+  /**
+   * Secret VALUES to sweep a ticket-ops artifact for, as literal needles.
+   *
+   * Passed in for the same reason `harnessPatterns` is: harvest is handed a
+   * run directory and must not resolve config from the cwd. It is also passed
+   * in rather than read here for a second reason that is about the values
+   * themselves — `up` writes a worker's credentials into a 0600 env file and
+   * nothing else, and a harvester that went looking for them would put
+   * plaintext credentials into the process that renders the report. A caller
+   * that legitimately holds them can supply them; the default is none, and the
+   * schema's own credential-hygiene rules run either way.
+   */
+  secrets?: readonly string[];
 }
 
 export interface TaskHarvest {
@@ -332,7 +346,9 @@ export async function harvestTask(
      * would have been a measurement nothing RECORDED, which is the ISC-153
      * defect rather than that one.
      */
-    const reconciled = await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc);
+    const reconciled = await reconcileArtifactClaims(scan, claimed?.artifacts ?? null, loc, {
+      secrets: opts.secrets,
+    });
     discrepancies.push(...reconciled.discrepancies);
 
     if (outbox.kind === "ok" && git.ok && git.facts.base_is_ancestor) {
@@ -569,6 +585,34 @@ export async function harvestTask(
     let verdict = adj.verdict;
     reasons.push(...adj.reasons);
     discrepancies.push(...adj.discrepancies);
+
+    /**
+     * ISC-332: a ticket-ops artifact that failed validation caps the verdict.
+     *
+     * WHY HERE AND NOT IN `adjudicate`. The adjudicator is handed derived facts
+     * and a claim; it never sees a descriptor, so artifact CONTENT is the one
+     * class of evidence it structurally cannot weigh. Pushing the finding into
+     * `discrepancies` alone would have left a ticketing task returning
+     * `success` with "this artifact is malformed" printed underneath it — the
+     * criterion's "surprise at read time", relocated rather than removed.
+     *
+     * WHY IT IS A CLAMP AND NOT AN ASSIGNMENT. `rank("unknown")` is -1, below
+     * every gradeable verdict, so a harvest that already refused to certify —
+     * ISC-154's voided tree, ISC-151's rewritten base — is left exactly as it
+     * was. Nothing is weighed on top of voided evidence, and a bad artifact
+     * cannot promote `unknown` into the more definite-sounding `failed`.
+     *
+     * WHY BEFORE THE SUPERVISOR OVERRIDE. `aborted` and `timed_out` are facts
+     * about the RUN and must still win: a task killed at its deadline is
+     * reported as killed, not as having written a bad artifact.
+     */
+    if (reconciled.verdictCeiling !== null && rank(verdict) > rank(reconciled.verdictCeiling)) {
+      verdict = reconciled.verdictCeiling;
+      reasons.push(
+        `a ${TICKET_OPS_ARTIFACT_NAME} artifact in the outbox failed validation, so what the ` +
+          `worker did to the ticket system cannot be read from its own report (ISC-332)`,
+      );
+    }
 
     // The supervisor's terminal verdicts outrank derived evidence: `aborted`
     // and `timed_out` are facts about the RUN, not inferences from the tree
