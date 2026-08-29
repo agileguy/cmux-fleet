@@ -76,6 +76,96 @@ export interface IsaClaim {
 
 export const ISA_CLAIMS: readonly IsaClaim[] = [
   {
+    isc: "ISC-334",
+    grade: "[x]",
+    claim:
+      "The env plan assigns the POINTER and never the value. This is the single line the whole " +
+      "criterion rests on: `vars` is what `serializeEnvFile` renders and what `--env-file` " +
+      "carries, so a value never assigned into it cannot reach any process in the container. " +
+      "Pinned on the ASSIGNMENT rather than on a count of mentions, because `secretContainerPath` " +
+      "appears in prose in this repo's comments and an editor tidying those must not be able to " +
+      "turn the claim red. It goes red if someone restores `vars[requested] = value`, which is " +
+      "exactly the mutation ISC-334 was proved against.",
+    argv: ["grep", "-nF", "vars[pointer] = secretContainerPath(requested);", "src/run/worker-env.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-334",
+    grade: "[x]",
+    claim:
+      "NO name under `secrets:` is assigned into the env plan by its own name. An ABSENCE claim, " +
+      "and the direction matters: the claim above pins what the code DOES, and this pins what it " +
+      "must never go back to doing. `vars[requested]` is the exact expression that put a " +
+      "credential in a durable artifact and on the wire to the inference server, and a future " +
+      "edit could reintroduce it beside the pointer rather than in place of it — which every " +
+      "assertion pinned on the pointer's presence would survive.",
+    argv: ["grep", "-rnF", "vars[requested] = value", "src/"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-337",
+    grade: "[x]",
+    claim:
+      "The secret store's mount is emitted READ-ONLY, from the path `run/paths.ts` names, and " +
+      "there is exactly one of it. Pinned on the whole `-v` expression including the `:ro` " +
+      "suffix, so it goes red on three separate regressions that have no other symptom: the " +
+      "flag being dropped, the path being joined at the mount site instead of taken from " +
+      "`workerPaths()` (ISC-188's shape, where Docker silently creates the missing source), and " +
+      "the mount being deleted outright.",
+    argv: [
+      "grep",
+      "-nF",
+      "argv.push(\"-v\", `${opts.worker.secretsDir}:${SECRETS_MOUNT}:ro`);",
+      "src/config/render.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-336",
+    grade: "[~]",
+    claim:
+      "The worker directory holding the store is TIGHTENED to 0700, which is what makes the " +
+      "0444 file mode safe on the host rather than a regression against the 0600 env file it " +
+      "replaced. Pinned because it is the load-bearing half of a two-part trade and the half " +
+      "with no visible symptom if it disappears: removing it leaves every probe in the suite " +
+      "green except the one that reads the mode back, and leaves a world-readable credential " +
+      "under a world-traversable run directory. The grade is `[~]` because the mode deviates " +
+      "from the commissioned 0400 — see the entry for why 0400 is unreadable to the worker uid " +
+      "on Linux and invisibly fine on macOS.",
+    argv: ["grep", "-nF", "await chmod(paths.dir, 0o700);", "src/run/materialize.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-338",
+    grade: "[x]",
+    claim:
+      "The anti-criterion is proved by SPAWNING a shell, not by inspecting an object. `/bin/sh` " +
+      "runs with the env plan as its entire environment and `$TICKET_API_TOKEN` must expand to " +
+      "nothing. Pinned as a `nonempty` claim because what can go wrong here is the probe being " +
+      "SILENTLY WEAKENED — rewritten as `expect(plan.vars[...]).toBeUndefined()`, which asserts " +
+      "something about a JavaScript object rather than about what a worker's shell prints, and " +
+      "which no checkbox anywhere would notice had happened.",
+    argv: [
+      "grep",
+      "-nF",
+      "const p = Bun.spawn([\"/bin/sh\", \"-c\", `printf %s \"${expr}\"`], {",
+      "test/unit/worker-secret-files.test.ts",
+    ],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-339",
+    grade: "[x]",
+    claim:
+      "The secret writer VERIFIES by reading back, rather than trusting `writeFile` to have " +
+      "resolved. Pinned on the `stat` because that call is the whole refusal: with it replaced " +
+      "by a fabricated result — the mutation this criterion was proved against — a full disk, a " +
+      "device node, or a mode the worker uid cannot read all produce a launch that reports " +
+      "success and a container that cannot authenticate.",
+    argv: ["grep", "-nF", "const st = await stat(path).catch(() => null);", "src/run/worker-env.ts"],
+    expect: 1,
+  },
+  {
     isc: "ISC-263",
     grade: "[x]",
     claim:
