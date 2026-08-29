@@ -69,7 +69,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { ZodError } from "zod";
 import { parseTicketOpsArtifact, type ResultEnvelope, type Verdict } from "../contracts.ts";
 import {
@@ -163,6 +163,30 @@ const READ_CHUNK_BYTES = 64 * 1024;
 export const TICKET_OPS_ARTIFACT_NAME = "ticket-ops.json";
 
 /**
+ * The HUMAN half of the same document — the one that opts nothing in.
+ *
+ * `skills/ticket-ops/SKILL.md` instructs a worker to write
+ * `/outbox/<task-id>/files/ticket-ops.json` AND `ticket-ops.md`, "the same
+ * content, once for a machine and once for a person". A worker that writes
+ * only the `.md` therefore satisfies a reader and bypasses BOTH checks keyed
+ * on the name above: the schema validation and the credential sweep. Neither
+ * reports a failure, because neither runs.
+ *
+ * That is the defect this constant exists to make visible, and it is worse
+ * than an unvalidated document. The sweep is what looks for the credential the
+ * worker was holding while it talked to the ticket system; a document that
+ * escapes it has been neither checked nor cleared, and the harvest's silence
+ * about it is indistinguishable from a clean result.
+ *
+ * DERIVED from the JSON name rather than spelled out, so the pair cannot
+ * drift. If the validated artifact is ever renamed, the document that must
+ * accompany it is renamed in the same edit, and a reader looking for the
+ * relationship finds it stated instead of having to notice that two string
+ * literals share a stem.
+ */
+export const TICKET_OPS_DOCUMENT_NAME = `${basename(TICKET_OPS_ARTIFACT_NAME, ".json")}.md`;
+
+/**
  * The verdict a failed ticket-ops validation clamps the task to.
  *
  * `failed` and not `partial`, taken from the role's own table: the `ticket-ops`
@@ -230,6 +254,21 @@ export interface ArtifactReconciliation {
    * and it cannot overrule the supervisor's terminal verdicts.
    */
   verdictCeiling: Verdict | null;
+  /**
+   * WHY the ceiling landed, in the words the harvest's `reasons` should carry.
+   * `null` exactly when `verdictCeiling` is.
+   *
+   * It travels WITH the ceiling rather than being reconstructed at the call
+   * site, and that is a correctness fix rather than tidiness. `harvest/index.ts`
+   * used to render one fixed sentence for any ceiling this module raised — "a
+   * ticket-ops.json artifact in the outbox failed validation" — which was true
+   * of the only cause that existed. It is FALSE of a document that was never
+   * written: nothing failed validation, and telling an operator it did sends
+   * them looking for a malformed file that is not there. A second cause with
+   * one shared sentence is how a report starts lying about its own evidence,
+   * and the cheapest place to stop that is here, where the cause is known.
+   */
+  verdictCeilingReason: string | null;
 }
 
 /** What reading one held descriptor produced. */
@@ -467,6 +506,25 @@ export async function reconcileArtifactClaims(
   const artifacts: ReconciledArtifact[] = [];
   const secrets = opts.secrets ?? [];
   let verdictCeiling: Verdict | null = null;
+  let verdictCeilingReason: string | null = null;
+  /**
+   * Raise the ceiling and record its cause together, so neither can be set
+   * without the other.
+   *
+   * The two fields are one fact and a `verdictCeiling = X` that forgot its
+   * reason would publish a clamp the harvest cannot explain. Kept as a helper
+   * rather than as a discipline: there are three call sites already.
+   *
+   * FIRST CAUSE WINS. All three raise the same `failed`, so the ceiling itself
+   * is unaffected by the order; the reason is not, and the earliest one is the
+   * one nearest the evidence. Every cause also pushes its own `discrepancies`
+   * line, so nothing is lost by naming one in `reasons` — the full set is still
+   * printed underneath.
+   */
+  const clampTo = (v: Verdict, why: string): void => {
+    verdictCeiling = v;
+    verdictCeilingReason ??= why;
+  };
 
   // The only region a claim may name. Deliberately `files/` and not the task
   // outbox: `result.json` sits beside it and is the envelope, not an artifact,
@@ -560,6 +618,117 @@ export async function reconcileArtifactClaims(
     }
   }
 
+  /**
+   * A `ticket-ops.md` WITH NO `ticket-ops.json` BESIDE IT — the half of the
+   * document that opts nothing in, arriving alone.
+   *
+   * ## The defect, measured
+   *
+   * `skills/ticket-ops/SKILL.md` tells a worker to write both halves. A live
+   * ticketing worker wrote only `files/ticket-ops.md`. Everything downstream
+   * read as clean, and the reason it read as clean is that NOTHING RAN: both
+   * the schema validation above and the credential sweep inside it are keyed
+   * on `TICKET_OPS_ARTIFACT_NAME`, so a document that is never written under
+   * that name is never parsed and never swept for the credential the worker
+   * was holding while it talked to the ticket system. The harvest's silence
+   * was not a clean bill of health; it was the absence of an examination, and
+   * the two are indistinguishable in a report that says neither.
+   *
+   * So the finding's job is to state the consequence rather than the fact. "No
+   * ticket-ops.json" is a filing complaint an operator can shrug at; "the
+   * schema validation and the credential sweep did not run on this document"
+   * is the thing they actually need to know.
+   *
+   * ## SIBLINGS, and not "somewhere in the outbox"
+   *
+   * The scan walks `files/` recursively, so `ticket-ops.json` can legitimately
+   * live in a subdirectory. Pairing is therefore per-DIRECTORY: a `.json` two
+   * directories away is a different document about different work, and
+   * accepting it as the pair would let one validated file vouch for any number
+   * of unvalidated documents elsewhere in the tree. `dirname` on the RAW host
+   * path for the same reason the selection above uses the raw one — an escaped
+   * copy is a rendering, and two files must not be able to become siblings, or
+   * stop being siblings, by how their names print.
+   *
+   * ## DECIDED BEFORE ANY CONTENT IS READ, deliberately
+   *
+   * Same reasoning as the reverse-direction pass above, and the same
+   * suppression it closes: this is a statement about which NAMES exist, so it
+   * must not sit anywhere a byte-cap refusal or a read errno could skip it. A
+   * worker that could turn the finding off by making one of the two files
+   * enormous would be choosing whether it is graded.
+   *
+   * ## A limit, stated rather than left to be discovered
+   *
+   * `scan.safe` holds only entries the scan ACCEPTED. A `ticket-ops.md` that
+   * the scan refused — a symlink, a FIFO, an entry past the descriptor budget
+   * — is not seen here and produces no pairing finding; its refusal is already
+   * a discrepancy of its own. The converse is the useful case and it does
+   * work: a `.md` accepted beside a `.json` the scan REFUSED fires this
+   * finding, which is a gap the byte-cap clamp above could never reach,
+   * because a refused entry never enters the digest loop at all.
+   */
+  {
+    const jsonDirs = new Set<string>();
+    const orphanedDocs: string[] = [];
+    for (const f of ordered) {
+      const name = basename(f.path);
+      if (name === TICKET_OPS_ARTIFACT_NAME) jsonDirs.add(dirname(f.path));
+    }
+    for (const f of ordered) {
+      if (basename(f.path) !== TICKET_OPS_DOCUMENT_NAME) continue;
+      if (jsonDirs.has(dirname(f.path))) continue;
+      orphanedDocs.push(f.path);
+    }
+    for (const path of orphanedDocs) {
+      discrepancies.push(
+        `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} at ${safeForReport(path)} with no ` +
+          `${TICKET_OPS_ARTIFACT_NAME} beside it, so the ticket-ops schema validation and the ` +
+          `credential sweep DID NOT RUN on it; this document is unchecked, not clean`,
+      );
+    }
+    if (orphanedDocs.length > 0) {
+      /**
+       * IT CLAMPS, and the argument is the one `TICKET_OPS_FAILURE_CEILING`
+       * already makes rather than a new one.
+       *
+       * That constant exists because an artifact that cannot be read leaves
+       * "nothing known about what the worker did to a system of record other
+       * people share". A document written only in prose is that same state
+       * exactly: the machine-readable half that would say which fields were
+       * sent, what came back, and whether the two matched was never produced,
+       * so the round-trip result the skill's own table turns into a verdict is
+       * unavailable. The block above already treats "too large to check" as
+       * distinct from "checked and clean"; "never written in a checkable form"
+       * is the same distinction, reached by an easier route.
+       *
+       * The clamp also carries the credential half, which the malformed-document
+       * case does not. A `.json` that fails validation was at least SWEPT — the
+       * sweep runs inside `parseTicketOpsArtifact` — and this one was not. A
+       * report that graded it `success` would be certifying a document nothing
+       * has looked at for the token the worker was granted.
+       *
+       * WHY A CLAMP RATHER THAN A DISCREPANCY, when the two layout findings in
+       * `harvest/index.ts` are discrepancies only: this one is attributable.
+       * The file is inside THIS task's `files/` directory, so it is this task's
+       * output and this task's verdict is the right thing to lower. An
+       * unexplained directory under the worker's outbox belongs to no task, and
+       * clamping every task of that worker on it would lower verdicts on
+       * evidence that names none of them.
+       *
+       * It is still a CEILING and the `rank` guard at the call site still
+       * applies, so `unknown` (rank -1) is untouched. Nothing is weighed on top
+       * of evidence the harvest already refused to certify.
+       */
+      clampTo(
+        TICKET_OPS_FAILURE_CEILING,
+        `the outbox holds ${TICKET_OPS_DOCUMENT_NAME} with no ${TICKET_OPS_ARTIFACT_NAME} ` +
+          `beside it, so neither the schema validation nor the credential sweep ran on the ` +
+          `worker's account of what it did to the ticket system`,
+      );
+    }
+  }
+
   let spent = 0;
 
   for (const f of ordered) {
@@ -592,7 +761,11 @@ export async function reconcileArtifactClaims(
         `ticket-ops artifact ${safeForReport(f.path)} could not be validated: ` +
           `the harvester declined to read it (${outcome.kind})`,
       );
-      verdictCeiling = TICKET_OPS_FAILURE_CEILING;
+      clampTo(
+        TICKET_OPS_FAILURE_CEILING,
+        `a ${TICKET_OPS_ARTIFACT_NAME} artifact in the outbox failed validation, so what the ` +
+          `worker did to the ticket system cannot be read from its own report (ISC-332)`,
+      );
     }
     switch (outcome.kind) {
       case "ok": {
@@ -603,7 +776,12 @@ export async function reconcileArtifactClaims(
             discrepancies.push(
               `ticket-ops artifact ${safeForReport(f.path)} ${safeForReport(problem, 512)}`,
             );
-            verdictCeiling = TICKET_OPS_FAILURE_CEILING;
+            clampTo(
+              TICKET_OPS_FAILURE_CEILING,
+              `a ${TICKET_OPS_ARTIFACT_NAME} artifact in the outbox failed validation, so what ` +
+                `the worker did to the ticket system cannot be read from its own report ` +
+                `(ISC-332)`,
+            );
           }
         }
         // The raw path stays the matching key above; only the PUBLISHED copy
@@ -635,7 +813,7 @@ export async function reconcileArtifactClaims(
         discrepancies.push(
           `artifact reconciliation stopped after ${spent} bytes; the per-task cap is ${MAX_RECONCILED_BYTES} — remaining artifacts were not digested`,
         );
-        return { discrepancies, artifacts, verdictCeiling };
+        return { discrepancies, artifacts, verdictCeiling, verdictCeilingReason };
       case "unreadable":
         /**
          * THE DEFECT THIS CATCHES REACHED `main` ONCE ALREADY.
@@ -657,5 +835,5 @@ export async function reconcileArtifactClaims(
     }
   }
 
-  return { discrepancies, artifacts, verdictCeiling };
+  return { discrepancies, artifacts, verdictCeiling, verdictCeilingReason };
 }

@@ -39,12 +39,14 @@ import { worktreeContentHash } from "../run/treehash.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
   readResultEnvelope,
+  safeForReport,
   withOutboxScan,
   type OutboxLocation,
   type OutboxRead,
 } from "./outbox.ts";
+import { dispatchedTaskIds, unexplainedOutboxDirs } from "./layout.ts";
 import { resolveWorkerNeedles } from "./needles.ts";
-import { reconcileArtifactClaims, TICKET_OPS_ARTIFACT_NAME } from "./reconcile.ts";
+import { reconcileArtifactClaims } from "./reconcile.ts";
 
 export interface HarvestOptions {
   /** Attach the full diff text to `derived.diff` (`--include diff`, §8.4). */
@@ -249,7 +251,70 @@ export async function harvestTask(
   } else if (outbox.kind === "missing") {
     // Not a failure (ISC-94): the repo facts stand on their own.
     reasons.push("no result envelope; verdict rests on derived facts alone");
+    /**
+     * AND IT IS A DISCREPANCY, which is the part that was missing.
+     *
+     * The line above is not new and it is not enough. `reasons` is where the
+     * harvest explains HOW it reached its verdict — every entry there is
+     * procedural, most are benign, and "verdict rests on derived facts alone"
+     * reads like one of the benign ones. `discrepancies` is the channel §8.4
+     * publishes for things that DISAGREE with the contract, and it is the one
+     * an operator scans. A dispatched task with no envelope was visible only in
+     * the first, phrased as a routine note, so a worker that never wrote its
+     * result produced a report indistinguishable from a worker that did.
+     *
+     * MEASURED: a live worker completed a task, wrote no `result.json`
+     * anywhere, and its output was accepted with no complaint. Nothing in the
+     * harvest was wrong; nothing in it said this either.
+     *
+     * NO CLAMP, and the restraint is ISC-94's, not timidity. A missing envelope
+     * is explicitly not a failure — a worker can be killed after committing
+     * real work, and the diff still speaks for it. Clamping here would convert
+     * every crash-after-commit into `failed` on evidence that says nothing
+     * about the work, which is a worse report than the silence it replaces. The
+     * defect was never a missing verdict; it was a missing STATEMENT.
+     *
+     * The CONTAINER spelling of the path, not the host one. It is the path the
+     * worker was given in its brief and the only one it could have written to,
+     * so it is the string an operator compares against what the worker
+     * actually did.
+     */
+    discrepancies.push(
+      `dispatched task ${safeForReport(taskId)} has no result envelope at ` +
+        `/outbox/${safeForReport(taskId)}/result.json; the worker's own account of what it did ` +
+        `is absent, so nothing it claims was checked`,
+    );
   }
+
+  /**
+   * THE OUTBOX'S LAYOUT, checked against what was dispatched.
+   *
+   * Everything below this line reads `<outbox>/<task-id>/`, and until now
+   * nothing asked whether the worker had put anything there. A worker that
+   * writes to a directory of its own naming produces an empty region, an empty
+   * scan, an empty reconciliation and a clean report — the harvest is correct
+   * at every step and says nothing at all. `harvest/layout.ts` carries the
+   * measurement.
+   *
+   * NOT A CLAMP, and this is the one place the three new findings are graded
+   * differently from each other, so the reasoning is worth stating here rather
+   * than only in the module.
+   *
+   * An unexplained directory is a fact about the WORKER's outbox, and the
+   * harvest cannot attribute it to any task — that is precisely what makes it
+   * unexplained. One worker serves many tasks, so clamping on it would lower
+   * the verdict of every task that worker ran, including the ones whose own
+   * output was complete and correct, on evidence that names none of them. The
+   * unpaired `ticket-ops.md` clamp in `reconcile.ts` is attributable — the file
+   * is inside this task's own `files/` — and that difference is the whole
+   * reason one clamps and this does not.
+   *
+   * It is also not, on its own, evidence that the work failed. The diff is
+   * still there and still speaks for what happened; what is lost is the
+   * artifact, and the finding says so in the terms that matter: nothing inside
+   * that directory was scanned, validated, or swept for credentials.
+   */
+  discrepancies.push(...(await unexplainedOutboxDirs(run, envelope.worker)));
 
   /**
    * From here to the end of the function, this scan is THIS function's to own.
@@ -656,9 +721,27 @@ export async function harvestTask(
      */
     if (reconciled.verdictCeiling !== null && rank(verdict) > rank(reconciled.verdictCeiling)) {
       verdict = reconciled.verdictCeiling;
+      /**
+       * THE REASON COMES FROM THE RECONCILER, not from this line.
+       *
+       * It used to be one fixed sentence, and that was correct while a failed
+       * schema parse was the only thing that could raise the ceiling. There is
+       * now a second cause — a `ticket-ops.md` written with no
+       * `ticket-ops.json` beside it, so nothing validated and nothing swept —
+       * and "failed validation" is FALSE of it: no document was parsed,
+       * nothing failed, and an operator told otherwise goes looking for a
+       * malformed file that does not exist. Two causes sharing one sentence is
+       * a report misdescribing its own evidence, so the cause now travels with
+       * the ceiling and this site prints what it was handed.
+       *
+       * The `??` is unreachable by construction — `clampTo` sets both fields
+       * together and neither is settable alone — and it is here so that a
+       * future edit which breaks that pairing degrades to a vague reason
+       * rather than to `undefined` in an operator's report.
+       */
       reasons.push(
-        `a ${TICKET_OPS_ARTIFACT_NAME} artifact in the outbox failed validation, so what the ` +
-          `worker did to the ticket system cannot be read from its own report (ISC-332)`,
+        reconciled.verdictCeilingReason ??
+          `an artifact in the outbox capped this task's verdict at ${reconciled.verdictCeiling}`,
       );
     }
 
@@ -736,16 +819,21 @@ export async function harvestTask(
 
 /** Every dispatched task in the run — the single end-of-fanout call (§8.4). */
 export async function harvestAll(run: RunPaths, opts: HarvestOptions = {}): Promise<TaskHarvest[]> {
-  let entries: string[];
-  try {
-    entries = await readdir(run.inboxDir);
-  } catch {
-    return []; // a run with no dispatches has an empty, valid harvest
-  }
-  const taskIds = entries
-    .filter((e) => e.endsWith(".json") && !e.startsWith("."))
-    .map((e) => e.slice(0, -".json".length))
-    .sort();
+  /*
+   * The dispatched set comes from `harvest/layout.ts`, which is also what the
+   * unexplained-directory check compares outbox directory names against. ONE
+   * function answers "which tasks did this run dispatch", for the reason
+   * ISC-345 states: two readers of one fact, written independently, is how one
+   * of them goes blind while the other keeps working. Here the drift would be
+   * silent in the worst direction — a task this loop harvested but that
+   * function did not recognise would be reported as an unexplained directory
+   * on every sibling task's harvest, forever, for having been dispatched
+   * normally.
+   *
+   * An unreadable inbox still yields an empty list, so a run with no
+   * dispatches still has an empty, valid harvest.
+   */
+  const taskIds = await dispatchedTaskIds(run);
   const out: TaskHarvest[] = [];
   // Sequential on purpose: several tasks can share a worktree, and concurrent
   // `git` invocations against one worktree contend on the index lock (F23).
