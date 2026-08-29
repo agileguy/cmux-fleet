@@ -844,7 +844,16 @@ export async function writeWorkerSecretFiles(
      * format for it would be the delivery layer guessing at the vendor.
      */
     await writeFile(path, secret.value);
-    await chmod(path, SECRET_FILE_MODE);
+    /*
+     * Tolerated, because the VERIFICATION below is the authority and this call
+     * is not. A `chmod` that cannot apply — the destination turned out to be a
+     * device node, a filesystem that does not carry POSIX modes — would
+     * otherwise escape as a raw errno thrown from the line that knows least
+     * about what went wrong. Swallowing it costs nothing: the mode is read
+     * back three lines down and a file the worker uid could not read is
+     * refused there, by name, with both modes in the message.
+     */
+    await chmod(path, SECRET_FILE_MODE).catch(() => {});
 
     const st = await stat(path).catch(() => null);
     if (st === null) throw new SecretFileWriteError(secret.name, path, "is not there after writing");

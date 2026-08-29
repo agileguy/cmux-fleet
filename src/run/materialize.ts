@@ -96,7 +96,12 @@ import {
   workerContainerName,
 } from "./paths.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
-import { buildWorkerEnv, writeWorkerEnvFile, writeWorkerSecretFiles } from "./worker-env.ts";
+import {
+  SECRETS_MOUNT,
+  buildWorkerEnv,
+  writeWorkerEnvFile,
+  writeWorkerSecretFiles,
+} from "./worker-env.ts";
 
 /**
  * Bounds on the skill-tree walk, matching the shape `security/repo-hazards.ts`
@@ -973,15 +978,17 @@ export async function materializeWorkerInputs(
        * where the operator is already reading, rather than being inferable
        * only from a 0600 file they would have to go and open.
        *
-       * `envPlan.secretNames` and NOT `envPlan.vars`: the plan carries names
-       * and values in two different fields precisely so that a reporting line
-       * like this one cannot reach a value. There is no formatting discipline
-       * to get wrong here, because the field being interpolated does not
-       * contain the secret.
+       * `envPlan.secretNames` and NOT `envPlan.vars` or `envPlan.secretFiles`:
+       * the plan carries names and values in separate fields precisely so that
+       * a reporting line like this one cannot reach a value. There is no
+       * formatting discipline to get wrong here, because the field being
+       * interpolated does not contain the secret.
        */
       process.stderr.write(
         `pifleet: ${workerId} is granted host secrets by name: ` +
-          `${envPlan.secretNames.join(", ")} (values are written only to its 0600 env file)\n`,
+          `${envPlan.secretNames.join(", ")} (values are written to 0444 files under ` +
+          `${paths.secretsDir}, mounted read-only at ${SECRETS_MOUNT}; the worker's ` +
+          `environment carries only the paths)\n`,
       );
     }
 
