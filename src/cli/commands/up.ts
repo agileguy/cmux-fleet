@@ -318,39 +318,46 @@ export function register(program: Command): void {
       await mkdir(run.ledgerDir, { recursive: true });
       await mkdir(run.inboxDir, { recursive: true });
       /*
-       * `sessions` is born OWNER-ONLY, and is widened only when a container is
-       * actually going to need it (ISC-335).
+       * `sessions` is CREATED owner-only and then widened deliberately, and
+       * the ordering is the whole of what changed (ISC-335).
        *
        * What is under here is every worker's entire conversation — each tool
        * call, each result, and on 2026-08-28 the 41-character API token a
-       * worker echoed on its second command. The directory used to be created
-       * at the umask default and chmod-ed to 0777 one line later, so it was
-       * world-traversable from `mkdir` onward and stayed 0777 for every run,
-       * whether or not anything needed it to be.
+       * worker echoed on its second command. It used to be created at the
+       * umask default and chmod-ed one line later, so there was a real window
+       * in which it existed at a mode nobody chose. `mode` is applied by
+       * `mkdir(2)` itself, so the first state this directory is ever in is
+       * 0700 and the widen below is a deliberate act on a known starting
+       * point rather than a correction of an accident.
        *
-       * `mode` is applied by `mkdir(2)` itself, so there is no window: the
-       * first state this directory is ever in is 0700.
+       * THE WIDEN IS UNCONDITIONAL, and an earlier draft of this that made it
+       * conditional on `useDouble` was WRONG in a way worth recording. Workers
+       * run as uid 10001 (`WORKER_UID`), a Linux bind mount passes host
+       * ownership through, and a 0700 directory owned by the operator leaves a
+       * worker unable to create its own transcript at all — the macOS VM
+       * squashes ownership and hides that completely. But the deciding fact is
+       * not the platform: `up` renders and materializes a full container mount
+       * table on EVERY run, `/sessions` is in it, and
+       * `test/integration/up-wiring.test.ts` asserts that every `-v` source
+       * exists at the mode the mount needs. Skipping the widen put the
+       * directory out of step with a mount table that was still being
+       * produced, which is precisely the divergence that guard exists to
+       * catch, and it caught it. A mode that disagrees with the mount table is
+       * a worse defect than a directory that is wider than one run needed.
        *
-       * THE WIDEN IS NOT REMOVED, because for a containerised run it is not
-       * optional. Workers run as uid 10001 (`WORKER_UID`), a Linux bind mount
-       * passes host ownership through, and a 0700 directory owned by the
-       * operator leaves the worker unable to create its own transcript at all.
-       * The macOS VM squashes ownership and hides that completely, so a
-       * Mac-green proof of "0700 works" is exactly the evidence not to trust
-       * here. What changes is that the widen is CONDITIONAL: a double run is
-       * one uid end to end and has no reason to open this to the whole box.
-       *
-       * WHAT THIS DOES NOT CLAIM. The transcript FILE is written by Pi, not by
-       * pifleet, so its mode is Pi's umask — and 0600 on it is not merely
-       * unimplemented here, it is unreachable for a containerised run: the
-       * host harvester must READ that file while the container uid must WRITE
-       * it, the two share no group, so any mode denying other users denies one
-       * of the two. Containment for that file is therefore the directory,
-       * which is the whole reason this line is worth getting right.
+       * SO THE TRANSCRIPT FILE IS NOT PROTECTED BY ITS MODE, and this is the
+       * honest statement rather than a gap left implicit. It is created by Pi,
+       * not by pifleet, so its mode is Pi's umask; and 0600 on it is not
+       * merely unimplemented but UNREACHABLE in the current two-uid design,
+       * because the host harvester must READ that file while the container uid
+       * must WRITE it and the two share no group — any mode that denies other
+       * users denies one of the two. `events.jsonl`, which is written by the
+       * supervisor and read by nothing in a container, has no such conflict
+       * and IS 0600 from its first byte.
        */
       await mkdir(run.sessionsDir, { recursive: true, mode: 0o700 });
       await mkdir(run.workersDir, { recursive: true });
-      if (!useDouble) await makeWorkerAccessible(run.sessionsDir, true);
+      await makeWorkerAccessible(run.sessionsDir, true);
 
       // Mint the run's control-socket secret (SRD §12.7) before launching
       // anything that listens or calls: the daemon and every supervisor read

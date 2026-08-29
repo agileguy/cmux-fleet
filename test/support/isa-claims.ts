@@ -868,11 +868,11 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     isc: "ISC-335",
     grade: "[x]",
     claim:
-      "Both creators of `<run>/sessions` agree on 0700 — `up.ts` and `supervisor/index.ts`. " +
-      "Two creators of one directory disagreeing on mode is `run/paths.ts`'s opening warning " +
-      "in permission bits, and a count below two means one of them drifted back.",
+      "`<run>/sessions` is CREATED 0700 and widened deliberately, rather than created at the " +
+      "umask default and corrected. Empty means the mode came off the `mkdir` and the window " +
+      "between creation and the widen is back.",
     argv: ["grep", "-rn", "run.sessionsDir, { recursive: true, mode: 0o700 }", "src/"],
-    expect: 2,
+    expect: 1,
   },
   {
     isc: "ISC-336",

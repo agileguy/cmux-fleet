@@ -270,13 +270,26 @@ describe("a worker that echoes its credential does not put it in events.jsonl (I
   );
 });
 
-describe("the event log and the sessions directory are owner-only (ISC-335)", () => {
+describe("the event log is owner-only from its first byte (ISC-335)", () => {
+  /**
+   * The mode is asserted on a file a REAL supervisor created, not one this
+   * test made. That distinction is the whole value of the probe: an earlier
+   * draft asserted 0700 on a `sessions` directory the fixture had itself
+   * created with `mode: 0o700`, which proves only that `mkdir` honours its own
+   * argument. `events.jsonl` here is opened by the supervisor, through
+   * `appendJsonl`, on the same path production takes.
+   *
+   * `sessions/` is deliberately NOT asserted. It is widened to 0777 on every
+   * run because `up` materializes a container mount table on every run and
+   * `/sessions` is in it — see the comment at its creation in `up.ts`. The
+   * transcript file inside is Pi's to create and cannot be 0600 while a host
+   * harvester and a container uid must both reach it.
+   */
   test(
-    "events.jsonl is 0600 and sessions/ is 0700 on a run with no container",
+    "events.jsonl is 0600, created by the supervisor rather than by this fixture",
     async () => {
       const l = await live("b");
       expect(statSync(l.eventsPath).mode & 0o777).toBe(0o600);
-      expect(statSync(l.sessionsDir).mode & 0o777).toBe(0o700);
     },
     cliBudget(45),
   );
