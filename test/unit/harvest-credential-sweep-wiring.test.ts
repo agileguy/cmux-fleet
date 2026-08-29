@@ -24,11 +24,23 @@
  *
  * A leak assertion over a fixture whose artifact the outbox scan refuses, or
  * whose envelope never parses, passes for the one reason that proves nothing.
- * Worse for this particular criterion: a fixture that produces `failed` for
- * some unrelated reason would make the "verdict degrades" assertion vacuous.
- * The first two tests measure the fixture — a clean artifact reconciles with no
- * finding, and its verdict is NOT the clamp value — so the leak test's two
- * assertions have somewhere to move from.
+ * Worse for this particular criterion: a fixture that cannot reach `success`
+ * would satisfy every "not success" assertion below for a reason unrelated to
+ * the sweep. The first test measures the fixture — a clean artifact reconciles
+ * with no finding and harvests `success` — so "degrades to failed" below is a
+ * movement rather than a coincidence.
+ *
+ * ## Why this fixture builds a REAL git repository
+ *
+ * The same reason `harvest-ticket-ops-wiring.test.ts` does, and it is not
+ * optional here. `harvest-reconcile-wiring.test.ts` gets away with
+ * `host_workdir: "unset"` because it asserts only on `discrepancies`. This file
+ * asserts on the VERDICT, and the clamp is deliberately a clamp:
+ * `rank("unknown")` is -1, below every gradeable verdict, so a harvest with no
+ * worktree is left exactly as it was and a credential hit would appear to
+ * change nothing. A fixture without a base commit and a change on top of it
+ * would make the criterion's central assertion untestable — while looking
+ * green if it were written the other way round.
  *
  * ## THE SECRET IN THIS FILE IS SYNTHETIC
  *
@@ -92,24 +104,47 @@ function ticketOps(notes: string): string {
   });
 }
 
+async function sh(argv: string[], cwd: string): Promise<string> {
+  const p = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(p.stdout).text();
+  if ((await p.exited) !== 0) {
+    throw new Error(`${argv.join(" ")} failed: ${await new Response(p.stderr).text()}`);
+  }
+  return out;
+}
+
 /**
- * A run directory with one dispatched task, an outbox holding a ticket-ops
- * document, and — the part this file is about — a worker whose GRANT is
- * recorded and whose env file carries the value.
+ * A run whose task would harvest `success` — a real base commit, a real change
+ * on top of it, an envelope whose `files_changed` agrees with the diff — plus
+ * the part this file is about: a worker whose GRANT is recorded in its launch
+ * record and whose 0600 env file carries the value.
  *
- * `host_workdir: "unset"` for the reason the reconcile-wiring fixture records:
- * `harvestTask` skips `deriveGitFacts` without a worktree, so the probe reaches
- * the outbox path without standing up a git repository nothing would look at.
+ * The ticket-ops document is claimed verbatim, so the reconciler's own
+ * over/under-claim findings stay silent and any discrepancy this file sees is
+ * the one it is looking for.
  *
- * `granted` is what `up` would have written into `launch.json`. Passing `null`
- * models the `PIFLEET_PI_COMMAND` double — no launch record at all — which is
- * how the run directory looks when no container was ever started.
+ * `granted: null` models the `PIFLEET_PI_COMMAND` double — no launch record at
+ * all, which is how a run directory looks when no container was ever started
+ * and therefore when no env file was ever handed to anything.
  */
 async function scaffold(opts: {
   notes: string;
   granted: Record<string, string> | null;
 }): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "pifleet-sweep-wiring-"));
+  const repo = join(root, "repo");
+  await mkdir(repo, { recursive: true });
+  await sh(["git", "init", "-q", "-b", "main"], repo);
+  await sh(["git", "config", "user.email", "fixture@example.test"], repo);
+  await sh(["git", "config", "user.name", "fixture"], repo);
+  await writeFile(join(repo, "README.md"), "base\n");
+  await sh(["git", "add", "-A"], repo);
+  await sh(["git", "commit", "-qm", "base"], repo);
+  const base = (await sh(["git", "rev-parse", "HEAD"], repo)).trim();
+  await writeFile(join(repo, "note.txt"), "the worker's change\n");
+  await sh(["git", "add", "-A"], repo);
+  await sh(["git", "commit", "-qm", "work"], repo);
+
   const run = runPaths(RUN_ID, join(root, "runs"));
   await mkdir(run.inboxDir, { recursive: true });
   await writeFile(
@@ -125,11 +160,11 @@ async function scaffold(opts: {
       dispatched_at: new Date().toISOString(),
       title: TASK,
       brief: "credential sweep fixture",
-      repo: root,
-      host_workdir: "unset",
+      repo,
+      host_workdir: repo,
       container_workdir: "/workspace",
-      branch: `fleet/${RUN_ID}/${WORKER}`,
-      base_ref: "0000000000000000000000000000000000000000",
+      branch: "main",
+      base_ref: base,
       outbox: `/outbox/${TASK}`,
       deadline_s: 1500,
     }),
@@ -175,6 +210,8 @@ async function scaffold(opts: {
       epoch: 1,
       worker: WORKER,
       status: "success",
+      branch: "main",
+      files_changed: [{ path: "note.txt", change: "added" }],
       artifacts: [{ kind: "file", path: `/outbox/${TASK}/files/ticket-ops.json` }],
     }),
   );
@@ -201,14 +238,14 @@ describe("the harvest sweeps a worker's own output for the credentials it was gr
         expect(harvest.reasons.join("\n")).not.toContain("outbox file refused");
         expect(harvest.derived.artifacts.map((a) => a.path).join(" ")).toContain("ticket-ops.json");
         expect(ticketFindings(harvest.discrepancies)).toEqual([]);
-        // And the baseline verdict is NOT the clamp value, so "degrades to
-        // failed" below is a movement rather than a coincidence.
-        expect(harvest.verdict).not.toBe(CEILING);
+        // And the fixture GRADES: a clean run of it reaches the top verdict,
+        // so "degrades to failed" below is a movement and not a coincidence.
+        expect(harvest.verdict).toBe("success");
       } finally {
         await f.cleanup();
       }
     },
-    cliBudget(1),
+    cliBudget(3),
   );
 
   /**
@@ -237,7 +274,7 @@ describe("the harvest sweeps a worker's own output for the credentials it was gr
         await f.cleanup();
       }
     },
-    cliBudget(1),
+    cliBudget(3),
   );
 
   /**
@@ -271,7 +308,7 @@ describe("the harvest sweeps a worker's own output for the credentials it was gr
         await f.cleanup();
       }
     },
-    cliBudget(1),
+    cliBudget(3),
   );
 
   /**
@@ -301,7 +338,7 @@ describe("the harvest sweeps a worker's own output for the credentials it was gr
         await without.cleanup();
       }
     },
-    cliBudget(2),
+    cliBudget(6),
   );
 
   /**
@@ -328,7 +365,7 @@ describe("the harvest sweeps a worker's own output for the credentials it was gr
       try {
         const q = await harvestTask(quiet.run, TASK);
         expect(ticketFindings(q.harvest.discrepancies)).toEqual([]);
-        expect(q.harvest.verdict).not.toBe(CEILING);
+        expect(q.harvest.verdict).toBe("success");
 
         const l = await harvestTask(loud.run, TASK);
         expect(ticketFindings(l.harvest.discrepancies)).toHaveLength(1);
@@ -338,6 +375,6 @@ describe("the harvest sweeps a worker's own output for the credentials it was gr
         await loud.cleanup();
       }
     },
-    cliBudget(2),
+    cliBudget(6),
   );
 });
