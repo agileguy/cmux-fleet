@@ -281,6 +281,50 @@ describe("the names and the values travel in one file", () => {
   });
 
   /**
+   * A FLEET-SET credential and a GRANTED one, delivered by different means,
+   * must BOTH be scrubbed (ISC-345).
+   *
+   * This probe exists because the first version of the fix failed it. The
+   * store and the env file do not hold two copies of one set: the store holds
+   * `secrets:` grants, while the env file additionally carries fleet-set
+   * credentials that were never grants and are still real variables —
+   * `OMLX_API_KEY` chief among them, which is armed because it is a credential
+   * but has no file in the store because it is not a `secrets:` entry.
+   *
+   * A resolver that took the store wholesale whenever the store was non-empty
+   * therefore dropped the LLM key from redaction while fixing the grants. That
+   * is a fix that trades one silent leak for another, and only a probe holding
+   * both kinds at once can tell the difference.
+   */
+  test("a store-delivered grant and an env-delivered fleet key both scrub (ISC-345)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-redact-both-"));
+    try {
+      const envPath = join(dir, "env");
+      const secretsDir = join(dir, "secrets");
+      const FLEET_KEY = "omlx-FAKE-fleet-key-8f3a91c0";
+      await writeFile(
+        envPath,
+        `${SECRET_NAMES_VAR}=OMLX_API_KEY,TICKET_API_TOKEN\n` +
+          `OMLX_API_KEY=${FLEET_KEY}\n` +
+          `TICKET_API_TOKEN_FILE=/secrets/TICKET_API_TOKEN\n`,
+      );
+      await writeWorkerSecretFiles(secretsDir, {
+        secretNames: ["TICKET_API_TOKEN"],
+        secretFiles: [{ name: "TICKET_API_TOKEN", value: CANARY }],
+      } as never);
+
+      const r = await redactorForWorkerEnv(envPath, secretsDir);
+      expect(r.unresolved, "neither delivery may be dropped").toEqual([]);
+      expect([...r.armed].sort()).toEqual(["OMLX_API_KEY", "TICKET_API_TOKEN"]);
+      const line = JSON.stringify({ a: CANARY, b: FLEET_KEY });
+      expect(r.redact(line)).not.toContain(CANARY);
+      expect(r.redact(line), "the env-delivered key must not be lost").not.toContain(FLEET_KEY);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
    * The half that makes the probe above more than a happy path.
    *
    * A granted name with no value in EITHER layout must not be silently

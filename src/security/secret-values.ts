@@ -177,34 +177,56 @@ export async function resolveGrantedSecretValues(
   }
 
   /*
-   * `size > 0` and not "every name resolved": a partially-populated store is
-   * still the current layout, and falling back to the env file for the missing
-   * names would look like a fix while actually reading pointers. Those names
-   * belong in `unresolved`, where a caller has to see them.
+   * PER-NAME, not all-or-nothing, and this was got wrong once already.
+   *
+   * The first version of this function took the store wholesale when the store
+   * had anything in it, on the reasoning that a half-populated store is still
+   * the current layout and falling back would "look like a fix while actually
+   * reading pointers". That reasoning does not survive contact with what the
+   * two files actually hold.
+   *
+   * They are not two layouts of the same set. The store holds the `secrets:`
+   * GRANTS. The env file additionally holds fleet-set credentials that were
+   * never grants and are still delivered as real variables — `OMLX_API_KEY`
+   * above all, which `SECRET_NAMES_VAR` arms the redactor for because it is a
+   * credential, but which has no file in the store because it is not a
+   * `secrets:` entry. Taking the store wholesale therefore DROPPED the LLM key
+   * from redaction: measured against the run that produced this module, where
+   * the fixed redactor armed the two grants and reported `OMLX_API_KEY`
+   * unresolved — a name the broken version had been scrubbing correctly.
+   *
+   * The pointer worry it was guarding against does not exist, because the
+   * fallback looks up the BARE name and a pointer is only ever stored under
+   * `<NAME>_FILE`. There is no lookup here that can return a path.
+   *
+   * So: each name takes its value from the store if it has one there, and from
+   * the env file otherwise. `unresolved` then means what it says — no layout
+   * had it — instead of meaning "the other layout had it and I did not look".
    */
-  let vars: Map<string, string>;
-  let source: SecretValueSource;
-  if (fromStore.size > 0) {
-    vars = fromStore;
-    source = "store";
-  } else {
-    const text = await readCapped(envFilePath, MAX_SECRET_READ_BYTES);
-    if (text === null) {
-      return { values: new Map(), source: "none", unresolved: [...granted] };
-    }
-    vars = parseEnvFile(text);
-    source = "env-file";
-  }
+  const envText = await readCapped(envFilePath, MAX_SECRET_READ_BYTES);
+  const fromEnv = envText === null ? new Map<string, string>() : parseEnvFile(envText);
 
   const values = new Map<string, string>();
   const unresolved: string[] = [];
+  let usedStore = false;
+  let usedEnv = false;
   for (const name of granted) {
-    const v = vars.get(name);
+    const v = fromStore.get(name) ?? fromEnv.get(name);
     if (v === undefined || v.length < MIN_RESOLVED_LENGTH) {
       unresolved.push(name);
       continue;
     }
+    if (fromStore.has(name)) usedStore = true;
+    else usedEnv = true;
     values.set(name, v);
   }
-  return { values, source: values.size === 0 ? "none" : source, unresolved };
+
+  /*
+   * The store WINS the label when both contributed, because the question the
+   * label answers is "is this run on the current delivery layout" — and a run
+   * whose grants come from files is, whatever else its env file also carries.
+   */
+  const source: SecretValueSource =
+    values.size === 0 ? "none" : usedStore ? "store" : usedEnv ? "env-file" : "none";
+  return { values, source, unresolved };
 }

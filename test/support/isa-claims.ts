@@ -176,7 +176,16 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "That is ISC-333's defect restored by its own sibling, and it fails GREEN: the delivery " +
       "tests assert the value is absent from the env file, which is the same fact that blinds " +
       "the sweep.",
-    argv: ["grep", "-nF", "valuesFromStore(wp, granted)", "src/harvest/needles.ts"],
+    // Pins the CALL, which moved to the shared resolver under ISC-345 after
+    // the same defect turned up in a second reader. The criterion is unchanged
+    // — the sweep still reads the store — only the function that answers
+    // "where do values live" is now shared instead of local.
+    argv: [
+      "grep",
+      "-nF",
+      "resolveGrantedSecretValues(wp.secretsDir, wp.envFile, granted)",
+      "src/harvest/needles.ts",
+    ],
     expect: 1,
   },
   {
@@ -230,6 +239,39 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "curl -sS --fail-with-body --max-time 60 --config",
       "skills/ticket-ops/SKILL.md",
     ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-345",
+    grade: "[x]",
+    claim:
+      "There is exactly ONE module that answers where a granted secret's value lives, and both " +
+      "consumers call it. Empty means someone re-implemented the lookup locally — which is the " +
+      "condition that produced the leak: two independently-written readers, each with its own " +
+      "env-file parser, one of them fixed when delivery moved and the other forgotten until a " +
+      "live credential reached an event log.",
+    argv: ["grep", "-rln", "resolveGrantedSecretValues", "src/"],
+    expect: 3,
+  },
+  {
+    isc: "ISC-345",
+    grade: "[x]",
+    claim:
+      "The redactor takes the secret store as a REQUIRED parameter, so a future delivery move " +
+      "is a compile error at every call site rather than a silent no-op. Empty means the " +
+      "parameter went away or became optional, which restores the exact failure mode: existing " +
+      "callers keep compiling while reading a file that no longer holds the values.",
+    argv: ["grep", "-nF", "secretsDir: string,", "src/security/redact.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-345",
+    grade: "[x]",
+    claim:
+      "A granted name the redactor cannot value is REPORTED rather than skipped. Empty means " +
+      "the `continue` is back: the run says protect this, the redactor cannot, and nothing " +
+      "anywhere says so. That silence is why the leak survived review and CI both.",
+    argv: ["grep", "-nF", "readonly unresolved: readonly string[];", "src/security/redact.ts"],
     expect: 1,
   },
   {
