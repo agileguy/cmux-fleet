@@ -1286,3 +1286,339 @@ export const AttendedRecordSchema = z.object({
   voided: z.array(VoidedRequirementSchema).max(MAX_ITEMS).default([]),
 });
 export type AttendedRecord = z.infer<typeof AttendedRecordSchema>;
+
+// ---------------------------------------------------------------------------
+// Ticket-ops artifact — what the `ticketing` role leaves in its outbox.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a write REPLACED a field or APPENDED to it.
+ *
+ * Recorded per field and not per ticket because these fields append by
+ * default: a "replace" that omits the vendor's overwrite flag returns 200 and
+ * silently concatenates. Naming the intended mode is what lets the read-back
+ * comparison below mean something — without it, a stored value that CONTAINS
+ * the sent value is consistent with both a correct append and a failed
+ * replace, and those need different人 responses.
+ */
+export const TicketFieldModeSchema = z.enum(["replace", "append"]);
+export type TicketFieldMode = z.infer<typeof TicketFieldModeSchema>;
+
+/**
+ * How the re-fetched value compared against what was sent.
+ *
+ * `sanitized` and `mismatch` are separate because they ask for different
+ * things from the reader. `sanitized` means the server kept the text and
+ * dropped markup — the ticket reads correctly and the formatting is gone.
+ * `mismatch` means the stored value is neither what was sent nor a subset of
+ * it, which is where a silent append lands. `unverified` is the one that must
+ * never be mistaken for either: the re-fetch itself failed, so the stored
+ * state is UNKNOWN and a person has to go and look.
+ */
+export const TicketMatchSchema = z.enum(["exact", "sanitized", "mismatch", "unverified"]);
+export type TicketMatch = z.infer<typeof TicketMatchSchema>;
+
+/**
+ * One field written on one ticket, with the round trip that judged it.
+ *
+ * THE POINT OF THIS TYPE is that `match` is not taken on trust. The schema
+ * holds `sent` and `read_back` side by side and re-derives the comparison
+ * itself, so a worker cannot record `exact` next to two values that differ.
+ * That is the separation `HarvestedArtifactSchema` draws between what was
+ * MEASURED and what was CLAIMED, applied one level down: the two values are
+ * the measurement, `match` is the claim, and the claim is checked against the
+ * measurement at parse time rather than by a human at read time.
+ */
+export const TicketFieldWriteSchema = z
+  .object({
+    field: shortStr,
+    mode: TicketFieldModeSchema,
+    /** Exactly what went over the wire, after the block renderer ran. */
+    sent: text,
+    /** What a second GET returned. Null ONLY when that GET failed. */
+    read_back: text.nullable(),
+    match: TicketMatchSchema,
+    /** Which tags were dropped, or why the re-fetch failed. Required unless exact. */
+    detail: text.default(""),
+  })
+  .superRefine((v, ctx) => {
+    // `unverified` and a null read-back are the same fact spelled two ways.
+    // Letting them disagree would allow "I could not check" to be recorded as
+    // a check that passed, which is the most expensive thing this document can
+    // get wrong: it is the difference between a known state and an unknown one
+    // in a system other people are reading.
+    if ((v.read_back === null) !== (v.match === "unverified")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["match"],
+        message:
+          `field "${v.field}": match "${v.match}" and a ` +
+          `${v.read_back === null ? "null" : "non-null"} read_back disagree — a null ` +
+          `read_back is exactly "unverified" and nothing else`,
+      });
+      return;
+    }
+    if (v.match === "exact" && v.read_back !== v.sent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["match"],
+        message: `field "${v.field}": match "exact" but read_back differs from sent`,
+      });
+    }
+    if ((v.match === "sanitized" || v.match === "mismatch") && v.read_back === v.sent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["match"],
+        message: `field "${v.field}": match "${v.match}" but read_back equals sent`,
+      });
+    }
+    if (v.match !== "exact" && v.detail.trim() === "") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["detail"],
+        message: `field "${v.field}": match "${v.match}" needs a detail saying what differed`,
+      });
+    }
+  });
+export type TicketFieldWrite = z.infer<typeof TicketFieldWriteSchema>;
+
+/** Best-first, so a verdict can be compared against the evidence under it. */
+const STATUS_RANK: Record<Status, number> = { success: 0, partial: 1, blocked: 2, failed: 3 };
+
+/** The floor a field's `match` puts under the verdict of the ticket holding it. */
+const MATCH_FLOOR: Record<TicketMatch, Status> = {
+  exact: "success",
+  sanitized: "partial",
+  mismatch: "partial",
+  unverified: "failed",
+};
+
+/**
+ * One ticket the task named, what was asked of it, and what actually landed.
+ *
+ * `requested` is prose and `fields` is measurement, deliberately. A reader who
+ * was not here needs the intent to judge whether the write was the RIGHT write
+ * at all — the round trip can only tell them it was the write that was sent.
+ */
+export const TicketUpdateSchema = z
+  .object({
+    ticket: shortStr,
+    /** What the task envelope asked for on this ticket, in a sentence or two. */
+    requested: text,
+    fields: z.array(TicketFieldWriteSchema).max(MAX_ITEMS).default([]),
+    verdict: StatusSchema,
+  })
+  .superRefine((v, ctx) => {
+    // A verdict may be WORSE than its evidence — a worker is free to downgrade
+    // itself for a reason the fields do not carry. It may never be better.
+    // Same direction as the result envelope's own rule: downgrade yes, upgrade
+    // never.
+    let floor: Status = "success";
+    for (const f of v.fields) {
+      const m = MATCH_FLOOR[f.match];
+      if (STATUS_RANK[m] > STATUS_RANK[floor]) floor = m;
+    }
+    if (STATUS_RANK[v.verdict] < STATUS_RANK[floor]) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["verdict"],
+        message:
+          `ticket "${v.ticket}": verdict "${v.verdict}" outranks its own read-backs, ` +
+          `which support at best "${floor}"`,
+      });
+    }
+  });
+export type TicketUpdate = z.infer<typeof TicketUpdateSchema>;
+
+/** One field read back on a query. A value, not a summary — the role does the reading. */
+export const TicketFieldReadSchema = z.object({
+  field: shortStr,
+  value: text.nullable(),
+});
+export type TicketFieldRead = z.infer<typeof TicketFieldReadSchema>;
+
+/** One ticket a query looked at. */
+export const TicketQuerySchema = z.object({
+  ticket: shortStr,
+  fields: z.array(TicketFieldReadSchema).max(MAX_ITEMS).default([]),
+});
+export type TicketQuery = z.infer<typeof TicketQuerySchema>;
+
+/**
+ * The two shapes of credential leak a schema CAN see, and therefore must.
+ *
+ * These do not detect a leaked token — nothing here knows what the token is
+ * (`findCredentialLeaks` below is that half). They detect the two SHAPES a
+ * credential arrives in when a worker records the call it made: a populated
+ * `Authorization` header, and a token-bearing query parameter. Both are things
+ * the `ticket-ops` skill tells the worker never to produce, and a rule that
+ * lives only in prose is a rule that holds until the day it does not.
+ *
+ * `<redacted>` is exempt, because recording the header WITH its value elided
+ * is exactly the behaviour being asked for.
+ */
+const AUTH_HEADER_RE = /authorization\s*:\s*(?:token|bearer|basic)\s+(?!<redacted>)\S/i;
+const CRED_QUERY_RE = /[?&](?:token|api_?key|access_token|auth|password)=[^&\s]/i;
+
+/** Every string in a value, with a dotted path to each. */
+function walkStrings(
+  node: unknown,
+  path: string,
+  out: Array<{ path: string; value: string }>,
+): void {
+  if (typeof node === "string") {
+    out.push({ path, value: node });
+  } else if (Array.isArray(node)) {
+    node.forEach((v, i) => walkStrings(v, `${path}[${i}]`, out));
+  } else if (node !== null && typeof node === "object") {
+    for (const [k, v] of Object.entries(node)) {
+      walkStrings(v, path === "" ? k : `${path}.${k}`, out);
+    }
+  }
+}
+
+/**
+ * The document the `ticketing` role writes to `/outbox/<task-id>/files/`.
+ *
+ * WHO THIS IS FOR, because it changes what belongs in it: the human operator,
+ * not the orchestrator. The orchestrator reads the result envelope and stops.
+ * It holds no credential for the ticket API and has no route to it, so
+ * anything it would have to re-fetch in order to check is of no use to it.
+ * This document is where the evidence goes instead, so that a person who was
+ * not present can reconstruct what happened to a system of record that other
+ * people read.
+ */
+export const TicketOpsArtifactSchema = z
+  .object({
+    schema: z.literal("pifleet.ticket-ops/v1"),
+    task_id: shortStr,
+    worker: workerId,
+    epoch: z.number().int().nonnegative(),
+    operation: z.enum(["query", "update"]),
+    /** Host only — never a full URL, and never one with credentials in it. */
+    ticket_host: shortStr,
+    generated_at: z.string().datetime(),
+    /**
+     * The tickets already said what the task wanted them to say.
+     *
+     * A first-class field rather than an inference from `updates: []`, because
+     * the two are different outcomes that would otherwise look identical: one
+     * checked and found nothing to do, the other did nothing. A role rewarded
+     * for producing changes will produce changes, and the cheapest way to stop
+     * that is to give "no change was needed" somewhere honest to be recorded.
+     */
+    no_change_needed: z.boolean().default(false),
+    queried: z.array(TicketQuerySchema).max(MAX_ITEMS).default([]),
+    updates: z.array(TicketUpdateSchema).max(MAX_ITEMS).default([]),
+    /** The calls made, with each Authorization value elided. Advisory. */
+    commands: z.array(shortStr).max(MAX_ITEMS).default([]),
+    verdict: StatusSchema,
+    notes: text.default(""),
+  })
+  .superRefine((v, ctx) => {
+    if (v.operation === "query" && v.updates.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["updates"],
+        message: "a query artifact records no updates — a write makes it an update artifact",
+      });
+    }
+    if (v.operation === "update" && v.no_change_needed && v.updates.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["no_change_needed"],
+        message: "no_change_needed is set but updates were recorded",
+      });
+    }
+    // An update that changed nothing and did not SAY it changed nothing is the
+    // gap a worker falls into when it means to report honestly and forgets.
+    if (v.operation === "update" && !v.no_change_needed && v.updates.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["updates"],
+        message:
+          "an update artifact with no updates must set no_change_needed — " +
+          "silence and 'nothing needed doing' are different outcomes",
+      });
+    }
+    let floor: Status = "success";
+    for (const u of v.updates) {
+      if (STATUS_RANK[u.verdict] > STATUS_RANK[floor]) floor = u.verdict;
+    }
+    if (STATUS_RANK[v.verdict] < STATUS_RANK[floor]) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["verdict"],
+        message: `artifact verdict "${v.verdict}" outranks its worst ticket verdict "${floor}"`,
+      });
+    }
+    const strings: Array<{ path: string; value: string }> = [];
+    walkStrings(v, "", strings);
+    for (const s of strings) {
+      if (AUTH_HEADER_RE.test(s.value)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [s.path],
+          message: `${s.path}: an Authorization header value must be elided as <redacted>`,
+        });
+      }
+      if (CRED_QUERY_RE.test(s.value)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [s.path],
+          message: `${s.path}: a credential-bearing query parameter must never be recorded`,
+        });
+      }
+    }
+  });
+export type TicketOpsArtifact = z.infer<typeof TicketOpsArtifactSchema>;
+
+/**
+ * Where a known secret VALUE appears in an artifact, by path.
+ *
+ * The schema's own hygiene rules catch the two shapes a credential is recorded
+ * IN. They cannot catch the token pasted somewhere unexpected, because a
+ * schema does not know what the token is. This does — it is handed the values
+ * from the environment and looks for them literally.
+ *
+ * Separate from the schema on purpose: the schema is a pure function of the
+ * document and runs anywhere, while this needs the process's secrets and so
+ * belongs at the boundary that already holds them. Empty and blank secrets are
+ * skipped, because an empty needle matches everywhere and would report the
+ * whole document as a leak — which is the same as reporting nothing.
+ */
+export function findCredentialLeaks(artifact: unknown, secrets: readonly string[]): string[] {
+  const needles = secrets.filter((s) => typeof s === "string" && s.trim() !== "");
+  if (needles.length === 0) return [];
+  const strings: Array<{ path: string; value: string }> = [];
+  walkStrings(artifact, "", strings);
+  const hits: string[] = [];
+  for (const s of strings) {
+    for (const n of needles) {
+      if (s.value.includes(n)) hits.push(s.path === "" ? "<root>" : s.path);
+    }
+  }
+  return [...new Set(hits)];
+}
+
+/**
+ * Parse a ticket-ops artifact and refuse it if a known secret is inside.
+ *
+ * One entry point rather than two calls a caller has to remember to pair,
+ * since the failure mode of forgetting the second is a credential published
+ * into a harvested artifact — which `reconcile` then digests, records the
+ * sha256 of, and renders in `pifleet artifacts`.
+ */
+export function parseTicketOpsArtifact(
+  raw: unknown,
+  secrets: readonly string[] = [],
+): TicketOpsArtifact {
+  const parsed = TicketOpsArtifactSchema.parse(raw);
+  const leaks = findCredentialLeaks(parsed, secrets);
+  if (leaks.length > 0) {
+    throw new Error(
+      `ticket-ops artifact contains a credential at: ${leaks.join(", ")} — refusing to publish it`,
+    );
+  }
+  return parsed;
+}

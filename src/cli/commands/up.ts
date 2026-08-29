@@ -6,6 +6,7 @@ import { EXIT } from "../../contracts.ts";
 import { Stopwatch } from "../../rpc/client.ts";
 import { newRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
 import { materializeWorkerInputs } from "../../run/materialize.ts";
+import { buildWorkerEnv } from "../../run/worker-env.ts";
 import { readWorkerState, runBudgetRecord, writePresentation } from "../../run/state.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import {
@@ -102,6 +103,37 @@ export function assertModelsAllowed(loaded: LoadedConfig, workerIds: readonly st
   for (const workerId of workerIds) {
     if (!defined.has(workerId)) continue;
     assertModelAllowed(loaded, resolveWorker(loaded, workerId));
+  }
+}
+
+/**
+ * `secrets:` is resolvable for every worker, BEFORE the run directory exists.
+ *
+ * `buildWorkerEnv` already refuses an unallowlisted name, a reserved one, and
+ * one the host environment does not carry, and `materializeWorkerInputs` calls
+ * it — so `up` would fail on a bad `secrets:` with or without this gate. What
+ * it buys is WHERE: without it the refusal lands after the run directory, the
+ * per-worker clones and the remotes in the operator's own repository are on
+ * disk, which is the exact complaint the image gate below records at length.
+ *
+ * IT CALLS `buildWorkerEnv` RATHER THAN RE-DERIVING THE PREDICATE, and that is
+ * the whole design of this function. A gate with its own copy of "is this name
+ * allowed" can drift from the one that runs at launch, and the drift is
+ * invisible in the safe direction — a gate that permits what launch refuses is
+ * merely useless, while one that refuses what launch permits blocks a working
+ * fleet. There is one decision function; this calls it and throws away the
+ * plan. Building an env plan is pure and allocates a small object, so the
+ * duplicated work is not worth a second predicate to avoid.
+ */
+export function assertSecretsResolvable(
+  loaded: LoadedConfig,
+  workerIds: readonly string[],
+  hostEnv: Record<string, string | undefined>,
+): void {
+  const defined = new Set(loaded.config.workers.map((w) => w.id));
+  for (const workerId of workerIds) {
+    if (!defined.has(workerId)) continue;
+    buildWorkerEnv(loaded, resolveWorker(loaded, workerId), hostEnv);
   }
 }
 
@@ -489,6 +521,13 @@ export function register(program: Command): void {
          * relay, and the reason is ISC-260 — see the comment at that call.
          */
         assertModelsAllowed(loadedConfig, workers);
+
+        /**
+         * Beside it, and before the first clone, for the reason
+         * `assertSecretsResolvable`'s own docstring gives: the refusal exists
+         * to happen while nothing is on disk yet.
+         */
+        assertSecretsResolvable(loadedConfig, workers, process.env);
 
         /**
          * EVERY ROLE'S IMAGE MUST EXIST AND MUST VERIFY (ISC-32, ISC-189).

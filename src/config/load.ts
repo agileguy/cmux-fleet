@@ -250,6 +250,10 @@ export interface ResolvedWorker {
   /** Always contains `pifleet-worker`; order preserved otherwise. */
   skills: string[];
   cloudAccess: boolean;
+  /** The CONNECT-proxy route, independent of the Google grant (§5.9). */
+  egressAccess: boolean;
+  /** Host variable NAMES requested; the intersection with the fleet ceiling is what arrives. */
+  secrets: string[];
   isolation: Isolation;
   paneMode: "rpc" | "tui";
   kind: "persistent" | "oneshot";
@@ -326,6 +330,13 @@ export function resolveWorker(loaded: LoadedConfig, id: string): ResolvedWorker 
     excludeTools: pick("exclude_tools", entry, role, d),
     skills,
     cloudAccess: pick("cloud_access", entry, role, d) ?? false,
+    egressAccess: pick("egress_access", entry, role, d) ?? false,
+    // Replace-wins like every other array here (§6.1 rule 1): a worker's
+    // `secrets: []` empties the role's request rather than unioning with it.
+    // Union would be the wrong default for a capability list — it would make a
+    // role's grant impossible to take away at the worker level, which is the
+    // direction that must stay easy.
+    secrets: [...(pick("secrets", entry, role, d) ?? [])],
     isolation: pick("isolation", entry, role, d) ?? config.run.isolation,
     paneMode: pick("pane_mode", entry, role, d) ?? "rpc",
     kind: pick("kind", entry, role, d) ?? "persistent",

@@ -907,6 +907,25 @@ export async function materializeWorkerInputs(
           `env file carries no oMLX key; the worker will only reach a server that needs none\n`,
       );
     }
+    if (envPlan.secretNames.length > 0) {
+      /*
+       * A grant is worth a line. `secrets:` moves values out of the operator's
+       * shell and into a container that runs model output, and the whole point
+       * of the intersection is that the act is deliberate — so it is stated
+       * where the operator is already reading, rather than being inferable
+       * only from a 0600 file they would have to go and open.
+       *
+       * `envPlan.secretNames` and NOT `envPlan.vars`: the plan carries names
+       * and values in two different fields precisely so that a reporting line
+       * like this one cannot reach a value. There is no formatting discipline
+       * to get wrong here, because the field being interpolated does not
+       * contain the secret.
+       */
+      process.stderr.write(
+        `pifleet: ${workerId} is granted host secrets by name: ` +
+          `${envPlan.secretNames.join(", ")} (values are written only to its 0600 env file)\n`,
+      );
+    }
 
     /**
      * The credential decision travels WITH the argv, for the reason stated
