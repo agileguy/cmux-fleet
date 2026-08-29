@@ -594,14 +594,63 @@ export async function writeTextAtomic(path: string, body: string): Promise<void>
   await fsyncDirBestEffort(dir);
 }
 
+/**
+ * Mode every JSONL file this module creates is born with.
+ *
+ * OWNER ONLY, and set at CREATION rather than chmod-ed after, because a chmod
+ * that follows the first `open(O_CREAT)` leaves a window in which the file
+ * exists at the umask default and any local user can read it — and the file
+ * whose window that is holds a worker's entire tool stream.
+ *
+ * Measured, not assumed: `events.jsonl` and the session transcript were both
+ * `-rw-r--r--` on 2026-08-28 while the env file beside them was `-rw-------`,
+ * and the run that found that had a 41-character API token inside the first of
+ * the two. `mode` on `appendFile` is passed straight to `open(2)`, so the
+ * first byte lands in a file no other user could ever have opened.
+ *
+ * Every caller wants this. Ledger shards, the credential record and the event
+ * log are all host control-plane files under the run directory; NONE of them
+ * is on a mount, so no container uid needs to read one. The container's own
+ * verbgate ledger is written by `docker/verbgate` in shell and never comes
+ * through here. So the tightening is the DEFAULT rather than an option a
+ * caller has to remember, which is the same reasoning that put the redaction
+ * at the `logEvent` funnel instead of at its call sites.
+ *
+ * It applies only to CREATION. An existing file keeps whatever mode it has —
+ * appending does not re-chmod — so a run directory made before this change
+ * stays as it was and is not silently "fixed" underneath a reader.
+ */
+export const JSONL_FILE_MODE = 0o600;
+
+export interface AppendJsonlOptions {
+  /**
+   * Rewrite the serialised line before it is written.
+   *
+   * Exists for exactly one caller — the supervisor's `logEvent`, which scrubs
+   * granted secret values out of every event (`security/redact.ts`). It takes
+   * the SERIALISED form and not the record because a transform over the object
+   * would have to know the record's shape, and the shapes are Pi's to change.
+   *
+   * Applied BEFORE the size guard, so a scrub that shortens a line can bring
+   * it back under the ceiling, and so the oversize replacement record is
+   * generated from an already-scrubbed measurement.
+   */
+  transform?: (line: string) => string;
+}
+
 /** Append one record to a sharded ledger file, bounded in line length. */
-export async function appendJsonl(path: string, record: unknown): Promise<void> {
+export async function appendJsonl(
+  path: string,
+  record: unknown,
+  opts: AppendJsonlOptions = {},
+): Promise<void> {
   const { appendFile, mkdir } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
   await mkdir(dirname(path), { recursive: true });
   let line = JSON.stringify(record);
+  if (opts.transform !== undefined) line = opts.transform(line);
   if (line.length > MAX_LINE_UNITS) {
     line = JSON.stringify({ error: "record_too_large", bytes: line.length });
   }
-  await appendFile(path, `${line}\n`, "utf8");
+  await appendFile(path, `${line}\n`, { encoding: "utf8", mode: JSONL_FILE_MODE });
 }

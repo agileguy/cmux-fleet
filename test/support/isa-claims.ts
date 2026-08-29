@@ -833,6 +833,57 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-rn", "append_system_prompt_file", "test/unit/role-briefings.test.ts"],
     expect: "nonempty",
   },
+  {
+    isc: "ISC-334",
+    grade: "[x]",
+    claim:
+      "The scrub happens at `logEvent`, the single funnel every `events.jsonl` append passes " +
+      "through. Empty means the transform was dropped from the append and the supervisor is " +
+      "writing worker tool output to disk unscrubbed again — the exact 2026-08-28 state, with " +
+      "a correct `security/redact.ts` still sitting beside it passing its own unit suite.",
+    argv: ["grep", "-n", "transform: (line) => redactor.redact(line)", "src/supervisor/index.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-334",
+    grade: "[x]",
+    claim:
+      "The granted NAMES ride the same 0600 env file as the values, so the two cannot drift. " +
+      "Empty means `buildWorkerEnv` stopped declaring them and every supervisor arms against " +
+      "an empty list while still reporting itself armed.",
+    argv: ["grep", "-rn", "SECRET_NAMES_VAR", "src/run/worker-env.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-335",
+    grade: "[x]",
+    claim:
+      "Every JSONL file this repo creates is born 0600, set on `open(2)` rather than chmod-ed " +
+      "after. Empty means the mode came off the append and `events.jsonl` is world-readable " +
+      "from its first byte again.",
+    argv: ["grep", "-rn", "JSONL_FILE_MODE", "src/util/jsonl.ts"],
+    expect: "nonempty",
+  },
+  {
+    isc: "ISC-335",
+    grade: "[x]",
+    claim:
+      "`<run>/sessions` is CREATED 0700 and widened deliberately, rather than created at the " +
+      "umask default and corrected. Empty means the mode came off the `mkdir` and the window " +
+      "between creation and the widen is back.",
+    argv: ["grep", "-rn", "run.sessionsDir, { recursive: true, mode: 0o700 }", "src/"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-336",
+    grade: "[x]",
+    claim:
+      "The wiring probe does NOT import the module it proves is wired. NONEMPTY means someone " +
+      "repaired a red build by calling the scrubber directly, which turns the one test that " +
+      "can detect an unwired scrubber into another test of a module nothing calls.",
+    argv: ["grep", "-rn", "security/redact", "test/integration/secret-redaction-wiring.test.ts"],
+    expect: "empty",
+  },
 ] as const;
 
 /**

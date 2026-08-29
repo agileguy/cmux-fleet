@@ -62,6 +62,7 @@ import {
   PROXY_LISTEN_PORT,
   RELAY_LISTEN_ALIAS,
 } from "../security/relay.ts";
+import { SECRET_NAMES_VAR } from "../security/redact.ts";
 
 /**
  * `docker run --env-file` has no quoting and no escapes.
@@ -272,6 +273,30 @@ export function buildWorkerEnv(
      * variable and started the listener.
      */
     PIFLEET_HONEYPOT: "1",
+    /*
+     * WHICH of this file's entries are credentials, by name.
+     *
+     * Declared HERE, empty, and filled in at the bottom of this function once
+     * the intersection has run. The placement is not cosmetic: `reserved` is
+     * built from `Object.keys(vars)` at the intersection, so declaring the key
+     * before that line is what makes a worker unable to request this name and
+     * hand the supervisor its own list. (`PIFLEET_` is a reserved prefix as
+     * well; this is belt to that brace, and it survives an edit to the prefix
+     * list.)
+     *
+     * Its consumer is `security/redact.ts`, which the supervisor arms at
+     * startup so a granted value is scrubbed out of every `events.jsonl`
+     * append — the control that exists because a worker told twice, in a role
+     * prompt and in a mounted skill, not to echo its token echoed it on its
+     * second command.
+     *
+     * NAMES AND VALUES SHARE ONE FILE ON PURPOSE. A sibling `secret-names.
+     * json` would be a second artifact written by a second call, and its
+     * failure mode is a redactor armed against a name whose value it no longer
+     * holds — reporting itself armed while scrubbing nothing. One file written
+     * by one call cannot drift.
+     */
+    [SECRET_NAMES_VAR]: "",
   };
 
   /*
@@ -468,6 +493,23 @@ export function buildWorkerEnv(
     vars[requested] = value;
   }
   if (missing.length > 0) throw new SecretMissingFromHostError(w.id, missing);
+
+  /*
+   * The redaction list, filled into the slot declared above.
+   *
+   * THE API KEY IS ON IT AND `secretNames` IS NOT WIDENED TO MATCH. The two
+   * lists answer different questions: `secretNames` is what the OPERATOR was
+   * asked to grant and is what `up` reports back to them, while this one is
+   * every value in this file that must never appear in a log. `llm.api_key_env`
+   * is a Class 1 credential (§12.4) that no worker requested and every worker
+   * carries, so it belongs on the second list and would be a lie on the first.
+   *
+   * Absent from `vars` when the host had no key — see `missingApiKey`, which
+   * is why the key is omitted entirely rather than written blank — so the
+   * membership test is over `vars`, not over `apiKeyEnvName` being a string.
+   */
+  const redactable = [...(apiKeyEnvName in vars ? [apiKeyEnvName] : []), ...secretNames];
+  vars[SECRET_NAMES_VAR] = redactable.join(",");
 
   return {
     vars,
