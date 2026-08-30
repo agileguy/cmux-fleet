@@ -7,10 +7,13 @@
  * code path wearing a prompt's clothes. Resolution lives in `./index.ts`;
  * this file is only the text.
  *
- * No briefing grants a capability. Cloud authority lives in the task
- * envelope's `cloud_allow[]` (SRD §5.10), enforced by the verbgate and
- * recorded in the ledger — a briefing that "authorizes" anything would be a
- * permission system implemented in prose, invisible to both. The briefings
+ * No briefing grants a capability. Cloud authority is the CREDENTIAL's scope
+ * (`cloud.impersonate_service_account`), enforced by the verbgate and recorded
+ * in the ledger — a briefing that "authorizes" anything would be a permission
+ * system implemented in prose, invisible to both. The envelope's
+ * `cloud_allow[]` was the designed grant and was DESCOPED on 2026-08-30
+ * (ISC-366): it is refused at parse time, and every mutating verb is refused
+ * with exit 77. The briefings
  * therefore describe the gate's EXISTENCE (a worker that treats exit 77 as a
  * bug will burn its budget fighting it) but never name the field that widens
  * it and never tell a worker what it may run. The unit suite asserts the

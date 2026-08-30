@@ -824,10 +824,34 @@ The gate is enforced for **every** `cloud_access` role. Roles without cloud acce
 > mount pins the inode. `PIFLEET_TASK_ID` remains set nowhere, and that absence is now a regression
 > guard rather than the defect.
 >
-> **The disposition.** This is recorded, not fixed. What ships is strictly safer than what is
-> documented — no mutating verb executes at all, rather than the ones an envelope named — so the
-> gap is a capability that is missing, not a control that is bypassed. `impersonate_service_account`
-> remains the load-bearing control exactly as the paragraph above says.
+> **The disposition — DESCOPED 2026-08-30 by owner decision (ISC-366), superseding the "recorded,
+> not fixed" holding this paragraph used to carry.** The rewriter will not be built. Task-scoped
+> cloud authorization is withdrawn from the design rather than left pending, and the sections above
+> are kept as the record of what was designed and why it is not here.
+>
+> **What that means concretely.** The mounted policy is written empty at `up` and never rewritten,
+> so the verbgate refuses EVERY mutating cloud verb with exit 77, for every worker, for the life of
+> every run. That is not a degraded mode; it is the shipped behaviour. Read verbs are unaffected.
+>
+> **`cloud_allow[]` is now REFUSED at parse time, not ignored** (`src/contracts.ts`, both
+> `TaskEnvelopeSchema` and `TaskSpecSchema`). A field that is accepted and does nothing is worse
+> than a field that is gone: the operator sets `cloud_allow: ["kubectl scale"]`, the brief tells
+> the worker it may scale, the worker tries, and the gate refuses — one epoch spent discovering
+> that a grant the document offered does not exist. The key remains in the schema at length zero
+> because the envelope is a wire format the supervisor also parses, and removing a key is a
+> compatibility break for a change whose whole point is that nothing depends on it.
+>
+> **The control that does exist is the credential's SCOPE.** `impersonate_service_account` was
+> always described here as the stronger of the two, with the verb gate as defence-in-depth on top
+> rather than a substitute; descoping the weaker half leaves that argument intact. A worker holding
+> a credential scoped to what its role may touch is bounded by the cloud provider's own
+> authorization, which no amount of shell in the container can widen — where the verb gate is a
+> filter on a command line that `bash` can route around.
+>
+> **Why descope rather than build.** Nothing depends on the mechanism; it fails closed, so there is
+> no exposure to close; the audit trail half of §5.10 was repaired independently by ISC-362; and a
+> half-built authorization system that reads as complete is precisely the failure this document
+> spent 2026-08-30 removing.
 
 ---
 
@@ -2424,17 +2448,25 @@ Runnable on `headless` against `pifleet-fake-pi` except where marked.
 > environment, on any writable path, or in any mounted credential material.** The env and on-disk
 > halves are still real and still the point.
 >
-> **Criterion 59 is unmeetable, because the task envelope's `cloud_allow[]` reaches no container.**
+> **Criterion 59 is WITHDRAWN as of 2026-08-30 (ISC-366), having been unmeetable before that.** The
+> permitted half was never built and the owner descoped it rather than building it, so 59 no longer
+> states an intention the system has — it is not a criterion this system is failing, it is a
+> criterion this system withdrew. The paragraph below is kept as the record of what it asserted and
+> how it was measured.
+>
+> **It was unmeetable because the task envelope's `cloud_allow[]` reaches no container.**
 > `src/run/materialize.ts:806` writes `/policy/cloud-allow` as an EMPTY file, once per worker at
 > `up`, and nothing rewrites it afterwards — `src/run/materialize.ts:783` carries a note addressed
-> to "WHOEVER WIRES DISPATCH-TIME REWRITING", which is the honest statement that nobody has. See
+> to "WHOEVER WIRES DISPATCH-TIME REWRITING", which was the honest statement that nobody had; that
+> note now records the descope instead. See
 > §5.10's erratum for the full consequence. **The permitted half of 59 is unreachable; the
 > ledger half was half-true and is now whole** (corrected 2026-08-30). Rows ARE appended for every
 > invocation, and as of ISC-362 they carry the real task id and epoch, read from the read-only
 > `/policy/task` mount the supervisor rewrites at each dispatch. Until then `docker/verbgate` read
 > `PIFLEET_TASK_ID`, which was set nowhere in production, so every production row recorded
-> `"task":"<none>"` and `"epoch":0`. What remains unmeetable in 59 is the PERMITTED half only: no
-> `cloud_allow[]` reaches a container, so no mutating verb is ever authorized. Criteria 58 and 60 survive intact:
+> `"task":"<none>"` and `"epoch":0`. What was left unmeetable in 59 is the PERMITTED half only, and that
+> half is now withdrawn rather than pending: no `cloud_allow[]` reaches a container, no mutating
+> verb is ever authorized, and the envelope refuses a non-empty `cloud_allow[]` outright. Criteria 58 and 60 survive intact:
 > an empty policy refuses every mutating verb with exit 77, which is 58 exactly, and the collector
 > (`src/run/verbgate-collect.ts`) delivers 60 subject to ISC-172's stated truncation window.
 >

@@ -4,9 +4,9 @@
  *
  * Resolution returns TEXT and nothing else. It takes no envelope, no config,
  * and no worker identity, so it structurally cannot make a capability
- * decision — the verb allowlist lives in `cloud_allow[]` on the envelope
- * (SRD §5.10) and the tool set lives in role config (SRD §6), neither of
- * which this module can see. A resolver that could reach either would be a
+ * decision — mutating cloud verbs are refused outright (the `cloud_allow[]`
+ * grant was descoped, ISC-366; SRD §5.10) and the tool set lives in role
+ * config (SRD §6), neither of which this module can see. A resolver that could reach either would be a
  * second authorization path, one the verbgate and the ledger never hear
  * about.
  *

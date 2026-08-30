@@ -787,11 +787,22 @@ export async function materializeWorkerInputs(
      * between that check and a fleet-wide refusal. A policy file is the one
      * thing nothing should ever hold write permission on, by any path.
      *
-     * WHOEVER WIRES DISPATCH-TIME REWRITING: chmod 0644, write IN PLACE
-     * (truncate + write), chmod back to 0444 — never tmp + rename. A bind
-     * mount pins the INODE, so a rename swaps the file the host sees while the
-     * container keeps reading the old one, for the life of the container, with
-     * both sides believing the policy changed.
+     * NOBODY IS WIRING DISPATCH-TIME REWRITING: task-scoped cloud
+     * authorization was DESCOPED on 2026-08-30 (ISC-366). This write is the
+     * only one, the policy is empty for the life of the run, and every
+     * mutating verb is refused with exit 77. `cloud_allow[]` is refused at
+     * parse time rather than silently ignored (`src/contracts.ts`), so no
+     * operator can set a grant this file will not honour.
+     *
+     * The recipe this note used to address a future writer with — chmod 0644,
+     * write IN PLACE (truncate + write), chmod back to 0444, never tmp+rename,
+     * because a bind mount pins the INODE and a rename swaps the file the host
+     * sees while the container keeps reading the old one for its whole life
+     * with both sides believing the policy changed — was correct, and is now
+     * implemented in `src/run/task-policy.ts` for the verbgate's task
+     * provenance (ISC-362). It is kept here because the hazard belongs to the
+     * `/policy` mount rather than to either file, and the next person to add a
+     * rewritable policy file needs it.
      */
     await establishing(`the cloud policy for ${workerId}`, async () => {
       await refuseSymlinkDestination(paths.cloudAllow);
