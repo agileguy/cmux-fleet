@@ -17,7 +17,7 @@ repository, and it would pin you to whatever that CLI decided an update was.
 | Name | Where from | What it is |
 |---|---|---|
 | `TICKET_API_TOKEN_FILE` | env | the **path** to a read-only file holding the write credential |
-| `TICKET_BASE_URL_FILE` | env | the path to a file holding `https://<TICKET_HOST>/api/v2` |
+| `TICKET_BASE_URL_FILE` | env | the path to a file holding `https://rally1.rallydev.com/slm/webservice/v2.0` |
 | ticket ids | the task envelope, and **only** there | the objects you may touch |
 
 **There is no `TICKET_API_TOKEN` variable.** `echo $TICKET_API_TOKEN` prints an empty line, and
@@ -40,11 +40,23 @@ being an argument, an environment variable, or a shell variable:
 
 ```bash
 umask 077
-{ printf 'header = "Authorization: Token '
+{ printf 'header = "ZSESSIONID: '
   cat "$TICKET_API_TOKEN_FILE"
   printf '"\n'
 } > /tmp/ticket.curlrc
 ```
+
+**`ZSESSIONID`, not `Authorization`.** This document said `Authorization: Token` until
+2026-08-30, which is the shape of a different vendor entirely and was never exercised — no
+credential existed on any machine that ran this fleet, so the line had never reached a server.
+Rally's WSAPI authenticates an API key with a `ZSESSIONID` header and answers `Authorization:
+Token` with a 401 whose body is an HTML login page. Verified against
+`/user?fetch=UserName` on 2026-08-30: `ZSESSIONID` returns the user object.
+
+That is worth pausing on, because the failure it would have produced is the one this whole
+document is written against: `--fail-with-body` turns the 401 into a non-zero exit and a body,
+so a worker would have reported `blocked` with an HTML page attached and nobody would have known
+whether the credential was wrong, the header was wrong, or the host was down.
 
 Read that construction carefully, because the obvious shorter forms are the ones that leak:
 
@@ -64,8 +76,17 @@ BASE_URL="$(cat "$TICKET_BASE_URL_FILE")"   # not a credential — a variable is
 
 curl -sS --fail-with-body --max-time 60 --config /tmp/ticket.curlrc \
      -H 'Accept: application/json' \
-     "${BASE_URL}/issue/${ID}" -o /tmp/issue.json
+     "${BASE_URL}/defect/${ID}?fetch=FormattedID,Name,State,Owner" -o /tmp/issue.json
 ```
+
+**The path segment is the Rally TYPE, and getting it wrong is a 404 rather than a redirect.**
+`defect`, `hierarchicalrequirement` (a user story — the URL does not say "story"), `task`,
+`iteration`. A `FormattedID` like `US12345` or `DE181674` is not an object id and cannot be
+substituted into the path: fetch by `FormattedID` with a query instead —
+`${BASE_URL}/hierarchicalrequirement?query=(FormattedID = "US12345")` — and read the `_ref` out
+of the result. **`fetch=` is not optional in practice**: without it Rally returns every field on
+the object, which is tens of kilobytes per row and the difference between a readable artifact
+and a payload that eats the turn.
 
 Seven rules about that command, each of which has a failure behind it:
 
