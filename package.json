@@ -15,7 +15,8 @@
     "test:e2e": "bun test test/e2e",
     "test:coverage": "bun test --coverage",
     "lint": "tsc --noEmit",
-    "pifleet": "bun run src/cli/index.ts"
+    "pifleet": "bun run src/cli/index.ts",
+    "operations": "bun run scripts/operations"
   },
   "dependencies": {
     "commander": "^14.0.2",
