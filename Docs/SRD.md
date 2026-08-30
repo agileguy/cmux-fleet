@@ -801,13 +801,28 @@ The gate is enforced for **every** `cloud_access` role. Roles without cloud acce
 > tmp+rename, because a bind mount pins the inode. That note is a correct and useful spec for work
 > that has not been done, and this SRD read as though it had been.
 >
-> **A second, smaller consequence.** `docker/verbgate:45` reads `PIFLEET_TASK_ID` and `:78` reads
-> `PIFLEET_EPOCH` for the ledger row's provenance fields. `grep -rnF 'PIFLEET_TASK_ID' src/` returns
-> nothing — both are set only by `test/integration/verbgate.test.ts` and `test/integration/image.test.ts`,
-> never by production. So the `{task_id, epoch, argv}` the diagram promises is `{"<none>", 0, argv}`
-> for every row a real run produces. Neither could be an env var of the CONTAINER as things stand,
-> since the container is started once at `up` and the task id changes per dispatch; binding them
-> needs the same dispatch-time write the policy does.
+> **A second, smaller consequence — FIXED 2026-08-30 by ISC-362; kept here because the reasoning
+> that followed it was half wrong.** `docker/verbgate` read `PIFLEET_TASK_ID` and `PIFLEET_EPOCH`
+> for the ledger row's provenance fields, and `grep -rnF 'PIFLEET_TASK_ID' src/` returned nothing —
+> both were set only by `test/integration/verbgate.test.ts` and `test/integration/image.test.ts`,
+> never by production. So the `{task_id, epoch, argv}` the diagram promises was `{"<none>", 0, argv}`
+> for every row a real run produced.
+>
+> The diagnosis was right that neither could be an env var of the CONTAINER, since the container is
+> started once at `up` while the task changes per dispatch. It was **wrong** to conclude that
+> binding them "needs the same dispatch-time write the policy does", where *the policy* means
+> `/policy/cloud-allow` and its unbuilt rewriter. Provenance needs a dispatch-time write, but not
+> THAT one: it is a separate file carrying no authorization semantics, so it could be — and was —
+> built on its own. Reading the two as one piece of work is what kept a repair that took an
+> afternoon waiting on one that is still an open decision.
+>
+> Provenance is now `/policy/task` (§5.5), a run-tree file bind-mounted **read-only**, rewritten in
+> place by the supervisor at each dispatch and cleared at settle. Read-only matters as much as the
+> value: environment is worker-controlled, so the old carrier let a worker forge the one field an
+> investigator would trust. The write follows the recipe `materialize.ts` states for the policy
+> rewriter — chmod 0644, truncate in place, chmod back to 0444, never tmp+rename, because a bind
+> mount pins the inode. `PIFLEET_TASK_ID` remains set nowhere, and that absence is now a regression
+> guard rather than the defect.
 >
 > **The disposition.** This is recorded, not fixed. What ships is strictly safer than what is
 > documented — no mutating verb executes at all, rather than the ones an envelope named — so the
@@ -2411,10 +2426,13 @@ Runnable on `headless` against `pifleet-fake-pi` except where marked.
 > `src/run/materialize.ts:806` writes `/policy/cloud-allow` as an EMPTY file, once per worker at
 > `up`, and nothing rewrites it afterwards — `src/run/materialize.ts:783` carries a note addressed
 > to "WHOEVER WIRES DISPATCH-TIME REWRITING", which is the honest statement that nobody has. See
-> §5.10's erratum for the full consequence. **The permitted half of 59 is unreachable and the
-> ledger half is half-true**: rows ARE appended for every invocation, but `docker/verbgate:45` reads
-> `PIFLEET_TASK_ID`, which `grep -rnF 'PIFLEET_TASK_ID' src/` shows is set nowhere in production, so
-> every production row records `"task":"<none>"` and `"epoch":0`. Criteria 58 and 60 survive intact:
+> §5.10's erratum for the full consequence. **The permitted half of 59 is unreachable; the
+> ledger half was half-true and is now whole** (corrected 2026-08-30). Rows ARE appended for every
+> invocation, and as of ISC-362 they carry the real task id and epoch, read from the read-only
+> `/policy/task` mount the supervisor rewrites at each dispatch. Until then `docker/verbgate` read
+> `PIFLEET_TASK_ID`, which was set nowhere in production, so every production row recorded
+> `"task":"<none>"` and `"epoch":0`. What remains unmeetable in 59 is the PERMITTED half only: no
+> `cloud_allow[]` reaches a container, so no mutating verb is ever authorized. Criteria 58 and 60 survive intact:
 > an empty policy refuses every mutating verb with exit 77, which is 58 exactly, and the collector
 > (`src/run/verbgate-collect.ts`) delivers 60 subject to ISC-172's stated truncation window.
 >
