@@ -640,9 +640,10 @@ export const HarnessSchema = z
       .array(shortStr)
       .min(
         1,
-        "harness.patterns cannot be empty: it REPLACES the built-in defaults, " +
-          "so an empty list would disable the ISC-150 test-harness cap entirely " +
-          "rather than mean 'no opinion'. Omit the harness key to get the defaults.",
+        "harness.patterns cannot be empty: under `replace: true` it becomes the " +
+          "WHOLE harness surface, so an empty list would disable the ISC-150 " +
+          "test-harness cap entirely rather than mean 'no opinion'. Omit the " +
+          "harness key to get the built-in defaults.",
       )
       .max(MAX_ITEMS)
       .optional(),
