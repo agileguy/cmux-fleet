@@ -54,6 +54,33 @@ describe("the pane set", () => {
     expect(plan().map((p) => p.title)).toEqual(["ticketing", "fleet-status", "git-watch"]);
   });
 
+  test("ticketing takes the whole top half; the other two tile beneath it", () => {
+    // The requested shape:
+    //
+    //   +-------------------------------+
+    //   |          ticketing            |
+    //   +---------------+---------------+
+    //   |  fleet-status |   git-watch   |
+    //   +---------------+---------------+
+    //
+    // `null` then `down` then `right` is the ONLY sequence that produces it,
+    // and each element is load-bearing. `down` first is what makes ticketing a
+    // half rather than a column — the first split decides the major axis. The
+    // `right` that follows lands INSIDE the half `down` created, because each
+    // pane is split off the previous one; a `right` off pane 1 instead would
+    // put git-watch in the top row beside ticketing, which is the layout this
+    // replaced and which no assertion on directions alone would catch.
+    expect(plan().map((p) => p.split)).toEqual([null, "down", "right"]);
+  });
+
+  test("exactly one pane is split off nothing — the initial surface is consumed once", () => {
+    // Two nulls would leave a split unissued and a pane unbuilt; zero would
+    // leave the workspace's own surface as a stray idle shell beside three
+    // others.
+    expect(plan().filter((p) => p.split === null).length).toBe(1);
+    expect(plan()[0]!.split).toBeNull();
+  });
+
   test("every command is something cmux will accept as --command text", () => {
     // `assertCmuxText` is imported, not re-implemented: a local copy of the
     // rule would drift from the one that actually runs at the call site.
@@ -74,8 +101,22 @@ describe("pane 1 — the ticketing agent", () => {
     // `private: true` and its bin entry is never linked. A pane invoking a bare
     // `pifleet` would work only on a machine where somebody had linked it.
     const cmd = plan()[0]!.command;
-    expect(cmd.startsWith("bun run ")).toBe(true);
+    expect(cmd).toContain("bun run ");
     expect(cmd).toContain(`'${REPO}/src/cli/index.ts'`);
+  });
+
+  test("loads ~/.env into the pane BEFORE up runs, and exports it", () => {
+    // Measured on the first live run: `OMLX_API_KEY` is in `~/.env`, no shell
+    // profile sources that file, and `up` warned the worker "will only reach a
+    // server that needs none" — which against an endpoint that does need one
+    // is every request refused.
+    const cmd = plan()[0]!.command;
+    expect(cmd).toContain(`[ -f "$HOME/.env" ]`);
+    // `set -a` is the load-bearing half: `up` is a CHILD, and a sourced
+    // variable that is not exported is invisible to it. Sourcing without it
+    // reproduces the same failure while looking fixed.
+    expect(cmd).toContain("set -a;");
+    expect(cmd.indexOf("$HOME/.env")).toBeLessThan(cmd.indexOf("'up'"));
   });
 
   test("drops to an interactive shell, and does so even when up fails", () => {
@@ -134,8 +175,21 @@ describe("pane 3 — the git watch", () => {
     // place to stand while working on some other repository. Proved by
     // mutation — passing `repoRoot` here reddens.
     const cmd = plan()[2]!.command;
-    expect(cmd).toContain(`git -C '${CWD}'`);
+    expect(cmd).toContain(`-C '${CWD}'`);
     expect(cmd).not.toContain(REPO);
+  });
+
+  test("runs git with --no-pager, or the loop stops at (END) forever", () => {
+    // MEASURED, not anticipated. On the first live run `git log` found a
+    // terminal on stdout, started `less`, and the pane sat at `(END)` waiting
+    // for a keypress. It showed a plausible commit list and refreshed never —
+    // a hang that looks exactly like a working watch.
+    const cmd = plan()[2]!.command;
+    const gitCalls = [...cmd.matchAll(/git\s+(\S+)/g)].map((m) => m[1]);
+    expect(gitCalls.length, "no git invocations found — the probe has rotted").toBeGreaterThanOrEqual(2);
+    // EVERY invocation, not just the log: `status` pages too once its output
+    // is longer than the pane.
+    for (const first of gitCalls) expect(first).toBe("--no-pager");
   });
 
   test("is a shell loop, because macOS has no watch(1)", () => {

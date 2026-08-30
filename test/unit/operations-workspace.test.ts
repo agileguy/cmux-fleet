@@ -51,6 +51,19 @@ function fakeCmux(opts: { workspaces?: Array<{ id: string; custom_title: string 
           splits += 1;
           return ok(JSON.stringify({ pane_id: `pane-${splits}`, surface_id: `surf-${splits}` }));
         }
+        case "list-panes":
+          // pane-0 holds the workspace's initial surface — the one pane 1
+          // consumes. Listed LAST so a probe that reads `panes[0]` instead of
+          // matching on the surface id gets the wrong answer.
+          return ok(
+            JSON.stringify({
+              panes: [
+                { id: "pane-1", selected_surface_id: "surf-1", index: 1 },
+                { id: "pane-2", selected_surface_id: "surf-2", index: 2 },
+                { id: "pane-0", selected_surface_id: "surf-0", index: 0 },
+              ],
+            }),
+          );
         default:
           return ok("");
       }
@@ -119,7 +132,23 @@ describe("creating the workspace", () => {
       "rename-tab",
       "respawn-pane",
       "select-workspace",
+      "list-panes",
+      "focus-pane",
     ]);
+  });
+
+  test("the operator lands in pane 1, not in whichever pane was split last", async () => {
+    // MEASURED, not anticipated: the first live run left focus on pane 3, the
+    // git watch — the one pane that ignores input. Every `new-split` moves
+    // focus to the pane it creates, and `--focus false` on `workspace create`
+    // governs the workspace, not the splits.
+    const { client, calls } = fakeCmux();
+    await ensureOperations(client, OPTS);
+    const focus = calls.find((c) => verb(["cmux", ...c]) === "focus-pane");
+    expect(focus, "no focus-pane call — the operator lands wherever cmux left them").toBeDefined();
+    // pane-0 is the one holding the INITIAL surface, and it is listed last by
+    // the fake, so an implementation that took `panes[0]` would focus pane-1.
+    expect(focus![focus!.indexOf("--pane") + 1]).toBe("pane-0");
   });
 
   test("the workspace is created on the INVOCATION directory", async () => {
@@ -145,7 +174,10 @@ describe("creating the workspace", () => {
     expect(respawns.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2"]);
 
     const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
-    expect(splits.map((c) => c[1])).toEqual(["right", "down"]);
+    // `down` then `right` — ticketing takes the top half, and the second split
+    // lands INSIDE the half the first one made because it anchors on surf-1,
+    // not surf-0. Anchoring both on surf-0 would tile all three in a row.
+    expect(splits.map((c) => c[1])).toEqual(["down", "right"]);
     expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1"]);
   });
 
@@ -166,7 +198,7 @@ describe("creating the workspace", () => {
       .map((c) => c[c.indexOf("--command") + 1]!);
     expect(commands[0]).toContain("'--workers' 'tick-1'");
     expect(commands[1]).toContain("'status' '--watch'");
-    expect(commands[2]).toContain(`git -C '${CWD}'`);
+    expect(commands[2]).toContain(`-C '${CWD}'`);
   });
 });
 

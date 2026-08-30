@@ -35,19 +35,22 @@
 import {
   CmuxClient,
   assertCmuxValue,
+  focusPaneArgv,
+  listPanesArgv,
   newSplitArgv,
   pingArgv,
   renameTabArgv,
   respawnPaneArgv,
   workspaceCreateArgv,
   workspaceListArgv,
-  type SplitDirection,
 } from "./client.ts";
 import {
   findWorkspaceByTitle,
+  parseListPanes,
   parseNewSplit,
   parseWorkspaceCreate,
   parseWorkspaceList,
+  type PaneListed,
 } from "./parse.ts";
 import { OPERATIONS_WORKSPACE, operationsPanes, type OperationsPlanOptions } from "./operations-plan.ts";
 
@@ -61,6 +64,18 @@ import { OPERATIONS_WORKSPACE, operationsPanes, type OperationsPlanOptions } fro
 export function selectWorkspaceArgv(workspaceId: string): string[] {
   assertCmuxValue("workspace id", workspaceId);
   return ["select-workspace", "--workspace", workspaceId];
+}
+
+/**
+ * Which pane is showing a given surface.
+ *
+ * Exported and pure so the "pane 1 gets focus" rule is testable without a
+ * cmux. Returns null rather than guessing: focusing the WRONG pane is worse
+ * than focusing none, because a wrong focus looks deliberate and a missing one
+ * is one keystroke from correct.
+ */
+export function paneHoldingSurface(panes: PaneListed[], surfaceId: string): string | null {
+  return panes.find((p) => p.selectedSurfaceId === surfaceId)?.paneId ?? null;
 }
 
 export interface EnsureResult {
@@ -96,9 +111,9 @@ export async function findOperations(client: CmuxClient): Promise<string | null>
  *
  * The first pane CONSUMES the surface `workspace create` opens with — leaving
  * it as a stray idle shell and splitting three more off it would give four
- * panes, one of them empty. Splits then alternate right/down off the most
- * recent surface, which is the sequence `src/backends/cmux/index.ts` already
- * uses to lay out a fleet.
+ * panes, one of them empty. Each later pane is split off the PREVIOUS one, in
+ * the direction that pane's plan names; the directions are a property of the
+ * layout and live in `operations-plan.ts`, not here.
  */
 export async function createOperations(
   client: CmuxClient,
@@ -114,16 +129,16 @@ export async function createOperations(
   const wsId = created.workspaceId;
 
   let anchor = created.surfaceId;
+  let firstPaneId: string | null = null;
 
-  for (let i = 0; i < panes.length; i += 1) {
-    const pane = panes[i]!;
+  for (const pane of panes) {
     let surfaceId: string;
 
-    if (i === 0) {
+    if (pane.split === null) {
       surfaceId = created.surfaceId;
     } else {
-      const dir: SplitDirection = i % 2 === 1 ? "right" : "down";
-      surfaceId = parseNewSplit(await client.runOk(newSplitArgv(wsId, anchor, dir))).surfaceId;
+      const split = parseNewSplit(await client.runOk(newSplitArgv(wsId, anchor, pane.split)));
+      surfaceId = split.surfaceId;
     }
 
     // Rename BEFORE respawning. `respawn-pane` restarts the surface's shell,
@@ -135,10 +150,22 @@ export async function createOperations(
     anchor = surfaceId;
   }
 
-  // Bring the workspace forward. Pane 1 — the ticketing console, the only
-  // pane anyone types into — is the workspace's initial surface and holds
-  // focus by construction, so there is no second focus call to get wrong.
+  // Bring the workspace forward, then land the operator in pane 1.
+  //
+  // THE SECOND CALL IS NOT REDUNDANT, and the comment that used to sit here
+  // claimed it was: "pane 1 is the initial surface and holds focus by
+  // construction, so there is no second focus call to get wrong". Measured on
+  // the first live run — focus was on pane 3. Every `new-split` moves focus to
+  // the pane it creates, `--focus false` governs the WORKSPACE rather than the
+  // split, and the operator therefore landed in the git watch, which is the one
+  // pane that ignores input. The claim was reasoning about cmux; the run was
+  // evidence about it.
   await client.runOk(selectWorkspaceArgv(wsId));
+  firstPaneId = paneHoldingSurface(
+    parseListPanes(await client.runOk(listPanesArgv(wsId))),
+    created.surfaceId,
+  );
+  if (firstPaneId !== null) await client.runOk(focusPaneArgv(firstPaneId));
   return { created: true, workspaceId: wsId };
 }
 
