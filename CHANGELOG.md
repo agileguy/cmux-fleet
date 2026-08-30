@@ -4,6 +4,43 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **The documents mounted into workers are checked against the code (ISC-364).** `skills/` and
+  `roles/` were current in the sense that CI builds them into the image — and three of the audit's
+  findings were in them anyway. Mounting guarantees a worker reads a document, not that what it
+  reads is true, and these are the worst files to be wrong in: an SRD that is wrong misleads a
+  human who can push back, a `SKILL.md` that is wrong is an instruction executed by an agent that
+  cannot.
+
+  Two things in a worker document are decidable rather than judgement, and both are load-bearing:
+  the statuses a worker is told to write must be exactly `StatusSchema`'s, and the container paths
+  it is told it has must be paths the renderer mounts. Both are now compared against the code.
+
+  This was originally scoped as a CI rule pairing `src/harvest/` changes with
+  `skills/pifleet-worker/`. That is the wrong control — satisfiable with a whitespace edit, and a
+  false alarm on the many harvest changes that touch no worker instruction. Comparing content is
+  not defeatable by touching a file.
+
+- **The SRD's identifiers are swept every CI run (ISC-363).** The documentation audit verified
+  §17's criteria by extracting every identifier and grepping for it by hand. That is mechanical, so
+  a build does it now: every repo path the document cites must exist, and every pifleet-owned
+  `CONSTANT_CASE` name in normative prose must appear in `src/` or `docker/`.
+
+  Paths are swept over the whole document including errata — a path is a pointer, and a stale
+  pointer misleads wherever it sits. Constants are swept over normative prose only, because an
+  erratum correcting a wrong constant has to spell it.
+
+  Two defects on the first run. §4.2 cited `docker/pi-worker.Dockerfile`; the file is
+  `docker/Dockerfile`. And §13's control-socket requirement named three instruments wrong at once —
+  `LOCAL_PEERCRED` for what is `getpeereid`/`SO_PEERCRED`, mode 0600 for what is 0700, and a
+  connect-probe for what is an unconditional unlink. The second is the case for the probe: §12.7's
+  account of the same socket had been corrected hours earlier in the same audit, and this line
+  survived it. Section-by-section reading fixes the section being read.
+
+  **It checks that names resolve, not that sentences are true.** A paragraph can name every symbol
+  correctly and still describe behaviour the code does not have.
+
 ### Security
 
 - **The verbgate ledger now names the task that caused each verb, and a worker cannot forge it
