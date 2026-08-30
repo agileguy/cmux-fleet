@@ -151,16 +151,18 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-339",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The worker directory holding the store is TIGHTENED to 0700, which is what makes the " +
       "0444 file mode safe on the host rather than a regression against the 0600 env file it " +
       "replaced. Pinned because it is the load-bearing half of a two-part trade and the half " +
       "with no visible symptom if it disappears: removing it leaves every probe in the suite " +
       "green except the one that reads the mode back, and leaves a world-readable credential " +
-      "under a world-traversable run directory. The grade is `[~]` because the mode deviates " +
-      "from the commissioned 0400 — see the entry for why 0400 is unreadable to the worker uid " +
-      "on Linux and invisibly fine on macOS.",
+      "under a world-traversable run directory. The mode DEVIATES from the commissioned 0400, " +
+      "and the owner accepted that deviation on 2026-08-30 — see the entry for why 0400 is " +
+      "unreadable to the worker uid on Linux and invisibly fine on macOS, and for what the " +
+      "trade costs. The `[x]` rests on this line: the file itself is world-readable, so THIS " +
+      "chmod is the containment, not the mode.",
     argv: ["grep", "-nF", "await chmod(paths.dir, 0o700);", "src/run/materialize.ts"],
     expect: 1,
   },
@@ -1048,6 +1050,26 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "after the clones and the remotes in the operator's own repository.",
     argv: ["grep", "-rn", "assertSecretsResolvable", "src/cli/commands/up.ts"],
     expect: "nonempty",
+  },
+  {
+    isc: "ISC-306",
+    grade: "[x]",
+    claim:
+      "The refusal is scoped to the INTERSECTION rather than to the whole allowlist, and the " +
+      "narrowing is pinned as an ASSERTION and not a comment. Registered on 2026-08-30, when " +
+      "the owner CHOSE that scope over the wider reading the commission asked for, because the " +
+      "choice makes this one probe the only thing defending it. Widening the source back to " +
+      "the declined reading reddens this probe and no other probe in the ISC-306 block, which " +
+      "is the discrimination it exists for; DELETING the probe reddens nothing at all, and the " +
+      "chosen scope would then be undefended with no symptom anywhere. Pinned as a count for " +
+      "that second case, which no checkbox would notice.",
+    argv: [
+      "grep",
+      "-nF",
+      'test("an allowlisted name NOBODY requested may be absent without refusing"',
+      "test/unit/worker-secrets.test.ts",
+    ],
+    expect: 1,
   },
   {
     isc: "ISC-332",
