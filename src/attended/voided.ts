@@ -87,19 +87,28 @@ export const TUI_VOIDED: readonly VoidedRequirement[] = [
  * mention is not a definition. A voided entry pointing at an id that is only
  * ever mentioned would be exactly the rot this check exists to catch.
  *
- * ALL THREE grades count as definitions, `[~]` included. The class was
- * `[ x]` and a grading audit walked straight into it: marking ISC-141 partial
- * — a grade this ISA has used since ISC-47/48 — made the extractor stop
- * seeing a criterion that is defined three lines above the ones it does see,
- * and the cross-check reported the operator-facing table as pointing at a
+ * ALL FOUR markers count as definitions, `[~]` and `[-]` included. The class
+ * was `[ x]` and a grading audit walked straight into it: marking ISC-141
+ * partial — a grade this ISA has used since ISC-47/48 — made the extractor
+ * stop seeing a criterion that is defined three lines above the ones it does
+ * see, and the cross-check reported the operator-facing table as pointing at a
  * nonexistent id. That is a FALSE POSITIVE of exactly the failure this
  * function exists to detect, which is the worst kind: it teaches a reader to
  * discount the check. A criterion's grade says how well it is EVIDENCED and
  * has nothing to do with whether the ISA defines it.
+ *
+ * `[-]` — RETIRED, added 2026-08-30 by ISC-368 — is the same trap a second
+ * time and is admitted here BEFORE it can spring rather than after. A retired
+ * criterion is excluded from `progress:`; it is NOT removed from the file, and
+ * the operator-facing voided table may legitimately reference one. Had this
+ * class been left as `[ x~]`, retiring a criterion the table names would have
+ * reported that table as pointing at a nonexistent id — the identical false
+ * positive the paragraph above records, for the identical reason. `-` is last
+ * in the class so it is a literal rather than a range.
  */
 export function definedIscIds(isaText: string): Set<string> {
   const ids = new Set<string>();
-  const re = /^- \[[ x~]\] (ISC-\d+[a-z]?):/gm;
+  const re = /^- \[[ x~-]\] (ISC-\d+[a-z]?):/gm;
   for (const m of isaText.matchAll(re)) ids.add(m[1]!);
   return ids;
 }

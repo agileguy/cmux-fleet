@@ -403,4 +403,36 @@ describe("the README's criteria count matches the ISA", () => {
       ).toBe(true);
     }
   });
+
+  /**
+   * ISC-368. The RETIRED count too, and for a sharper reason than symmetry.
+   *
+   * The `[~]` sentence above is a claim about work that is unfinished. The
+   * retired count is a claim about work this project has stopped counting —
+   * criteria subtracted from `progress:`'s denominator — and a denominator
+   * that shrinks unannounced is the one drift a reader cannot detect by
+   * reading more carefully. If the README says the ISA retires two and it
+   * retires three, someone withdrew a criterion and the only document a
+   * newcomer reads never said so.
+   *
+   * Pinned on the same word map as the sentence above so both counts fail the
+   * same way, and skipped entirely when nothing is retired — a README should
+   * not be required to carry a sentence about an empty set.
+   */
+  test("the number of [-] retired criteria the README states is the number ISA.md carries", () => {
+    const isa = read("ISA.md");
+    const retired = [...isa.matchAll(/^- \[-\] ISC-/gm)].length;
+    if (retired === 0) return;
+
+    const words: Record<number, string> = {
+      1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five",
+      6: "Six", 7: "Seven", 8: "Eight", 9: "Nine", 10: "Ten",
+    };
+    const word = words[retired];
+    expect(word, `ISA has ${retired} [-] criteria — extend the word map`).toBeDefined();
+    expect(
+      README.includes(`${word} are retired \`[-]\``),
+      `README should say "${word} are retired \`[-]\`" — ISA.md carries ${retired}.`,
+    ).toBe(true);
+  });
 });
