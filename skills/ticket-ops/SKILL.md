@@ -186,12 +186,34 @@ This is the part the verdict comes from. After every write:
 fine" — it is a change of unknown extent in a system other people are reading, and it needs a
 human to look. Say so in the artifact, in those terms.
 
-## The artifact
+## The artifact — two files, and the `.json` is the one with teeth
 
-Write `/outbox/<task-id>/files/ticket-ops.json` and `ticket-ops.md` — the same content, once for
-a machine and once for a person. The JSON is validated against
-`TicketOpsArtifactSchema` in `src/contracts.ts`; a malformed one is a build failure, not a
-surprise at read time.
+Write **both** of these, every time, under the id you were dispatched with (`pifleet-worker`
+says where to read that id; it is not a name you pick):
+
+| Path | Who reads it |
+|---|---|
+| `/outbox/<task-id>/files/ticket-ops.json` | the harvester, mechanically |
+| `/outbox/<task-id>/files/ticket-ops.md` | the human operator |
+
+They carry the same content. They do not carry the same consequences, and that is the part to
+read twice.
+
+**The harvester selects on the filename `ticket-ops.json` and on nothing else** — not on your
+role's name, not on what the document turns out to contain. That exact string is what puts a
+file through `TicketOpsArtifactSchema` in `src/contracts.ts`, and it is what puts it through the
+sweep that looks for the credential's literal bytes in the thing you are about to publish. A
+file under any other name is an ordinary artifact: unvalidated, unswept, and reported as though
+nothing about it needed checking.
+
+So a run that writes only `ticket-ops.md` does not fail. It passes, quietly, with both checks
+skipped — including the one that exists to catch you having put the write credential into your
+own write-up. Measured: a worker wrote `files/ticket-ops.md`, omitted the `.json`, and neither
+the schema check nor the credential sweep ran on the only output that run produced.
+
+The `.md` is not a substitute and it is not the safe half; it is the half nothing inspects. A
+malformed `.json` is loud — a schema violation, reported, and it clamps the verdict. An absent
+one is silent, which is worse, and it is the one that has actually happened.
 
 Per updated field the JSON carries `mode`, `sent`, `read_back` and `match`, so a reader can see
 what was asked for, what went out, what came back, and how the two compared — without a
@@ -203,6 +225,8 @@ actually ran — `curl --config /tmp/ticket.curlrc ...` — which names no heade
 you record an expanded header for any reason, elide it as `Authorization: Token <redacted>`.
 This is checked.
 
-If the tickets already said what the task wanted, write the artifact with `no_change_needed:
+If the tickets already said what the task wanted, write **both files** with `no_change_needed:
 true`, an empty `updates` array, and report `success`. That is a real outcome, not a failure to
-find work.
+find work — and a run with nothing to report is exactly the one most likely to skip the `.json`
+on the reasoning that there is nothing in it worth validating. There is: that no write happened
+is itself the finding, and the `.json` is where a machine can read it.
