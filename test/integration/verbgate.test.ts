@@ -36,7 +36,10 @@ afterEach(async () => {
  * point the gate at its own allow file and its ledger at /dev/null. A test that
  * configures them through env would be testing a control that no longer exists.
  */
-async function makeSandbox(allow = "kubectl rollout restart\n"): Promise<{
+async function makeSandbox(
+  allow = "kubectl rollout restart\n",
+  provenance: { task: string; epoch: string } = { task: "T-004", epoch: "1" },
+): Promise<{
   host: string;
   mounts: string[];
   ledger: () => Promise<string>;
@@ -54,9 +57,31 @@ async function makeSandbox(allow = "kubectl rollout restart\n"): Promise<{
   const policy = join(host, "policy", "cloud-allow");
   await writeFile(policy, allow);
   await chmod(policy, 0o444);
+  /**
+   * Provenance is a MOUNTED FILE now, not environment (ISC-362). The tests
+   * below that used to `export PIFLEET_TASK_ID` were the only place in the
+   * repo that variable was ever set, which was the defect: the gate read a
+   * value nothing in production supplied.
+   *
+   * It is parameterised because the forgery probes need to poison it. The gate
+   * does not trust this file even though the host writes it — a gate that
+   * trusts an input because of where it came from is one mount error away from
+   * trusting the worker — so the sanitisation those probes cover still has to
+   * be proved, now against a hostile FILE rather than a hostile environment.
+   */
+  const taskPolicy = join(host, "policy", "task");
+  await writeFile(taskPolicy, `${provenance.task}\n${provenance.epoch}\n`);
+  await chmod(taskPolicy, 0o444);
   return {
     host,
-    mounts: ["-v", `${join(host, "outbox")}:/outbox`, "-v", `${policy}:/policy/cloud-allow:ro`],
+    mounts: [
+      "-v",
+      `${join(host, "outbox")}:/outbox`,
+      "-v",
+      `${policy}:/policy/cloud-allow:ro`,
+      "-v",
+      `${taskPolicy}:/policy/task:ro`,
+    ],
     ledger: () =>
       readFile(join(host, "outbox", "ledger", "verbgate.jsonl"), "utf8").catch(() => ""),
   };
@@ -73,7 +98,10 @@ async function inImage(script: string, mounts: string[] = []): Promise<string> {
   return out;
 }
 
-const PRELUDE = `export PIFLEET_TASK_ID=T-004 PIFLEET_EPOCH=1`;
+// Provenance arrives through the mounted policy file, so the prelude has
+// nothing to export. Kept as a named constant because every probe below
+// composes it, and inlining an empty string reads like an omission.
+const PRELUDE = `:`;
 
 describe.skipIf(!DOCKER)("verbgate", () => {
   /**
@@ -203,10 +231,9 @@ describe.skipIf(!DOCKER)("verbgate", () => {
       "chmod +x /tmp/stub/jq && export PATH=/tmp/stub:$PATH";
 
     test("a forged task id cannot rewrite the decision in the fallback row", async () => {
-      const sb = await makeSandbox();
+      const sb = await makeSandbox(undefined, { task: FORGE_TASK, epoch: "1" });
       await inImage(
-        `export PIFLEET_TASK_ID='${FORGE_TASK}' PIFLEET_EPOCH=1\n${STUB_JQ}\n` +
-          `kubectl delete pod x >/dev/null 2>&1; echo "rc=$?"`,
+        `${STUB_JQ}\nkubectl delete pod x >/dev/null 2>&1; echo "rc=$?"`,
         sb.mounts,
       );
       const rows = (await sb.ledger())
@@ -221,10 +248,9 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     }, cliBudget(1));
 
     test("a forged epoch cannot break the row or inject a key", async () => {
-      const sb = await makeSandbox();
+      const sb = await makeSandbox(undefined, { task: "T-2", epoch: FORGE_EPOCH });
       await inImage(
-        `export PIFLEET_TASK_ID=T-2 PIFLEET_EPOCH='${FORGE_EPOCH}'\n${STUB_JQ}\n` +
-          `kubectl delete pod y >/dev/null 2>&1; echo "rc=$?"`,
+        `${STUB_JQ}\nkubectl delete pod y >/dev/null 2>&1; echo "rc=$?"`,
         sb.mounts,
       );
       const rows = (await sb.ledger())

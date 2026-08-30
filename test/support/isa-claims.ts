@@ -1329,13 +1329,38 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     isc: "ISC-360",
     grade: "[~]",
     claim:
-      "`PIFLEET_TASK_ID` is set NOWHERE in production, so every verbgate ledger row a real run " +
-      "produces carries the `<none>` placeholder — which is why §17's criterion 59 cannot be " +
-      "met even for a refusal. An ABSENCE claim, and the direction is the useful one: any real " +
-      "implementation of task-scoped authorization must set this variable, so binding it is " +
-      "exactly the change that must retire §5.10's erratum, and this goes red on that commit.",
+      "`PIFLEET_TASK_ID` is set NOWHERE in `src/`, and after ISC-362 that is a REGRESSION GUARD " +
+      "rather than a report of the defect. **THIS CLAIM\'S ORIGINAL REASONING WAS WRONG AND IS " +
+      "KEPT HERE AS THE RECORD.** It read: \'any real implementation of task-scoped authorization " +
+      "must set this variable, so binding it is exactly the change that must retire §5.10\'s " +
+      "erratum, and this goes red on that commit.\' ISC-362 fixed the provenance half WITHOUT " +
+      "setting it — environment is the wrong carrier twice over (a container outlives an epoch, " +
+      "and the worker can rewrite its own environment) — so the claim stayed GREEN across the " +
+      "commit it predicted would redden it. A guard pinned to a PROXY passes over the property " +
+      "it was standing in for. What it now asserts is the narrow thing it can: the env carrier " +
+      "has not been reintroduced. The provenance property itself is pinned by ISC-362\'s claims.",
     argv: ["grep", "-rnF", "PIFLEET_TASK_ID", "src/"],
     expect: "empty",
+  },
+  {
+    isc: "ISC-362",
+    grade: "[x]",
+    claim:
+      "The verbgate takes its ledger provenance from the mounted policy FILE, not from the " +
+      "environment the worker controls. Pinned on the shell expansion rather than the variable " +
+      "name, because the header still names both variables to explain why they went away.",
+    argv: ["grep", "-nF", 'task_file="/policy/task"', "docker/verbgate"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-362",
+    grade: "[x]",
+    claim:
+      "`render` mounts the provenance file READ-ONLY. The `:ro` is the whole integrity argument " +
+      "— a writable provenance file lets a worker attribute its own destructive verbs to another " +
+      "task — so the claim pins the mode, not just the path.",
+    argv: ["grep", "-nF", "${TASK_POLICY_MOUNT}:ro`", "src/config/render.ts"],
+    expect: 1,
   },
   {
     isc: "ISC-361",

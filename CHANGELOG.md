@@ -6,6 +6,29 @@ All notable changes to this project are documented here.
 
 ### Security
 
+- **The verbgate ledger now names the task that caused each verb, and a worker cannot forge it
+  (ISC-362).** `docker/verbgate` stamped every gated cloud invocation with `PIFLEET_TASK_ID` and
+  `PIFLEET_EPOCH`. Nothing in `src/` ever set them, so every row in every production run read
+  `{"task_id":"<none>","epoch":0}`: the audit trail recorded THAT a destructive verb was attempted
+  and lost WHICH task attempted it.
+
+  The obvious repair — set the two variables in the worker's `--env-file` — is wrong twice. A
+  worker container is long-lived and takes many epochs over its life, so a value fixed at
+  materialize time would name the first task forever and misattribute every later one; and the
+  worker controls its own environment, so it could rewrite the one field an investigator would
+  trust.
+
+  Provenance is now `/policy/task`, a run-tree file bind-mounted **read-only** beside
+  `/policy/cloud-allow`, rewritten by the supervisor at each dispatch and cleared at settle. The
+  rewrite is chmod 0644 → truncate in place → chmod 0444, never tmp+rename: a bind mount pins the
+  inode, so a rename swaps the file the host sees while the container reads the old one for its
+  whole life, with both sides believing the policy changed. `verbgate` holds the new file to the
+  same writability refusal as the allow file — a worker that can write either gets every verb
+  refused.
+
+  **This repairs the audit trail, not the authorization.** `cloud_allow[]` still reaches no
+  container and every mutating verb is still refused rather than permitted; that half stays open.
+
 - **Granted secrets are delivered as files, not environment variables (ISC-337..342, #115).** A
   worker printed its own credential with `echo $NAME` in its second command, with the role prompt
   and the mounted skill each forbidding exactly that. Printing your environment while orienting is a

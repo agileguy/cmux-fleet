@@ -95,6 +95,7 @@ import {
   type RunPaths,
   workerContainerName,
 } from "./paths.ts";
+import { writeTaskPolicy } from "./task-policy.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import {
   SECRETS_MOUNT,
@@ -152,6 +153,12 @@ export interface MaterializedWorker {
   skillNames: readonly string[];
   skillsDir: string;
   cloudAllow: string;
+  /**
+   * The verbgate's task-provenance file. Rewritten by the SUPERVISOR at each
+   * dispatch, not here — materialize only establishes it, at 0444 with no live
+   * task, so the mount exists before the first epoch does.
+   */
+  taskPolicy: string;
   /** null when the worker has no briefing content (render's own predicate). */
   systemAppendMd: string | null;
   /** null when `cloud.kubeconfig` is null or the worker has no cloud access. */
@@ -808,6 +815,20 @@ export async function materializeWorkerInputs(
     });
 
     /**
+     * The verbgate's task-provenance file, established with no live task so the
+     * bind mount has an inode from launch. The supervisor rewrites it IN PLACE
+     * at each dispatch (`src/run/task-policy.ts`); this is the call that
+     * CREATES the inode that mount pins, which is why it lives here and not in
+     * the supervisor. A file a container bind-mounts must exist before
+     * `docker run`, or Docker creates a DIRECTORY at the host path instead and
+     * the gate reads a provenance file that can never have content.
+     */
+    await establishing(`the task provenance for ${workerId}`, async () => {
+      await refuseSymlinkDestination(paths.taskPolicy);
+      await writeTaskPolicy(paths.taskPolicy, null, 0);
+    });
+
+    /**
      * Briefing content, path, and existence all come from `render` — the same
      * call that decides whether a `-v` is emitted at all. A worker with no
      * fragments gets no file, matching the absent mount exactly.
@@ -1055,6 +1076,7 @@ export async function materializeWorkerInputs(
       skillNames: w.skills,
       skillsDir,
       cloudAllow: paths.cloudAllow,
+      taskPolicy: paths.taskPolicy,
       systemAppendMd,
       kubeconfig,
       kubeconfigSource,

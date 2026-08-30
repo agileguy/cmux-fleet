@@ -48,6 +48,7 @@ import { RpcClient, RpcTimeoutError, Stopwatch } from "../rpc/client.ts";
 import { CompletionTracker } from "../rpc/completion.ts";
 import { EpochManager } from "../rpc/epoch.ts";
 import { isInsideRunTree, runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
+import { writeTaskPolicy } from "../run/task-policy.ts";
 import {
   initialWorkerState,
   readFence,
@@ -981,6 +982,14 @@ async function main(): Promise<void> {
       tree_hash: treeHash,
     });
     state.phase = shuttingDown ? state.phase : "idle";
+    /**
+     * Clear the provenance as the task settles. A worker process outlives its
+     * epoch, so anything it runs between settle and the next dispatch belongs
+     * to NO task — recording it against the one that just finished would be a
+     * false attribution, and a row naming work it did not come from is exactly
+     * the failure this file was built to remove.
+     */
+    await writeTaskPolicy(wp.taskPolicy, null, 0);
     state.task_id = null;
     state.completed_epochs = [...state.completed_epochs, settled.epoch];
     await flushState();
@@ -1613,6 +1622,14 @@ async function main(): Promise<void> {
         // Durable fence BEFORE the prompt; state.json epoch BEFORE the prompt
         // (SRD §7.5). Crash between here and the send burns the epoch — safe.
         await persistFence();
+        /**
+         * Provenance BEFORE the prompt, for the same reason the fence is
+         * durable before the prompt: the worker can invoke a gated verb the
+         * instant it is prompted, and a verb classified before this write
+         * would be ledgered against the PREVIOUS task. The ordering is the
+         * whole correctness argument here — the write itself is trivial.
+         */
+        await writeTaskPolicy(wp.taskPolicy, envelope.task_id, decision.epoch);
         state.epoch = decision.epoch;
         state.task_id = envelope.task_id;
         state.phase = "busy";

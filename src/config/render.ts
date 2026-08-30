@@ -40,6 +40,7 @@ import {
   type RunPaths,
   type WorkerPaths,
 } from "../run/paths.ts";
+import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
 import { ConfigError, expandPath, resolveWorker, type LoadedConfig, type ResolvedWorker } from "./load.ts";
 import type { Toolchain } from "./schema.ts";
@@ -270,6 +271,11 @@ export function buildDockerArgv(
   // the policy could rewrite the policy, and the task-scoped cloud grant was a
   // suggestion rather than a control.
   argv.push("-v", `${opts.worker.cloudAllow}:/policy/cloud-allow:ro`);
+  // Task provenance, same surface and same integrity rule as the allow file:
+  // read-only to the worker, rewritten in place by the supervisor at each
+  // dispatch. It is NOT environment, because a worker container outlives any
+  // one epoch and a worker can rewrite its own environment (ISC-362).
+  argv.push("-v", `${opts.worker.taskPolicy}:${TASK_POLICY_MOUNT}:ro`);
   /*
    * The secret store, `:ro` like every other input the worker only reads.
    *
