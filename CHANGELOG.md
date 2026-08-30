@@ -58,6 +58,23 @@ All notable changes to this project are documented here.
 
 ### Security
 
+- **Task-scoped cloud authorization is descoped, and `cloud_allow[]` is now refused (ISC-366).** It
+  was designed in SRD §5.10 and never built: the mounted policy is written empty at `up` and nothing
+  rewrites it, so a value an operator set reached the worker's *brief* and never the verbgate. The
+  rewriter will not be built.
+
+  **This is a breaking change for anyone setting the field**, and deliberately so. A non-empty
+  `cloud_allow[]` is now a usage error on both the task spec and the task envelope, with a message
+  naming the reason and the alternative. Accepted-and-ignored was the worse option: the operator
+  sets `cloud_allow: ["kubectl scale"]`, the brief tells the worker it may scale, the worker tries,
+  and the gate refuses with exit 77 — an epoch spent discovering that a grant the document offered
+  does not exist.
+
+  What ships: the policy is empty for the life of every run, every mutating cloud verb is refused
+  with exit 77, read verbs are untouched, and the load-bearing control is the credential's scope via
+  `cloud.impersonate_service_account` — which §5.10 always called the stronger of the two, with the
+  verb gate as defence-in-depth rather than a substitute.
+
 - **The verbgate ledger now names the task that caused each verb, and a worker cannot forge it
   (ISC-362).** `docker/verbgate` stamped every gated cloud invocation with `PIFLEET_TASK_ID` and
   `PIFLEET_EPOCH`. Nothing in `src/` ever set them, so every row in every production run read

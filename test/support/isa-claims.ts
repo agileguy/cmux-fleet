@@ -1353,6 +1353,17 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-366",
+    grade: "[x]",
+    claim:
+      "`cloud_allow[]` is refused rather than accepted-and-ignored, on BOTH doors — the task spec " +
+      "an operator writes and the envelope the supervisor parses off the control socket. Pinned on " +
+      "the shared refusal helper with an expected count of 2, so restoring a plain array on either " +
+      "schema goes red. A descope that leaves the field accepted is a trap with a plausible name.",
+    argv: ["grep", "-nF", "cloud_allow: cloudAllowDescoped(", "src/contracts.ts"],
+    expect: 2,
+  },
+  {
     isc: "ISC-365",
     grade: "[x]",
     claim:

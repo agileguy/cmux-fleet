@@ -83,6 +83,41 @@ export function rank(v: Verdict): number {
 }
 
 /**
+ * DESCOPED 2026-08-30, and refused rather than ignored.
+ *
+ * Task-scoped cloud authorization was designed (SRD §5.10) and never built:
+ * `materialize.ts` writes the mounted policy EMPTY at `up` and nothing ever
+ * rewrites it, so a `cloud_allow[]` an operator sets reaches the worker's
+ * PROMPT and never the verbgate. The owner descoped the rewriter on
+ * 2026-08-30 rather than build it.
+ *
+ * Leaving the field to be silently ignored would be the worse half of both
+ * options. The operator writes `cloud_allow: ["kubectl scale"]`, the brief
+ * tells the worker it may scale, the worker tries, and the gate refuses with
+ * exit 77 — one epoch spent discovering that a grant the document offered does
+ * not exist. A field that does nothing is not a descoped feature, it is a trap
+ * with a plausible name.
+ *
+ * So a non-empty value is a USAGE error naming the reason. The field itself
+ * stays, at length zero, because the envelope is a wire format the supervisor
+ * also parses and removing a key is a compatibility break for a change whose
+ * whole point is that nothing depends on it.
+ */
+const cloudAllowDescoped = (label: string) =>
+  z
+    .array(shortStr)
+    .max(MAX_ITEMS)
+    .default([])
+    .refine((v) => v.length === 0, {
+      message:
+        `cloud_allow[] is not implemented and was descoped on 2026-08-30: the verbgate's policy ` +
+        `is written empty at \`up\` and never rewritten, so naming a verb here would grant ` +
+        `nothing while telling the worker otherwise. Every mutating cloud verb is refused with ` +
+        `exit 77; scope the CREDENTIAL instead, with cloud.impersonate_service_account. ` +
+        `(${label})`,
+    });
+
+/**
  * Combine a derived verdict with the worker's claim.
  *
  * `aborted` and `timed_out` are terminal and set by the supervisor, so they win
@@ -129,8 +164,8 @@ export const TaskEnvelopeSchema = z.object({
   acceptance: z.array(text).max(MAX_ITEMS).default([]),
   constraints: z.array(text).max(MAX_ITEMS).default([]),
   outbox: shortStr,
-  /** Normalized mutating-verb prefixes this task may run (SRD §5.10). */
-  cloud_allow: z.array(shortStr).max(MAX_ITEMS).default([]),
+  /** DESCOPED — must be empty; see `cloudAllowDescoped` (SRD §5.10). */
+  cloud_allow: cloudAllowDescoped("task envelope"),
   deadline_s: z.number().int().positive(),
   depends_on: z.array(shortStr).max(MAX_ITEMS).default([]),
 });
@@ -1158,7 +1193,7 @@ export const TaskSpecSchema = z.object({
   acceptance: z.array(text).max(MAX_ITEMS).default([]),
   constraints: z.array(text).max(MAX_ITEMS).default([]),
   inputs: z.array(TaskInputSchema).max(MAX_ITEMS).default([]),
-  cloud_allow: z.array(shortStr).max(MAX_ITEMS).default([]),
+  cloud_allow: cloudAllowDescoped("task spec"),
   deadline_s: z.number().int().positive().default(1800),
 });
 export type TaskSpec = z.infer<typeof TaskSpecSchema>;
