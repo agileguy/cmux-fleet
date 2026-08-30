@@ -67,7 +67,7 @@ All six phases are done. 2510 tests pass, 123 skip, 0 fail across 166 files (`te
 | 5 | Orchestration | done — `dispatch --auto` DAG scheduling, `pifleet report`, `pifleet logs` |
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 
-No ISA done-condition criterion is unattempted — there are zero `[ ]`. Nine are graded `[~]`
+No ISA done-condition criterion is unattempted — there are zero `[ ]`. Eight are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-306 and ISC-339 are scope decisions awaiting an owner rather than
 defects; ISC-307 and ISC-331 each have one unexercised surface (a stderr line, a live round trip);

@@ -1478,7 +1478,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-361",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The bridge gateway is DROPped for traffic from the egress bridge, and the rule is the " +
       "narrow `-i <bridge> -d <gateway>` pair rather than a blanket drop — which is both the " +
@@ -1495,7 +1495,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-361",
-    grade: "[~]",
+    grade: "[x]",
     claim:
       "The block is installed from inside `ensureEgressNetwork`, so it is not a step an " +
       "operator or a caller can skip on the way to a running fleet. Empty means the call site " +

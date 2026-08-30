@@ -1951,12 +1951,70 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void beginShutdown());
 }
 
-function renderPrompt(envelope: { title: string; brief: string; acceptance: string[] }): string {
+/**
+ * The worker's prompt, and the two identifiers it could not previously see.
+ *
+ * ISC-349 found a ticketing worker writing its output to
+ * `/outbox/list-tickets-2026-08-29/` — a slug of the job it thought it had
+ * done — while the id it was dispatched under was `my-iteration-2`. Both
+ * shipped documents already told it to use `<task-id>`. The finding was not
+ * the worker's carelessness: **the placeholder was unbindable.**
+ *
+ * This function took `title`, `brief` and `acceptance` and nothing else, so
+ * `task_id` and `outbox` sat in the envelope, reached the supervisor, and
+ * never reached the agent. `PIFLEET_TASK_ID` was set nowhere in production
+ * (fixed for the verbgate's ledger by ISC-362, which delivers it to the GATE
+ * and not to the agent). And `materialize.ts` creates only the worker-level
+ * directory that becomes the `/outbox` mount, so the name could not be
+ * discovered by listing either. A worker asked for `<outbox>/<task-id>/` had
+ * no route to the middle component by any means available to it.
+ *
+ * Delivering them is the mechanism the instruction was missing. It does not
+ * make a worker obey — nothing here can — but it removes the case where
+ * obedience was impossible, which is what ISC-349 actually measured.
+ *
+ * The identifiers go in a fenced block under a heading rather than into the
+ * prose, so a model skimming for the task cannot read them as part of the
+ * brief's argument, and `outbox` is given as the literal path the worker
+ * should write to rather than as a template it has to assemble.
+ */
+export function renderPrompt(envelope: {
+  title: string;
+  brief: string;
+  acceptance: string[];
+  task_id: string;
+  outbox: string;
+}): string {
   const acceptance =
     envelope.acceptance.length > 0
       ? `\n\n## Acceptance\n${envelope.acceptance.map((a) => `- ${a}`).join("\n")}`
       : "";
-  return `# ${envelope.title}\n\n${envelope.brief}${acceptance}`;
+  /**
+   * DELIVERY ONLY. An earlier version of this block also told the worker to
+   * write `<outbox>/result.json` LAST — and the live chain (ISC-290) went from
+   * `complete` to `partial` on it, because a worker that previously wrote NO
+   * envelope started writing a malformed one, and a refused envelope degrades
+   * the harvest where a missing one does not.
+   *
+   * That was the criterion's own lesson applied backwards. ISC-349's finding is
+   * that the placeholder was UNBINDABLE, and the repair for that is the value,
+   * not another imperative. `skills/pifleet-worker/SKILL.md` is mounted into
+   * every container and already says what to write, where, in what order, and
+   * what the envelope must contain; a terser second copy in the prompt competes
+   * with it and adds nothing the worker did not already have.
+   *
+   * So this names the two values and says which placeholders they bind. It
+   * changes what the worker CAN do, not what it is told to do.
+   */
+  const identity =
+    `\n\n## This task\n\n` +
+    "```\n" +
+    `task_id: ${envelope.task_id}\n` +
+    `outbox:  ${envelope.outbox}\n` +
+    "```\n\n" +
+    `These are the values the mounted documents refer to as \`<task-id>\` and \`<outbox>\`. ` +
+    `Neither is derivable from the title.`;
+  return `# ${envelope.title}\n\n${envelope.brief}${acceptance}${identity}`;
 }
 
 if (import.meta.main) {
