@@ -1353,6 +1353,28 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-364",
+    grade: "[x]",
+    claim:
+      "The worker skill's status instruction is a single sentence the probe cuts at the first " +
+      "full stop. Pinned on that sentence because the clause AFTER it names two statuses the " +
+      "worker must NOT write — a probe reading the whole line inverts the document's meaning.",
+    argv: ["grep", "-nF", "`status` is exactly one of", "skills/pifleet-worker/SKILL.md"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-364",
+    grade: "[x]",
+    claim:
+      "The worker-document path probe admits placeholders. An ABSENCE-shaped claim on the " +
+      "character class: without `<` in it every interesting path in these documents — " +
+      "`/outbox/<task-id>/result.json` above all — is invisible, which is how the first version " +
+      "stayed green while the envelope contract's own path was rewritten to a directory that " +
+      "does not exist.",
+    argv: ["grep", "-nF", "[a-zA-Z0-9<]", "test/unit/worker-docs-currency.test.ts"],
+    expect: 1,
+  },
+  {
     isc: "ISC-363",
     grade: "[x]",
     claim:

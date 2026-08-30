@@ -6,6 +6,22 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **The documents mounted into workers are checked against the code (ISC-364).** `skills/` and
+  `roles/` were current in the sense that CI builds them into the image — and three of the audit's
+  findings were in them anyway. Mounting guarantees a worker reads a document, not that what it
+  reads is true, and these are the worst files to be wrong in: an SRD that is wrong misleads a
+  human who can push back, a `SKILL.md` that is wrong is an instruction executed by an agent that
+  cannot.
+
+  Two things in a worker document are decidable rather than judgement, and both are load-bearing:
+  the statuses a worker is told to write must be exactly `StatusSchema`'s, and the container paths
+  it is told it has must be paths the renderer mounts. Both are now compared against the code.
+
+  This was originally scoped as a CI rule pairing `src/harvest/` changes with
+  `skills/pifleet-worker/`. That is the wrong control — satisfiable with a whitespace edit, and a
+  false alarm on the many harvest changes that touch no worker instruction. Comparing content is
+  not defeatable by touching a file.
+
 - **The SRD's identifiers are swept every CI run (ISC-363).** The documentation audit verified
   §17's criteria by extracting every identifier and grepping for it by hand. That is mechanical, so
   a build does it now: every repo path the document cites must exist, and every pifleet-owned
