@@ -284,14 +284,20 @@ describe("verbgate (SRD §5.10)", () => {
       await makeWorkerAccessible(join(host, "outbox", "ledger"), true);
       const policy = join(host, "cloud-allow");
       await writeFile(policy, "kubectl delete\n");
+      // Provenance is a mounted FILE, not environment (ISC-362): this test used
+      // to pass `env: { PIFLEET_TASK_ID: "T-test" }`, and it plus
+      // `verbgate.test.ts` were the only places that variable was ever set —
+      // which is what made every production ledger row read `<none>`.
+      const taskPolicy = join(host, "task-policy");
+      await writeFile(taskPolicy, "T-test\n1\n");
       const r = await runInImage(
         ["-c", 'kubectl delete pod x --dry-run=client 2>/dev/null; echo "gate=$?"'],
         {
           entrypoint: "/bin/sh",
-          env: { PIFLEET_TASK_ID: "T-test" },
           extra: [
             "-v", `${join(host, "outbox")}:/outbox`,
             "-v", `${policy}:/policy/cloud-allow:ro`,
+            "-v", `${taskPolicy}:/policy/task:ro`,
           ],
         },
       );
