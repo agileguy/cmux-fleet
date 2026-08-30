@@ -649,12 +649,18 @@ export const EXIT = {
   /**
    * A failure pifleet could not diagnose — a bug in pifleet itself.
    *
-   * Not in the SRD §10 ladder, and deliberately outside it: every code above
-   * describes something that happened to the RUN, and this one describes the
-   * tool breaking. The entry point used to report it as `USAGE`, which made a
-   * crash indistinguishable from a typo'd flag over the only channel a machine
-   * caller has — so an orchestrator would answer it by rewriting its arguments
-   * and trying again, forever (ISC-216).
+   * Conceptually outside the rest of the SRD §10 ladder, and ranked FIRST in
+   * `EXIT_SEVERITY` because of it: every other code describes something that
+   * happened to the RUN, and this one describes the tool breaking, so nothing
+   * it reports about the run can outrank it. The entry point used to report it
+   * as `USAGE`, which made a crash indistinguishable from a typo'd flag over
+   * the only channel a machine caller has — so an orchestrator would answer it
+   * by rewriting its arguments and trying again, forever (ISC-216).
+   *
+   * This docblock used to open "Not in the SRD §10 ladder", which was true of
+   * the document and not of the intent; §10 carries `8` at the top of its
+   * ladder as of the 2026-08-30 documentation audit, and `test/unit/docs-currency.test.ts`
+   * now fails if any `EXIT` value goes missing from that line.
    */
   INTERNAL: 8,
 } as const;

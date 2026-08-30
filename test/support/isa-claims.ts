@@ -298,13 +298,19 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     claim:
       "The skill states the COST of a guessed outbox directory in mechanism terms, not as a " +
       "bare imperative: `harvest/outbox.ts` scans `join(workerOutboxDir, taskId)` and only " +
-      "that, so a wrongly-named directory is invisible rather than merely untidy. Empty here " +
-      "means the rule went back to an instruction with no stated consequence — the form it was " +
-      "in when a worker disregarded it.",
+      "that, so a wrongly-named directory's CONTENT is invisible rather than merely untidy. " +
+      "Empty here means the rule went back to an instruction with no stated consequence — the " +
+      "form it was in when a worker disregarded it.\n\n" +
+      "PINNED STRING CHANGED 2026-08-30, and the reason is the failure this registry exists " +
+      "for. It used to be `not scanned, not reported, and not swept`, and the middle word went " +
+      "FALSE when ISC-346..348 built `harvest/layout.ts`'s `unexplainedOutboxDirs`: a guessed " +
+      "directory IS reported now, by name, as holding nothing that was checked. The skill was " +
+      "telling a worker the harvest is blind to something it had learned to see, and this " +
+      "claim was green over that sentence for as long as the wording held.",
     argv: [
       "grep",
       "-nF",
-      "not scanned, not reported, and not swept for credentials",
+      "not scanned, not validated, and not swept for credentials",
       "skills/pifleet-worker/SKILL.md",
     ],
     expect: 1,
@@ -1305,6 +1311,64 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "— in the direction that silently weakens the cap.",
     argv: ["grep", "-nF", "REPLACES the defaults, it does not extend them", "fleet.example.yaml"],
     expect: 0,
+  },
+  {
+    isc: "ISC-360",
+    grade: "[~]",
+    claim:
+      "The verbgate's policy file is written EMPTY, once per worker at `up`, and this is the " +
+      "only write of it in the tree. SRD §5.10 and §17's criterion 59 now say so; if this line " +
+      "goes away — because someone wired the dispatch-time rewriter `run/materialize.ts` " +
+      "addresses in its own comment — both errata become false and the acceptance criterion " +
+      "becomes meetable again. Pinned on the whole expression including the empty-string " +
+      "argument, so writing a POPULATED policy at the same call site reddens it too.",
+    argv: ["grep", "-nF", 'await writeFile(paths.cloudAllow, "");', "src/run/materialize.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-360",
+    grade: "[~]",
+    claim:
+      "`PIFLEET_TASK_ID` is set NOWHERE in production, so every verbgate ledger row a real run " +
+      "produces carries the `<none>` placeholder — which is why §17's criterion 59 cannot be " +
+      "met even for a refusal. An ABSENCE claim, and the direction is the useful one: any real " +
+      "implementation of task-scoped authorization must set this variable, so binding it is " +
+      "exactly the change that must retire §5.10's erratum, and this goes red on that commit.",
+    argv: ["grep", "-rnF", "PIFLEET_TASK_ID", "src/"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-361",
+    grade: "[~]",
+    claim:
+      "The bridge gateway is DROPped for traffic from the egress bridge, and the rule is the " +
+      "narrow `-i <bridge> -d <gateway>` pair rather than a blanket drop — which is both the " +
+      "security property and the blast-radius bound. SRD §12.8's reachable set no longer " +
+      "carries the gateway term because of this line; if it is generalised or deleted, the " +
+      "residual comes back and three unions in that section become right again.",
+    argv: [
+      "grep",
+      "-nF",
+      'return [op, CHAIN, "-i", bridge, "-d", gateway, "-j", TARGET];',
+      "src/security/gateway-block.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-361",
+    grade: "[~]",
+    claim:
+      "The block is installed from inside `ensureEgressNetwork`, so it is not a step an " +
+      "operator or a caller can skip on the way to a running fleet. Empty means the call site " +
+      "moved or went away, and SRD §12.8's erratum — the only place the closure is written " +
+      "down — is asserting a containment the network setup no longer establishes.",
+    argv: [
+      "grep",
+      "-nF",
+      "await ensureGatewayBlocked(status.id, status.gateway);",
+      "src/security/network.ts",
+    ],
+    expect: 1,
   },
 ] as const;
 

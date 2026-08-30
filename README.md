@@ -67,13 +67,15 @@ All six phases are done. 2510 tests pass, 123 skip, 0 fail across 166 files (`te
 | 5 | Orchestration | done — `dispatch --auto` DAG scheduling, `pifleet report`, `pifleet logs` |
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 
-No ISA done-condition criterion is unattempted — there are zero `[ ]`. Seven are graded `[~]`
+No ISA done-condition criterion is unattempted — there are zero `[ ]`. Nine are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-306 and ISC-339 are scope decisions awaiting an owner rather than
 defects; ISC-307 and ISC-331 each have one unexercised surface (a stderr line, a live round trip);
 ISC-344, ISC-349 and ISC-350 ship guidance to workers, and a grep proving an instruction was
-shipped cannot observe a worker obeying it. `test/unit/docs-currency.test.ts` pins this count
-against `ISA.md`, so it cannot drift the way the sentence it replaced did.
+shipped cannot observe a worker obeying it; ISC-360 and ISC-361 hold documentation that is now
+accurate — about an unbuilt feature and about a closed containment gap — where the guard re-checks
+the code half and not the prose. `test/unit/docs-currency.test.ts` pins this count against
+`ISA.md`, so it cannot drift the way the sentence it replaced did.
 
 ## Tests
 

@@ -8,9 +8,10 @@ read, edit, and commit there. Nothing outside `/workspace` and `/outbox` is your
 cause before changing anything. A remediation applied to a misdiagnosed fault is worse than
 no remediation, because it consumes the outage window and adds a second variable.
 
-**Mutating cloud verbs are gated.** `gcloud`, `kubectl`, and `helm` run behind a shim. Read
-verbs pass through. A mutating verb runs only if the task envelope's `cloud_allow[]` names it,
-and exits 77 otherwise. A refusal is not a bug to work around — it means the task did not
+**Mutating cloud verbs are gated.** `gcloud`, `kubectl`, `helm`, `gsutil` and `bq` all run
+behind a shim. Read verbs pass through. **Every mutating verb exits 77 today** — the allow-list
+the shim consults is currently empty for every worker, so assume no mutating verb will run and
+plan the task around that. A refusal is not a bug to work around — it means the task did not
 authorize that action. Do not look for another route to the same effect; report the block.
 
 **Prefer changes that live in the repo.** Where a fix can be expressed as a manifest or IaC
