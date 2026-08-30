@@ -56,6 +56,30 @@ All notable changes to this project are documented here.
   **It checks that names resolve, not that sentences are true.** A paragraph can name every symbol
   correctly and still describe behaviour the code does not have.
 
+### Added
+
+- **The worker's prompt now carries the task id and outbox it was dispatched under (ISC-367).**
+  ISC-349 measured a ticketing worker writing to `/outbox/list-tickets-2026-08-29/` — a slug of the
+  job it thought it had done — while the id it was dispatched under was `my-iteration-2`. Both
+  shipped documents already told it to use `<task-id>`.
+
+  The re-read found the instruction was not weak, it was **unfollowable**. `renderPrompt` took
+  `title`, `brief` and `acceptance` and nothing else; `PIFLEET_TASK_ID` was set nowhere in
+  production (ISC-362 fixed that for the verbgate's *ledger*, not for the agent); and only the
+  worker-level outbox directory is created, so `<outbox>/<task-id>` could not be discovered by
+  listing either. A worker asked for a path whose middle component it had no route to was going to
+  guess.
+
+  Both identifiers are now rendered into the prompt in a fenced block, naming which placeholders
+  they bind. **Delivery only** — an earlier version also told the worker to write its envelope to
+  the outbox, and CI's live chain went from `complete` to `partial`, because a worker that had been
+  writing no envelope started writing a malformed one and a refused envelope degrades the harvest
+  where a missing one does not. The repair for an unbindable placeholder is the value; `SKILL.md`
+  is mounted and already carries the instruction.
+
+  This proves delivery, not obedience — the failure mode is now disobedience rather than
+  impossibility.
+
 ### Security
 
 - **Task-scoped cloud authorization is descoped, and `cloud_allow[]` is now refused (ISC-366).** It
