@@ -1353,6 +1353,66 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-365",
+    grade: "[x]",
+    claim:
+      "F11's pre-emptive `compact` is NOT BUILT, and §13's table says so. A TRIPWIRE, not a report: " +
+      "the claim is pinned to the ABSENCE, so the commit that builds it goes red and the row " +
+      "cannot keep saying NOT BUILT after it stops being true. A mitigation named in the " +
+      "present tense that does not exist is worse than a blank cell, because it stops the " +
+      "reader looking further — and §13 is read mid-incident.",
+    argv: ["grep", "-rF", "\"compact\"", "src/"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-365",
+    grade: "[x]",
+    claim:
+      "F13's retry backoff is NOT BUILT, and §13's table says so. A TRIPWIRE, not a report: " +
+      "the claim is pinned to the ABSENCE, so the commit that builds it goes red and the row " +
+      "cannot keep saying NOT BUILT after it stops being true. A mitigation named in the " +
+      "present tense that does not exist is worse than a blank cell, because it stops the " +
+      "reader looking further — and §13 is read mid-incident.",
+    argv: ["grep", "-rF", "backoff", "src/"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-365",
+    grade: "[x]",
+    claim:
+      "F19's interrogative detection, which needs the assistant's last text is NOT BUILT, and §13's table says so. A TRIPWIRE, not a report: " +
+      "the claim is pinned to the ABSENCE, so the commit that builds it goes red and the row " +
+      "cannot keep saying NOT BUILT after it stops being true. A mitigation named in the " +
+      "present tense that does not exist is worse than a blank cell, because it stops the " +
+      "reader looking further — and §13 is read mid-incident.",
+    argv: ["grep", "-rF", "get_last_assistant_text", "src/"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-365",
+    grade: "[x]",
+    claim:
+      "F35's `skipped:dependency_failed` is NOT BUILT, and §13's table says so. A TRIPWIRE, not a report: " +
+      "the claim is pinned to the ABSENCE, so the commit that builds it goes red and the row " +
+      "cannot keep saying NOT BUILT after it stops being true. A mitigation named in the " +
+      "present tense that does not exist is worse than a blank cell, because it stops the " +
+      "reader looking further — and §13 is read mid-incident.",
+    argv: ["grep", "-rF", "dependency_failed", "src/"],
+    expect: "empty",
+  },
+  {
+    isc: "ISC-365",
+    grade: "[x]",
+    claim:
+      "F36's auth-failure detection is NOT BUILT, and §13's table says so. A TRIPWIRE, not a report: " +
+      "the claim is pinned to the ABSENCE, so the commit that builds it goes red and the row " +
+      "cannot keep saying NOT BUILT after it stops being true. A mitigation named in the " +
+      "present tense that does not exist is worse than a blank cell, because it stops the " +
+      "reader looking further — and §13 is read mid-incident.",
+    argv: ["grep", "-rF", "invalid_grant", "src/"],
+    expect: "empty",
+  },
+  {
     isc: "ISC-364",
     grade: "[x]",
     claim:

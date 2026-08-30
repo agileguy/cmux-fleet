@@ -2090,15 +2090,15 @@ The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Gen
 | F8 | cmux socket refuses | `ping`/`capabilities` | named diagnosis; `tmux` fallback; exit 3 |
 | F9 | `read-screen` absent or fails after display sleep | probe | irrelevant by design |
 | F10 | cmux/Pi version drift | pinned versions in ledger | `doctor` exits 3 on delta |
-| F11 | Context overflow / compaction thrash | `compaction_*` frequency | pre-emptive `compact`; smaller briefs; report flag |
-| F12 | Cost runaway | 60s `get_session_stats` | reservation + ceiling halt (**the 80% soft-stop was never implemented and its config key was removed — ISC-280**) |
-| F13 | Provider rate-limit / transient error | `auto_retry_*` | backoff; excess retries → `blocked` |
+| F11 | Context overflow / compaction thrash | `compaction_*` frequency | **NOT BUILT** — smaller briefs and the report flag are real; pre-emptive `compact` is not (`grep -rF '"compact"' src/` returns nothing) |
+| F12 | Cost runaway | **NOT BUILT** — no 60s sampler exists; all nine `get_session_stats` references in `src/` are comments, and `src/harvest/usage.ts` records that the only executable one in the repository is the RESPONDER in the test double | reservation + ceiling halt (**the 80% soft-stop was never implemented and its config key was removed — ISC-280**) |
+| F13 | Provider rate-limit / transient error | `auto_retry_*` | **NOT BUILT** — no backoff and no retry-count escalation to `blocked`; `grep -rniE backoff src/` returns nothing |
 | F14 | Session file rewritten, not appended | inode/size change | `(dev,ino,size,offset)` tracking (§8.3) |
 | F15 | Pane closed by Dan | surface missing | supervisor is detached — unaffected (**rpc mode only**) |
 | F16 | Secrets rendered into a pane | — | no provider key exists in the container (§12.4) |
 | F17 | Stale checkouts accumulate | `StaleWorktreeError` refuses to adopt one at `up` (§9.2 erratum — `git worktree prune` retired with `git worktree add`) | two-phase `down`; refuse dirty without `--force` |
 | F18 | Orchestrator crashes mid-run | ledger + registry on disk | detached supervisors; replayable `wait`; idempotent dispatch |
-| F19 | Worker ends turn asking a question | no diff + no envelope + interrogative | `blocked`; question surfaced |
+| F19 | Worker ends turn asking a question | **NOT BUILT** — the interrogative test needs the assistant's last text and `get_last_assistant_text` exists only in the test double | `blocked`; question surfaced |
 | F20 | `pi` wedged but alive | `last_event_at` stall | two-signal liveness |
 | F21 | Torn read / multi-byte split | — | `StringDecoder` across polls; whole-line watermark (§8.3) |
 | F22 | `result.json` half-written | schema/epoch check | atomic write + dir fsync |
@@ -2114,8 +2114,8 @@ The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Gen
 | F32 | **`down --prune` races a live container** | supervisor not confirmed dead | two-phase quiesce-then-prune (§9.3) |
 | F33 | **Container clock/uid mismatch breaks worktree write-through** | `image verify` write-through probe | fixed uid 10001; `doctor` checks both directions |
 | F34 | **Registry lost-update race exceeds the ceiling** | — | single-writer daemon; all mutations by RPC |
-| F35 | **`depends_on` cycle or failed dependency deadlocks `wait`** | topological sort | exit 2 on cycle; `skipped:dependency_failed` |
-| F36 | **ADC token expires mid-task; `gcloud`/`kubectl` fail late with an auth error** | 401/`invalid_grant` in tool output | supervisor refreshes and re-injects every `token_refresh` (45 m < 60 m TTL); a failure re-mints once before failing the epoch |
+| F35 | **`depends_on` cycle or failed dependency deadlocks `wait`** | topological sort | exit 2 on cycle is real; `skipped:dependency_failed` is **NOT BUILT** (`grep -rF dependency_failed src/` returns nothing) |
+| F36 | **ADC token expires mid-task; `gcloud`/`kubectl` fail late with an auth error** | **NOT BUILT** — nothing inspects tool output for 401 or `invalid_grant` | the periodic refresh and re-injection are real; "re-mints once before failing the epoch" is **NOT BUILT** — `src/supervisor/index.ts`'s `onFailure` sets `degraded: true` and flushes state, degrading LOUDLY without killing the epoch |
 | F37 | **Google credential exfiltrated by a worker with `bash`** | not detectable from inside | `adc_mode: token` bounds it to ~1 h; `cloud_access` off by default; SA impersonation; egress allowlist; host gcloud store never mounted (§5.8) |
 | F39 | **Model emits prose instead of native `tool_calls`** — worker looks healthy, streams, settles, and does nothing | startup `tools` probe **+** runtime zero-tool-call counter | exit 2 at `up` on prose; at runtime, 3 turns with zero tool calls → `failed:no_tool_calls`; measured on `Qwen3-8B-4bit` (§5.9) |
 | F40 | **N workers queue on one local inference server**; a slow generation stalls the whole fleet and trips stall-kills | oMLX latency measured at `doctor` | `max_concurrent` default 2, set from evidence; `event_stall_warn` sized to absorb queueing; refuse to start during MLX training |
