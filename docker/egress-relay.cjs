@@ -32,17 +32,23 @@
  * perform on ordinary bridges, which this project's Colima setup was
  * measured NOT to provide consistently).
  *
- * Deliberately NOT a general-purpose forward proxy. It forwards only the
- * literal (host, port) pairs it is configured with — currently the oMLX
- * endpoint alone. `src/security/egress.ts`'s `decide()` already carries
- * allow rules for the configured Google endpoints (`egress.google_hosts`),
- * but routing arbitrary `*.googleapis.com` subdomains through a relay needs
- * either wildcard DNS aliasing (Docker network aliases don't support
- * wildcards) or an HTTP CONNECT/SNI-routing proxy — neither is built here.
- * That gap is shared with ISC-253 and is recorded in `ISA.md` rather than
- * silently assumed away: this relay proves the oMLX allow rule and the
- * default-deny for everything off the subnet, live; it does not prove live
- * Google reachability.
+ * Deliberately NOT a general-purpose forward proxy. The TCP forwarder below
+ * forwards only the literal (host, port) pairs it is configured with —
+ * currently the oMLX endpoint alone. `src/security/egress.ts`'s `decide()`
+ * already carries allow rules for the configured Google endpoints
+ * (`egress.google_hosts`), and routing arbitrary `*.googleapis.com`
+ * subdomains through a relay needs either wildcard DNS aliasing (Docker
+ * network aliases don't support wildcards) or an HTTP CONNECT proxy.
+ *
+ * CORRECTED 2026-08-30 (documentation audit): this paragraph used to end
+ * "neither is built here". The CONNECT proxy has since been built and is
+ * loaded by THIS FILE — see `require("./connect-proxy.cjs")` below, ISC-263 —
+ * so the sentence had been false since that landed, in the one place a reader
+ * goes to find out what the relay does. What remains true is the split of
+ * responsibility: the forwarder proves the oMLX allow rule and the
+ * default-deny for everything off the subnet, live; the CONNECT proxy carries
+ * the Google hosts under the same `decide()` policy. Wildcard DNS aliasing is
+ * still not built, and is no longer needed.
  *
  * Deliberately plain Node with no dependencies: the worker image's `base`
  * toolchain has no `bun` (only `node`, from the `node:*` base layer itself),

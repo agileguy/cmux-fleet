@@ -676,6 +676,55 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- **The SRD's judgement half is reconciled with the implementation (ISC-357..361).** A prior pass
+  closed four *mechanical* invariants — mount paths, CLI commands, config keys, exit codes — and
+  said plainly that it did not claim the SRD was accurate, because nothing re-reads prose. Read by
+  hand, the prose held thirty-one further divergences across §4.1, §4.2, §5.10, §7.1, §7.2, §7.5,
+  §7.6, §7.7, §11, §12.1-12.3, §12.5-12.9, §13, §15 and §17, plus nineteen in the worker-facing
+  `roles/*.md`, `skills/*` and `docker/*` documents.
+
+  **Their shape is different from the first pass's.** #120's eleven were omissions — a table
+  missing rows, a ladder missing a code. Most of these are *unbuilt mitigations described in the
+  present tense*: §13 names six (a pre-emptive `compact`, a `get_session_stats` cost sampler, a
+  retry backoff, prose-blocking detection, `skipped:dependency_failed`, auth-failure detection),
+  §7.1 names a host-path refusal that does not exist, §12.6 names a fencing-and-banner pass that
+  does not exist, and §12.9 names a CI grep gate and a commit template that do not exist. A
+  document can be current on every countable fact and still describe defences the system does not
+  have. Each is now recorded as unbuilt rather than repaired; recording it is the finding.
+
+  **Two are load-bearing for an operator.** §5.10 described task-scoped authorization for mutating
+  cloud verbs as though it were wired end to end; `/policy/cloud-allow` is written empty at `up`
+  and never rewritten, so the `cloud_allow[]` in a dispatch envelope reaches no container and every
+  mutating verb is refused — safer than documented, and a capability that does not exist.
+  `PIFLEET_TASK_ID` is set nowhere in production, so every verbgate ledger row carries `<none>`.
+  §15 named `PIFLEET_PI_BIN` as the variable that selects the Pi test double; the name is
+  `PIFLEET_PI_COMMAND`, and it is the only way to run the acceptance suite at all.
+
+  **One ran the other way, and that direction is new here.** §12.8's bridge-gateway residual was
+  *closed* — `security/gateway-block.ts` installs the exact `iptables` rule the section called out
+  of scope, mandatorily, with a full 65535-port enumeration asserting the reachable set is empty —
+  while the section still said "accepted as a residual, not fixed". Three reachable-set unions were
+  overstating the exposure. Drift is not only a document falling behind a fix; it is also a fix
+  nobody wrote down.
+
+- **Worker-facing documents stop describing a harvest that has changed under them.**
+  `skills/pifleet-worker/SKILL.md` told workers a guessed outbox directory is "not reported" and
+  that "nothing goes looking for it" — ISC-346..348 built exactly that reporting; that a
+  half-written envelope "is read as a missing one" — it is *refused*, which is worse than missing;
+  and listed writing outside `/workspace`/`/outbox` and AI attribution under "Things that will not
+  work", where nothing enforces either. `roles/ticketing.md` and `skills/ticket-ops/SKILL.md` said
+  writing only `ticket-ops.md` "reports clean"; it now clamps the verdict to `failed`.
+  `roles/ticketing.md` promised a `/workspace` its `isolation: none` role does not get, and
+  `docker/egress-relay.cjs` said the CONNECT proxy was "not built here" in the file that requires
+  it.
+
+  Three new probes in `test/unit/docs-currency.test.ts` cover what is derivable: every `PIFLEET_*`
+  variable the SRD names must exist in the code, every `REQUIRED_COMMANDS` entry must have a §4.1
+  table row, and every `WorkerStateSchema` field must appear in §7.6's JSON block. Each is
+  mutation-proved. The first was *decorative twice over* when written — it scanned erratum text
+  that necessarily spells the wrong name, and its own docstring satisfied it — and went green with
+  the defect still in §15.
+
 - **The worker's artifact claims are reconciled against the outbox (ISC-246, ISC-303, #108).** The
   outbox scan validated each artifact and handed back an open descriptor, and nothing in `src/` read
   one. A worker could name an artifact it never wrote, or write one it never named, and the harvest

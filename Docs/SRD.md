@@ -231,6 +231,8 @@ Verified behaviour:
 | `cmux new-split <dir>` / `cmux new-pane` / `cmux new-surface` | additional panes | required |
 | `cmux list-panes --json` | worker → surface map (`list-panels` is the legacy alias) | required |
 | `cmux focus-pane --pane <ref>` / `focus-panel` | `pifleet attach` | required |
+| `cmux respawn-pane --workspace <id> --surface <id> --command <text>` | **starts the viewer in a split pane** — without it, panes are empty shells | **required** |
+| `cmux rename-tab --workspace <id> --surface <id> --title <text>` | labels a pane with its worker id; best-effort, a failure costs a label | optional |
 | `cmux send [--surface]` / `send-key [--surface]` | **`tui` mode only** | optional |
 | `cmux set-status <k> <v> [--icon --color --priority]`, `clear-status`, `list-status` | per-worker sidebar pill, keyed by worker id | optional |
 | `cmux set-progress <0..1> [--label]`, `clear-progress` | run progress (**singular per workspace**) | optional |
@@ -246,6 +248,65 @@ Verified behaviour:
 **Flag surface is not uniform:** `workspace create` takes `--focus <true|false>` and *rejects* `--no-focus`, while `open` and `ssh` accept `--no-focus`. Legacy names (`new-workspace`, `list-workspaces`, `list-panels`) emit a deprecation notice unless `CMUX_QUIET=1`.
 
 **Minimum pinned version: cmux 0.64.20.** `doctor` records `cmux --version` plus the `capabilities` payload and **exits 3** if any `required` row is missing.
+
+> **Erratum (2026-08-30, documentation audit) — the table above is the CLI as PROBED in Phase 0; it
+> is not the CLI as CALLED. Eight rows disagree with `src/backends/cmux/`, in both directions, and
+> the `required` column disagrees with the list `doctor` actually enforces.**
+>
+> This section's own thesis is that it was written from a running binary rather than from
+> documentation, and that remains its value. What went stale is the second half of the contract:
+> which of those commands pifleet ends up invoking, and with which argv. `src/backends/cmux/client.ts`
+> is the single argv builder and `src/backends/cmux/capabilities.ts:37-46` is the single
+> `required` list, so both halves are checkable.
+>
+> **What `doctor` actually requires** (`REQUIRED_COMMANDS`, `capabilities.ts:37-46`): `ping`,
+> `capabilities`, `identify`, `workspace`, `new-split`, `list-panes`, `focus-pane`, `respawn-pane`.
+> Eight names, checked as substrings of `cmux --help` output (`capabilities.ts:113`).
+>
+> | Row above | What the code does |
+> |---|---|
+> | `workspace close --workspace <ref>` | positional: `["workspace","close",workspaceId]` (`client.ts:89-90`), whose comment records the live probe — `// Positional, not --workspace` |
+> | `new-split` / `new-pane` / `new-surface`, all **required** | only `new-split` exists anywhere. `grep -rnF 'new-pane' src/ test/` and the same for `new-surface` return nothing; `newSplitArgv` is `client.ts:102-106` |
+> | *(no row)* | **`respawn-pane` is `required`** (`capabilities.ts:43`) and is how a viewer starts in a split pane — without it, panes are empty shells and ISC-129 is unmeetable. Invoked at `index.ts:290` |
+> | *(no row)* | `rename-tab --workspace --surface --title` (`client.ts:113-127`), invoked at `index.ts:222` |
+> | `identify --json` → "own surface/workspace, socket path" | required as a PRESENCE check only. There is no `identifyArgv` and no call site; nothing in this repo parses its output |
+> | `read-screen [--scrollback] [--lines n]` | `["read-screen","--surface",surfaceId]` plus optional `--lines` (`client.ts:215-219`). `--surface` is mandatory and unnamed above; `--scrollback` is never passed |
+> | `set-status` / `set-progress` / `notify` | all three always append `--workspace <id>` (`client.ts:160`, `:200`, `:212`), which no signature above shows |
+> | `cmux rpc <method> [json]` "escape hatch" (¶ above the table) | not implemented. `grep -rnF 'cmux rpc' src/ test/` returns nothing, and there is no `rpcArgv` |
+>
+> **Every JSON-returning invocation carries `--id-format uuids`, and that changes the response
+> keys.** `client.ts:55` is `const JSON_IDS = ["--json", "--id-format", "uuids"]`, appended to
+> `workspace list`, `workspace create`, `list-panes` and `new-split`, because UUIDs are the only
+> identifier cmux resolves globally — refs are window-scoped and renumber. `parse.ts:10-13` records
+> the consequence: under that flag `workspace_ref` comes back as `workspace_id` and `surface_ref` as
+> `surface_id`. The "returns `{workspace_ref, surface_ref, window_ref}`" in **Verified spawn
+> semantics** is the `--id-format`-omitted spelling, which is not the shape this backend requests.
+>
+> **The viewer is not launched by `workspace create --command`.** `workspaceCreateArgv`
+> (`client.ts:79-84`) emits no `--command` at all. The 0700-script half of that paragraph is right
+> and is the load-bearing half — `index.ts:280-288` writes `viewer-<surface>.sh` at mode 0700 with
+> an `exec` line built by `shellQuote` — but it is then run by
+> `respawnPaneArgv(workspaceId, surfaceId, \`sh <script>\`)` (`index.ts:290`), with **`sh`**, and the
+> script's own shebang is `#!/bin/sh`. Both the command and the interpreter in the SRD's sentence
+> are wrong; its reasoning about shell injection is why the script exists and still holds.
+>
+> **The pin says 0.64.20; two argv builders are written against 0.64.22.** `client.ts:121` and
+> `:134`, and `parse.ts:36`, record that `respawn-pane` and `rename-tab` resolve a surface
+> WORKSPACE-SCOPED from 0.64.22 on, and that "a bare `--surface <uuid>` — the shape this backend
+> shipped, matching the SRD's 0.64.20 baseline — fails". The effective floor for the two commands
+> the viewer depends on is therefore higher than the number this section pins.
+>
+> **`doctor` does not record the `capabilities` payload.** It records `cmux --version`
+> (`doctor.ts:458`) and emits `socket_mode`, `missing_commands` and `optional_capabilities`
+> (`doctor.ts:1382-1388`). Note that `socket_mode` there is read from `~/.config/cmux/cmux.json`
+> (`doctor.ts:517-521`, defaulting to `cmuxOnly` on any read failure) — a DIFFERENT source from the
+> backend's `access_mode`, which is parsed out of `capabilities --json` at `parse.ts:198-205`. The
+> exit-3-on-missing-required half is correct (`doctor.ts:390-391` → `EXIT.BACKEND_UNAVAILABLE`).
+>
+> **What this erratum does NOT claim.** Nothing here re-probes cmux. Every statement above is about
+> what THIS repository does; the Phase 0 findings about cmux's own behaviour — the 255 methods, the
+> `allowAll`/`cmuxOnly` semantics, `--focus <bool>` rejecting `--no-focus`, the #1472 refutation, the
+> deprecation notices — were not re-verified and are left standing.
 
 ### 4.2 Pi 0.79.6 — control and data plane
 
@@ -299,6 +360,45 @@ Entry types: `SessionHeader` (v3) then a tree via `id`/`parentId` — `SessionMe
 | **Fire-and-forget** (no reply expected) | `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text` | none — responding is meaningless |
 
 `select`/`confirm`/`input` carry an optional `timeout` and self-resolve; **`editor` has no timeout and hangs forever unanswered** — it is the one method where the supervisor's timer is load-bearing. **There is no "deny" verb**: denial is `{cancelled:true}`, and how an extension interprets that is extension-defined (§12.3).
+
+> **Erratum (2026-08-30, documentation audit) — three corrections. Two are headings that mean
+> something other than what a reader takes them to mean, and one is a field name the installed
+> format spells differently.**
+>
+> **"RPC commands used" is the vocabulary Pi EXPOSES, not the set pifleet sends.** Twenty-five
+> commands are listed; `grep -rnE '\.send\(\s*"' src/` returns **five**: `prompt`
+> (`src/supervisor/index.ts:1673`), `steer` (`:1718`), `abort` (`:1336`, `:1549`, `:1872`, `:1916`),
+> `get_state` (`:1041-1042`, `:1525`) and `export_html` (`:1844`). `get_session_stats` is *parsed*
+> (`src/harvest/usage.ts:81`) but never sent, and `src/harvest/usage.ts:11` says so outright — "the
+> only executable `get_session_stats` in the repository is the RESPONDER". The remaining nineteen
+> appear in `src/` only inside comments. This matters because the heading is the reason the test
+> double implements what it implements: `test/fixtures/fake-pi.ts` answers seven commands, and a
+> reader sizing the double against the list above would conclude eighteen are missing.
+>
+> **`extension_error` is listed under "Events consumed" and is consumed by nothing.**
+> `grep -rn 'extension_error' src/ test/` returns no hits at all. It is not in `ACTIVITY_EVENTS`
+> (`src/rpc/completion.ts:33-51`) and has no case in the supervisor's event dispatch
+> (`src/supervisor/index.ts:1394-1444`), so an extension error arriving on the stream is neither
+> counted as activity nor logged as a distinct kind. Every other name in that list is a real
+> constant in `src/rpc/completion.ts` or `src/supervisor/index.ts`.
+>
+> **`CompactionEntry` does not carry `retainedTail` on the installed build.** The shape the
+> harvester dereferences is `{type:"compaction", summary, firstKeptEntryId, tokensBefore?}`
+> (`src/harvest/transcript.ts:78-83`, guarded at `:115-119`), and `transcript.ts:20-24` records the
+> discrepancy at the source: "the SRD calls the compaction field `retainedTail`; the installed
+> format spells the same concept `summary` + `firstKeptEntryId`". `grep -rnF 'retainedTail' src/`
+> returns only those two comment lines. The *concept* — a compaction entry is self-contained, so
+> replay never needs the entries above it — is unchanged and is what the code implements.
+>
+> **What this erratum does NOT claim.** The rest of §4.2's entry-type vocabulary
+> (`SessionMessageEntry`, `UserMessage`, `ModelChangeEntry`, `BranchSummaryEntry`, `SessionInfoEntry`
+> and the others) is neither confirmed nor refuted here: the harvester deliberately models only the
+> three wire discriminators it dereferences — `session`, `message`, `compaction`
+> (`src/harvest/transcript.ts:36-42` explains why — an unknown entry type must be skipped, not
+> parsed) — so those names are simply not exercised by this repository. Likewise the Pi flags §4.2
+> documents but pifleet never renders (`--offline`, `-p/--print`, `--approve`, `--no-builtin-tools`,
+> `--name`), and the skills-discovery roots, which the container disables wholesale
+> (`src/config/render.ts:124`). Absence of exercise is not evidence of error, and none is asserted.
 
 ---
 
@@ -673,6 +773,46 @@ Matching is on the **normalized verb prefix** (`kubectl rollout restart`), not a
 
 The gate is enforced for **every** `cloud_access` role. Roles without cloud access have no credential, so the shim is irrelevant to them.
 
+> **Erratum (2026-08-30, documentation audit) — "task-scoped" is the design, not the build. The
+> policy file the shim reads is written EMPTY at `up` and is never rewritten, so in production the
+> gate is deny-all for mutating verbs and the `cloud_allow[]` an operator writes into a dispatch
+> envelope reaches no container.**
+>
+> Everything above about the SHIM is accurate and was verified against `docker/verbgate`: read verbs
+> exec unconditionally, mutating verbs need a normalized verb-prefix match, refusal is exit 77,
+> `*` is honoured (`docker/verbgate:240`), the policy path and ledger path are constants the subject
+> cannot redirect, and a policy file writable by the current uid refuses everything with exit 78.
+> What is missing is the SUPPLY side.
+>
+> **The measurement.** `src/config/render.ts:272` mounts
+> `` `${opts.worker.cloudAllow}:/policy/cloud-allow:ro` `` — per WORKER, fixed at container start.
+> `src/run/paths.ts:365` puts that file at `<run>/workers/<id>/cloud-allow`.
+> `src/run/materialize.ts:806` is `await writeFile(paths.cloudAllow, "")` and is the ONLY writer:
+> `grep -rn 'cloudAllow' src/` returns ten lines, of which one writes (that one), one mounts, one
+> records the path into a launch record, and the rest are the path definition and its permission
+> handling. `dispatch` never touches it — `src/cli/commands/dispatch.ts:953` puts `cloud_allow` into
+> the ENVELOPE, which is delivered over the control socket to the supervisor and rendered into a Pi
+> `prompt` (§7.1); no leg of that path writes the mounted policy.
+>
+> **The code says so itself, which is why this is a documentation gap rather than a discovery.**
+> `src/run/materialize.ts:783` opens "WHOEVER WIRES DISPATCH-TIME REWRITING:" and then specifies the
+> exact procedure that writer must follow — chmod 0644, write IN PLACE, chmod back to 0444, never
+> tmp+rename, because a bind mount pins the inode. That note is a correct and useful spec for work
+> that has not been done, and this SRD read as though it had been.
+>
+> **A second, smaller consequence.** `docker/verbgate:45` reads `PIFLEET_TASK_ID` and `:78` reads
+> `PIFLEET_EPOCH` for the ledger row's provenance fields. `grep -rnF 'PIFLEET_TASK_ID' src/` returns
+> nothing — both are set only by `test/integration/verbgate.test.ts` and `test/integration/image.test.ts`,
+> never by production. So the `{task_id, epoch, argv}` the diagram promises is `{"<none>", 0, argv}`
+> for every row a real run produces. Neither could be an env var of the CONTAINER as things stand,
+> since the container is started once at `up` and the task id changes per dispatch; binding them
+> needs the same dispatch-time write the policy does.
+>
+> **The disposition.** This is recorded, not fixed. What ships is strictly safer than what is
+> documented — no mutating verb executes at all, rather than the ones an envelope named — so the
+> gap is a capability that is missing, not a control that is bypassed. `impersonate_service_account`
+> remains the load-bearing control exactly as the paragraph above says.
+
 ---
 
 ## 6. Configuration
@@ -950,9 +1090,48 @@ Three rules, each of which exists because the obvious alternative was a silent-d
 
 **Paths are container paths.** The worker only ever sees `/workspace`, so the v1.1 wrong-checkout hazard disappears by construction rather than by heuristic. `inputs[]` is the **only** path channel: the brief is *rendered from* that structure, and `pifleet` rejects any brief containing an absolute host path. Scanning free-form prose for paths — v1.1's approach — both false-positives on code samples and fails open on paths it doesn't recognize.
 
+> **Erratum (2026-08-30, documentation audit) — the second and third sentences describe a control
+> that does not exist. `inputs[]` reaches no prompt, and no brief is ever scanned or refused.**
+>
+> **What the worker is actually sent.** `renderPrompt` (`src/supervisor/index.ts:1937-1943`) takes
+> `{title, brief, acceptance}` and returns `` `# ${title}\n\n${brief}` `` plus an `## Acceptance`
+> list. `inputs` is not a parameter of it. `grep -rnE '\.inputs|inputs:' src/ --include='*.ts'`
+> returns four envelope-side lines — the schema at `src/contracts.ts:128` and `:1154`, and the two
+> writers at `src/cli/commands/dispatch.ts:264` and `:950` — and no reader anywhere. So `inputs[]`
+> is carried in the envelope, persisted to `<run-dir>/inbox/<task-id>.json`, and never delivered to
+> the agent. **It is not a path channel at all; it is a record.**
+>
+> **No brief is refused.** `brief` is length-bounded and nothing else: `src/contracts.ts:121` is
+> `brief: text,` where `text = z.string().max(MAX_TEXT)`. There is no host-path predicate in `src/`
+> under any spelling.
+>
+> **The rule survives as an instruction to the worker, which is a weaker thing and is named as such.**
+> `skills/pifleet-worker/SKILL.md` tells a worker that an absolute host path in a brief is a bug to
+> report rather than to act on. That is a document mounted into the container, so it is exactly the
+> shape ISC-344/349/350 are graded `[~]` for: shipping an instruction is not the same as anything
+> re-checking that it was followed, and here nothing on the pifleet side even attempts the check the
+> sentence above claims.
+>
+> **The paragraph's reasoning is still right, and that is why this is an erratum and not a deletion.**
+> Scanning free-form prose for paths does false-positive on code samples and does fail open. The
+> conclusion drawn from it — put paths in a structured field and refuse them in prose — was never
+> built on either side: the structured field has no consumer, and the refusal has no implementation.
+> Closing this needs one of the two, and the cheap one is the reader: `renderPrompt` gaining an
+> `## Inputs` section would make `inputs[]` the channel this section says it is.
+
 ### 7.2 Result envelope — advisory, not authoritative
 
 Written by the worker to `/outbox/<task-id>/result.json`, atomically (tmp + `fsync` + `rename` + **directory fsync**), under instruction from the `pifleet-worker` skill.
+
+> **Correction (2026-08-30, documentation audit) — the shipped instruction is tmp + `fsync` +
+> `rename`, without the directory fsync.** `skills/pifleet-worker/SKILL.md` says "write a temp file,
+> `fsync` it, rename it into place". The writer here is the WORKER, not pifleet, so that document is
+> the entire mechanism and the parenthesis above overstates it by one step. pifleet's own durable
+> writes do fsync the containing directory (`src/util/jsonl.ts:594`, `fsyncDirBestEffort`), which is
+> where the four-step form in this sentence came from — but nothing pifleet writes is this file.
+> Left as an instruction gap rather than closed: a directory fsync is awkward to ask an agent for in
+> shell, and the failure it guards against (rename durable, directory entry not, across a host crash
+> mid-harvest) is not one this system has met.
 
 > **Primacy rule.** The envelope is authored by the actor being graded. It is **advisory metadata that may downgrade a verdict but never upgrade one.** Authority belongs to derived facts: the worktree diff, the commits, the exit codes of acceptance commands the harvester re-runs itself, and the transcript's terminal state.
 >
@@ -1018,6 +1197,42 @@ Every dispatch gets a monotonic epoch, recorded in `state.json` **before** the `
 
 A second hazard: `prompt` **acks immediately and is not awaited**, and a failure can emit a *second* response with the same `id` later. `dispatch --json {accepted:true}` therefore means *accepted*, not *started*; epoch start binds to the first `agent_start` after dispatch, and a late `success:false` on a live epoch fails that epoch.
 
+> **Erratum (2026-08-30, documentation audit) — the interleaving above is real and is the reason the
+> mechanism exists, but three of this section's normative sentences describe a design that was
+> superseded during implementation. The code carries the correction; this document did not.**
+>
+> **Attribution is by STREAM OFFSET, not by an "open window".** The header of `src/rpc/epoch.ts:2-16`
+> is explicit — "Epoch fencing (SRD §7.5), corrected to fence on STREAM OFFSET" — and states the rule
+> as `an event belongs to epoch N ⟺ seq(event) > seq(N's prompt ack)`. `attribute(seq)` at
+> `src/rpc/epoch.ts:236-241` returns `"live"` or `"prior"`. The premise this section reasons from is
+> still true (Pi events carry no `id`), but the conclusion drawn from it — that terminal events
+> "cannot be attributed to an epoch by inspection" — is false of a supervisor that reads its own
+> stream monotonically, which is what the fix was. `ack_seq` is the field that carries it and appears
+> nowhere in §7.
+>
+> **Prior-epoch terminal events are recorded, not discarded.** `src/supervisor/index.ts:1443` says so
+> in place — "the live epoch's completion, never blindly discarded (SRD §7.5 fix)" — and `:1445-1449`
+> emits an `epoch_attribution` event with `attributed:"prior"` AND appends a `prior_epoch_event`
+> record to the run ledger. That matters beyond word choice: ISC-147's completion property is read
+> back out of those `epoch_attribution` records rather than recomputed, so "discarded" describes the
+> absence of the very evidence the suite grades on.
+>
+> **`dispatch` carries a third field, and a replay is not `already_completed`.** The wire carries
+> `attempt_id` (`src/supervisor/index.ts:1595`, written at `src/cli/commands/dispatch.ts:281`), and
+> the manager dedups on `(task_id, attempt_id)`: a repeat of the SAME attempt replays the stored
+> allocation and answers `accepted:true, replayed:true`. `src/rpc/epoch.ts:36-39` gives the reason —
+> answering `already_completed` "would leave the caller unable to distinguish 'someone else did it'
+> from 'I did it and lost the ack'", which is precisely the retry an orchestrator makes after a
+> dropped reply. `already_completed` is reserved for a DIFFERENT attempt against a settled task, and
+> it is one of three rejection reasons, not one: `src/rpc/epoch.ts:96-98` has `already_completed`,
+> `busy` and `stale_epoch`. ISC-145 is the criterion that pins both halves.
+>
+> Unchanged and re-verified: the epoch is recorded before the prompt is written
+> (`src/supervisor/index.ts:1613-1619`), the supervisor is the sole allocator (`:1598`), no epoch
+> advances while one is live (`src/rpc/epoch.ts:183-185`, `reason:"busy"`), and the whole of the
+> paragraph below about `prompt` acking without being awaited (`src/supervisor/index.ts:1455-1466`
+> fails the live epoch on a late `success:false`).
+
 ### 7.6 Worker state file
 
 `<run-dir>/workers/<id>/state.json`, written atomically (tmp + `fsync` + `rename` + **directory fsync** — the rename is atomic on APFS but the directory entry's durability is not guaranteed without it):
@@ -1027,6 +1242,7 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
   "schema": "pifleet.state/v1",
   "worker": "eng-1", "run_id": "…",
   "pid": 47213, "pgid": 47213, "started_at": "2026-07-26T14:02:11Z",
+  "proc_started": "Sat Jul 26 14:02:11 2026",
   "container": {"name": "pifleet-…-eng-1", "id": "3f9a…", "image": "pifleet/pi-worker:0.79.6-node-a1b2"},
   "phase": "busy",
   "epoch": 1, "completed_epochs": [], "task_id": "T-004",
@@ -1038,17 +1254,73 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
   "ui_requests": {"answered": 0, "denied": 1},
   "usage": {"input_tokens": 812345, "output_tokens": 41207, "usd": 1.87, "priced": true},
   "compactions": 1, "retries": 0,
+  "credential": {"injections": 3, "generation": 3, "degraded": false, "last_failure": null,
+                 "last_injected_at": "2026-07-26T14:47:11Z"},
   "exit": {"code": null, "signal": null}
 }
 ```
 
 `session_path` is **recorded from `get_state`**, never computed. `pgid` is recorded so the kill ladder can signal the process group. `exit` distinguishes SIGKILL from a clean exit — necessary because Pi exits 0 in every case. Presentation identifiers (`surface_id`, `workspace_id`) live in a sibling `presentation.json` so a lost cmux cannot invalidate control state.
 
+> **Added and corrected (2026-08-30, documentation audit) — the block above is a true SUBSET of
+> `WorkerStateSchema`, and the two omissions are both load-bearing. The sibling file's field names
+> are also not the ones named here.**
+>
+> **`proc_started` (`src/contracts.ts:255`)** — the launch-time process identity, `ps`-comparable
+> and deliberately distinct from `started_at` (which this block does carry). It is what the kill
+> ladder and the reaper compare against so a recycled pid cannot be signalled as though it were the
+> supervisor; `started_at` is a wall-clock record and cannot serve that purpose.
+>
+> **`credential` (`src/contracts.ts:309-322`)** — `{injections, generation, degraded, last_failure,
+> last_injected_at}`, nullable. This is the ADC refresh loop's durable state (§5.8) and the surface
+> `status` reads to say a worker's Google credential has gone stale. A state file documented without
+> it reads as though credential health were not control-plane state.
+>
+> **The sibling file's fields are `worker`, `backend`, `workspace_ref`, `surface_ref`, `window_ref`**
+> (`src/contracts.ts:462-466`) — five, not two, and `_ref` rather than `_id`. `surface_id` and
+> `workspace_id` are cmux's OWN wire spellings under `--id-format uuids`, which `src/backends/cmux/parse.ts:11`
+> normalizes away precisely so the control plane holds one vocabulary; naming them here reintroduced
+> the spelling the parser exists to remove. `backend` is the field that makes the file useful after a
+> restart, since it says which presentation the refs belong to.
+>
+> **`fence.json` is missing from §7 entirely, and it is the durable half of §7.5.** `state.json`
+> holds the epoch, but the fence — `last_accepted_epoch`, `ack_seq`, `last_seq`, `live`, `completed`,
+> `attempts` (`src/rpc/epoch.ts:100-119`) — is persisted as a sibling at
+> `<run-dir>/workers/<id>/fence.json` (`src/run/paths.ts:355`, schema `pifleet.fence/v1` at
+> `src/run/state.ts:690`), written BEFORE the prompt alongside the state flush
+> (`src/supervisor/index.ts:1615-1619`), and its write failure is fail-stop: a supervisor that cannot
+> persist its high-water mark must stop allocating epochs (`src/supervisor/index.ts:612-613`). §7.5's
+> "recorded in `state.json` before the `prompt` is written" is true and incomplete — it names the
+> advisory copy and omits the authoritative one.
+
 ### 7.7 Ledger and registry
 
 `<run-dir>/ledger/<writer-id>.jsonl` — **sharded per writer**, merged at report time. N detached supervisors plus the CLI appending to one file cannot rely on `O_APPEND` atomicity for large records across filesystems. Records are `{seq, ts, actor, run_id, event, …}` with a capped line length.
 
 `registry.json` has a **single writer** — the `pifleet daemon`. Every mutation (budget reservation, worker registration) is an RPC to it. Reservations release at settle and reconcile actual cost into the ledger.
+
+> **Erratum (2026-08-30, documentation audit) — the single-writer claim is true of the REGISTRY and
+> false of the BUDGET, which is a different file with a different writer.**
+>
+> The daemon's complete verb set is `ping | register_worker | deregister_worker | get_registry |
+> shutdown` (`src/run/registry.ts:770-797`). There is no budget verb, so a budget reservation is not
+> an RPC to anything. Budget state lives in `<run-dir>/budget.json` (`src/run/paths.ts:210`,
+> "written by the scheduler" at `:162`) and is persisted by the DISPATCH process:
+> `src/cli/commands/dispatch.ts:818` is `onChange: (snapshot) => writeJsonAtomic(run.budgetJson, snapshot)`.
+>
+> **Reservations do release at settle, and the reconciliation lands in `budget.json`, not the
+> ledger.** `src/safety/budget.ts:369-370` books the actual spend into `tokens_spent`/`usd_spent`
+> and `src/orchestrate/scheduler.ts:527` persists it; `grep -n 'ledger' src/orchestrate/scheduler.ts`
+> returns nothing at all — the scheduler never touches the ledger. This is why `pifleet artifacts`
+> and `pifleet report` read cost from `budget.json` rather than by replaying ledger records, and a
+> reader following this sentence would look for accounting events that were never written.
+>
+> Everything else in this subsection was re-verified and holds: the ledger's per-writer shards
+> (`src/run/paths.ts:548-550`, one `LedgerWriter` per actor at `src/run/ledger.ts:22-26`), the
+> `(ts, actor, seq)` merge at report time (`src/run/ledger.ts:113-117`), the record shape
+> `{seq, ts, actor, run_id, event, …}` (`src/contracts.ts:474-484`), the capped line length
+> (`src/util/jsonl.ts:26`, `:652-654`), and `registry.json`'s single daemon writer — the only two
+> writes of that path are inside `startRegistryDaemon` (`src/run/registry.ts:755`, `:841`).
 
 ---
 
@@ -1306,6 +1578,25 @@ v1.1 put `spawn(pane, argv, env)` in the backend — spawning *into* a pane, whi
 
 The acceptance suite runs entirely on `headless`. If correctness can only be demonstrated with a GUI running, it isn't demonstrated.
 
+> **Erratum (2026-08-30, documentation audit) — two corrections. The interface block and the
+> backend table were re-verified member for member against `src/backends/` and are otherwise
+> accurate.**
+>
+> **`launchDetached` returns `LaunchRecord`, which has a third field.** `src/backends/types.ts:92-97`
+> is `{pid, pgid, started}` and `:101` declares `Promise<LaunchRecord>`. `started` is not
+> bookkeeping — `types.ts:86-88` says the trio are "SENTINELS, not absences. `pgid <= 0` and
+> `started === ""` mean the capture FAILED, and every reader refuses them", and it is the
+> process-start-time half of the identity the kill ladder and the reaper compare against (§13.1). A
+> signature without it reads as though a pid and a pgid were sufficient to signal safely, which is
+> exactly the assumption ISC-77/78 exist to refuse.
+>
+> **The daemon probe is `docker version`, not `docker info`.** `src/cli/commands/doctor.ts:331-337`
+> runs `["docker","version","--format","{{.Server.Version}}"]`, falling back to `["docker","--version"]`
+> at `:338` — chosen because it yields the SERVER version, which is what the floor at `:131-135` is
+> compared against. `docker info` survives in `dockerAvailable` (`src/container/run.ts:191`), whose
+> only caller is `src/cli/commands/image.ts:75`. The daemon-reachability guarantee this row is for
+> is met either way; the command named is not the command run.
+
 ---
 
 ## 12. Security
@@ -1318,11 +1609,34 @@ Pi's `bash` tool spawns a shell with `cwd` as a *starting directory only* and th
 
 **Therefore:** a role granted `bash` is fully privileged *inside its container*, and that is the only statement `pifleet` makes. Roles claimed read-only (`reviewer`, `researcher`) are given `[read, grep, find, ls]` and **not** `bash`. `config validate` **rejects** any role that combines `bash` with a `read_only: true` marker.
 
+> **Correction (2026-08-30, documentation audit) — `researcher` was retired and this sentence kept
+> naming it.** The read-only role in the shipped example is `reviewer` alone
+> (`fleet.example.yaml:293`, `tools: [read, grep, find, ls]` with the comment `# NO bash — see §12.1`);
+> §6.2 records the retirement at the end of its own worked example and this line was not updated.
+> The rule is unchanged. `config validate`'s refusal was re-verified and is stronger than the
+> sentence suggests: `src/config/schema.ts:768-807` rejects the combination at both the role and the
+> worker level, and resolves an omitted `tools:` list to the full builtin set FIRST, so the common
+> shape — `read_only: true` with no `tools:` at all — is caught rather than passing as "no bash
+> named".
+
 ### 12.2 Repo content is untrusted input
 
 Pi discovers `<cwd>/.pi/extensions`, `.pi/skills`, `.pi/prompts` from the repo it is working on, and **extensions are TypeScript executed in-process**. It also loads repo `AGENTS.md`/`CLAUDE.md` into the system prompt.
 
 **Therefore, mandatory and non-overridable:** `--no-extensions`, `--no-skills`, `--no-context-files` (default `no_context_files: true`), with skills re-added by absolute path from the read-only `/skills` mount. Cloning a hostile repo must change nothing about the run — and if it did execute something, it executes as uid 10001 in a read-only-root container with no host mounts and no credentials (§12.4).
+
+> **Correction (2026-08-30, documentation audit) — "no host mounts and no credentials" is shorthand
+> that reads as a guarantee, and §5.5 is the guarantee.** A worker container has eight to ten host
+> bind mounts (`src/config/render.ts:255-298`: `/workspace`, `/outbox`, `/sessions`, `/skills:ro`,
+> `/policy/cloud-allow:ro`, the secret store at `/secrets:ro`, the briefing, and the kubeconfig),
+> and a `cloud_access` role holds a ~1 h Google access token by design. What the sentence means and
+> should say is that the operator's HOME is not mounted — no `~/.config/gcloud`, no `~/.pi/agent`,
+> no run directory, no Docker socket — which is the property that actually bounds a hostile repo's
+> blast radius, and which §5.5's Condition column and §12.4's Class 2 table both state precisely.
+> The mandatory flags themselves were re-verified: `src/config/render.ts:124` pushes all three
+> unconditionally, and `no_context_files` is accepted for §6.2 compatibility and then deliberately
+> ignored (`src/config/schema.ts:136-141`) — stronger than "default true", since it cannot be turned
+> off.
 
 ### 12.3 Hang guards, corrected
 
@@ -1330,6 +1644,35 @@ Pi discovers `<cwd>/.pi/extensions`, `.pi/skills`, `.pi/prompts` from the repo i
 2. **Supervisor auto-response, keyed by request class.** Answer only the four **dialog** methods (`select`, `confirm`, `input`, `editor`) with `{cancelled:true}` after `ui_request_timeout`; **log and ignore** the five fire-and-forget methods, which nothing is waiting on. `editor` carries no timeout of its own and is the one method where the supervisor's timer is the only unblocker. Because denial semantics are extension-defined — an extension may read `cancelled` as "proceed" — this guard is paired with `--no-extensions` (§12.2), which is what actually makes it sound.
 3. **Two liveness signals.** Supervisor heartbeat proves the *supervisor*; `last_event_at` staleness proves the *agent*. `event_stall_warn` → `stalled`; `event_stall_kill` → `abort` → SIGTERM → SIGKILL to the **process group**, plus `docker kill`.
 4. **Prose-blocking detection.** A worker can end its turn asking a question and settle looking done. At settle, if the derived verdict shows no diff, no commits, no envelope, and `get_last_assistant_text` returns an interrogative, classify `blocked` and surface the question.
+
+> **Erratum (2026-08-30, documentation audit) — guard 4 does not exist, and guard 3's escalation
+> chain names two things that are not on the stall path. Guards 1 and 2 are correct and were
+> re-verified in full.**
+>
+> **Guard 4 is unbuilt, in both halves.** `grep -rnE 'interrogative|get_last_assistant_text' src/`
+> returns nothing; the command is implemented only by the test double
+> (`test/fixtures/fake-pi.ts:855`). `src/harvest/adjudicate.ts` never reads a last assistant
+> message, and `"blocked"` there is only ever a lattice rank. A worker that ends its turn with a
+> question and no output becomes `unknown` with `turn_completed_without_result_envelope`
+> (`src/harvest/transcript.ts:492-493`), which is not wrong so much as silent about the reason.
+> Note `src/supervisor/prose-detector.ts` is NOT this guard — its own header says it is "§5.9
+> detector 2", consecutive zero-tool-call turns (F39), a different failure entirely.
+>
+> **Guard 3's kill half is advisory only.** `event_stall_kill` reaches `abortWedged`
+> (`src/run/stall-io.ts:104-121`), which appends a `worker_stall_kill` ledger event and issues one
+> `{cmd:"abort"}` control call. `src/run/stall-io.ts:90-92` states the choice: "Signalling is
+> deliberately NOT done here." The `-pgid` SIGTERM→SIGKILL ladder is real but lives in `down`
+> (`src/safety/kill.ts:556`, `:625`, `:640`) and in the reaper (§13.1), not on the stall path. And
+> `docker kill` is never invoked anywhere in `src/` — teardown is `docker rm -f`
+> (`src/cli/commands/down.ts:1507`, `src/safety/reaper.ts:148`).
+>
+> **What this leaves standing.** Guard 3's two-signal DETECTION is exactly as documented
+> (`src/safety/stall.ts:48-52`, `src/run/stall-io.ts:71-82`, wired at
+> `src/orchestrate/scheduler.ts:572-592`), including the `holdsSlot` narrowing that stops a worker
+> queued behind `max_concurrent` being killed for the queue's silence. Guard 2 is exact to the
+> method: four dialog methods, five fire-and-forget names logged and ignored, `{cancelled:true}`,
+> `editor` marked `supervisor_only`, timer from `ui_request_timeout` (default `5s`) —
+> `src/supervisor/ui-requests.ts:113-138`, `:173-175`, `src/supervisor/index.ts:1232`.
 
 ### 12.4 Credentials — two classes, two different answers
 
@@ -1438,15 +1781,102 @@ The harvester parses `result.json` and dereferences `artifacts[].path` and `file
 
 **Requirements:** schema-validate with `maxLength`/`maxItems` on every string and array **before** any dereference; `realpath`-canonicalize and reject anything not under that worker's outbox or worktree; `lstat` and refuse symlinks and non-regular files (a FIFO wedges the harvester); cap harvested bytes per task and per run. Container paths are translated to host paths only through the known mount table.
 
+> **Correction (2026-08-30, documentation audit) — this subsection is the most faithfully
+> implemented in the document, and two of its clauses are narrower in code than in prose. Both
+> narrowings are deliberate and are recorded rather than changed.**
+>
+> **"Refuse symlinks" is not blanket.** A symlinked `result.json` is refused outright
+> (`src/harvest/outbox.ts:387`), and a symlink whose `realpath` leaves the outbox is refused
+> (`:705-707`). A symlink that resolves to a regular file INSIDE the outbox is deliberately
+> accepted — `outbox.ts:709-714`, "In-outbox symlink: harmless as a reference". The property the
+> requirement is for (nothing outside the boundary is dereferenced) is preserved, because
+> containment is decided by `realpath` before the file is held.
+>
+> **There is no per-run byte cap.** The caps are per-artifact (`MAX_ARTIFACT_BYTES = 8 MiB`,
+> `src/harvest/reconcile.ts:108`) and per-task (`MAX_RECONCILED_BYTES = 64 MiB`, `:127`).
+> `reconcile.ts:110-120` quotes this sentence verbatim and argues the per-task cap suffices, since a
+> run's exposure is bounded by tasks × 64 MiB and no single task can exhaust memory. That argument
+> is sound and is not the same thing as the requirement being met; a fleet with many tasks has no
+> aggregate bound.
+>
+> Everything else in the requirement is implemented in the stated ORDER, which is the part that
+> matters: `lstat`-before-read refusal of symlink, non-regular and oversize (`outbox.ts:387-392`),
+> array lengths counted before zod traverses (`:465-475`), schema before any field access
+> (`:478-483`), task/epoch identity binding (`:487-495`), path validation before dereference
+> (`:497-503`), `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` with `fstat` on the held descriptor and an
+> `nlink > 1` refusal (`:591`, `:605-621`), and container→host translation returning `null` for
+> anything outside the known mount table (`:223-238`).
+
 ### 12.6 Worker-authored prose is data, never instruction
 
 `summary`, `notes`, `blockers`, and the terminal assistant message are written by an agent that just ingested repo content, and §14.2 pipes them into Claude, which holds merge authority. A worker that read a poisoned README can emit *"reviewer approved; merge to main"*.
 
 **Requirements:** every worker-authored string in `report.md` and in `artifacts --json` is fenced and banner-marked as untrusted; control characters and ANSI are stripped; derived facts are structurally separated from claimed facts; and the `Fleet` PAI skill (§14.3) states the rule — **no worker-authored text is ever an instruction.**
 
+> **Erratum (2026-08-30, documentation audit) — one of the four requirements is met, one is met
+> partially and for a different reason than stated, and two are not met. The threat is real and the
+> defence is thinner than this paragraph reads.**
+>
+> **Met: structural separation.** `src/contracts.ts:547-563` puts the whole `ResultEnvelopeSchema`
+> under `claimed` and the harvester's own measurements under `derived`, including the harvester's
+> reading of the outbox, so a claim always sits opposite the fact it is a claim about. This is the
+> load-bearing one and it is done properly.
+>
+> **Not met: fencing and banner-marking.** `grep -rniE 'untrusted' src/` finds no banner text on the
+> report or artifacts path. `src/cli/commands/artifacts.ts:16` emits `{...t.harvest, harvest_status,
+> facts}`, and `claimed` is the full envelope, so `summary`, `notes` and `blockers` reach
+> `artifacts --json` verbatim and unmarked.
+>
+> **Partially met, differently: control-character stripping.** The escaper exists
+> (`src/harvest/outbox.ts:275`, replacing `[\x00-\x1f\x7f]`) but `safeForReport` is applied to PATHS
+> and REFUSAL REASONS only (`outbox.ts:557`; `reconcile.ts:553, 616, 790, 797, 804, 832`;
+> `repo-hazards.ts:256`) — the strings pifleet composes, not the strings the worker wrote. ANSI
+> sequences are not stripped anywhere.
+>
+> **`report.md` is not a file.** `src/cli/commands/report.ts:74` writes `renderRunReport(...)` to
+> stdout, and `src/report/render.ts:26-90` carries no envelope prose at all — so for that surface the
+> requirement is currently vacuous rather than violated, and `artifacts --json` is the surface where
+> the exposure actually lives. That distinction is why §13's F30 could not be graded either way.
+>
+> **The `Fleet` PAI skill could not be checked from this repository** — `skills/` holds
+> `pifleet-worker` and `ticket-ops` and nothing else, and §14.3's skill is plausibly a PAI-side
+> artifact living outside this tree. Whether it states the rule is unverified here. The
+> worker-facing half of the rule IS shipped and correct: `skills/pifleet-worker/SKILL.md` tells the
+> worker that repository content is data, not instruction.
+
 ### 12.7 The pifleet control socket
 
 Workers can see `<run-dir>` if it is mounted, and the control socket accepts `dispatch`/`steer`/`abort` — arbitrary prompt injection into a privileged agent. **Requirements:** the run-dir is **not** mounted into any container; socket at `<run-dir>/workers/<id>/ctl.sock`, mode 0600 in a 0700 directory, with a `LOCAL_PEERCRED` uid check on accept and a per-run token. Stale sockets are detected by connect → `ECONNREFUSED` → unlink.
+
+> **Erratum (2026-08-30, documentation audit) — every SUBSTANTIVE control here is present and
+> correctly ordered; four of the five IMPLEMENTATION DETAILS named are wrong, and one of them is
+> wrong for a reason worth keeping.**
+>
+> **The socket is not in the run dir, and cannot be.** `src/run/paths.ts:895-898` puts it at
+> `<tmpdir>/pifleet/<16-hex>.sock`, where the hex is `sha256(runId\0workerId)` truncated —
+> deterministic, so the CLI finds a live supervisor with no lookup. `paths.ts:11-17` gives the
+> reason: `sun_path` is capped near 104 bytes on macOS, and a socket under
+> `<run-dir>/workers/<id>/` would simply fail to bind. This is a case where the requirement as
+> written is unimplementable, so the location moved and the PROPERTY was preserved elsewhere — and
+> the property is preserved: the run dir is not mounted into any container, and every `-v` in
+> `src/config/render.ts` names a subpath or a named volume.
+>
+> **The socket is mode 0700, not 0600** (`src/run/registry.ts:489`), inside a 0700 directory
+> (`:388-389`), both set in code rather than inherited from umask.
+>
+> **The uid check is `getpeereid` / `SO_PEERCRED`, not `LOCAL_PEERCRED`** (`src/security/peer-uid.ts:243`,
+> `:119`). It runs where the requirement needs it to — in the `open` handler, before a byte is read
+> (`src/run/registry.ts:421`, `:445-447`), with in-flight bytes from a refused peer dropped.
+>
+> **Stale sockets are unlinked unconditionally before `bind`, not probed.** `src/run/registry.ts:390-394`,
+> with `:341-342` explaining that a stale file from a crashed predecessor would otherwise fail
+> `EADDRINUSE`. There is no connect probe and no `ECONNREFUSED` path in `src/`.
+>
+> **The per-run token is real and is stronger than the one clause given to it:** a CSPRNG token in a
+> single 0600 exclusively-created file, never logged (`src/security/control-auth.ts:24-33`, `:211`),
+> enforced at the FRAMING layer before any handler sees a verb (`src/run/registry.ts:344-349`),
+> compared in constant time (`control-auth.ts:259-266`), and stripped from the message before
+> dispatch (`registry.ts:466`).
 
 ### 12.8 Containment verification
 
@@ -1564,9 +1994,67 @@ Post-run, `pifleet` asserts: no ref outside `fleet/<run-id>/*` moved; `git -C <m
 >
 > So the residual is not materially worse on a runner than on the maintainer's machine; that sentence was reasoning, not measurement, and is corrected here. The enumeration is roughly 2.2x slower there — 154.9s and 153.8s for the two probes against ~70s locally — comfortably inside the 600s per-test budget those timeouts were sized for.
 
+> **Erratum (2026-08-30, documentation audit) — GOOD NEWS THAT WENT UNRECORDED: the gateway residual
+> was CLOSED in code, and every "accepted as a residual, not fixed" above has been stale since.
+> Three reachable-set unions in this section are consequently wrong in the direction of overstating
+> the exposure.**
+>
+> The 2026-08-19 erratum said closing it "requires either host-side `iptables` DROP rules for
+> gateway-destined traffic from the bridge (outside Docker's model, and outside what this tool
+> should be installing on an operator's machine), or a dedicated Docker host whose gateway serves
+> nothing. Neither is in scope here." The first option was subsequently built and IS in scope:
+> `src/security/gateway-block.ts:108` emits `[op, "INPUT", "-i", bridge, "-d", gateway, "-j", "DROP"]`,
+> applied in the host network namespace via `nsenter` from a privileged short-lived container
+> (`gateway-block.ts:113-121`).
+>
+> **It is mandatory, not opt-in.** `src/security/network.ts:217` calls `ensureGatewayBlocked` from
+> inside `ensureEgressNetwork`, on the adopt path as well as after create, and `gateway-block.ts:185-205`
+> refuses to start when the rule cannot be installed or verified — so a fleet either has the block
+> or does not run. The `-i`/`-d` pair is deliberately narrow: it drops traffic from THIS bridge to
+> THIS gateway and nothing else, which is the security property and the blast-radius bound at once.
+>
+> **The measured result.** `test/integration/relay.test.ts:554` enumerates the gateway across all
+> 65535 ports and asserts the reachable set is **empty**. Its own docstring says this "would be GOOD
+> NEWS to be written into SRD §12.8 and ISC-51 … That is exactly what happened" — and it did not
+> happen to this document until now, which is the drift this audit was looking for.
+>
+> **So the honest reachable set from a worker is:**
+>
+> ```
+> {relay listen ports} ∪ {every port on every sibling container on the bridge}
+>                      ∪ {one LAN host:port, only where the operator authorized one}
+> ```
+>
+> The `{every port on the bridge gateway}` and `{every HOST-NAMESPACE listener on the Docker host}`
+> terms are **gone**. The sibling-container term stands and is still open-ended: containers on the
+> same bridge reach each other, and nothing in this section addresses that. The residual paragraphs
+> above are kept verbatim as the record of what was measured and accepted before the fix, because
+> the ISC-261 enumeration that widened the term from "gateway" to "host namespace" is the reasoning
+> that made closing it worth doing.
+
 ### 12.9 No AI attribution
 
 The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Generated with", and any mention of AI/LLM in commits, branches, or PR bodies. Enforced by a grep gate in CI.
+
+> **Erratum (2026-08-30, documentation audit) — one sentence, three claims, and the enforcement it
+> names is not the enforcement that exists.**
+>
+> **There is no commit template.** `grep -rn 'commit.template\|gitmessage'` across the repository
+> returns exactly one line: this sentence.
+>
+> **There is no grep gate in CI.** The guard is a Bun unit test — `test/unit/anti-criteria.test.ts:54-70`
+> — running four regexes (`/Co-?Authored-?By/i`, `/generated\s+(?:with|by)…/i`,
+> `/(?:AI|LLM)-(?:generated|assisted|authored|written)/i`, `/written\s+by\s+(?:an?\s+)?(?:AI|LLM)/i`)
+> over `src/**/*.ts`, executed by `bun test test/unit` in the `test` job. A test is a better
+> instrument than a grep gate, so this is a correction of the name rather than a complaint.
+>
+> **Nothing inspects commits, branch names, or PR bodies — and the test says why.** Its docstring at
+> `:100-107` records those clauses as VACUOUSLY true: pifleet emits no `git commit`, no `git push`
+> and no `gh`, so there is no generated commit or PR body to inspect. `:106-146` pins that
+> capability, so if pifleet ever gains one the vacuity is broken loudly rather than silently. What
+> is NOT covered, and cannot be by this instrument, is a WORKER's commits — the skill instructs, and
+> nothing checks. `skills/pifleet-worker/SKILL.md` now says so in place rather than listing the rule
+> among things that "will not work".
 
 ---
 
@@ -1618,6 +2106,80 @@ The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Gen
 ### 13.1 The reaper
 
 `heartbeat_at` older than 3× `heartbeat_interval` ⇒ SIGTERM the supervisor's **process group** ⇒ SIGKILL ⇒ `docker rm -f` the container. Every signal is guarded by the recorded process start-time, so a reused pid after a crash or reboot is never signalled.
+
+> **Erratum (2026-08-30, documentation audit) — §13.1 is correct as written and was re-verified line
+> by line. The table above is not: six of its cells name a mechanism that does not exist, and five
+> more name the wrong instrument for a mechanism that does. They are separated below because the two
+> classes need different responses — the first is unbuilt work, the second is a document to fix.**
+>
+> **§13.1 confirmed.** `STALE_HEARTBEAT_MULTIPLIER = 3` (`src/safety/reaper.ts:66`), staleness at
+> `:113-115`, the SIGTERM→SIGKILL ladder at `src/safety/kill.ts:625,640`, `docker rm -f` at
+> `src/safety/reaper.ts:148`, and the start-time guard at `src/safety/kill.ts:406-407` —
+> `same = await sameIdentity(target, ops); if (!same) return "gone";`.
+>
+> **Class 1 — cells naming a mechanism that does not exist.**
+>
+> | Cell | Measurement |
+> |---|---|
+> | **F12** detection, "60s `get_session_stats`" | nothing sends that command. `grep -rn 'get_session_stats' src/supervisor/` returns nothing, and `src/cli/commands/harvest.ts:57-60` says so at the source: "`state.usage` is never written — nothing sends `get_session_stats`". Cost is read from the transcript instead (`src/cli/commands/dispatch.ts:520-527`). **The mitigation half — reservation plus ceiling halt — is real** (`src/safety/budget.ts:316`, `:376-382`), so F12 is defended; it is defended by a different sensor |
+> | **F11** mitigation, "pre-emptive `compact`" | `grep -rnE '"compact"' src/` returns nothing. `compaction_end` increments a counter (`src/supervisor/index.ts:1369-1370`) and no threshold reads it. The "report flag" is not in `src/report/` either; the count reaches only the reconstruction payload (`src/cli/commands/harvest.ts:97`) |
+> | **F19** mitigation, "interrogative → `blocked`; question surfaced" | not built, in either half. `grep -rniE 'interrogat' src/` finds only the word "interrogated" in two unrelated comments, and `grep -rn 'get_last_assistant_text' src/` returns nothing. The settle chain (`src/supervisor/index.ts:1082-1095`) has no `blocked` branch at all; such a turn becomes `unknown` with `turn_completed_without_result_envelope` (`src/harvest/transcript.ts:492-493`). §12.3's "guard 4" is the same claim and is equally unbuilt |
+> | **F13** mitigation, "backoff; excess retries → `blocked`" | `auto_retry_start` increments `state.retries` (`src/supervisor/index.ts:1370-1371`) and nothing reads it as a threshold. No backoff timer exists; `#retriesOutstanding` (`src/rpc/completion.ts:55`) only gates the quiesce condition |
+> | **F35** mitigation, "`skipped:dependency_failed`" | no such state and no such reason. `grep -rn 'dependency_failed' src/` returns nothing; the scheduler marks dependents `blocked` with a root-cause pointer (`src/orchestrate/graph.ts:228-229`), and the state enum (`src/contracts.ts:1174-1180`) has no `skipped`. **"exit 2 on cycle" is correct** (`src/orchestrate/tasklist.ts:88-93`) |
+> | **F36** detection, "401/`invalid_grant` in tool output", and "re-mints once before failing the epoch" | `grep -rn 'invalid_grant' src/` returns nothing; no code inspects tool output for auth failures. The refresher retries on a fixed 60 s interval indefinitely (`src/security/refresh.ts:38`, `:104-107`) and never fails an epoch — `src/supervisor/index.ts:735-736`: "A failed refresh degrades the worker LOUDLY; it does not kill it." **The 45 m interval against a ~60 m TTL is correct** (`src/config/schema.ts:538`) |
+>
+> **Class 2 — right mechanism, wrong instrument named.**
+>
+> - **F10** — no version reaches the ledger (`src/run/ledger.ts:73-75` states outright that "nothing
+>   stamps a version on a ledger record"), and `doctor` does not exit 3 on a Pi/cmux delta: its
+>   version floors cover `docker`, `git` and `tmux` only (`src/cli/commands/doctor.ts:131-135`),
+>   cmux is graded by capability rather than version, and `pi --version` is probed for display with
+>   no floor (`doctor.ts:1135`, `required: false`). The pin-vs-actual comparison is real but lives in
+>   `pifleet image verify` and `up` (`src/container/image.ts:350`, reached from
+>   `src/cli/commands/image.ts:103` and `assertImagesReady` at `src/cli/commands/up.ts:609`).
+> - **F33** — `doctor` does not check write-through in both directions. It probes one direction, that
+>   a bind-mount SOURCE is visible inside a container at all (`doctor.ts:1210, 1248-1261`, via
+>   `probeBindMountSources`), which is a different and narrower thing. The both-directions probe is
+>   `probeWriteThrough` (`src/container/mounts.ts:231`), called only from `src/container/image.ts:402`
+>   — `image verify` and `up`. The detection column is therefore right and the mitigation column
+>   names the wrong command.
+> - **F3** — `docker inspect` is never run against a worker container. Every `inspect` call site is
+>   the relay container, the egress network, or an image; a worker is only ever `docker rm -f`'d
+>   (`src/safety/reaper.ts:148`, `src/cli/commands/down.ts:1507`). **The row's doctrine holds** — the
+>   exit code is never consulted, and `src/supervisor/index.ts:1002-1011` settles
+>   `failed`/`worker_died` on any exit — and event staleness is real.
+> - **F14** — the identity tuple is `(dev, ino, birthtime)` plus head and tail content hashes
+>   (`src/util/jsonl.ts:374`, `:377-390`), not `(dev, ino, size, offset)`. Size is explicitly rejected
+>   as a discriminator at `jsonl.ts:349-353` and inode identity alone at `:362-366`. Stronger than
+>   the doc, and differently shaped.
+> - **F24** — reconciliation is not against the ledger; see §7.7's erratum. Settlement books
+>   `io.taskTokens` (`src/orchestrate/scheduler.ts:523-526`) computed from `state.json` plus the
+>   transcript. The per-task reservation mitigation is correct.
+> - **F21** — the class is `TextDecoder` with `{stream: true}` (`src/util/jsonl.ts:55`), not
+>   `StringDecoder`. Same mechanism, different name; recorded because a reader grepping for the
+>   documented name finds nothing.
+> - **F23** — the config-lock retry is a FIXED 50 ms delay, twenty times
+>   (`src/run/worktree.ts:453-460`), not backoff. Bounded, which is the property the row needs.
+> - **F7** — "the container has no other mount" is false as written: `src/config/render.ts:255-298`
+>   emits `/workspace`, `/outbox`, `/sessions`, `/skills:ro`, `/policy/cloud-allow:ro`, the secret
+>   store, the agent volume, the briefing and `/home/pi/.kube/config:ro`. **The row's substantive
+>   claim holds** — exactly one repo checkout is mounted, `:255` or `:258` and never both — and §5.5
+>   is the table that carries the full list.
+> - **F1** — "§12.3 four guards" over-counts. Guard 4 is F19 above and does not exist, and guard 3's
+>   kill half is not on the stall path: `src/run/stall-io.ts:89-90` says "Signalling is deliberately
+>   NOT done here", and `abortWedged` (`:115-120`) sends only the advisory RPC. F1's own mitigation —
+>   `{cancelled:true}` on dialogs only — is correct (`src/supervisor/ui-requests.ts:114-117`).
+>
+> **What this erratum does NOT claim.** The other twenty-odd rows were checked and hold; the
+> confirmations are not reproduced here row by row, but every config key §13 names exists with the
+> stated default (`tokens_ceiling`, `max_concurrent: 2`, `event_stall_warn: 3m`,
+> `event_stall_kill: 25m`, `heartbeat_interval: 5s`, `adc_mode: token`, `token_refresh: 45m`,
+> `cloud_access` defaulting false), and no `soft_stop_at` or configurable `usd_ceiling` survives, as
+> F12 and F27 assert. **F30's "untrusted-data fencing" was NOT settled** — `report.md` appears to
+> carry no worker-authored prose at all, so §12.6's requirement may be vacuous there rather than
+> violated, and deciding that is a scope question about what "the report" means rather than a code
+> question. **Nothing above was fixed in code.** Six unbuilt mitigations are recorded as unbuilt;
+> that is the finding, not the repair.
 
 ---
 
@@ -1676,7 +2238,32 @@ Roughly a dozen acceptance criteria demand deterministic control of the event st
  ]}
 ```
 
-Selected via `PIFLEET_PI_BIN`, shipped as a Phase 1 deliverable, with its scenario schema specified alongside §7. One contract test replays a **recorded real** `pi` stream through the double so it cannot drift from the real protocol.
+Selected via `PIFLEET_PI_COMMAND`, shipped as a Phase 1 deliverable, with its scenario schema specified alongside §7. One contract test replays a **recorded real** `pi` stream through the double so it cannot drift from the real protocol.
+
+> **Erratum (2026-08-30, documentation audit) — this sentence used to name `PIFLEET_PI_BIN`, and the
+> recorded-stream contract test was never built.**
+>
+> **The selector.** Grepping the old spelling across `src/`, `test/` and `docker/` returns nothing.
+> The name that selects the double is **`PIFLEET_PI_COMMAND`**: `src/cli/commands/up.ts:312` decides from it
+> whether a run is a double run, `:481` refuses a no-config `up` when it is unset, `:1356` forwards
+> it to each supervisor, and `src/supervisor/index.ts:30` already spells it correctly. This was
+> worse than a typo. The variable is the only way to run the acceptance suite at all, so §17's own
+> preamble — "runnable on `headless` against `pifleet-fake-pi`" — was reachable from this document
+> only by guessing.
+>
+> The scenario schema above is otherwise accurate: `on`, `emit`, `respond` and `delay_ms` are the
+> shapes `test/fixtures/fake-pi.ts:33-48` documents and parses. The double lives at
+> `test/fixtures/fake-pi.ts`, with its session-partition rule split into
+> `test/fixtures/scenario-steps.ts`.
+>
+> **The contract test does not exist.** There is no recorded `pi` stream anywhere in the tree:
+> `test/fixtures/` holds `scenarios/` (24 hand-written scripts), `tasklists/`, `hostile-repo/` and
+> four `.ts` helpers, and no capture of a real session. The sentence is kept above rather than
+> deleted because it names a real gap — every fixture the suite replays is a script somebody WROTE,
+> so the double's fidelity to Pi 0.79.6 rests on §4.2's Phase 0 reading and on nothing that
+> re-checks itself. ISC-147 found the sharp end of the same problem from the other side:
+> `test/fixtures/fake-pi.ts:487` decides `isStreaming` by reading `willRetry`, so for a long time
+> every fixture was defended by the double rather than by the code under test.
 
 ---
 
@@ -1806,6 +2393,50 @@ Runnable on `headless` against `pifleet-fake-pi` except where marked.
 87. No file under `src/` imports a cmux symbol outside `backends/cmux/`.
 88. No code path uses `readline` or `split(/\r?\n/)` on an RPC or session stream.
 89. No acceptance test in the `headless` suite requires network egress or provider spend.
+
+> **Erratum (2026-08-30, documentation audit) — four of the criteria above cannot be met as
+> written, and one of them cannot fail. Each is corrected here rather than edited in place, so the
+> list still reads as the design's original done-condition and the drift is legible.**
+>
+> **Criterion 11 names a mount that was never built.** "not in `/creds`" was written against
+> `adc_mode: file`, which §5.8's 2026-08-25 amendment REMOVED — `buildDockerArgv` emitted no
+> `/creds` mount and `ADC_FILE_PATH`/`fileModeMaterials`/`fileModeStartupEnv` had no caller. The
+> criterion is therefore vacuously true of a directory nothing creates, which is the one thing an
+> acceptance criterion must not be. **Read it as: no `refresh_token` appears in the container's
+> environment, on any writable path, or in any mounted credential material.** The env and on-disk
+> halves are still real and still the point.
+>
+> **Criterion 59 is unmeetable, because the task envelope's `cloud_allow[]` reaches no container.**
+> `src/run/materialize.ts:806` writes `/policy/cloud-allow` as an EMPTY file, once per worker at
+> `up`, and nothing rewrites it afterwards — `src/run/materialize.ts:783` carries a note addressed
+> to "WHOEVER WIRES DISPATCH-TIME REWRITING", which is the honest statement that nobody has. See
+> §5.10's erratum for the full consequence. **The permitted half of 59 is unreachable and the
+> ledger half is half-true**: rows ARE appended for every invocation, but `docker/verbgate:45` reads
+> `PIFLEET_TASK_ID`, which `grep -rnF 'PIFLEET_TASK_ID' src/` shows is set nowhere in production, so
+> every production row records `"task":"<none>"` and `"epoch":0`. Criteria 58 and 60 survive intact:
+> an empty policy refuses every mutating verb with exit 77, which is 58 exactly, and the collector
+> (`src/run/verbgate-collect.ts`) delivers 60 subject to ISC-172's stated truncation window.
+>
+> **Criterion 75 is the un-corrected twin of a sentence §12.8 fixed on 2026-08-18.** The branch
+> namespace is `<branch_prefix>/<run-id>/*`, operator-configurable, not the literal `fleet/`:
+> `src/run/paths.ts:543-544` is `` `${branchPrefix}/${runId}/${workerId}` `` and
+> `test/integration/worktree.test.ts:528` asserts `experiment/run-abc/eng-1` for a fleet that sets
+> one. §12.8's erratum corrected its own copy of this sentence and this one was left standing, which
+> is exactly the failure mode a numbered acceptance list invites — the same claim in two places, one
+> of them maintained. **Read it as: no ref outside THIS RUN's own configured namespace moves.** The
+> second clause is unchanged and is now true outright (worker checkouts live under the run dir, not
+> inside the operator's tree).
+>
+> **Criterion 37's `UserMessage` is Pi's type name, not a spelling this codebase uses.** Kept as
+> written because §4.2:290 is where that vocabulary is defined; the wire encoding the harvester
+> actually dereferences is `{type:"message", message:{role:"user"}}`
+> (`src/harvest/transcript.ts:102-107`).
+>
+> **What this erratum does NOT claim.** The other 85 criteria were checked for the identifiers they
+> name — every command, flag, exit code, config key, env var, path and enum member in §17 was
+> grepped against `src/` and `docker/` — and the four above are the only ones that failed. That is a
+> check on the NOUNS, not on the behaviours: nothing here re-ran the suite, and a criterion whose
+> vocabulary is correct can still describe behaviour the code does not have.
 
 ---
 

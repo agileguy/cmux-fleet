@@ -203,17 +203,23 @@ read twice.
 role's name, not on what the document turns out to contain. That exact string is what puts a
 file through `TicketOpsArtifactSchema` in `src/contracts.ts`, and it is what puts it through the
 sweep that looks for the credential's literal bytes in the thing you are about to publish. A
-file under any other name is an ordinary artifact: unvalidated, unswept, and reported as though
-nothing about it needed checking.
+file under any other name is an ordinary artifact: unvalidated and unswept.
 
-So a run that writes only `ticket-ops.md` does not fail. It passes, quietly, with both checks
-skipped — including the one that exists to catch you having put the write credential into your
-own write-up. Measured: a worker wrote `files/ticket-ops.md`, omitted the `.json`, and neither
-the schema check nor the credential sweep ran on the only output that run produced.
+**A run that writes only `ticket-ops.md` FAILS.** The harvest looks for a `ticket-ops.md` with no
+`ticket-ops.json` beside it, records that "the ticket-ops schema validation and the credential
+sweep DID NOT RUN on it; this document is unchecked, not clean", and clamps the verdict to
+`failed`. That is deliberate rather than harsh: with neither check run, nothing is known about
+what you did to a system of record other people share, and any softer verdict would assert more
+than the harvest can support.
+
+Measured, and the reason that check exists: a worker wrote `files/ticket-ops.md`, omitted the
+`.json`, and neither the schema check nor the credential sweep ran on the only output that run
+produced — including the one that exists to catch you having put the write credential into your
+own write-up. At the time, that run reported clean.
 
 The `.md` is not a substitute and it is not the safe half; it is the half nothing inspects. A
 malformed `.json` is loud — a schema violation, reported, and it clamps the verdict. An absent
-one is silent, which is worse, and it is the one that has actually happened.
+one used to be silent, which was worse; it is loud now, and it still costs you the task.
 
 Per updated field the JSON carries `mode`, `sent`, `read_back` and `match`, so a reader can see
 what was asked for, what went out, what came back, and how the two compared — without a

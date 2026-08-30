@@ -58,6 +58,29 @@ function srdSection(heading: string): string {
   return nextIdx === -1 ? after : after.slice(0, nextIdx);
 }
 
+/**
+ * Lines of a section that are TABLE ROWS naming a `cmux <verb>`, and nothing
+ * else. Rows only, for the reason the mount probe records: an erratum below a
+ * table names the same strings in prose, so a section-wide search cannot be
+ * reddened by deleting the row it exists to guard.
+ */
+function cmuxTableCommands(section: string): Set<string> {
+  const found = new Set<string>();
+  for (const m of section.matchAll(/^\|\s*`cmux ([a-z][a-z0-9-]*)/gm)) found.add(m[1]!);
+  return found;
+}
+
+/** Every file under `dir` with one of `exts`, recursively. */
+function filesUnder(dir: string, exts: readonly string[], acc: string[] = []): string[] {
+  for (const e of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+    if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+    const rel = `${dir}/${e.name}`;
+    if (e.isDirectory()) filesUnder(rel, exts, acc);
+    else if (exts.some((x) => e.name.endsWith(x))) acc.push(rel);
+  }
+  return acc;
+}
+
 describe("the SRD's mount table names every mount the renderer emits", () => {
   /**
    * `render.ts` is the single writer of `-v` flags for a worker container.
@@ -201,6 +224,129 @@ describe("the SRD's exit ladder carries every exit code", () => {
       missing,
       `§10's exit ladder omits: ${missing.join(", ")}. Exit 8 was missing for the whole of its ` +
         `existence, and it ranks FIRST in EXIT_SEVERITY.`,
+    ).toEqual([]);
+  });
+});
+
+describe("every PIFLEET_* variable the SRD names is one the code reads (ISC-357)", () => {
+  /**
+   * §15 told a reader the Pi double is "selected via `PIFLEET_PI_BIN`". No such
+   * variable exists anywhere — the name is `PIFLEET_PI_COMMAND` — and since that
+   * variable is the only way to run the acceptance suite at all, the one document
+   * that says how to run it said something unusable.
+   *
+   * An env var name is the ideal subject for a derived check: it is a literal
+   * string that must appear identically in the document and in whatever reads it,
+   * with no rendering, no synonym and no judgement in between.
+   *
+   * TWO EXCLUSIONS, both found by mutating this probe rather than by reading it,
+   * and the first version had BOTH defects at once — it passed while the defect
+   * it exists to catch was still in the document.
+   *
+   *  1. ERRATUM BLOCKS ARE STRIPPED. An erratum that corrects a wrong variable
+   *     name has to SPELL the wrong name, so scanning the whole document makes
+   *     the correction indistinguishable from the error. Only unquoted, normative
+   *     prose is scanned; a wrong name inside a `>` block is invisible here, which
+   *     is the intended trade.
+   *  2. THIS FILE IS NOT IN THE CORPUS. The docstring you are reading names
+   *     `PIFLEET_PI_BIN`, and while it was in the corpus it SATISFIED the probe on
+   *     the document's behalf — the exact shape `test/support/isa-claims.ts`
+   *     excludes itself for.
+   */
+  test("no SRD-named PIFLEET_* variable is absent from src/, docker/ and test/", () => {
+    const normative = SRD.split("\n")
+      .filter((l) => !l.trimStart().startsWith(">"))
+      .join("\n");
+    const named = new Set([...normative.matchAll(/PIFLEET_[A-Z0-9_]+/g)].map((m) => m[0]));
+    // CONTROL. A count floor would be weak here — normative prose names only two
+    // — so pin the one name whose absence WAS the defect. If §15 stops naming the
+    // selector at all, this fails rather than passing over an empty set.
+    expect(
+      [...named].sort(),
+      "the SRD's normative prose no longer names PIFLEET_PI_COMMAND — §15 must say how the double is selected",
+    ).toContain("PIFLEET_PI_COMMAND");
+    expect(named.size, "extractor found too few PIFLEET_* names — the regex has rotted").toBeGreaterThanOrEqual(2);
+
+    const SELF = "test/unit/docs-currency.test.ts";
+    const sources = [
+      ...filesUnder("src", [".ts"]),
+      ...filesUnder("docker", [".sh", ".cjs", ".cts", "Dockerfile", "verbgate"]),
+      ...filesUnder("test", [".ts", ".json", ".sh"]),
+    ]
+      .filter((p) => p !== SELF)
+      .map((p) => read(p))
+      .join("\n");
+    // A CONTROL: a corpus that silently lost most of the tree would still find
+    // the common names, so pin its size rather than trusting the walk.
+    expect(sources.length, "source corpus is implausibly small — filesUnder() has rotted").toBeGreaterThan(500_000);
+
+    const absent = [...named].filter((n) => !sources.includes(n));
+    expect(
+      absent,
+      `the SRD names these PIFLEET_* variables and nothing in src/, docker/ or test/ mentions them: ` +
+        `${absent.join(", ")}. An environment variable the document invents is unusable by the one ` +
+        `reader who needs it.`,
+    ).toEqual([]);
+  });
+});
+
+describe("§4.1's table names every cmux command pifleet requires (ISC-358)", () => {
+  /**
+   * `respawn-pane` has been in `REQUIRED_COMMANDS` — and is how a viewer starts
+   * in a split pane, so panes are empty shells without it — while §4.1's table
+   * had no row for it at all. `doctor` exits 3 on a missing required command, so
+   * the table is the only place an operator learns which commands that means.
+   */
+  function requiredCommands(): string[] {
+    const src = read("src/backends/cmux/capabilities.ts");
+    const block = src.match(/REQUIRED_COMMANDS = \[([\s\S]*?)\] as const;/);
+    expect(block, "could not locate REQUIRED_COMMANDS").not.toBeNull();
+    return [...block![1]!.matchAll(/"([a-z][a-z0-9-]*)"/g)].map((m) => m[1]!);
+  }
+
+  test("every REQUIRED_COMMANDS entry has a §4.1 table ROW", () => {
+    const required = requiredCommands();
+    const rows = cmuxTableCommands(srdSection("### 4.1 cmux 0.64.20"));
+    expect(required.length, "extractor found no required commands").toBeGreaterThanOrEqual(6);
+    expect(rows.size, "no §4.1 table rows parsed — the table shape changed").toBeGreaterThanOrEqual(10);
+
+    const missing = required.filter((c) => !rows.has(c));
+    expect(
+      missing,
+      `§4.1's CLI table has no row for these commands, which \`doctor\` treats as required and ` +
+        `exits 3 without: ${missing.join(", ")}.`,
+    ).toEqual([]);
+  });
+});
+
+describe("§7.6 names every field of the worker state file (ISC-359)", () => {
+  /**
+   * The §7.6 block omitted `proc_started` — the process identity the kill ladder
+   * and the reaper compare against, deliberately distinct from `started_at`,
+   * which the block DID carry — and `credential`, the ADC refresh loop's durable
+   * state. A state file documented without either reads as though neither
+   * signalling safety nor credential health were control-plane state.
+   *
+   * Reads the JSON EXAMPLE, not the section, so the erratum explaining the two
+   * additions cannot satisfy the probe on their behalf.
+   */
+  test("every top-level WorkerStateSchema key appears in §7.6's JSON block", () => {
+    const contracts = read("src/contracts.ts");
+    const block = contracts.match(/export const WorkerStateSchema = z\.object\(\{([\s\S]*?)\n\}\)/);
+    expect(block, "could not locate WorkerStateSchema").not.toBeNull();
+    const keys = [...block![1]!.matchAll(/^ {2}([a-z_]+):/gm)].map((m) => m[1]!);
+    expect(keys.length, "extractor found no state keys — the schema shape changed").toBeGreaterThanOrEqual(20);
+
+    const section = srdSection("### 7.6 Worker state file");
+    const fence = section.match(/```json\n([\s\S]*?)```/);
+    expect(fence, "§7.6 has no ```json block").not.toBeNull();
+    const documented = fence![1]!;
+
+    const missing = keys.filter((k) => !documented.includes(`"${k}"`));
+    expect(
+      missing,
+      `§7.6's state.json block omits these WorkerStateSchema fields: ${missing.join(", ")}. ` +
+        `A field absent from the block is one no reader of the design knows the control plane holds.`,
     ).toEqual([]);
   });
 });
