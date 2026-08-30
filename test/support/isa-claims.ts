@@ -1248,6 +1248,64 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     argv: ["grep", "-nF", "credential sweep DID NOT RUN on it", "src/harvest/reconcile.ts"],
     expect: 1,
   },
+  {
+    isc: "ISC-356",
+    grade: "[x]",
+    claim:
+      "SRD §12.4 records that a granted secret is delivered as a FILE reached through " +
+      "`<NAME>_FILE`, not as a value in the environment. Empty means the erratum was reverted " +
+      "and the document is back to describing only env delivery — under which a reader " +
+      "concludes `echo $NAME` prints a credential, when it has printed an empty line since " +
+      "ISC-337..342 landed on 2026-08-29.",
+    argv: ["grep", "-nF", "<NAME>_FILE=/secrets/<NAME>", "Docs/SRD.md"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-356",
+    grade: "[x]",
+    claim:
+      "SRD §12.4 states the limit rather than overclaiming the boundary: a worker can still " +
+      "read its own credential file deliberately, and what file delivery removes is the " +
+      "ACCIDENT surface. Empty means the honest half was dropped and the section now reads as " +
+      "though the value were unreachable, which ISC-341 exists to deny.",
+    argv: ["grep", "-nF", "This narrows the accident, not the", "Docs/SRD.md"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-356",
+    grade: "[x]",
+    claim:
+      "SRD §8.2a records that a diff touching the test-harness surface caps the verdict at " +
+      "`unknown`. Empty means the section went away and §8 is back to describing the " +
+      "harvester's re-run of acceptance as authoritative with no mention that a worker who " +
+      "edited the suite cannot be certified by it — the state in which the cap shaped every " +
+      "verdict this tool ever issued while appearing in no version of the design.",
+    argv: ["grep", "-nF", "8.2a The test-harness cap", "Docs/SRD.md"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-356",
+    grade: "[x]",
+    claim:
+      "§8.2a records that NEGATIVE evidence survives the cap — the cap refuses to grade, it " +
+      "does not fail. Empty means the asymmetry was lost, and a reader would expect a worker's " +
+      "own harness to be unable to indict the worker, which is backwards: trusting it only " +
+      "ever downgrades.",
+    argv: ["grep", "-nF", "Negative evidence (`failed`, `blocked`) **survives**", "Docs/SRD.md"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-356",
+    grade: "[x]",
+    claim:
+      "An ABSENCE claim on the stale rule `fleet.example.yaml` carried until 2026-08-30: " +
+      "`patterns` described as REPLACING the defaults, true when written and false since " +
+      "ISC-243 on 2026-08-25. Non-empty means the sentence came back, and with it the one " +
+      "document that covered `harness:` telling operators the opposite of the shipped default " +
+      "— in the direction that silently weakens the cap.",
+    argv: ["grep", "-nF", "REPLACES the defaults, it does not extend them", "fleet.example.yaml"],
+    expect: 0,
+  },
 ] as const;
 
 /**

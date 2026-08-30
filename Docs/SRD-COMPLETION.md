@@ -15,6 +15,26 @@
 
 ---
 
+> # ⚠️ SUPERSEDED — this plan has been delivered
+>
+> **Status as of 2026-08-30: this document describes work that is done.** It was written against
+> `ISA.md` at `progress: 239/293`, and its entire subject is *"the 54 criteria `ISA.md` has not
+> closed"* — 35 `[ ]` plus 19 `[~]`. That set no longer exists. `ISA.md` now carries **zero `[ ]`**
+> and five `[~]`, none of which is one of the nineteen this plan was ordering.
+>
+> **Read it as history, not as a plan.** The delivery ORDER it argues for — which criterion unblocks
+> which, and why some sequences are forced — is the part still worth reading, and the reasoning
+> behind each ordering decision is preserved intact. But every "remaining", "not yet built" and
+> "will be delivered in" in the text below is stale by construction, and no reader should take a
+> statement about the *current* state of the repository from this file. `ISA.md` is the system of
+> record; `Docs/SRD.md` is the design.
+>
+> Retained rather than deleted because the sequencing rationale documents *why* the build went the
+> way it did, which nothing else records. Marked here rather than silently, because an 884-line
+> document whose premise expired is exactly the kind of thing a reader trusts by accident.
+
+---
+
 ## 0. Preamble
 
 ### 0.1 The one-paragraph thesis

@@ -4,41 +4,706 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-### Fixed
+### Security
 
-- **The outbox scan's ownership is now structural, which closes ISC-301's uncovered half.**
-  `OutboxFile` has always documented that the caller owns the descriptors and must close them, and
-  that contract was carried by a comment and one hand-written `finally` — the same shape whose
-  absence caused the leak in the first place. `withOutboxScan(loc, fn)` scans, runs the body and
-  releases in a `finally`, so a caller cannot obtain a scan without also handing back the point at
-  which it ends.
+- **Granted secrets are delivered as files, not environment variables (ISC-337..342, #115).** A
+  worker printed its own credential with `echo $NAME` in its second command, with the role prompt
+  and the mounted skill each forbidding exactly that. Printing your environment while orienting is a
+  natural thing for an agent to do, so the environment was the wrong place to keep a value that must
+  not be printed — a prompt-level prohibition is not a control.
 
-  It also reaches the evidence the criterion was short of. The throwing path — the one `harvestAll`
-  catches and loops past, and therefore the one that would accumulate the most descriptors — was
-  covered by the code and by no test: a mutation releasing only on success left every probe green,
-  and inducing a throw inside `harvestTask` was impossible because its acceptance block swallows its
-  own errors. Passing a body that throws reaches it directly, with no production hook existing only
-  to make a test possible. The same previously-invisible mutation now reddens exactly one probe.
+  Delivery is now: the value is written to `<run-dir>/workers/<worker>/secrets/<NAME>` at mode
+  `0444`, the directory is bind-mounted read-only at `/secrets`, and the worker's environment
+  receives `<NAME>_FILE=/secrets/<NAME>` — the pointer, never the value. `echo $TICKET_API_TOKEN`
+  now prints an empty line and so does `env | grep TOKEN`. A worker that asked for no secret gets no
+  mount at all, and a granted secret whose file did not land refuses the launch by name rather than
+  starting a worker whose environment points at nothing.
 
-- **An ISA claim's grep could not tell code from prose, and it had already failed in both
-  directions (ISC-302).** A claim is a text search over bytes. ISC-300's went vacuously GREEN when
-  the decision it pinned moved and the old spelling survived inside a comment explaining the move;
-  ISC-246's went falsely RED two days later when three lines of new docstring named the field it
-  greps for. The convention that followed — comments deliberately decline to spell greppable forms —
-  is real, documented in three places, and unenforceable: it asks every future author to know which
-  strings some other file searches for.
+  **What this buys is the removal of the ACCIDENT surface, not of the capability.** A worker can
+  still `cat "$TICKET_API_TOKEN_FILE"` deliberately; ISC-341 records that standing limit rather than
+  claiming a boundary that is not there.
 
-  Claims now run against a comment-MASKED mirror of the tracked tree. Every comment byte becomes a
-  space and every newline is kept, so lengths and line numbers are unchanged and a claim's `grep -n`
-  still names the line a reader will find in the real file. Both original failures were replayed as
-  proof: re-adding a comment naming the field leaves ISC-246's claim green, and respelling the code
-  so the pinned form survives only in a comment turns ISC-301's claim red.
+- **Granted secret values are scrubbed at the event-log seam (ISC-334..336, #113).** A worker told
+  twice not to echo its credential echoed it anyway, and the full value reached `events.jsonl` and
+  the session transcript. Redaction now happens at the seam every event passes through, so it does
+  not depend on any worker's cooperation.
 
-  Files that are not `.ts` are mirrored verbatim, and that limit is stated rather than hidden —
-  masking them means a second comment syntax whose marker is also an ordinary character inside shell
-  strings and YAML values.
+- **The event-log redactor follows the store the secrets moved to (ISC-345, #117).** Delivery moving
+  to files left the redactor reading the env file, where the values no longer were — a leak that
+  survived both review and CI. There is now exactly one module that answers where a granted secret's
+  value lives, both consumers call it, and it takes the store as a **required** parameter, so a
+  future move is a compile error at every call site rather than a silent no-op. A granted name the
+  redactor cannot resolve is reported rather than skipped.
+
+- **The credential sweep has a real needle supplier (ISC-333, #112).** `findCredentialLeaks` had a
+  caller and nothing to look for: `harvestTask` took a `secrets` option nothing ever passed, so the
+  sweep ran over an empty set and could not fire. It reads its needles from wherever the granted
+  values actually live, so moving delivery cannot silently switch the detector off again.
+
+- **The verbgate policy is mounted read-only at `/policy/cloud-allow`, separately from `/outbox`.**
+  It used to be read out of `/outbox`, which the worker owns — so the subject of the policy could
+  rewrite the policy, and the task-scoped cloud grant was a suggestion rather than a control.
+
+
+- **The run dir — holding the 0600 control-socket secret — could be mounted into a worker container
+  (#34, ISC-127).** Measured before fixing: with `run.repo` set to a checkout containing the runs root,
+  the rendered `/workspace` mount was an **ancestor of `<run-dir>/control-auth.json`**, along with the
+  ledger, the inbox and every other worker's state. This defeats the control-auth design directly —
+  `security/control-auth.ts` states its threat model is "a worker that escaped its container", and the
+  mount handed that worker the secret **without any escape at all**. `classifyRunDirExposure` /
+  `assertNoRunDirMount` now refuse it from `buildDockerArgv`; two relations are refused and not three,
+  because SRD §5.5 mounts run-dir *children* deliberately. **Framed honestly: this was latent
+  hardening, not an active breach** — `rendered.docker` reached no `exec` at the time. **Known limit,
+  recorded on the criterion:** the launch-time guard is lexical (`resolve`, not `realpath`), so a
+  symlinked `run.repo` could evade it at launch.
+
+- **No cloud provider key can reach any container's environment, enforced structurally (#34,
+  ISC-31).** The guard enumerates **every** `docker run` argv builder in `src/` and applies two rules:
+  no cloud credential by name — importing `adc.ts`'s own `CREDENTIAL_ENV_VARS` rather than a copy —
+  and **no bare `-e NAME`** host pass-through. The second rule is what catches a key nobody thought to
+  list: a planted bare `-e FOOCLOUD_API_KEY`, in no enumerated list anywhere, fails on secret shape.
+- **The mandatory native-tool-call gate was certifying a network path no worker uses.** `up`
+  probed oMLX from the HOST, through a helper (`hostFacingBaseUrl`) whose only job was rewriting
+  the worker-facing `host.docker.internal` into `localhost` so the host could reach it — while
+  every worker reaches oMLX from inside the `--internal` egress bridge, where that name resolves
+  to the relay and nothing else resolves at all. On a Docker-host-local oMLX both land on the same
+  box, which hid the asymmetry completely. It is not harmless: the gate certifies a model, the
+  fleet launches, and the workers are denied at RUNTIME — the "burns a whole run before anyone
+  notices" failure §5.9 makes this probe mandatory to prevent. A gate that certifies reachability
+  it did not test is worse than no gate, because it is trusted. The probe now runs in a throwaway
+  container on `docker.network` and dials `llm.base_url` verbatim, so it tests the workers' path;
+  `hostFacingBaseUrl` is deleted rather than relocated, and `fetchImpl` lost its global-`fetch`
+  default so a host-side probe is no longer one omitted argument away. Nothing here names an oMLX
+  address, which is what makes it independent of where the server moves next: relocating oMLX
+  rewrites the relay's dial target, not the probe.
+- **The probe's API key travels on stdin, never in argv.** `docker run` argv is visible in `ps` to
+  every user on the host and is recorded by `docker inspect` for the container's lifetime. The
+  script goes in argv, where it is not secret; the URL, headers and body go in on stdin. The
+  container test asserts the far end received an `Authorization` header without putting a
+  credential anywhere in the repository.
+
+- **The relay's `decide()` gate is no longer vacuous, and the oMLX server may now live on a trusted
+  LAN peer.** These are one change, in that order, because doing them the other way round would
+  have been dangerous. The gate that landed previously judged a target derived from `llm.base_url`
+  against a policy whose LLM rule derived from `llm.base_url`: two derivations of one field agree
+  without checking anything. That was survivable only because the relay threw unless the dial host
+  was literally `host.docker.internal`, so the worst case was a port on a machine the operator
+  fully controls — and that host pin is exactly what permitting a LAN oMLX removes. Pointing the
+  dial side at a LAN host while the target was still an unchecked derivation of `base_url` would
+  have made this module a TCP tunnel from a bridge running untrusted model output to an arbitrary
+  `host:port` on the operator's home LAN, established by editing one YAML string. So the dial side
+  was decoupled and gated against operator-written allow rules **first**, and the pin relaxed only
+  after.
+  - **New `llm.relay_upstream`** (`host:port`, explicit port) is what the RELAY dials. `base_url`
+    keeps its `host.docker.internal` pin and means only what a WORKER dials — that alias is the
+    only name resolvable on the internal bridge. Default is
+    `host.docker.internal:<port from base_url>`, so **every existing `fleet.yaml` is unaffected**.
+  - **Relay targets are judged by `relayGatePolicy`, not `policyFromConfig`.** This is the fix, and
+    the distinction is not cosmetic: passing the new field to `policyFromConfig` would re-open the
+    circularity through a different field, since `base_url: http://192.168.86.49:8000/v1` yields an
+    LLM rule authorizing the very upstream under test. `relayGatePolicy` contains no config-derived
+    host except ones the operator wrote as allow rules — a compile-time-constant host at the listen
+    port, plus `egress.allow`. `google_hosts` are excluded, because the relay forwards no Google
+    traffic and a rule for a path that does not exist must not authorize one that does.
+  - **A LAN upstream therefore needs two edits in two config blocks**, one of which is
+    unambiguously a security decision. `relay_upstream` alone is refused with `rule: default-deny`
+    before Docker is contacted at all. Proven by mutation rather than by inspection: with the allow
+    entry the upstream is accepted, without it — from a byte-identical target — it is refused, and
+    mutating the source to re-derive a rule from the upstream turns 5 tests red while ignoring
+    `egress.allow` turns 2 red.
+  - **A hostname upstream is refused at `config validate`.** The relay resolves through Docker's
+    embedded DNS, which forwards to the host resolver, and this machine's resolver does not answer
+    mDNS/`.local` names (`macbook.local` needed `dns-sd`). A name there yields a relay that starts
+    cleanly, reports ready, and fails every connection with an error no operator surface shows.
+    Consequently `--add-host host.docker.internal:host-gateway` is now emitted **only** when a
+    target actually dials the Docker host, so it is never inert argv implying a route nothing uses.
+- **SRD §12.4's credential argument was quoted, retired and restated rather than quietly edited.**
+  It justified injecting `OMLX_API_KEY` straight into workers because the key "carries no billing
+  authority and no value off this host". The second clause was load-bearing and true *by
+  measurement* — oMLX here binds `127.0.0.1:8000`, loopback only. A LAN oMLX is bound to a routable
+  interface by definition and `base_url` is plain `http://`, so **the key crosses an unencrypted
+  LAN hop on every request and now has value on at least one other host**. Recorded as an
+  **accepted residual** on the stated basis that the LAN is trusted, with the conditions that would
+  make TLS *required* named up front: if the key ever gates billing authority or data access, is
+  reused for a credential that does, or the LAN stops being one the operator controls. No billing
+  authority remains unconditional; the Google credential never traverses this path.
+- **The bridge gateway residual is narrower than it was documented to be, and enumeration is what found it.**
+  `test/integration/relay.test.ts` now enumerates all three terms of SRD §12.8's reachable set instead of
+  sampling them — a full 1–65535 port scan of the gateway, of the relay's own bridge address, and an
+  authoritative `docker network inspect` of bridge membership. The scanner is built from what the worker
+  image already has: measured by running it, `nmap`, `nc`, `ncat`, `socat`, `ss`, `netstat` and `ip` are all
+  absent, but bash 5.2.15 has `/dev/tcp` compiled in. The expected gateway set is **not** derived from a
+  second probe of the same shape — that is circular in the way ISC-253's `decide()` gate was — but from
+  `/proc/net/tcp` read in a `--network host` container, the kernel's own socket table, obtained without
+  sending a packet. Measured: kernel `[22, 53, 39375, 40375]`, ordinary bridge `[22, 39375, 40375]`,
+  deny-all bridge `[22, 40375]`. Two strict narrowings, so the subset assertion is not a tautology.
+  **A published container port is NOT reachable from the internal bridge** — Docker's isolation DROP lives
+  in FORWARD, evaluated after nat/PREROUTING has rewritten the destination to an address outside the bridge
+  subnet — so the previous `reachable == served` assertion was false in general and held only because all
+  five of its guessed candidate ports happened to be host-namespace services. The §12.8 residual is
+  therefore every **host-namespace** listener, not every port the Docker host listens on. Nothing is
+  inconclusive and nothing is vacuous any more: both beacons and the stray sibling are **planted** before
+  anything is measured, which removes the old `[inconclusive]` early return that passed while proving
+  nothing, and makes an empty-set comparison impossible to mistake for a working scan.
+- **A live inference is now asserted through the relay, differentially.** A real completion —
+  `gemma-4-26b-a4b-it-4bit` answering in 428 ms from inside the deny-all bridge, with `completion_tokens > 0`
+  and the echoed model checked, because a 200 with an empty string is not an inference. Model selection is an
+  **allowlist, never a heuristic**: the embedding model is first in `/v1/models` and answers chat with an
+  error, and "the first id that is not obviously an embedding model" selects a model that SIGABRTs the
+  inference server during generation. Error shapes do not generalise either — the same embedding model
+  returns HTTP 500 on one host and HTTP 400 on another — so no classification rule is safe. The control is
+  re-checked **after** any relayed failure, because the server can die between the two calls; only a relayed
+  failure against a still-succeeding control is a real failure. The key is read from the environment and
+  passed by name via `-e OMLX_API_KEY`, never into argv.
+- **The deny-all bridge does not deny the bridge gateway, and this branch was claiming otherwise.**
+  Measured, not inferred: a container attached to nothing but the `--internal` `pifleet-egress`
+  network — no `--add-host`, no second network, no capabilities, no relay running — pulls a live
+  `SSH-2.0-OpenSSH_9.6p1` banner off `172.18.0.1:22`. Docker implements internal-network isolation
+  as FORWARD-chain rules (`! -d 172.18.0.0/16 -i br-<id> -j DROP`), but the bridge gateway is
+  on-link and inside that subnet, so traffic to it is delivered through INPUT (policy ACCEPT) and
+  is never filtered. `--internal` really does remove the default route — `1.1.1.1`, the LAN oMLX
+  candidate, the Lima host address and `169.254.169.254` are all genuinely unreachable — but it
+  cannot filter the gateway. The prior evidence sampled two public destinations and never measured
+  it. Accepted as a documented residual (SRD §12.8 erratum) rather than fixed, because closing it
+  needs host-side iptables outside Docker's model, or a Docker host whose gateway serves nothing.
+  The reachable set is `{relay listen ports} ∪ {gateway ports} ∪ {sibling container ports}` and is
+  **not fixed** — anything the host or a sibling binds later joins it with no code change.
+  ISC-51/57 are re-worded to what Docker actually guarantees (no route off the bridge *subnet*),
+  ISC-50/51 downgraded from closed to partial, and the relay suite now **enumerates** the route
+  table instead of sampling addresses. The gateway residual is asserted as a positive, so hardening
+  it later turns that test red and flags §12.8 as stale rather than drifting silently.
+- **The oMLX API key no longer travels in `docker run` argv.** The live relay probe interpolated
+  the real key into a shell string passed as arguments — visible in `ps`, in the ephemeral
+  container's `docker inspect`, and in any CI log that echoes commands. It is now passed by name
+  and expanded inside the container. No leak occurred, because that test has only ever run on one
+  machine; it would have become a live exposure on the first CI run with a real secret.
+- **The relay container is pinned by image digest.** It bridges the deny-all bridge to a NAT'd
+  network under `--restart unless-stopped`, and it was pulling a floating Docker Hub tag — so the
+  code on that boundary could change under a machine reboot with no commit in this repo.
+- **The relay applies the egress policy instead of re-deriving it.** `omlxRelayTarget` pinned the
+  host but read the port straight from `llm.base_url` with nothing comparing it to `decide()`, so
+  `http://host.docker.internal:22/v1` produced a relay tunnelling the bridge to the host's sshd.
+  Targets are now gated through `decide()` before argv is built. **That gate was circular when it
+  landed** — the policy's LLM rule derived from the same field — and a test said so by name; it has
+  since been made non-vacuous by the trusted-LAN change below, which is where it became blocking.
+- **One idle container could deny the whole fleet its model server.** The relay dialled upstream on
+  accept, before any byte arrived, with no timeouts and no connection cap: 300 client connections
+  sending zero bytes took it from 19 open FDs to 619, with 603 matching unauthenticated connections
+  against oMLX. Upstream is now dialled on first byte, both legs carry idle timeouts, and
+  concurrency is capped. Also: only a listen failure is fatal (an accept-time EMFILE used to
+  crash-loop the relay and cut model access fleet-wide), the relay gets the same pids/memory/cpu
+  limits as the workers it shares a bridge with, IP forwarding is turned off in its netns, and the
+  ports in its own env parsing are range-checked — `listen(0)` would have bound a random port and
+  reported healthy.
+
+### Added
+
+- **A `ticketing` role, its skill bundle, and an artifact contract (#110).** The worker holds the
+  ticket-system credential and route, performs the query or update itself, and verifies every write
+  by re-fetching the object. Ships with `skills/ticket-ops` and `roles/ticketing.md`.
+
+- **The harvest reports outbox-contract violations instead of accepting them silently (ISC-346..348,
+  #119).** A live worker broke the contract three ways in one task — an outbox directory named after
+  its own idea of the job rather than the dispatched task id, no `result.json` at all, and
+  `ticket-ops.md` with no `ticket-ops.json` beside it — and everything downstream read as clean
+  because nothing ran. The third had teeth: `reconcile.ts` keys both ticket-ops schema validation
+  and the credential sweep on that exact filename, so writing only the `.md` bypassed both. All
+  three are now findings in `discrepancies`, the channel §8.4 publishes contract disagreements on,
+  rather than notes in `reasons`, the channel that explains grading. The `.md`-without-`.json` case
+  clamps the verdict: the document is *unchecked*, not clean.
+
+  A new `harvest/layout.ts` lists one directory level under a worker's outbox and never descends —
+  harvesting a worker-chosen directory would make the harvested region the one the worker picks,
+  which is the §12.5 exfiltration primitive with extra steps.
+
+
+- **ISC-189 closed: the launch gate is proved against REAL bytes on a REAL daemon.** The criterion's
+  own TO CLOSE was specific — one probe in the Docker-gated `container` job that builds a real image
+  and files it under another image's tag, asserting both that the labels come back as `buildImage`
+  wrote them and that `assertImagesReady` refuses. That, plus the older residual it was carrying
+  separately: the fails-verify half was a `docker` PATH shim, never a real image that really fails.
+
+  Four probes in `test/integration/image.test.ts`, and the two that refuse are worthless without
+  the two that do not:
+
+  1. **The label round trip.** `docker image inspect` on the freshly built image must report
+     `pifleet.pi-version`, `pifleet.toolchain` and `pifleet.config-hash` exactly as `parseImageTag`
+     reads them off the tag it was built under. That is the equality `imageIdentityDrift` is built
+     on, and no test read it back from an actual image store until now — the shim answered
+     `{{json .Config.Labels}}` by taking the tag string apart, so nothing would have noticed if
+     `buildImage` stopped stamping the labels tomorrow.
+  2. **The stale-but-present case.** One `docker tag` files the real worker image under a tag whose
+     config-hash is not its own. The probe asserts, in order, that `imagePresent` says PRESENT,
+     that `verifyImage` says OK, and that the gate refuses anyway with `reason: "mismatched"`
+     naming both hash values. The first two are the load-bearing ones: they establish that both
+     halves of the pre-identity gate pass on the wrong image.
+  3. **Fails-verify on real bytes.** An image built `FROM` the real one with nothing changed but
+     `USER root`, stamped with identity labels that MATCH its own tag — so presence passes, the
+     identity check passes, and the run reaches verification under its own power, where
+     `verifyImage`'s `uid-10001` check refuses it.
+  4. **The positive control**, which is not optional: a gate that refused everything would pass
+     both refusal probes.
+
+  Composed with `up-wiring.test.ts` — which proves the half about `up` (on the launch path, right
+  diagnosis, before any clone, remote or supervisor) — the criterion is covered end to end. Neither
+  file proves it alone, and that is stated in the ISA rather than left to be inferred.
+
+  Mutation-proved, one probe reddened per mutation: neutering `imageIdentityDrift` reddens only the
+  retag case (`the gate ACCEPTED pifleet/pi-worker:0.79.6-node-74f1f971d3b2`); neutering the verify
+  verdict reddens only the fails-verify case. Both restored byte-identical under `shasum -c`. The
+  exit code is deliberately the discriminator nowhere: this criterion already recorded a mutation
+  that still exited 3 because a later preflight refuses with the same code.
+
+  `TOTAL_EXPECTED` 107 → 111, **derived** by the hand method rather than incremented:
+  `6 pass, 105 skip, 0 fail. Ran 111 tests across 12 files.`
+
+- **ISC-48 closed: the minted token's identity is asked of GOOGLE, not asserted from the argv.** The
+  criterion names a TOKEN, and until ISC-248 no `up` path minted one — so the previous close-out
+  could only check the PLAN (every grant line names the SA, the operator's account never consulted),
+  which is a real property and not this one.
+
+  Both of the entry's stated blockers turned out to be false, and neither was removed by anything
+  done to this criterion. *"`gcloudMinter` has NO CALLER ANYWHERE IN `src/cli/**`"* died with
+  ISC-248. *"No real granted SA was available to test against"* was environmental: the old refusal
+  was correct on its facts — the only discoverable service accounts belonged to a live production
+  project — but a target now exists in the SAME personal project as the CI identity, with
+  `roles/iam.serviceAccountTokenCreator` already granted to `cmux-fleet-ci`. **Nothing was created
+  to close this**; the SA, the IAM binding and the `GCP_IMPERSONATION_TARGET` secret all already
+  existed and were simply wired nowhere.
+
+  The probe mints through the production `gcloudMinter` with impersonation and sends the token to
+  the standard introspection endpoint — in a POST **body**, since a bearer token in a query string
+  lands in logs and proxy history. Asserting that `mintArgv` carried `--impersonate-service-account`
+  would prove we *asked* for impersonation, not that we got it.
+
+  **It took three attempts to ask correctly, and both failures were mine rather than the product's.**
+  The first asserted `email === <SA>` on the impersonated token and failed in CI with the literal
+  string `(tokeninfo named no identity)` — a fallback that was a second defect in its own right, a
+  diagnostic reporting only its own inability to answer. The second returned the claims whole (safe:
+  the response echoes claims, never the credential) but moved the same assumption onto the CONTROL,
+  asserting the un-impersonated mint reports an `email`. It does not, in CI.
+
+  **Which claim carries the identity depends on the credential, and both reachable shapes were
+  introspected rather than assumed.** A user credential — the operator's local ADC — returns `email`
+  + `sub` + `azp` with `openid` and `userinfo.email` among its scopes. The CI credential is
+  federated and already a service account: it returns `azp=106755930525734032049` and **nothing
+  else** — no `email`, no `sub`, scope `cloud-platform` alone. That number is `cmux-fleet-ci`'s
+  `uniqueId`, confirmed by `gcloud iam service-accounts describe`, so tokeninfo does name the
+  principal there; it just uses a different field. An access token carries `email` only when its
+  scopes include `openid`/`userinfo.email`, and a service-account token is minted with
+  cloud-platform alone.
+
+  So every assertion is now over the **set** of identity-bearing claims (`email`, `sub`, `azp`;
+  `aud` excluded, since it names the token's audience rather than its presenter) and none of them
+  names a field. Three, in order: a **control** — the un-impersonated mint names *somebody*, without
+  which tokeninfo cannot see identity here and nothing after it means anything; **substitution** —
+  the impersonated token's claim set is **disjoint** from the control's, which is the criterion's
+  literal *"not the launching user's account"* and cannot be dodged by surfacing the same principal
+  under a different key; and **positively the SA** — the service account's numeric `uniqueId`,
+  resolved from the SA itself rather than hardcoded, appears among the token's claims. Disjointness
+  alone would also be satisfied by some third principal, which is why the positive half exists.
+
+  **The probe found a hole in the CI credential setup, which is worth more than the criterion it
+  was written for.** `gcloud iam service-accounts describe` failed with `Failed to load credential
+  file: [.../gha-creds-<id>.json]` — a path the "Move the federated credential out of the
+  workspace" step had relocated minutes earlier. That step re-points
+  `GOOGLE_APPLICATION_CREDENTIALS` and calls `gcloud auth login --force --cred-file` precisely so
+  that "leaving it dangling would break any plain `gcloud` call the probes make". It did not:
+  `google-github-actions/auth` also exports `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, which gcloud
+  reads in preference to the account store and which still named the workspace path. Every plain
+  `gcloud <api>` call in that job was broken, invisibly, because nothing made one — the ADC mints
+  follow a different variable and were fine, and the step's own verification only exercised that
+  half. Both stores are re-pointed now, by comparison with the source path rather than
+  unconditionally, and the step proves both mints before the job proceeds.
+
+  **One IAM change was made**, recorded here rather than left to be discovered: `cmux-fleet-ci` held
+  no project-level roles and no permission to READ the SA it may impersonate, so `service-accounts
+  describe` would have failed in CI. It was granted `roles/iam.serviceAccountViewer` on that single
+  service account — read-only, one resource. The alternative was hardcoding the `uniqueId` into the
+  test, which would compare a constant against itself the day the SA is recreated.
+
+  **The delegation caveat stands and is not closed by this.** At real mint time the operator's ADC
+  IS used to obtain the SA token, so "the launching user's account is never consulted" is true of
+  planning and cannot be true of the mint itself. What the criterion claims, and all it claims, is
+  that the issued token's identity is the SA.
+
+  **CI-only, stated rather than hidden:** the `tokenCreator` binding is granted to `cmux-fleet-ci`
+  alone, so minting impersonated from a developer host returns `IAM_PERMISSION_DENIED` and the probe
+  self-skips with a message naming what it needs. Granting the role to a human account to make it
+  locally runnable was deliberately not done.
+
+
+- **The supervisor now runs the credential refresher (ISC-248) — and, it turned out, injects the
+  initial token at all.** `TokenRefresher` had been unit-proved and callerless for two phases:
+  `grep -rn 'security/refresh' src/` returned nothing, so the criterion's verb — *runs* — had no
+  evidence and could have none. The recorded reason was honest (it attaches to a running container;
+  the headless path started none) and stopped being true when the container launcher landed
+  (ISC-286/287).
+
+  **The gap was larger than the entry claimed.** `injectToken` and `gcloudMinter` had no production
+  callers either. So there was no refresh loop AND no initial injection: the container got the
+  gcloud tmpfs and the env pointing at `TOKEN_FILE`, and nothing ever wrote a token there. A
+  `cloud_access: true` worker had a credential-shaped hole, not a stale credential.
+
+  The credential PLAN now rides in `WorkerLaunch` — `planCredential`'s output, written by
+  `run/materialize.ts` where config is known and read where the container is known, on the launch
+  record's own argument that a detached supervisor does not share the cwd and environment `up`
+  resolved in. The supervisor constructs a `TokenRefresher` after the container spawn and drives
+  `run(signal)`, which ticks due-at-0, so ONE path serves both the initial injection and the loop
+  rather than two places for the mint, the record and the failure handling to drift.
+  `refreshAbort.abort()` on shutdown tears it down — without it the process holds a live loop and a
+  pending timer and does not exit.
+
+  **A failed mint degrades the worker loudly; it does not kill it.** An owner decision: a transient
+  `gcloud` hiccup must not destroy a worker mid-task, but a worker configured for cloud access that
+  silently has none is indistinguishable from a healthy one until a later task fails naming the
+  wrong component. `state.credential.degraded` is set where `status` reads it, and is cleared by the
+  next success rather than by time. `credentials.jsonl` is a new append-only sibling carrying every
+  `CredentialInjection` — which has no token field by construction.
+
+  **Probed against the real thing.** The 23 unit tests drive `tick()` on a fake clock, which is the
+  right way to pin a schedule and structurally cannot answer "does a real supervisor start one".
+  The closing probe uses a real supervisor, a real container and a real federated credential with
+  `token_refresh` compressed to 2s — the only faked value, faked in the field an operator sets.
+  Mutation-proved on both limbs: disabling the wiring fails it with `Received: 0`, and swapping
+  `run()` for a single `injectNow()` fails it with `Received: 1`. Deliberately NOT asserted: that
+  the token VALUE changed between generations — gcloud serves a cached token until near expiry, so
+  that would pin gcloud's cache rather than this loop.
+
+
+- **`pifleet up` now re-points the egress relay when `llm.relay_upstream` changes, instead of
+  adopting the old one (ISC-265).** A running relay was recognized by NAME alone, so moving the
+  fleet to a different oMLX did nothing until an operator ran `docker rm -f` by hand — and the
+  resulting failure was silent rather than loud: every worker connected, got real completions, and
+  was talking to the previous server. `up` now reads `PIFLEET_RELAY_TARGETS` back off the running
+  container and compares it as a set against what the config resolves to; a relay forwarding
+  somewhere else is removed and rebuilt, and a new `relay_targets_replaced` ledger event records
+  what was displaced. A relay whose targets cannot be read is replaced too, rather than trusted.
+  **Operators sharing one egress network should know the trade this makes:** the relay is shared,
+  so a replacement interrupts a concurrent fleet's in-flight turns. That is deliberate — with
+  drifted targets the two fleets already disagree about a single shared resource, and the previous
+  behaviour resolved the disagreement silently in favour of whoever booted first.
+
+- **A durable file with an unrecognised stamp now refuses by name instead of throwing a library
+  error (Phase G, ISC-157, ISC-192).** Both criteria asked to *read* an older file "rather than
+  failing"; the owner chose the opposite deliberately — **refuse by design, named, with a hatch** —
+  so both were **restated and closed against the restatement**, not built as written. No version
+  stamp was added to ledger records and no `v0 -> v1` upgrade ladder exists. **Measured before it
+  was fixed:** a `v0` stamp threw a bare `ZodError` whose message's first line was the lone
+  character `[`, and a truncated file a bare `SyntaxError`; neither carried an `exitCode`, so both
+  left the CLI as a stack trace on exit 1, off the §10 ladder entirely. Four readers now separate
+  **provenance from damage** — `readRegistry`, `control-auth`, `attended/mode` and `report/collect`
+  each pair a schema error naming a build to go back to with a damage error that deliberately does
+  not. The stamp is checked **before** the schema at every site, so a future `v2` renaming a field
+  is not misdiagnosed as a missing one. Two of the brief's premises were wrong and were corrected
+  against the tree rather than implemented: `attended/mode.ts` was already wrapped, and `collect.ts`
+  already caught — what neither could do was tell version skew from damage.
+
+- **`down` no longer treats an unreadable `ps` as a dead worker, which was the data-loss half
+  (Phase G).** `processStartTime` conflated "`ps` failed" with "no such process", and `down`'s
+  `anchorIdentity` maps that to the one verdict that reports `stopped: true`, calls `reapContainer()`
+  and makes the worker **prunable** — so a broken `ps` could destroy a live worker's container and
+  worktree. It now raises `IdentityReadError` and `down` reports `identity_read_failed`. The rule it
+  rests on was measured, not assumed: on Darwin, exit 1 with empty stdout does **not** identify an
+  absent process — a reaped pid, an out-of-range pid, a malformed `-p` and an illegal flag all
+  produce it. Only silence on **all three** channels does.
+
+- **`mergeLedger`'s shape tolerance is pinned, including the position clause (Phase G).** A
+  malformed record does not crash the merge, it lands in `errors`, and every well-formed record
+  around it survives **regardless of position**. The position half is load-bearing and was measured:
+  under a mutation hoisting the try/catch to per-shard, the last-position test still **passes** while
+  mid-shard reddens — so a merge that silently drops the tail after an error would have passed a
+  naive test. This pins shape tolerance and is **not** a version policy: a record failing today's
+  schema is discarded rather than read, and the merge cannot tell "written by an older writer" from
+  "corrupt shard".
+
+- **The launch preflight refuses before it can leave anything behind (Phase F).** The image-presence
+  gate runs ahead of any clone, remote registration or supervisor launch, so a missing image costs
+  nothing to recover from.
+
+- **Every rung of the kill ladder now validates the process GROUP, not just the leader (Phase F,
+  ISC-272).** `down` signals `-pgid`, so the previous weak anchor aimed SIGTERM and then SIGKILL at
+  an entire group named by a possibly stale file. A group that disagrees with the OS, or that the
+  identity-validated supervisor does not lead, now refuses the ladder (`group_unconfirmed`). No
+  schema field was needed — a group is named by its leader's pid, so its launch-time identity *is*
+  the leader's, already recorded. Mutation-measured on real spawned groups: with the old rung
+  restored, `foreign group members: 24667,24669,24670` became `(none — DEAD)` while the actual
+  supervisor was never touched.
+
+
+- **The run's budget is enforced on the dispatch path; five criteria closed from one call site
+  (#37, ISC-235/114/115/193/109).** `src/safety/budget.ts` was finished, correct, thoroughly
+  unit-tested — and imported by nothing. The audits that produced this are worth stating: a probe
+  drove the real `runSchedule` with 6 workers against `max_concurrent: 2` and measured **peak
+  in-flight = 6**; `EXIT.BUDGET` had **no runtime producer**, so no run could exit 5 for any reason;
+  and `budget.json` had no path and no writer. `runSchedule` now calls `admit` before every dispatch,
+  `settle`s on every terminal transition, drains in-flight work after a halt, and folds
+  `budgetExitCode` into `worstExit`.
+
+- **A wedged agent is now actually acted on (#40, ISC-110, ISC-117).** `classifyStall` distinguishes
+  a QUEUED worker from a WEDGED one and had **no production caller**, so no worker was ever killed as
+  wedged nor spared as queued by any code path; `event_stall_warn`/`event_stall_kill` were parsed by
+  the schema and read by no production line. This could not have been wired before #37 — a worker can
+  only be *queued* once admission is on the dispatch path. The policy moved to `src/safety/stall.ts`,
+  which imports **nothing**, because `scheduler.ts` importing it from `kill.ts` tripped a module cycle
+  (`ReferenceError: Cannot access 'realProcessOps' before initialization`); a module with no imports
+  cannot be in a cycle, and `kill.ts` re-exports it so every existing caller keeps its address.
+
+- **`doctor` reports whether the oMLX endpoint serves every `models_allowlist` entry (#35,
+  ISC-256).** Both sides decompose per §6.1 first, matching `assertModelAllowed` — a raw compare
+  would have `doctor` calling `omlx/X:high` unserved while `up` accepts it. **The check runs only
+  against a list actually fetched**, and that gate is asserted rather than assumed: an unreachable
+  endpoint serves nothing, so an ungated check would report every entry missing and send an operator
+  off to edit a *correct* allowlist — on the default config that would fire on every machine, every
+  run. Live evidence for the motivating finding: `fleet.example.yaml`'s three allowlist names give
+  **0/3 served, exit 3**, including `Qwen3.5-35B-A3B-8bit` missing the served `-4bit` by a single
+  character.
+
+- **The control socket answers `export_html` (#32, ISC-234).** Forwarded to Pi's RPC at 8s, under
+  the CLI's 10s fallback, with both directions proved on one run: `source: "rpc"` while the worker
+  lives, `source: "local"` once it is gone. **Limit recorded on the criterion:** proved for a
+  host-process Pi only — a containerised Pi resolves the path in the container namespace and degrades
+  to the local render.
+
+- **Five anti-criteria now have probes that can actually fail (ISC-138, 139, 140, 165, 199).** An
+  `Anti:` criterion asserts an *absence*, which is the one claim a green suite cannot make on its
+  own — each was satisfied by a codebase that had simply not done the forbidden thing yet. Every
+  guard in `test/unit/anti-criteria.test.ts` is **mutation-verified**: seven planted violations,
+  seven reds, baseline green before and after. **ISC-139 changed shape under measurement** — the
+  first draft banned the bare tokens `claude`/`anthropic`/`copilot` and went red on six legitimate
+  sites, because `CLAUDE.md` is a *filename* this tool must know (`repo-hazards.ts` scans
+  repository instruction files). It now matches attribution *constructions*, which have no
+  legitimate use here. Its more useful half is a **capability pin**: the git verbs appearing as
+  argv literals under `src/` are add, branch, checkout, config, diff, log, rev-parse, status,
+  symbolic-ref, worktree — no `commit`, no `push`, no `gh` — so the criterion's commit and PR-body
+  clauses are *vacuous*, and the test pins that fact so they cannot silently go live. **ISC-165**
+  checks per test that a `:ro` write refusal also reads from the mount, since an absent mount
+  refuses writes just as happily as a read-only one. **ISC-140** is split from ISC-21 because the
+  two fail in opposite directions: a test needing egress fails closed and everyone finds out; a
+  test needing provider spend passes and quietly bills someone. **ISC-199** bans hardcoded `ps`
+  output spellings, not `ps` itself. **ISC-138 is a bookkeeping correction** — its guard already
+  existed beside ISC-137's, which had been `[x]` all along; the work was verifying it bites.
+
+- **`adc_mode: file` is now tracked as a criterion rather than a caveat inside a closed one
+  (ISC-268).** ISC-44 closed honestly about its `file`-mode probe — it "hand-writes the `-v` itself
+  and inspects a shape it authored" — but that admission lived only in the prose of an `[x]`
+  criterion, where nothing re-reads it. The measured state: `ADC_FILE_PATH`, `fileModeMaterials`
+  and `fileModeStartupEnv` have ZERO callers in `src/` outside `adc.ts`, and `buildDockerArgv`
+  emits no `/creds` mount, so `adc_mode: file` is accepted by the schema and does nothing. A mode
+  that neither works nor fails is worse than an absent one: it surfaces as an unexplained
+  permission error inside the container instead of a refusal at launch. It also leaves ISC-44's
+  mount guard with one carve-out — the single ADC file `file` mode may mount — defending a path
+  nothing takes, so the guard's most delicate branch has no production coverage and would be
+  load-bearing on its first real run. ISC-268 closes on either arm: wire the mode through
+  `buildDockerArgv` and prove it by `docker inspect`ing a container built from production argv, or
+  reject the value in the schema and delete the three symbols and the carve-out together. No code
+  changed in this entry — this records a known gap where it can be counted.
+- **The suite is now judged under deliberate load rather than only on a quiet box (ISC-266).**
+  `.github/scripts/test-under-load.sh` runs a target under `ceil(cores * 0.75)` busy loops and exits
+  with the suite's own status, and a separate `load` job in CI runs it on every PR. A budget that is
+  too small — or a test whose spawn count grows without its `cliBudget(N)` growing with it — now
+  fails a PR instead of a developer's afternoon. Measured: the full integration suite under eleven
+  loops on 14 cores ran 375 pass / 81 skip / 0 fail in 300.87 s against 167.76 s idle, a 1.79x
+  inflation with every budget holding. On CI the job is confirmed to apply real load rather than
+  merely pass: the same commit ran `test/integration` in 124.32 s in the `test` job and 222.78 s in
+  the `load` job — 1.79x, the same factor. **What it does not prove is stated in the job's own
+  comment:** the runner reports two cores against the 14 these numbers came from, and none of the
+  editor, language server, browser and concurrent agents behind the load average of 18.40 ISC-266
+  recorded, so it reproduces the *shape* of the contention at a smaller magnitude — a floor on the
+  evidence, not a ceiling. The harness's cleanup traps a recorded PID list and never `jobs -p`, which is empty in a
+  non-interactive shell and would read as correct while killing nothing.
+
+
+- **`llm.relay_upstream` — where the egress relay dials, as distinct from where workers dial.**
+  `host:port` with an explicit port; unset means `host.docker.internal:<port from base_url>`, which
+  is exactly the previous behaviour. Must be an IP literal or the Docker-host alias, and anything
+  other than the Docker host also requires a matching `egress.allow` entry. SRD §5.9 is retitled
+  "The LLM is self-hosted — oMLX on the Docker host or a trusted LAN peer"; **the no-hosted-provider
+  prohibition is unchanged and is explicitly not what was relaxed.** The motivating measurement:
+  this Docker host's oMLX serves 3 models and none of `fleet.example.yaml`'s three allowlisted ones
+  (it has `Qwen3.5-35B-A3B-4bit`, not the allowlisted `-8bit`), so `up` exits 2 against it, while
+  the LAN server at `192.168.86.49:8000` serves 32 including all three.
+- **`up` now refuses to start a fleet on a model that cannot emit native tool calls**
+  (SRD §5.9 F39, ISC-53). Whether a model answers a `tools`-bearing request with `tool_calls`
+  or with prose is a property of its chat template, not of oMLX — and a worker on such a
+  model looks perfectly healthy while accomplishing nothing, because its intended actions
+  never become tool calls. `up` sends one probe per distinct resolved model (deduped: six
+  workers on one model is the normal fleet shape, and six real generations to learn one fact
+  would be a tax on every launch) and refuses with exit 2. An oMLX that cannot be reached
+  exits 3 instead — nothing has been learned about the model, so reporting it as a usage
+  error would send the operator to edit a `model:` line that is probably correct.
+  `llm.require_native_tool_calls: false` disables the gate. Exit 2 is reserved for the two
+  cases where something in `fleet.yaml` is genuinely wrong — the model answers in prose, or
+  the server does not serve it. An answer that settles nothing (truncated, filtered, an
+  unknown finish reason) exits 3, because a probe that failed to get an answer is not
+  evidence about the model.
+- **`up` now refuses to start while an MLX training run appears to be active**, unless
+  `--i-know` is passed (ISC-56). §5.9 records concurrent heavy GPU load on this machine
+  turning a process OOM into a kernel watchdog panic, which costs the training run as well as
+  the fleet. Detection is an explicitly documented heuristic over `ps`, and it asks two questions
+  rather than one: is this token a training entry point — `mlx_lm`/`mlx-lm`/`mlx.`/`mlx_vlm`
+  paired with a training verb (`lora`, `train`, `fuse`, `dpo`, `sft`, `grpo`, `orpo`,
+  `finetune`), never `server` or `generate` — and is this token the PROGRAM BEING RUN. The
+  second question is what keeps a filename from counting as a process: matching the name
+  anywhere in the command line refuses `up` on a host merely SERVING a LoRA adapter, or
+  tailing a training log, and the oMLX inference server every fleet requires is exactly the
+  thing that gets hit. An override is recorded both on stderr and in the run ledger
+  (`mlx_training_guard_overridden`), so a run that raced a training run says so in its own
+  record months later.
+- **New criterion ISC-256**: `doctor` should report whether each `models_allowlist` entry is
+  actually served by the configured endpoint. `fleet.example.yaml`'s allowlist names three
+  models the default `base_url` serves none of, and nothing reports that today — the
+  allowlist check is config-vs-config, and the tool-call probe only touches models a worker
+  resolves to. Its wording is adjacent to, not a duplicate of, the criterion added on the
+  sibling branch, and both reconcile when the SRD §5.9/§12 erratum lands — see the ISA entry.
+- **New criterion ISC-260**: the native-tool-call probe should run from INSIDE the egress
+  network the workers use, not from the host. `up` probes from the host today while workers
+  reach oMLX through the internal bridge; both currently resolve to the same box, which masks
+  the asymmetry. If oMLX moves off the Docker host, ISC-53 can pass on the host while every
+  worker is denied — certifying a model no worker can use and pushing the failure to runtime,
+  which is what §5.9 makes the probe mandatory to prevent.
+
+- **An egress relay, so the deny-all bridge stops denying the fleet its own model server.**
+  Workers sit on a Docker `--internal` bridge with no default route and no NAT, which is
+  deny-all in hardware — and denies `host.docker.internal:8000` along with everything else,
+  so every worker started healthy and could accomplish nothing. `src/security/relay.ts`
+  stands up the single container that reopens exactly one destination: it runs with a
+  dedicated NON-internal uplink network as its primary network so `--add-host` has something
+  to route through, then attaches to the internal bridge under the DNS alias
+  `host.docker.internal`, so a worker's baked-in `llm.base_url` resolves to it with no
+  per-worker flags at all. Measured live rather than read from documentation: a container on
+  an internal network cannot reach the host even WITH `--add-host` (internal genuinely
+  removes the route), and Docker's automatic `/etc/hosts` injection was not dependable on
+  this project's Colima setup, so the alias and the `--add-host` are both always explicit.
+  The relay runs `--read-only`, `--cap-drop ALL`, `no-new-privileges`, and as uid `node`,
+  because it listens on a bridge every worker can reach. `up` ensures it immediately after
+  the network and records `egress_relay_ready`; failure is `BACKEND_UNAVAILABLE`.
+- **The relay forwards oMLX and nothing else, on purpose.** `egress.google_hosts` remains a
+  policy-level allow rule with no live traffic path — a Docker network alias cannot be a
+  wildcard, so routing `*.googleapis.com` needs an HTTP CONNECT proxy or SNI passthrough,
+  neither of which is built. A `cloud_access` worker on the internal bridge consequently
+  cannot reach Google at all. Tracked as ISC-253/ISC-57 rather than implied away.
+- **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
+  allowlist refuses to start, checked for every worker before any of them launch.
+- **Exit code `8` (internal error) documented in the README's exit ladder.**
+- **A test-coverage report.** `bun run test:coverage` (Bun's built-in coverage,
+  text + lcov, no threshold gate).
+- **The `late_prompt_failure` settle guard has its own regression test**, alongside the
+  existing deadline-escalation one — the two are different call sites reached by different
+  events.
+- **Version-floor checks for docker (>= 23.0.0), git (>= 2.32.0), and tmux (>= 2.4.0,
+  reported only, not enforced).** `doctor` previously captured each tool's version but never
+  compared it to a minimum; each floor is derived from a concrete feature dependency this
+  project already relies on (BuildKit's `COPY --chmod=`, hermetic git's
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, tmux's `respawn-pane -c`) rather than picked
+  arbitrarily.
+- **`harness.patterns` is now a `fleet.yaml` key.** A config that supplies patterns
+  replaces `DEFAULT_HARNESS_PATTERNS` entirely for the ISC-150 anti-gaming cap; an empty
+  list is a validation error rather than "match nothing" (silently disabling the cap
+  through a key that reads as harmless). Because an honest, non-malicious pattern list
+  that simply doesn't match a worker's diff has the same silencing effect as an empty
+  one, the harvester now also compares the configured surface against the built-in
+  defaults and records a discrepancy — visible in both the human report and `--json` —
+  whenever narrowing the surface would have changed the verdict.
+- **A 16-worker e2e test proving no container-name collision, no port-collision surface,
+  and no worker starves another's event loop under load.** Found and fixed along the
+  way: the supervisor's completion-latency measurement was stamped from the dispatch
+  CLI subprocess's exit rather than the actual dispatch ack, so it silently included
+  `writeJsonAtomic`'s real fsync time in the "quiet" baseline — measurably wrong on an
+  idle machine (recorded latencies below a scripted delay that made them physically
+  impossible) and capable of a silent false-pass under real load. Latency is now derived
+  from the supervisor's own event log. Also fixed: a failed `up` no longer orphans all
+  16 detached supervisors — cleanup now runs regardless of whether `up`'s own result
+  could be parsed.
+- **`up` now creates the host side of every mount before the container starts (SRD §5.5).**
+  `render` decided what each worker would bind-mount and nothing made those host paths exist
+  — and on a bind mount that gap doesn't fail, it succeeds wrongly: Docker creates a missing
+  `-v` source, so a missing directory arrives empty and a missing *file* arrives as an empty
+  *directory*. A worker's `/skills` came up with no skills at all, and `/policy/cloud-allow`
+  came up as a directory that verbgate's `[ -r ]` accepts and reads no lines from, quietly
+  degrading the run to deny-all and leaving a stray `cloud-allow/` in the run dir. Every
+  symptom read as model behaviour. `up` now writes the outbox, the per-role skill bundle, a
+  zero-byte `cloud-allow` at 0444 (verbgate refuses *every* verb if its policy is writable by
+  the uid consulting it), the concatenated briefing, and a verbatim copy of the configured
+  kubeconfig — all through the same path helpers that emit the mounts — and refuses the whole
+  launch rather than starting a worker with an input missing. Skill bundles are copied from
+  `<repo>/skills/<name>/` (override with `PIFLEET_SKILLS_DIR`); a configured skill with no
+  source bundle is a refusal naming the worker, role, skill and resolved path instead of a
+  bundle that silently shrinks by one. Symlinks are refused rather than followed on both the
+  source and the destination side, and a `.git` directory inside a bundle is refused rather
+  than copied into the read-only directory the agent reads as instruction (its `config` can
+  carry a credential in a remote URL) — ordinary dotfiles like `.DS_Store` and `.gitignore`
+  copy normally. Found and fixed along the way: `skills: ["../../../../victim"]` walked out
+  of the run directory and reopened a 0600 key to 0644, so skill and role names are now
+  validated as single path segments where they enter the system; `--workers eng-1,eng-1`
+  aborted the entire fleet with an environment error, because the duplicate id reached the
+  policy write twice and the second attempt hit the 0444 the first had just set; an
+  unreadable skill source was diagnosed as "no bundle exists", sending the operator to edit a
+  config that was already correct; and `fleet.example.yaml` named three skill bundles that
+  have no source directory, which the new refusal would have made un-runnable as shipped.
+- **Real per-worker git isolation (SRD §9.1/§9.2), implemented as `git clone --no-hardlinks`
+  rather than the SRD's originally specified `git worktree add`.** A security spike ran two
+  worktree-based designs against a real container before this one shipped: mounting only the
+  linked worktree fails outright (`.git` is a `gitdir:` pointer file resolving outside the
+  container's mounts), and also mounting the gitdir to fix that is a confirmed
+  container-to-host remote code execution (a container with write access to it zeroed the
+  host's `refs/heads/main` and planted an executable `post-checkout` hook that ran as the
+  operator on their next `git checkout`). `run/worktree.ts` instead clones each worker with
+  `--no-hardlinks --single-branch --branch <parent's checked-out branch>`, strips `origin`
+  immediately (so the host's absolute repo path can't be read out of `.git/config`), and
+  registers a `worker-<id>` remote in the parent so an operator can still fetch a worker's
+  commits without leaving their own checkout. `--no-hardlinks` is load-bearing, not hygiene: a
+  bare local clone hardlinks object files into the copy, and a worker container writing
+  through its own "copy" then corrupts the PARENT'S object store through the shared inode —
+  which is how the spike investigating this feature destroyed this repository's own pack file
+  before the flag was added. `Docs/SRD.md` §9.2 carries the full erratum. Preflight
+  (`inspectBaseRef`/`assertBaseRefCloneable`) refuses a ref with submodules or LFS-tracked
+  content before any clone is attempted — both clone as silently-wrong content (empty
+  directories, pointer stubs) rather than failing — and a detached parent HEAD is a named
+  refusal rather than a base silently substituted for the one the operator is sitting on.
+  `down --prune` (SRD §9.3) defines "dirty" for a clone with no upstream: uncommitted paths OR
+  commits past the recorded base sha, since stripping `origin` removes the usual "it's pushed
+  somewhere" escape hatch. `up` also now runs hazard neutralization against each finished
+  clone rather than the operator's own checkout, closing the gap a linked worktree's
+  pointer-file `.git` (which the scanner explicitly declines to follow) would have left open.
+- **`pifleet worktrees [--run r] [--json]` — the `git worktree list` replacement.** A worker
+  checkout is now an independent clone with no entry in the parent's `.git/worktrees/`, so
+  `git worktree list` against the parent shows nothing about workers regardless of how many
+  `up` created, which reads as "no workers running" to an operator who reaches for the old
+  habit. The new command lists every worker's branch, path, base sha and remote name from the
+  same on-disk record `dispatch` and `down --prune` already trust, and reports each checkout
+  as `clean`, `dirty (…)`, or `MISSING` via the same dirt-inspection `down --prune` gates on.
 
 ### Changed
+
+- **The worker's artifact claims are reconciled against the outbox (ISC-246, ISC-303, #108).** The
+  outbox scan validated each artifact and handed back an open descriptor, and nothing in `src/` read
+  one. A worker could name an artifact it never wrote, or write one it never named, and the harvest
+  had no opinion either way.
+
+- **`secrets.env_allowlist` has a reader, and the proxy route is split from the cloud grant (#109).**
+  The field had exactly one occurrence in the tree — its own declaration — so it was documentation
+  rather than configuration. Two declared-but-inert config surfaces became functional.
+
+- **A ticket-ops artifact is validated where the harvester already reads it (ISC-332, #111).**
+  `parseTicketOpsArtifact` had no caller in `src/`. The harvester measured every outbox artifact's
+  bytes and sha256 and never asked whether the document parsed.
+
+- **The ticketing role asks the server its question and bounds every request (ISC-344, #116).** A
+  live run got the answer wrong, confidently: asked for one user's tickets in the current iteration,
+  the worker paged through 59,616 objects and grepped them locally for the owner name, then reported
+  that a user with thirty open tickets had none. Absence in a page you happened to fetch is not
+  absence in the system. A second failure produced no answer at all — an unbounded `curl` inside a
+  container does not fail, it hangs, and the worker was killed at its deadline with nothing written.
+  The shipped skill and role now carry filter-on-the-server, bound-every-request and
+  reconcile-the-count rules, each with the measurement that motivated it.
+
+- **The outbox task id is bound and the ticket-ops artifact is a pair (ISC-349, ISC-350, #118).**
+  `<task-id>` was an unbindable placeholder — the value reaches the supervisor and never reaches the
+  agent — so a worker filled it with the most plausible string in context, which at the end of a
+  task is the name of the job just finished. The shipped prompts now name the one reachable source
+  of the id and state what a guessed directory costs in mechanism terms.
+
 
 - **ISC-300, ISC-259 and ISC-57 restated on the owner's decisions, and each closes on evidence that
   already runs.** ISC-300's reaper keeps narrowing a capture-failed process group and the criterion
@@ -197,124 +862,6 @@ All notable changes to this project are documented here.
   expected value taken from an identical-content twin, the same mutation reddens both probes and the
   first reproduces the CI failure verbatim, down to `error: unable to index file 'add.js'`.
 
-### Added
-
-- **ISC-189 closed: the launch gate is proved against REAL bytes on a REAL daemon.** The criterion's
-  own TO CLOSE was specific — one probe in the Docker-gated `container` job that builds a real image
-  and files it under another image's tag, asserting both that the labels come back as `buildImage`
-  wrote them and that `assertImagesReady` refuses. That, plus the older residual it was carrying
-  separately: the fails-verify half was a `docker` PATH shim, never a real image that really fails.
-
-  Four probes in `test/integration/image.test.ts`, and the two that refuse are worthless without
-  the two that do not:
-
-  1. **The label round trip.** `docker image inspect` on the freshly built image must report
-     `pifleet.pi-version`, `pifleet.toolchain` and `pifleet.config-hash` exactly as `parseImageTag`
-     reads them off the tag it was built under. That is the equality `imageIdentityDrift` is built
-     on, and no test read it back from an actual image store until now — the shim answered
-     `{{json .Config.Labels}}` by taking the tag string apart, so nothing would have noticed if
-     `buildImage` stopped stamping the labels tomorrow.
-  2. **The stale-but-present case.** One `docker tag` files the real worker image under a tag whose
-     config-hash is not its own. The probe asserts, in order, that `imagePresent` says PRESENT,
-     that `verifyImage` says OK, and that the gate refuses anyway with `reason: "mismatched"`
-     naming both hash values. The first two are the load-bearing ones: they establish that both
-     halves of the pre-identity gate pass on the wrong image.
-  3. **Fails-verify on real bytes.** An image built `FROM` the real one with nothing changed but
-     `USER root`, stamped with identity labels that MATCH its own tag — so presence passes, the
-     identity check passes, and the run reaches verification under its own power, where
-     `verifyImage`'s `uid-10001` check refuses it.
-  4. **The positive control**, which is not optional: a gate that refused everything would pass
-     both refusal probes.
-
-  Composed with `up-wiring.test.ts` — which proves the half about `up` (on the launch path, right
-  diagnosis, before any clone, remote or supervisor) — the criterion is covered end to end. Neither
-  file proves it alone, and that is stated in the ISA rather than left to be inferred.
-
-  Mutation-proved, one probe reddened per mutation: neutering `imageIdentityDrift` reddens only the
-  retag case (`the gate ACCEPTED pifleet/pi-worker:0.79.6-node-74f1f971d3b2`); neutering the verify
-  verdict reddens only the fails-verify case. Both restored byte-identical under `shasum -c`. The
-  exit code is deliberately the discriminator nowhere: this criterion already recorded a mutation
-  that still exited 3 because a later preflight refuses with the same code.
-
-  `TOTAL_EXPECTED` 107 → 111, **derived** by the hand method rather than incremented:
-  `6 pass, 105 skip, 0 fail. Ran 111 tests across 12 files.`
-
-- **ISC-48 closed: the minted token's identity is asked of GOOGLE, not asserted from the argv.** The
-  criterion names a TOKEN, and until ISC-248 no `up` path minted one — so the previous close-out
-  could only check the PLAN (every grant line names the SA, the operator's account never consulted),
-  which is a real property and not this one.
-
-  Both of the entry's stated blockers turned out to be false, and neither was removed by anything
-  done to this criterion. *"`gcloudMinter` has NO CALLER ANYWHERE IN `src/cli/**`"* died with
-  ISC-248. *"No real granted SA was available to test against"* was environmental: the old refusal
-  was correct on its facts — the only discoverable service accounts belonged to a live production
-  project — but a target now exists in the SAME personal project as the CI identity, with
-  `roles/iam.serviceAccountTokenCreator` already granted to `cmux-fleet-ci`. **Nothing was created
-  to close this**; the SA, the IAM binding and the `GCP_IMPERSONATION_TARGET` secret all already
-  existed and were simply wired nowhere.
-
-  The probe mints through the production `gcloudMinter` with impersonation and sends the token to
-  the standard introspection endpoint — in a POST **body**, since a bearer token in a query string
-  lands in logs and proxy history. Asserting that `mintArgv` carried `--impersonate-service-account`
-  would prove we *asked* for impersonation, not that we got it.
-
-  **It took three attempts to ask correctly, and both failures were mine rather than the product's.**
-  The first asserted `email === <SA>` on the impersonated token and failed in CI with the literal
-  string `(tokeninfo named no identity)` — a fallback that was a second defect in its own right, a
-  diagnostic reporting only its own inability to answer. The second returned the claims whole (safe:
-  the response echoes claims, never the credential) but moved the same assumption onto the CONTROL,
-  asserting the un-impersonated mint reports an `email`. It does not, in CI.
-
-  **Which claim carries the identity depends on the credential, and both reachable shapes were
-  introspected rather than assumed.** A user credential — the operator's local ADC — returns `email`
-  + `sub` + `azp` with `openid` and `userinfo.email` among its scopes. The CI credential is
-  federated and already a service account: it returns `azp=106755930525734032049` and **nothing
-  else** — no `email`, no `sub`, scope `cloud-platform` alone. That number is `cmux-fleet-ci`'s
-  `uniqueId`, confirmed by `gcloud iam service-accounts describe`, so tokeninfo does name the
-  principal there; it just uses a different field. An access token carries `email` only when its
-  scopes include `openid`/`userinfo.email`, and a service-account token is minted with
-  cloud-platform alone.
-
-  So every assertion is now over the **set** of identity-bearing claims (`email`, `sub`, `azp`;
-  `aud` excluded, since it names the token's audience rather than its presenter) and none of them
-  names a field. Three, in order: a **control** — the un-impersonated mint names *somebody*, without
-  which tokeninfo cannot see identity here and nothing after it means anything; **substitution** —
-  the impersonated token's claim set is **disjoint** from the control's, which is the criterion's
-  literal *"not the launching user's account"* and cannot be dodged by surfacing the same principal
-  under a different key; and **positively the SA** — the service account's numeric `uniqueId`,
-  resolved from the SA itself rather than hardcoded, appears among the token's claims. Disjointness
-  alone would also be satisfied by some third principal, which is why the positive half exists.
-
-  **The probe found a hole in the CI credential setup, which is worth more than the criterion it
-  was written for.** `gcloud iam service-accounts describe` failed with `Failed to load credential
-  file: [.../gha-creds-<id>.json]` — a path the "Move the federated credential out of the
-  workspace" step had relocated minutes earlier. That step re-points
-  `GOOGLE_APPLICATION_CREDENTIALS` and calls `gcloud auth login --force --cred-file` precisely so
-  that "leaving it dangling would break any plain `gcloud` call the probes make". It did not:
-  `google-github-actions/auth` also exports `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, which gcloud
-  reads in preference to the account store and which still named the workspace path. Every plain
-  `gcloud <api>` call in that job was broken, invisibly, because nothing made one — the ADC mints
-  follow a different variable and were fine, and the step's own verification only exercised that
-  half. Both stores are re-pointed now, by comparison with the source path rather than
-  unconditionally, and the step proves both mints before the job proceeds.
-
-  **One IAM change was made**, recorded here rather than left to be discovered: `cmux-fleet-ci` held
-  no project-level roles and no permission to READ the SA it may impersonate, so `service-accounts
-  describe` would have failed in CI. It was granted `roles/iam.serviceAccountViewer` on that single
-  service account — read-only, one resource. The alternative was hardcoding the `uniqueId` into the
-  test, which would compare a constant against itself the day the SA is recreated.
-
-  **The delegation caveat stands and is not closed by this.** At real mint time the operator's ADC
-  IS used to obtain the SA token, so "the launching user's account is never consulted" is true of
-  planning and cannot be true of the mint itself. What the criterion claims, and all it claims, is
-  that the issued token's identity is the SA.
-
-  **CI-only, stated rather than hidden:** the `tokenCreator` binding is granted to `cmux-fleet-ci`
-  alone, so minting impersonated from a developer host returns `IAM_PERMISSION_DENIED` and the probe
-  self-skips with a message naming what it needs. Granting the role to a human account to make it
-  locally runnable was deliberately not done.
-
-### Changed
 
 - **The chain probe tolerates ONE tool flail the model recovers from, instead of demanding zero.**
   `full-chain.test.ts` asserted `tool_errors === 0` while its own failure message argued the
@@ -356,78 +903,6 @@ All notable changes to this project are documented here.
   rot two grades silently. Mutation-proved: changing the pin fails the registry with
   `RE-GRADE ISC-41`.
 
-### Fixed
-
-- **The ISC-154 quiesce diagnostic is now READABLE, and the null it explains no longer has an
-  unnamed third cause.** The diagnostic shipped days earlier wrote its reason to `events.jsonl`
-  inside the run directory — and a CI runner is destroyed with that file on it. On 2026-08-27 a
-  `container-live` run failed `expect(record.tree_hash).not.toBeNull()` with the message *"the
-  supervisor took no quiesce sample"*, and the reason was in practice unrecoverable. The diagnostic
-  existed and could not be read, which is the same defect it was written to remove, one layer out.
-
-  Two halves, because there were two problems.
-
-  **The reason now travels in the failure message.** `quiesceSampleDigest` reads the same
-  `events.jsonl` and prints what the supervisor said, exactly as `toolErrorDigest` already does for
-  the model's erroring tool calls two assertions above it. It POLLS rather than reading once:
-  `logEvent` queues appends on a chain shared with the worker's stderr, so under a flood the record
-  can be enqueued before the task record is written and land on disk after it — a single read that
-  lost that race would report "no event" and send a reader hunting a bug that is not there.
-
-  **A null hash had THREE origins and only one of them said anything.** `worktreeContentHash`
-  failing emits `quiesce_sample_failed` with a reason; `settledWorkdir === null` emitted NOTHING and
-  produced the identical null. So "no failure event" was ambiguous between *the sampler ran and
-  could not answer*, *the epoch owned no workdir so nothing was sampled*, and *the sampler was never
-  reached* — three different bugs behind one silence. The skipped case now logs
-  `quiesce_sample_skipped` with its reason. It is deliberately not logged as a failure: a task
-  dispatched with no worktree is a legitimate shape, so the event records why no sample was taken
-  rather than complaining that none was.
-
-  Mutation-proved: removing the `quiesce_sample_skipped` call fails
-  `supervisor.test.ts`'s "a task with no worktree settles with a null hash, not a guess" with
-  `Expected: true / Received: false`. The test asserts the REASON, not merely the event type — an
-  event type with an empty reason is the same silence wearing a name.
-
-### Added
-
-- **The supervisor now runs the credential refresher (ISC-248) — and, it turned out, injects the
-  initial token at all.** `TokenRefresher` had been unit-proved and callerless for two phases:
-  `grep -rn 'security/refresh' src/` returned nothing, so the criterion's verb — *runs* — had no
-  evidence and could have none. The recorded reason was honest (it attaches to a running container;
-  the headless path started none) and stopped being true when the container launcher landed
-  (ISC-286/287).
-
-  **The gap was larger than the entry claimed.** `injectToken` and `gcloudMinter` had no production
-  callers either. So there was no refresh loop AND no initial injection: the container got the
-  gcloud tmpfs and the env pointing at `TOKEN_FILE`, and nothing ever wrote a token there. A
-  `cloud_access: true` worker had a credential-shaped hole, not a stale credential.
-
-  The credential PLAN now rides in `WorkerLaunch` — `planCredential`'s output, written by
-  `run/materialize.ts` where config is known and read where the container is known, on the launch
-  record's own argument that a detached supervisor does not share the cwd and environment `up`
-  resolved in. The supervisor constructs a `TokenRefresher` after the container spawn and drives
-  `run(signal)`, which ticks due-at-0, so ONE path serves both the initial injection and the loop
-  rather than two places for the mint, the record and the failure handling to drift.
-  `refreshAbort.abort()` on shutdown tears it down — without it the process holds a live loop and a
-  pending timer and does not exit.
-
-  **A failed mint degrades the worker loudly; it does not kill it.** An owner decision: a transient
-  `gcloud` hiccup must not destroy a worker mid-task, but a worker configured for cloud access that
-  silently has none is indistinguishable from a healthy one until a later task fails naming the
-  wrong component. `state.credential.degraded` is set where `status` reads it, and is cleared by the
-  next success rather than by time. `credentials.jsonl` is a new append-only sibling carrying every
-  `CredentialInjection` — which has no token field by construction.
-
-  **Probed against the real thing.** The 23 unit tests drive `tick()` on a fake clock, which is the
-  right way to pin a schedule and structurally cannot answer "does a real supervisor start one".
-  The closing probe uses a real supervisor, a real container and a real federated credential with
-  `token_refresh` compressed to 2s — the only faked value, faked in the field an operator sets.
-  Mutation-proved on both limbs: disabling the wiring fails it with `Received: 0`, and swapping
-  `run()` for a single `injectNow()` fails it with `Received: 1`. Deliberately NOT asserted: that
-  the token VALUE changed between generations — gcloud serves a cached token until near expiry, so
-  that would pin gcloud's cache rather than this loop.
-
-### Changed
 
 - **The `scanOutboxFiles` hard-link test stops pinning WHICH defence catches the attack, and the
   `nlink` check gains a fixture that can pin it.** `test/unit/harvest-outbox.test.ts` asserted the
@@ -536,7 +1011,153 @@ All notable changes to this project are documented here.
   shared or guessable key is no longer proportionate when it is the only thing in front of the
   server.
 
+
+- **`soft_stop_at` is removed from `BudgetSchema` and `fleet.example.yaml` (#42, ISC-280).**
+  **This is a behaviour change, not a tidy-up:** the schema is `.strict()`, so an existing
+  `fleet.yaml` carrying the key now **fails validation** — including any config copied from the
+  `fleet.example.yaml` that shipped it, which is the likely case. That is intended, but a bare
+  `unrecognized key` describes it as a typo, and a typo and a removal want opposite reactions from
+  a reader: one should be corrected, the other deleted. `REMOVED_KEYS` in `config/load.ts` gives the
+  dotted path a message saying it was removed, why, and that deleting the line changes nothing. It
+  was never implemented, and the SRD's risk rows **F12** (cost runaway) and **F24** (budget overshoot
+  between polls) both named an "80% soft-stop" among their mitigations — so both overstated the
+  product's protection against the two risks the budget machinery exists for. Both rows are now
+  annotated rather than rewritten, because whether they need a replacement mitigation is an owner's
+  call about risk.
+
+- **`backend.kind` no longer defaults to `cmux` at the schema (Phase F, ISC-271).** It is
+  `.optional()`, so `up` can distinguish an absent backend block from one explicitly set — without
+  which every headless run silently became `cmux`. `up` now honours `config.backend.kind` when
+  `--backend` is absent; an explicit flag still wins. **This affects every existing `fleet.yaml`.**
+
+- **An identity value written before this build is reported `identity_legacy_format`, not
+  `identity_mismatch`.** Pinning `ps -o lstart=` to `TZ=UTC LC_ALL=C` changes the bytes of every
+  `started` value already on disk — including on a machine already in UTC, because `LC_ALL=C` also
+  reorders the fields. Values written by this build carry a `utc1 ` tag; no locale renders a weekday
+  as `utc1`, so the tag cannot collide with a legacy value. `--force-identity` is the named hatch.
+  Reporting such a value as a mismatch would assert something false about the world and train the
+  operator to reach reflexively for the one flag that re-opens the fail-open.
+
+- **`up` runs the ISC-53 gate after the egress network and relay, not before.** Not a preference:
+  on an `--internal` bridge `host.docker.internal` resolves to the relay, and resolves to nothing
+  before the relay exists, so the probe cannot test anything real until both are up. It still runs
+  before `run.json`, the ledger and every supervisor, so a refusal still launches nothing.
+- **`doctor` says which vantage its oMLX numbers come from.** It reports `vantage: "host"` in
+  `--json`, prints `omlx (from host):` in the text output, and uses `llm.base_url` verbatim
+  instead of silently rewriting it — the old rewrite answered "can this host reach SOME oMLX" in
+  place of the question actually asked, and stops being even approximately right once the server
+  is not on this box. When a container-facing hostname is unreachable from the host, `omlx.detail`
+  now explains why rather than leaving a bare "unreachable" that reads as an outage. That
+  explanation is a note, not a diagnosis: as a diagnosis it made `doctor` exit 3 on a healthy
+  machine, because any diagnosis is a failure. `doctor` deliberately does NOT probe from inside
+  the network — doing so would make ISC-54/55's only CI-executable test require a Docker daemon,
+  turning live coverage into a self-skip.
+
+- The container suite runs ONCE in CI instead of twice. It had been executed for its own
+  sake and then again inside the guard purely to re-count the summary — doubling real
+  Docker time for no extra coverage, inside a 60-minute budget that also builds
+  google-cloud-cli, and leaving two runs that could disagree with each other.
+- The ADC file-mode mount-shape test is now CI-runnable via `PIFLEET_TEST_ADC_FILE`. It
+  only ever needed *a file* to inspect a mount table, but it was pinned to the operator's
+  real credential and so ran in no automated job at all.
+- ISA criteria now distinguish `[x]` (something reproducible re-checks it) from `[~]`
+  (partly proved, with the local-only half named explicitly). ISC-41, ISC-47 and ISC-48
+  moved to `[~]` — the first two had been marked closed with no evidence of any kind, and
+  the third names a token that nothing in the CLI ever mints.
+
 ### Fixed
+
+- **The live tool-call probe points at a model that can answer it (#114).** Three CI runs failed on
+  `omlx-live` and each was re-run as a suspected flake. It was not a flake:
+  `GLM-4.5-Air-MLX-4bit` is a reasoning model that streams its chain of thought as
+  `reasoning_content` deltas and, on this probe's shape, never reaches `content` or `tool_calls`.
+  The probe got HTTP 200 and a body it could not parse, which is why the failure read as
+  "unreadable body" rather than "wrong answer".
+
+- **Documentation currency audit (2026-08-30).** `Docs/SRD.md` had drifted from the implementation
+  across eleven findings while the skills and `fleet.example.yaml` stayed current — documentation
+  currency tracked proximity to executing code, and nothing executed the SRD. Corrected: §5.5's
+  mount table was missing three mounts and closed with a false "nothing else is mounted"; §12.4
+  never recorded that secrets are delivered as files; the `harness:` config block and the ISC-150
+  test-harness cap it controls were undocumented entirely (now §6.5 and §8.2a); §10 was missing
+  `tui` and exit code `8`; §6.2's example was missing `egress:`, `harness:` and the `ticketing`
+  role; §5.8 sat between §5.5 and §5.6. `README.md`'s test counts and open-criteria paragraph were
+  stale, and `Docs/SRD-COMPLETION.md` now carries a superseded banner.
+
+  **The audit's own first pass reported `fleet.example.yaml` as silent on `harness:` too, and that
+  was wrong — asserted rather than grepped.** Checking it properly found the worse defect: the block
+  that existed still described `patterns` as REPLACING the defaults, true when written and false
+  since 2026-08-25 (ISC-243), and never mentioned `replace`. The one document that covered the key
+  was stating the opposite of the shipped default, in the direction that silently weakens the cap.
+  The same stale reasoning is corrected in the two user-facing error messages that carried it.
+
+  `test/unit/docs-currency.test.ts` now derives the mount list, the command table, the config keys
+  and the exit ladder from the source and fails when the documentation disagrees. That test is the
+  fix; the prose corrections are what it was written against.
+
+- **The outbox scan's ownership is now structural, which closes ISC-301's uncovered half.**
+  `OutboxFile` has always documented that the caller owns the descriptors and must close them, and
+  that contract was carried by a comment and one hand-written `finally` — the same shape whose
+  absence caused the leak in the first place. `withOutboxScan(loc, fn)` scans, runs the body and
+  releases in a `finally`, so a caller cannot obtain a scan without also handing back the point at
+  which it ends.
+
+  It also reaches the evidence the criterion was short of. The throwing path — the one `harvestAll`
+  catches and loops past, and therefore the one that would accumulate the most descriptors — was
+  covered by the code and by no test: a mutation releasing only on success left every probe green,
+  and inducing a throw inside `harvestTask` was impossible because its acceptance block swallows its
+  own errors. Passing a body that throws reaches it directly, with no production hook existing only
+  to make a test possible. The same previously-invisible mutation now reddens exactly one probe.
+
+- **An ISA claim's grep could not tell code from prose, and it had already failed in both
+  directions (ISC-302).** A claim is a text search over bytes. ISC-300's went vacuously GREEN when
+  the decision it pinned moved and the old spelling survived inside a comment explaining the move;
+  ISC-246's went falsely RED two days later when three lines of new docstring named the field it
+  greps for. The convention that followed — comments deliberately decline to spell greppable forms —
+  is real, documented in three places, and unenforceable: it asks every future author to know which
+  strings some other file searches for.
+
+  Claims now run against a comment-MASKED mirror of the tracked tree. Every comment byte becomes a
+  space and every newline is kept, so lengths and line numbers are unchanged and a claim's `grep -n`
+  still names the line a reader will find in the real file. Both original failures were replayed as
+  proof: re-adding a comment naming the field leaves ISC-246's claim green, and respelling the code
+  so the pinned form survives only in a comment turns ISC-301's claim red.
+
+  Files that are not `.ts` are mirrored verbatim, and that limit is stated rather than hidden —
+  masking them means a second comment syntax whose marker is also an ordinary character inside shell
+  strings and YAML values.
+
+
+- **The ISC-154 quiesce diagnostic is now READABLE, and the null it explains no longer has an
+  unnamed third cause.** The diagnostic shipped days earlier wrote its reason to `events.jsonl`
+  inside the run directory — and a CI runner is destroyed with that file on it. On 2026-08-27 a
+  `container-live` run failed `expect(record.tree_hash).not.toBeNull()` with the message *"the
+  supervisor took no quiesce sample"*, and the reason was in practice unrecoverable. The diagnostic
+  existed and could not be read, which is the same defect it was written to remove, one layer out.
+
+  Two halves, because there were two problems.
+
+  **The reason now travels in the failure message.** `quiesceSampleDigest` reads the same
+  `events.jsonl` and prints what the supervisor said, exactly as `toolErrorDigest` already does for
+  the model's erroring tool calls two assertions above it. It POLLS rather than reading once:
+  `logEvent` queues appends on a chain shared with the worker's stderr, so under a flood the record
+  can be enqueued before the task record is written and land on disk after it — a single read that
+  lost that race would report "no event" and send a reader hunting a bug that is not there.
+
+  **A null hash had THREE origins and only one of them said anything.** `worktreeContentHash`
+  failing emits `quiesce_sample_failed` with a reason; `settledWorkdir === null` emitted NOTHING and
+  produced the identical null. So "no failure event" was ambiguous between *the sampler ran and
+  could not answer*, *the epoch owned no workdir so nothing was sampled*, and *the sampler was never
+  reached* — three different bugs behind one silence. The skipped case now logs
+  `quiesce_sample_skipped` with its reason. It is deliberately not logged as a failure: a task
+  dispatched with no worktree is a legitimate shape, so the event records why no sample was taken
+  rather than complaining that none was.
+
+  Mutation-proved: removing the `quiesce_sample_skipped` call fails
+  `supervisor.test.ts`'s "a task with no worktree settles with a null hash, not a guess" with
+  `Expected: true / Received: false`. The test asserts the REASON, not merely the event type — an
+  event type with an empty reason is the same silence wearing a name.
+
 
 - **Two fleets can now run against one repo, and a crashed run no longer blocks the next one
   (ISC-295).** A worker's checkout lived at `<repo>/.worktrees/<worker>` — keyed on the worker id
@@ -581,68 +1202,6 @@ All notable changes to this project are documented here.
   now refused outright rather than obeyed — it does not disable the backstop, it makes the run poll
   forever.
 
-### Added
-
-- **`pifleet up` now re-points the egress relay when `llm.relay_upstream` changes, instead of
-  adopting the old one (ISC-265).** A running relay was recognized by NAME alone, so moving the
-  fleet to a different oMLX did nothing until an operator ran `docker rm -f` by hand — and the
-  resulting failure was silent rather than loud: every worker connected, got real completions, and
-  was talking to the previous server. `up` now reads `PIFLEET_RELAY_TARGETS` back off the running
-  container and compares it as a set against what the config resolves to; a relay forwarding
-  somewhere else is removed and rebuilt, and a new `relay_targets_replaced` ledger event records
-  what was displaced. A relay whose targets cannot be read is replaced too, rather than trusted.
-  **Operators sharing one egress network should know the trade this makes:** the relay is shared,
-  so a replacement interrupts a concurrent fleet's in-flight turns. That is deliberate — with
-  drifted targets the two fleets already disagree about a single shared resource, and the previous
-  behaviour resolved the disagreement silently in favour of whoever booted first.
-
-- **A durable file with an unrecognised stamp now refuses by name instead of throwing a library
-  error (Phase G, ISC-157, ISC-192).** Both criteria asked to *read* an older file "rather than
-  failing"; the owner chose the opposite deliberately — **refuse by design, named, with a hatch** —
-  so both were **restated and closed against the restatement**, not built as written. No version
-  stamp was added to ledger records and no `v0 -> v1` upgrade ladder exists. **Measured before it
-  was fixed:** a `v0` stamp threw a bare `ZodError` whose message's first line was the lone
-  character `[`, and a truncated file a bare `SyntaxError`; neither carried an `exitCode`, so both
-  left the CLI as a stack trace on exit 1, off the §10 ladder entirely. Four readers now separate
-  **provenance from damage** — `readRegistry`, `control-auth`, `attended/mode` and `report/collect`
-  each pair a schema error naming a build to go back to with a damage error that deliberately does
-  not. The stamp is checked **before** the schema at every site, so a future `v2` renaming a field
-  is not misdiagnosed as a missing one. Two of the brief's premises were wrong and were corrected
-  against the tree rather than implemented: `attended/mode.ts` was already wrapped, and `collect.ts`
-  already caught — what neither could do was tell version skew from damage.
-
-- **`down` no longer treats an unreadable `ps` as a dead worker, which was the data-loss half
-  (Phase G).** `processStartTime` conflated "`ps` failed" with "no such process", and `down`'s
-  `anchorIdentity` maps that to the one verdict that reports `stopped: true`, calls `reapContainer()`
-  and makes the worker **prunable** — so a broken `ps` could destroy a live worker's container and
-  worktree. It now raises `IdentityReadError` and `down` reports `identity_read_failed`. The rule it
-  rests on was measured, not assumed: on Darwin, exit 1 with empty stdout does **not** identify an
-  absent process — a reaped pid, an out-of-range pid, a malformed `-p` and an illegal flag all
-  produce it. Only silence on **all three** channels does.
-
-- **`mergeLedger`'s shape tolerance is pinned, including the position clause (Phase G).** A
-  malformed record does not crash the merge, it lands in `errors`, and every well-formed record
-  around it survives **regardless of position**. The position half is load-bearing and was measured:
-  under a mutation hoisting the try/catch to per-shard, the last-position test still **passes** while
-  mid-shard reddens — so a merge that silently drops the tail after an error would have passed a
-  naive test. This pins shape tolerance and is **not** a version policy: a record failing today's
-  schema is discarded rather than read, and the merge cannot tell "written by an older writer" from
-  "corrupt shard".
-
-- **The launch preflight refuses before it can leave anything behind (Phase F).** The image-presence
-  gate runs ahead of any clone, remote registration or supervisor launch, so a missing image costs
-  nothing to recover from.
-
-- **Every rung of the kill ladder now validates the process GROUP, not just the leader (Phase F,
-  ISC-272).** `down` signals `-pgid`, so the previous weak anchor aimed SIGTERM and then SIGKILL at
-  an entire group named by a possibly stale file. A group that disagrees with the OS, or that the
-  identity-validated supervisor does not lead, now refuses the ladder (`group_unconfirmed`). No
-  schema field was needed — a group is named by its leader's pid, so its launch-time identity *is*
-  the leader's, already recorded. Mutation-measured on real spawned groups: with the old rung
-  restored, `foreign group members: 24667,24669,24670` became `(none — DEAD)` while the actual
-  supervisor was never touched.
-
-### Fixed
 
 - **`pifleet down` could kill an unrelated live process on the operator's machine (#36, ISC-191).**
   `down` did not use `safety/kill.ts` at all — it ran its own inline ladder whose gate was
@@ -695,120 +1254,6 @@ All notable changes to this project are documented here.
   measured at thresholds 1 through 6, the verdict is `identity_read_failed` every time, produced
   earlier by the anchor or the SIGTERM rung.
 
-### Changed
-
-- **`soft_stop_at` is removed from `BudgetSchema` and `fleet.example.yaml` (#42, ISC-280).**
-  **This is a behaviour change, not a tidy-up:** the schema is `.strict()`, so an existing
-  `fleet.yaml` carrying the key now **fails validation** — including any config copied from the
-  `fleet.example.yaml` that shipped it, which is the likely case. That is intended, but a bare
-  `unrecognized key` describes it as a typo, and a typo and a removal want opposite reactions from
-  a reader: one should be corrected, the other deleted. `REMOVED_KEYS` in `config/load.ts` gives the
-  dotted path a message saying it was removed, why, and that deleting the line changes nothing. It
-  was never implemented, and the SRD's risk rows **F12** (cost runaway) and **F24** (budget overshoot
-  between polls) both named an "80% soft-stop" among their mitigations — so both overstated the
-  product's protection against the two risks the budget machinery exists for. Both rows are now
-  annotated rather than rewritten, because whether they need a replacement mitigation is an owner's
-  call about risk.
-
-- **`backend.kind` no longer defaults to `cmux` at the schema (Phase F, ISC-271).** It is
-  `.optional()`, so `up` can distinguish an absent backend block from one explicitly set — without
-  which every headless run silently became `cmux`. `up` now honours `config.backend.kind` when
-  `--backend` is absent; an explicit flag still wins. **This affects every existing `fleet.yaml`.**
-
-- **An identity value written before this build is reported `identity_legacy_format`, not
-  `identity_mismatch`.** Pinning `ps -o lstart=` to `TZ=UTC LC_ALL=C` changes the bytes of every
-  `started` value already on disk — including on a machine already in UTC, because `LC_ALL=C` also
-  reorders the fields. Values written by this build carry a `utc1 ` tag; no locale renders a weekday
-  as `utc1`, so the tag cannot collide with a legacy value. `--force-identity` is the named hatch.
-  Reporting such a value as a mismatch would assert something false about the world and train the
-  operator to reach reflexively for the one flag that re-opens the fail-open.
-
-### Added
-
-- **The run's budget is enforced on the dispatch path; five criteria closed from one call site
-  (#37, ISC-235/114/115/193/109).** `src/safety/budget.ts` was finished, correct, thoroughly
-  unit-tested — and imported by nothing. The audits that produced this are worth stating: a probe
-  drove the real `runSchedule` with 6 workers against `max_concurrent: 2` and measured **peak
-  in-flight = 6**; `EXIT.BUDGET` had **no runtime producer**, so no run could exit 5 for any reason;
-  and `budget.json` had no path and no writer. `runSchedule` now calls `admit` before every dispatch,
-  `settle`s on every terminal transition, drains in-flight work after a halt, and folds
-  `budgetExitCode` into `worstExit`.
-
-- **A wedged agent is now actually acted on (#40, ISC-110, ISC-117).** `classifyStall` distinguishes
-  a QUEUED worker from a WEDGED one and had **no production caller**, so no worker was ever killed as
-  wedged nor spared as queued by any code path; `event_stall_warn`/`event_stall_kill` were parsed by
-  the schema and read by no production line. This could not have been wired before #37 — a worker can
-  only be *queued* once admission is on the dispatch path. The policy moved to `src/safety/stall.ts`,
-  which imports **nothing**, because `scheduler.ts` importing it from `kill.ts` tripped a module cycle
-  (`ReferenceError: Cannot access 'realProcessOps' before initialization`); a module with no imports
-  cannot be in a cycle, and `kill.ts` re-exports it so every existing caller keeps its address.
-
-- **`doctor` reports whether the oMLX endpoint serves every `models_allowlist` entry (#35,
-  ISC-256).** Both sides decompose per §6.1 first, matching `assertModelAllowed` — a raw compare
-  would have `doctor` calling `omlx/X:high` unserved while `up` accepts it. **The check runs only
-  against a list actually fetched**, and that gate is asserted rather than assumed: an unreachable
-  endpoint serves nothing, so an ungated check would report every entry missing and send an operator
-  off to edit a *correct* allowlist — on the default config that would fire on every machine, every
-  run. Live evidence for the motivating finding: `fleet.example.yaml`'s three allowlist names give
-  **0/3 served, exit 3**, including `Qwen3.5-35B-A3B-8bit` missing the served `-4bit` by a single
-  character.
-
-- **The control socket answers `export_html` (#32, ISC-234).** Forwarded to Pi's RPC at 8s, under
-  the CLI's 10s fallback, with both directions proved on one run: `source: "rpc"` while the worker
-  lives, `source: "local"` once it is gone. **Limit recorded on the criterion:** proved for a
-  host-process Pi only — a containerised Pi resolves the path in the container namespace and degrades
-  to the local render.
-
-- **Five anti-criteria now have probes that can actually fail (ISC-138, 139, 140, 165, 199).** An
-  `Anti:` criterion asserts an *absence*, which is the one claim a green suite cannot make on its
-  own — each was satisfied by a codebase that had simply not done the forbidden thing yet. Every
-  guard in `test/unit/anti-criteria.test.ts` is **mutation-verified**: seven planted violations,
-  seven reds, baseline green before and after. **ISC-139 changed shape under measurement** — the
-  first draft banned the bare tokens `claude`/`anthropic`/`copilot` and went red on six legitimate
-  sites, because `CLAUDE.md` is a *filename* this tool must know (`repo-hazards.ts` scans
-  repository instruction files). It now matches attribution *constructions*, which have no
-  legitimate use here. Its more useful half is a **capability pin**: the git verbs appearing as
-  argv literals under `src/` are add, branch, checkout, config, diff, log, rev-parse, status,
-  symbolic-ref, worktree — no `commit`, no `push`, no `gh` — so the criterion's commit and PR-body
-  clauses are *vacuous*, and the test pins that fact so they cannot silently go live. **ISC-165**
-  checks per test that a `:ro` write refusal also reads from the mount, since an absent mount
-  refuses writes just as happily as a read-only one. **ISC-140** is split from ISC-21 because the
-  two fail in opposite directions: a test needing egress fails closed and everyone finds out; a
-  test needing provider spend passes and quietly bills someone. **ISC-199** bans hardcoded `ps`
-  output spellings, not `ps` itself. **ISC-138 is a bookkeeping correction** — its guard already
-  existed beside ISC-137's, which had been `[x]` all along; the work was verifying it bites.
-
-- **`adc_mode: file` is now tracked as a criterion rather than a caveat inside a closed one
-  (ISC-268).** ISC-44 closed honestly about its `file`-mode probe — it "hand-writes the `-v` itself
-  and inspects a shape it authored" — but that admission lived only in the prose of an `[x]`
-  criterion, where nothing re-reads it. The measured state: `ADC_FILE_PATH`, `fileModeMaterials`
-  and `fileModeStartupEnv` have ZERO callers in `src/` outside `adc.ts`, and `buildDockerArgv`
-  emits no `/creds` mount, so `adc_mode: file` is accepted by the schema and does nothing. A mode
-  that neither works nor fails is worse than an absent one: it surfaces as an unexplained
-  permission error inside the container instead of a refusal at launch. It also leaves ISC-44's
-  mount guard with one carve-out — the single ADC file `file` mode may mount — defending a path
-  nothing takes, so the guard's most delicate branch has no production coverage and would be
-  load-bearing on its first real run. ISC-268 closes on either arm: wire the mode through
-  `buildDockerArgv` and prove it by `docker inspect`ing a container built from production argv, or
-  reject the value in the schema and delete the three symbols and the carve-out together. No code
-  changed in this entry — this records a known gap where it can be counted.
-- **The suite is now judged under deliberate load rather than only on a quiet box (ISC-266).**
-  `.github/scripts/test-under-load.sh` runs a target under `ceil(cores * 0.75)` busy loops and exits
-  with the suite's own status, and a separate `load` job in CI runs it on every PR. A budget that is
-  too small — or a test whose spawn count grows without its `cliBudget(N)` growing with it — now
-  fails a PR instead of a developer's afternoon. Measured: the full integration suite under eleven
-  loops on 14 cores ran 375 pass / 81 skip / 0 fail in 300.87 s against 167.76 s idle, a 1.79x
-  inflation with every budget holding. On CI the job is confirmed to apply real load rather than
-  merely pass: the same commit ran `test/integration` in 124.32 s in the `test` job and 222.78 s in
-  the `load` job — 1.79x, the same factor. **What it does not prove is stated in the job's own
-  comment:** the runner reports two cores against the 14 these numbers came from, and none of the
-  editor, language server, browser and concurrent agents behind the load average of 18.40 ISC-266
-  recorded, so it reproduces the *shape* of the contention at a smaller magnitude — a floor on the
-  evidence, not a ceiling. The harness's cleanup traps a recorded PID list and never `jobs -p`, which is empty in a
-  non-interactive shell and would read as correct while killing nothing.
-
-
-### Fixed
 - **A dependency-gating assertion failed on the scheduler's tick granularity rather than on gating
   (ISC-267, second instance).** `dispatch-auto.test.ts` asserted `gapMs > 100` between two
   dependent dispatches, justified by six local runs of 237-262 ms. The **ISC-266 load job caught
@@ -878,226 +1323,6 @@ All notable changes to this project are documented here.
   move, so no constant satisfies both floors. Mutation-verified: `42` fails (it passed before),
   `5000` fails, a clock read twice fails.
 
-### Security
-
-- **The run dir — holding the 0600 control-socket secret — could be mounted into a worker container
-  (#34, ISC-127).** Measured before fixing: with `run.repo` set to a checkout containing the runs root,
-  the rendered `/workspace` mount was an **ancestor of `<run-dir>/control-auth.json`**, along with the
-  ledger, the inbox and every other worker's state. This defeats the control-auth design directly —
-  `security/control-auth.ts` states its threat model is "a worker that escaped its container", and the
-  mount handed that worker the secret **without any escape at all**. `classifyRunDirExposure` /
-  `assertNoRunDirMount` now refuse it from `buildDockerArgv`; two relations are refused and not three,
-  because SRD §5.5 mounts run-dir *children* deliberately. **Framed honestly: this was latent
-  hardening, not an active breach** — `rendered.docker` reached no `exec` at the time. **Known limit,
-  recorded on the criterion:** the launch-time guard is lexical (`resolve`, not `realpath`), so a
-  symlinked `run.repo` could evade it at launch.
-
-- **No cloud provider key can reach any container's environment, enforced structurally (#34,
-  ISC-31).** The guard enumerates **every** `docker run` argv builder in `src/` and applies two rules:
-  no cloud credential by name — importing `adc.ts`'s own `CREDENTIAL_ENV_VARS` rather than a copy —
-  and **no bare `-e NAME`** host pass-through. The second rule is what catches a key nobody thought to
-  list: a planted bare `-e FOOCLOUD_API_KEY`, in no enumerated list anywhere, fails on secret shape.
-- **The mandatory native-tool-call gate was certifying a network path no worker uses.** `up`
-  probed oMLX from the HOST, through a helper (`hostFacingBaseUrl`) whose only job was rewriting
-  the worker-facing `host.docker.internal` into `localhost` so the host could reach it — while
-  every worker reaches oMLX from inside the `--internal` egress bridge, where that name resolves
-  to the relay and nothing else resolves at all. On a Docker-host-local oMLX both land on the same
-  box, which hid the asymmetry completely. It is not harmless: the gate certifies a model, the
-  fleet launches, and the workers are denied at RUNTIME — the "burns a whole run before anyone
-  notices" failure §5.9 makes this probe mandatory to prevent. A gate that certifies reachability
-  it did not test is worse than no gate, because it is trusted. The probe now runs in a throwaway
-  container on `docker.network` and dials `llm.base_url` verbatim, so it tests the workers' path;
-  `hostFacingBaseUrl` is deleted rather than relocated, and `fetchImpl` lost its global-`fetch`
-  default so a host-side probe is no longer one omitted argument away. Nothing here names an oMLX
-  address, which is what makes it independent of where the server moves next: relocating oMLX
-  rewrites the relay's dial target, not the probe.
-- **The probe's API key travels on stdin, never in argv.** `docker run` argv is visible in `ps` to
-  every user on the host and is recorded by `docker inspect` for the container's lifetime. The
-  script goes in argv, where it is not secret; the URL, headers and body go in on stdin. The
-  container test asserts the far end received an `Authorization` header without putting a
-  credential anywhere in the repository.
-
-- **The relay's `decide()` gate is no longer vacuous, and the oMLX server may now live on a trusted
-  LAN peer.** These are one change, in that order, because doing them the other way round would
-  have been dangerous. The gate that landed previously judged a target derived from `llm.base_url`
-  against a policy whose LLM rule derived from `llm.base_url`: two derivations of one field agree
-  without checking anything. That was survivable only because the relay threw unless the dial host
-  was literally `host.docker.internal`, so the worst case was a port on a machine the operator
-  fully controls — and that host pin is exactly what permitting a LAN oMLX removes. Pointing the
-  dial side at a LAN host while the target was still an unchecked derivation of `base_url` would
-  have made this module a TCP tunnel from a bridge running untrusted model output to an arbitrary
-  `host:port` on the operator's home LAN, established by editing one YAML string. So the dial side
-  was decoupled and gated against operator-written allow rules **first**, and the pin relaxed only
-  after.
-  - **New `llm.relay_upstream`** (`host:port`, explicit port) is what the RELAY dials. `base_url`
-    keeps its `host.docker.internal` pin and means only what a WORKER dials — that alias is the
-    only name resolvable on the internal bridge. Default is
-    `host.docker.internal:<port from base_url>`, so **every existing `fleet.yaml` is unaffected**.
-  - **Relay targets are judged by `relayGatePolicy`, not `policyFromConfig`.** This is the fix, and
-    the distinction is not cosmetic: passing the new field to `policyFromConfig` would re-open the
-    circularity through a different field, since `base_url: http://192.168.86.49:8000/v1` yields an
-    LLM rule authorizing the very upstream under test. `relayGatePolicy` contains no config-derived
-    host except ones the operator wrote as allow rules — a compile-time-constant host at the listen
-    port, plus `egress.allow`. `google_hosts` are excluded, because the relay forwards no Google
-    traffic and a rule for a path that does not exist must not authorize one that does.
-  - **A LAN upstream therefore needs two edits in two config blocks**, one of which is
-    unambiguously a security decision. `relay_upstream` alone is refused with `rule: default-deny`
-    before Docker is contacted at all. Proven by mutation rather than by inspection: with the allow
-    entry the upstream is accepted, without it — from a byte-identical target — it is refused, and
-    mutating the source to re-derive a rule from the upstream turns 5 tests red while ignoring
-    `egress.allow` turns 2 red.
-  - **A hostname upstream is refused at `config validate`.** The relay resolves through Docker's
-    embedded DNS, which forwards to the host resolver, and this machine's resolver does not answer
-    mDNS/`.local` names (`macbook.local` needed `dns-sd`). A name there yields a relay that starts
-    cleanly, reports ready, and fails every connection with an error no operator surface shows.
-    Consequently `--add-host host.docker.internal:host-gateway` is now emitted **only** when a
-    target actually dials the Docker host, so it is never inert argv implying a route nothing uses.
-- **SRD §12.4's credential argument was quoted, retired and restated rather than quietly edited.**
-  It justified injecting `OMLX_API_KEY` straight into workers because the key "carries no billing
-  authority and no value off this host". The second clause was load-bearing and true *by
-  measurement* — oMLX here binds `127.0.0.1:8000`, loopback only. A LAN oMLX is bound to a routable
-  interface by definition and `base_url` is plain `http://`, so **the key crosses an unencrypted
-  LAN hop on every request and now has value on at least one other host**. Recorded as an
-  **accepted residual** on the stated basis that the LAN is trusted, with the conditions that would
-  make TLS *required* named up front: if the key ever gates billing authority or data access, is
-  reused for a credential that does, or the LAN stops being one the operator controls. No billing
-  authority remains unconditional; the Google credential never traverses this path.
-- **The bridge gateway residual is narrower than it was documented to be, and enumeration is what found it.**
-  `test/integration/relay.test.ts` now enumerates all three terms of SRD §12.8's reachable set instead of
-  sampling them — a full 1–65535 port scan of the gateway, of the relay's own bridge address, and an
-  authoritative `docker network inspect` of bridge membership. The scanner is built from what the worker
-  image already has: measured by running it, `nmap`, `nc`, `ncat`, `socat`, `ss`, `netstat` and `ip` are all
-  absent, but bash 5.2.15 has `/dev/tcp` compiled in. The expected gateway set is **not** derived from a
-  second probe of the same shape — that is circular in the way ISC-253's `decide()` gate was — but from
-  `/proc/net/tcp` read in a `--network host` container, the kernel's own socket table, obtained without
-  sending a packet. Measured: kernel `[22, 53, 39375, 40375]`, ordinary bridge `[22, 39375, 40375]`,
-  deny-all bridge `[22, 40375]`. Two strict narrowings, so the subset assertion is not a tautology.
-  **A published container port is NOT reachable from the internal bridge** — Docker's isolation DROP lives
-  in FORWARD, evaluated after nat/PREROUTING has rewritten the destination to an address outside the bridge
-  subnet — so the previous `reachable == served` assertion was false in general and held only because all
-  five of its guessed candidate ports happened to be host-namespace services. The §12.8 residual is
-  therefore every **host-namespace** listener, not every port the Docker host listens on. Nothing is
-  inconclusive and nothing is vacuous any more: both beacons and the stray sibling are **planted** before
-  anything is measured, which removes the old `[inconclusive]` early return that passed while proving
-  nothing, and makes an empty-set comparison impossible to mistake for a working scan.
-- **A live inference is now asserted through the relay, differentially.** A real completion —
-  `gemma-4-26b-a4b-it-4bit` answering in 428 ms from inside the deny-all bridge, with `completion_tokens > 0`
-  and the echoed model checked, because a 200 with an empty string is not an inference. Model selection is an
-  **allowlist, never a heuristic**: the embedding model is first in `/v1/models` and answers chat with an
-  error, and "the first id that is not obviously an embedding model" selects a model that SIGABRTs the
-  inference server during generation. Error shapes do not generalise either — the same embedding model
-  returns HTTP 500 on one host and HTTP 400 on another — so no classification rule is safe. The control is
-  re-checked **after** any relayed failure, because the server can die between the two calls; only a relayed
-  failure against a still-succeeding control is a real failure. The key is read from the environment and
-  passed by name via `-e OMLX_API_KEY`, never into argv.
-- **The deny-all bridge does not deny the bridge gateway, and this branch was claiming otherwise.**
-  Measured, not inferred: a container attached to nothing but the `--internal` `pifleet-egress`
-  network — no `--add-host`, no second network, no capabilities, no relay running — pulls a live
-  `SSH-2.0-OpenSSH_9.6p1` banner off `172.18.0.1:22`. Docker implements internal-network isolation
-  as FORWARD-chain rules (`! -d 172.18.0.0/16 -i br-<id> -j DROP`), but the bridge gateway is
-  on-link and inside that subnet, so traffic to it is delivered through INPUT (policy ACCEPT) and
-  is never filtered. `--internal` really does remove the default route — `1.1.1.1`, the LAN oMLX
-  candidate, the Lima host address and `169.254.169.254` are all genuinely unreachable — but it
-  cannot filter the gateway. The prior evidence sampled two public destinations and never measured
-  it. Accepted as a documented residual (SRD §12.8 erratum) rather than fixed, because closing it
-  needs host-side iptables outside Docker's model, or a Docker host whose gateway serves nothing.
-  The reachable set is `{relay listen ports} ∪ {gateway ports} ∪ {sibling container ports}` and is
-  **not fixed** — anything the host or a sibling binds later joins it with no code change.
-  ISC-51/57 are re-worded to what Docker actually guarantees (no route off the bridge *subnet*),
-  ISC-50/51 downgraded from closed to partial, and the relay suite now **enumerates** the route
-  table instead of sampling addresses. The gateway residual is asserted as a positive, so hardening
-  it later turns that test red and flags §12.8 as stale rather than drifting silently.
-- **The oMLX API key no longer travels in `docker run` argv.** The live relay probe interpolated
-  the real key into a shell string passed as arguments — visible in `ps`, in the ephemeral
-  container's `docker inspect`, and in any CI log that echoes commands. It is now passed by name
-  and expanded inside the container. No leak occurred, because that test has only ever run on one
-  machine; it would have become a live exposure on the first CI run with a real secret.
-- **The relay container is pinned by image digest.** It bridges the deny-all bridge to a NAT'd
-  network under `--restart unless-stopped`, and it was pulling a floating Docker Hub tag — so the
-  code on that boundary could change under a machine reboot with no commit in this repo.
-- **The relay applies the egress policy instead of re-deriving it.** `omlxRelayTarget` pinned the
-  host but read the port straight from `llm.base_url` with nothing comparing it to `decide()`, so
-  `http://host.docker.internal:22/v1` produced a relay tunnelling the bridge to the host's sshd.
-  Targets are now gated through `decide()` before argv is built. **That gate was circular when it
-  landed** — the policy's LLM rule derived from the same field — and a test said so by name; it has
-  since been made non-vacuous by the trusted-LAN change below, which is where it became blocking.
-- **One idle container could deny the whole fleet its model server.** The relay dialled upstream on
-  accept, before any byte arrived, with no timeouts and no connection cap: 300 client connections
-  sending zero bytes took it from 19 open FDs to 619, with 603 matching unauthenticated connections
-  against oMLX. Upstream is now dialled on first byte, both legs carry idle timeouts, and
-  concurrency is capped. Also: only a listen failure is fatal (an accept-time EMFILE used to
-  crash-loop the relay and cut model access fleet-wide), the relay gets the same pids/memory/cpu
-  limits as the workers it shares a bridge with, IP forwarding is turned off in its netns, and the
-  ports in its own env parsing are range-checked — `listen(0)` would have bound a random port and
-  reported healthy.
-
-### Changed
-- **`up` runs the ISC-53 gate after the egress network and relay, not before.** Not a preference:
-  on an `--internal` bridge `host.docker.internal` resolves to the relay, and resolves to nothing
-  before the relay exists, so the probe cannot test anything real until both are up. It still runs
-  before `run.json`, the ledger and every supervisor, so a refusal still launches nothing.
-- **`doctor` says which vantage its oMLX numbers come from.** It reports `vantage: "host"` in
-  `--json`, prints `omlx (from host):` in the text output, and uses `llm.base_url` verbatim
-  instead of silently rewriting it — the old rewrite answered "can this host reach SOME oMLX" in
-  place of the question actually asked, and stops being even approximately right once the server
-  is not on this box. When a container-facing hostname is unreachable from the host, `omlx.detail`
-  now explains why rather than leaving a bare "unreachable" that reads as an outage. That
-  explanation is a note, not a diagnosis: as a diagnosis it made `doctor` exit 3 on a healthy
-  machine, because any diagnosis is a failure. `doctor` deliberately does NOT probe from inside
-  the network — doing so would make ISC-54/55's only CI-executable test require a Docker daemon,
-  turning live coverage into a self-skip.
-
-### Added
-- **`llm.relay_upstream` — where the egress relay dials, as distinct from where workers dial.**
-  `host:port` with an explicit port; unset means `host.docker.internal:<port from base_url>`, which
-  is exactly the previous behaviour. Must be an IP literal or the Docker-host alias, and anything
-  other than the Docker host also requires a matching `egress.allow` entry. SRD §5.9 is retitled
-  "The LLM is self-hosted — oMLX on the Docker host or a trusted LAN peer"; **the no-hosted-provider
-  prohibition is unchanged and is explicitly not what was relaxed.** The motivating measurement:
-  this Docker host's oMLX serves 3 models and none of `fleet.example.yaml`'s three allowlisted ones
-  (it has `Qwen3.5-35B-A3B-4bit`, not the allowlisted `-8bit`), so `up` exits 2 against it, while
-  the LAN server at `192.168.86.49:8000` serves 32 including all three.
-- **`up` now refuses to start a fleet on a model that cannot emit native tool calls**
-  (SRD §5.9 F39, ISC-53). Whether a model answers a `tools`-bearing request with `tool_calls`
-  or with prose is a property of its chat template, not of oMLX — and a worker on such a
-  model looks perfectly healthy while accomplishing nothing, because its intended actions
-  never become tool calls. `up` sends one probe per distinct resolved model (deduped: six
-  workers on one model is the normal fleet shape, and six real generations to learn one fact
-  would be a tax on every launch) and refuses with exit 2. An oMLX that cannot be reached
-  exits 3 instead — nothing has been learned about the model, so reporting it as a usage
-  error would send the operator to edit a `model:` line that is probably correct.
-  `llm.require_native_tool_calls: false` disables the gate. Exit 2 is reserved for the two
-  cases where something in `fleet.yaml` is genuinely wrong — the model answers in prose, or
-  the server does not serve it. An answer that settles nothing (truncated, filtered, an
-  unknown finish reason) exits 3, because a probe that failed to get an answer is not
-  evidence about the model.
-- **`up` now refuses to start while an MLX training run appears to be active**, unless
-  `--i-know` is passed (ISC-56). §5.9 records concurrent heavy GPU load on this machine
-  turning a process OOM into a kernel watchdog panic, which costs the training run as well as
-  the fleet. Detection is an explicitly documented heuristic over `ps`, and it asks two questions
-  rather than one: is this token a training entry point — `mlx_lm`/`mlx-lm`/`mlx.`/`mlx_vlm`
-  paired with a training verb (`lora`, `train`, `fuse`, `dpo`, `sft`, `grpo`, `orpo`,
-  `finetune`), never `server` or `generate` — and is this token the PROGRAM BEING RUN. The
-  second question is what keeps a filename from counting as a process: matching the name
-  anywhere in the command line refuses `up` on a host merely SERVING a LoRA adapter, or
-  tailing a training log, and the oMLX inference server every fleet requires is exactly the
-  thing that gets hit. An override is recorded both on stderr and in the run ledger
-  (`mlx_training_guard_overridden`), so a run that raced a training run says so in its own
-  record months later.
-- **New criterion ISC-256**: `doctor` should report whether each `models_allowlist` entry is
-  actually served by the configured endpoint. `fleet.example.yaml`'s allowlist names three
-  models the default `base_url` serves none of, and nothing reports that today — the
-  allowlist check is config-vs-config, and the tool-call probe only touches models a worker
-  resolves to. Its wording is adjacent to, not a duplicate of, the criterion added on the
-  sibling branch, and both reconcile when the SRD §5.9/§12 erratum lands — see the ISA entry.
-- **New criterion ISC-260**: the native-tool-call probe should run from INSIDE the egress
-  network the workers use, not from the host. `up` probes from the host today while workers
-  reach oMLX through the internal bridge; both currently resolve to the same box, which masks
-  the asymmetry. If oMLX moves off the Docker host, ISC-53 can pass on the host while every
-  worker is denied — certifying a model no worker can use and pushing the failure to runtime,
-  which is what §5.9 makes the probe mandatory to prevent.
-
-### Fixed
 - **The relay suite ran in no CI job at all, and the live-oMLX probes skipped invisibly**
   (ISC-257, ISC-262). `test/integration/relay.test.ts` is `PIFLEET_DOCKER`-gated exactly like
   `image`/`verbgate`/`egress`/`adc`, but the `container` job named those four literally and
@@ -1437,131 +1662,6 @@ All notable changes to this project are documented here.
   is now an explicit `detail` note rather than silence; actually computing cross-clone
   conflicts (fetching each sibling's branch into the parent via its existing `worker-<id>`
   remote) is filed as a follow-up, not built in this pass.
-
-### Changed
-- The container suite runs ONCE in CI instead of twice. It had been executed for its own
-  sake and then again inside the guard purely to re-count the summary — doubling real
-  Docker time for no extra coverage, inside a 60-minute budget that also builds
-  google-cloud-cli, and leaving two runs that could disagree with each other.
-- The ADC file-mode mount-shape test is now CI-runnable via `PIFLEET_TEST_ADC_FILE`. It
-  only ever needed *a file* to inspect a mount table, but it was pinned to the operator's
-  real credential and so ran in no automated job at all.
-- ISA criteria now distinguish `[x]` (something reproducible re-checks it) from `[~]`
-  (partly proved, with the local-only half named explicitly). ISC-41, ISC-47 and ISC-48
-  moved to `[~]` — the first two had been marked closed with no evidence of any kind, and
-  the third names a token that nothing in the CLI ever mints.
-
-### Added
-- **An egress relay, so the deny-all bridge stops denying the fleet its own model server.**
-  Workers sit on a Docker `--internal` bridge with no default route and no NAT, which is
-  deny-all in hardware — and denies `host.docker.internal:8000` along with everything else,
-  so every worker started healthy and could accomplish nothing. `src/security/relay.ts`
-  stands up the single container that reopens exactly one destination: it runs with a
-  dedicated NON-internal uplink network as its primary network so `--add-host` has something
-  to route through, then attaches to the internal bridge under the DNS alias
-  `host.docker.internal`, so a worker's baked-in `llm.base_url` resolves to it with no
-  per-worker flags at all. Measured live rather than read from documentation: a container on
-  an internal network cannot reach the host even WITH `--add-host` (internal genuinely
-  removes the route), and Docker's automatic `/etc/hosts` injection was not dependable on
-  this project's Colima setup, so the alias and the `--add-host` are both always explicit.
-  The relay runs `--read-only`, `--cap-drop ALL`, `no-new-privileges`, and as uid `node`,
-  because it listens on a bridge every worker can reach. `up` ensures it immediately after
-  the network and records `egress_relay_ready`; failure is `BACKEND_UNAVAILABLE`.
-- **The relay forwards oMLX and nothing else, on purpose.** `egress.google_hosts` remains a
-  policy-level allow rule with no live traffic path — a Docker network alias cannot be a
-  wildcard, so routing `*.googleapis.com` needs an HTTP CONNECT proxy or SNI passthrough,
-  neither of which is built. A `cloud_access` worker on the internal bridge consequently
-  cannot reach Google at all. Tracked as ISC-253/ISC-57 rather than implied away.
-- **`models_allowlist` is now enforced.** A worker whose resolved model isn't on a non-empty
-  allowlist refuses to start, checked for every worker before any of them launch.
-- **Exit code `8` (internal error) documented in the README's exit ladder.**
-- **A test-coverage report.** `bun run test:coverage` (Bun's built-in coverage,
-  text + lcov, no threshold gate).
-- **The `late_prompt_failure` settle guard has its own regression test**, alongside the
-  existing deadline-escalation one — the two are different call sites reached by different
-  events.
-- **Version-floor checks for docker (>= 23.0.0), git (>= 2.32.0), and tmux (>= 2.4.0,
-  reported only, not enforced).** `doctor` previously captured each tool's version but never
-  compared it to a minimum; each floor is derived from a concrete feature dependency this
-  project already relies on (BuildKit's `COPY --chmod=`, hermetic git's
-  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, tmux's `respawn-pane -c`) rather than picked
-  arbitrarily.
-- **`harness.patterns` is now a `fleet.yaml` key.** A config that supplies patterns
-  replaces `DEFAULT_HARNESS_PATTERNS` entirely for the ISC-150 anti-gaming cap; an empty
-  list is a validation error rather than "match nothing" (silently disabling the cap
-  through a key that reads as harmless). Because an honest, non-malicious pattern list
-  that simply doesn't match a worker's diff has the same silencing effect as an empty
-  one, the harvester now also compares the configured surface against the built-in
-  defaults and records a discrepancy — visible in both the human report and `--json` —
-  whenever narrowing the surface would have changed the verdict.
-- **A 16-worker e2e test proving no container-name collision, no port-collision surface,
-  and no worker starves another's event loop under load.** Found and fixed along the
-  way: the supervisor's completion-latency measurement was stamped from the dispatch
-  CLI subprocess's exit rather than the actual dispatch ack, so it silently included
-  `writeJsonAtomic`'s real fsync time in the "quiet" baseline — measurably wrong on an
-  idle machine (recorded latencies below a scripted delay that made them physically
-  impossible) and capable of a silent false-pass under real load. Latency is now derived
-  from the supervisor's own event log. Also fixed: a failed `up` no longer orphans all
-  16 detached supervisors — cleanup now runs regardless of whether `up`'s own result
-  could be parsed.
-- **`up` now creates the host side of every mount before the container starts (SRD §5.5).**
-  `render` decided what each worker would bind-mount and nothing made those host paths exist
-  — and on a bind mount that gap doesn't fail, it succeeds wrongly: Docker creates a missing
-  `-v` source, so a missing directory arrives empty and a missing *file* arrives as an empty
-  *directory*. A worker's `/skills` came up with no skills at all, and `/policy/cloud-allow`
-  came up as a directory that verbgate's `[ -r ]` accepts and reads no lines from, quietly
-  degrading the run to deny-all and leaving a stray `cloud-allow/` in the run dir. Every
-  symptom read as model behaviour. `up` now writes the outbox, the per-role skill bundle, a
-  zero-byte `cloud-allow` at 0444 (verbgate refuses *every* verb if its policy is writable by
-  the uid consulting it), the concatenated briefing, and a verbatim copy of the configured
-  kubeconfig — all through the same path helpers that emit the mounts — and refuses the whole
-  launch rather than starting a worker with an input missing. Skill bundles are copied from
-  `<repo>/skills/<name>/` (override with `PIFLEET_SKILLS_DIR`); a configured skill with no
-  source bundle is a refusal naming the worker, role, skill and resolved path instead of a
-  bundle that silently shrinks by one. Symlinks are refused rather than followed on both the
-  source and the destination side, and a `.git` directory inside a bundle is refused rather
-  than copied into the read-only directory the agent reads as instruction (its `config` can
-  carry a credential in a remote URL) — ordinary dotfiles like `.DS_Store` and `.gitignore`
-  copy normally. Found and fixed along the way: `skills: ["../../../../victim"]` walked out
-  of the run directory and reopened a 0600 key to 0644, so skill and role names are now
-  validated as single path segments where they enter the system; `--workers eng-1,eng-1`
-  aborted the entire fleet with an environment error, because the duplicate id reached the
-  policy write twice and the second attempt hit the 0444 the first had just set; an
-  unreadable skill source was diagnosed as "no bundle exists", sending the operator to edit a
-  config that was already correct; and `fleet.example.yaml` named three skill bundles that
-  have no source directory, which the new refusal would have made un-runnable as shipped.
-- **Real per-worker git isolation (SRD §9.1/§9.2), implemented as `git clone --no-hardlinks`
-  rather than the SRD's originally specified `git worktree add`.** A security spike ran two
-  worktree-based designs against a real container before this one shipped: mounting only the
-  linked worktree fails outright (`.git` is a `gitdir:` pointer file resolving outside the
-  container's mounts), and also mounting the gitdir to fix that is a confirmed
-  container-to-host remote code execution (a container with write access to it zeroed the
-  host's `refs/heads/main` and planted an executable `post-checkout` hook that ran as the
-  operator on their next `git checkout`). `run/worktree.ts` instead clones each worker with
-  `--no-hardlinks --single-branch --branch <parent's checked-out branch>`, strips `origin`
-  immediately (so the host's absolute repo path can't be read out of `.git/config`), and
-  registers a `worker-<id>` remote in the parent so an operator can still fetch a worker's
-  commits without leaving their own checkout. `--no-hardlinks` is load-bearing, not hygiene: a
-  bare local clone hardlinks object files into the copy, and a worker container writing
-  through its own "copy" then corrupts the PARENT'S object store through the shared inode —
-  which is how the spike investigating this feature destroyed this repository's own pack file
-  before the flag was added. `Docs/SRD.md` §9.2 carries the full erratum. Preflight
-  (`inspectBaseRef`/`assertBaseRefCloneable`) refuses a ref with submodules or LFS-tracked
-  content before any clone is attempted — both clone as silently-wrong content (empty
-  directories, pointer stubs) rather than failing — and a detached parent HEAD is a named
-  refusal rather than a base silently substituted for the one the operator is sitting on.
-  `down --prune` (SRD §9.3) defines "dirty" for a clone with no upstream: uncommitted paths OR
-  commits past the recorded base sha, since stripping `origin` removes the usual "it's pushed
-  somewhere" escape hatch. `up` also now runs hazard neutralization against each finished
-  clone rather than the operator's own checkout, closing the gap a linked worktree's
-  pointer-file `.git` (which the scanner explicitly declines to follow) would have left open.
-- **`pifleet worktrees [--run r] [--json]` — the `git worktree list` replacement.** A worker
-  checkout is now an independent clone with no entry in the parent's `.git/worktrees/`, so
-  `git worktree list` against the parent shows nothing about workers regardless of how many
-  `up` created, which reads as "no workers running" to an operator who reaches for the old
-  habit. The new command lists every worker's branch, path, base sha and remote name from the
-  same on-disk record `dispatch` and `down --prune` already trust, and reports each checkout
-  as `clean`, `dirty (…)`, or `MISSING` via the same dirt-inspection `down --prune` gates on.
 
 ## [1.0.0] — 2026-07-28 — Phase 6: attended
 

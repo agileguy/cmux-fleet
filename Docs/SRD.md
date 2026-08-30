@@ -423,16 +423,76 @@ Three consequences, all deliberate:
 
 ### 5.5 Mount table
 
-| Host | Container | Mode | Why |
-|---|---|---|---|
-| `<run-dir>/worktrees/<worker>` | `/workspace` | rw | the only writable code path. Widened `a+rwX` recursively at creation and named in `safe.directory` — see the §9.2 amendment |
-| `<run-dir>/outbox/<worker>` | `/outbox` | rw | result envelopes + file artifacts |
-| `<run-dir>/sessions` | `/sessions` | rw | transcripts, harvested from the host |
-| `<run-dir>/skills/<role>` | `/skills` | **ro** | role skill bundle |
-| *(named volume)* `pifleet-piagent-<worker>` | `/home/pi/.pi/agent` | rw | container-local Pi state — **never the host `~/.pi/agent`**, which holds Dan's auth and sessions |
-| `<run-dir>/workers/<worker>/kubeconfig` | `/home/pi/.kube/config` | **ro** | only when `cloud.kubeconfig` is set; a filtered copy, never the host `~/.kube/config` wholesale |
+Emitted by `buildDockerArgv` (`src/config/render.ts`). The **Condition** column matters as much as
+the rest of the row: three of these mounts are conditional, and a reader who assumes every row is
+always present will look for a `/secrets` that a worker granted nothing never receives.
 
-Nothing else is mounted. Notably **not** mounted: the main checkout, `~/.ssh`, `~/.gitconfig`, `~/.env`, the host `~/.config/gcloud`, or the Docker socket.
+| Host | Container | Mode | Condition | Why |
+|---|---|---|---|---|
+| `<run-dir>/worktrees/<worker>` | `/workspace` | rw | `workspace: worktree` *(default)* | the only writable code path. Widened `a+rwX` recursively at creation and named in `safe.directory` — see the §9.2 amendment |
+| `<repo>` | `/workspace` | **ro** | `workspace: shared-ro` | the operator's own checkout, read-only — §9.1 |
+| *(no mount)* | — | — | `workspace: none` | the role works against live systems, not the repo — §9.1 |
+| `<run-dir>/outbox/<worker>` | `/outbox` | rw | always | result envelopes + file artifacts |
+| `<run-dir>/sessions` | `/sessions` | rw | always | transcripts, harvested from the host |
+| `<run-dir>/skills/<role>` | `/skills` | **ro** | always | role skill bundle |
+| `<run-dir>/workers/<worker>/cloud-allow` | `/policy/cloud-allow` | **ro** | always | the verbgate's policy (§5.10). **Read-only and separate from `/outbox` on purpose** — it used to be read out of `/outbox`, which the worker owns, so the subject of the policy could rewrite the policy and the task-scoped cloud grant was a suggestion rather than a control |
+| `<run-dir>/workers/<worker>/secrets` | `/secrets` | **ro** | only when the worker was granted ≥1 `secrets:` name | granted credentials, one file per name at 0444, reached through `<NAME>_FILE` — §12.4 |
+| *(named volume)* `pifleet-piagent-<worker>` | `/home/pi/.pi/agent` | rw | always | container-local Pi state — **never the host `~/.pi/agent`**, which holds Dan's auth and sessions |
+| `<run-dir>/workers/<worker>/system-append.md` | `/briefing/system-append.md` | **ro** | only when a briefing fragment exists | the single concatenated `--append-system-prompt` file — §6.3 |
+| `<run-dir>/workers/<worker>/kubeconfig` | `/home/pi/.kube/config` | **ro** | only when `cloud.kubeconfig` is set **and** the worker has `cloud_access` | a filtered copy, never the host `~/.kube/config` wholesale |
+
+Nothing outside this table is mounted. Notably **not** mounted: the main checkout (except under
+`shared-ro`, read-only, by explicit configuration), `~/.ssh`, `~/.gitconfig`, `~/.env`, the host
+`~/.config/gcloud`, or the Docker socket.
+
+> **Erratum (2026-08-30, documentation audit) — this table listed six mounts and closed with the
+> sentence "Nothing else is mounted", and both halves were false.**
+>
+> Three mounts the renderer emits were missing: `/policy/cloud-allow` (**unconditional**),
+> `/secrets` (ISC-337..342, shipped 2026-08-29) and `/briefing/system-append.md`. Two of the three
+> are the security-relevant ones — the verbgate's policy and the credential store — so the
+> sentence that was wrong was also the sentence a reader would rely on when reasoning about what a
+> worker can reach. The `shared-ro` and `none` workspace modes were absent too: the table asserted
+> `/workspace` was `rw`, full stop, while §9.1 has always documented three modes.
+>
+> **The closing sentence is now scoped to the table rather than to the author's memory of it**, and
+> `test/unit/docs-currency.test.ts` derives the mount list from `render.ts` and fails when the two
+> disagree. That test is the actual fix; this erratum only records why it exists. The table drifted
+> silently for the same reason every other finding in that audit did — nothing executed it.
+
+### 5.6 Runtime flags
+
+```bash
+docker run -i --rm \
+  --name pifleet-<run-id>-<worker> \
+  --user 10001:10001 \
+  --security-opt no-new-privileges \
+  --cap-drop ALL \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+  --pids-limit 512 --memory 4g --cpus 2 \
+  --network pifleet-egress \
+  --env-file <run-dir>/workers/<worker>/env \
+  -v <worktree>:/workspace \
+  -v <run-dir>/outbox/<worker>:/outbox \
+  -v <run-dir>/sessions:/sessions \
+  -v <run-dir>/skills/<role>:/skills:ro \
+  -v pifleet-piagent-<worker>:/home/pi/.pi/agent \
+  pifleet/pi-worker:<tag> \
+  --mode rpc --session-id <run-id>--<worker> --session-dir /sessions …
+```
+
+`--read-only` with a `noexec` `/tmp` blocks the "download a binary and run it" path while leaving `/workspace` and `/outbox` writable. `--network pifleet-egress` is a user-defined bridge that the model-provider proxy sits on (§12.4).
+
+### 5.7 Image lifecycle
+
+| Command | Behaviour |
+|---|---|
+| `pifleet image build [--toolchain t] [--pi-version v] [--tag t]` | builds and tags `pifleet/pi-worker:<pi-version>-<toolchain>-<config-hash>` |
+| `pifleet image list --json` | local images with their build args |
+| `pifleet image verify --tag t` | runs `pi --version` in the image and asserts it matches the pinned version; asserts uid 10001, read-only root, and `/workspace` write-through |
+| `pifleet image gc [--keep n]` | prunes old tags |
+
+`pifleet up` **refuses to start** if a configured role's image is absent or fails `verify` — no implicit builds, so a run never silently uses a stale image.
 
 ### 5.8 Google credentials — inherited from the launching Claude instance
 
@@ -485,40 +545,6 @@ Workers inherit Dan's Google identity via **Application Default Credentials**, s
 **Scoping.** `cloud.quota_project` sets `CLOUDSDK_CORE_PROJECT` and the ADC quota project (locally: `gen-lang-client-0675968762`). Where a scoped service account exists, `cloud.impersonate_service_account` is strongly preferred — the supervisor mints an impersonated token instead of a user token, and the worker inherits only that SA's roles rather than Dan's full authority.
 
 **This is a real privilege grant, stated plainly:** a worker with `bash` and `cloud_access: true` can do anything Dan's Google identity can do, for the lifetime of its token. It is off per role by default (`cloud_access: false`), and `pifleet up` prints the granted identity, project, and mode so the grant is never silent.
-
-### 5.6 Runtime flags
-
-```bash
-docker run -i --rm \
-  --name pifleet-<run-id>-<worker> \
-  --user 10001:10001 \
-  --security-opt no-new-privileges \
-  --cap-drop ALL \
-  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=256m \
-  --pids-limit 512 --memory 4g --cpus 2 \
-  --network pifleet-egress \
-  --env-file <run-dir>/workers/<worker>/env \
-  -v <worktree>:/workspace \
-  -v <run-dir>/outbox/<worker>:/outbox \
-  -v <run-dir>/sessions:/sessions \
-  -v <run-dir>/skills/<role>:/skills:ro \
-  -v pifleet-piagent-<worker>:/home/pi/.pi/agent \
-  pifleet/pi-worker:<tag> \
-  --mode rpc --session-id <run-id>--<worker> --session-dir /sessions …
-```
-
-`--read-only` with a `noexec` `/tmp` blocks the "download a binary and run it" path while leaving `/workspace` and `/outbox` writable. `--network pifleet-egress` is a user-defined bridge that the model-provider proxy sits on (§12.4).
-
-### 5.7 Image lifecycle
-
-| Command | Behaviour |
-|---|---|
-| `pifleet image build [--toolchain t] [--pi-version v] [--tag t]` | builds and tags `pifleet/pi-worker:<pi-version>-<toolchain>-<config-hash>` |
-| `pifleet image list --json` | local images with their build args |
-| `pifleet image verify --tag t` | runs `pi --version` in the image and asserts it matches the pinned version; asserts uid 10001, read-only root, and `/workspace` write-through |
-| `pifleet image gc [--keep n]` | prunes old tags |
-
-`pifleet up` **refuses to start** if a configured role's image is absent or fails `verify` — no implicit builds, so a run never silently uses a stale image.
 
 ### 5.9 The LLM is a private oMLX instance
 
@@ -725,7 +751,21 @@ cloud:
   token_refresh: 45m
 
 secrets:
-  env_allowlist: []          # NEVER provider keys — see §12.4
+  # The grant CEILING. A role draws against it with its own `secrets: [NAME]`;
+  # a name is delivered only when it is in BOTH. Delivery is a 0444 FILE under
+  # /secrets plus a `<NAME>_FILE` pointer — never the value in the environment.
+  # The key name is historical; see the §12.4 erratum. NEVER provider keys.
+  env_allowlist: []
+
+egress:
+  # The deny-all bridge's allowlist. The relay may reach the Docker host at the
+  # listen port without an entry here; anything else — including a LAN oMLX named
+  # by `llm.relay_upstream` — needs an explicit rule (§5.9, §12.8).
+  allow: []
+
+# harness:                   # omitted entirely = the 91 built-in defaults (§6.5, §8.2a).
+#   patterns: ["ci/**"]      # `patterns: []` is a validation error, not "match nothing".
+#   replace: false           # false EXTENDS the defaults; true REPLACES them.
 
 defaults:
   pane_mode: rpc
@@ -785,6 +825,15 @@ roles:
     skills: [pifleet-worker]
     append_system_prompt_file: ./roles/tester.md
 
+  ticketing:
+    model: Qwen3-Coder-30B-A3B-Instruct-4bit
+    toolchain: base
+    workspace: none          # works against a live ticket API, not the repo
+    tools: [read, bash, grep, find, ls]
+    skills: [pifleet-worker, ticket-ops]
+    secrets: [TICKET_API_TOKEN, TICKET_BASE_URL]   # drawn against the ceiling above
+    append_system_prompt_file: ./roles/ticketing.md
+
 workers:
   # 6 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
   # admission control does the queuing against the single oMLX server.
@@ -812,6 +861,56 @@ Two things changed from v1.1's example and both were review findings: the review
 |---|---|---|---|
 | `persistent` *(default)* | one long-lived `docker run -i`, RPC mode | whole run, many tasks | most work |
 | `oneshot` | one container per task, `pi -p --mode json` | one task | cheap stateless fan-out |
+
+---
+
+### 6.5 `harness:` — which paths count as the test harness
+
+Governs the §8.2a cap. Optional; omitting the whole key is the supported way to say "no opinion".
+
+```yaml
+harness:
+  patterns: ["ci/**", "scripts/verify.sh"]   # repo-relative globs
+  replace: false                             # default: EXTEND the 91 built-in globs
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `patterns` | *(unset — the 91 built-in globs)* | repo-relative globs that count as the test harness |
+| `replace` | `false` | `false` EXTENDS the built-in defaults; `true` REPLACES them outright |
+
+Three rules, each of which exists because the obvious alternative was a silent-disable path:
+
+1. **`patterns: []` is a validation error, not "match nothing".** An empty list reads like "no
+   opinion" and would switch the ISC-150 cap off entirely — `touched` could never be non-empty. To
+   mean "no opinion", omit the key. The error message says so rather than reporting a formatting
+   nit, because the obvious way to satisfy a formatting nit is to put *something* in the list, and
+   any list that matches nothing narrows the surface exactly as an empty one does.
+
+2. **`replace: false` is the default, and it changed on 2026-08-25 (ISC-243).** Replacement used to
+   be the only behaviour, which made the realistic first edit — `patterns: ["ci/**"]`, to add one CI
+   file someone cared about — silently swap out all 91 defaults and disable the cap for every diff
+   that did not touch `ci/`. The over-cap that replacement answers is a **loud** failure (a run
+   capped to `unknown`); the under-cap it caused is a **silent** one (a red suite certified
+   `success`). Extending makes the common edit safe and leaves the rare one available by name.
+
+3. **A narrowed surface is a weakened cap, and that is a legitimate but deliberate operator
+   decision.** A repo whose suites do not live under `test/` needs `replace: true`. When a
+   configured surface matches nothing that the defaults *would* have matched, the harvester records
+   the difference as `defaults_missed` on the artifact rather than staying quiet about it.
+
+> **Added 2026-08-30 (documentation audit).** `harness` is a top-level key of a `.strict()` schema —
+> so it has always been spellable, and always been the only lever over the §8.2a cap — and it
+> appeared in no version of THIS document. `fleet.example.yaml` had carried a thorough commented
+> block for it all along, which is how the audit's first pass came to report the example as silent
+> too: that half of the finding was asserted rather than grepped, and it was wrong.
+>
+> **Checking it properly turned up the worse defect.** That block still described `patterns` as
+> REPLACING the defaults — true when it was written, false since 2026-08-25 (ISC-243) — and never
+> mentioned `replace` at all. So the one document that did cover this key was telling operators the
+> opposite of the shipped default, in the direction that silently weakens the cap. The block is
+> rewritten here, and the same stale reasoning has been corrected in the two user-facing error
+> messages that carried it (`src/config/schema.ts`, `src/harvest/acceptance.ts`).
 
 ---
 
@@ -1015,6 +1114,33 @@ Disagreement between A1's `files_changed` and A2's diff is a hard failure class 
 > which was survivable under `os.tmpdir()` and becomes a permanent leak of one full clone per run under
 > `$HOME`.
 
+### 8.2a The test-harness cap — a worker cannot grade itself
+
+**A diff that touches the test harness caps the verdict at `unknown`.** Path 1 above is
+authoritative because the harvester re-runs acceptance itself, in a fresh container, from the image
+the worker used. That authority rests on one assumption: the *meaning* of the acceptance command is
+fixed by the repository, not by the worker. A worker whose diff edits `test/**` breaks it. Even a
+fresh clone at that worker's head runs harness code the worker wrote, so a green suite proves the
+worker can make its own exam pass — which is not the claim anyone wanted.
+
+`harvest/adjudicate.ts` applies the cap **last**, after the derived verdict has already been combined
+with the worker's claim:
+
+- Anything ranked above `blocked` collapses to `unknown` — *refuse to grade*, not *fail*.
+- Negative evidence (`failed`, `blocked`) **survives** the cap. A worker's own harness indicting the
+  worker only ever downgrades, so there is no reason to discard it.
+- The reason is published on the artifact, naming the files that tripped it.
+
+**Which paths count as harness is `harness.patterns` (§6.5).** The default surface is 91 built-in
+globs — `test/**`, `**/*.test.*`, `Makefile`, CI workflow files, lockfiles, and the rest of the set
+an acceptance command's meaning resolves through.
+
+> **Added 2026-08-30 (documentation audit).** This cap has shipped since ISC-150 and shaped every
+> verdict the harvester has ever issued, and no version of this document mentioned it. An operator
+> reading §8 would have concluded that a green re-run of acceptance yields `success`, full stop. The
+> config key that controls the surface (§6.5) was undocumented on the same day and for the same
+> reason.
+
 ### 8.3 Reading a live JSONL stream correctly
 
 This applies to both the session transcript and the RPC stdout stream, and Pi mandates it of its own clients:
@@ -1116,13 +1242,29 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet harvest --reconstruct --worker <id>` | rebuild from transcript |
 | `pifleet report --run <id> [--md]` | merged report + conflict pre-check |
 | `pifleet attach --worker <id>` | focus that pane |
+| `pifleet tui --worker <id> [--leave]` | hand that worker's pane to a person; `--leave` returns it to the read-only viewer. Refused on `headless`, which has no pane. §3.5 lists what attended mode voids |
 | `pifleet logs --worker <id> [--follow] [--render]` | tail `events.jsonl`; `--render` is the pane viewer |
 | `pifleet exec --worker <id> -- <cmd>` | run a command in that worker's container (debugging) |
 | `pifleet down [--run r] [--keep-panes] [--prune]` | quiesce, stop containers, optional worktree prune |
 
 **Exit codes** — a strict severity ladder, highest wins, because one `wait --all` can legitimately have a timeout *and* a budget trip *and* a failed task:
 
-`2` usage/config > `3` backend unavailable > `5` budget ceiling > `6` worker died > `4` timeout > `7` partial (some `failed`/`blocked`/`aborted`) > `0` success.
+`8` internal error > `2` usage/config > `3` backend unavailable > `5` budget ceiling > `6` worker died > `4` timeout > `7` partial (some `failed`/`blocked`/`aborted`) > `0` success.
+
+> **Erratum (2026-08-30, documentation audit) — `8` was missing from this ladder, and it sits at the
+> TOP of it.**
+>
+> `EXIT.INTERNAL` (`src/contracts.ts`) means a failure pifleet could not diagnose — a bug in pifleet
+> itself — and it is deliberately outside the rest of the ladder: every other code describes
+> something that happened to the RUN, and this one describes the tool breaking. If pifleet itself
+> broke, nothing it reports about the run is trustworthy enough to outrank that, which is why it
+> ranks first in `EXIT_SEVERITY` rather than last.
+>
+> It exists because the entry point used to report a crash as `2` (usage), making a pifleet bug
+> indistinguishable from a typo'd flag over the only channel a machine caller has — so an
+> orchestrator would answer a crash by rewriting its arguments and retrying, forever (ISC-216). The
+> code has shipped since that fix; this ladder was never updated, and the source's own docblock
+> said so ("Not in the SRD §10 ladder") without anything acting on it. `README.md` had it right.
 
 `--json` always carries per-task terminal state, so no caller must infer from the integer alone.
 
@@ -1261,6 +1403,34 @@ This is a deliberate exception, not an oversight. Dan's requirement is that work
 **Stated plainly:** a worker with `bash` and `cloud_access: true` can do anything Dan's Google identity can do, for up to an hour. Containment reduces exposure; it does not eliminate it. Roles that do not need cloud access must not be given it, and `config validate` warns when `cloud_access: true` is combined with a repo the run does not own.
 
 **Both classes:** `env_allowlist` never includes provider keys; the Docker socket is never mounted (that is host root); `GIT_CONFIG_GLOBAL` points at a per-run scratch config with **no credential helper and no push remotes**, so a push cannot authenticate even if attempted.
+
+
+> **Erratum (2026-08-30, documentation audit) — Class 3 was missing entirely, and this section's
+> framing made the whole document read as though the environment were the only delivery channel.**
+>
+> **Class 3 — operator-granted secrets: delivered as FILES, never as values in the environment.**
+> A worker draws against `secrets.env_allowlist` (the fleet CEILING) with its own role-level
+> `secrets: [NAME]` (the REQUEST); a name is delivered only when it is in **both**, and a name in
+> the request that the ceiling does not carry refuses the launch by name. Delivery is
+> `src/run/worker-env.ts`: the value is written to `<run-dir>/workers/<worker>/secrets/<NAME>` at
+> mode **0444**, that directory is bind-mounted read-only at `/secrets` (§5.5), and the worker's
+> environment receives **`<NAME>_FILE=/secrets/<NAME>`** — the pointer, never the value.
+>
+> **So `echo $TICKET_API_TOKEN` inside a worker prints an empty line, and so does `env | grep
+> TOKEN`.** That is the point: what this buys is the removal of the ACCIDENT surface — `env`,
+> `set`, a stray expansion, a shell trace, a crash dump that serialises the environment. It does
+> **not** remove the capability. A worker that wants its own credential can still
+> `cat "$TICKET_API_TOKEN_FILE"` and put the value in its transcript deliberately, and ISC-341
+> records that standing limit rather than pretending otherwise. This narrows the accident, not the
+> agent.
+>
+> **The key is still spelled `env_allowlist`, and the name is now historical rather than
+> descriptive.** It was accurate when the ceiling governed environment variables. Renaming it would
+> break every existing `fleet.yaml` for a cosmetic gain, so the name stays and this sentence is the
+> correction — the list is a *grant ceiling*, and what it gates is delivery by file.
+>
+> Shipped 2026-08-29 (ISC-337..342). `fleet.example.yaml` carried the full explanation from the day
+> it landed; this document did not, which is the drift the 2026-08-30 audit was looking for.
 
 ### 12.5 The result envelope is untrusted input
 

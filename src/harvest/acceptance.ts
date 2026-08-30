@@ -309,7 +309,8 @@ export function harnessSurfaceFor(
   if (configured === undefined) return harnessSurface(changedFiles, DEFAULT_HARNESS_PATTERNS);
   if (configured.length === 0) {
     throw new Error(
-      "harness.patterns is empty — an empty list would disable the ISC-150 " +
+      "harness.patterns is empty — under `replace: true` it becomes the WHOLE " +
+        "harness surface, so an empty list would disable the ISC-150 " +
         "test-harness cap entirely rather than mean 'no opinion'. Omit the " +
         "harness key to get the built-in defaults.",
     );
