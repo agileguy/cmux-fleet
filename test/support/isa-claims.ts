@@ -58,12 +58,41 @@
  * here is spawned as argv with the pattern flavour named explicitly.
  */
 
+/**
+ * RETIRED CRITERIA KEEP THEIR CLAIMS, and the choice is the load-bearing half
+ * of ISC-368 rather than an implementation detail.
+ *
+ * A retired criterion (`[-]`) is one whose PREMISE was superseded. Its premise
+ * is not its code. ISC-307 was written when a granted secret's value reached a
+ * 0600 env file; secrets are delivered as files now, so the sentence describes
+ * a design that no longer exists — but the claim it carried, that the stderr
+ * grant line interpolates the NAMES field and never the values map, is a live
+ * property of the shipped tree and the only thing standing between an
+ * operator-facing log and a credential inside it. ISC-360 is the same shape
+ * twice: the empty policy write and the absence of `PIFLEET_TASK_ID` from
+ * `src/` are both still true, and after the descope the second one is a
+ * REGRESSION GUARD against the withdrawn mechanism coming back by the carrier
+ * that was rejected.
+ *
+ * DELETING THOSE CLAIMS WITH THE GRADE WOULD MAKE RETIREMENT A WAY TO DROP
+ * GUARDS, which is exactly the abuse ISC-368 exists to refuse. So the grade
+ * union admits `[-]`, the claims stay in the registry, and the "still at the
+ * grade recorded" check in `test/unit/isa-claims.test.ts` keeps working in
+ * both directions: un-retiring a criterion without revisiting its claims goes
+ * red, and so does retiring one without revisiting them.
+ *
+ * The cost is stated so it is not discovered later: a `[-]` line in this file
+ * means "this command still passes, and the criterion it was filed under is no
+ * longer counted". It is NOT a claim that the retired criterion's sentence is
+ * true — nothing here re-checks that, and nothing should.
+ */
+
 /** One claim in `ISA.md` that a command can re-check. */
 export interface IsaClaim {
   /** The criterion whose grade rests on this, e.g. `"ISC-115"`. */
   isc: string;
-  /** That criterion's grade at the time this line was written. */
-  grade: "[x]" | "[~]" | "[ ]";
+  /** That criterion's grade at the time this line was written. `[-]` = retired. */
+  grade: "[x]" | "[~]" | "[ ]" | "[-]";
   /** The claim as `ISA.md` words it, so a failure quotes the entry. */
   claim: string;
   /** Spawned directly — no shell, so no quoting can change the pattern. */
@@ -966,11 +995,17 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-307",
-    grade: "[~]",
+    grade: "[-]",
     claim:
       "The stderr grant line interpolates the NAMES field and not the values map. This is " +
-      "the grep the [~] grade rests on: nothing reads that line back, so it is the only " +
-      "thing standing between an operator-facing log and a secret inside it.",
+      "the grep the grade rested on: nothing reads that line back, so it is the only " +
+      "thing standing between an operator-facing log and a secret inside it. " +
+      "**THE CRITERION IS RETIRED (2026-08-30, ISC-368) AND THIS CLAIM IS NOT.** What was " +
+      "retired is ISC-307's premise — a value reaching a 0600 env file, a design ISC-337 " +
+      "replaced with file delivery. This grep is about the stderr surface, which still " +
+      "exists, still names variables, and still has nothing reading it back. Deleting it " +
+      "with the grade would turn retirement into a way to drop a guard, which is the abuse " +
+      "ISC-368 refuses by name.",
     argv: ["grep", "-rn", "secretNames", "src/run/materialize.ts"],
     expect: "nonempty",
   },
@@ -1314,8 +1349,12 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-360",
-    grade: "[~]",
+    grade: "[-]",
     claim:
+      "**ISC-360 IS RETIRED (2026-08-30, ISC-368); THIS CLAIM STILL RUNS.** ISC-366 descoped " +
+      "the mechanism, so the criterion's subject — an erratum recording it as designed-but-" +
+      "not-built — describes a state the SRD no longer holds. The empty write is still the " +
+      "shipped behaviour and is still the only write of the file, so the guard is kept. " +
       "The verbgate's policy file is written EMPTY, once per worker at `up`, and this is the " +
       "only write of it in the tree. SRD §5.10 and §17's criterion 59 now say so; if this line " +
       "goes away — because someone wired the dispatch-time rewriter `run/materialize.ts` " +
@@ -1327,8 +1366,13 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
   },
   {
     isc: "ISC-360",
-    grade: "[~]",
+    grade: "[-]",
     claim:
+      "**ISC-360 IS RETIRED (2026-08-30, ISC-368); THIS CLAIM IS THE REASON RETIREMENT DOES " +
+      "NOT DELETE CLAIMS.** After ISC-366 withdrew task-scoped cloud authorization, this is " +
+      "the guard that goes red if the withdrawn mechanism comes back through the carrier " +
+      "ISC-362 rejected. The criterion it was filed under is no longer counted; the property " +
+      "it pins is more load-bearing now than when it was written. " +
       "`PIFLEET_TASK_ID` is set NOWHERE in `src/`, and after ISC-362 that is a REGRESSION GUARD " +
       "rather than a report of the defect. **THIS CLAIM\'S ORIGINAL REASONING WAS WRONG AND IS " +
       "KEPT HERE AS THE RECORD.** It read: \'any real implementation of task-scoped authorization " +

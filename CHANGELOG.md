@@ -80,6 +80,27 @@ All notable changes to this project are documented here.
   This proves delivery, not obedience — the failure mode is now disobedience rather than
   impossibility.
 
+- **`ISA.md` can RETIRE a criterion, and the count says how many (ISC-368).** The file had three
+  markers and no fourth, so a criterion whose *premise* had been superseded kept its grade and kept
+  being counted, with the supersession recorded in prose inside the entry. Two had accumulated, and
+  `8 [~]` had come to mean "eight are unproved OR withdrawn" — two facts under one number.
+
+  `- [-]` marks a retired criterion. It leaves the numerator and the denominator of `progress:`
+  together, and a new `retired:` line in the frontmatter reports how many left, so the total is
+  stated rather than absorbed: `353/359` live, `retired: 2`.
+
+  **Retiring is not closing, not deleting, and not available to a criterion that is merely hard.**
+  A retirement must name the closed criterion that superseded its premise, and that criterion must
+  name it back — a check that cannot be satisfied by editing one line, which is what stops a
+  difficult criterion being retired behind whichever closed one was nearest. The retired entries
+  keep their text, their ids and their registered claims: all three of those claims still run, at
+  `[-]`, over code that still ships. Deleting a claim along with the grade would have been a silent
+  way to drop a live guard, and that is now its own probe.
+
+  Retired first: **ISC-307** (a secret's value reaching a 0600 env file — file delivery replaced it,
+  ISC-337) and **ISC-360** (an SRD erratum recording task-scoped cloud authorization as
+  designed-but-not-built — the owner withdrew the mechanism, ISC-366).
+
 ### Security
 
 - **Task-scoped cloud authorization is descoped, and `cloud_allow[]` is now refused (ISC-366).** It

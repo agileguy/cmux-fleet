@@ -121,6 +121,41 @@ describe("cross-check against the real ISA", () => {
     expect(defined.has("ISC-8")).toBe(false);
     expect(defined.has("ISC-9")).toBe(false);
   });
+
+  /**
+   * EVERY marker is a definition, `[~]` and `[-]` included (ISC-368).
+   *
+   * The extractor's class was `[ x]` once and a partial grade walked into it:
+   * the cross-check reported the operator-facing table as pointing at an id
+   * the ISA defines three lines above the ones it accepted. That is a false
+   * positive of the exact failure the cross-check exists to detect, and the
+   * comment on `definedIscIds` records it.
+   *
+   * `[-]` — retired — is the same trap laid a second time, and this is the
+   * probe that keeps it sprung. A retired criterion stays in the file and may
+   * still be named by the voided table; only `progress:` stops counting it.
+   * Asserted on synthetic text rather than on `ISA.md`, because the two
+   * criteria the real file retires are not ones the table names — so a probe
+   * reading `ISA.md` would stay green with the class narrowed back to `[ x~]`
+   * and would only redden on the unrelated day someone voided a retired
+   * criterion, which is precisely the deferred false positive being avoided.
+   */
+  test("a retired [-] criterion is still a definition", () => {
+    const text = [
+      "- [x] ISC-7: closed.",
+      "- [~] ISC-8: partially evidenced.",
+      "- [-] ISC-9: retired, premise superseded.",
+    ].join("\n");
+    const defined = definedIscIds(text);
+    expect(defined.has("ISC-7")).toBe(true);
+    expect(defined.has("ISC-8")).toBe(true);
+    expect(
+      defined.has("ISC-9"),
+      "a retired criterion is excluded from progress:, not from the ISA — " +
+        "dropping it from the definition set makes the voided cross-check " +
+        "report a real id as nonexistent",
+    ).toBe(true);
+  });
 });
 
 /**

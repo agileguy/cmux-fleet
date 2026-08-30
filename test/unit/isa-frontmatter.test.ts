@@ -38,11 +38,13 @@ import { describe, expect, test } from "bun:test";
 
 const ISA_PATH = new URL("../../ISA.md", import.meta.url);
 
-/** Every criterion line, whatever its state. `.` matches x, ~ or a space. */
+/** Every criterion line, whatever its state. `.` matches x, ~, - or a space. */
 const ANY_CRITERION = /^- \[.\] ISC-/gm;
 const CHECKED = /^- \[x\] ISC-/gm;
 const PARTIAL = /^- \[~\] ISC-/gm;
 const OPEN = /^- \[ \] ISC-/gm;
+/** ISC-368. Retired: the premise was superseded, so the criterion is not live. */
+const RETIRED = /^- \[-\] ISC-/gm;
 
 function count(body: string, re: RegExp): number {
   return body.match(re)?.length ?? 0;
@@ -72,27 +74,29 @@ describe("ISA.md — the headline figure agrees with the body", () => {
     const checked = count(body, CHECKED);
     const partial = count(body, PARTIAL);
     const open = count(body, OPEN);
+    const retired = count(body, RETIRED);
     const total = count(body, ANY_CRITERION);
+    const live = checked + partial + open;
 
     /**
-     * The three states account for every criterion line.
+     * The four markers account for every criterion line.
      *
      * Asserted BEFORE the headline comparison, because it is the assumption the
      * comparison rests on. A malformed checkbox — `- [X]` with a capital, or
      * `- []` with no space — still matches `ANY_CRITERION` but none of the
-     * three specific patterns, so it would inflate `total` while leaving
+     * four specific patterns, so it would inflate `total` while leaving
      * `checked` alone. Without this line that reads as "the headline is wrong"
      * and sends the next reader to edit the frontmatter, which is the wrong fix
      * and would leave the malformed line in place.
      */
     expect(
-      checked + partial + open,
-      `Some criterion line is neither [x], [~] nor [ ] — likely a malformed checkbox. ` +
-        `checked=${checked} partial=${partial} open=${open} sum=${checked + partial + open} ` +
-        `but ${total} lines match '- [.] ISC-'.`,
+      live + retired,
+      `Some criterion line is none of [x], [~], [ ] or [-] — likely a malformed checkbox. ` +
+        `checked=${checked} partial=${partial} open=${open} retired=${retired} ` +
+        `sum=${live + retired} but ${total} lines match '- [.] ISC-'.`,
     ).toBe(total);
 
-    // The headline itself. `progress` counts CHECKED over TOTAL — partials are
+    // The headline itself. `progress` counts CHECKED over LIVE — partials are
     // deliberately not credited, which is the same strictness rule that makes a
     // `[~]` mean "measured locally, not re-checked by anything reproducible".
     expect(
@@ -100,10 +104,71 @@ describe("ISA.md — the headline figure agrees with the body", () => {
       `ISA.md frontmatter says ${statedChecked} checked, but the body has ${checked} '[x]' ` +
         `criteria. Recount from the file — do not adjust the body to match the headline.`,
     ).toBe(checked);
+
+    /**
+     * ISC-368. The denominator is the LIVE set, and retired criteria are
+     * subtracted from it rather than left in to be silently miscounted.
+     *
+     * Stated as arithmetic rather than as a preference, because the whole
+     * point of the marker is that one number stopped meaning one thing: while
+     * a superseded criterion sat at `[~]`, `N [~]` meant "N are unproven OR
+     * withdrawn", which is two facts under one figure. `[x] + [~] + [ ]` is
+     * therefore what `progress:`'s denominator must equal — and `retired:`
+     * carries the rest, so the total is REPORTED rather than disappeared.
+     */
     expect(
       statedTotal,
-      `ISA.md frontmatter says ${statedTotal} total, but the body has ${total} criteria ` +
-        `(${checked} checked, ${partial} partial, ${open} open).`,
-    ).toBe(total);
+      `ISA.md frontmatter says ${statedTotal} total, but the body has ${live} LIVE criteria ` +
+        `(${checked} checked, ${partial} partial, ${open} open) plus ${retired} retired. ` +
+        `The denominator is the live set; retired criteria are reported by 'retired:'.`,
+    ).toBe(live);
+  });
+
+  /**
+   * ISC-368. `retired: N` is present exactly when the body retires anything,
+   * and it is the number the body actually carries.
+   *
+   * WHY A SECOND FRONTMATTER FIELD AND NOT A FOOTNOTE. Retiring a criterion
+   * shrinks the denominator, and a denominator that shrinks with no visible
+   * cause is indistinguishable — to the one reader who only ever reads the
+   * headline — from criteria being deleted. `350/358` beside `retired: 2`
+   * says where the other two went; `350/358` alone does not, and the ISA's
+   * whole claim on a reader is that its summary can be trusted without
+   * auditing its body.
+   *
+   * The absent case is asserted too, and in the strict direction: with no
+   * retired criteria the field must be ABSENT rather than `retired: 0`. A
+   * stale `retired: 2` left behind after both were un-retired is exactly the
+   * drift `progress:` itself suffered in PR #22, and the only way to make it
+   * impossible is to have one legal spelling per state.
+   */
+  test("retired: N is present exactly when criteria are retired, and matches", async () => {
+    const text = await Bun.file(ISA_PATH).text();
+    const [head, ...rest] = text.slice(4).split("\n---\n");
+    const body = rest.join("\n---\n");
+
+    const retired = count(body, RETIRED);
+    const stated = /^retired: (\d+)$/m.exec(head!);
+
+    if (retired === 0) {
+      expect(
+        stated,
+        `ISA.md frontmatter carries a 'retired:' line but the body retires nothing. ` +
+          `Remove the line rather than setting it to 0 — one spelling per state.`,
+      ).toBeNull();
+      return;
+    }
+
+    expect(
+      stated,
+      `ISA.md body retires ${retired} criteria ('- [-] ISC-') but the frontmatter has no ` +
+        `'retired: <n>' line. The denominator in 'progress:' excludes them, so without ` +
+        `this field the count of criteria this project has stopped counting is unstated.`,
+    ).not.toBeNull();
+    expect(
+      Number(stated![1]),
+      `ISA.md frontmatter says 'retired: ${stated![1]}' but the body has ${retired} ` +
+        `'- [-] ISC-' criteria. Recount from the file.`,
+    ).toBe(retired);
   });
 });
