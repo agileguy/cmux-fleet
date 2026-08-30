@@ -4,6 +4,27 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **The SRD's identifiers are swept every CI run (ISC-363).** The documentation audit verified
+  §17's criteria by extracting every identifier and grepping for it by hand. That is mechanical, so
+  a build does it now: every repo path the document cites must exist, and every pifleet-owned
+  `CONSTANT_CASE` name in normative prose must appear in `src/` or `docker/`.
+
+  Paths are swept over the whole document including errata — a path is a pointer, and a stale
+  pointer misleads wherever it sits. Constants are swept over normative prose only, because an
+  erratum correcting a wrong constant has to spell it.
+
+  Two defects on the first run. §4.2 cited `docker/pi-worker.Dockerfile`; the file is
+  `docker/Dockerfile`. And §13's control-socket requirement named three instruments wrong at once —
+  `LOCAL_PEERCRED` for what is `getpeereid`/`SO_PEERCRED`, mode 0600 for what is 0700, and a
+  connect-probe for what is an unconditional unlink. The second is the case for the probe: §12.7's
+  account of the same socket had been corrected hours earlier in the same audit, and this line
+  survived it. Section-by-section reading fixes the section being read.
+
+  **It checks that names resolve, not that sentences are true.** A paragraph can name every symbol
+  correctly and still describe behaviour the code does not have.
+
 ### Security
 
 - **The verbgate ledger now names the task that caused each verb, and a worker cannot forge it

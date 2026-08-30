@@ -410,7 +410,7 @@ A worker is not "pi with some flags"; it is a reproducible environment with a de
 
 ### 5.2 Base image
 
-`docker/pi-worker.Dockerfile` — a hardened elaboration of the pattern in Pi's own shipped `docs/containerization.md` ("Plain Docker": whole `pi` process in a local container, host cwd mounted at `/workspace`).
+`docker/Dockerfile` — a hardened elaboration of the pattern in Pi's own shipped `docs/containerization.md` ("Plain Docker": whole `pi` process in a local container, host cwd mounted at `/workspace`).
 
 ```dockerfile
 # syntax=docker/dockerfile:1
@@ -1862,7 +1862,9 @@ The harvester parses `result.json` and dereferences `artifacts[].path` and `file
 
 ### 12.7 The pifleet control socket
 
-Workers can see `<run-dir>` if it is mounted, and the control socket accepts `dispatch`/`steer`/`abort` — arbitrary prompt injection into a privileged agent. **Requirements:** the run-dir is **not** mounted into any container; socket at `<run-dir>/workers/<id>/ctl.sock`, mode 0600 in a 0700 directory, with a `LOCAL_PEERCRED` uid check on accept and a per-run token. Stale sockets are detected by connect → `ECONNREFUSED` → unlink.
+Workers can see `<run-dir>` if it is mounted, and the control socket accepts `dispatch`/`steer`/`abort` — arbitrary prompt injection into a privileged agent. **Requirements:** the run-dir is **not** mounted into any container; socket at `<run-dir>/workers/<id>/ctl.sock`, mode **0700** in a 0700 directory, with a peer-uid check on accept and a per-run token. Stale sockets are unlinked unconditionally before bind.
+>
+> **Erratum (2026-08-30, ISC-363 identifier sweep) — three instruments were named wrong here, and §12.7's own erratum had already corrected two of them without this requirement line being updated.** The uid check is not `LOCAL_PEERCRED`: `src/security/peer-uid.ts` uses `getpeereid` on macOS/BSD and `getsockopt(SO_PEERCRED)` on Linux, the split being measured rather than assumed — glibc does not export `getpeereid` at all. The socket mode is 0700, not 0600 (`src/run/registry.ts` chmods the inode after `Bun.listen`, deliberately duplicating the directory's 0700 so a later widening of the directory cannot take the filesystem gate with it). And the stale socket is unlinked unconditionally, not detected by a connect probe expecting `ECONNREFUSED`. **That a corrected section and an uncorrected requirement line can disagree is the argument for sweeping the document mechanically instead of section by section:** the audit that fixed §12.7 read §13 too, and this line survived it.
 
 > **Erratum (2026-08-30, documentation audit) — every SUBSTANTIVE control here is present and
 > correctly ordered; four of the five IMPLEMENTATION DETAILS named are wrong, and one of them is
