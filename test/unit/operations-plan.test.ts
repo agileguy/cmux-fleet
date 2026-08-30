@@ -30,7 +30,7 @@ import {
   gitWatchCommand,
   operationsPanes,
   pifleetCommand,
-} from "../../src/operations/plan.ts";
+} from "../../src/backends/cmux/operations-plan.ts";
 
 const REPO = "/Users/x/repos/cmux-fleet";
 const CWD = "/Users/x/repos/somewhere-else";

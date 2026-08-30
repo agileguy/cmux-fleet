@@ -12,10 +12,10 @@
  *
  * Running it twice is safe and is the expected way to get back to the console:
  * an `operations` workspace that already exists is selected, not rebuilt. See
- * `src/operations/workspace.ts` for why rebuilding would be destruction.
+ * `src/backends/cmux/operations.ts` for why rebuilding would be destruction.
  *
  * Only I/O lives here — argv parsing, the process exit, and the printing. The
- * decisions are in `src/operations/plan.ts` and `src/operations/workspace.ts`,
+ * decisions are in `src/operations/plan.ts` and `src/backends/cmux/operations.ts`,
  * where `test/unit/operations-plan.test.ts` and
  * `test/unit/operations-workspace.test.ts` re-check them on every run.
  */
@@ -24,8 +24,8 @@ import { dirname, resolve } from "node:path";
 
 import { CmuxClient } from "../src/backends/cmux/client.ts";
 import { EXIT } from "../src/contracts.ts";
-import { OPERATIONS_WORKSPACE, operationsPanes } from "../src/operations/plan.ts";
-import { cmuxReachable, ensureOperations } from "../src/operations/workspace.ts";
+import { OPERATIONS_WORKSPACE, operationsPanes } from "../src/backends/cmux/operations-plan.ts";
+import { cmuxReachable, ensureOperations } from "../src/backends/cmux/operations.ts";
 
 const USAGE = `Usage: scripts/operations [options]
 

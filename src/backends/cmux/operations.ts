@@ -15,6 +15,12 @@
  * A substring or prefix match would adopt `operations-old` or `my-operations`
  * as this workspace and then split panes into somebody else's window.
  *
+ * ## Where this lives
+ *
+ * Under `src/backends/cmux/` for the reason `operations-plan.ts` records:
+ * ISC-137 keeps every cmux import in this one directory, and this file is
+ * nothing but cmux calls.
+ *
  * ## Why an injected client
  *
  * `CmuxClient` takes an `Exec`. Everything below therefore runs in the unit
@@ -36,14 +42,14 @@ import {
   workspaceCreateArgv,
   workspaceListArgv,
   type SplitDirection,
-} from "../backends/cmux/client.ts";
+} from "./client.ts";
 import {
   findWorkspaceByTitle,
   parseNewSplit,
   parseWorkspaceCreate,
   parseWorkspaceList,
-} from "../backends/cmux/parse.ts";
-import { OPERATIONS_WORKSPACE, operationsPanes, type OperationsPlanOptions } from "./plan.ts";
+} from "./parse.ts";
+import { OPERATIONS_WORKSPACE, operationsPanes, type OperationsPlanOptions } from "./operations-plan.ts";
 
 /**
  * `select-workspace <id>` — built here rather than in `client.ts` because the

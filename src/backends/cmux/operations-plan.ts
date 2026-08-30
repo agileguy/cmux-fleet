@@ -18,6 +18,17 @@
  * A pane whose command exits is a pane cmux tears down, so the trailing
  * `exec $SHELL -i` is load-bearing and not a convenience.
  *
+ * ## Where this lives, and why here rather than `src/operations/`
+ *
+ * Under `src/backends/cmux/` because ISC-137 confines every cmux import to
+ * this directory — the seam that lets `pifleet` run on tmux or headless at
+ * all. A first draft of this file sat at `src/operations/plan.ts` and imported
+ * `shellQuote` from `./parse.ts`; the anti-criterion caught it. Inlining a
+ * private copy of the quoting rule to get out from under the guard would have
+ * been worse than the violation: two copies of a shell-quoting decision is
+ * precisely the drift the rest of this module argues against. The console IS a
+ * cmux artefact, so it belongs with the rest of the cmux knowledge.
+ *
  * ## Why this is a plan and not a script
  *
  * Every function here is PURE — it returns argv arrays and command strings and
@@ -43,7 +54,7 @@
  *   `shellQuote`.
  */
 
-import { shellQuote } from "../backends/cmux/parse.ts";
+import { shellQuote } from "./parse.ts";
 
 /**
  * The workspace's `--name`, which is also the idempotency key.

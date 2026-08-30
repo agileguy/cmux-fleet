@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 
 import { CmuxClient } from "../../src/backends/cmux/client.ts";
 import type { ExecResult } from "../../src/container/run.ts";
-import { cmuxReachable, ensureOperations, selectWorkspaceArgv } from "../../src/operations/workspace.ts";
+import { cmuxReachable, ensureOperations, selectWorkspaceArgv } from "../../src/backends/cmux/operations.ts";
 
 const REPO = "/Users/x/repos/cmux-fleet";
 const CWD = "/Users/x/repos/somewhere-else";
