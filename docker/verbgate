@@ -29,8 +29,12 @@
 # solved here. Everything below reduces forgery and evasion; none of it makes
 # the ledger authoritative against a hostile worker.
 #
-# Environment (provenance only — never paths, never policy):
-#   PIFLEET_TASK_ID / PIFLEET_EPOCH
+# Provenance (task id + epoch) comes from /policy/task, NOT from environment.
+# It was environment until ISC-362, which was wrong twice over: nothing in the
+# supervisor ever set the two variables, so every ledger row read <none>/0; and
+# environment is worker-controlled, so a worker could have forged the one field
+# an investigator would trust. The file is bind-mounted read-only and rewritten
+# in place by the supervisor at each dispatch.
 set -u
 # Globbing off for the whole script: verb classification iterates over token
 # words, and an unquoted expansion let an argument of `*` re-expand against the
@@ -42,7 +46,20 @@ tool=$(basename "$0")
 real="/usr/local/libexec/${tool}.real"
 allow_file="/policy/cloud-allow"
 ledger="/outbox/ledger/verbgate.jsonl"
-task="${PIFLEET_TASK_ID:-<none>}"
+task_file="/policy/task"
+# Line 1 task id, line 2 epoch. Every read is defensive: an unreadable or
+# truncated file must degrade to <none>/0, never to a broken ledger row. The
+# gate does not trust this file even though the host writes it — a gate that
+# trusts its inputs because of where they came from is one mount error away
+# from trusting the worker.
+task="<none>"
+epoch=0
+if [ -r "${task_file}" ]; then
+  task=$(sed -n 1p "${task_file}" 2>/dev/null || printf '<none>')
+  epoch=$(sed -n 2p "${task_file}" 2>/dev/null || printf '0')
+fi
+[ -n "${task}" ] || task="<none>"
+[ -n "${epoch}" ] || epoch=0
 
 # --- ledger ------------------------------------------------------------------
 # $1=decision  $2=display-verb  rest=original argv. Best-effort: a full outbox
@@ -66,7 +83,7 @@ log_ledger() {
   # attacker append a forged row through the crack. Strip anything that can
   # break out of a JSON string and bound the length.
   # Every field interpolated into the fallback must be filtered, not just the
-  # verb. `task` is PIFLEET_TASK_ID and `epoch` is PIFLEET_EPOCH — both are
+  # verb. `task` and `epoch` come from /policy/task — host-written, but still
   # environment the WORKER controls, and both landed in the JSON raw. A task id
   # of  T-1","decision":"allow_read  appends a duplicate `decision` key, and
   # JSON.parse takes the last one: a refused destructive verb reads back from
@@ -76,7 +93,7 @@ log_ledger() {
   safe_task=$(printf '%s' "${task}" | tr -d '\000-\037\177"\\' | cut -c1-200)
   # Digits only, and never empty — this one is emitted unquoted, so anything
   # else is a syntax break rather than a string escape.
-  safe_epoch=$(printf '%s' "${PIFLEET_EPOCH:-0}" | tr -cd '0-9' | cut -c1-18)
+  safe_epoch=$(printf '%s' "${epoch}" | tr -cd '0-9' | cut -c1-18)
   [ -n "${safe_epoch}" ] || safe_epoch=0
   jq -cn \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -84,7 +101,7 @@ log_ledger() {
     --arg verb "${dverb}" \
     --arg decision "${decision}" \
     --arg task_id "${task}" \
-    --arg epoch "${PIFLEET_EPOCH:-0}" \
+    --arg epoch "${epoch}" \
     '{ts:$ts,tool:$tool,verb:$verb,decision:$decision,task_id:$task_id,epoch:($epoch|tonumber? // 0),argv:$ARGS.positional}' \
     --args -- "$@" >> "${ledger}" 2>/dev/null \
   || printf '{"ts":"%s","tool":"%s","verb":"%s","decision":"%s","task_id":"%s","epoch":%s,"argv_unencoded":true}\n' \
@@ -96,12 +113,22 @@ log_ledger() {
 # --- policy integrity --------------------------------------------------------
 # A policy the subject can edit is not a policy. Refuse before classifying, so
 # there is no path where a tampered allow file is consulted.
-if [ -w "${allow_file}" ] || [ -w "$(dirname "${allow_file}")" ]; then
-  log_ledger policy_writable "(policy-integrity)" "$@"
-  printf "verbgate: policy file %s is writable by uid %s — refusing every verb\n" \
-    "${allow_file}" "$(id -u)" >&2
-  exit 78
-fi
+#
+# The provenance file is held to the SAME standard as the allow file, not a
+# weaker one. It does not decide whether a verb runs, so it is tempting to
+# treat it as advisory — but a worker that can rewrite it can attribute its own
+# destructive verbs to another task, or to none, which defeats the audit trail
+# that is this gate's actual product. The directory test already covered it (it
+# is the same directory); it is named explicitly so that stays true if either
+# file moves.
+for policy_path in "${allow_file}" "${task_file}"; do
+  if [ -w "${policy_path}" ] || [ -w "$(dirname "${policy_path}")" ]; then
+    log_ledger policy_writable "(policy-integrity)" "$@"
+    printf "verbgate: policy file %s is writable by uid %s — refusing every verb\n" \
+      "${policy_path}" "$(id -u)" >&2
+    exit 78
+  fi
+done
 
 # --- collect leading non-flag tokens -----------------------------------------
 # The verb words come before the first flag in every sane invocation — with one

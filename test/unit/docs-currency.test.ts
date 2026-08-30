@@ -95,15 +95,37 @@ describe("the SRD's mount table names every mount the renderer emits", () => {
     for (const m of src.matchAll(/argv\.push\("-v",\s*`[^`]*?:(\/[A-Za-z0-9/._-]+)(?::ro)?`\)/g)) {
       found.add(m[1]!);
     }
-    // The two mounts whose container path is a named constant.
-    for (const [constName, file] of [
-      ["SECRETS_MOUNT", "src/run/worker-env.ts"],
-      ["BRIEFING_MOUNT", "src/config/render.ts"],
-    ] as const) {
-      if (!src.includes(constName)) continue;
-      const m = read(file).match(new RegExp(`${constName}\\s*=\\s*"(/[^"]+)"`));
-      expect(m, `${constName} should be a string literal in ${file}`).not.toBeNull();
-      found.add(m![1]!);
+    /**
+     * Mounts whose container path is a named constant, resolved by SEARCHING
+     * for the declaration rather than from a hardcoded list of constant names.
+     *
+     * The list used to be hardcoded — `SECRETS_MOUNT` and `BRIEFING_MOUNT` —
+     * and that made this probe blind in exactly the direction it exists to
+     * watch: adding a mount through a NEW constant silently added nothing to
+     * `found`, so the SRD could omit the row and stay green. ISC-362's
+     * `${TASK_POLICY_MOUNT}` walked straight through it, and it was caught by
+     * a real change failing to redden the probe, not by reading the probe.
+     *
+     * Every `${NAME}` in a `-v` push must now resolve to a string literal
+     * somewhere in `src/`, and an unresolvable one FAILS rather than being
+     * skipped — silence is the failure mode being removed here.
+     */
+    const sources = new Map<string, string>();
+    for (const file of [...new Bun.Glob("**/*.ts").scanSync("src")].sort()) {
+      sources.set(file, read(`src/${file}`));
+    }
+    for (const m of src.matchAll(/argv\.push\("-v",\s*`[^`]*?:\$\{([A-Z][A-Z0-9_]*)\}(?::ro)?`\)/g)) {
+      const constName = m[1]!;
+      let resolved: string | null = null;
+      for (const text of sources.values()) {
+        const d = text.match(new RegExp(`${constName}\\s*=\\s*"(/[^"]+)"`));
+        if (d !== null) {
+          resolved = d[1]!;
+          break;
+        }
+      }
+      expect(resolved, `${constName} is used as a mount path but declares no string literal in src/`).not.toBeNull();
+      found.add(resolved!);
     }
     // The named volume is a mount too, and the table carries it.
     if (src.includes("pifleet-piagent-")) found.add("/home/pi/.pi/agent");

@@ -1424,8 +1424,9 @@ describe("the run directory is computed once (ISC-188)", () => {
       [after, moved],
     ] as const) {
       const hostPaths = runStateHostPaths(rendered.docker);
-      // Or the loop below is vacuous: six mounts plus the env file.
-      expect(hostPaths.length).toBe(7);
+      // Or the loop below is vacuous: seven mounts plus the env file. The
+      // seventh is /policy/task, added with ISC-362.
+      expect(hostPaths.length).toBe(8);
       for (const p of hostPaths) expect(p.startsWith(join(root, "dry"))).toBe(true);
     }
 
@@ -1493,10 +1494,11 @@ describe("the run directory is computed once (ISC-188)", () => {
         const r = await renderWorker(loaded, "eng-1");
         expect(isAbsolute(r.runDir)).toBe(true);
         const hostPaths = runStateHostPaths(r.docker);
-        // Six mounts plus the env file. Unresolved, they are not absolute and
-        // `runStateHostPaths` drops them as named volumes — so this count is
-        // the assertion, and it read 0 before the root was canonicalized.
-        expect(hostPaths.length).toBe(7);
+        // Seven mounts plus the env file (the seventh is /policy/task, ISC-362).
+        // Unresolved, they are not absolute and `runStateHostPaths` drops them
+        // as named volumes — so this count is the assertion, and it read 0
+        // before the root was canonicalized.
+        expect(hostPaths.length).toBe(8);
         for (const p of hostPaths) expect(isAbsolute(p)).toBe(true);
       } finally {
         if (saved === undefined) delete process.env["PIFLEET_RUNS_DIR"];

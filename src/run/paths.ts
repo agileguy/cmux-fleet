@@ -268,6 +268,8 @@ export interface WorkerPaths {
   envFile: string;
   systemAppendMd: string;
   cloudAllow: string;
+  /** Per-dispatch task provenance for the verbgate ledger (ISC-362). */
+  taskPolicy: string;
   kubeconfig: string;
   /**
    * The per-worker secret store: one file per granted `secrets:` name, holding
@@ -363,6 +365,7 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     envFile: join(dir, "env"),
     systemAppendMd: join(dir, "system-append.md"),
     cloudAllow: join(dir, "cloud-allow"),
+    taskPolicy: join(dir, "task-policy"),
     kubeconfig: join(dir, "kubeconfig"),
     secretsDir: join(dir, "secrets"),
     launchJson: join(dir, "launch.json"),
