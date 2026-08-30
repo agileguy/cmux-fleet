@@ -6,6 +6,21 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **§13's failure table says NOT BUILT where the mitigation does not exist (ISC-365).** The audit
+  found six mitigations written in the present tense that do not exist and recorded them in one
+  erratum below the table. Right finding, wrong placement: a failure taxonomy is consulted during an
+  incident by someone scanning rows, and a named mitigation stops the reader looking further. A
+  blank cell sends them onward; a cell naming `skipped:dependency_failed` sends them hunting for why
+  it did not fire.
+
+  Each of the six now carries the marker inline, with whatever IS real in the same cell — F11's
+  smaller briefs are built and its pre-emptive `compact` is not; F35's `exit 2` on a cycle is built
+  and its `skipped:dependency_failed` is not; F36's periodic refresh is built and its "re-mints once
+  before failing the epoch" is not.
+
+  Five tripwires pin the absence of the identifier each mitigation would introduce, so the commit
+  that builds one goes red and the row cannot keep saying NOT BUILT after it stops being true.
+
 - **The documents mounted into workers are checked against the code (ISC-364).** `skills/` and
   `roles/` were current in the sense that CI builds them into the image — and three of the audit's
   findings were in them anyway. Mounting guarantees a worker reads a document, not that what it
