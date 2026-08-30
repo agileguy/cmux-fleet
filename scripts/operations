@@ -1,0 +1,113 @@
+#!/usr/bin/env bun
+/**
+ * `scripts/operations` — open the standing three-pane operations console.
+ *
+ *   ./scripts/operations                       # ticketing worker tick-1
+ *   ./scripts/operations --workers tick-1,sre-1
+ *   ./scripts/operations --dry-run             # print the plan, touch nothing
+ *
+ * Panes, left to right: a ticketing agent you hand work to with
+ * `pifleet dispatch`, a live `pifleet status --watch`, and a git poll loop over
+ * THE DIRECTORY YOU RAN THIS FROM.
+ *
+ * Running it twice is safe and is the expected way to get back to the console:
+ * an `operations` workspace that already exists is selected, not rebuilt. See
+ * `src/operations/workspace.ts` for why rebuilding would be destruction.
+ *
+ * Only I/O lives here — argv parsing, the process exit, and the printing. The
+ * decisions are in `src/operations/plan.ts` and `src/operations/workspace.ts`,
+ * where `test/unit/operations-plan.test.ts` and
+ * `test/unit/operations-workspace.test.ts` re-check them on every run.
+ */
+
+import { dirname, resolve } from "node:path";
+
+import { CmuxClient } from "../src/backends/cmux/client.ts";
+import { EXIT } from "../src/contracts.ts";
+import { OPERATIONS_WORKSPACE, operationsPanes } from "../src/operations/plan.ts";
+import { cmuxReachable, ensureOperations } from "../src/operations/workspace.ts";
+
+const USAGE = `Usage: scripts/operations [options]
+
+  --workers <ids>   comma-separated pifleet workers for pane 1 (default: tick-1)
+  --backend <kind>  pifleet backend for pane 1 (default: headless)
+  --config <path>   fleet.yaml for pane 1 (default: <repo>/fleet.yaml)
+  --poll <seconds>  git pane refresh interval (default: 5)
+  --dry-run         print the pane plan and exit without touching cmux
+  -h, --help        this message
+`;
+
+function flag(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(name);
+  if (i === -1) return undefined;
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith("--")) {
+    throw new Error(`${name} needs a value`);
+  }
+  return v;
+}
+
+async function main(argv: string[]): Promise<number> {
+  if (argv.includes("-h") || argv.includes("--help")) {
+    process.stdout.write(USAGE);
+    return EXIT.SUCCESS;
+  }
+
+  // `scripts/` sits directly under the repository root.
+  const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+  const watchDir = process.cwd();
+
+  const workersFlag = flag(argv, "--workers");
+  const pollFlag = flag(argv, "--poll");
+
+  const opts = {
+    repoRoot,
+    watchDir,
+    ...(workersFlag === undefined
+      ? {}
+      : { workers: workersFlag.split(",").map((w) => w.trim()).filter((w) => w !== "") }),
+    ...(flag(argv, "--backend") === undefined ? {} : { backend: flag(argv, "--backend")! }),
+    ...(flag(argv, "--config") === undefined ? {} : { configPath: flag(argv, "--config")! }),
+    ...(pollFlag === undefined ? {} : { gitPollSeconds: Number(pollFlag) }),
+  };
+
+  // Built before the cmux probe on purpose: a bad `--workers` or `--poll` is
+  // an argv mistake, and diagnosing it must not depend on whether the GUI
+  // happens to be running.
+  const panes = operationsPanes(opts);
+
+  if (argv.includes("--dry-run")) {
+    process.stdout.write(`workspace: ${OPERATIONS_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
+    for (const [i, p] of panes.entries()) {
+      process.stdout.write(`pane ${i + 1} (${p.title}):\n  ${p.command}\n\n`);
+    }
+    return EXIT.SUCCESS;
+  }
+
+  const client = new CmuxClient();
+  if (!(await cmuxReachable(client))) {
+    process.stderr.write(
+      "operations: no cmux is listening on ~/.local/state/cmux/cmux.sock.\n" +
+        "Start the cmux app, then run this again.\n",
+    );
+    return EXIT.BACKEND_UNAVAILABLE;
+  }
+
+  const result = await ensureOperations(client, opts);
+  process.stdout.write(
+    result.created
+      ? `operations: created workspace ${result.workspaceId} with ${panes.length} panes\n`
+      : `operations: workspace ${result.workspaceId} is already in place — selected it, changed nothing\n`,
+  );
+  return EXIT.SUCCESS;
+}
+
+try {
+  process.exit(await main(process.argv.slice(2)));
+} catch (err) {
+  // The plan module already prefixes its refusals with `operations:`; adding a
+  // second one made every input error read `operations: operations: ...`.
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`${msg.startsWith("operations:") ? msg : `operations: ${msg}`}\n`);
+  process.exit(EXIT.USAGE);
+}
