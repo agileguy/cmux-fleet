@@ -38,6 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
+import { TASK_POLICY_MOUNT } from "../../src/run/task-policy.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
 import { BudgetStateSchema, EXIT, type LedgerRecord } from "../../src/contracts.ts";
 import { runPaths, workerBranch, workerPaths } from "../../src/run/paths.ts";
@@ -2676,6 +2677,10 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // to the container user — so at 0644 only the `:ro` flag stands between
     // that check and a fleet-wide refusal.
     "/policy/cloud-allow": { directory: false, mode: 0o444 },
+    // 0444 for the same reason, and it is checked by the same refusal: the
+    // gate holds its provenance file to the allow file's integrity bar, so a
+    // writable one refuses every verb rather than yielding a forgeable ledger.
+    [TASK_POLICY_MOUNT]: { directory: false, mode: 0o444 },
     [BRIEFING_MOUNT]: { directory: false, mode: 0o644 },
     "/home/pi/.kube/config": { directory: false, mode: 0o644 },
   };
