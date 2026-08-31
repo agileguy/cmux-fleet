@@ -15,7 +15,7 @@
  */
 
 import { realExec, type Exec, type ExecResult } from "../../container/run.ts";
-import { assertPaneTypeableLine } from "../../util/pane-text.ts";
+import { assertPaneKey, assertPaneTypeableLine } from "../../util/pane-text.ts";
 
 /**
  * Identifiers that ride the cmux command line as VALUES. cmux parses argv
@@ -310,7 +310,14 @@ export function sendArgv(surfaceId: string, text: string): string[] {
 
 export function sendKeyArgv(surfaceId: string, key: string): string[] {
   assertCmuxValue("surface id", surfaceId);
-  assertCmuxValue("send key", key);
+  // NOT `assertCmuxValue`. Its grammar has no `+`, so it refused `shift+enter`
+  // before the key ever reached cmux — see `assertPaneKey` for the measurement
+  // and for why the fix is an allow-list rather than a widened character class.
+  try {
+    assertPaneKey("send key", key);
+  } catch (err) {
+    throw new Error(`cmux: ${err instanceof Error ? err.message : String(err)}`);
+  }
   return ["send-key", "--surface", surfaceId, key];
 }
 

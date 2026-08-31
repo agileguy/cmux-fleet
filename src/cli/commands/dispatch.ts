@@ -37,7 +37,7 @@ import { controlCall } from "../../supervisor/launch.ts";
 import { renderPrompt } from "../../supervisor/index.ts";
 import { launchPaneMode } from "../../container/interrupt.ts";
 import { loadBackend } from "../../backends/registry.ts";
-import { assertPaneTypeableLine } from "../../util/pane-text.ts";
+import { assertPaneKey, assertPaneTypeableLine } from "../../util/pane-text.ts";
 import { nextAttendedRecord, readAttended } from "./steer.ts";
 import {
   readBudgetState,
@@ -296,11 +296,21 @@ export type PaneKeystroke = { kind: "text"; text: string } | { kind: "key"; key:
  * the box. That is reported (the caller names the step that failed) but it
  * cannot be rolled back — nothing here can un-type a keystroke.
  */
+/**
+ * The two keys a pane dispatch uses, named rather than spelled inline.
+ *
+ * `shift+enter` inserts a newline in Pi's composer without submitting; `enter`
+ * submits. Both are cmux's vocabulary, which `util/pane-text.ts` records as the
+ * fleet's canonical one and `backends/tmux/argv.ts` translates.
+ */
+export const SEPARATOR_KEY = "shift+enter";
+export const SUBMIT_KEY = "enter";
+
 export function paneKeystrokes(worker: string, prompt: string): PaneKeystroke[] {
   const lines = prompt.split("\n");
   const plan: PaneKeystroke[] = [];
   lines.forEach((line, i) => {
-    if (i > 0) plan.push({ kind: "key", key: "shift+enter" });
+    if (i > 0) plan.push({ kind: "key", key: SEPARATOR_KEY });
     if (line === "") return;
     try {
       // The SAME predicate `sendArgv` enforces (`util/pane-text.ts`), applied
@@ -313,7 +323,44 @@ export function paneKeystrokes(worker: string, prompt: string): PaneKeystroke[] 
     }
     plan.push({ kind: "text", text: line });
   });
-  plan.push({ kind: "key", key: "enter" });
+  plan.push({ kind: "key", key: SUBMIT_KEY });
+
+  /**
+   * THE KEYS ARE GATED TOO, and originally they were not.
+   *
+   * The text lines above go through `assertPaneTypeableLine` here, one layer
+   * above the backend, precisely so a prompt that cannot be typed is refused
+   * before any byte of it is. The key steps had no such gate, and a backend
+   * that refuses a key refuses it mid-plan: measured live on 2026-08-31,
+   * `cmux` rejected `shift+enter` at STEP 2 OF 29 with two lines of the
+   * operator's prompt already in the pane and unwithdrawable.
+   *
+   * Validating the WHOLE plan restores the property the docblock above claims:
+   * either nothing is typed, or the plan is one every step of which the
+   * backend will accept. Half a gate is not a gate — it just moves which kind
+   * of step strands the prompt.
+   *
+   * **THIS LOOP CANNOT FIRE TODAY, and that is stated rather than implied.**
+   * The only keys it inspects are `SEPARATOR_KEY` and `SUBMIT_KEY`, both
+   * constants, both members of `PANE_KEYS`. A mutation deleting this loop
+   * leaves the unit suite green, which was checked — so it is not carrying the
+   * weight the paragraph above might suggest. What actually holds the property
+   * is the probe pinning those two constants against `PANE_KEYS`.
+   *
+   * It stays because the thing it guards is a FUTURE edit: the first key that
+   * comes from a task, a config or a role rather than from a constant here.
+   * Then it becomes reachable and this is where it must already be. Kept as a
+   * declared, unreachable backstop rather than removed and re-derived later —
+   * and labelled, so nobody reads it as the live gate.
+   */
+  for (const step of plan) {
+    if (step.kind !== "key") continue;
+    try {
+      assertPaneKey("prompt key", step.key);
+    } catch (err) {
+      throw new UntypeablePromptError(worker, 0, err instanceof Error ? err.message : String(err));
+    }
+  }
   return plan;
 }
 

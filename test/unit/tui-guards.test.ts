@@ -24,6 +24,9 @@ import { readFileSync } from "node:fs";
 import { WorkerLaunchSchema, type WorkerLaunch } from "../../src/contracts.ts";
 import { stripComments } from "../support/source-structure.ts";
 import { sendKeyArgv as tmuxSendKeyArgv } from "../../src/backends/tmux/argv.ts";
+import { sendKeyArgv as cmuxSendKeyArgv } from "../../src/backends/cmux/client.ts";
+import { PANE_KEYS } from "../../src/util/pane-text.ts";
+import { SEPARATOR_KEY, SUBMIT_KEY, paneKeystrokes } from "../../src/cli/commands/dispatch.ts";
 import {
   assertTuiBackendPossible,
   panePresentationArgv,
@@ -479,4 +482,81 @@ describe("tmux speaks its own key names", () => {
     // restoring the fallback.
     expect(() => tmuxSendKeyArgv(CTX, "%1", "ctrl+shift+f7")).toThrow(/literal text/);
   });
+});
+
+/**
+ * cmux's key vocabulary, and the guard that refused it.
+ *
+ * MEASURED 2026-08-31 against a real cmux surface, the rejected arm being the
+ * control that proves the two backends genuinely differ:
+ *
+ *   cmux send-key <surface> shift+enter   rc=0  OK
+ *   cmux send-key <surface> enter         rc=0  OK
+ *   cmux send-key <surface> S-Enter       rc=1  invalid_params: Unknown key
+ *
+ * The defect was upstream of cmux: `assertCmuxValue`'s grammar
+ * (`^[A-Za-z0-9][A-Za-z0-9:._-]*$`) has no `+`, so `shift+enter` was refused
+ * before it was ever sent — at STEP 2 OF 29, with two lines of the operator's
+ * prompt already in the pane and unwithdrawable.
+ *
+ * Widening that regex was refused: it guards surface ids, workspace refs and
+ * status keys too, and the flag-injection hazard it exists to stop is not
+ * specific to keys. A closed list also makes an unknown key FAIL rather than be
+ * forwarded — which matters because tmux exits 0 on an unknown key name and
+ * types it as literal text.
+ */
+describe("cmux keys pass their own guard, not the identifier guard", () => {
+  test("shift+enter survives to the argv", () => {
+    expect(cmuxSendKeyArgv("surface:25", "shift+enter")).toEqual([
+      "send-key",
+      "--surface",
+      "surface:25",
+      "shift+enter",
+    ]);
+  });
+
+  test("an unknown key is still refused, and the surface id still is too", () => {
+    expect(() => cmuxSendKeyArgv("surface:25", "S-Enter")).toThrow(/not a pane key/);
+    expect(() => cmuxSendKeyArgv("--evil", "enter")).toThrow(/not a valid cmux identifier/);
+  });
+
+  /**
+   * The plan is gated WHOLE. Text lines were already checked one layer above
+   * the backend so nothing is typed if any line is untypeable; the key steps
+   * were not, and a key refused mid-plan strands a half-typed prompt. Half a
+   * gate only changes which kind of step does the stranding.
+   */
+  test("a plan containing an unsendable key is refused before any byte", () => {
+    const plan = paneKeystrokes("w1", "one\ntwo\nthree");
+    for (const step of plan) {
+      if (step.kind === "key") expect(PANE_KEYS).toContain(step.key);
+    }
+    // And the separator is the measured one, not a guess.
+    expect(plan.filter((s) => s.kind === "key").map((s) => (s as { key: string }).key)).toEqual([
+      "shift+enter",
+      "shift+enter",
+      "enter",
+    ]);
+  });
+});
+
+/**
+ * The two key constants are members of the allow-list.
+ *
+ * THIS is what actually holds "nothing is typed unless every step is
+ * sendable", and it is written down because the runtime loop in
+ * `paneKeystrokes` does NOT: deleting that loop leaves the suite green, since
+ * the only keys it can ever see are these two constants. Checked, rather than
+ * assumed — a guard nobody can redden is not a guard, and pretending otherwise
+ * is how a decorative probe gets kept.
+ *
+ * A constant edited to something no backend accepts is the real failure mode,
+ * and it fails here.
+ */
+test("the separator and submit keys are sendable keys", () => {
+  expect(PANE_KEYS).toContain(SEPARATOR_KEY);
+  expect(PANE_KEYS).toContain(SUBMIT_KEY);
+  // And they are DIFFERENT: a separator equal to submit would end the turn
+  // after the first line — the exact silent truncation this mode guards.
+  expect(SEPARATOR_KEY).not.toBe(SUBMIT_KEY);
 });
