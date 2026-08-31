@@ -254,11 +254,16 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     isc: "ISC-344",
     grade: "[~]",
     claim:
-      "The canonical call in the mounted skill carries `--max-time`, so the shape a worker " +
-      "copies is a bounded one. Empty here means the documented example went back to an " +
+      "BOTH canonical calls in the mounted skill carry `--max-time`, so every shape a worker " +
+      "copies is a bounded one. A lower count means a documented example went back to an " +
       "unbounded request — which inside a container does not fail but HANGS, leaving the " +
       "supervisor nothing but silence and killing the run with no reason recorded. Still " +
-      "`[~]`: this pins the EXAMPLE, not the calls a worker actually issues.",
+      "`[~]`: this pins the EXAMPLES, not the calls a worker actually issues. " +
+      "WENT FROM 1 TO 2 ON 2026-08-30, when a Rally query section was added after a live run " +
+      "reported 5 where the answer was 8. The number is a count of BOUNDED examples and " +
+      "therefore a floor on the good shape, NOT a ceiling on the bad one: an unbounded " +
+      "example added beside these two would leave this green. That was equally true at 1 and " +
+      "is written down here rather than discovered later.",
     // The pattern deliberately starts at `curl` rather than at `--max-time`:
     // a pattern leading with `-` is consumed by grep as an OPTION, which is how
     // this claim failed the first time it ran. It failed loudly, which is the
@@ -270,7 +275,7 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "curl -sS --fail-with-body --max-time 60 --config",
       "skills/ticket-ops/SKILL.md",
     ],
-    expect: 1,
+    expect: 2,
   },
   {
     isc: "ISC-345",

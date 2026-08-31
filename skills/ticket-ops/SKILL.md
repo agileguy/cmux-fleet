@@ -17,7 +17,7 @@ repository, and it would pin you to whatever that CLI decided an update was.
 | Name | Where from | What it is |
 |---|---|---|
 | `TICKET_API_TOKEN_FILE` | env | the **path** to a read-only file holding the write credential |
-| `TICKET_BASE_URL_FILE` | env | the path to a file holding `https://<TICKET_HOST>/api/v2` |
+| `TICKET_BASE_URL_FILE` | env | the path to a file holding `https://rally1.rallydev.com/slm/webservice/v2.0` |
 | ticket ids | the task envelope, and **only** there | the objects you may touch |
 
 **There is no `TICKET_API_TOKEN` variable.** `echo $TICKET_API_TOKEN` prints an empty line, and
@@ -40,11 +40,23 @@ being an argument, an environment variable, or a shell variable:
 
 ```bash
 umask 077
-{ printf 'header = "Authorization: Token '
+{ printf 'header = "ZSESSIONID: '
   cat "$TICKET_API_TOKEN_FILE"
   printf '"\n'
 } > /tmp/ticket.curlrc
 ```
+
+**`ZSESSIONID`, not `Authorization`.** This document said `Authorization: Token` until
+2026-08-30, which is the shape of a different vendor entirely and was never exercised — no
+credential existed on any machine that ran this fleet, so the line had never reached a server.
+Rally's WSAPI authenticates an API key with a `ZSESSIONID` header and answers `Authorization:
+Token` with a 401 whose body is an HTML login page. Verified against
+`/user?fetch=UserName` on 2026-08-30: `ZSESSIONID` returns the user object.
+
+That is worth pausing on, because the failure it would have produced is the one this whole
+document is written against: `--fail-with-body` turns the 401 into a non-zero exit and a body,
+so a worker would have reported `blocked` with an HTML page attached and nobody would have known
+whether the credential was wrong, the header was wrong, or the host was down.
 
 Read that construction carefully, because the obvious shorter forms are the ones that leak:
 
@@ -64,8 +76,17 @@ BASE_URL="$(cat "$TICKET_BASE_URL_FILE")"   # not a credential — a variable is
 
 curl -sS --fail-with-body --max-time 60 --config /tmp/ticket.curlrc \
      -H 'Accept: application/json' \
-     "${BASE_URL}/issue/${ID}" -o /tmp/issue.json
+     "${BASE_URL}/defect/${ID}?fetch=FormattedID,Name,State,Owner" -o /tmp/issue.json
 ```
+
+**The path segment is the Rally TYPE, and getting it wrong is a 404 rather than a redirect.**
+`defect`, `hierarchicalrequirement` (a user story — the URL does not say "story"), `task`,
+`iteration`. A `FormattedID` like `US12345` or `DE181674` is not an object id and cannot be
+substituted into the path: fetch by `FormattedID` with a query instead —
+`${BASE_URL}/hierarchicalrequirement?query=(FormattedID = "US12345")` — and read the `_ref` out
+of the result. **`fetch=` is not optional in practice**: without it Rally returns every field on
+the object, which is tens of kilobytes per row and the difference between a readable artifact
+and a payload that eats the turn.
 
 Seven rules about that command, each of which has a failure behind it:
 
@@ -104,6 +125,51 @@ many real answers. Ask for a large page, then compare how many records you actua
 against the total the response reports. If they differ, page until they agree or say in the
 artifact that they did not. A first page mistaken for a complete answer is the same error as
 grepping a download, and it looks just as confident.
+
+## Rally's query grammar and pagination, because guessing them produced a wrong answer
+
+**Every fact in this section was measured on 2026-08-30, immediately after a run got all three
+of them wrong.** That run was asked to count the open defects owned by one user. It reported
+**5**. The answer is **8**. It did not report a wrong number because the API was hard; it
+reported one because it concluded, from two failed guesses, that the server could not answer the
+question — and then filtered the one page it had. Its artifact called them "API Limitations
+Encountered". Both were wrong:
+
+> *"Compound queries not supported: Rally WSAPI does not support `AND` in query strings"* — it
+> does. **Every binary operator must be parenthesised, including the whole expression.**
+> `(A AND B)` is rejected; `((A) AND (B))` works. Three terms nest pairwise:
+> `(((A) AND (B)) AND (C))`. A flat `AND` list is the shape that fails, and failing that way
+> reads exactly like the feature being absent.
+>
+> *"Pagination broken: the `startIndex` parameter does not work"* — there is no `startIndex`
+> parameter. It is **`start`, and it is 1-BASED**, alongside `pagesize` (default 20). `start=21`
+> returns `StartIndex: 21` and the next page. A parameter Rally does not recognise is IGNORED,
+> not rejected, so a wrong name gives you page one every time and looks like a broken server.
+
+```bash
+# The whole answer, server-side, in one request:
+curl -sS --fail-with-body --max-time 60 --config /tmp/ticket.curlrc \
+     -H 'Accept: application/json' -G "${BASE_URL}/defect" \
+     --data-urlencode 'query=((Owner.UserName = "someone@example.com") AND (State != "Closed"))' \
+     --data-urlencode 'fetch=FormattedID,Name,State' \
+     --data-urlencode 'pagesize=200' -o /tmp/q.json
+jq '.QueryResult | {total: .TotalResultCount, got: (.Results|length), errors: .Errors}' /tmp/q.json
+```
+
+- **Traverse with dots.** `Owner` is a reference object, and comparing it to an email matches
+  nothing while erroring on nothing. `Owner.UserName` is the field a person means.
+- **`--data-urlencode` with `-G`, never a hand-built query string.** The grammar is full of
+  spaces, quotes and parentheses, and one unescaped space is a 400 that reads like a syntax
+  error in your filter.
+- **Read `TotalResultCount` and `Results|length` in the same breath, every time.** They disagree
+  by default — the page is 20 — and that disagreement is the whole trap. `Errors: []` is part of
+  the check: Rally answers a malformed query with `200` and an `Errors` array, so a non-empty
+  `Errors` with zero results is a broken query, not an empty result set.
+- **If you cannot express the filter, say so and report `blocked`.** Do not fall back to
+  filtering a page. A stated inability beats a confident wrong total — and note that the run
+  above also marked its own acceptance criterion *"count based on TotalResultCount"* as **met**,
+  with `TotalResultCount: 33, open defects visible: 5` as the evidence. Two numbers that
+  contradict the claim they were offered to support. Grading yourself is not checking yourself.
 
 ## Rich text is HTML, and you do not write HTML
 
