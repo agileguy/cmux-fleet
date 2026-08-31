@@ -1557,6 +1557,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet tui --worker <id> [--leave]` | hand that worker's pane to a person; `--leave` returns it to the read-only viewer. Refused on `headless`, which has no pane. §3.5 lists what attended mode voids |
 | `pifleet logs --worker <id> [--follow] [--render]` | tail `events.jsonl`; `--render` is the pane viewer |
 | `pifleet exec --worker <id> -- <cmd>` | run a command in that worker's container (debugging) |
+| `pifleet shell --worker <id>` | open an interactive shell in that worker's container, on any backend |
 | `pifleet down [--run r] [--keep-panes] [--prune]` | quiesce, stop containers, optional worktree prune |
 
 **Exit codes** — a strict severity ladder, highest wins, because one `wait --all` can legitimately have a timeout *and* a budget trip *and* a failed task:

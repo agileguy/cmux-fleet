@@ -21,7 +21,7 @@ import { CliError } from "./index.ts";
 import { EXIT, type WorkerState } from "../contracts.ts";
 import { latestRunId, runPaths, runsRoot, workerPaths, type RunPaths } from "../run/paths.ts";
 import { readWorkerState } from "../run/state.ts";
-import { processStartTime } from "../run/registry.ts";
+import { processStartTime, latestLiveRunId } from "../run/registry.ts";
 
 /**
  * Resolve `--run` (or the latest run) to paths, refusing a name that names
@@ -32,7 +32,21 @@ import { processStartTime } from "../run/registry.ts";
  */
 export async function resolveRunPaths(runOpt: string | undefined): Promise<RunPaths> {
   const root = runsRoot();
-  const runId = runOpt ?? (await latestRunId(root));
+  /*
+   * LIVE-FIRST, and every caller of this helper wants it that way.
+   *
+   * `resolveRunPaths` serves `shell`, `abort`, `exec` and `steer` — four verbs
+   * that all go on to call `requireLiveWorker`. Handing them the newest run
+   * DIRECTORY meant that after a `down` of the newest run they resolved the
+   * corpse and refused with "worker is dead", while a live fleet sat one run
+   * older and perfectly reachable. The operator's next move is to hunt for a
+   * run id the CLI already knows.
+   *
+   * The fallback keeps the old behaviour exactly where it was right: with no
+   * live run anywhere this resolves the newest run and `requireLiveWorker`
+   * gives its own, better message about that specific worker.
+   */
+  const runId = runOpt ?? (await latestLiveRunId(root)) ?? (await latestRunId(root));
   if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
   const run = runPaths(runId, root);
   if (!existsSync(run.root)) {

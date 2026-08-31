@@ -37,7 +37,8 @@ import {
 import type { KillOutcome } from "../safety/kill.ts";
 import { classifyPeer, ownUid, peerRefusal } from "../security/peer-uid.ts";
 import { writeJsonAtomic, LineSplitter, parseLine } from "../util/jsonl.ts";
-import { workerPaths, type RunPaths } from "./paths.ts";
+import { readdir } from "node:fs/promises";
+import { runIdsAscending, runPaths, runsRoot, workerPaths, type RunPaths } from "./paths.ts";
 import { readWorkerState } from "./state.ts";
 import { VerbgateCollector, type VerbgateCollectReport } from "./verbgate-collect.ts";
 
@@ -989,4 +990,61 @@ export async function registryCall(
     if (opts.optional) return null;
     throw err;
   }
+}
+
+/**
+ * The newest run that still has a LIVE supervisor, or null when none does.
+ *
+ * ## The question `status` is actually asked
+ *
+ * `latestRunId` answers "which run directory sorts last", and for `report` and
+ * `harvest` that is right — they grade a finished run and a dead one is their
+ * subject. `status` answers "what is my fleet doing", and there the newest
+ * DIRECTORY is the wrong run whenever the newest run is over and an older one
+ * is still up.
+ *
+ * MEASURED on the operations console 2026-08-30, twice. First it showed
+ * `run 2026-08-24T17-18-05Z-7f40 / eng-1: dead supervisor=gone` — a run six
+ * days old — while nothing else was running. Then, with a healthy fleet up
+ * under `2026-08-31T05-31-17Z-8058`, a `down` of a NEWER run left the pane
+ * reporting `dead / supervisor=gone` for the run that had just ended, with the
+ * live one invisible. A standing pane whose job is to say whether the fleet is
+ * up, saying "gone" while it is up, is worse than no pane.
+ *
+ * Newest-first with an early return, so the common case — the newest run IS
+ * the live one — costs a single run's worth of checks rather than a scan of
+ * every run ever created.
+ *
+ * FALLS BACK, and the fallback is not a detail: with no live run at all this
+ * returns null and the caller uses `latestRunId`, so a post-mortem `status`
+ * after everything has settled behaves exactly as it always did. This narrows
+ * WHICH run is chosen when several exist; it never makes `status` refuse one.
+ */
+export async function latestLiveRunId(root: string = runsRoot()): Promise<string | null> {
+  const runs = await runIdsAscending(root);
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const runId = runs[i]!;
+    const run = runPaths(runId, root);
+    const registry = await readRegistry(run);
+    let workerIds: string[];
+    try {
+      workerIds = (await readdir(run.workersDir)).filter((w) => !w.startsWith("."));
+    } catch {
+      continue;
+    }
+    for (const id of workerIds) {
+      const state = await readWorkerState(workerPaths(run, id));
+      if (state === null) continue;
+      // The SAME (pid, start-time) identity the snapshot below uses, not a
+      // second liveness rule: a run this selector called live and the table
+      // then called `gone` would be the defect wearing a different mask.
+      const registered = registry?.workers[id];
+      const alive =
+        registered !== undefined
+          ? await identityAlive({ pid: registered.pid, started: registered.started })
+          : (await processStartTime(state.pid)) !== null;
+      if (alive) return runId;
+    }
+  }
+  return null;
 }

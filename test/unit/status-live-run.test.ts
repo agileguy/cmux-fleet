@@ -26,8 +26,8 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { latestLiveRunId } from "../../src/cli/commands/status.ts";
 import { latestRunId, runPaths, workerPaths } from "../../src/run/paths.ts";
+import { latestLiveRunId } from "../../src/run/registry.ts";
 import { initialWorkerState, writeWorkerState } from "../../src/run/state.ts";
 import { stripComments } from "../support/source-structure.ts";
 

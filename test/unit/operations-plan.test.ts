@@ -161,6 +161,57 @@ describe("pane 1 — the ticketing agent", () => {
   });
 });
 
+describe("pane 1 — the agent", () => {
+  test("stages are up → viewer → container shell → host shell, in that order", () => {
+    // The requirement, and it is an ORDER: the pane must never land on a host
+    // prompt while anything above it is still available. A viewer placed after
+    // the shell, or a host `$SHELL` reached before the container one, both
+    // type-check and both give back the terminal the console exists to replace.
+    const cmd = plan()[0]!.command;
+    const at = (needle: string) => cmd.indexOf(needle);
+    expect(at("'up'")).toBeGreaterThan(-1);
+    expect(at("'up'")).toBeLessThan(at("'logs'"));
+    expect(at("'logs'")).toBeLessThan(at("'shell'"));
+    expect(at("'shell'")).toBeLessThan(at("exec $SHELL"));
+  });
+
+  test("the viewer FOLLOWS and RENDERS — it blocks, and a human reads it", () => {
+    // `--follow` is what makes the pane sit on an idle worker and come alive on
+    // dispatch; without it `logs` prints the backlog and exits, and the pane
+    // falls straight through to the shell. `--render` is the difference between
+    // an operator reading events and an operator reading raw JSONL.
+    const cmd = plan()[0]!.command;
+    expect(cmd).toContain("'logs'");
+    expect(cmd).toContain("'--follow'");
+    expect(cmd).toContain("'--render'");
+  });
+
+  test("viewer and shell both name the FIRST configured worker", () => {
+    // A pane shows one worker. Hardcoding `tick-1` would silently show the
+    // wrong agent for `--workers rev-1`, with the pane looking perfectly
+    // healthy while tailing a worker nobody asked about.
+    const cmd = plan({ workers: ["rev-1", "eng-1"] })[0]!.command;
+    expect(cmd).toContain("'logs' '--worker' 'rev-1'");
+    expect(cmd).toContain("'shell' '--worker' 'rev-1'");
+    expect(cmd).not.toContain("'--worker' 'eng-1'");
+  });
+
+  test("the stages are joined by `;`, never `&&`", () => {
+    // With `&&` a refused `up` closes the pane, taking its own error message
+    // with it — measured on the first live run, where the shell was the only
+    // thing that made the refusal readable. Each stage must be reachable
+    // whether or not the one before it succeeded.
+    //
+    // Sliced from `'up'` onward, and the first version of this was NOT: a bare
+    // `not.toContain("&&")` failed on `envPreamble`'s own
+    // `[ -f "$HOME/.env" ] && . "$HOME/.env"`, which is a legitimate guard and
+    // not a stage separator. An assertion that cannot tell the two apart would
+    // have had to be deleted or weakened; scoping it to the stages keeps it.
+    const cmd = plan()[0]!.command;
+    expect(cmd.slice(cmd.indexOf("'up'"))).not.toContain("&&");
+  });
+});
+
 describe("pane 2 — fleet status", () => {
   test("refreshes forever, so the pane cannot print once and close", () => {
     // The original requirement, unchanged: `pifleet status` on its own prints

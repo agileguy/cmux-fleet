@@ -8,7 +8,7 @@
  *
  * | pane | title | what runs |
  * |---|---|---|
- * | 1 | `ticketing` | `pifleet up --workers tick-1`, then an interactive shell |
+ * | 1 | `ticketing` | `pifleet up`, then the agent's live event viewer, then a container shell |
  * | 2 | `fleet-status` | a poll loop over `pifleet status` |
  * | 3 | `git-watch` | a poll loop over `git status` + `git log` in the INVOCATION directory |
  *
@@ -200,16 +200,54 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
     configPath,
   ]);
   const status = statusWatchCommand(repoRoot, poll);
+  /*
+   * The AGENT half of pane 1. `workers[0]` — the pane shows one worker, and
+   * the first named is the one the console is built around (`tick-1` by
+   * default). A pane trying to show all of them would be a status pane, and
+   * there is already one of those below.
+   */
+  const agent = workers[0]!;
+  const viewer = pifleetCommand(repoRoot, ["logs", "--worker", agent, "--follow", "--render"]);
+  const shell = pifleetCommand(repoRoot, ["shell", "--worker", agent]);
 
   return [
     {
       title: "ticketing",
-      // `;` and not `&&`: a failed `up` must still leave a usable shell. With
-      // `&&` a fleet that refuses admission closes the pane, taking the error
-      // message with it, and the operator is left with a workspace that has a
-      // hole where its console was. Measured on the first live run, where `up`
-      // did refuse and the shell was what made the refusal readable.
-      command: `${envPreamble()} ${up} ; exec $SHELL -i`,
+      /*
+       * THREE STAGES, each a deliberate step down, and the pane never lands on
+       * a host prompt while anything above it is still available.
+       *
+       *   1. `up`      — stand the worker up.
+       *   2. VIEWER    — `logs --follow --render`, which BLOCKS. This is what
+       *                  the pane shows for its whole life: it sits on an idle
+       *                  worker waiting, and prints the agent's events as they
+       *                  happen the moment something is dispatched. It does not
+       *                  exit on its own.
+       *   3. SHELL     — Ctrl-C out of the viewer and the pane becomes an
+       *                  interactive shell INSIDE the worker's container. Same
+       *                  mounts, same egress policy, same absent credentials as
+       *                  the agent.
+       *   4. host `$SHELL` — only if all three are unavailable, which in
+       *                  practice means `up` refused.
+       *
+       * ## The pane is deliberately NOT a shell "to Pi", because there is no
+       * ## such thing here
+       *
+       * `interactiveArgv`'s docblock states it: this fleet launches Pi in RPC
+       * MODE with the supervisor holding stdin, so attaching a human keyboard
+       * to that JSONL protocol stream would corrupt the control plane on the
+       * first keystroke. Stage 3 puts a person inside the same boundary without
+       * touching Pi's pipes, which is what keeps dispatch, steer, abort and
+       * harvest working while someone is typing. Talking TO the agent mid-turn
+       * is `steer`; watching it is stage 2.
+       *
+       * `;` and not `&&` throughout: a failed `up` must still leave a usable
+       * shell. With `&&` a fleet that refuses admission closes the pane, taking
+       * the error message with it, and the operator is left with a workspace
+       * that has a hole where its console was. Measured on the first live run,
+       * where `up` did refuse and the shell was what made the refusal readable.
+       */
+      command: `${envPreamble()} ${up} ; ${viewer} ; ${shell} ; exec $SHELL -i`,
       // The initial surface: the whole workspace until something splits it.
       split: null,
     },
