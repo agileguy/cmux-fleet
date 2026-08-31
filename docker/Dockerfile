@@ -21,9 +21,26 @@ FROM node:${NODE_TAG} AS base
 
 ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 
+# `ripgrep` and `fd-find` are not general conveniences here — they are the two
+# binaries Pi's own tools-manager BOOTSTRAPS OVER THE NETWORK when it cannot
+# find them, downloading release tarballs from api.github.com and
+# objects.githubusercontent.com on first start. A pifleet worker runs behind a
+# deny-all egress policy (§12.4), so that fetch cannot succeed and must not:
+# widening the allowlist to let every worker pull an unpinned binary from
+# GitHub at startup would put a supply-chain fetch inside the sandbox, and the
+# whole point of a pinned image is that two workers on one role are
+# byte-identical. Shipping both tools makes the download UNREACHED rather than
+# merely blocked.
+#
+# The symlink is load-bearing, not tidiness. Debian ships the binary as
+# `fdfind` (the name `fd` belongs to fdclone), and Pi 0.79.6 happens to accept
+# either — `systemBinaryNames: ["fd", "fdfind"]`. Providing BOTH names means
+# the fix does not depend on Pi continuing to know Debian's rename, and a
+# worker's own `fd ...` command line works the way its muscle memory expects.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git ripgrep jq curl less tini gnupg \
- && rm -rf /var/lib/apt/lists/*
+      bash ca-certificates git ripgrep fd-find jq curl less tini gnupg \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd
 
 # --- cloud CLI baseline: present in EVERY worker image (SRD §5.3) ---
 # SRE-shaped tasks are a primary use case; a role that discovers mid-task that
@@ -113,16 +130,21 @@ RUN if [ -n "${EXTRA_APT_PACKAGES}" ]; then \
 # --ignore-scripts: install-time scripts are an unnecessary supply-chain surface.
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
 
-# Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl
+# Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl/rg/fd
 # (§5.3). Executing each one at build time is the difference between an image
 # that *contains* the tools and an image where they *run*: the relocation above
 # once produced a build that passed every presence check and exited 127 on use.
+# `fd` and `fdfind` are BOTH executed because they are two names for one
+# binary and the symlink is what makes the first of them exist.
 RUN set -eux; \
     gcloud version >/dev/null; \
     kubectl version --client >/dev/null; \
     helm version >/dev/null; \
     jq --version >/dev/null; \
     curl --version >/dev/null; \
+    rg --version >/dev/null; \
+    fd --version >/dev/null; \
+    fdfind --version >/dev/null; \
     pi --version >/dev/null
 
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.
