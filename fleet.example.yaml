@@ -165,10 +165,23 @@ secrets:
     - TICKET_API_TOKEN       # the ticket system's write credential
     # NOT a secret, and it is here only because `secrets:` is the one per-worker
     # delivery channel that exists. It rides the same file path as the
-    # credential — `TICKET_BASE_URL_FILE` names a file the worker `cat`s — which
-    # is harmless but is not what this list is for. A plain non-secret `env:`
-    # selector is the right home for it and does not exist yet.
-    - TICKET_BASE_URL
+    # credential — `TICKET_BASE_URL_FILE` names a file the worker `cat`s.
+    #
+    # `credential: false` was NOT cosmetic. The harvester sweeps every granted
+    # VALUE through `findCredentialLeaks`, and a ticket worker's artifacts
+    # legitimately contain the endpoint they were pointed at — so every
+    # `ticket-ops.json` was refused as carrying a credential and every verdict
+    # clamped. A detector that fires on every honest run carries as little
+    # information as one that never fires, and additionally teaches an operator
+    # to disbelieve it when it catches the real thing.
+    #
+    # It says ONE thing: do not use this value as a needle. Delivery is
+    # unchanged — still granted, still a 0444 file, still a `<NAME>_FILE`
+    # pointer, still subject to every reserved-name and allowlist check. It
+    # buys no privilege; it forfeits a check. The default is `true`, and a bare
+    # string above means `true`.
+    - name: TICKET_BASE_URL
+      credential: false
 
 # Extra holes in the deny-all bridge. Empty by default, and every entry here is
 # a decision rather than a detail.

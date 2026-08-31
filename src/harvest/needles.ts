@@ -163,11 +163,52 @@ export async function resolveWorkerNeedles(wp: WorkerPaths): Promise<NeedleSuppl
   const granted = launch.secret_names;
   if (granted.length === 0) return EMPTY;
 
+  /**
+   * The grants the fleet said are NOT credentials — delivered, not swept.
+   *
+   * ## The defect this closes, and it is the detector's opposite failure
+   *
+   * `secrets:` is the only per-worker delivery channel that exists, so a
+   * variable that must reach a worker is listed there whether or not it is
+   * secret. `TICKET_BASE_URL` is the standing case: a public endpoint, over
+   * the eight-byte floor, and present in EVERY command a ticket worker
+   * legitimately records. So `parseTicketOpsArtifact` refused every
+   * `ticket-ops.json` as carrying a credential, every one became a
+   * discrepancy, and every verdict clamped.
+   *
+   * ISC-333 was filed because this sweep could not fire. A sweep that fires on
+   * every honest run is the same defect with one sign flipped: both produce a
+   * finding that carries no information, and this one additionally trains an
+   * operator to disbelieve the detector that catches the real leak.
+   *
+   * ## Read from the RUN, and that is not a detail
+   *
+   * `launch.non_credential_secrets`, not `fleet.yaml`. The paragraph at the
+   * top of this file about where grants come from applies unchanged and for
+   * the same reason: a run outlives its config. Reading the declaration from
+   * whatever document happens to be in front of the harvester would sweep an
+   * old run against a newer answer, in a direction nothing would notice.
+   *
+   * ## It narrows the sweep, so it is bounded twice
+   *
+   * The excluded name is INTERSECTED with the grant rather than trusted — a
+   * record naming something this worker never held changes nothing — and the
+   * exclusion is reported in `names` by its absence, so a caller that prints
+   * what was swept prints the truth. `credential: true` is the default and a
+   * bare string means it, so a new grant is swept unless someone deliberately
+   * says otherwise.
+   */
+  const notCredentials = new Set(launch.non_credential_secrets);
+
   const resolved = await resolveGrantedSecretValues(wp.secretsDir, wp.envFile, granted);
 
   const needles: string[] = [];
   const names: string[] = [];
   for (const [name, value] of resolved.values) {
+    // Declared not a credential: delivered to the worker, and deliberately not
+    // a needle. Skipped BEFORE the length floor so the two reasons a value is
+    // dropped stay distinguishable to anyone reading this loop.
+    if (notCredentials.has(name)) continue;
     // Short and blank values are DROPPED rather than reported: the variable was
     // delivered, it is simply not usable as a literal needle. Counting it as a
     // failure would put a permanent note on every run that grants a region

@@ -989,6 +989,8 @@ secrets:
   # a name is delivered only when it is in BOTH. Delivery is a 0444 FILE under
   # /secrets plus a `<NAME>_FILE` pointer — never the value in the environment.
   # The key name is historical; see the §12.4 erratum. NEVER provider keys.
+  # An entry may be written long — `- {name: X, credential: false}` — for a
+  # granted variable that is not a secret, which is delivered but not swept.
   env_allowlist: []
 
 egress:
@@ -1869,6 +1871,47 @@ This is a deliberate exception, not an oversight. Dan's requirement is that work
 >
 > Shipped 2026-08-29 (ISC-337..342). `fleet.example.yaml` carried the full explanation from the day
 > it landed; this document did not, which is the drift the 2026-08-30 audit was looking for.
+
+> **Erratum (2026-08-31) — `credential: false`, because "the ceiling is the only delivery channel"
+> had a cost this section did not name.**
+>
+> The paragraph above is right that `env_allowlist` is a *grant ceiling* rather than a list of
+> secrets. What follows from that, and was not written down, is that a variable which is **not** a
+> secret still has to be listed there to reach a worker at all — there is no plain non-secret `env:`
+> selector. `TICKET_BASE_URL` is the standing case.
+>
+> **That was not free, and the bill arrived at the harvester.** `harvest/needles.ts` sweeps every
+> granted VALUE through `findCredentialLeaks` (§12.6, ISC-333), and a ticket worker's artifacts
+> legitimately contain the endpoint they were pointed at. So every `ticket-ops.json` was refused as
+> carrying a credential, every refusal became a discrepancy, and every verdict clamped. **ISC-333
+> was filed because the sweep could not fire; this is the same defect with one sign flipped** —
+> a finding on every honest run carries as little information as a finding on none, and it
+> additionally teaches an operator to disbelieve the detector on the day it catches the real thing.
+>
+> An entry may therefore be written long:
+>
+> ```yaml
+> secrets:
+>   env_allowlist:
+>     - TICKET_API_TOKEN                 # a bare string means credential: true
+>     - name: TICKET_BASE_URL
+>       credential: false                # delivered, NOT swept
+> ```
+>
+> `credential: false` says one thing and only one: **do not use this value as a needle.** Delivery
+> is untouched — still granted, still a 0444 file, still a `<NAME>_FILE` pointer, still subject to
+> every reserved-name and ceiling check. It buys no privilege; it forfeits a check. **The default is
+> `true` and a bare string means `true`**, so a mistake falls toward sweeping.
+>
+> **The declaration is written into `launch.json` (`non_credential_secrets`), not read from config
+> at harvest time**, for the reason `harvest/needles.ts` already gives about grants: a harvester is
+> handed a run directory, not a workspace, and a run outlives the document that produced it.
+> Reading it from whatever `fleet.yaml` is in front of the harvester would sweep an old run against
+> a newer answer. It is intersected with that worker's actual grant, so a record naming something
+> the worker never held narrows nothing, and the field defaults to `[]` so every pre-existing
+> record keeps its sweep exactly as wide as it was.
+>
+> Shipped 2026-08-31 (ISC-388).
 
 ### 12.5 The result envelope is untrusted input
 
