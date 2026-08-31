@@ -48,13 +48,28 @@ afterAll(async () => {
  *
  * Sleeps rather than exiting so the supervisor treats it as a live child; the
  * test reads the recording, not the exit.
+ *
+ * THE RENAME IS LOAD-BEARING, and it is here because the earlier version was
+ * flaky in one direction only. `waitForFile` returns on the first non-empty
+ * read, while the recorder appends ONE LINE PER ARGUMENT — so a reader that
+ * arrived mid-loop saw a PREFIX of the argv and the test failed comparing a
+ * correctly-spawned command against a partially-written file. It surfaced
+ * first under `--coverage`, which is simply slow enough to widen the window.
+ *
+ * Building in `.part` and renaming makes the visible file atomic: any read
+ * that finds `argv.txt` at all finds all of it. **Reproduced deliberately
+ * rather than inferred:** injecting `sleep 0.2` between the appends turns two
+ * of this file's three recorder tests red against the append-in-place version
+ * and leaves all four green against this one.
  */
 async function plantRecorder(dir: string): Promise<{ bin: string; recording: string }> {
   const bin = join(dir, "recorder.sh");
   const recording = join(dir, "argv.txt");
   await writeFile(
     bin,
-    `#!/bin/sh\n: > ${recording}\nfor a in "$@"; do printf '%s\\n' "$a" >> ${recording}; done\nsleep 30\n`,
+    `#!/bin/sh\n: > ${recording}.part\n` +
+      `for a in "$@"; do printf '%s\\n' "$a" >> ${recording}.part; done\n` +
+      `mv ${recording}.part ${recording}\nsleep 30\n`,
   );
   await chmod(bin, 0o755);
   return { bin, recording };
