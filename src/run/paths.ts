@@ -907,13 +907,21 @@ export function socketPath(runId: string, workerId: string): string {
  * after every timestamp would otherwise become "the latest run" and every
  * socket path derived from it would dangle (found by the e2e suite).
  */
-export async function latestRunId(root: string = runsRoot()): Promise<string | null> {
+/**
+ * Every run id under the root, oldest first — the list `latestRunId` reduces.
+ *
+ * Extracted so a caller that needs "the newest run matching a PREDICATE" does
+ * not re-implement the `run.json` filter and the lexical sort. Two copies of
+ * that filter is how a stray directory becomes "the latest run" in one command
+ * and not in another.
+ */
+export async function runIdsAscending(root: string = runsRoot()): Promise<string[]> {
   const { readdir, stat } = await import("node:fs/promises");
   let entries: string[];
   try {
     entries = await readdir(root);
   } catch {
-    return null;
+    return [];
   }
   const runs: string[] = [];
   for (const e of entries) {
@@ -926,5 +934,10 @@ export async function latestRunId(root: string = runsRoot()): Promise<string | n
     }
   }
   runs.sort();
+  return runs;
+}
+
+export async function latestRunId(root: string = runsRoot()): Promise<string | null> {
+  const runs = await runIdsAscending(root);
   return runs.length > 0 ? runs[runs.length - 1]! : null;
 }
