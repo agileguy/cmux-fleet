@@ -969,6 +969,32 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
       return state.phase === "idle" ? "idle" : "busy";
     },
 
+    /**
+     * The scheduler's window onto `pane_mode` (TUI spec item 13), so it can
+     * refuse a `depends_on` edge onto a tui worker before dispatching anything.
+     *
+     * `planDispatch` and not a second reading of the launch record: it owns the
+     * `launch === null` -> rpc answer and the field-leads-marks-veto rule, and
+     * the whole reason `launchPaneMode` is imported rather than reproduced in
+     * this file is that a second copy is how the CLI and the abort path would
+     * start disagreeing about which plane a worker has. Two computations of one
+     * fact are two things that can disagree after an edit.
+     *
+     * An UNREADABLE record answers `"unknown"` rather than throwing, and that
+     * is not swallowing the error: `sendTaskEnvelope` still refuses it with the
+     * reason at dispatch time, and the scheduler's own contract is that
+     * `"unknown"` is not tui. Throwing here would convert a damaged record for
+     * ONE worker into a refusal of the whole schedule, including the tasks that
+     * never touch it.
+     */
+    async paneMode(worker: string): Promise<"rpc" | "tui" | "unknown"> {
+      const route = planDispatch(
+        await readWorkerLaunch(workerPaths(run, worker)).catch(() => null),
+      );
+      if (route.kind === "rpc") return "rpc";
+      return route.kind === "pane" ? "tui" : "unknown";
+    },
+
     async dispatch(spec: TaskSpec, worker: string, taskId: string): Promise<DispatchAnswer> {
       /**
        * `--auto` never types into a person's pane.
