@@ -37,7 +37,7 @@ import { workerPaths, type RunPaths } from "../run/paths.ts";
 import { StateReadError } from "../run/state.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import type { PaneRef } from "../backends/types.ts";
-import { TUI_VOIDED } from "./voided.ts";
+import { voidedFor, type LaunchPaneMode } from "./voided.ts";
 
 /**
  * The one backend method mode-switching needs. Narrowed from `FleetBackend`
@@ -391,6 +391,19 @@ export interface ModeSwitchArgs {
   workerId: string;
   backend: PaneDriver;
   pane: PaneRef;
+  /**
+   * How `up` LAUNCHED this worker, which decides which voided table the record
+   * carries (TUI spec item 14). Defaults to `rpc` because every worker was one
+   * until Phase 1 and every existing caller means that.
+   *
+   * NOT DERIVED HERE, deliberately. The answer lives in the worker's launch
+   * record and `container/interrupt.ts`'s `launchPaneMode` is the one reader of
+   * it — a second, private derivation in this module is the drift
+   * `steer.ts`'s duplicate `readAttended` already cost this repo once. The
+   * caller has already computed it (`cli/commands/tui.ts` needs it to decide
+   * whether to respawn the pane at all) and passes what it found.
+   */
+  paneMode?: LaunchPaneMode;
 }
 
 /**
@@ -400,6 +413,10 @@ export interface ModeSwitchArgs {
  * answers "was this run ever touched", and the first touch is when the answer
  * became yes — while `left_at` returns to `null` and the voided table is
  * refreshed to the current build's list.
+ *
+ * WHICH list depends on how the worker was LAUNCHED, not on what the pane is
+ * doing: a `pane_mode: tui` worker voids a second set of guarantees for the
+ * life of the run, and `voidedFor` is the only place that decision is made.
  */
 export async function enterTui(args: ModeSwitchArgs): Promise<AttendedRecord> {
   const existing = await readAttended(args.run, args.workerId);
@@ -409,7 +426,7 @@ export async function enterTui(args: ModeSwitchArgs): Promise<AttendedRecord> {
     mode: "tui" satisfies PaneMode,
     entered_at: existing?.entered_at ?? new Date().toISOString(),
     left_at: null,
-    voided: [...TUI_VOIDED],
+    voided: [...voidedFor(args.paneMode ?? "rpc")],
   });
 
   // Record first, pane second — see the module comment for why this order.

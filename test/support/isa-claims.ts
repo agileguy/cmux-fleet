@@ -1624,6 +1624,96 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     ],
     expect: 1,
   },
+  {
+    isc: "ISC-370",
+    grade: "[x]",
+    claim:
+      "`--mode rpc` is pushed for every worker that is NOT tui — the whole of 'a tui worker's " +
+      "pi argv omits --mode entirely', in one line. Pinned on the NEGATED condition rather " +
+      "than on a mention of `paneMode`, because the defect this criterion was filed against " +
+      "is a field that parses and is read by nothing: before Phase 1 `pane_mode: tui` " +
+      "validated and produced an argv identical to `rpc`'s. Inverting this condition, or " +
+      "unguarding the push, makes every tui worker an RPC worker again with no other symptom.",
+    argv: [
+      "grep",
+      "-nF",
+      'if (w.paneMode !== "tui") argv.push("--mode", "rpc");',
+      "src/config/render.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-370",
+    grade: "[x]",
+    claim:
+      "…and the other mark, which must move with it. `-t` is what gives the container the " +
+      "pseudo-TTY Pi needs to present a TUI at all. The two lines are also what " +
+      "`launchPaneMode` reads back to decide whether a worker can be signalled or attached " +
+      "to, so a change to either without the other produces a record whose marks disagree — " +
+      "which every consumer then refuses, correctly, and which no operator can act on. " +
+      "`tui-interrupt.test.ts`'s 'the ends that must move together' asserts the same pair " +
+      "from the other side.",
+    argv: [
+      "grep",
+      "-nF",
+      'if (w.paneMode === "tui") argv.push("-t");',
+      "src/config/render.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-374",
+    grade: "[x]",
+    claim:
+      "There is EXACTLY ONE detacher in the supervisor. The count is the claim, not the " +
+      "presence: a second call site would mean two places deciding the launch shape, and the " +
+      "next reader would have to work out which won — the ISC-188 shape `detachedDockerArgv` " +
+      "itself throws on. Empty means the tui launch path is gone; more than one means it " +
+      "grew a rival.",
+    argv: ["grep", "-cF", "detachedDockerArgv(", "src/supervisor/index.ts"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-374",
+    grade: "[x]",
+    claim:
+      "The mode reaches the launch record at all. This is the line whose deletion left 82 " +
+      "tests green on a fleet that could no longer launch a TUI, because " +
+      "`WorkerLaunchSchema` DEFAULTS `pane_mode` to `rpc` and every in-memory fixture went " +
+      "on passing. A registered claim is the cheapest guard that notices a line whose " +
+      "absence is indistinguishable from a default.",
+    argv: ["grep", "-rnF", "pane_mode: w.paneMode", "src/"],
+    expect: 1,
+  },
+  {
+    isc: "ISC-382",
+    grade: "[x]",
+    claim:
+      "The voided table stamped into a worker's attended record — which is the list `report` " +
+      "prints — is CHOSEN by how `up` launched that worker, at the one site that writes it. " +
+      "A presence claim, and the direction matters: if this call site reverts to a constant, " +
+      "a `pane_mode: tui` run reports the attended table alone and an operator is never told " +
+      "that a re-dispatch would run the task twice.",
+    argv: [
+      "grep",
+      "-nF",
+      'voided: [...voidedFor(args.paneMode ?? "rpc")],',
+      "src/attended/mode.ts",
+    ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-382",
+    grade: "[x]",
+    claim:
+      "NO production path stamps the attended table unconditionally. The absence half of the " +
+      "claim above, and the one a presence check cannot make: a future edit could add a " +
+      "second writer of `attended.json` — `up` is the obvious one, since ISC-382's own " +
+      "residual asks for exactly that — and spell it the way this module did before Phase 4. " +
+      "That would leave `voidedFor` present, called, and bypassed.",
+    argv: ["grep", "-rnF", "voided: [...TUI_VOIDED]", "src/"],
+    expect: "empty",
+  },
 ] as const;
 
 /**

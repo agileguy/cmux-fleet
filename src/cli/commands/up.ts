@@ -1905,6 +1905,26 @@ export function register(program: Command): void {
                 workerId,
                 backend: PANE_ALREADY_ATTENDED,
                 pane,
+                /*
+                 * `"tui"` is not a guess: the predicate on the line above is
+                 * true exactly when `launchPaneMode(launch) === "tui"`, so
+                 * inside this block the mode is established rather than
+                 * assumed.
+                 *
+                 * IT MUST BE PASSED, and omitting it is a defect this merge
+                 * actually made. `enterTui` defaults to `"rpc"` — correctly,
+                 * because every caller written before Phase 4 means that — so
+                 * a record written without this argument names the ATTENDED
+                 * voided table and not the MODE's. Closing the attendance gap
+                 * with the wrong table would report a run as attended while
+                 * dropping every row only this mode voids: no epoch, so a
+                 * re-dispatch runs the task twice (ISC-85); `cmux` exiting 0
+                 * proves only that bytes reached a pty (ISC-86); the session
+                 * file was found by suffix match rather than recorded
+                 * (ISC-95); `abort` stops the worker rather than interrupting
+                 * a turn (ISC-81).
+                 */
+                paneMode: "tui",
               });
             }
           } catch (err) {

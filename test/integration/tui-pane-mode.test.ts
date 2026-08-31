@@ -114,6 +114,45 @@ describe("pifleet tui on a pane_mode: tui worker", () => {
   }, cliBudget(1));
 
   /**
+   * The record carries the MODE's voided table, not just the attended one
+   * (TUI spec item 14).
+   *
+   * `report` prints `record.voided` verbatim, so this file is the only place
+   * where "the report says which guarantees the mode gave up" is a fact about
+   * the shipped command rather than about an exported constant. A unit test on
+   * `voidedFor` proves the table; only this proves it was reached.
+   *
+   * Asserted by CONTENT and not by length. A count would pass against a build
+   * that stamped ten copies of the same row, and the ids below are chosen as
+   * the ones an operator acts on differently: ISC-85 is "a re-dispatch runs the
+   * task twice", ISC-95 is "the session file was found by search", ISC-106 is
+   * the attended-mode audit-trail row that must NOT be dropped by the merge.
+   */
+  test("the record carries the mode's voided rows, not only the attended ones", async () => {
+    const rig = await makeRun("tui");
+    expect((await tui(rig, ["--worker", "eng-1", "--run", RUN_ID])).code).toBe(0);
+    const record = JSON.parse(await readFile(rig.attendedPath, "utf8")) as {
+      voided: { isc: string; because: string }[];
+    };
+    const ids = record.voided.map((v) => v.isc);
+
+    // Mode rows: true from the moment `up` created the container.
+    expect(ids).toContain("ISC-85");
+    expect(ids).toContain("ISC-95");
+    // Attended rows survive the merge — a tui pane is a person's by
+    // construction, so dropping these would UNDER-report the run.
+    expect(ids).toContain("ISC-106");
+    // No criterion twice, or an operator reads the same warning under two
+    // contradictory sentences.
+    expect(new Set(ids).size).toBe(ids.length);
+
+    // The sentence, not just the id: the mode's reason is the one shown for a
+    // criterion both tables name (ISC-87 is completion detection).
+    const completion = record.voided.find((v) => v.isc === "ISC-87")!.because;
+    expect(completion).toMatch(/transcript/i);
+  }, cliBudget(1));
+
+  /**
    * The CONTROL arm. Same rig, same unreachable surface, `pane_mode: rpc` — and
    * it fails, because an rpc worker's entry DOES respawn the pane. Without this
    * arm the test above would also pass for a build that had simply stopped
@@ -124,6 +163,29 @@ describe("pifleet tui on a pane_mode: tui worker", () => {
     const r = await tui(rig, ["--worker", "eng-1", "--run", RUN_ID]);
     expect(r.code).not.toBe(0);
     expect(`${r.stdout}${r.stderr}`).not.toMatch(/pane was NOT changed/);
+
+    /**
+     * …and its record carries the ATTENDED table only (TUI spec item 14).
+     *
+     * The control arm for the voided-table assertion above, and the reason it
+     * is here rather than in its own test: this rig already differs from the
+     * tui rig in exactly one variable. Without it, a `voidedFor` that ignored
+     * its argument and always merged would satisfy every positive assertion in
+     * this file while telling an operator that an ordinary rpc worker had lost
+     * its epochs, its ack and its abort.
+     *
+     * The record exists despite the failure BY DESIGN: `enterTui` writes before
+     * it respawns, so a failed respawn overclaims attendance rather than losing
+     * it. That ordering is `attended/mode.ts`'s, and reading the file here is
+     * what makes it observable from outside.
+     */
+    const record = JSON.parse(await readFile(rig.attendedPath, "utf8")) as {
+      voided: { isc: string }[];
+    };
+    const ids = record.voided.map((v) => v.isc);
+    expect(ids).toContain("ISC-106"); // attended rows: present, as always
+    expect(ids).not.toContain("ISC-85"); // mode rows: absent, because rpc has epochs
+    expect(ids).not.toContain("ISC-95"); // …and records its session path verbatim
   }, cliBudget(1));
 
   /**

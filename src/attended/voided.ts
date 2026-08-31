@@ -16,13 +16,36 @@
  *    `test/unit/voided.test.ts` against the real ISA file.
  *
  * 2. **The table is derived from reading the criteria, not from the SRD's
- *    §3.5 prose.** The SRD's tui design reparents Pi's stdin to the pane; this
- *    implementation does not — the supervisor keeps the RPC stream, so RPC
+ *    §3.5 prose.** The SRD's tui design reparents Pi's stdin to the pane; an
+ *    **`rpc` worker** does not — the supervisor keeps the RPC stream, so RPC
  *    `abort`, stats polling and dialog answering all still work. What a person
  *    in the pane gets is hands inside the worker's container and worktree, and
  *    the guarantees that die are the ones about ATTRIBUTION and QUIESCENCE:
  *    everything that treats the diff as the agent's work, the settle as the
  *    end of writes, and the pane as a surface that carries no input.
+ *
+ * ## The `rpc` qualifier in (2) was ADDED, not always there (TUI spec item 14)
+ *
+ * It used to read "this implementation does not", with no worker named, and as
+ * a flat statement about the implementation it is now FALSE. It was written
+ * when every worker in this repo was an rpc worker, so the qualifier cost
+ * nothing and was left off — the same way `attended/mode.ts`'s `interactiveArgv`
+ * carried a flat "NOT `docker attach`" until Phase 3 had to scope it.
+ *
+ * `pane_mode: tui` is the counterexample the sentence did not anticipate. Such
+ * a worker runs Pi with `--mode rpc` OMITTED on a real pty, and the supervisor
+ * holds none of its three streams (`supervisor/index.ts` launches it detached
+ * and tracks it by container name). So for that worker the SRD's design is
+ * exactly what shipped: `abort` is not RPC, stats cannot be polled, and nothing
+ * answers a dialog. `PANE_MODE_TUI_VOIDED` below is that second, disjoint
+ * cause of voiding, and `voidedFor` is how a caller gets the right one.
+ *
+ * **THE TWO TABLES ARE KEYED ON DIFFERENT THINGS, which is why merging them
+ * into one would be wrong.** `TUI_VOIDED` is keyed on an ACT — a person typed —
+ * and is stamped when `pifleet tui` records that act. `PANE_MODE_TUI_VOIDED` is
+ * keyed on the MODE, and every row in it is true from the moment `up` creates
+ * the container, whether or not anybody has touched it. A tui worker gets both,
+ * because its pane is a person's by construction.
  */
 
 import { VoidedRequirementSchema, type VoidedRequirement } from "../contracts.ts";
@@ -77,6 +100,126 @@ export const TUI_VOIDED: readonly VoidedRequirement[] = [
       "Stream-offset fencing orders RPC records only; a person's writes have no stream position at all, so the fence cannot place their work before or after any epoch.",
   },
 ].map((v) => VoidedRequirementSchema.parse(v));
+
+/**
+ * What `pane_mode: tui` gives up, for the LIFE OF THE RUN (SRD §3.5, TUI spec
+ * item 14).
+ *
+ * Every row is true from the moment `up` creates the container. Nobody has to
+ * type anything: the mode omits `--mode rpc`, the supervisor holds none of the
+ * worker's three streams, and the whole control plane the criteria below are
+ * written about does not exist for this worker.
+ *
+ * **THE REASONS ARE THE ONES THE BUILD MEASURED, NOT THE ONES §3.5 GUESSED**,
+ * and in three places those differ. §3.5 feared `docker kill --signal=INT`
+ * would be a no-op; measured, it stops the worker cleanly (ISC-81 below).
+ * §3.5 says only "completion is transcript-derived, coarser"; the operator-
+ * facing consequence is that a re-dispatch RUNS THE TASK TWICE (ISC-85). And
+ * §3.5 does not mention ISC-95 at all, though voiding `get_state` is what
+ * forces the session file to be found by search rather than recorded.
+ *
+ * Ordered by criterion number, like the table above, so a reader can diff the
+ * printed list against the ISA top to bottom.
+ */
+export const PANE_MODE_TUI_VOIDED: readonly VoidedRequirement[] = [
+  {
+    isc: "ISC-74",
+    because:
+      "SRD F15 — closing a pane does not stop the worker — is false here: the pane IS the worker's terminal, and closing it ends the docker attach that holds it. ASSERTED, NOT MEASURED, and it is the only unmeasured row in this table: --sig-proxy is left at docker's default and no probe has ever closed a tui pane and then looked at the container, so confirm with `docker ps` before reading a settled verdict as a finished run. ISC-74's own sentence survives (no backend touches a SUPERVISOR's lifecycle, and none does here); what is void is the guarantee its original wording carried, which said `in rpc mode` even then.",
+  },
+  {
+    isc: "ISC-81",
+    because:
+      "`pifleet abort` on this worker issues `docker kill --signal=INT`, which STOPS it rather than returning it to idle — measured: tini forwards to the entrypoint shell, whose `trap forward TERM INT HUP` converts it to TERM and Pi exits cleanly. Pi's turn-interrupt is the ESCAPE keystroke in the pane, which no pifleet command can send, so there is no way to end a turn and keep the worker; abort's JSON says `via` so the two claims are never confused.",
+  },
+  {
+    isc: "ISC-84",
+    because:
+      "No epoch is allocated at all — the supervisor is the sole allocator and it allocates inside the RPC dispatch handler this worker does not have — so §7.5's interleaving cannot be decided rather than being decided wrongly, and every diff in the run belongs to one undifferentiated placeholder epoch 0.",
+  },
+  {
+    isc: "ISC-85",
+    because:
+      "With no epoch there is no `(worker, task_id, epoch)` to recognise, so `already_completed` can never be returned: re-dispatching the same task file types the prompt into the pane a second time and RUNS THE TASK TWICE, and the harvest accepts whichever result.json lands last. Check the transcript before re-dispatching, because nothing else will.",
+  },
+  {
+    isc: "ISC-86",
+    because:
+      "There is no ack to fail late, because there is no ack at all: `accepted: true` here means cmux exited 0, i.e. bytes reached a pty. It does not prove Pi read them, that a turn started, or that the program on that terminal is still Pi. `prompt_rejected` cannot happen either, so its absence is not evidence that nothing refused.",
+  },
+  {
+    isc: "ISC-87",
+    because:
+      "Completion is read out of the session transcript — a terminal-looking assistant entry followed by a quiet window — with no agent_end and no correlated get_state to double-check it against. It is coarser by construction: a turn that resumes after the quiet window has already been settled, so treat a tui worker's settle as a strong hint rather than as the proof the rpc path gives.",
+  },
+  {
+    isc: "ISC-95",
+    because:
+      "`session_path` cannot be recorded verbatim, because get_state is an RPC method this worker has no channel for, so discoverSessionPath SUFFIX-MATCHES `_<worker-id>.jsonl` in the run's own flat session directory instead. Bounded rather than ignored — unique worker id, non-recursive read, and when several match the newest by mtime is returned WITH THE COUNT so the ambiguity is logged — but still weaker than a path Pi stated itself: a Pi that changes §4.2's naming yields nothing here while the rpc path keeps working.",
+  },
+  {
+    isc: "ISC-111",
+    because:
+      "Nothing answers a dialog extension_ui_request, so one BLOCKS the worker until a person answers it in the pane. That is acceptable only because this mode is attended by construction — leave a tui worker unwatched and a dialog stalls it silently for the rest of the run, with the pane showing the answer nobody gave.",
+  },
+  {
+    isc: "ISC-115",
+    because:
+      "get_session_stats can never be wired for this worker — there is no control plane to send it on — so harvest/usage.ts's element-wise max is permanently one-armed and the transcript is the only cost source there will ever be. A transcript rewritten or branch-pruned on session switch therefore under-counts with nothing to correct it, and an under-count feeding tokens_ceiling means the ceiling never trips. The polling is unwired for rpc workers too (SRD §13, F12), so this is a structural bound rather than a regression against them.",
+  },
+  {
+    isc: "ISC-141",
+    because:
+      "There is no RPC stream, so there are no offsets and no fence post: the input the attribution rule reads does not exist for this worker. That subsumes the weaker attended-mode reason above — it is not that a person's writes sit outside the fence, it is that there is no fence.",
+  },
+].map((v) => VoidedRequirementSchema.parse(v));
+
+/**
+ * How the worker was LAUNCHED, as `container/interrupt.ts`'s `launchPaneMode`
+ * reports it. Not `PaneMode` from `contracts.ts` — that is `viewer | tui` and
+ * describes what a PANE is showing right now, which is a different question
+ * with an unhappily similar spelling.
+ */
+export type LaunchPaneMode = "rpc" | "tui";
+
+/**
+ * The table to stamp into a worker's attended record, and therefore the list
+ * `report` prints for it.
+ *
+ * A tui worker gets BOTH tables. Its pane is a person's `docker attach` from
+ * the moment `up` creates it, so every attended-mode row applies to it as much
+ * as to a worker someone entered by hand — and the mode's own rows apply on
+ * top. Returning only `PANE_MODE_TUI_VOIDED` would silently drop the
+ * mutating-verb audit-trail warning (ISC-106/107) and the diff-attribution
+ * warnings (ISC-92/93/94) from the one class of run where a person's hands are
+ * in the container by default, which is the worse of the two possible errors.
+ *
+ * **THE OVERLAP RESOLVES TOWARDS THE MODE, deliberately.** ISC-84, ISC-87 and
+ * ISC-141 are in both tables for different reasons, and the mode's reason is
+ * the stronger one in each case: attended mode says a person's writes carry no
+ * stream position, the mode says there is no stream. Showing the weaker
+ * sentence on a tui worker would tell an operator a fence exists that their
+ * work merely sits outside of. `test/unit/voided.test.ts` asserts the winner
+ * per id rather than trusting the order of the spread below.
+ *
+ * `Object.freeze` because the array is handed to callers that put it straight
+ * into a durable record; a table any caller can push onto is not a table.
+ * `unknown` is deliberately NOT a case here — `cli/commands/tui.ts` refuses a
+ * worker whose launch record and argv disagree before it ever gets this far,
+ * and inventing a third answer would hide that refusal behind a default.
+ */
+export function voidedFor(mode: LaunchPaneMode): readonly VoidedRequirement[] {
+  if (mode === "rpc") return TUI_VOIDED;
+  const byIsc = new Map<string, VoidedRequirement>();
+  for (const v of TUI_VOIDED) byIsc.set(v.isc, v);
+  // Second, so the mode's sentence replaces the attended one on a collision.
+  for (const v of PANE_MODE_TUI_VOIDED) byIsc.set(v.isc, v);
+  return Object.freeze(
+    [...byIsc.values()].sort(
+      (a, b) => Number(a.isc.slice("ISC-".length)) - Number(b.isc.slice("ISC-".length)),
+    ),
+  );
+}
 
 /**
  * The set of criterion ids the ISA actually DEFINES.

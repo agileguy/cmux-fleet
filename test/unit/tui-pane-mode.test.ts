@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { WorkerLaunchSchema, type WorkerLaunch } from "../../src/contracts.ts";
 import { runPaths, workerPaths, type RunPaths } from "../../src/run/paths.ts";
 import { enterTui, readAttended } from "../../src/attended/mode.ts";
-import { TUI_VOIDED } from "../../src/attended/voided.ts";
+import { TUI_VOIDED, voidedFor } from "../../src/attended/voided.ts";
 import type { PaneRef } from "../../src/backends/types.ts";
 import { PANE_ALREADY_ATTENDED, tuiPaneMode } from "../../src/cli/commands/tui.ts";
 
@@ -95,6 +95,14 @@ describe("entering attended mode on a worker whose pane is already a person's", 
    * ever mark it attended, and the run would present as autonomous while a
    * person typed into it.
    */
+  /**
+   * STRENGTHENED for TUI spec item 14. This test's scenario is a
+   * `pane_mode: tui` worker, and it used to assert the record carried
+   * `TUI_VOIDED` — the ATTENDED table — because that was the only table there
+   * was. It now asserts the table `voidedFor` picks for the mode, which is
+   * that one plus the mode's own rows. Nothing was relaxed: every id the old
+   * assertion required is still required, by the loop below.
+   */
   test("writes the attended record and its voided table", async () => {
     const run = await makeRun();
     const record = await enterTui({
@@ -102,15 +110,45 @@ describe("entering attended mode on a worker whose pane is already a person's", 
       workerId: "w-1",
       backend: PANE_ALREADY_ATTENDED,
       pane: PANE,
+      paneMode: "tui",
     });
     expect(record.mode).toBe("tui");
     expect(record.left_at).toBeNull();
-    expect(record.voided.map((v) => v.isc)).toEqual(TUI_VOIDED.map((v) => v.isc));
+    expect(record.voided.map((v) => v.isc)).toEqual(voidedFor("tui").map((v) => v.isc));
+    // The old assertion's content, kept explicitly rather than implied by the
+    // line above: every attended-mode row survives the merge.
+    for (const v of TUI_VOIDED) expect(record.voided.map((r) => r.isc)).toContain(v.isc);
+    // …and the mode's rows are there too, which is what the merge is FOR.
+    expect(record.voided.map((r) => r.isc)).toContain("ISC-85");
 
     // …and it is on DISK, not merely returned. `report` reads the file.
     const onDisk = await readAttended(run, "w-1");
     expect(onDisk?.mode).toBe("tui");
-    expect(onDisk?.voided.length).toBe(TUI_VOIDED.length);
+    expect(onDisk?.voided.length).toBe(voidedFor("tui").length);
+    expect(onDisk!.voided.length).toBeGreaterThan(TUI_VOIDED.length);
+  });
+
+  /**
+   * The DEFAULT is `rpc`, and it is asserted rather than left implicit.
+   *
+   * `paneMode` is optional on `ModeSwitchArgs` so that every pre-Phase-4
+   * caller keeps meaning what it meant. An omitted argument that silently
+   * merged the mode's table would tell an operator entering an ordinary
+   * worker's pane that their run had lost its epochs and its ack, which is the
+   * over-reporting direction — safe for the invariant, and a lie about the
+   * mechanism. Both directions are wrong; this pins the one that is reachable
+   * by forgetting an argument.
+   */
+  test("an omitted paneMode records the attended table, not the mode's", async () => {
+    const run = await makeRun();
+    const record = await enterTui({
+      run,
+      workerId: "w-2",
+      backend: PANE_ALREADY_ATTENDED,
+      pane: PANE,
+    });
+    expect(record.voided.map((v) => v.isc)).toEqual(TUI_VOIDED.map((v) => v.isc));
+    expect(record.voided.map((v) => v.isc)).not.toContain("ISC-85");
   });
 
   /**

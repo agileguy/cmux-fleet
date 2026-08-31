@@ -434,6 +434,46 @@ describe("the pane argv and the attendance record share one predicate", () => {
     // No hand-rolled record write beside the sanctioned one.
     expect(src).not.toContain("ATTENDED_SCHEMA");
   });
+
+  /**
+   * …and it writes the table for the MODE, not the one for an operator's act.
+   *
+   * ADDED 2026-08-31, after a defect that existed only in the merge. This call
+   * site and `attended/voided.ts`'s `voidedFor` were built on separate
+   * branches, neither touching the other's files, and git merged them clean.
+   * The result compiled, typechecked, and passed every test on both sides
+   * while doing the wrong thing: `enterTui`'s `paneMode` defaults to `"rpc"`
+   * — correctly, because every pre-Phase-4 caller means that — so `up` closed
+   * the attendance gap by writing a record that named the ATTENDED voided
+   * table and not the mode's.
+   *
+   * That is not a cosmetic mismatch. The rows it dropped are the ones only
+   * this mode voids: that no epoch is allocated so a re-dispatch RUNS THE TASK
+   * TWICE (ISC-85), that `cmux` exiting 0 means only that bytes reached a pty
+   * (ISC-86), that the session file was found by suffix match rather than
+   * recorded (ISC-95), and that `abort` is a stop rather than a turn-interrupt
+   * (ISC-81). An operator reading `report` for a run they never typed into
+   * would have been told the run was attended and NOT told any of it.
+   *
+   * Pinned as source text in the idiom of its neighbours above, because the
+   * fact under test is which argument this one call site passes, and the
+   * behaviour it selects is already proved in `voided.test.ts`. The two halves
+   * meet here and nowhere else.
+   */
+  test("the record it writes carries the tui table, not the rpc default", () => {
+    const src = stripComments(
+      readFileSync(join(new URL("../../", import.meta.url).pathname, "src/cli/commands/up.ts"), "utf8"),
+    );
+    const call = /if \(panePresentationIsAttach\(\{ launch \}\)\) \{([\s\S]*?)\n            \}/.exec(src);
+    expect(call, "the attendance write could not be located").not.toBeNull();
+    const body = call![1] ?? "";
+    expect(
+      body,
+      "up must pass paneMode: \"tui\" — the predicate guarding this block is true " +
+        "exactly when the worker is tui, and enterTui defaults to \"rpc\", so omitting " +
+        "it writes the attended table and silently drops every row the MODE voids",
+    ).toMatch(/paneMode:\s*"tui"/);
+  });
 });
 
 // ---------------------------------------------------------------------------
