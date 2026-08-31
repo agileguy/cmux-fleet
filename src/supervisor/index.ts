@@ -1769,7 +1769,34 @@ async function main(): Promise<void> {
       em.noteAbortRequested();
       void persistFence();
       logEvent({ type: "deadline_exceeded", task_id: em.live.task_id, epoch: em.live.epoch });
-      void client.send("abort").catch(() => {});
+      /**
+       * SITE 1 of 6 — the DEADLINE abort. A `tui` worker gets none.
+       *
+       * SRD §3.5 voids RPC `abort` for this mode and names the replacement:
+       * `docker kill --signal=INT` against the container. That is spec item 8
+       * and it is NOT built here — `.local/TUI-SPEC.md` §2.8 shows why it is a
+       * product decision rather than a line of code (tini runs without `-g`, so
+       * the signal lands on the entrypoint shell; and the shell's own
+       * `trap forward TERM INT HUP` would convert a person's Ctrl-C in the pane
+       * into a SIGTERM on the worker). Shipping half of that would give a pane
+       * whose Ctrl-C kills the agent.
+       *
+       * So the deadline is recorded and NOT acted on, loudly. The event is the
+       * whole point: a silent `?.` here would leave an operator reading a task
+       * that timed out with no line anywhere saying the interrupt never left
+       * this process.
+       */
+      if (client === null) {
+        logEvent({
+          type: "tui_abort_unavailable",
+          trigger: "deadline",
+          task_id: em.live.task_id,
+          epoch: em.live.epoch,
+          detail: "no RPC channel in pane_mode: tui; docker kill --signal=INT is spec item 8",
+        });
+      } else {
+        void client.send("abort").catch(() => {});
+      }
       // `abort` is advisory: an agent blocked inside a tool call may never act
       // on it, and settle is reachable only through `agent_end`. Without a
       // terminal escalation the epoch stays live forever — and because
@@ -1793,12 +1820,254 @@ async function main(): Promise<void> {
           .finally(() => {
             // Death must be unambiguous: a child that ignored abort is not
             // trustworthy to run the next task.
+            //
+            // FOR A `tui` WORKER THIS KILL REACHES NOTHING, and saying so is
+            // better than letting the line read as a guarantee it no longer
+            // makes. `child` is the `docker run -d` CLI, which exited seconds
+            // after launch; killing it is a no-op and the container runs on.
+            // The epoch is still settled — the task is over as far as the fleet
+            // is concerned — but the worker is not stopped. Stopping it needs
+            // `docker kill` against the recorded name, which is spec item 8.
+            if (tuiMode) {
+              logEvent({
+                type: "tui_kill_unavailable",
+                trigger: "deadline_escalation",
+                detail: "the epoch is settled but the container was not stopped (spec item 8)",
+              });
+              return;
+            }
             child.kill();
           });
       }, ABORT_GRACE_MS);
     }
     void flushState();
   }, HEARTBEAT_MS);
+
+  // -------------------------------------------------------------------------
+  // The `tui` completion plane (SRD §3.5, spec item 6) — transcript-derived.
+  //
+  // BELOW the heartbeat, and that position is load-bearing rather than
+  // stylistic. `test/unit/supervisor-session-latch.test.ts` locates the
+  // heartbeat by matching from the first `setInterval(() => {` to the first
+  // `}, HEARTBEAT_MS)` and then asserts what that body may not contain. A
+  // second interval declared ABOVE it silently widens that capture to span both
+  // — which is how this block first failed the guard, on a body that was not
+  // the heartbeat's. The guard is right; it was reading the wrong interval.
+  // -------------------------------------------------------------------------
+
+  /** The transcript reader, once a session file has been found. */
+  let tuiReader: TranscriptReader | null = null;
+  /**
+   * The entry count at the moment the LIVE epoch was first observed, and the
+   * epoch that count belongs to.
+   *
+   * Both, because one without the other is wrong. The count alone would carry
+   * across an epoch boundary and let the second task on a worker be judged from
+   * the first task's entries; the epoch alone says nothing about where to slice.
+   */
+  let tuiBaselineEpoch: number | null = null;
+  let tuiBaselineCount = 0;
+  /**
+   * How long the reading has been `ended`, or null whenever it is not.
+   *
+   * A `Stopwatch` and not a `Date.now()` subtraction (ISC-155). The quiet
+   * window is an ELAPSED measurement, and this supervisor runs on a laptop that
+   * sleeps: wall clock jumps on resume, so a two-second window measured against
+   * it would elapse instantly the moment the lid opened and settle a turn that
+   * was still running. `src/util/clock.ts` states the rule and
+   * `test/unit/clock.test.ts` greps this file for violations — it caught this
+   * line written the wrong way round.
+   */
+  let tuiQuiet: Stopwatch | null = null;
+  /** Entry count at the previous poll, to detect growth. */
+  let tuiLastCount = 0;
+  /** Re-entrancy guard: the poll body awaits, the interval does not wait. */
+  let tuiPolling = false;
+
+  /**
+   * Poll the session transcript, and settle the live epoch off it.
+   *
+   * This is what replaces `maybeProbe` for an attended worker, and it is
+   * deliberately a much weaker instrument. `maybeProbe` asks Pi twice, under a
+   * correlated generation token, and believes the answer only if both replies
+   * agree; there is no one to ask here, so the substitute is to watch the file
+   * Pi writes and decide the turn ended when it stops growing after an assistant
+   * message that did not end in a tool call. SRD §3.5 says completion in this
+   * mode is "transcript-derived, coarser". This is that coarseness, and the
+   * places it is coarse are named on `classifyTuiTurn` and `TUI_QUIET_MS`.
+   *
+   * ## Two jobs, and only one of them waits for Phase 3
+   *
+   * DISCOVERY runs today and matters today. `state.session_path` is what
+   * `harvest`, `transcript` and `budget` read, and SRD §3.5 promises the harvest
+   * is IDENTICAL in both modes — which is only true if something records the
+   * path. On the rpc path `get_state` reports it; here nothing would, and a
+   * `tui` worker's transcript would be invisible to every consumer even though
+   * the file was sitting in the run directory. That half is live whether or not
+   * a task is ever dispatched, which is the normal case for a worker a person
+   * is simply pair-working with.
+   *
+   * SETTLEMENT cannot fire yet, and that is stated rather than left to be
+   * discovered. `dispatch` REFUSES for a tui worker in this phase (see the case
+   * below), so no epoch goes live and `em.live` is always null here. Spec item
+   * 10 — `pifleet dispatch` routing through `cmux send` — is what makes epochs
+   * live by the pane route, and this loop is what will settle them. It is
+   * written and unit-proved now because the alternative is Phase 3 landing a
+   * dispatch path with no completion path underneath it.
+   *
+   * ## The baseline is taken HERE and not at dispatch
+   *
+   * Deliberately, and it is the reason this survives Phase 3 unchanged: the
+   * loop snapshots the entry count the first time it SEES a live epoch, so it
+   * does not care which route made it live. The cost is a window of up to one
+   * `TUI_POLL_MS` in which entries appended between the epoch going live and
+   * this poll observing it are counted as pre-baseline and ignored. At 500 ms,
+   * against a turn that has to reach a model before it writes anything, that
+   * window is not reachable in practice — but it is a real bound and it is
+   * written down rather than assumed away.
+   */
+  const transcriptPoll: ReturnType<typeof setInterval> | null = !tuiMode
+    ? null
+    : setInterval(() => {
+        if (tuiPolling || shuttingDown) return;
+        tuiPolling = true;
+        void (async () => {
+          try {
+            if (state.session_path === null) {
+              const found = await discoverSessionPath(run.sessionsDir, argv.workerId);
+              if (found.path === null) return;
+              /**
+               * The path, and ONLY the path.
+               *
+               * `session_present` is deliberately not set here even though the
+               * file has just been stat'd by the search. ISC-281 put that latch
+               * on the write path — `noteSessionFilePresent` runs inside
+               * `flushState`'s chain, immediately before the bytes are
+               * serialized — and `supervisor-session-latch.test.ts` asserts
+               * there is EXACTLY ONE place that stats the recorded path,
+               * because a second one makes the first deletable with every test
+               * still green. The `flushState()` below is what sets the flag, on
+               * the same code path an rpc worker uses.
+               */
+              state.session_path = found.path;
+              /**
+               * A DIFFERENT event type from the rpc path's, on purpose.
+               *
+               * `session_file_present` says the recorded path exists. This says
+               * the path was INFERRED from a filename rather than reported by
+               * Pi, and `matches` says how many files the inference had to
+               * choose between. An operator reading a run months later should
+               * be able to tell which of the two claims they are holding — see
+               * `discoverSessionPath` for why the weaker one is the only one
+               * available in this mode.
+               */
+              logEvent({
+                type: "tui_session_path_discovered",
+                path: found.path,
+                matches: found.matches,
+              });
+              void flushState();
+            }
+            if (tuiReader === null || tuiReader.path !== state.session_path) {
+              tuiReader = new TranscriptReader(state.session_path);
+              tuiLastCount = 0;
+              tuiQuiet = null;
+            }
+            await tuiReader.poll();
+            const count = tuiReader.entries.length;
+            const grew = count > tuiLastCount;
+            tuiLastCount = count;
+
+            const live = em.live;
+            if (live === null) {
+              // Nothing to settle. The reader is still polled above so that the
+              // baseline taken when an epoch DOES go live reflects the file as
+              // it actually stands, rather than as it stood at the last epoch.
+              tuiBaselineEpoch = null;
+              tuiQuiet = null;
+              return;
+            }
+            if (tuiBaselineEpoch !== live.epoch) {
+              tuiBaselineEpoch = live.epoch;
+              tuiBaselineCount = count;
+              tuiQuiet = null;
+              logEvent({
+                type: "tui_turn_baseline",
+                epoch: live.epoch,
+                task_id: live.task_id,
+                entries_before: count,
+              });
+              return;
+            }
+
+            const reading = classifyTuiTurn(tuiReader.entries.slice(tuiBaselineCount));
+            if (reading.phase !== "ended") {
+              tuiQuiet = null;
+              return;
+            }
+            // Growth RESETS the quiet clock even when the reading is already
+            // `ended`: entries that landed this tick mean the file is still
+            // being written, and an ending stop reason observed in the same
+            // poll as new bytes is exactly the mid-write race the window
+            // exists to survive.
+            if (grew || tuiQuiet === null) {
+              tuiQuiet = new Stopwatch();
+              return;
+            }
+            if (tuiQuiet.elapsedMs() < TUI_QUIET_MS) return;
+
+            /**
+             * PRECEDENCE, and it is the rpc path's with one addition.
+             *
+             * `maybeProbe` orders prose-trip, then `timed_out`, then `aborted`,
+             * then `success`, and states the rule behind that ordering: a
+             * DIAGNOSIS outranks a DESCRIPTION of how the epoch ended. The
+             * prose detector cannot trip here — it is fed from RPC events — so
+             * its slot is taken by the one diagnosis this mode does have. A
+             * transcript whose last assistant message stopped on `error` says
+             * WHY the turn ended, where `timed_out` and `aborted` only say that
+             * the supervisor was waiting or had asked it to stop.
+             *
+             * Everything below `error` is the same chain in the same order, so
+             * a task that hit its deadline reads `timed_out` in both modes.
+             */
+            let verdict: Verdict;
+            let reason: string;
+            if (reading.stopReason === "error") {
+              ({ verdict, reason } = verdictForStopReason("error"));
+            } else if (em.timedOut) {
+              verdict = "timed_out";
+              reason = "transcript_quiesced";
+            } else if (em.abortRequested) {
+              verdict = "aborted";
+              reason = "transcript_quiesced";
+            } else {
+              ({ verdict, reason } = verdictForStopReason(reading.stopReason));
+            }
+            logEvent({
+              type: "tui_turn_ended",
+              epoch: live.epoch,
+              task_id: live.task_id,
+              stop_reason: reading.stopReason,
+              quiet_ms: TUI_QUIET_MS,
+              verdict,
+            });
+            tuiQuiet = null;
+            // Through `settle`, and not through a second settlement path of its
+            // own: that one function writes the fence, the task record, the
+            // quiesce sample, the ledger row and `state`, and a tui epoch that
+            // settled by any other route would produce a differently-shaped run
+            // directory for the same event.
+            await settle(verdict, reason);
+          } catch (err) {
+            // A transcript that cannot be read must not take the supervisor
+            // down, and must not be silent either. The next poll retries.
+            logEvent({ type: "tui_transcript_poll_failed", message: String(err) });
+          } finally {
+            tuiPolling = false;
+          }
+        })();
+      }, TUI_POLL_MS);
 
   // -------------------------------------------------------------------------
   // Control socket handler (started earlier, before idle was writable).
@@ -1817,6 +2086,66 @@ async function main(): Promise<void> {
         const envelope = TaskEnvelopeSchema.parse(msg["envelope"]);
         const attemptId = typeof msg["attempt_id"] === "string" ? msg["attempt_id"] : "a-unknown";
         const requested = typeof msg["requested_epoch"] === "number" ? msg["requested_epoch"] : null;
+
+        /**
+         * SITE 2 of 6 — THE `prompt` SEND, and the one that matters most.
+         *
+         * A `tui` worker is not dispatchable over this socket. SRD §3.5 gives
+         * the mode a different dispatch path entirely — `cmux send` plus
+         * `send-key enter`, typed into the pane a person is attached to — and
+         * that path is spec item 10, Phase 3. It does not exist yet.
+         *
+         * ## Why this REFUSES rather than accepting and skipping the send
+         *
+         * The tempting shape is to allocate the epoch, do everything except the
+         * RPC `prompt`, and answer `accepted: true` so that Phase 3's CLI can
+         * deliver the text itself. That is the right END state and the wrong
+         * state to be in TODAY, because today's `dispatch` CLI reads
+         * `accepted: true` as "the worker has the prompt". It would then wait on
+         * a task no worker was ever told about, until the deadline settled it
+         * `timed_out` — a fleet that looks alive and does nothing, which is the
+         * exact shape this repo keeps closing.
+         *
+         * Refusing BEFORE `em.allocate` is also why nothing is burned. An epoch
+         * allocated and then abandoned advances the fence, and `allocate`
+         * refuses while one is live, so the tidy-looking alternative of
+         * allocate-then-settle would strand the worker for the length of a
+         * settle on every attempt. Nothing above this line has touched the
+         * fence, `state`, or the task policy.
+         *
+         * BOTH channels are told, deliberately. The ledger entry is what an
+         * operator reads afterwards; the returned error is what the caller sees
+         * NOW. A refusal that only logged would be a `dispatch` that appeared to
+         * hang from the CLI's side.
+         */
+        if (client === null) {
+          // `client === null` and not `tuiMode`, though the two are equivalent
+          // by construction. This spelling is the one that makes the guard
+          // real rather than asserted: it is what narrows `client` for the
+          // `send` below, so the refusal cannot be deleted without the prompt
+          // send failing to compile.
+          const reason = "pane_mode_tui_has_no_rpc_dispatch";
+          logEvent({
+            type: "dispatch_refused",
+            task_id: envelope.task_id,
+            reason,
+            detail:
+              "a tui worker is prompted by a person in its pane (cmux send + send-key enter); " +
+              "that route is spec item 10 and is not built",
+          });
+          await ledger.append("dispatch_rejected", {
+            worker: argv.workerId,
+            task_id: envelope.task_id,
+            detail: { reason },
+          });
+          return {
+            accepted: false,
+            reason,
+            error:
+              `worker ${argv.workerId} is pane_mode: tui; the supervisor holds no RPC channel to ` +
+              `it and cannot deliver a prompt. Type it in the attached pane.`,
+          };
+        }
 
         const decision = em.allocate(envelope.task_id, attemptId, requested);
         if (!decision.ok) {
@@ -1970,6 +2299,26 @@ async function main(): Promise<void> {
 
       case "steer": {
         if (em.live === null) return { ok: false, error: "no live epoch" };
+        /**
+         * SITE 3 of 6 — `steer`. Refused, and the refusal is nearly redundant.
+         *
+         * Steering is mid-turn text sent to a running agent, which in this mode
+         * is precisely what the attached pane is FOR: a person types it. So the
+         * capability is not lost, it moved to a keyboard, and the honest answer
+         * to a socket client asking for it is to say where it went.
+         *
+         * Nearly redundant because `dispatch` already refused, so no epoch can
+         * be live and the guard above returns first. It is written anyway
+         * because that will stop being true in Phase 3 — epochs WILL go live by
+         * the pane route — and a `steer` case that fell through to a null
+         * `client` at that point would be a crash rather than a refusal.
+         */
+        if (client === null) {
+          return {
+            ok: false,
+            error: `worker ${argv.workerId} is pane_mode: tui; steer it by typing in its pane`,
+          };
+        }
         const message = typeof msg["message"] === "string" ? msg["message"] : "";
         const sent = await client.send("steer", { message });
         return { ok: sent.response.success };
@@ -2062,6 +2411,35 @@ async function main(): Promise<void> {
        * container namespace than the operator's desktop was.
        */
       case "export_html": {
+        /**
+         * SITE 4 of 6 — `export_html`. Refused for a `tui` worker, FIRST.
+         *
+         * This is the one voided capability SRD §3.5 does not list, because
+         * §3.5 enumerates what the mode costs the CONTROL plane and this is an
+         * artifact path. It is voided all the same, for the same single reason:
+         * `export_html` is an RPC method, and there is no RPC channel.
+         *
+         * The loss is small and is already handled. This case exists so that a
+         * LIVE worker renders its own transcript — the authority, because it
+         * knows record types `harvest/transcript.ts` only models — and
+         * `cli/commands/transcript.ts` already prints the refusal on stderr and
+         * falls back to its own render. A `tui` worker therefore exports; it
+         * exports via the second opinion rather than the first.
+         *
+         * Placed at the TOP of the case, above the ISC-276 path check, because
+         * everything below it has side effects — `mkdir` of `exportsDir`, a
+         * staged filename, a sweep timer — and a refusal that first created an
+         * empty `exports/` directory and armed a 30-second timer would be
+         * leaving litter for an operation that never had a chance of running.
+         */
+        if (client === null) {
+          return {
+            ok: false,
+            error:
+              `worker ${argv.workerId} is pane_mode: tui and has no RPC channel; ` +
+              `render the transcript locally from the recorded session path`,
+          };
+        }
         // ISC-276. `in` rather than a type check on purpose: the objection is
         // to the field EXISTING, not to its shape. `{"path": null}` and
         // `{"path": 7}` are callers that believe they are steering this write
@@ -2125,6 +2503,42 @@ async function main(): Promise<void> {
           worker: argv.workerId,
           task_id: em.live?.task_id ?? undefined,
         });
+        /**
+         * SITE 5 of 6 — the OPERATOR's `abort`, and the only one of the six
+         * that must not answer `ok: true` in this mode.
+         *
+         * The lines above have already recorded the intent — `noteAbortRequested`
+         * plus a durable fence plus a ledger entry — and they stay, because a
+         * person asked for this and the record of the asking is true. What is
+         * NOT true is that anything was interrupted. SRD §3.5's replacement is
+         * `docker kill --signal=INT` against the container, which is spec item 8
+         * and is unresolved for the reason `.local/TUI-SPEC.md` §2.8 measures:
+         * tini runs without `-g` so the signal reaches the entrypoint shell and
+         * not the worker, and that shell's `trap forward TERM INT HUP` would
+         * turn a person's Ctrl-C in the pane into a SIGTERM that KILLS the agent
+         * rather than interrupting the turn. Both ends have to move together.
+         *
+         * `ok: false` is therefore the honest answer and the important one. An
+         * `abort` that logged and returned success would tell `pifleet abort`
+         * the turn had been interrupted; the operator would stop watching, and
+         * the agent would keep running. Reporting the failure sends them to the
+         * pane, where Ctrl-C does reach Pi today.
+         */
+        if (client === null) {
+          logEvent({
+            type: "tui_abort_unavailable",
+            trigger: "operator",
+            task_id: em.live.task_id,
+            epoch: em.live.epoch,
+            detail: "no RPC channel in pane_mode: tui; docker kill --signal=INT is spec item 8",
+          });
+          return {
+            ok: false,
+            error:
+              `worker ${argv.workerId} is pane_mode: tui; the abort was RECORDED but not ` +
+              `delivered — nothing interrupted the turn. Interrupt it in the attached pane.`,
+          };
+        }
         void client.send("abort").catch(() => {});
         return { ok: true };
       }
@@ -2166,15 +2580,77 @@ async function main(): Promise<void> {
      * here can safely unwind a half-finished injection.
      */
     refreshAbort.abort();
-    // Graceful stop per §13 F3: abort → give the turn a moment to settle →
-    // THEN close stdin. Closing stdin first destroys in-flight responses.
+    /**
+     * SITE 6 of 6 — the SHUTDOWN abort, and the teardown behind it.
+     *
+     * §13 F3's graceful stop is abort → give the turn a moment to settle → then
+     * close stdin, and every step of that assumes a child whose stdin this
+     * process holds. A `tui` worker gives it none, so the sequence is not
+     * shortened, it is replaced.
+     *
+     * The grace WAIT is dropped rather than kept. Waiting exists so an
+     * in-flight `abort` can produce a terminal event and settle the epoch
+     * cleanly; with no channel there is no abort in flight, and the loop would
+     * do nothing but delay every stop by two seconds before settling exactly as
+     * it settles now. So the epoch is settled directly, with the same verdict
+     * and the same reason string the rpc path writes, because it is the same
+     * fact: the operator stopped the worker mid-task.
+     */
     if (em.live !== null) {
-      void client.send("abort").catch(() => {});
-      const grace = new Stopwatch();
-      while (em.live !== null && grace.elapsedMs() < SHUTDOWN_GRACE_MS) {
-        await new Promise((r) => setTimeout(r, 25));
+      if (client === null) {
+        logEvent({
+          type: "tui_abort_unavailable",
+          trigger: "shutdown",
+          task_id: em.live.task_id,
+          epoch: em.live.epoch,
+          detail: "no RPC channel in pane_mode: tui; the epoch is settled without interrupting Pi",
+        });
+        await settle("aborted", "shutdown");
+      } else {
+        void client.send("abort").catch(() => {});
+        const grace = new Stopwatch();
+        while (em.live !== null && grace.elapsedMs() < SHUTDOWN_GRACE_MS) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        if (em.live !== null) await settle("aborted", "shutdown");
       }
-      if (em.live !== null) await settle("aborted", "shutdown");
+    }
+    if (tuiMode) {
+      /**
+       * THE TAIL `onChildExit` WILL NEVER RUN, done here instead.
+       *
+       * On the rpc path the lines below hand off: closing stdin ends Pi, Pi
+       * exits, `onChildExit` fires and — seeing `shuttingDown` — deregisters,
+       * stops the control server, clears the heartbeat and exits 0. Every one
+       * of those depends on a child that is still alive to die.
+       *
+       * A tui supervisor's child died at launch, on purpose, and its
+       * `onChildExit` already returned early. Nothing will ever call it again.
+       * Without this block `pifleet down` would leave a supervisor process
+       * spinning on a 250 ms heartbeat, still registered and still holding its
+       * control socket, forever — which is worse than the hang it replaces,
+       * because `state.json` would keep looking healthy.
+       *
+       * **WHAT THIS DOES NOT DO.** It does not stop the CONTAINER. This process
+       * has no handle on it — that was the whole point of detaching — and the
+       * `docker kill` that would is spec item 8, unresolved for the reason §2.8
+       * of the spec measures. `pifleet down` removes by the recorded name and
+       * remains the reaper for this mode, as it already is for an orphan the
+       * `--rm` flag could not collect.
+       */
+      logEvent({ type: "tui_shutdown", detail: "the container is left to `down`; see spec item 8" });
+      state.phase = "dead";
+      await flushState();
+      await ledger.append("worker_exit", {
+        worker: argv.workerId,
+        detail: { code: null, signal: null, pane_mode: "tui" },
+      });
+      clearUiDeadlines();
+      await registryCall(run, { cmd: "deregister_worker", worker: argv.workerId }, { optional: true });
+      await server.stop();
+      clearInterval(heartbeat);
+      if (transcriptPoll !== null) clearInterval(transcriptPoll);
+      process.exit(0);
     }
     try {
       child.stdin.end();
