@@ -85,6 +85,40 @@ proving the `rpc` argv did not move.
 
 ## Phase 2 — Supervisor: no RPC control plane
 
+### 2.0 THE BLOCKER — read this before anything else in Phase 2
+
+Phase 1 emits `-t` for a TUI worker, and **that argv cannot launch today.** Verified
+2026-08-31 against the merged Phase 1 work:
+
+```
+pifleet render -w tick-1    ->  docker flags ['-i','--rm']       pi: --mode rpc
+pifleet render -w tick-tui  ->  docker flags ['-i','-t','--rm']  pi: (none — interactive)
+```
+
+…which is exactly right. But `src/supervisor/index.ts:666` launches it as:
+
+```js
+const child = Bun.spawn({ cmd, stdin: "pipe", stdout: "pipe", stderr: "pipe", … });
+```
+
+A FOREGROUND `docker run -t` whose own stdin is a pipe fails with
+`the input device is not a TTY` — measured directly. So the first thing Phase 2 must do is
+give a TUI worker a launch path that does not run the container in the supervisor's
+foreground with pipes:
+
+- create the container **detached** (`-d`), which is what the smoke test above proves works
+  and what the pane's `docker attach` requires anyway; and
+- have the supervisor track the container by NAME rather than by holding its stdio, since
+  for a TUI worker it holds none of the three streams.
+
+This also means `onChildExit` cannot be the completion signal for a TUI worker — the
+`docker run -d` process exits immediately, long before Pi does. That is the same fact as
+item 6 (transcript-derived completion), arriving from the launch side.
+
+**Do not "fix" this by removing `-t`.** Without a TTY Pi does not present a TUI at all, and
+the whole mode is pointless.
+
+
 5. The supervisor must not open the RPC client, send `prompt`, or set the ack fence for a
    `tui` worker. Read `src/supervisor/index.ts` around the dispatch path first.
 6. Completion is **transcript-derived**: watch the session file rather than waiting for
