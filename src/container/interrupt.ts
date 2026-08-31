@@ -201,19 +201,38 @@ export function launchPaneMode(launch: WorkerLaunch): "rpc" | "tui" | "unknown" 
 /**
  * Decide how to interrupt one worker.
  *
- * `launch === null` is the `PIFLEET_PI_COMMAND` double — the launch record's
- * absence already means "no container was started" (`WorkerLaunchSchema`), so
- * this is a fact being read, not an inference.
+ * ## `launch === null` is an RPC worker, and the first version said otherwise
+ *
+ * The record's absence is the `PIFLEET_PI_COMMAND` double: a plain process on
+ * this host with no container. That much is a fact being read. This function
+ * originally drew `unavailable` from it, with the reason "no container to
+ * signal" — true, and the wrong conclusion. **Having no container is not the
+ * same as having no control plane.** The double runs under a supervisor with a
+ * live RPC client and a control socket, and `abort` over that socket is how
+ * ISC-81 has always been satisfied.
+ *
+ * MEASURED as a regression rather than reasoned about: two integration tests in
+ * `test/integration/abort.test.ts` went red with
+ * `cannot be aborted: no launch record`, one of them ISC-81's own busy-to-idle
+ * clock. Every unit test stayed green, because the unit test for this branch
+ * asserted the refusal — it pinned the defect rather than catching it. That is
+ * the shape worth remembering: a probe written from the same wrong premise as
+ * the code confirms it forever.
+ *
+ * `src/supervisor/index.ts` had already reached the opposite conclusion for the
+ * same case, in as many words: *"`launch === null` — the `PIFLEET_PI_COMMAND`
+ * double path — is `rpc` and cannot be anything else. The double is a plain
+ * process on this host, there is no container to detach and no terminal to
+ * attach to."* One fleet cannot hold both answers: a supervisor that gives the
+ * double an RPC control plane, and an `abort` that tells the operator it has
+ * none. This is the supervisor's answer, restated here.
+ *
+ * There is no ambiguity to guard against, either. `tui` mode is a property of a
+ * CONTAINER's TTY, so a worker with no container cannot be in it — which is why
+ * this returns the route directly instead of consulting `launchPaneMode`.
  */
 export function planInterrupt(launch: WorkerLaunch | null): InterruptPlan {
-  if (launch === null) {
-    return {
-      kind: "unavailable",
-      reason:
-        "no launch record — this worker was started against the PIFLEET_PI_COMMAND double, " +
-        "so it has no container to signal",
-    };
-  }
+  if (launch === null) return { kind: "rpc" };
 
   const mode = launchPaneMode(launch);
   if (mode === "rpc") return { kind: "rpc" };

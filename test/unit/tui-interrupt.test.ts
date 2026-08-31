@@ -217,11 +217,29 @@ describe("planInterrupt", () => {
    * through to either route: there is no container to signal and no claim to
    * make about a socket.
    */
-  test("a worker with no launch record is unavailable, not rpc and not signal", () => {
-    const plan = planInterrupt(null);
-    expect(plan.kind).toBe("unavailable");
-    if (plan.kind !== "unavailable") throw new Error("unreachable");
-    expect(plan.reason).toContain("no launch record");
+  /**
+   * REPLACES an assertion that was wrong, and the replacement is the reason to
+   * distrust a probe written from the same premise as its code.
+   *
+   * This test read `a worker with no launch record is unavailable, not rpc and
+   * not signal`, and it passed. `planInterrupt(null)` is the
+   * `PIFLEET_PI_COMMAND` double — no container, and therefore nothing to
+   * `docker kill` — from which the code concluded the worker could not be
+   * aborted at all. The double has no container AND a live supervisor holding
+   * an RPC control socket, which is how ISC-81 has always been satisfied.
+   *
+   * Two integration tests caught it, one of them ISC-81's own busy-to-idle
+   * clock, both with `cannot be aborted: no launch record`. Nothing at unit
+   * level did, because this test asserted the defect.
+   *
+   * Both directions, since the failure was a route and not a value: the double
+   * takes the rpc route, and it must not take either of the other two.
+   */
+  test("a worker with no launch record takes the rpc route — it has a control socket", () => {
+    expect(planInterrupt(null)).toEqual({ kind: "rpc" });
+    // Not signalled (there is no container) and not refused (there is a socket).
+    expect(planInterrupt(null).kind).not.toBe("signal");
+    expect(planInterrupt(null).kind).not.toBe("unavailable");
   });
 
   test("disagreeing marks refuse rather than guess", () => {
