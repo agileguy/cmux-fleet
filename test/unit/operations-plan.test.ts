@@ -161,11 +161,91 @@ describe("pane 1 — the ticketing agent", () => {
   });
 });
 
+describe("pane 1 — the agent", () => {
+  test("stages are up → viewer → container shell → host shell, in that order", () => {
+    // The requirement, and it is an ORDER: the pane must never land on a host
+    // prompt while anything above it is still available. A viewer placed after
+    // the shell, or a host `$SHELL` reached before the container one, both
+    // type-check and both give back the terminal the console exists to replace.
+    const cmd = plan()[0]!.command;
+    const at = (needle: string) => cmd.indexOf(needle);
+    expect(at("'up'")).toBeGreaterThan(-1);
+    expect(at("'up'")).toBeLessThan(at("'logs'"));
+    expect(at("'logs'")).toBeLessThan(at("'shell'"));
+    expect(at("'shell'")).toBeLessThan(at("exec $SHELL"));
+  });
+
+  test("the viewer FOLLOWS and RENDERS — it blocks, and a human reads it", () => {
+    // `--follow` is what makes the pane sit on an idle worker and come alive on
+    // dispatch; without it `logs` prints the backlog and exits, and the pane
+    // falls straight through to the shell. `--render` is the difference between
+    // an operator reading events and an operator reading raw JSONL.
+    const cmd = plan()[0]!.command;
+    expect(cmd).toContain("'logs'");
+    expect(cmd).toContain("'--follow'");
+    expect(cmd).toContain("'--render'");
+  });
+
+  test("viewer and shell both name the FIRST configured worker", () => {
+    // A pane shows one worker. Hardcoding `tick-1` would silently show the
+    // wrong agent for `--workers rev-1`, with the pane looking perfectly
+    // healthy while tailing a worker nobody asked about.
+    const cmd = plan({ workers: ["rev-1", "eng-1"] })[0]!.command;
+    expect(cmd).toContain("'logs' '--worker' 'rev-1'");
+    expect(cmd).toContain("'shell' '--worker' 'rev-1'");
+    expect(cmd).not.toContain("'--worker' 'eng-1'");
+  });
+
+  test("the stages are joined by `;`, never `&&`", () => {
+    // With `&&` a refused `up` closes the pane, taking its own error message
+    // with it — measured on the first live run, where the shell was the only
+    // thing that made the refusal readable. Each stage must be reachable
+    // whether or not the one before it succeeded.
+    //
+    // Sliced from `'up'` onward, and the first version of this was NOT: a bare
+    // `not.toContain("&&")` failed on `envPreamble`'s own
+    // `[ -f "$HOME/.env" ] && . "$HOME/.env"`, which is a legitimate guard and
+    // not a stage separator. An assertion that cannot tell the two apart would
+    // have had to be deleted or weakened; scoping it to the stages keeps it.
+    const cmd = plan()[0]!.command;
+    expect(cmd.slice(cmd.indexOf("'up'"))).not.toContain("&&");
+  });
+});
+
 describe("pane 2 — fleet status", () => {
-  test("is the watching form, not a one-shot snapshot", () => {
-    // `pifleet status` without `--watch` prints once and exits, which closes
-    // the pane — the same defect as pane 1's, in a place with no shell after it.
-    expect(plan()[1]!.command).toContain("'status' '--watch'");
+  test("refreshes forever, so the pane cannot print once and close", () => {
+    // The original requirement, unchanged: `pifleet status` on its own prints
+    // once and exits, which closes the pane — the same defect as pane 1's, in a
+    // place with no shell after it. What changed is HOW it keeps running.
+    const cmd = plan()[1]!.command;
+    expect(cmd).toMatch(/^while :; do/);
+    expect(cmd).toContain("'status'");
+  });
+
+  test("CLEARS before each refresh — a standing pane is read at a glance", () => {
+    // `status --watch` APPENDS, and the live console measured what that costs:
+    // dozens of identical `run 2026-08-24… / eng-1: dead supervisor=gone`
+    // blocks scrolled past each other, so the pane was a transcript of how long
+    // a dead worker had been dead rather than a display of the fleet. Only the
+    // last screen is ever read; everything above it is cost with no reader.
+    expect(plan()[1]!.command).toContain("clear;");
+    // And specifically NOT the built-in watch, which is the form that appends.
+    expect(plan()[1]!.command).not.toContain("--watch");
+  });
+
+  test("survives a status that exits non-zero", () => {
+    // Without `|| true` the loop dies on the first refresh after a `down` —
+    // exactly when an operator looks at it — leaving a pane that stopped
+    // updating and does not say so.
+    expect(plan()[1]!.command).toContain("|| true");
+  });
+
+  test("polls on the SAME interval as the git pane, from the same flag", () => {
+    // One `--poll` governs both, so a `down` appears in the two panes at the
+    // same moment rather than in whichever happens to poll first.
+    const panes = plan({ gitPollSeconds: 11 });
+    expect(panes[1]!.command).toContain("sleep 11");
+    expect(panes[2]!.command).toContain("sleep 11");
   });
 });
 

@@ -41,6 +41,7 @@ import {
   pingArgv,
   renameTabArgv,
   respawnPaneArgv,
+  workspaceCloseArgv,
   workspaceCreateArgv,
   workspaceListArgv,
 } from "./client.ts";
@@ -171,15 +172,69 @@ export async function createOperations(
 
 /**
  * The entry point: build it, or find it already built and leave it alone.
+ *
+ * ## `recreate` exists because idempotence has a failure mode
+ *
+ * Adoption is the requested behaviour and stays the default: a second
+ * `operations` must not stack a duplicate console on top of the one the
+ * operator is working in. But adoption leaves the PANES exactly as they are,
+ * and a pane's contents are not part of what `findOperations` matches on — it
+ * matches a workspace TITLE. So a console whose panes died, or whose commands
+ * were built by an older version of this script, is adopted forever and there
+ * is no flag that refreshes it.
+ *
+ * MEASURED 2026-08-30, and it is the shape a reader should expect rather than
+ * a hypothetical. An `operations` workspace launched before `envPreamble` and
+ * before `~/.env` carried the ticket variables showed: a ticketing pane holding
+ * a dead `up` that had refused on unset secrets, a `fleet-status` pane still
+ * watching a run from six days earlier, and a git watch that looked healthy
+ * because it is the one pane that re-polls. Every later `operations` selected
+ * that workspace and reported "already in place — changed nothing", which was
+ * true and useless.
+ *
+ * The escape hatch replaces the WORKSPACE rather than respawning each pane,
+ * because the pane SET is part of the plan: a console built by an older version
+ * may have a different number of panes in different places, and respawning the
+ * ones that happen to exist would leave a half-migrated layout that matches
+ * neither version.
+ *
+ * ## BUILD FIRST, CLOSE SECOND — and the first version had this backwards
+ *
+ * Closing first is the obvious order and it is wrong. MEASURED 2026-08-30, on
+ * the operator's own console: `operations` was the ONLY workspace, closing it
+ * left the cmux app with no window, and the very next call failed with
+ * `unavailable: TabManager not available`. So did every call after it — even
+ * `workspace list` — because a windowless cmux has no tab manager to answer
+ * with. The flag whose entire job is to repair a stale console had destroyed a
+ * working one and left nothing able to rebuild it; recovery took `cmux <path>`
+ * from a shell, which is exactly the manual step this script exists to spare.
+ *
+ * The argument FOR closing first was that `findOperations` matches an exact
+ * title, so building first leaves two workspaces briefly wearing one name. That
+ * is true and it is the lesser risk by a wide margin: the window is a few
+ * hundred milliseconds inside one function, nothing re-queries by title during
+ * it, and the old id is already in hand — so the close targets a captured
+ * UUID and cannot pick the wrong one. Weigh a transient ambiguity nothing
+ * observes against a destroyed console that cannot be rebuilt, and the order
+ * is not a close call.
+ *
+ * If the create THROWS, the old console is still standing. That is the right
+ * failure: a stale console beats no console, which is the whole lesson above.
  */
 export async function ensureOperations(
   client: CmuxClient,
   opts: OperationsPlanOptions,
+  recreate = false,
 ): Promise<EnsureResult> {
   const existing = await findOperations(client);
-  if (existing !== null) {
+  if (existing !== null && !recreate) {
     await client.runOk(selectWorkspaceArgv(existing));
     return { created: false, workspaceId: existing };
   }
-  return createOperations(client, opts);
+  const built = await createOperations(client, opts);
+  // By CAPTURED ID, never by a re-query: the only moment two workspaces share
+  // this title is between these two lines, and resolving the name here is the
+  // one thing that could close the console just built.
+  if (existing !== null) await client.runOk(workspaceCloseArgv(existing));
+  return built;
 }

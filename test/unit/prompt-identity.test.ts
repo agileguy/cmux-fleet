@@ -76,6 +76,8 @@ describe("renderPrompt delivers the identifiers the shipped documents ask a work
       acceptance: ["a ticket-ops pair exists"],
       task_id: "my-iteration-2",
       outbox: "/outbox/my-iteration-2",
+      worker: "tick-1",
+      epoch: 1,
     });
 
     // The literal id, not a slug of the title — the failure ISC-349 measured
@@ -86,6 +88,72 @@ describe("renderPrompt delivers the identifiers the shipped documents ask a work
     expect(rendered).toContain("Do the thing.");
   });
 
+  test("it delivers worker and epoch, which the ticket-ops schema requires and nothing else supplies", () => {
+    // MEASURED 2026-08-30. `TicketOpsArtifactSchema` requires `worker` and
+    // `epoch`; the worker's environment carries neither (`env` holds
+    // PIFLEET_LLM_*, PIFLEET_SECRET_NAMES, the proxy vars and the two ticket
+    // FILE paths, and no worker id at all), and the system-append never names
+    // them. Three runs wrote artifacts missing exactly these fields, each
+    // clamped to `harvest_status: "partial"` and `verdict: "unknown"`.
+    //
+    // The same shape as ISC-349's finding, in a third place: a document asking
+    // for something the system did not supply. Interpolation is asserted, not
+    // just the parameter, because a destructured-and-dropped field is the
+    // defect this closes.
+    const body = functionBody(SUPERVISOR, "renderPrompt")!;
+    expect(body).toMatch(/\$\{envelope\.worker\}/);
+    expect(body).toMatch(/\$\{envelope\.epoch\}/);
+
+    const rendered = renderPrompt({
+      title: "t",
+      brief: "b",
+      acceptance: [],
+      task_id: "t-1",
+      outbox: "/outbox/t-1",
+      worker: "tick-7",
+      epoch: 3,
+    });
+    expect(rendered).toContain("tick-7");
+    expect(rendered).toContain("epoch:   3");
+  });
+
+  test("the DISPATCHED epoch is rendered, never the envelope's", () => {
+    /*
+     * MEASURED 2026-08-30 on the first live ticketing run after this criterion
+     * put the identifiers in the prompt. The call site was
+     * `renderPrompt(envelope)`, so the prompt carried `envelope.epoch` — the
+     * value the CALLER put on the task envelope, which for every `dispatch` is
+     * the schema default of 0. The epoch a task actually runs under is
+     * allocated by the supervisor and is what goes on the wire
+     * (`epoch: decision.epoch`) and what the harvester validates against.
+     *
+     * The prompt said `epoch: 0`. The worker did exactly as it was told and
+     * wrote `"epoch": 0`. The harvest refused it — "envelope epoch 0 is stale
+     * (expected 1)" — clamping a task that had produced a correct, fully-paged
+     * answer to `verdict=unknown`.
+     *
+     * THIS CRITERION'S OWN LESSON, landing on this criterion: the repair for
+     * an unbindable placeholder is the VALUE, and a value delivered but WRONG
+     * is worse than one missing, because the worker has no way to doubt it. A
+     * missing epoch produced no envelope; a wrong one produces a REFUSED
+     * envelope, and a refused envelope degrades the harvest where an absent one
+     * does not.
+     *
+     * Pinned at the CALL SITE, because that is where the defect was — the
+     * function was always correct, it was handed the wrong number. A test that
+     * only calls `renderPrompt` with good input cannot see this, which is why
+     * every existing test in this file stayed green through the whole failure.
+     */
+    const body = functionBody(SUPERVISOR, "handleDispatch") ?? SUPERVISOR;
+    // Spread-then-override: the envelope supplies title/brief/acceptance and
+    // the supervisor supplies the epoch it actually allocated.
+    expect(body).toMatch(/renderPrompt\(\{\s*\.\.\.envelope,\s*epoch:\s*decision\.epoch\s*\}\)/);
+    // …and NOT the bare form. Asserting the absence too, because the fix and
+    // the defect can coexist — a second `renderPrompt(envelope)` elsewhere on
+    // the dispatch path would restore it with this test still green.
+    expect(SUPERVISOR).not.toMatch(/renderPrompt\(envelope\)/);
+  });
+
   test("the identifiers are fenced, so a skimming model cannot read them as brief prose", () => {
     const rendered = renderPrompt({
       title: "t",
@@ -93,6 +161,8 @@ describe("renderPrompt delivers the identifiers the shipped documents ask a work
       acceptance: [],
       task_id: "t-1",
       outbox: "/outbox/t-1",
+      worker: "w-1",
+      epoch: 0,
     });
     // A PAIR of fences, and both identifiers between them. The first version
     // of this assertion took `indexOf("```")` and was satisfied by the CLOSING
@@ -104,6 +174,10 @@ describe("renderPrompt delivers the identifiers the shipped documents ask a work
     const block = rendered.slice(fences[0]!, fences[1]!);
     expect(block).toContain("t-1");
     expect(block).toContain("/outbox/t-1");
+    // All four, not the original two: a field moved out of the block is
+    // invisible to a check that only knows about the ones that shipped first.
+    expect(block).toContain("w-1");
+    expect(block).toContain("epoch:");
   });
 
   test("the brief still leads — identity is appended, never prepended", () => {
@@ -113,6 +187,8 @@ describe("renderPrompt delivers the identifiers the shipped documents ask a work
       acceptance: [],
       task_id: "t-1",
       outbox: "/outbox/t-1",
+      worker: "w-1",
+      epoch: 0,
     });
     // A worker reads top-down under a budget. Pushing the brief below a block
     // of metadata is a behavioural change nobody asked for.

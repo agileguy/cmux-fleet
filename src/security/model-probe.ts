@@ -599,6 +599,36 @@ export function hostReachableBaseUrl(cfg: HostDialConfigView): string {
   // no host-reachable answer for a base_url that is not a URL.
   const url = new URL(cfg.llm.base_url);
 
+  // `url.hostname` yields IPv6 WITH brackets; `normalizeHost` strips them and
+  // lowercases, which is what makes these comparisons agree with the relay's.
+  const baseHost = normalizeHost(url.hostname);
+  const publishedEndpoint =
+    baseHost !== null &&
+    baseHost !== RELAY_LISTEN_ALIAS &&
+    baseHost !== LEGACY_RELAY_LISTEN_ALIAS;
+
+  /**
+   * A PUBLISHED ENDPOINT is returned verbatim, and this test runs BEFORE
+   * `relay_upstream` (ISC-369).
+   *
+   * When `base_url` names a real, publicly-resolvable endpoint, the relay
+   * publishes that name on the bridge and splices raw TCP to `relay_upstream`
+   * — which for such a fleet is that endpoint's ADDRESS, because the relay
+   * cannot dial a name it publishes to itself (`relayUpstreamError`). Taking
+   * the `relay_upstream` branch first would therefore hand a host-side prober
+   * `https://<address>:443/v1`, and dialing an HTTPS origin BY ADDRESS presents
+   * no SNI and validates a certificate issued for the name — so `doctor` would
+   * report a TLS failure on a fleet whose workers are talking to that server
+   * perfectly well.
+   *
+   * This is case 3 of the derivation above, and the ordering is what makes it
+   * reachable: `base_url` already names something this host can dial, so there
+   * is nothing to rewrite. Rewriting it would answer "can this host reach SOME
+   * model server" in place of the question asked — the `hostFacingBaseUrl`
+   * mistake ISC-260 deleted, arriving through the other branch.
+   */
+  if (publishedEndpoint) return cfg.llm.base_url;
+
   const raw = cfg.llm.relay_upstream;
   if (raw !== null && raw !== undefined && raw !== "") {
     // Through the relay's OWN parser, not a second one. A dial target that
@@ -609,8 +639,9 @@ export function hostReachableBaseUrl(cfg: HostDialConfigView): string {
     return compose(url, host, String(target.port), cfg.llm.base_url);
   }
 
-  // `url.hostname` yields IPv6 WITH brackets; `normalizeHost` strips them and
-  // lowercases, which is what makes this comparison agree with the relay's.
+  // A bridge alias with no `relay_upstream`: the schema's documented default is
+  // `host.docker.internal:<port from base_url>`, so evaluate that alias from
+  // the Docker host — loopback.
   //
   // Compared against the LISTEN aliases, not `RELAY_DEFAULT_DIAL_HOST`
   // (ISC-264). `base_url` is what a WORKER dials, so its host is the listen
@@ -623,11 +654,7 @@ export function hostReachableBaseUrl(cfg: HostDialConfigView): string {
   //
   // Both spellings, because `base_url` still accepts the old one during the
   // transition and a config carrying it must still be probeable from the host.
-  const baseHost = normalizeHost(url.hostname);
-  if (baseHost === RELAY_LISTEN_ALIAS || baseHost === LEGACY_RELAY_LISTEN_ALIAS) {
-    return compose(url, DOCKER_HOST_LOOPBACK, url.port, cfg.llm.base_url);
-  }
-  return cfg.llm.base_url;
+  return compose(url, DOCKER_HOST_LOOPBACK, url.port, cfg.llm.base_url);
 }
 
 /**

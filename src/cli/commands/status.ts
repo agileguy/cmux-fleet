@@ -4,7 +4,7 @@ import { CliError } from "../index.ts";
 import { EXIT, type WorkerState } from "../../contracts.ts";
 import { latestRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
 import { readWorkerState } from "../../run/state.ts";
-import { identityAlive, processStartTime, readRegistry } from "../../run/registry.ts";
+import { identityAlive, latestLiveRunId, processStartTime, readRegistry } from "../../run/registry.ts";
 
 /**
  * Register `pifleet status` (SRD §10): a fleet snapshot read entirely from
@@ -21,7 +21,7 @@ export function register(program: Command): void {
     .option("--json", "emit machine-readable output")
     .action(async (opts: { run?: string; watch?: boolean; json?: boolean }) => {
       const root = runsRoot();
-      const runId = opts.run ?? (await latestRunId(root));
+      const runId = opts.run ?? (await latestLiveRunId(root)) ?? (await latestRunId(root));
       if (runId === null) throw new CliError("no runs found", EXIT.USAGE);
       const run = runPaths(runId, root);
 

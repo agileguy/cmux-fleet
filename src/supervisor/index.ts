@@ -1684,7 +1684,32 @@ async function main(): Promise<void> {
               });
         liveToolErrorsAtStart = state.tool_errors;
 
-        const message = renderPrompt(envelope);
+        /*
+         * `decision.epoch`, NOT `envelope.epoch`, and the difference is the
+         * whole point of this line.
+         *
+         * The epoch a task actually runs under is allocated HERE, by the
+         * supervisor, and it is what goes on the wire one line below
+         * (`epoch: decision.epoch`) and what the harvester validates the
+         * result envelope against. `envelope.epoch` is whatever the CALLER put
+         * on the task envelope, which for every `dispatch` is the schema
+         * default of 0.
+         *
+         * MEASURED 2026-08-30, on the first live ticketing run after ISC-367
+         * put these identifiers in the prompt. The prompt said `epoch: 0`, the
+         * worker did exactly as it was told and wrote `"epoch": 0` into its
+         * result envelope, and the harvest REFUSED it — "envelope epoch 0 is
+         * stale (expected 1)" — clamping a task that had produced a correct,
+         * well-formed, fully-paged answer to `verdict=unknown`.
+         *
+         * This is ISC-367's own lesson landing on ISC-367: the repair for an
+         * unbindable placeholder is the VALUE, and a value that is delivered
+         * but WRONG is worse than one that is missing, because the worker has
+         * no way to doubt it. A missing epoch produced no envelope; a wrong one
+         * produces a refused envelope, which degrades the harvest where the
+         * absence did not.
+         */
+        const message = renderPrompt({ ...envelope, epoch: decision.epoch });
         try {
           const sent = await client.send(
             "prompt",
@@ -1984,6 +2009,8 @@ export function renderPrompt(envelope: {
   acceptance: string[];
   task_id: string;
   outbox: string;
+  worker: string;
+  epoch: number;
 }): string {
   const acceptance =
     envelope.acceptance.length > 0
@@ -2011,9 +2038,12 @@ export function renderPrompt(envelope: {
     "```\n" +
     `task_id: ${envelope.task_id}\n` +
     `outbox:  ${envelope.outbox}\n` +
+    `worker:  ${envelope.worker}\n` +
+    `epoch:   ${envelope.epoch}\n` +
     "```\n\n" +
-    `These are the values the mounted documents refer to as \`<task-id>\` and \`<outbox>\`. ` +
-    `Neither is derivable from the title.`;
+    `These are the values the mounted documents refer to as \`<task-id>\` and \`<outbox>\`, ` +
+    `and the ones the ticket-ops artifact schema requires as \`worker\` and \`epoch\`. ` +
+    `None is derivable from the title.`;
   return `# ${envelope.title}\n\n${envelope.brief}${acceptance}${identity}`;
 }
 

@@ -263,7 +263,12 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "reported 5 where the answer was 8. The number is a count of BOUNDED examples and " +
       "therefore a floor on the good shape, NOT a ceiling on the bad one: an unbounded " +
       "example added beside these two would leave this green. That was equally true at 1 and " +
-      "is written down here rather than discovered later.",
+      "is written down here rather than discovered later. " +
+      "WENT FROM 2 TO 3 ON 2026-08-30, when the artifact-shape section landed — three live " +
+      "runs had written `{summary, query, defects, writes_made}` and failed " +
+      "`TicketOpsArtifactSchema` on the same four fields, because the skill documented at " +
+      "length what the artifact is FOR and never what it must CONTAIN. Its worked example " +
+      "carries a `commands:` entry, which is a third bounded shape a worker copies.",
     // The pattern deliberately starts at `curl` rather than at `--max-time`:
     // a pattern leading with `-` is consumed by grep as an OPTION, which is how
     // this claim failed the first time it ran. It failed loudly, which is the
@@ -275,7 +280,46 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "curl -sS --fail-with-body --max-time 60 --config",
       "skills/ticket-ops/SKILL.md",
     ],
-    expect: 2,
+    expect: 3,
+  },
+  {
+    isc: "ISC-369",
+    grade: "[x]",
+    claim:
+      "The relay's listen-alias set is DERIVED from `llm.base_url`, in one function, and that " +
+      "derivation is what `NO_PROXY` is built from too. Empty on either line means the two " +
+      "went back to independent lists — which is the exact defect the first live bring-up " +
+      "against the tunnel hit: `up` reported success while the ticketing worker, the one role " +
+      "with `egress_access: true`, got `CONNECT tunnel failed, response 403` on every " +
+      "inference call because its model host was not in a hardcoded NO_PROXY.",
+    argv: [
+      "grep",
+      "-rn",
+      "relayListenAliases",
+      "src/security/relay.ts",
+      "src/run/worker-env.ts",
+    ],
+    // FOUR, and the number is a measurement rather than a guess: the registry
+    // greps a COMMENT-MASKED mirror, so the three prose mentions of this name
+    // do not count. What remains is the exported definition, the call in
+    // `ensureEgressRelay`, the import into worker-env and its use there — a
+    // count rather than a mere presence check, because dropping the worker-env
+    // side is precisely the failure that shipped green.
+    expect: 4,
+  },
+  {
+    isc: "ISC-369",
+    grade: "[x]",
+    claim:
+      "The relay container is launched with the unprivileged-port sysctl, so a published " +
+      "`https://` endpoint's listen port of 443 can be bound by a process running `--user " +
+      "node --cap-drop ALL`. Empty means the flag was dropped and such a fleet gets a " +
+      "container that `docker run -d`s cleanly and dies on EACCES milliseconds later, " +
+      "reported as \"exited immediately after start\" — a message that blames the port for a " +
+      "permissions problem. A SYSCTL and not `--cap-add NET_BIND_SERVICE`: the cap set stays " +
+      "empty and only this netns's floor moves.",
+    argv: ["grep", "-nF", "net.ipv4.ip_unprivileged_port_start=0", "src/security/relay.ts"],
+    expect: 1,
   },
   {
     isc: "ISC-345",

@@ -93,6 +93,54 @@ describe("an operations workspace that already exists is left alone", () => {
     expect(calls[1]).toEqual(selectWorkspaceArgv("ws-ops"));
   });
 
+  test("…unless --recreate, which BUILDS first and closes the old one second", async () => {
+    // The gap adoption cannot reach, measured on the live console 2026-08-30:
+    // `findOperations` matches a workspace TITLE, and a pane's contents are not
+    // part of that. A console whose ticketing pane held a dead `up` from before
+    // `envPreamble` existed, and whose status pane was watching a run six days
+    // old, was adopted by every later `operations` and reported "already in
+    // place — changed nothing". True, and useless.
+    const { client, calls } = fakeCmux({
+      workspaces: [{ id: "ws-ops", custom_title: "operations" }],
+    });
+
+    const result = await ensureOperations(client, OPTS, true);
+
+    expect(result.created).toBe(true);
+    const verbs = verbsOf(calls);
+    expect(verbs).toContain("workspace close");
+    /*
+     * CREATE BEFORE CLOSE, and this assertion was written the OTHER WAY ROUND
+     * first — mutation-proved in that direction, and pinning the wrong
+     * requirement the whole time.
+     *
+     * MEASURED on the operator's console the first time `--recreate` ran:
+     * `operations` was the ONLY workspace, closing it left the cmux app with no
+     * window, and the create that followed failed with `unavailable: TabManager
+     * not available`. So did every later call, `workspace list` included. The
+     * flag whose job is to repair a stale console destroyed a working one and
+     * left nothing able to rebuild it.
+     *
+     * The case for closing first was that two workspaces briefly share this
+     * title. They do — for a few hundred milliseconds inside one function, with
+     * nothing re-querying by title in between, and the close targeting a
+     * CAPTURED id rather than a resolved name. A transient ambiguity nothing
+     * observes against a console that cannot be rebuilt is not a close call.
+     */
+    expect(verbs.indexOf("workspace create")).toBeLessThan(verbs.indexOf("workspace close"));
+    // By the OLD id. Closing a name here would close the console just built.
+    expect(calls[verbs.indexOf("workspace close")]).toEqual(["workspace", "close", "ws-ops"]);
+  });
+
+  test("--recreate on a machine with NO operations workspace just builds one", async () => {
+    // The flag must not require something to destroy. Without this, the close
+    // could be made unconditional and every test above would still pass.
+    const { client, calls } = fakeCmux({ workspaces: [{ id: "ws-other", custom_title: "pifleet" }] });
+    const result = await ensureOperations(client, OPTS, true);
+    expect(result.created).toBe(true);
+    expect(verbsOf(calls)).not.toContain("workspace close");
+  });
+
   test("matching is exact — a similarly named workspace is not adopted", async () => {
     // `operations-old` and `my-operations` are the workspaces a person
     // actually ends up with. Adopting either would split this console's panes
@@ -197,7 +245,7 @@ describe("creating the workspace", () => {
       .filter((c) => verb(["cmux", ...c]) === "respawn-pane")
       .map((c) => c[c.indexOf("--command") + 1]!);
     expect(commands[0]).toContain("'--workers' 'tick-1'");
-    expect(commands[1]).toContain("'status' '--watch'");
+    expect(commands[1]).toContain("'status'");
     expect(commands[2]).toContain(`-C '${CWD}'`);
   });
 });

@@ -265,6 +265,54 @@ says where to read that id; it is not a name you pick):
 They carry the same content. They do not carry the same consequences, and that is the part to
 read twice.
 
+### The exact shape of the `.json`, because guessing it fails the task
+
+**This section did not exist until 2026-08-30, and its absence was measured.** Two live runs and
+one fixture run each wrote a `ticket-ops.json` that was a sensible-looking object of the
+worker's own invention — `{summary, query, defects, writes_made}` — and every one failed
+`TicketOpsArtifactSchema` on the same four required fields. The document explained at length
+what the file is FOR and never once said what it must CONTAIN. The harvest did its job each
+time: the malformed document reached `discrepancies`, `harvest_status` went `partial`, and the
+verdict came out `unknown` rather than the `success` the worker had claimed for itself. So the
+work was done, the answer was right, and the run was ungradeable.
+
+Required at the top level. Anything missing is a schema violation, and a schema violation costs
+you the task no matter how good the prose beside it is:
+
+```bash
+jq -n --arg host "$(cat "$TICKET_BASE_URL_FILE" | sed -E 's#^https?://([^/]+).*#\1#')" '{
+  schema:       "pifleet.ticket-ops/v1",
+  task_id:      "<the id from ## This task — NOT a name you pick>",
+  worker:       "<the worker from ## This task>",
+  epoch:        0,
+  operation:    "query",
+  ticket_host:  $host,
+  generated_at: (now | todateiso8601),
+  no_change_needed: false,
+  queried:      [ {ticket: "DE100025", fields: [{field: "State", value: "Submitted"}]} ],
+  updates:      [],
+  commands:     ["curl -sS --fail-with-body --max-time 60 --config /tmp/ticket.curlrc ..."],
+  verdict:      "success",
+  notes:        "what you concluded, and any count that did not reconcile"
+}' > /outbox/<task-id>/files/ticket-ops.json
+```
+
+- **`task_id`, `worker` and `epoch` are given to you** in the `## This task` block of your
+  prompt. They are not derivable from anything else you can see, which is why they are handed
+  over rather than left to be reconstructed.
+- **`operation` is `query` or `update`, and nothing else.** A query that changed nothing is
+  still an `operation: "query"` with `updates: []` — not an `update` with an empty list.
+- **`verdict` is one of `success`, `partial`, `blocked`, `failed`.** It is YOUR claim, and the
+  harvest may lower it; it can never raise it.
+- **`queried` is one entry per object you actually read**, and it is what a reader counts. An
+  artifact whose prose says "8 open defects" and whose `queried` array holds 5 is contradicting
+  itself in the half that gets read mechanically.
+- **`ticket_host` is the HOST, not the base URL** — no scheme, no path.
+- **Inside `queried[].fields[]` the key is `field`, not `name`.** Measured: the first version of
+  the example above said `name`, and a run that copied it faithfully produced an artifact that
+  failed validation on every row. The schema is `{field, value}`, `value` may be `null`, and
+  nothing else is accepted. Copy the shape, do not paraphrase it.
+
 **The harvester selects on the filename `ticket-ops.json` and on nothing else** — not on your
 role's name, not on what the document turns out to contain. That exact string is what puts a
 file through `TicketOpsArtifactSchema` in `src/contracts.ts`, and it is what puts it through the

@@ -10,6 +10,7 @@
  */
 
 import { spawnCliProcess } from "../support/spawn-cli.ts";
+import { stripComments } from "../support/source-structure.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -148,7 +149,11 @@ describe("logs — one-shot", () => {
       await writeFile(f.supervisorLog, "supervisor crashed: boom\n");
       const r = await runCli(f.root, ["--worker", WORKER, "--render"]);
       expect(r.code).toBe(EXIT.SUCCESS);
-      expect(r.stdout).toContain("12:00:00 event #3 agent_start");
+      // The agent view (2026-08-31): what HAPPENED, not the event's name and
+      // sequence number. `event #3 agent_start` announced an event and threw
+      // away everything it carried; on a live task that shape printed 3,853
+      // near-identical `message_update` lines and told the operator nothing.
+      expect(r.stdout).toContain("12:00:00 ▶▶ agent started");
       expect(r.stdout).toContain("T-4");
       expect(r.stdout).toContain("partial");
       expect(r.stdout).toContain("supervisor crashed: boom");
@@ -351,7 +356,25 @@ describe("logs — follow", () => {
  */
 describe("logs is read-only (SRD §3.3)", () => {
   test("the source references no control socket and no write API", async () => {
-    const src = await Bun.file(LOGS_SRC).text();
+    /*
+     * COMMENT-STRIPPED, and the reason is a measured false positive rather
+     * than tidiness.
+     *
+     * The list below is scanned as SUBSTRINGS over the file, so an ordinary
+     * English word in a comment trips it. On 2026-08-31 a docblock explaining
+     * why the renderer clips each content segment — "clipping their
+     * concatenation would truncate the last ones to nothing" — failed this
+     * test on `truncate`, and CI reported the viewer as having acquired a
+     * write API. The words in that list are common English (`rename`,
+     * `chmod`, `mkdir` less so, but `truncate` and `rename` very much so),
+     * so this was going to recur every time someone explained themselves.
+     *
+     * Stripping comments narrows the guard to CODE, which is what it always
+     * meant: the claim is that `logs.ts` CALLS none of these, and a comment
+     * calls nothing. The one thing it gives up is catching a banned call
+     * inside a commented-out block — which is not executed either.
+     */
+    const src = stripComments(await Bun.file(LOGS_SRC).text());
     // Positive control: we are scanning the real implementation.
     expect(src).toContain("TailReader");
 
