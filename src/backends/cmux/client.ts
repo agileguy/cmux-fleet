@@ -219,10 +219,91 @@ export function readScreenArgv(surfaceId: string, lines?: number): string[] {
   return argv;
 }
 
+/**
+ * Text bound for `cmux send`, which types it into a real terminal.
+ *
+ * SEPARATE FROM `assertCmuxText` because `send`'s grammar is not the others'.
+ * A title, a status value and a notification body end up in cmux's own GUI
+ * chrome; `send` text ends up as KEYSTROKES in a pty owned by whatever program
+ * is running there. Two rules therefore differ, and each difference is
+ * measured against cmux 0.64.22 rather than reasoned about.
+ *
+ * ## Added: the escape-sequence hijack
+ *
+ * `cmux send --help` states it outright — *"Escape sequences: \n and \r send
+ * Enter, \t sends Tab"* — and `send` has no literal mode to turn that off.
+ * Measured, one fresh pane per arm, a pane reading LINES:
+ *
+ *   argv text `A\nB`     ->  pane receives `A`, ENTER, `B`     (submitted at \n)
+ *   argv text `A\\nB`    ->  pane receives `A\`, ENTER, `B`    (\\ -> \, then \n)
+ *   argv text `A\\\nB`   ->  pane receives `A\`, ENTER, `B`
+ *   argv text `A\xB`     ->  pane receives `A\xB` literally    (unknown escape)
+ *
+ * There is no spelling of a backslash followed by `n` that survives: the
+ * substitution is applied after the backslash unescaping, so escaping the
+ * escape re-creates it. Confirmed against the REAL Pi TUI (v0.79.6, the shipped
+ * worker image, pane running `docker attach`): text `ARMC first line\nARMC
+ * second line` left `ARMC second line` sitting in Pi's prompt box, the first
+ * line having been submitted as a turn of its own. `cmux send` exited 0 and so
+ * did everything around it.
+ *
+ * That is the whole reason this guard exists. A brief containing `\n` — any
+ * code sample, any regex, any "join with \n" instruction — would otherwise be
+ * TRUNCATED at that point, with the operator's remaining intent left as
+ * unsubmitted keystrokes and every exit code saying success. A real newline
+ * BYTE does the same thing and is already refused by the control-character
+ * rule below, which is why only the two-character form needed adding.
+ *
+ * ## Dropped: the leading-dash refusal, replaced by the `--` separator
+ *
+ * `assertCmuxText` refuses a leading `-` because a config-derived string could
+ * otherwise parse as a flag. For `send` that refusal is both too weak and too
+ * strong, measured:
+ *
+ *   `cmux send --surface <id> "--json"`      ->  `Error: send requires text`,
+ *                                                exit 1, nothing reaches the pane
+ *   `cmux send --surface <id> -- "--json"`   ->  pane receives `--json`, exit 0
+ *   `cmux send --surface <id> -- "plain"`    ->  pane receives `plain`, exit 0
+ *
+ * So the hazard is real (arm 1 — cmux ate the text as a flag), the `--`
+ * separator is cmux's own documented answer to it (`Usage: cmux send [flags]
+ * [--] <text>`), and it does not disturb ordinary text. `sendArgv` now emits
+ * `--`, which makes flag-parsing impossible BY CONSTRUCTION rather than by a
+ * refusal — a strictly stronger guarantee than the rule it replaces.
+ *
+ * The reason it had to move rather than merely being relaxed: a prompt typed
+ * into a pane is markdown, and `- item` is a bulleted line. Under the old rule
+ * every task carrying `acceptance` entries refused, which is a feature that
+ * cannot be used. `assertCmuxText`'s own callers (titles, statuses,
+ * notifications) keep the leading-dash rule untouched; nothing about their
+ * grammar changed.
+ *
+ * The length cap and the control-character rule are duplicated from
+ * `assertCmuxText` rather than delegated, because delegating would re-impose
+ * the dash rule this function exists to drop. The duplication is two
+ * predicates and is pinned by tests on both functions.
+ */
+export function assertCmuxSendText(what: string, v: string): void {
+  if (v.length === 0 || v.length > 1024 || /[\x00-\x1f\x7f]/.test(v)) {
+    throw new Error(
+      `cmux: refusing ${what} ${JSON.stringify(v.slice(0, 64))} — empty, over 1024 characters, or carrying control characters`,
+    );
+  }
+  if (/\\[nrt]/.test(v)) {
+    throw new Error(
+      `cmux: refusing ${what} ${JSON.stringify(v.slice(0, 64))} — cmux send turns \\n and \\r into Enter and \\t into Tab, ` +
+        `so this text would submit a fragment and leave the rest unsent`,
+    );
+  }
+}
+
 export function sendArgv(surfaceId: string, text: string): string[] {
   assertCmuxValue("surface id", surfaceId);
-  assertCmuxText("send text", text);
-  return ["send", "--surface", surfaceId, text];
+  assertCmuxSendText("send text", text);
+  // `--` before the text: see `assertCmuxSendText` for the measurement showing
+  // `cmux send --surface <id> "--json"` consumes the text as a flag and sends
+  // nothing at all, exit 1.
+  return ["send", "--surface", surfaceId, "--", text];
 }
 
 export function sendKeyArgv(surfaceId: string, key: string): string[] {
