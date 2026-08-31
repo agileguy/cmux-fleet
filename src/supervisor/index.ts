@@ -75,6 +75,15 @@ import {
   ProseTurnDetector,
 } from "./prose-detector.ts";
 import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
+import {
+  TUI_POLL_MS,
+  TUI_QUIET_MS,
+  classifyTuiTurn,
+  detachedDockerArgv,
+  discoverSessionPath,
+  verdictForStopReason,
+} from "./tui.ts";
+import { TranscriptReader } from "../harvest/transcript.ts";
 
 /** Event types that end or could end a turn — logged when attributed prior. */
 const TERMINAL_EVENT_TYPES = new Set(["agent_end", "auto_retry_end"]);
@@ -367,6 +376,24 @@ async function main(): Promise<void> {
   const launch = await readWorkerLaunch(wp);
 
   /**
+   * IS THIS AN ATTENDED WORKER (SRD §3.5)? Decided ONCE, here, from the record.
+   *
+   * Every branch below reads this variable and none of them re-derives the
+   * answer, because the two halves of the decision must not be able to
+   * disagree: a supervisor that launches the container detached but then opens
+   * an RPC client on a `docker run -d` process's stdout waits forever on a
+   * stream that carries one container ID and closes, and a supervisor that
+   * does the reverse never launches at all.
+   *
+   * `launch === null` — the `PIFLEET_PI_COMMAND` double path — is `rpc` and
+   * cannot be anything else. The double is a plain process on this host, there
+   * is no container to detach and no terminal to attach to, and the whole
+   * mode is about a container's TTY. Reading the field off a record that does
+   * not exist would have to invent a default; this states the answer instead.
+   */
+  const tuiMode = launch !== null && launch.pane_mode === "tui";
+
+  /**
    * How long a blocking `extension_ui_request` may go unanswered before the
    * supervisor reports that it failed to answer it (SRD §12.3 guard 2 —
    * ISC-111, ISC-112).
@@ -521,7 +548,33 @@ async function main(): Promise<void> {
    */
   let cmd: string[];
   if (launch !== null) {
-    cmd = launch.argv;
+    /**
+     * THE ONE EXCEPTION to "a container's argv is used VERBATIM", and it is an
+     * exception to the letter of that rule rather than to its reason.
+     *
+     * The paragraph above forbids the supervisor APPENDING to the argv, and
+     * the reason it gives is about the WORKER's contract: `--session-dir` and
+     * friends are container paths, and host paths appended here would send Pi's
+     * transcripts somewhere the harvest cannot find them. Nothing about `-d`
+     * touches that. It is a flag to the docker CLI describing THIS process's
+     * relationship to the container — foreground or detached — and this process
+     * is the only one that knows what that relationship has to be.
+     *
+     * It is applied here rather than in `render.ts` because `pifleet render`
+     * prints a command a human can paste, and in a human's terminal the
+     * foreground `-i -t` form is the correct one; `-d` is required only because
+     * the supervisor spawns with `stdin: "pipe"`, and docker refuses `-t` in
+     * the foreground when its own stdin is not a terminal. Putting it in the
+     * renderer would also move an `rpc` worker's argv, which `render.test.ts`
+     * pins byte for byte precisely so that it cannot move.
+     *
+     * `detachedDockerArgv` throws on an argv that is not `docker run …` or that
+     * already carries `-d`. Both are fail-stop rather than best-effort: a
+     * silently un-detached tui launch is the `the input device is not a TTY`
+     * error, which does not mention `pane_mode` and sends the next reader to
+     * the wrong file.
+     */
+    cmd = tuiMode ? detachedDockerArgv(launch.argv) : launch.argv;
   } else {
     const piCommand = process.env["PIFLEET_PI_COMMAND"];
     if (piCommand === undefined || piCommand.trim() === "") {
@@ -1009,9 +1062,53 @@ async function main(): Promise<void> {
   };
 
   async function onChildExit(code: number | null, signal: string | null): Promise<void> {
+    /**
+     * THE `tui` LAUNCH IS NOT A DEATH (spec item 2.0, and the launch-side half
+     * of item 6).
+     *
+     * On the `rpc` path `child` IS the worker: a foreground `docker run` that
+     * lives exactly as long as Pi does, which is what makes its exit the
+     * unambiguous end of the worker. On the `tui` path `child` is a `docker run
+     * -d` CLIENT. It returns as soon as the container has STARTED — measured at
+     * a few hundred milliseconds — and Pi then runs for the whole session
+     * behind it, attached to a pseudo-TTY this process does not hold.
+     *
+     * Running the block below on that exit would therefore, within a second of
+     * every tui worker starting: write `phase: "dead"`, settle any live epoch
+     * `failed:worker_died`, append `worker_exit` to the ledger, and — if a stop
+     * were in flight — deregister and `process.exit(0)`. The worker would be
+     * alive in Docker and dead in every artifact the fleet reads, which is the
+     * quiet-wrongness shape rather than a visible failure.
+     *
+     * A NON-ZERO exit is still a real failure and is treated as one. `docker
+     * run -d` exits 0 when the container was created and started; anything else
+     * means it did not, and there is nothing behind it to keep alive. That
+     * asymmetry is the whole branch: exit 0 says "handed off", and only exit 0
+     * says it.
+     *
+     * What replaces the exit as the LIVENESS signal is not in this function.
+     * `docker inspect` on the recorded name would be the honest probe and is
+     * not built here; until it is, a tui worker whose container dies after a
+     * successful start is detected by its transcript going quiet, which
+     * `settleFromTranscript` treats as the end of the turn. That is coarser
+     * than the `rpc` path's guarantee and is said so rather than implied — the
+     * mode voids F15 ("closing a pane doesn't stop the worker") for the same
+     * underlying reason (SRD §3.5).
+     */
+    if (tuiMode && code === 0) {
+      /**
+       * `state.exit` is deliberately NOT written here, and that is the point of
+       * the whole branch rather than an omission. That field means "the worker
+       * exited, with this code"; `status` prints it and `harvest` reads it. The
+       * process that exited was the docker CLI, and recording its 0 there would
+       * assert a clean worker shutdown that has not happened.
+       */
+      logEvent({ type: "tui_launch_returned", code, signal });
+      return;
+    }
     state.exit = { code, signal };
     state.phase = "dead";
-    client.close("child exited");
+    client?.close("child exited");
     if (em.live !== null) {
       // Death is a fact about the worker, not the task — but a task in flight
       // when the worker died cannot be trusted to have finished (SRD §3.4).
@@ -1041,6 +1138,24 @@ async function main(): Promise<void> {
   // -------------------------------------------------------------------------
 
   const maybeProbe = (): void => {
+    /**
+     * The completion probe is an RPC probe, so a `tui` worker never reaches it.
+     *
+     * Not merely "cannot" — `client` is null and every line below dereferences
+     * it — but MUST NOT, which is why this reads as its own guard rather than
+     * relying on the `?.` that would be needed anyway. The probe's contract is
+     * two correlated `get_state` calls under one generation token, and half of
+     * that (one call answered, one not) is not a weaker version of the probe,
+     * it is a different and wrong one. `settleFromTranscript` is what settles a
+     * tui epoch; see there for what it gives up.
+     *
+     * Nothing feeds `tracker` in this mode either — its inputs are RPC events —
+     * so `tracker.eligible` would never be true and this guard is currently
+     * belt-and-braces. It is written anyway because a future event source that
+     * fed the tracker without a control channel would silently arm a probe that
+     * cannot run.
+     */
+    if (client === null) return;
     if (probing || shuttingDown) return;
     if (!em.windowOpen || !tracker.eligible) return;
     probing = true;
@@ -1243,7 +1358,12 @@ async function main(): Promise<void> {
     uiDeadlines.set(plan.id, deadline);
 
     try {
-      client.sendUncorrelated(cancelledResponse(plan.id));
+      // `?.` and not a guard: this whole path is driven by an
+      // `extension_ui_request` arriving on the RPC event stream, so a `tui`
+      // worker has no route to it. SRD §3.5 voids the answering behaviour for
+      // that mode — a dialog blocks until a person answers it in the pane,
+      // which is acceptable only because the mode is attended.
+      client?.sendUncorrelated(cancelledResponse(plan.id));
     } catch (err) {
       // Left ARMED on purpose. The write failing is exactly the condition the
       // deadline exists to report, and reporting it at the configured bound
@@ -1342,7 +1462,12 @@ async function main(): Promise<void> {
       ...(live === null ? {} : { task_id: live.task_id, epoch: live.epoch }),
       detail: { prose_turns: prose.streak, threshold: prose.threshold },
     });
-    void client.send("abort").catch(() => {});
+    // `?.` for the same reason as the UI path: `prose` is fed only from the
+    // LIVE-attributed branch of `onEvent`, which is the RPC event stream, so a
+    // `tui` worker's detector never counts a turn and never trips. The escalation
+    // ladder below is left unconditional — if a future event source ever trips
+    // the detector without a control channel, the epoch must still come down.
+    void client?.send("abort").catch(() => {});
     proseEscalation = setTimeout(() => {
       proseEscalation = null;
       if (em.live === null) return; // the abort landed; nothing to escalate.
@@ -1480,25 +1605,80 @@ async function main(): Promise<void> {
     }
   };
 
-  const client = new RpcClient(
-    {
-      write: (s) => child.stdin.write(s),
-      flush: () => child.stdin.flush(),
-    },
-    {
-      onEvent,
-      onStray,
-      onProtocolError: (err) => {
-        logEvent({ type: "protocol_error", message: err.message });
-        // The stream is unusable; only liveness detection remains. Kill the
-        // child so death is unambiguous rather than a half-open pipe.
-        child.kill();
-      },
-      idPrefix: argv.workerId,
-    },
-  );
+  /**
+   * THE CONTROL CHANNEL — and its absence (SRD §3.5, spec item 5).
+   *
+   * `null` for a `tui` worker, and null rather than a client wired to a sink
+   * because the difference has to be visible at every call site. There are
+   * fourteen `client.` uses in this file and each one is a different question:
+   * `prompt` must not be sent (a person types the prompt into the pane),
+   * `get_state` cannot be answered, `abort` is replaced by
+   * `docker kill --signal=INT`, `export_html` has no route at all. A client
+   * that swallowed writes and never answered would turn every one of those into
+   * a five-second timeout and a plausible-looking log line; `?.` and explicit
+   * `client === null` guards make each site state its own answer.
+   *
+   * There is nothing to talk TO in any case. `docker run -d` returns as soon as
+   * the container starts: this process's `child` is that short-lived client,
+   * its stdout carries a container ID and then closes, and Pi's actual stdio is
+   * on a pseudo-TTY inside the container that only `docker attach` reaches.
+   * Feeding that stdout to `RpcClient` would not fail loudly — it would parse
+   * one non-JSON line, report a protocol error, and kill the child.
+   */
+  const client: RpcClient | null = tuiMode
+    ? null
+    : new RpcClient(
+        {
+          write: (s) => child.stdin.write(s),
+          flush: () => child.stdin.flush(),
+        },
+        {
+          onEvent,
+          onStray,
+          onProtocolError: (err) => {
+            logEvent({ type: "protocol_error", message: err.message });
+            // The stream is unusable; only liveness detection remains. Kill the
+            // child so death is unambiguous rather than a half-open pipe.
+            child.kill();
+          },
+          idPrefix: argv.workerId,
+        },
+      );
 
   void (async () => {
+    if (client === null) {
+      /**
+       * A detached `docker run` prints the container's full 64-hex ID and
+       * exits. It is recorded for two reasons, neither of them cosmetic.
+       *
+       * `state.container.id` is written `""` at startup with a comment saying
+       * the ID "is deliberately not guessed: it is unknowable until Docker
+       * starts it". On the `rpc` path it stays unknowable, because a foreground
+       * `docker run` never prints it. Here Docker hands it over, so the field
+       * that has always been empty can hold the true value — and `docker logs`
+       * or `docker inspect` on a worker whose NAME was reused now has an
+       * unambiguous handle.
+       *
+       * It is recorded as well as logged because `down` removes by NAME and
+       * must keep doing so (ISC-188: two spellings of one container is the
+       * defect). This ID is diagnostic, and nothing routes off it.
+       */
+      const decoder = new TextDecoder();
+      let out = "";
+      for await (const chunk of child.stdout) out += decoder.decode(chunk as Uint8Array, { stream: true });
+      const id = out.trim();
+      if (/^[0-9a-f]{12,64}$/.test(id)) {
+        if (state.container !== null) state.container.id = id;
+        logEvent({ type: "tui_container_started", container_id: id });
+        void flushState();
+      } else if (id !== "") {
+        // Not a container ID. Said out loud rather than dropped: `docker run`
+        // writes diagnostics to stderr, so unexpected STDOUT means the argv is
+        // not the one this branch believes it built.
+        logEvent({ type: "tui_container_id_unrecognized", output: id.slice(0, 200) });
+      }
+      return;
+    }
     for await (const chunk of child.stdout) client.feed(chunk as Uint8Array);
     client.feedEof();
   })();
@@ -1528,14 +1708,48 @@ async function main(): Promise<void> {
 
   const server = await startControlServer();
 
-  // Initial get_state: records the session path verbatim and proves the RPC
-  // stream is live — the idle gate ISC-70 measures.
-  try {
-    const r = await client.send("get_state", {}, { timeoutMs: 30_000 });
-    if (r.response.success) recordSessionPath((r.response.data ?? {}) as RpcSessionState);
-    state.phase = "idle";
-  } catch {
-    state.phase = "dead";
+  if (client === null) {
+    /**
+     * THE `tui` IDLE GATE — what stands in for the initial `get_state`.
+     *
+     * ISC-70's gate is "the RPC stream answered, therefore this worker is
+     * dispatchable". That evidence does not exist here, and the honest
+     * substitute is the one fact Docker does supply: whether `docker run -d`
+     * succeeded. Exit 0 means the container was created AND started; anything
+     * else means it did not, and there is no worker.
+     *
+     * Awaiting it is safe on this path and would NOT be on the other. Here the
+     * child is a CLI that returns in a few hundred milliseconds by design; on
+     * the `rpc` path the child is Pi itself and awaiting its exit would block
+     * the supervisor for the worker's entire life, before the control socket
+     * ever served a dispatch.
+     *
+     * **WHAT THIS GATE DOES NOT CLAIM.** `rpc`'s gate proves Pi is up and
+     * answering. This proves Docker started a container. Pi could still fail
+     * inside it — a bad `--skill` path, an image without the binary — and this
+     * gate would call the worker idle. The failure surfaces one layer later, as
+     * a transcript that never appears and a task that settles on its deadline
+     * rather than on a refusal. Closing that needs a readiness probe inside the
+     * container, which this phase does not build.
+     */
+    const code = await child.exited;
+    state.phase = code === 0 ? "idle" : "dead";
+    if (code !== 0) {
+      logEvent({ type: "tui_launch_failed", code });
+      process.stderr.write(
+        `supervisor: docker run -d exited ${code} for ${argv.workerId}; no container was started\n`,
+      );
+    }
+  } else {
+    // Initial get_state: records the session path verbatim and proves the RPC
+    // stream is live — the idle gate ISC-70 measures.
+    try {
+      const r = await client.send("get_state", {}, { timeoutMs: 30_000 });
+      if (r.response.success) recordSessionPath((r.response.data ?? {}) as RpcSessionState);
+      state.phase = "idle";
+    } catch {
+      state.phase = "dead";
+    }
   }
   await flushState();
 

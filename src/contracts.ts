@@ -483,6 +483,38 @@ export const WorkerLaunchSchema = z
      * "nothing granted" rather than failing a harvest.
      */
     secret_names: z.array(shortStr).max(MAX_ITEMS).default([]),
+    /**
+     * The worker's `pane_mode` (SRD §3.5), recorded rather than re-derived.
+     *
+     * The supervisor needs this before it spawns anything: a `tui` worker is
+     * created DETACHED and is never given an RPC client, and both of those are
+     * decisions about the very first syscall this process makes. There is no
+     * later moment at which it could ask.
+     *
+     * ## Why the record and not the argv
+     *
+     * The argv above already differs — `render.ts` emits `-t` for a `tui`
+     * worker and for nothing else — so `argv.includes("-t")` would "work". It
+     * is refused for the same reason `credential` is a field rather than
+     * something inferred from the mounts: a flag is evidence of a decision, not
+     * the decision. `-t` could arrive from `docker.extra_args`, could be
+     * spelled `--tty`, and could one day be right for an `rpc` worker for some
+     * unrelated reason; every one of those turns a string search into a
+     * supervisor that silently picks the wrong launch path. `up` is the only
+     * process that resolves `pane_mode`, and this is its output.
+     *
+     * ## Why not the environment
+     *
+     * `worker-env.ts` already exports `PIFLEET_PANE_MODE`, but that variable is
+     * in the CONTAINER's environment, not the supervisor's. The supervisor is
+     * detached from `up` and does not inherit it.
+     *
+     * Defaulted to `"rpc"`, so a launch record written before this field
+     * existed parses as the mode it was actually launched in rather than
+     * failing the run — and so every existing test fixture that constructs a
+     * `WorkerLaunch` keeps describing an `rpc` worker without being edited.
+     */
+    pane_mode: z.enum(["rpc", "tui"]).default("rpc"),
   })
   .strict();
 
