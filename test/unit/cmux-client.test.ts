@@ -149,8 +149,81 @@ describe("argv builders produce exactly the documented command line", () => {
   });
 
   test("send and send-key address a surface", () => {
-    expect(sendArgv("surf-uuid", "hello")).toEqual(["send", "--surface", "surf-uuid", "hello"]);
+    // `--` before the text is load-bearing, not cosmetic: measured against cmux
+    // 0.64.22, `cmux send --surface <id> "--json"` answers `Error: send
+    // requires text` and exit 1 with nothing reaching the pane, while the same
+    // call with `--` delivers `--json` verbatim. See `assertCmuxSendText`.
+    expect(sendArgv("surf-uuid", "hello")).toEqual([
+      "send",
+      "--surface",
+      "surf-uuid",
+      "--",
+      "hello",
+    ]);
     expect(sendKeyArgv("surf-uuid", "enter")).toEqual(["send-key", "--surface", "surf-uuid", "enter"]);
+  });
+
+  /**
+   * The leading-dash rule this REPLACES, and why the replacement is stronger.
+   *
+   * `sendArgv` used to refuse any text beginning with `-`, which is the rule
+   * `assertCmuxText` still applies to titles, statuses and notification bodies.
+   * For `send` it was both too weak and too strong, measured live against cmux
+   * 0.64.22 on 2026-08-31 (each arm a fresh pane running `read -r`):
+   *
+   *   `cmux send --surface <id> "--json"`     -> `Error: send requires text`,
+   *                                              exit 1, pane received NOTHING
+   *   `cmux send --surface <id> -- "--json"`  -> pane received `--json`, exit 0
+   *   `cmux send --surface <id> -- "plain"`   -> pane received `plain`, exit 0
+   *
+   * So the hazard the old assertion named is real (arm 1), and `--` — cmux's
+   * own documented separator, `Usage: cmux send [flags] [--] <text>` — removes
+   * it by construction rather than by refusal. The refusal had to go because a
+   * prompt typed into a pane is markdown: under the old rule every task with
+   * `acceptance` entries refused on its first `- item` line, which is a route
+   * that cannot be used.
+   *
+   * Both directions are asserted here: a leading dash now RIDES (after `--`),
+   * and the guards that remain still bite.
+   */
+  test("send text rides after -- instead of being refused for a leading dash", () => {
+    expect(sendArgv("surf", "-oops")).toEqual(["send", "--surface", "surf", "--", "-oops"]);
+    expect(sendArgv("surf", "- an acceptance bullet")).toEqual([
+      "send",
+      "--surface",
+      "surf",
+      "--",
+      "- an acceptance bullet",
+    ]);
+    // …and the surface id is still an identifier, so the OTHER half of the
+    // injection guard is untouched.
+    expect(() => sendArgv("-x", "hello")).toThrow(/refusing/);
+  });
+
+  test("send text refuses what cmux would silently reinterpret", () => {
+    // The two-character escape sequences cmux converts to key events. Measured
+    // against the real Pi TUI: `A\nB` submits `A` as a turn and leaves `B` in
+    // the prompt box, with every exit code 0.
+    expect(() => sendArgv("surf", "first line\\nsecond line")).toThrow(/Enter/);
+    expect(() => sendArgv("surf", "a\\rb")).toThrow(/Enter/);
+    expect(() => sendArgv("surf", "a\\tb")).toThrow(/Tab/);
+    // A real newline byte was already refused as a control character, and stays
+    // refused — the escape rule is an ADDITION, not a substitution.
+    expect(() => sendArgv("surf", "a\nb")).toThrow(/control characters/);
+    expect(() => sendArgv("surf", "")).toThrow(/refusing/);
+    expect(() => sendArgv("surf", "x".repeat(1025))).toThrow(/refusing/);
+    /**
+     * A backslash before ANY OTHER letter is not an escape cmux acts on
+     * (measured: argv text `A\xB` arrives at the pane literally), so it must
+     * still pass — a guard wider than its evidence would refuse ordinary prose.
+     *
+     * The first draft of this case used a Windows path, `C:\path\to\file`, on
+     * the assumption that it was an innocent backslash example. It is not: `\t`
+     * sits inside `\to`, so the guard fired and caught the test's own premise.
+     * Left recorded because it is the strongest argument FOR the guard — the
+     * sequence does not have to be written deliberately to be there.
+     */
+    expect(() => sendArgv("surf", "the \\x escape is not one cmux acts on")).not.toThrow();
   });
 
   /**
@@ -211,7 +284,10 @@ describe("argv builders produce exactly the documented command line", () => {
     expect(() => focusPaneArgv("a b")).toThrow(/refusing/);
     expect(() => workspaceCloseArgv("-x")).toThrow(/refusing/);
     expect(() => setStatusArgv("ws", "-k", "v")).toThrow(/refusing/);
-    expect(() => sendArgv("surf", "-oops")).toThrow(/refusing/);
+    // `sendArgv`'s TEXT is no longer part of this sweep — it rides after `--`
+    // (see "send text rides after -- …" above, which pins both directions).
+    // Its identifier half still is.
+    expect(() => sendArgv("-x", "hello")).toThrow(/refusing/);
     expect(() => respawnPaneArgv("-x", "surf", "cmd")).toThrow(/refusing/);
     expect(() => respawnPaneArgv("ws", "-x", "cmd")).toThrow(/refusing/);
     expect(() => renameTabArgv("-x", "surf", "title")).toThrow(/refusing/);
