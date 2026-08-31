@@ -135,27 +135,52 @@ export function interruptArgv(container: string): string[] {
 }
 
 /**
- * Read a worker's pane mode back off the argv `up` actually rendered.
+ * A worker's pane mode: the RECORDED decision, checked against the argv.
  *
- * The mode is NOT recorded as a field anywhere durable — `WorkerState` has no
- * pane mode and `launch.json` has no pane mode — so it is read from the one
- * artifact that cannot disagree with what was launched: the argv the
- * supervisor runs VERBATIM (`WorkerLaunchSchema.argv`). Two independent marks
- * are left there by `config/render.ts`, and both are checked:
+ * ## The source, and why it changed
+ *
+ * This function first read the mode OFF the argv, and its docblock said why:
+ * "the mode is NOT recorded as a field anywhere durable — `WorkerState` has no
+ * pane mode and `launch.json` has no pane mode". That was true when it was
+ * written and is no longer: `WorkerLaunchSchema.pane_mode` now carries
+ * `resolveWorker`'s output, written by the one process that resolves it.
+ *
+ * So the source is the field, for the reason the field exists — **a flag is
+ * evidence of a decision, not the decision.** `-t` could arrive from
+ * `docker.extra_args`, could be spelled `--tty`, and could one day be right for
+ * an `rpc` worker for an unrelated reason; each of those turns a string search
+ * into a confident wrong answer about which control plane a worker has.
+ *
+ * ## The marks are kept, demoted to a CROSS-CHECK
+ *
+ * They are not redundant with the field, because they fail differently. The
+ * field says what `up` DECIDED; the marks say what it RENDERED. Two independent
+ * marks are left by `config/render.ts`:
  *
  *   `--mode rpc` present   <=>  paneMode !== "tui"   (render.ts, buildPiArgv)
  *   `-t` present           <=>  paneMode === "tui"   (render.ts, buildDockerArgv)
  *
- * Requiring them to AGREE is deliberate, and it is the same shape the
- * entrypoint uses when it checks both `-t 0` and `/dev/tty` before believing
- * it has a terminal: either mark alone would keep working through a renderer
- * change that moved only the other one, and would then answer confidently
- * about a worker that is no longer the thing it names. A disagreement is a
- * renderer bug, and it is reported as unknown rather than guessed.
+ * A record that says `tui` over an argv with no `-t` is not a worker whose mode
+ * is in doubt — it is a worker that CANNOT WORK, launched detached into a
+ * container with no pseudo-TTY and therefore no Pi TUI. The supervisor has no
+ * way to notice that and no way to survive it. Reporting `unknown` here refuses
+ * to guess and puts the disagreement in the operator's error message, which is
+ * the same discipline the entrypoint uses when it checks both `-t 0` and
+ * `/dev/tty` before believing it has a terminal.
+ *
+ * That is why the three-way agreement is required rather than the field simply
+ * trusted: dropping the marks would make this function correct and useless, and
+ * dropping the field would make it confident and wrong.
  *
  * `-t` is matched exactly and not as a substring: `--tty` is not a form this
  * renderer emits, and `-t` appears in no other flag it does emit, but a
  * substring test would also match a bind-mount path containing "-t".
+ *
+ * **DOES NOT CLAIM** that a record predating the field is diagnosable. It
+ * parses as `rpc` by schema default (deliberately — see `contracts.ts`), so an
+ * OLD tui record reads as a renderer disagreement rather than as an old record.
+ * Both answers are `unknown`, both refuse, and the operator is told the marks
+ * disagree; nothing here can tell the two causes apart.
  */
 export function launchPaneMode(launch: WorkerLaunch): "rpc" | "tui" | "unknown" {
   const argv = launch.argv;
@@ -166,8 +191,10 @@ export function launchPaneMode(launch: WorkerLaunch): "rpc" | "tui" | "unknown" 
   const modeAt = argv.indexOf("--mode");
   const rpcMode = modeAt >= 0 && argv[modeAt + 1] === "rpc";
 
-  if (rpcMode && !hasTty) return "rpc";
-  if (!rpcMode && hasTty) return "tui";
+  // The marks must agree with EACH OTHER and with the record. Written as the
+  // recorded mode leading, so a reader sees which one is the source.
+  if (launch.pane_mode === "rpc" && rpcMode && !hasTty) return "rpc";
+  if (launch.pane_mode === "tui" && !rpcMode && hasTty) return "tui";
   return "unknown";
 }
 

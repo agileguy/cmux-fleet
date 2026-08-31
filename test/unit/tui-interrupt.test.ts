@@ -37,13 +37,25 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
  * production. `argv` is the whole command line — docker flags and the pi flag
  * list — because that is what `WorkerLaunchSchema.argv` holds and what the
  * supervisor runs verbatim.
+ *
+ * `paneMode` DEFAULTS to whatever the argv's `-t` implies, and that default is
+ * a fixture convenience rather than a claim: it builds the CONSISTENT record
+ * `up` writes, so a test about mark-vs-mark disagreement does not have to
+ * restate the field. The production code does the opposite — the field leads
+ * and the marks check it — so every record-vs-argv disagreement is spelled out
+ * explicitly below rather than left to this default.
  */
-function launch(argv: string[], container = "pifleet-r1-eng-1"): WorkerLaunch {
+function launch(
+  argv: string[],
+  container = "pifleet-r1-eng-1",
+  paneMode: "rpc" | "tui" = argv.includes("-t") ? "tui" : "rpc",
+): WorkerLaunch {
   return WorkerLaunchSchema.parse({
     kind: "container",
     argv,
     container,
     image: "pifleet/pi-worker:test",
+    pane_mode: paneMode,
   });
 }
 
@@ -127,6 +139,62 @@ describe("launchPaneMode reads the mode back off the rendered argv", () => {
   test("a bare rpc token that is not --mode's value does not read as rpc mode", () => {
     const bare = ["docker", "run", "-i", "-t", "--rm", "img", "pi", "--skill", "rpc"];
     expect(launchPaneMode(launch(bare))).toBe("tui");
+  });
+
+  /**
+   * THE RECORD IS THE SOURCE, and a record that disagrees with the argv is a
+   * worker that cannot work rather than a mode to be inferred.
+   *
+   * These two cases are the reason `launchPaneMode` reads
+   * `WorkerLaunchSchema.pane_mode` at all instead of sniffing `-t`. Each is a
+   * real launch failure with a message that does not name `pane_mode`:
+   *
+   *   record tui / argv rpc  ->  detached container, no pseudo-TTY, no Pi TUI
+   *   record rpc / argv tui  ->  `the input device is not a TTY`, no container
+   *
+   * Neither is survivable and neither is guessable, so both refuse. A reader
+   * that trusted only the marks would answer confidently in both.
+   */
+  test("a record that disagrees with the argv is unknown, in both directions", () => {
+    expect(launchPaneMode(launch(RPC_ARGV, "pifleet-r1-eng-1", "tui"))).toBe("unknown");
+    expect(launchPaneMode(launch(TUI_ARGV, "pifleet-r1-eng-1", "rpc"))).toBe("unknown");
+  });
+
+  /**
+   * BOTH marks are required on the tui arm, and this is the case that proves
+   * the `-t` half is load-bearing.
+   *
+   * Found by a surviving mutation: deleting `hasTty` from the tui arm left the
+   * suite green, because every existing tui-disagreement fixture carried
+   * `--mode rpc` and was already refused by `!rpcMode`. An argv with NEITHER
+   * mark — no `-t`, no `--mode rpc` — slipped through as a confident `"tui"`.
+   *
+   * It is the worst of the three failures, not the mildest. `planInterrupt`
+   * would answer `signal`, `abort` would report a clean `docker kill`, and the
+   * container it signalled has no pseudo-TTY and never ran a Pi TUI at all.
+   */
+  test("a tui record over an argv with neither mark is unknown", () => {
+    const neither = ["docker", "run", "-i", "--rm", "img", "pi", "--session-id", "eng-1"];
+    expect(launchPaneMode(launch(neither, "pifleet-r1-eng-1", "tui"))).toBe("unknown");
+  });
+
+  /**
+   * A record written before `pane_mode` existed parses as `rpc` by schema
+   * default, so an OLD tui record reads as a disagreement. Asserted rather than
+   * left implicit because it bounds what this function can diagnose: the answer
+   * is right — refuse — and the REASON given to the operator names the marks,
+   * not the record's age. Nothing here can tell those two causes apart.
+   */
+  test("a pre-field record over a tui argv refuses rather than guesses", () => {
+    const old = WorkerLaunchSchema.parse({
+      kind: "container",
+      argv: TUI_ARGV,
+      container: "pifleet-r1-eng-1",
+      image: "pifleet/pi-worker:test",
+      // `pane_mode` deliberately absent — this is the old record shape.
+    });
+    expect(old.pane_mode).toBe("rpc");
+    expect(launchPaneMode(old)).toBe("unknown");
   });
 });
 
