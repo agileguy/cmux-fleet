@@ -1752,3 +1752,317 @@ describe("render CLI (ISC-60)", () => {
     await expect(renderWorker(loaded, "ghost-9")).rejects.toThrow(ConfigError);
   });
 });
+
+/**
+ * `pane_mode` is binding on both argvs (SRD §3.5).
+ *
+ * The field has been in `WorkerSchema` and set by `resolveWorker` since it was
+ * added, and NOTHING in `src/` read it — so `pane_mode: tui` parsed, validated
+ * and produced an argv identical to `rpc`'s. These are the probes that make it
+ * mean something, and the risk they exist for is not the new path.
+ *
+ * THE RISK IS THE DEFAULT PATH. Every worker in every existing fleet is `rpc`,
+ * the change touches the function that builds their argv, and an argv that
+ * moved by one element is not a thing anyone notices from the outside: docker
+ * accepts flags in any order, so a misplaced `-t` or a dropped `--mode rpc`
+ * produces a container that starts and then behaves like something nobody
+ * asked for. So the `rpc` argv is pinned WHOLE with `toEqual`, and the `tui`
+ * argv is stated as a total relation to it rather than as a second list that
+ * could drift into agreeing with a bug.
+ *
+ * ### Why the literals are literals here
+ *
+ * Machine-specific PATHS come from `run/paths.ts`, for ISC-188's reason: a
+ * path rebuilt in this file would only assert that two `join()` calls agree.
+ * Everything else — flag names, order, `10001:10001`, the tmpfs specs, the
+ * mount destinations — is spelled out, and that is a DELIBERATE departure from
+ * the sibling ISC-125/ISC-255 probes above, which take the same values from
+ * `WORKER_UID` and `gcloudConfigTmpfsArgv()`. Those assert that two places
+ * AGREE, and a constant is right for that. This one asserts that the list did
+ * not MOVE, and a pin written in terms of the constants it is pinning cannot
+ * see a change to them. If a legitimate change turns this red, the list below
+ * is the thing to update — deliberately, as a decision, which is the whole
+ * service it renders.
+ */
+describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
+  /**
+   * One fixture, two workers of the SAME role differing in exactly one key.
+   *
+   * `eng-2` copies `eng-1`'s worker-level `append_system_prompt` too, so the
+   * two differ in their id and their `pane_mode` and in nothing else. Anything
+   * that shows up as a difference between their argvs is therefore either
+   * id-derived or `pane_mode`, which is what makes the relation test below a
+   * statement rather than an approximation.
+   *
+   * `pane_mode` is set at the WORKER level on purpose: `pick()` merges
+   * worker → role → defaults, and the worker level is the one an operator
+   * reaches for when attaching to a single agent in an otherwise automated
+   * fleet, which is the §3.5 use case ("pair-working, demos").
+   */
+  async function bothModes() {
+    const f = await fixture((doc) => {
+      (doc["workers"] as unknown[]).push({
+        id: "eng-2",
+        role: "eng",
+        pane_mode: "tui",
+        append_system_prompt: "Worker-specific note.",
+      });
+    });
+    return {
+      ...f,
+      rpc: await renderWorker(f.loaded, "eng-1"),
+      tui: await renderWorker(f.loaded, "eng-2"),
+    };
+  }
+
+  test("an rpc worker's docker argv is unchanged, element for element", async () => {
+    const { runsDir, rpc } = await bothModes();
+    const run = runPaths("dry", runsDir);
+    const worker = workerPaths(run, "eng-1");
+
+    expect(rpc.docker).toEqual([
+      "docker",
+      "run",
+      "-i",
+      // NO `-t` here. This element gap is the assertion: `-t` for an `rpc`
+      // worker is the regression this whole block exists to catch.
+      "--rm",
+      "--name",
+      "pifleet-dry-eng-1",
+      "--user",
+      "10001:10001",
+      "--security-opt",
+      "no-new-privileges",
+      "--cap-drop",
+      "ALL",
+      "--read-only",
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,size=256m",
+      "--tmpfs",
+      "/run:rw,noexec,nosuid,size=1m,uid=10001,gid=10001",
+      "--tmpfs",
+      "/home/pi/.config/gcloud:rw,noexec,nosuid,size=16m,uid=10001,gid=10001",
+      "--pids-limit",
+      "512",
+      "--memory",
+      "4g",
+      "--cpus",
+      "2",
+      "--network",
+      "pifleet-egress",
+      "--env-file",
+      worker.envFile,
+      "-v",
+      `${workerWorktree(run.root, "eng-1")}:/workspace`,
+      "-v",
+      `${workerOutboxDir(run.root, "eng-1")}:/outbox`,
+      "-v",
+      `${run.sessionsDir}:/sessions`,
+      "-v",
+      `${roleSkillsDir(run.root, "eng")}:/skills:ro`,
+      "-v",
+      `${worker.cloudAllow}:/policy/cloud-allow:ro`,
+      "-v",
+      `${worker.taskPolicy}:/policy/task:ro`,
+      "-v",
+      "pifleet-piagent-eng-1:/home/pi/.pi/agent",
+      "-v",
+      `${worker.systemAppendMd}:/briefing/system-append.md:ro`,
+      // The tag's VALUE has its own probes (ISC-160 walks the build context).
+      // What this pin fixes is its POSITION: everything after it is the pi
+      // flag list, and an element that crossed the image would change what
+      // docker thinks it was told without changing what the array contains.
+      rpc.image,
+      "--mode",
+      "rpc",
+      "--session-id",
+      "eng-1",
+      "--session-dir",
+      "/sessions",
+      "--no-extensions",
+      "--no-skills",
+      "--no-context-files",
+      "--provider",
+      "omlx",
+      "--model",
+      "Qwen3-Coder-30B-A3B-Instruct-4bit",
+      "--thinking",
+      "medium",
+      "--tools",
+      "read,write,edit,bash,grep,find,ls",
+      "--append-system-prompt",
+      "/briefing/system-append.md",
+      "--skill",
+      "/skills/pifleet-worker",
+      "--skill",
+      "/skills/tdd",
+      "--skill",
+      "/skills/diagnose",
+    ]);
+  });
+
+  test("an rpc worker's pi argv is unchanged, element for element", async () => {
+    const { rpc } = await bothModes();
+    expect(rpc.pi).toEqual([
+      "pi",
+      "--mode",
+      "rpc",
+      "--session-id",
+      "eng-1",
+      "--session-dir",
+      "/sessions",
+      "--no-extensions",
+      "--no-skills",
+      "--no-context-files",
+      "--provider",
+      "omlx",
+      "--model",
+      "Qwen3-Coder-30B-A3B-Instruct-4bit",
+      "--thinking",
+      "medium",
+      "--tools",
+      "read,write,edit,bash,grep,find,ls",
+      "--append-system-prompt",
+      "/briefing/system-append.md",
+      "--skill",
+      "/skills/pifleet-worker",
+      "--skill",
+      "/skills/tdd",
+      "--skill",
+      "/skills/diagnose",
+    ]);
+  });
+
+  /**
+   * The tui pi argv, whole — and the point is what is NOT in it.
+   *
+   * `--mode` does not appear at all. There is no `--mode tui`: `pi --help` in
+   * `pifleet/pi-worker:0.79.6-base` offers `text (default), json, or rpc`, and
+   * Pi's TUI is `text` attached to a terminal. Spelling the list out is how a
+   * future `argv.push("--mode", "tui")` becomes visible here rather than
+   * becoming a container that came up in a mode nobody selected.
+   */
+  test("a tui worker's pi argv omits --mode entirely and invents no value for it", async () => {
+    const { tui } = await bothModes();
+    expect(tui.pi).toEqual([
+      "pi",
+      "--session-id",
+      "eng-2",
+      "--session-dir",
+      "/sessions",
+      "--no-extensions",
+      "--no-skills",
+      "--no-context-files",
+      "--provider",
+      "omlx",
+      "--model",
+      "Qwen3-Coder-30B-A3B-Instruct-4bit",
+      "--thinking",
+      "medium",
+      "--tools",
+      "read,write,edit,bash,grep,find,ls",
+      "--append-system-prompt",
+      "/briefing/system-append.md",
+      "--skill",
+      "/skills/pifleet-worker",
+      "--skill",
+      "/skills/tdd",
+      "--skill",
+      "/skills/diagnose",
+    ]);
+    // Stated separately because the array above would also be satisfied by a
+    // renderer that emitted `--mode` with an EMPTY value in some other
+    // position — and because this is the sentence the spec actually makes.
+    expect(tui.pi).not.toContain("--mode");
+    expect(tui.pi).not.toContain("tui");
+  });
+
+  /**
+   * The tui docker argv, as a TOTAL relation to the pinned rpc one.
+   *
+   * Not a second literal list. A second list is a second chance to write down
+   * the bug: if `-t` went in at the wrong index, a hand-written expectation
+   * built by reading the implementation would carry the same wrong index and
+   * agree with it. Derived from the argv the test above pins, the claim is
+   * exact and has no room for that — `tui.docker` IS `rpc.docker` with the
+   * worker id swapped, `-t` inserted after `-i`, and `--mode rpc` removed.
+   * Every other element, in order, is required to be untouched.
+   *
+   * The id swap is safe because the runs root is a `mkdtemp` path that cannot
+   * contain "eng-1", so the only elements it rewrites are the six that are
+   * id-derived by construction: `--name`, the worktree, the outbox, the
+   * env-file, the pi-agent volume, and the briefing file.
+   */
+  test("a tui worker's docker argv is the rpc one plus -t, minus --mode rpc, and nothing else", async () => {
+    const { rpc, tui } = await bothModes();
+
+    const swapped = rpc.docker.map((a) => a.replaceAll("eng-1", "eng-2"));
+    const withoutMode = swapped.filter(
+      (a, i) => a !== "--mode" && swapped[i - 1] !== "--mode",
+    );
+    const expected = [...withoutMode.slice(0, 3), "-t", ...withoutMode.slice(3)];
+    expect(expected.slice(0, 5)).toEqual(["docker", "run", "-i", "-t", "--rm"]);
+    expect(tui.docker).toEqual(expected);
+  });
+
+  /**
+   * Harvest identity, asserted as the requirement SRD §3.5 states rather than
+   * inferred from the two lists above.
+   *
+   * §3.5's table says the harvest path is "identical" in both modes, and the
+   * reason it can say that is that `--session-id` is chosen before launch. So
+   * this is a constraint on future edits to `buildPiArgv`, not a description
+   * of one: a `tui` branch that also touched `--session-dir` would leave the
+   * transcript somewhere `harvest` does not look, and a harvest that finds
+   * nothing reports nothing — the run looks alive and produces no record.
+   */
+  test("session identity, briefing, tools and skills are identical across modes", async () => {
+    const { runsDir, rpc, tui } = await bothModes();
+
+    expect(valueOf(rpc.pi, "--session-id")).toBe("eng-1");
+    expect(valueOf(tui.pi, "--session-id")).toBe("eng-2");
+    expect(valueOf(tui.pi, "--session-dir")).toBe(valueOf(rpc.pi, "--session-dir"));
+    expect(valueOf(tui.pi, "--session-dir")).toBe("/sessions");
+    expect(valueOf(tui.pi, "--append-system-prompt")).toBe(BRIEFING_MOUNT);
+    expect(countOf(tui.pi, "--append-system-prompt")).toBe(1);
+    expect(valueOf(tui.pi, "--tools")).toBe(valueOf(rpc.pi, "--tools"));
+    expect(valuesOf(tui.pi, "--skill")).toEqual(valuesOf(rpc.pi, "--skill"));
+    for (const denial of ["--no-extensions", "--no-skills", "--no-context-files"]) {
+      expect(tui.pi).toContain(denial);
+    }
+
+    // And the container-side half: the sessions mount a `tui` worker writes
+    // its transcript through is the same directory, mounted at the same place.
+    expect(tui.docker).toContain(`${runPaths("dry", runsDir).sessionsDir}:/sessions`);
+  });
+
+  /**
+   * The default is `rpc`, and it survives a config that says nothing.
+   *
+   * `load.ts` defaults `paneMode` to `"rpc"` and `buildPiArgv`/`buildDockerArgv`
+   * branch on `=== "tui"`, so an omitted key and an explicit `pane_mode: rpc`
+   * must produce the same bytes. Asserted because those are two different code
+   * paths through `pick()` — an absent key and a present one — and only one of
+   * them is exercised by every other test in this file.
+   *
+   * BOTH WORKERS COME FROM ONE FIXTURE. Two `fixture()` calls would mkdtemp two
+   * runs roots and set `PIFLEET_RUNS_DIR` twice, so every path in the two argvs
+   * would differ for a reason that has nothing to do with `pane_mode` — the
+   * comparison would have to be loosened to survive, and a loosened comparison
+   * is not the claim.
+   */
+  test("an explicit pane_mode: rpc renders identically to omitting the key", async () => {
+    const { loaded } = await fixture((doc) => {
+      (doc["workers"] as unknown[]).push({
+        id: "eng-2",
+        role: "eng",
+        pane_mode: "rpc",
+        append_system_prompt: "Worker-specific note.",
+      });
+    });
+    const implicit = await renderWorker(loaded, "eng-1");
+    const explicit = await renderWorker(loaded, "eng-2");
+    expect(explicit.docker).toEqual(implicit.docker.map((a) => a.replaceAll("eng-1", "eng-2")));
+    expect(explicit.pi).toEqual(implicit.pi.map((a) => a.replaceAll("eng-1", "eng-2")));
+  });
+});

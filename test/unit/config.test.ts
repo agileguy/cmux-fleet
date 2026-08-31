@@ -568,6 +568,106 @@ describe("validation rejections", () => {
   });
 });
 
+/**
+ * `pane_mode: tui` in a shape that has no pane (SRD §3.5).
+ *
+ * `pane_mode` was parsed by the schema and read by NOTHING — `load.ts` resolved
+ * it into `ResolvedWorker.paneMode` and no consumer existed — which is the same
+ * dead-field shape `max_concurrent`, `branch_prefix` and `ui_request_timeout`
+ * were each caught in. Making it binding means two documents that describe a
+ * worker nobody could ever drive have to start failing, and BOTH are refused
+ * here rather than at `up`: a `config validate` error names the field and the
+ * file, whereas the same refusal from inside `up` arrives after worktrees,
+ * containers and panes exist.
+ *
+ * The message is asserted, not merely the throw. A bare "it rejected" passes
+ * for the wrong error, and these two are refusals an operator has to be able to
+ * ACT on — the fix for one is `kind:`, for the other `backend.kind:`, and a
+ * message that named neither would send them to delete the pane mode they
+ * actually wanted.
+ */
+describe("pane_mode: tui is refused where there is no pane (SRD §3.5)", () => {
+  test("a role pairing tui with the oneshot lifecycle is rejected, naming both fields", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { pair: { pane_mode: "tui", kind: "oneshot" } };
+    doc["workers"] = [{ id: "w1", role: "pair" }];
+    await expectIssue(doc, "roles.pair.pane_mode", "kind: oneshot");
+    // The REASON, so the diagnosis survives someone rewording the sentence:
+    // oneshot launches `pi -p`, which is Pi's non-interactive mode.
+    await expectIssue(doc, "roles.pair.pane_mode", "non-interactive");
+  });
+
+  test("a worker override that completes tui + oneshot is rejected at the worker", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { pair: { kind: "oneshot" } };
+    doc["workers"] = [{ id: "w1", role: "pair", pane_mode: "tui" }];
+    await expectIssue(doc, "workers.0.pane_mode", "kind: oneshot");
+  });
+
+  /**
+   * Assembled ACROSS levels, which is the shape the read_only guard above was
+   * originally caught getting wrong: neither `defaults` nor the role states
+   * the combination on its own, and the merge produces it anyway.
+   */
+  test("tui from defaults and oneshot from the role is still rejected", async () => {
+    const doc = baseDoc();
+    doc["defaults"] = { pane_mode: "tui" };
+    doc["roles"] = { pair: { kind: "oneshot" } };
+    doc["workers"] = [{ id: "w1", role: "pair" }];
+    await expectIssue(doc, "roles.pair.pane_mode", "kind: oneshot");
+    await expectIssue(doc, "workers.0.pane_mode", "kind: oneshot");
+  });
+
+  test("tui on the headless backend is rejected, naming backend.kind and the reason", async () => {
+    const doc = baseDoc();
+    doc["backend"] = { kind: "headless" };
+    doc["roles"] = { eng: { pane_mode: "tui" } };
+    await expectIssue(doc, "roles.eng.pane_mode", "backend.kind is headless");
+    // Consistent with `pifleet tui --worker`, which refuses a headless worker
+    // at runtime because there is no pane to hand over.
+    await expectIssue(doc, "workers.0.pane_mode", "docker attach");
+  });
+
+  /**
+   * The negative controls. Without these the guard could be satisfied by
+   * refusing `pane_mode: tui` outright, which would make the whole feature
+   * unreachable while every rejection test above still passed.
+   */
+  test("tui with the default lifecycle on a cmux backend loads", async () => {
+    const doc = baseDoc();
+    doc["backend"] = { kind: "cmux" };
+    doc["roles"] = { eng: { pane_mode: "tui" } };
+    const loaded = await writeAndLoad(doc);
+    expect(resolveWorker(loaded, "w1").paneMode).toBe("tui");
+    expect(resolveWorker(loaded, "w1").kind).toBe("persistent");
+  });
+
+  test("oneshot on a headless backend loads while the pane mode stays rpc", async () => {
+    const doc = baseDoc();
+    doc["backend"] = { kind: "headless" };
+    doc["roles"] = { eng: { kind: "oneshot" } };
+    const loaded = await writeAndLoad(doc);
+    expect(resolveWorker(loaded, "w1").paneMode).toBe("rpc");
+    expect(resolveWorker(loaded, "w1").kind).toBe("oneshot");
+  });
+
+  /**
+   * `backend.kind` is OPTIONAL and an absent block means UNSET (ISC-271), so
+   * this check can only see the document that SAYS headless. Stated as a test
+   * rather than only in a comment, because the honest bound of a guard is the
+   * part most likely to be misremembered as wider than it is: a `--backend
+   * headless` typed at `up` is a different surface, and `pifleet tui --worker`
+   * is what refuses that worker at runtime.
+   */
+  test("a tui worker with no backend block stated is NOT refused here", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: { pane_mode: "tui" } };
+    const loaded = await writeAndLoad(doc);
+    expect(loaded.config.backend.kind).toBeUndefined();
+    expect(resolveWorker(loaded, "w1").paneMode).toBe("tui");
+  });
+});
+
 describe("worker count follows config (ISC-61)", () => {
   test("changing only the workers: length changes the resolved count", async () => {
     const three = baseDoc();

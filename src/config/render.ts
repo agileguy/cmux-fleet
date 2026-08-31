@@ -21,6 +21,13 @@
  *    to derive its own run root from `config.run.root` — a field `up` never
  *    reads — so a preview could name mounts the real launch would not use, and
  *    a wrong preview is silent by construction (ISC-188).
+ *
+ * `pane_mode` (SRD §3.5) reaches exactly two lines in this file, and they are
+ * the only two places in `src/` that read it: `-t` on the `docker run` and the
+ * ABSENCE of `--mode rpc` on the pi argv. `resolveWorker` has set `paneMode`
+ * since the field was added and nothing consumed it, so `pane_mode: tui`
+ * parsed, validated, and did nothing — the shape this repo keeps closing. Both
+ * branch sites carry the measurement that shaped them.
  */
 
 import { join } from "node:path";
@@ -113,10 +120,45 @@ async function concatBriefing(w: ResolvedWorker): Promise<string | null> {
   return `${parts.join("\n\n")}\n`;
 }
 
-/** Build the Pi argv for a resolved worker. Pure. */
+/**
+ * Build the Pi argv for a resolved worker. Pure.
+ *
+ * `--mode rpc` is emitted for every pane mode EXCEPT `tui`, and that one flag
+ * is the WHOLE of what `pane_mode: tui` does to this argv.
+ *
+ * THERE IS NO `--mode tui`. Measured against the shipped worker image,
+ * `pi --help` in `pifleet/pi-worker:0.79.6-base` reports exactly:
+ *
+ *     --mode <mode>   Output mode: text (default), json, or rpc
+ *
+ * Pi's TUI is `text` — its DEFAULT — attached to a real terminal (SRD §162:
+ * "a TTY has one owner"). So a TUI worker is this same argv with the flag left
+ * OFF, not a third value for it. Emitting `--mode tui` would be refused by
+ * nothing on this path: Pi would take the unrecognized value and the container
+ * would come up as something nobody chose, which is why the omission is
+ * written as an omission rather than as a second `argv.push`.
+ *
+ * Everything below this branch is deliberately IDENTICAL in both modes —
+ * `--session-id`, `--session-dir`, `--append-system-prompt`, the discovery
+ * denials, `--tools`, `--exclude-tools`, `--skill`. SRD §3.5 states the
+ * harvest path is "identical" in `tui` because `--session-id` is chosen before
+ * launch, and that sentence is a REQUIREMENT rather than an observation: a tui
+ * worker whose session flags drifted would write its transcript somewhere
+ * `harvest` does not look, and a harvest that finds nothing reports nothing —
+ * the run would look alive and produce no record. So the branch covers one
+ * flag and no others, and any future flag added here must be added for both.
+ *
+ * The test is `=== "tui"` rather than `=== "rpc"` so an absent `paneMode`
+ * keeps the RPC control plane. `resolveWorker` always sets the field
+ * (`load.ts` defaults it to `"rpc"`), but two integration probes hand this
+ * function a hand-built object cast to `ResolvedWorker`, and of the two ways
+ * to be wrong about an unset value, "started an RPC worker for a pane that
+ * wanted a TTY" is loud and "dropped the control plane out from under the
+ * supervisor" is not.
+ */
 export function buildPiArgv(w: ResolvedWorker, hasBriefing: boolean): string[] {
   const argv: string[] = ["pi"];
-  argv.push("--mode", "rpc");
+  if (w.paneMode !== "tui") argv.push("--mode", "rpc");
   argv.push("--session-id", w.id);
   argv.push("--session-dir", "/sessions");
   // Mandatory discovery denials (SRD §12.2): the repo under test may carry
@@ -175,7 +217,39 @@ export function buildDockerArgv(
   // (ISC-188). With the name unbound, that line does not compile at all. The
   // single field this function needs from the section is read at its use site.
   const { docker, cloud } = loaded.config;
-  const argv: string[] = ["docker", "run", "-i", "--rm"];
+  const argv: string[] = ["docker", "run", "-i"];
+  /*
+   * `-t` for a `tui` worker and for nothing else (SRD §3.5).
+   *
+   * Placed here so the pair reads as the `-it` it is, and — more to the point
+   * — so an `rpc` worker's argv stays BYTE-IDENTICAL to what this function
+   * emitted before `pane_mode` was read by anything: `["docker", "run", "-i",
+   * "--rm", …]`, with `-t` inserted into the gap rather than the array
+   * rebuilt around it. `render.test.ts` pins that whole array with `toEqual`.
+   * The risk in wiring `pane_mode` was never the tui path, which had no
+   * behaviour to regress; it was moving the default one by a byte.
+   *
+   * WHAT THIS FLAG DOES NOT CLAIM: that the argv it lands in is runnable
+   * as-is. Measured against docker 28.4.0 on 2026-08-31:
+   *
+   *   docker run --rm -i -t alpine:3 true </dev/null
+   *     -> "the input device is not a TTY", exit 1
+   *   docker run -d  -i -t alpine:3 sleep 5
+   *     -> starts; .Config.Tty=true, .Config.OpenStdin=true
+   *
+   * The Docker CLI refuses `-t` in the FOREGROUND when its own stdin is not a
+   * terminal, and the foreground-with-pipes shape is exactly how the
+   * supervisor spawns a worker today — it has to, because RPC mode is a JSONL
+   * protocol on that pipe (§3.4 rule 1). The DETACHED form is the one that
+   * produces the pseudo-TTY `docker attach` needs. Supplying that launch shape
+   * is the rest of the plan: the supervisor must stop owning a tui worker's
+   * stdin, and the pane must run `docker attach`. Neither is wired yet, so a
+   * `tui` worker renders correctly TODAY and does not run. That is recorded
+   * here rather than left to be discovered, because the failure is a one-line
+   * CLI error that does not mention `pane_mode`.
+   */
+  if (w.paneMode === "tui") argv.push("-t");
+  argv.push("--rm");
   argv.push("--name", workerContainerName(opts.run.runId, w.id));
   // `WORKER_UID`, not a literal, because the gcloud tmpfs below must be owned
   // by exactly this uid to be writable and a drift between the two is silent:
