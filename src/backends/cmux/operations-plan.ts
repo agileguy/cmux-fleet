@@ -54,6 +54,7 @@
  *   `shellQuote`.
  */
 
+import type { SplitDirection } from "./client.ts";
 import { shellQuote } from "./parse.ts";
 
 /**
@@ -84,6 +85,27 @@ export interface OperationsPane {
   readonly title: string;
   /** Shell text for `respawn-pane --command`. */
   readonly command: string;
+  /**
+   * The direction this pane is split off the PREVIOUS one, or `null` for the
+   * first, which consumes the workspace's initial surface and is split off
+   * nothing.
+   *
+   * Carried per-pane rather than derived from the index. It was
+   * `i % 2 === 1 ? "right" : "down"` — an alternating sequence copied from the
+   * fleet backend, where panes are interchangeable and any tiling will do.
+   * These three are not interchangeable: the shape below is the requirement,
+   * and a modulo cannot express it because the second split must land inside
+   * the pane the first one created rather than beside it.
+   *
+   * ```
+   * +-------------------------------+
+   * |          ticketing            |   split: null   (the initial surface)
+   * +---------------+---------------+
+   * |  fleet-status |   git-watch   |   "down", then "right" off fleet-status
+   * +---------------+---------------+
+   * ```
+   */
+  readonly split: SplitDirection | null;
 }
 
 export interface OperationsPlanOptions {
@@ -185,12 +207,19 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       // `;` and not `&&`: a failed `up` must still leave a usable shell. With
       // `&&` a fleet that refuses admission closes the pane, taking the error
       // message with it, and the operator is left with a workspace that has a
-      // hole where its console was.
-      command: `${up} ; exec $SHELL -i`,
+      // hole where its console was. Measured on the first live run, where `up`
+      // did refuse and the shell was what made the refusal readable.
+      command: `${envPreamble()} ${up} ; exec $SHELL -i`,
+      // The initial surface: the whole workspace until something splits it.
+      split: null,
     },
     {
       title: "fleet-status",
       command: status,
+      // DOWN off pane 1, which is what makes ticketing the top HALF rather
+      // than a column: the first split decides the major axis, and everything
+      // after it lands inside the half this one created.
+      split: "down",
     },
     {
       title: "git-watch",
@@ -199,8 +228,38 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       // that failed to apply cannot silently redirect the pane at something
       // else. `watchDir`, never `repoRoot` — see the field's docblock.
       command: gitWatchCommand(watchDir, poll),
+      // RIGHT off fleet-status, so the two lower panes tile side by side in the
+      // bottom half. Splitting right off pane 1 instead would put git-watch in
+      // the top row beside ticketing, which is the layout this replaced.
+      split: "right",
     },
   ];
+}
+
+/**
+ * Load `~/.env` into pane 1 before `up` runs, if it is there.
+ *
+ * `up` reads the model credential (`llm.api_key_env`, `OMLX_API_KEY`) and every
+ * name on `secrets.env_allowlist` from ITS OWN environment, and hands what it
+ * finds to the workers. Measured on the first live run: the key is in `~/.env`,
+ * no shell profile sources that file, and `up` therefore warned that the worker
+ * "will only reach a server that needs none" — which is every request refused
+ * with a 401 against an endpoint that does need one.
+ *
+ * `set -a` because `up` is a CHILD: a sourced variable that is not exported is
+ * invisible to it, which would reproduce the same failure with the file read.
+ * The `[ -f ]` guard makes this a no-op where the file does not exist rather
+ * than an error line in a pane the operator is about to work in.
+ *
+ * **THIS PUTS THE WHOLE FILE IN THE PANE'S ENVIRONMENT, not a chosen subset.**
+ * That is the operator's own login-shell material and the same thing they would
+ * type by hand, so the pane is no more exposed than their terminal is. What
+ * bounds the WORKER is unchanged and is elsewhere: `secrets.env_allowlist` is
+ * the ceiling on what may cross into a container, and a name absent from it
+ * does not reach one however it got into this shell.
+ */
+export function envPreamble(): string {
+  return `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
 }
 
 /**
@@ -212,7 +271,14 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
  * reads as a hung console.
  */
 export function gitWatchCommand(watchDir: string, pollSeconds: number): string {
-  const g = `git -C ${shellQuote([watchDir])}`;
+  // `--no-pager` IS THE WHOLE PANE. Measured on the first live run: `git log`
+  // found a terminal on stdout, started `less`, and the loop stopped at `(END)`
+  // waiting for a keypress that was never coming. The pane showed a plausible
+  // commit list, refreshed never, and looked like a working watch — the exact
+  // failure a screenshot cannot distinguish from success. `git -c core.pager=`
+  // and `GIT_PAGER=cat` both work too; this is the shortest, and it survives a
+  // user's `[pager]` config, which an unset environment variable does not.
+  const g = `git --no-pager -C ${shellQuote([watchDir])}`;
   return (
     `while :; do clear; ${g} status --short --branch; echo; ` +
     `${g} log --oneline -10; sleep ${pollSeconds}; done`
