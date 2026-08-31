@@ -559,6 +559,34 @@ export const PresentationSchema = z.object({
   workspace_ref: shortStr.nullable().default(null),
   surface_ref: shortStr.nullable().default(null),
   window_ref: shortStr.nullable().default(null),
+  /**
+   * The pane is the TERMINAL THAT RAN `up`, adopted rather than created.
+   *
+   * ## The case §3.5 did not have
+   *
+   * The design knew two shapes: pifleet owns the pane (`cmux`/`tmux`), or
+   * there is no pane (`headless`). The operations console is a third — a pane
+   * exists, cmux made it, and pifleet is simply not the one that made it. On
+   * that surface `--backend headless` is correct (the fleet must not open
+   * windows of its own) and `pane_mode: tui` is also correct (the operator
+   * wants Pi's own interface), and `assertTuiBackendPossible` refused the
+   * combination because "headless" had been standing in for "no pane".
+   *
+   * ## What the flag DOES and DOES NOT license
+   *
+   * It records that a terminal is attached, so `report` and `pifleet tui` can
+   * tell an adopted pane from no pane at all. It does NOT make the pane
+   * addressable: `surface_ref` stays `null` because there is no surface id a
+   * later process could send bytes to, and `dispatch` therefore still refuses
+   * this worker with "a tui worker's prompt has nowhere to go". That refusal
+   * is correct here rather than a limitation to route around — **the person at
+   * the keyboard is the dispatcher**, which is the whole of what attended mode
+   * means.
+   *
+   * Defaulted `false`, so every record written before this field existed
+   * parses as the pane pifleet itself created — which is what they all were.
+   */
+  adopted_terminal: z.boolean().default(false),
 });
 export type Presentation = z.infer<typeof PresentationSchema>;
 

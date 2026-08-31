@@ -237,6 +237,20 @@ lines of the operator's prompt already typed and unwithdrawable. That grammar wa
 guards surface ids, workspace refs and status keys, and flag injection is not a key-specific
 hazard — so keys pass a closed allow-list of their own instead.
 
+**ERRATUM 4 — there is a THIRD pane shape, and the guard above assumed there were two.**
+The table's `tui` row and `up`'s headless refusal both rest on "headless means no pane exists".
+That held for the two surfaces this section had: pifleet owns the pane (`cmux`/`tmux`), or there is
+none (`headless`). The operations console is neither — **a pane exists, cmux made it, and pifleet
+is not the one that made it** — so on that surface `--backend headless` is right (the console must
+not have windows opening under it) and `pane_mode: tui` is right (the point is Pi's interface), and
+the combination was refused. `up --attach-here` is the third shape: the calling terminal becomes
+the worker's pane, recorded as `presentation.adopted_terminal`, licensed by four preconditions
+checked before the headless guard sees its exemption (exactly one `tui` worker; the effective
+backend is `headless`; stdin and stdout are both terminals). **It buys pifleet nothing it did not
+have** — `surface_ref` stays `null`, so `dispatch` still refuses the worker, and that refusal is
+correct rather than a gap: **the person holding the terminal is the dispatcher.** Shipped
+2026-08-31 (ISC-389), and found the same way ERRATUM 3 was — by running it in front of someone.
+
 Therefore: `tui` workers may not be the target of a `depends_on` edge, and `pifleet up` warns when
 a `tui` worker is configured in an unattended run. **Both guards are built**, and `up` additionally
 refuses a `tui` worker on the *effective* `headless` backend — `config validate` can only see a

@@ -62,8 +62,8 @@ started them. `up` is not "fire and forget": it returns only once every worker h
 
 ## Status
 
-All six phases are done, and `pane_mode: tui` with them. 2895 tests pass, 124 skip, 0 fail across
-192 files — `test/unit` 2288, `test/integration` 590 (+124 skipped behind Docker/oMLX gates),
+All six phases are done, and `pane_mode: tui` with them. 2909 tests pass, 124 skip, 0 fail across
+193 files — `test/unit` 2302, `test/integration` 590 (+124 skipped behind Docker/oMLX gates),
 `test/e2e` 17. **Measured on a developer host on 2026-08-31, not read off a CI run**, because the
 figure this replaces said "`test` job, CI on `main`" and this branch is not `main`; the honest
 provenance is the one that was available. CI runs the same three suites plus a Docker `container`
