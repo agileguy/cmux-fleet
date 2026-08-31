@@ -20,3 +20,6 @@ fleet.yaml
 # job moves it out of the workspace and fails if any remain, but a stray file
 # must never become a commit.
 gha-creds-*.json
+
+# Agent worktrees — transient, created by background agents
+.claude/worktrees/
