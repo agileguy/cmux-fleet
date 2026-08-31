@@ -85,14 +85,12 @@ export function renderEventLine(line: string): string | null {
 
   switch (type) {
     case "event": {
-      // The wrapped Pi RPC event — the line an operator watches for.
+      // The wrapped Pi RPC event — the one an operator actually watches.
       const inner = r["event"];
-      const innerType =
-        typeof inner === "object" && inner !== null && !Array.isArray(inner)
-          ? String((inner as Record<string, unknown>)["type"] ?? "?")
-          : "?";
-      const seq = typeof r["seq"] === "number" ? ` #${r["seq"]}` : "";
-      return clip(sanitize(`${time} event${seq} ${innerType}`));
+      if (typeof inner !== "object" || inner === null || Array.isArray(inner)) {
+        return clip(sanitize(`${time} event ?`));
+      }
+      return renderAgentEvent(time, inner as Record<string, unknown>);
     }
     case "settled": {
       const reason =
@@ -115,6 +113,159 @@ export function renderEventLine(line: string): string | null {
       const detail = Object.keys(rest).length > 0 ? ` ${JSON.stringify(rest)}` : "";
       return clip(sanitize(`${time} ${type}${detail}`));
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The agent view
+// ---------------------------------------------------------------------------
+
+/**
+ * How much of one CONTENT segment survives. Separate from `RENDER_CLIP`, which
+ * bounds a whole rendered line: a turn renders as several segments and clipping
+ * their concatenation would truncate the last ones to nothing.
+ */
+const SEGMENT_CLIP = 360;
+
+/** Collapse to one line and bound it — a pane is not a document viewer. */
+function oneLine(s: string, limit = SEGMENT_CLIP): string {
+  const flat = sanitize(s).replace(/\s+/g, " ").trim();
+  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+}
+
+/** `content: [{type, text}]` → the text, joined. Total: any shape yields "". */
+function textOf(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const c of content) {
+    if (typeof c !== "object" || c === null) continue;
+    const t = (c as Record<string, unknown>)["text"];
+    if (typeof t === "string") parts.push(t);
+  }
+  return parts.join(" ");
+}
+
+/**
+ * A tool call's arguments, as the ONE thing worth reading.
+ *
+ * `bash` is the verb this fleet's workers spend their time in and its
+ * `command` is the whole story; `read`/`write` are their `path`. Anything else
+ * falls back to JSON, which is worse but never wrong. Rendering the full args
+ * object for `bash` buries a 200-character curl in `{"command":"…"}` quoting.
+ */
+function argSummary(name: string, args: unknown): string {
+  if (typeof args !== "object" || args === null) return "";
+  const a = args as Record<string, unknown>;
+  for (const key of ["command", "path", "file_path", "pattern", "query"]) {
+    const v = a[key];
+    if (typeof v === "string" && v !== "") return oneLine(v);
+  }
+  return oneLine(JSON.stringify(a));
+}
+
+/**
+ * ONE Pi event → the lines a person wants, or `null` for one they do not.
+ *
+ * ## `message_update` is dropped, and that is the whole fix
+ *
+ * MEASURED on a live ticketing task: 4,423 events, of which 3,853 were
+ * `message_update`. Each is a TOKEN-LEVEL delta of a partially-built assistant
+ * message, and the previous renderer printed one line per event carrying the
+ * event's NAME and nothing else — `event #206 message_update`, hundreds of
+ * times, with the content it was announcing thrown away. The pane looked
+ * extremely busy and said nothing.
+ *
+ * The complete content of every one of those deltas arrives again, assembled,
+ * on `turn_end`. So dropping them loses no information and removes 87% of the
+ * lines. What the pane shows instead is what the agent thought, what it ran,
+ * and what came back.
+ *
+ * The cost, stated: the pane is QUIET while a turn generates, where before it
+ * scrolled. Scrolling is not progress — it was the same line 3,853 times — and
+ * `tool_execution_start` fires the moment the agent acts, so the gaps are the
+ * gaps in which nothing has happened yet.
+ */
+function renderAgentEvent(time: string, e: Record<string, unknown>): string | null {
+  const type = typeof e["type"] === "string" ? (e["type"] as string) : "?";
+  const line = (marker: string, body: string): string => `${time} ${marker} ${body}`;
+
+  switch (type) {
+    // The flood. See the docblock above.
+    case "message_update":
+    case "tool_execution_update":
+    // `message_start`/`message_end` carry the SAME assembled message as
+    // `turn_end`, so rendering them too would print every turn three times.
+    case "message_start":
+    case "message_end":
+    case "turn_start":
+      return null;
+
+    case "agent_start":
+      return line("▶▶", "agent started");
+
+    case "agent_end":
+      return line("■", "agent finished");
+
+    case "tool_execution_start": {
+      const name = String(e["toolName"] ?? "?");
+      return line("▶", `${name}  ${argSummary(name, e["args"])}`);
+    }
+
+    case "tool_execution_end": {
+      const name = String(e["toolName"] ?? "?");
+      const res = e["result"];
+      const body =
+        typeof res === "object" && res !== null
+          ? textOf((res as Record<string, unknown>)["content"])
+          : "";
+      // An empty result is reported as empty rather than omitted: a tool that
+      // returned nothing and a tool whose output this renderer failed to find
+      // look identical otherwise, and the first is a real finding.
+      return line("✔", `${name}  ${body === "" ? "(no output)" : oneLine(body)}`);
+    }
+
+    case "turn_end": {
+      // The assembled assistant message: what it reasoned, what it said, and
+      // which calls it decided on. Emitted as separate lines because a person
+      // reads them as separate things.
+      const msg = e["message"];
+      if (typeof msg !== "object" || msg === null) return null;
+      const content = (msg as Record<string, unknown>)["content"];
+      if (!Array.isArray(content)) return null;
+      const out: string[] = [];
+      for (const c of content) {
+        if (typeof c !== "object" || c === null) continue;
+        const part = c as Record<string, unknown>;
+        const kind = part["type"];
+        if (kind === "thinking" && typeof part["thinking"] === "string") {
+          const t = oneLine(part["thinking"]);
+          if (t !== "") out.push(line("·", t));
+        } else if (kind === "text" && typeof part["text"] === "string") {
+          const t = oneLine(part["text"]);
+          if (t !== "") out.push(line("»", t));
+        }
+        // `toolCall` parts are deliberately NOT rendered here: the same call
+        // arrives as `tool_execution_start` with its arguments, and printing
+        // both puts every command on the pane twice.
+      }
+      return out.length === 0 ? null : out.join("\n");
+    }
+
+    case "auto_retry_start":
+      return line(
+        "⚠",
+        `retry ${String(e["attempt"] ?? "?")}/${String(e["maxAttempts"] ?? "?")}: ` +
+          oneLine(String(e["errorMessage"] ?? ""), 120),
+      );
+
+    case "auto_retry_end":
+      return line("⚠", `retry ${String(e["attempt"] ?? "?")} ${e["success"] === true ? "recovered" : "failed"}`);
+
+    default:
+      // An event type this build has never seen still shows up, by name. Pi is
+      // a moving target and silently dropping the unknown is how a pane starts
+      // omitting the one event that mattered.
+      return line("·", type);
   }
 }
 
