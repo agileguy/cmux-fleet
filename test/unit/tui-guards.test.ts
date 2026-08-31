@@ -23,6 +23,7 @@ import { EXIT } from "../../src/contracts.ts";
 import { readFileSync } from "node:fs";
 import { WorkerLaunchSchema, type WorkerLaunch } from "../../src/contracts.ts";
 import { stripComments } from "../support/source-structure.ts";
+import { sendKeyArgv as tmuxSendKeyArgv } from "../../src/backends/tmux/argv.ts";
 import {
   assertTuiBackendPossible,
   panePresentationArgv,
@@ -429,5 +430,53 @@ describe("the pane argv and the attendance record share one predicate", () => {
     expect(body).toContain("PANE_ALREADY_ATTENDED");
     // No hand-rolled record write beside the sanctioned one.
     expect(src).not.toContain("ATTENDED_SCHEMA");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The backend key vocabulary — found by a live pane, not by a test
+// ---------------------------------------------------------------------------
+
+/**
+ * `shift+enter` is cmux's key name. tmux's is `S-Enter`, and tmux does not say
+ * so — it exits 0 and types the unknown name as literal text.
+ *
+ * MEASURED 2026-08-31, one call per arm, pane read back afterwards:
+ *
+ *   tmux send-keys -t <pane> "shift+enter"   exit 0, pane got the LITERAL text
+ *   tmux send-keys -t <pane> "S-Enter"       exit 0, pane got the KEY
+ *   tmux send-keys -t <pane> "Enter"         exit 0, pane got the KEY
+ *
+ * The defect this catches was live in a real run: `dispatch` reported
+ * `accepted: true`, the pane showed an agent working, and the brief it worked
+ * from read `t-live-1shift+entershift+enterReply with exactly...` — the
+ * separator typed into the prompt as text. Every exit code said success.
+ *
+ * Nothing at unit level could have caught it before, and that is the lesson
+ * worth keeping: the dispatch probes assert the PLAN — `{kind:"key", key:
+ * "shift+enter"}` — and the plan was correct. What was wrong was what one
+ * backend did with a correct plan. So this probe grades the TRANSLATION, which
+ * is the seam the plan crosses.
+ */
+describe("tmux speaks its own key names", () => {
+  const CTX = { socket: null, server: null } as unknown as Parameters<typeof tmuxSendKeyArgv>[0];
+
+  test("the fleet's key names are translated, never passed through", () => {
+    expect(tmuxSendKeyArgv(CTX, "%1", "shift+enter")).toContain("S-Enter");
+    expect(tmuxSendKeyArgv(CTX, "%1", "enter")).toContain("Enter");
+    // The literal cmux spelling must NOT reach tmux, because tmux would type it.
+    expect(tmuxSendKeyArgv(CTX, "%1", "shift+enter")).not.toContain("shift+enter");
+  });
+
+  /**
+   * The refusal is the load-bearing half. An unknown key is exactly the case
+   * that silently becomes typed text, so a pass-through fallback would
+   * reintroduce the defect for the next key anyone adds.
+   */
+  test("an unknown key is refused rather than typed", () => {
+    expect(() => tmuxSendKeyArgv(CTX, "%1", "ctrl+shift+f7")).toThrow(/no key name/);
+    // And the message says why, so the next reader does not "fix" it by
+    // restoring the fallback.
+    expect(() => tmuxSendKeyArgv(CTX, "%1", "ctrl+shift+f7")).toThrow(/literal text/);
   });
 });

@@ -212,8 +212,59 @@ export function sendKeysLiteralArgv(ctx: TmuxContext, paneId: string, text: stri
   return tmuxArgv(ctx, ["send-keys", "-t", paneId, "-l", "--", text]);
 }
 
+/**
+ * The fleet's key names, in tmux's vocabulary.
+ *
+ * ## Why a map and not a pass-through — found by a live run, not a test
+ *
+ * `dispatch` types a prompt into a `pane_mode: tui` worker one line at a time,
+ * separated by `shift+enter` (which inserts a newline in Pi's composer without
+ * submitting) and terminated by `enter`. That vocabulary is cmux's, where
+ * `send-key --surface <id> shift+enter` is the real verb and was measured
+ * against the real Pi TUI.
+ *
+ * tmux does not share it, and — this is the whole reason this map exists —
+ * **tmux does not say so.** Measured 2026-08-31, one call per arm, reading the
+ * pane back afterwards:
+ *
+ *   tmux send-keys -t <pane> "shift+enter"   exit 0, pane receives the LITERAL
+ *                                            text "shift+enter"
+ *   tmux send-keys -t <pane> "S-Enter"       exit 0, pane receives the KEY
+ *   tmux send-keys -t <pane> "Enter"         exit 0, pane receives the KEY
+ *
+ * An unknown key name is not an error to tmux; it falls back to sending the
+ * name as text. So the pass-through this replaces exited 0 while typing the
+ * string `shift+enter` into the agent's prompt between every pair of lines.
+ * The dispatch reported `accepted: true`, the pane showed an agent working, and
+ * the brief it was working from was corrupted — visible in a live pane capture
+ * and invisible to every exit code and every unit assertion, because the unit
+ * probes assert the PLAN (`{kind:"key", key:"shift+enter"}`) and the plan was
+ * right. What was wrong was what the backend did with it.
+ *
+ * ## Unknown keys THROW rather than pass through
+ *
+ * The refusal is the load-bearing half. A key this map does not know is
+ * precisely the case that silently becomes typed text, so forwarding it would
+ * reintroduce the same defect for the next key anyone adds. Failing here names
+ * the key and the backend; failing tmux's way corrupts a prompt.
+ */
+const TMUX_KEY_NAMES: Readonly<Record<string, string>> = {
+  enter: "Enter",
+  "shift+enter": "S-Enter",
+  escape: "Escape",
+  tab: "Tab",
+};
+
 export function sendKeyArgv(ctx: TmuxContext, paneId: string, key: string): string[] {
-  return tmuxArgv(ctx, ["send-keys", "-t", paneId, key]);
+  const name = TMUX_KEY_NAMES[key.toLowerCase()];
+  if (name === undefined) {
+    throw new Error(
+      `tmux: no key name for ${JSON.stringify(key)} — tmux would send it as literal text ` +
+        `(it exits 0 either way), so refusing rather than typing it into the pane. ` +
+        `Known: ${Object.keys(TMUX_KEY_NAMES).join(", ")}`,
+    );
+  }
+  return tmuxArgv(ctx, ["send-keys", "-t", paneId, name]);
 }
 
 export function capturePaneArgv(ctx: TmuxContext, paneId: string): string[] {
