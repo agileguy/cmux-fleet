@@ -204,6 +204,13 @@ describe("toolchain baseline (ISC-33..37)", () => {
     ["helm", "/usr/local/bin/helm", ["version"]],
     ["jq", "/usr/bin/jq", ["--version"]],
     ["curl", "/usr/bin/curl", ["--version"]],
+    // The search tools are here for a different reason from the rest: see the
+    // offline-resolution test below. `fd` is the symlink, `fdfind` is Debian's
+    // real name, and each is probed because one existing does not make the
+    // other exist.
+    ["rg", "/usr/bin/rg", ["--version"]],
+    ["fd", "/usr/local/bin/fd", ["--version"]],
+    ["fdfind", "/usr/bin/fdfind", ["--version"]],
   ];
   for (const [name, bin, args] of probes) {
     it(`${name} works inside the image`, async () => {
@@ -211,6 +218,47 @@ describe("toolchain baseline (ISC-33..37)", () => {
       expect(r.code).toBe(0);
     }, PROBE_TIMEOUT);
   }
+
+  /**
+   * The criterion the two `fd` probes above only approximate: **Pi must not
+   * reach the network to get its search tools.**
+   *
+   * Pi's `tools-manager` bootstraps `fd` and `rg` by downloading release
+   * tarballs from api.github.com when it cannot find them on PATH. Under
+   * §12.4's deny-all egress that fetch fails, and it fails the quiet way — a
+   * single dim `Failed to download fd: fetch failed` line at startup, after
+   * which Pi runs on with a degraded file-search tool for the rest of the run.
+   * Widening the allowlist would be the wrong fix twice over: it would put an
+   * unpinned supply-chain fetch inside the sandbox, and it would make two
+   * workers on one role stop being byte-identical.
+   *
+   * Asserted through Pi's OWN resolver rather than by checking PATH, because
+   * PATH is what the probes above already cover and it is not the question.
+   * The question is whether the names Pi searches for are among the names the
+   * image provides — a join that lives half in this Dockerfile and half in a
+   * pinned dependency, and that no amount of `command -v fd` can re-check.
+   * `--network none` is the load-bearing flag: with egress available a
+   * regression here would silently download the tool and pass.
+   *
+   * If a PI_VERSION bump moves this module, this test fails rather than the
+   * behaviour silently regressing — which is the trade this is written for.
+   */
+  it("Pi resolves fd and rg with no network at all (ISC-390)", async () => {
+    const script =
+      `import { getToolPath } from ` +
+      `"/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/utils/tools-manager.js";` +
+      `console.log(JSON.stringify({ fd: getToolPath("fd"), rg: getToolPath("rg") }));`;
+    const r = await runInImage(["--input-type=module", "-e", script], {
+      entrypoint: "/usr/local/bin/node",
+      extra: ["--network", "none"],
+    });
+    expect(r.code).toBe(0);
+    const resolved = JSON.parse(r.stdout.trim());
+    // Non-null is the whole assertion: a null is exactly the state that makes
+    // Pi print "fd not found. Downloading...".
+    expect(resolved.fd).not.toBeNull();
+    expect(resolved.rg).not.toBeNull();
+  }, PROBE_TIMEOUT);
 });
 
 describe("entrypoint models.json rendering (ISC-39, ISC-40)", () => {

@@ -490,8 +490,9 @@ ARG TOOLCHAIN=base          # base | node | python | go | full
 ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git ripgrep jq curl less tini gnupg \
- && rm -rf /var/lib/apt/lists/*
+      bash ca-certificates git ripgrep fd-find jq curl less tini gnupg \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd
 
 # --- cloud CLI baseline: present in EVERY worker image ---
 RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
@@ -554,7 +555,9 @@ Notes:
 
 ### 5.3 Configurable toolchain
 
-**Every** worker image carries the cloud/ops baseline — `gcloud`, `kubectl`, the GKE auth plugin, `helm`, `curl`, `jq`, `git`, `ripgrep` — because SRE-shaped tasks are a primary use case and a role that discovers mid-task that `kubectl` is missing is a wasted run.
+**Every** worker image carries the cloud/ops baseline — `gcloud`, `kubectl`, the GKE auth plugin, `helm`, `curl`, `jq`, `git`, `ripgrep`, `fd` — because SRE-shaped tasks are a primary use case and a role that discovers mid-task that `kubectl` is missing is a wasted run.
+
+`ripgrep` and `fd` are on that list for a second, sharper reason: **they are the two binaries Pi bootstraps over the network when it cannot find them.** Pi's tools-manager resolves `fd` (accepting either `fd` or Debian's `fdfind`) and `rg` from `PATH`, and on a miss downloads a release tarball from `api.github.com`. Under §12.4's deny-all egress that fetch cannot succeed, and it fails quietly — one dim `Failed to download fd: fetch failed` line at startup, after which the worker runs the whole task with a degraded file-search tool. The fix is to make the download *unreached*, not to allow it: an unpinned startup fetch from GitHub inside the sandbox is a supply-chain surface, and it would end the §5.1 guarantee that two workers on one role are byte-identical. The image therefore ships both binaries and provides `fd` under **both** names, so the property does not depend on Pi continuing to know about Debian's rename.
 
 `TOOLCHAIN` layers *language* runtimes on top. A reviewer needs none; a tester on a Bun repo needs `node`.
 

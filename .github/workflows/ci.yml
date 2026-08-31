@@ -789,7 +789,22 @@ jobs:
           # skipped tests too, so the file counted 5 with the gate closed and 3
           # with it open — a file whose count moves with the gate makes this
           # derivation disagree with the run it is grading.
-          TOTAL_EXPECTED: "125"
+          #
+          # 125 -> 129: ISC-390's four cases in image.test.ts — three PATH
+          # probes joining the ISC-33..37 toolchain table (`rg`, `fd`,
+          # `fdfind`) and the load-bearing one, which asserts through PI'S OWN
+          # resolver inside a `--network none` container that it finds both
+          # tools without reaching api.github.com. All four are Docker-gated
+          # and none of them is in the pinned skip set below, so with the gate
+          # OPEN they contribute 4 pass and the skip identity is unchanged.
+          #
+          # DERIVED by the hand method, same conditions (bun 1.3.11,
+          # PIFLEET_DOCKER unset, PIFLEET_DIND unset,
+          # PIFLEET_IMPERSONATION_TARGET unset, no listener on :8000):
+          #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container,honeypot,hostile-pi,mount-preflight-remote}.test.ts
+          #     -> 6 pass, 123 skip, 0 fail. Ran 129 tests across 15 files.
+          # Four added gated cases, four more skips, pass unmoved at 6.
+          TOTAL_EXPECTED: "129"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
