@@ -77,8 +77,18 @@ Make `pane_mode` binding.
 3. `docker/entrypoint.sh` must not install the RPC stdin plumbing (`exec 3<&0` … ) for a
    TUI worker. Read that file's docblock first: it explains why the redirection exists.
 4. Refuse combinations that cannot work, at config-validate time with a field-level error:
-   `tui` + `oneshot` lifecycle, and `tui` + a role with `pane_mode` unset on a headless
-   backend (headless has no pane to attach to — see `cli/commands/tui.ts`).
+   `tui` + `oneshot` lifecycle, and `pane_mode: tui` on the `headless` backend (headless has
+   no pane to attach to — see `cli/commands/tui.ts`).
+
+   *(CORRECTED 2026-08-31. This item originally read "`tui` + a role with `pane_mode` unset
+   on a headless backend", which describes a role that is not tui at all. Caught by the
+   engineer implementing it, who built the rule as stated above rather than the garble.)*
+
+   **The headless half is necessarily PARTIAL, and that bound is asserted rather than
+   hidden.** `backend.kind` is optional and an absent block means UNSET (ISC-271); `up`
+   resolves `--backend > backend.kind > DEFAULT_BACKEND`. Config-validate can only catch the
+   document that SAYS headless — a `--backend headless` typed at `up` is a different
+   surface. Closing it needs a check in `up` against the EFFECTIVE backend: **Phase 4.**
 
 **Evidence:** argv pinned byte-for-byte in the unit suite, both modes, plus a mutation
 proving the `rpc` argv did not move.
@@ -130,6 +140,33 @@ the whole mode is pointless.
 still takes the RPC path (the risk here is a refactor that quietly routes both modes
 through the new one).
 
+### 2.8 THE INTERRUPT PATH — SRD §3.5 cannot work as written
+
+Measured 2026-08-31 by the engineer who built the entrypoint branch. §3.5 says a tui worker
+is interrupted with `docker kill --signal=INT`. Two independent reasons that does not reach
+the worker today, and they pull in OPPOSITE directions:
+
+- `docker kill` signals **PID 1 only**, and the Dockerfile starts tini **without `-g`**
+  (`ENTRYPOINT ["/usr/bin/tini","--", …]`), so the INT lands on the entrypoint shell and
+  never on the worker.
+- `docker/entrypoint.sh` already carries `trap forward TERM INT HUP`, which converts any INT
+  into a **SIGTERM on the worker**. Measured in a `-t` container: the shell and its async
+  child share pgrp 1, which is also the pty's foreground group — so a person's **Ctrl-C in
+  an attached pane** is delivered to the worker AND triggers that trap. In rpc mode nothing
+  ever types into the container, so this has never fired. In tui mode Ctrl-C would KILL the
+  worker rather than interrupt the turn.
+
+The choice is a product decision and both ends must move together:
+
+| option | `docker kill --signal=INT` | a person's Ctrl-C in the pane |
+|---|---|---|
+| supervisor ignores INT | becomes a silent no-op | works — reaches Pi as an interrupt |
+| supervisor forwards INT | works | double-delivers |
+
+Pi's response to a double INT is **unmeasured**; measure it before choosing. Whoever takes
+item 8 takes this with it — shipping the abort path without resolving it gives a pane whose
+Ctrl-C kills the agent.
+
 ## Phase 3 — Presentation and dispatch
 
 9. A `tui` worker's pane runs `docker attach <container>` — cmux and tmux backends.
@@ -164,3 +201,25 @@ through the new one).
   measurements, and states what it does **not** claim.
 - Never weaken or delete an existing assertion to make a change pass. If one is genuinely
   wrong, say so explicitly and prove the new one in both directions.
+
+## Corrections to EXISTING code comments, found while building
+
+`docker/entrypoint.sh`'s pre-existing docblock says "`<&0` alone is not reliable here — the
+default is applied to the asynchronous list before redirections are processed". Measured in
+bash 5.2.37 in the real image: `child <&0 &` receives the piped line correctly, with both a
+pipe and a pty on stdin. The block's stated MEASUREMENTS are both right (`cat &` reads
+nothing; `exec 3<&0; cat <&3 &` reads the piped line) — it is the INFERENCE about `<&0`,
+which was never measured, that does not hold. The RPC path was left untouched; this is
+recorded so the next reader does not inherit the wrong reason for a right decision.
+
+The third construct was measured at the same time and is why the RPC plumbing is the WRONG
+contract for a TUI rather than merely an unnecessary one:
+
+```
+child &                    fd0=/dev/null      (the POSIX async-list rule)
+exec 3<&0; child <&3 &     fd0=/dev/pts/0  fd3=PRESENT
+child < /dev/tty &         fd0=/dev/tty    fd3=absent
+```
+
+`fd3=PRESENT` is the point: the fork happens before the parent's `exec 3<&-`, so an RPC-style
+child carries a second, undeclared handle on the terminal.
