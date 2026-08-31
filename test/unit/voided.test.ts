@@ -11,8 +11,14 @@
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { VoidedRequirementSchema } from "../../src/contracts.ts";
-import { TUI_VOIDED, definedIscIds, unknownIscs } from "../../src/attended/voided.ts";
+import { VoidedRequirementSchema, type VoidedRequirement } from "../../src/contracts.ts";
+import {
+  PANE_MODE_TUI_VOIDED,
+  TUI_VOIDED,
+  definedIscIds,
+  unknownIscs,
+  voidedFor,
+} from "../../src/attended/voided.ts";
 
 const ISA_PATH = join(new URL("../../", import.meta.url).pathname, "ISA.md");
 
@@ -200,5 +206,204 @@ describe("the voided set is exact", () => {
       expect(v.because.length).toBeGreaterThan(60);
       expect(v.because).toMatch(/[a-z]\s+[a-z]/i);
     }
+  });
+});
+
+/**
+ * `pane_mode: tui` — the SECOND table, and why it had to be a second one
+ * (TUI spec item 14).
+ *
+ * `TUI_VOIDED` above is about a PERSON: what stops holding once someone types
+ * into an ordinary worker's pane. Its own docblock says the table is derived
+ * from the criteria rather than from SRD §3.5, because "the SRD's tui design
+ * reparents Pi's stdin to the pane; this implementation does not — the
+ * supervisor keeps the RPC stream".
+ *
+ * That premise held for every worker in the repo until Phase 1. A
+ * `pane_mode: tui` worker runs Pi with `--mode rpc` OMITTED on a real pty and
+ * the supervisor holds none of its three streams — so the sentence is true of
+ * `rpc` workers only, and everything it said could not happen has happened for
+ * this one. `PANE_MODE_TUI_VOIDED` is that difference. It is keyed on the MODE
+ * rather than on the operator, because these rows are true from the moment
+ * `up` creates the container, whether or not anybody has touched it.
+ */
+describe("the pane_mode: tui table", () => {
+  test("is non-empty and every entry parses against the seam schema", () => {
+    expect(PANE_MODE_TUI_VOIDED.length).toBeGreaterThan(0);
+    for (const v of PANE_MODE_TUI_VOIDED) {
+      expect(VoidedRequirementSchema.parse(v)).toEqual(v);
+      expect(v.because.trim().length).toBeGreaterThan(20);
+    }
+  });
+
+  test("names each criterion at most once", () => {
+    const ids = PANE_MODE_TUI_VOIDED.map((v) => v.isc);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  /**
+   * The exact set, for the reason the attended table's own exactness test
+   * gives: both directions are errors. A missing row is a warning an operator
+   * never gets, and a spurious row is how a reader learns to discount the
+   * table. Each id is annotated with the requirement it discharges, so a
+   * reader deleting one has to say which warning they are dropping.
+   */
+  const EXPECTED_MODE = [
+    "ISC-74", //  F15 — the pane owns the attach
+    "ISC-81", //  RPC `abort` -> `docker kill --signal=INT`
+    "ISC-84", //  epoch attribution — there is no epoch
+    "ISC-85", //  `already_completed` — a re-dispatch RUNS THE TASK TWICE
+    "ISC-86", //  no ack on dispatch
+    "ISC-87", //  completion is transcript-derived
+    "ISC-95", //  the session file is found by suffix match, not recorded
+    "ISC-111", // `extension_ui_request` — a dialog blocks until a person answers
+    "ISC-115", // `get_session_stats` — the cost merge is permanently one-armed
+    "ISC-141", // stream-offset fencing — there is no stream
+  ];
+
+  test("names exactly the criteria pane_mode: tui voids", () => {
+    expect(PANE_MODE_TUI_VOIDED.map((v) => v.isc).sort()).toEqual([...EXPECTED_MODE].sort());
+  });
+
+  test("every consequence is written for its own criterion", () => {
+    const reasons = PANE_MODE_TUI_VOIDED.map((v) => v.because);
+    expect(new Set(reasons).size).toBe(reasons.length);
+    for (const v of PANE_MODE_TUI_VOIDED) {
+      expect(v.because.length).toBeGreaterThan(60);
+      expect(v.because).toMatch(/[a-z]\s+[a-z]/i);
+    }
+  });
+
+  /**
+   * The rows carry the fact the BUILD measured, not the one §3.5 guessed, and
+   * every pin below sits where those two differ. `length > 60` and
+   * distinctness cannot see that difference — the review that mutated the
+   * attended table into ten identical placeholders is the recorded precedent —
+   * so the load-bearing clause of each surprising row is pinned by phrase.
+   *
+   * Only the SURPRISES are pinned. A row an operator could predict from §3.5
+   * needs no guard; a row that overturns §3.5 does, because a later editor
+   * "correcting" it back to the SRD's wording would be restoring a claim this
+   * build measured as false.
+   */
+  const reason = (isc: string): string =>
+    PANE_MODE_TUI_VOIDED.find((v) => v.isc === isc)?.because ?? "";
+
+  test("abort is described as a STOP, not as a turn-interrupt", () => {
+    // §2.8's alarm said `docker kill --signal=INT` could not reach the worker
+    // at all. Measured, it stops it — and stopping is not interrupting, which
+    // is the distinction an operator acts on. Pi's turn-interrupt is ESCAPE.
+    expect(reason("ISC-81")).toMatch(/stop/i);
+    expect(reason("ISC-81")).toMatch(/escape/i);
+  });
+
+  test("the epoch row states the operator-facing consequence: the task runs twice", () => {
+    // "completion is transcript-derived, coarser" is §3.5's wording, and it is
+    // too gentle to act on. The blunt version is what goes in the table.
+    expect(reason("ISC-85")).toMatch(/twice/i);
+  });
+
+  test("the ack row says what `cmux` exiting 0 actually proves", () => {
+    expect(reason("ISC-86")).toMatch(/pty/i);
+  });
+
+  test("the session-path row names the search and its bound", () => {
+    // ISC-95's rule is "never glob". This row must say the rule is broken AND
+    // how far, or it reads as a rule quietly dropped.
+    expect(reason("ISC-95")).toMatch(/suffix/i);
+    expect(reason("ISC-95")).toMatch(/newest|count/i);
+  });
+
+  test("the F15 row admits it is asserted rather than measured", () => {
+    // The one row here with no measurement behind it: `--sig-proxy` sits at
+    // docker's default and no probe has ever closed a tui pane and looked at
+    // the container. Stated flatly it would be the only unmeasured claim in a
+    // table whose value is that its claims are measured.
+    expect(reason("ISC-74")).toMatch(/not measured|never measured|asserted/i);
+  });
+
+  test("the dialog row says why blocking is acceptable at all", () => {
+    expect(reason("ISC-111")).toMatch(/attended/i);
+  });
+});
+
+describe("cross-check the pane_mode table against the real ISA", () => {
+  test("every voided ISC is a criterion ISA.md actually defines", async () => {
+    const isa = await Bun.file(ISA_PATH).text();
+    const defined = definedIscIds(isa);
+    expect(defined.size).toBeGreaterThan(100);
+    expect(unknownIscs(PANE_MODE_TUI_VOIDED, defined)).toEqual([]);
+  });
+});
+
+/**
+ * The selector IS the wiring. `report` prints the `voided` array off the
+ * attended record, so which table gets stamped there is which guarantees the
+ * report names.
+ */
+describe("voidedFor picks the table by the worker's launch mode", () => {
+  test("an rpc worker gets the attended table unchanged", () => {
+    expect(voidedFor("rpc")).toEqual([...TUI_VOIDED]);
+  });
+
+  /**
+   * BOTH tables, because both are true of a tui worker. Its pane is a person's
+   * from the moment `up` creates it, so every attended-mode row applies — and
+   * the mode's own rows apply on top. A selector returning only the mode's
+   * table would DROP the audit-trail and diff-attribution warnings from a run
+   * that is attended by construction, which is the worse of the two errors.
+   */
+  test("a tui worker gets both tables, each criterion once", () => {
+    const got = voidedFor("tui");
+    const ids = got.map((v) => v.isc);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const v of TUI_VOIDED) expect(ids).toContain(v.isc);
+    for (const v of PANE_MODE_TUI_VOIDED) expect(ids).toContain(v.isc);
+    expect(got.length).toBe(
+      new Set([...TUI_VOIDED, ...PANE_MODE_TUI_VOIDED].map((v) => v.isc)).size,
+    );
+  });
+
+  /**
+   * THE OVERLAP IS THE INTERESTING PART, and it is asserted rather than left
+   * to whichever spread happened to come second.
+   *
+   * ISC-84, ISC-87 and ISC-141 are in both tables for DIFFERENT reasons, and
+   * the mode's reason is the stronger one every time: attended mode says a
+   * person's writes carry no stream position, the mode says there is no
+   * stream. An operator shown the weaker sentence on a tui worker is being
+   * told a fence exists that their work merely sits outside of.
+   */
+  test("on a criterion both tables name, the MODE's sentence is the one shown", () => {
+    const overlap = TUI_VOIDED.filter((a) =>
+      PANE_MODE_TUI_VOIDED.some((b) => b.isc === a.isc),
+    ).map((v) => v.isc);
+    // The overlap is real; an empty one would make this test vacuous.
+    expect(overlap.length).toBeGreaterThan(0);
+
+    const got = voidedFor("tui");
+    for (const isc of overlap) {
+      const shown = got.find((v) => v.isc === isc)!.because;
+      const mode = PANE_MODE_TUI_VOIDED.find((v) => v.isc === isc)!.because;
+      const attended = TUI_VOIDED.find((v) => v.isc === isc)!.because;
+      expect(shown).toBe(mode);
+      expect(shown).not.toBe(attended);
+    }
+  });
+
+  /**
+   * Ordered by criterion number, for the reason the attended table's own
+   * comment gives: a reader diffs the printed list against the ISA top to
+   * bottom. A bare concatenation would print ISC-141 above ISC-74.
+   */
+  test("the merged table is ordered by criterion number", () => {
+    const nums = voidedFor("tui").map((v) => Number(v.isc.slice("ISC-".length)));
+    expect(nums).toEqual([...nums].sort((a, b) => a - b));
+  });
+
+  /** A returned array a caller can mutate is a table anyone can edit at runtime. */
+  test("the caller cannot mutate the table it is handed", () => {
+    const got = voidedFor("tui") as VoidedRequirement[];
+    expect(() => got.push({ isc: "ISC-1", because: "x".repeat(70) })).toThrow();
   });
 });
