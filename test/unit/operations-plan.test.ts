@@ -162,10 +162,39 @@ describe("pane 1 — the ticketing agent", () => {
 });
 
 describe("pane 2 — fleet status", () => {
-  test("is the watching form, not a one-shot snapshot", () => {
-    // `pifleet status` without `--watch` prints once and exits, which closes
-    // the pane — the same defect as pane 1's, in a place with no shell after it.
-    expect(plan()[1]!.command).toContain("'status' '--watch'");
+  test("refreshes forever, so the pane cannot print once and close", () => {
+    // The original requirement, unchanged: `pifleet status` on its own prints
+    // once and exits, which closes the pane — the same defect as pane 1's, in a
+    // place with no shell after it. What changed is HOW it keeps running.
+    const cmd = plan()[1]!.command;
+    expect(cmd).toMatch(/^while :; do/);
+    expect(cmd).toContain("'status'");
+  });
+
+  test("CLEARS before each refresh — a standing pane is read at a glance", () => {
+    // `status --watch` APPENDS, and the live console measured what that costs:
+    // dozens of identical `run 2026-08-24… / eng-1: dead supervisor=gone`
+    // blocks scrolled past each other, so the pane was a transcript of how long
+    // a dead worker had been dead rather than a display of the fleet. Only the
+    // last screen is ever read; everything above it is cost with no reader.
+    expect(plan()[1]!.command).toContain("clear;");
+    // And specifically NOT the built-in watch, which is the form that appends.
+    expect(plan()[1]!.command).not.toContain("--watch");
+  });
+
+  test("survives a status that exits non-zero", () => {
+    // Without `|| true` the loop dies on the first refresh after a `down` —
+    // exactly when an operator looks at it — leaving a pane that stopped
+    // updating and does not say so.
+    expect(plan()[1]!.command).toContain("|| true");
+  });
+
+  test("polls on the SAME interval as the git pane, from the same flag", () => {
+    // One `--poll` governs both, so a `down` appears in the two panes at the
+    // same moment rather than in whichever happens to poll first.
+    const panes = plan({ gitPollSeconds: 11 });
+    expect(panes[1]!.command).toContain("sleep 11");
+    expect(panes[2]!.command).toContain("sleep 11");
   });
 });
 

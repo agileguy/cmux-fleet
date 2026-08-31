@@ -34,6 +34,7 @@ const USAGE = `Usage: scripts/operations [options]
   --config <path>   fleet.yaml for pane 1 (default: <repo>/fleet.yaml)
   --poll <seconds>  git pane refresh interval (default: 5)
   --dry-run         print the pane plan and exit without touching cmux
+  --recreate        close an existing operations workspace and rebuild it
   -h, --help        this message
 `;
 
@@ -93,11 +94,20 @@ async function main(argv: string[]): Promise<number> {
     return EXIT.BACKEND_UNAVAILABLE;
   }
 
-  const result = await ensureOperations(client, opts);
+  // Adoption is the default and stays it — a second `operations` must not stack
+  // a duplicate console on the one the operator is working in. `--recreate` is
+  // for the case adoption cannot reach: the workspace TITLE is what identifies
+  // a console, so one whose panes have died, or whose commands were built by an
+  // older version of this script, is adopted forever and reported as "already
+  // in place — changed nothing", which is true and useless.
+  const recreate = argv.includes("--recreate");
+  const result = await ensureOperations(client, opts, recreate);
   process.stdout.write(
     result.created
-      ? `operations: created workspace ${result.workspaceId} with ${panes.length} panes\n`
-      : `operations: workspace ${result.workspaceId} is already in place — selected it, changed nothing\n`,
+      ? `operations: ${recreate ? "rebuilt" : "created"} workspace ${result.workspaceId} ` +
+        `with ${panes.length} panes\n`
+      : `operations: workspace ${result.workspaceId} is already in place — selected it, changed ` +
+        `nothing (use --recreate to rebuild its panes)\n`,
   );
   return EXIT.SUCCESS;
 }

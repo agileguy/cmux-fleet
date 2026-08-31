@@ -9,7 +9,7 @@
  * | pane | title | what runs |
  * |---|---|---|
  * | 1 | `ticketing` | `pifleet up --workers tick-1`, then an interactive shell |
- * | 2 | `fleet-status` | `pifleet status --watch` |
+ * | 2 | `fleet-status` | a poll loop over `pifleet status` |
  * | 3 | `git-watch` | a poll loop over `git status` + `git log` in the INVOCATION directory |
  *
  * Pane 1 is the point of the thing: it stands a ticketing worker up and then
@@ -199,7 +199,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
     "--config",
     configPath,
   ]);
-  const status = pifleetCommand(repoRoot, ["status", "--watch"]);
+  const status = statusWatchCommand(repoRoot, poll);
 
   return [
     {
@@ -260,6 +260,38 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
  */
 export function envPreamble(): string {
   return `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
+}
+
+/**
+ * Pane 2: `pifleet status` on a clear-and-redraw loop, NOT `status --watch`.
+ *
+ * ## Why the built-in watch is the wrong tool for a standing pane
+ *
+ * `--watch` APPENDS. Measured on the live console 2026-08-30: the pane held
+ * dozens of identical `run 2026-08-24T17-18-05Z-7f40 / eng-1: dead
+ * supervisor=gone` blocks scrolled past each other, so the pane was a
+ * transcript of how long a dead worker had been dead rather than a display of
+ * what the fleet is doing. A standing pane in the corner of a workspace is read
+ * at a GLANCE, and a glance can only read the last screen — everything above it
+ * is cost with no reader.
+ *
+ * The same `while :; do clear; …; sleep n; done` shape as `gitWatchCommand`,
+ * deliberately: that pane was confirmed working on the same live run, one
+ * mechanism is one thing to debug, and the two panes then refresh in step so a
+ * `down` shows up in both at the same moment rather than in whichever polls
+ * first.
+ *
+ * NOT `--watch` piped through something that clears, and not `watch(1)`: the
+ * first still holds a long-running process whose output nobody re-reads, and
+ * the second is not installed by default on macOS.
+ */
+export function statusWatchCommand(repoRoot: string, pollSeconds: number): string {
+  const status = pifleetCommand(repoRoot, ["status"]);
+  // `|| true` so a `status` that exits non-zero — no run yet, a run directory
+  // half-written — leaves the loop running. Without it the pane dies on the
+  // first refresh after a `down`, which is exactly when an operator looks at
+  // it. The message still prints; only the exit code is swallowed.
+  return `while :; do clear; ${status} || true; sleep ${pollSeconds}; done`;
 }
 
 /**

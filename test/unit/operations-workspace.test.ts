@@ -93,6 +93,40 @@ describe("an operations workspace that already exists is left alone", () => {
     expect(calls[1]).toEqual(selectWorkspaceArgv("ws-ops"));
   });
 
+  test("…unless --recreate, which CLOSES it and rebuilds — in that order", async () => {
+    // The gap adoption cannot reach, measured on the live console 2026-08-30:
+    // `findOperations` matches a workspace TITLE, and a pane's contents are not
+    // part of that. A console whose ticketing pane held a dead `up` from before
+    // `envPreamble` existed, and whose status pane was watching a run six days
+    // old, was adopted by every later `operations` and reported "already in
+    // place — changed nothing". True, and useless.
+    const { client, calls } = fakeCmux({
+      workspaces: [{ id: "ws-ops", custom_title: "operations" }],
+    });
+
+    const result = await ensureOperations(client, OPTS, true);
+
+    expect(result.created).toBe(true);
+    const verbs = verbsOf(calls);
+    // CLOSE BEFORE CREATE, and the order is the assertion. `findOperations`
+    // matches on an exact title, so building first would leave two workspaces
+    // wearing one name and make the NEXT `findOperations` ambiguous — the
+    // duplicate this whole function exists to prevent, created by the flag
+    // that repairs it.
+    expect(verbs).toContain("workspace close");
+    expect(verbs.indexOf("workspace close")).toBeLessThan(verbs.indexOf("workspace create"));
+    expect(calls[verbs.indexOf("workspace close")]).toEqual(["workspace", "close", "ws-ops"]);
+  });
+
+  test("--recreate on a machine with NO operations workspace just builds one", async () => {
+    // The flag must not require something to destroy. Without this, the close
+    // could be made unconditional and every test above would still pass.
+    const { client, calls } = fakeCmux({ workspaces: [{ id: "ws-other", custom_title: "pifleet" }] });
+    const result = await ensureOperations(client, OPTS, true);
+    expect(result.created).toBe(true);
+    expect(verbsOf(calls)).not.toContain("workspace close");
+  });
+
   test("matching is exact — a similarly named workspace is not adopted", async () => {
     // `operations-old` and `my-operations` are the workspaces a person
     // actually ends up with. Adopting either would split this console's panes
@@ -197,7 +231,7 @@ describe("creating the workspace", () => {
       .filter((c) => verb(["cmux", ...c]) === "respawn-pane")
       .map((c) => c[c.indexOf("--command") + 1]!);
     expect(commands[0]).toContain("'--workers' 'tick-1'");
-    expect(commands[1]).toContain("'status' '--watch'");
+    expect(commands[1]).toContain("'status'");
     expect(commands[2]).toContain(`-C '${CWD}'`);
   });
 });

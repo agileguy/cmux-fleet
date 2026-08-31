@@ -41,6 +41,7 @@ import {
   pingArgv,
   renameTabArgv,
   respawnPaneArgv,
+  workspaceCloseArgv,
   workspaceCreateArgv,
   workspaceListArgv,
 } from "./client.ts";
@@ -171,15 +172,47 @@ export async function createOperations(
 
 /**
  * The entry point: build it, or find it already built and leave it alone.
+ *
+ * ## `recreate` exists because idempotence has a failure mode
+ *
+ * Adoption is the requested behaviour and stays the default: a second
+ * `operations` must not stack a duplicate console on top of the one the
+ * operator is working in. But adoption leaves the PANES exactly as they are,
+ * and a pane's contents are not part of what `findOperations` matches on — it
+ * matches a workspace TITLE. So a console whose panes died, or whose commands
+ * were built by an older version of this script, is adopted forever and there
+ * is no flag that refreshes it.
+ *
+ * MEASURED 2026-08-30, and it is the shape a reader should expect rather than
+ * a hypothetical. An `operations` workspace launched before `envPreamble` and
+ * before `~/.env` carried the ticket variables showed: a ticketing pane holding
+ * a dead `up` that had refused on unset secrets, a `fleet-status` pane still
+ * watching a run from six days earlier, and a git watch that looked healthy
+ * because it is the one pane that re-polls. Every later `operations` selected
+ * that workspace and reported "already in place — changed nothing", which was
+ * true and useless.
+ *
+ * The escape hatch is a CLOSE-then-build rather than a respawn of each pane,
+ * because the pane SET is part of the plan: a console built by an older version
+ * may have a different number of panes in different places, and respawning the
+ * ones that happen to exist would leave a half-migrated layout that matches
+ * neither version. Closing is also the operation an operator can reason about —
+ * it is what they would do by hand.
  */
 export async function ensureOperations(
   client: CmuxClient,
   opts: OperationsPlanOptions,
+  recreate = false,
 ): Promise<EnsureResult> {
   const existing = await findOperations(client);
-  if (existing !== null) {
+  if (existing !== null && !recreate) {
     await client.runOk(selectWorkspaceArgv(existing));
     return { created: false, workspaceId: existing };
   }
+  // Closed BEFORE the build, and the order is forced: `findOperations` matches
+  // on an exact title, so building first would leave two workspaces wearing the
+  // same name and make the next `findOperations` ambiguous — the duplicate this
+  // whole function exists to prevent, created by the flag that repairs it.
+  if (existing !== null) await client.runOk(workspaceCloseArgv(existing));
   return createOperations(client, opts);
 }
