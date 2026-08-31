@@ -212,10 +212,18 @@ export function register(program: Command): void {
       const record = await enterTui({
         run,
         workerId: opts.worker,
-        // The ONE difference between the two modes' entry: a tui worker's pane
-        // is not respawned, because it is already the person's `docker attach`.
+        // The pane difference: a tui worker's pane is not respawned, because
+        // it is already the person's `docker attach`.
         backend: alreadyAttended ? PANE_ALREADY_ATTENDED : backend,
         pane,
+        // …and the RECORD difference (TUI spec item 14). The mode voids a
+        // second set of guarantees for the life of the run, so the table this
+        // stamps — which is the list `report` prints — is chosen by how `up`
+        // launched the worker, not by what the pane is showing. Passed rather
+        // than re-derived inside `enterTui`: `paneMode` above is read from the
+        // launch record, and one reader of that record per command is the rule
+        // this file already follows for the backend.
+        paneMode,
       });
       await ledger.append("tui_entered", {
         worker: opts.worker,

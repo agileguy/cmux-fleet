@@ -75,3 +75,55 @@ export function assertPaneTypeableLine(what: string, v: string): void {
     );
   }
 }
+
+/**
+ * The key names a pane dispatch may send, and why this is a list rather than a
+ * grammar.
+ *
+ * ## Found live, on the cmux path, after the tmux one was already fixed
+ *
+ * `dispatch` separates a prompt's lines with `shift+enter` and terminates it
+ * with `enter`. Measured 2026-08-31 against a real cmux surface, with the
+ * rejected arm as the control:
+ *
+ *   cmux send-key <surface> shift+enter   rc=0  OK
+ *   cmux send-key <surface> enter         rc=0  OK
+ *   cmux send-key <surface> S-Enter       rc=1  invalid_params: Unknown key
+ *
+ * So `shift+enter` is right for cmux and `S-Enter` is right for tmux — the two
+ * backends genuinely disagree, which is what `backends/tmux/argv.ts` translates.
+ *
+ * The defect was upstream of both. `assertCmuxValue` guards every value that
+ * rides cmux's argv against flag injection with `^[A-Za-z0-9][A-Za-z0-9:._-]*$`
+ * — a grammar that has no `+` in it, because until this mode existed no cmux
+ * value needed one. It refused `shift+enter` before the key ever reached cmux,
+ * and refused it at STEP 2 OF 29: two lines of the operator's prompt were
+ * already in the pane and could not be withdrawn.
+ *
+ * ## An allow-list, not a widened character class
+ *
+ * The obvious repair is to add `+` to `CMUX_VALUE_RE`. That is refused: the
+ * regex guards surface ids, workspace refs and status keys too, and widening it
+ * for a key would widen it for all of them. The hazard it exists to stop —
+ * a value parsed as a flag — is not specific to keys.
+ *
+ * A closed list also gets something a grammar cannot: an unknown key FAILS
+ * rather than being forwarded. `backends/tmux/argv.ts` records why that matters
+ * — tmux exits 0 on an unknown key name and types it as literal text — so a
+ * permissive key rule reintroduces that defect on the other backend.
+ *
+ * Lives here for the same reason `assertPaneTypeableLine` does: `dispatch.ts`
+ * gates on it before typing the first byte and `backends/cmux/client.ts`
+ * enforces it as a backstop, and ISC-137 forbids the first from importing the
+ * second. One definition, so the gate cannot become laxer than the backstop.
+ */
+export const PANE_KEYS: readonly string[] = ["enter", "shift+enter", "escape", "tab"];
+
+export function assertPaneKey(what: string, v: string): void {
+  if (!PANE_KEYS.includes(v)) {
+    throw new Error(
+      `refusing ${what} ${JSON.stringify(v.slice(0, 64))} — not a pane key. ` +
+        `Known: ${PANE_KEYS.join(", ")}`,
+    );
+  }
+}

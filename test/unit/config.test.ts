@@ -655,9 +655,28 @@ describe("pane_mode: tui is refused where there is no pane (SRD §3.5)", () => {
    * `backend.kind` is OPTIONAL and an absent block means UNSET (ISC-271), so
    * this check can only see the document that SAYS headless. Stated as a test
    * rather than only in a comment, because the honest bound of a guard is the
-   * part most likely to be misremembered as wider than it is: a `--backend
-   * headless` typed at `up` is a different surface, and `pifleet tui --worker`
-   * is what refuses that worker at runtime.
+   * part most likely to be misremembered as wider than it is.
+   *
+   * ## The bound is UNCHANGED; where it is CLOSED has changed
+   *
+   * Every assertion below still holds and is still the point: the schema does
+   * not refuse this document, and must not start to — `parseConfig` has no
+   * `--backend` and no `DEFAULT_BACKEND`, so a schema that guessed would refuse
+   * a perfectly good `up --backend cmux`.
+   *
+   * What was stale was the sentence that used to end this comment: "`pifleet
+   * tui --worker` is what refuses that worker at runtime". That was true when
+   * it was written and describes the wrong guard now. `pifleet tui` refuses one
+   * COMMAND, after a fleet is already up with no pane to attach to; TUI spec
+   * item 4's second half asked for the check against the EFFECTIVE backend, and
+   * `up` now makes it — `assertTuiBackendPossible` in `cli/commands/up.ts`,
+   * proven in both directions in `test/unit/tui-guards.test.ts` and through the
+   * real CLI in `test/integration/up-wiring.test.ts`.
+   *
+   * Worth knowing while reading this test: `DEFAULT_BACKEND` is `headless`, so
+   * the very document below is one `up` with no `--backend` now refuses. The
+   * two statements are consistent — the schema cannot see that and `up` can,
+   * which is the whole reason the check had to move.
    */
   test("a tui worker with no backend block stated is NOT refused here", async () => {
     const doc = baseDoc();

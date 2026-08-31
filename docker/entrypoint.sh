@@ -153,11 +153,31 @@ fi
 # mode needs stdin/stdout as pipes; a TUI needs them as a terminal").
 #
 # rpc (the default): `exec 3<&0` then `<&3` is an EXPLICIT redirection, which
-# is exactly what the rule above exempts. `<&0` alone is not reliable here —
-# the default is applied to the asynchronous list before redirections are
-# processed, so the saved duplicate is the form that survives it. Measured both
-# ways in the real image: `cat &` reads nothing, `exec 3<&0; cat <&3 &` reads
-# the piped line. The parent's copy is closed immediately after. It is not
+# is exactly what the rule above exempts. Measured both ways in the real image:
+# `cat &` reads nothing, `exec 3<&0; cat <&3 &` reads the piped line.
+#
+# CORRECTION 2026-08-31, and it is left here because a right decision with a
+# wrong reason is how the next person justifies a wrong one. This block used to
+# add that "`<&0` alone is not reliable here — the default is applied to the
+# asynchronous list before redirections are processed". That INFERENCE was never
+# measured, and it does not hold. Re-measured 2026-08-31 in this image
+# (bash 5.2.15), three arms into one `docker run -i`, the bare form being the
+# control that proves the rule is real and the test can see it:
+#
+#   cat &                            reads NOTHING   — the rule above
+#   cat <&0 &                        reads the line
+#   exec 3<&0; cat <&3 &             reads the line  — the shipped form
+#
+# `<&0` is an explicit redirection too, so the rule exempts it just the same.
+# (Measured with a PIPE on stdin only: a pty needs `-t`, which needs a terminal
+# the process running these measurements does not have — the same constraint
+# §2.0 hit. The fd-3 table below was taken separately, under a pty.) The
+# saved duplicate is therefore a STYLE choice for the rpc arm, not a
+# correctness one — and the plumbing that genuinely matters is the tui arm's,
+# for the fd-3 reason below. The rpc path is left untouched: it works, it is
+# what `container-live` exercises, and nothing here is a reason to change it.
+#
+# The parent's copy is closed immediately after. It is not
 # needed again, and a stray duplicate of the read end is the kind of thing that
 # quietly changes who holds a pipe open.
 #

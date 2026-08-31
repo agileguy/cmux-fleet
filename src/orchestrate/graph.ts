@@ -19,7 +19,127 @@
  *    `ScheduledTaskSchema`).
  */
 
-import type { ScheduledTask, TaskSchedState, TaskSpec, Verdict } from "../contracts.ts";
+import { EXIT, type ExitCode, type ScheduledTask, type TaskSchedState, type TaskSpec, type Verdict } from "../contracts.ts";
+
+/**
+ * One `depends_on` edge whose dependency runs on a `pane_mode: tui` worker.
+ *
+ * The DEPENDENT is what is broken, but the WORKER is what the operator has to
+ * change, so all three are carried rather than a formatted string: a caller
+ * that only got prose would have to parse it back out to say anything else.
+ */
+export interface TuiDependencyEdge {
+  /** The task that names the dependency — the one that would wait forever. */
+  dependent: string;
+  /** The task it waits on, which runs on a tui worker. */
+  dependency: string;
+  /** The `tui` worker `dependency` is pinned to. */
+  worker: string;
+}
+
+/**
+ * A task list that names a `tui` worker's task as a dependency (TUI spec
+ * item 13, SRD §3.5).
+ *
+ * Structural `ExitCoded` (contracts.ts), for the same reason `TaskListError`
+ * and `SchedulerError` are: this module must not import the CLI to signal a
+ * ladder code, or every unit test of the DAG would drag the whole commander
+ * program in behind it.
+ */
+export class TuiDependencyError extends Error {
+  readonly exitCode: ExitCode = EXIT.USAGE;
+
+  constructor(readonly edges: readonly TuiDependencyEdge[]) {
+    super(
+      `${edges.length} dependency edge(s) name a task running on a pane_mode: tui worker, and ` +
+        `a tui worker's completion cannot be waited on:\n` +
+        edges
+          .map(
+            (e) =>
+              `  task '${e.dependent}' depends on '${e.dependency}', which is pinned to ` +
+              `worker '${e.worker}' (pane_mode: tui)`,
+          )
+          .join("\n") +
+        `\nA tui worker's prompt is TYPED INTO ITS PANE, and no epoch is allocated for a pane ` +
+        `dispatch — the supervisor allocates inside the RPC dispatch handler, which this worker ` +
+        `does not have. SRD §3.5 voids epoch fencing (§7.5) for the mode outright, and its ` +
+        `completion is derived from the transcript rather than from a task record. So the ` +
+        `dependent would be waiting on a signal that cannot be fenced to the attempt it is ` +
+        `waiting for: it is coarser than the wait needs, and there is nothing to tie it to. ` +
+        `Pin the dependency to an rpc worker, or remove the edge.`,
+    );
+    this.name = "TuiDependencyError";
+  }
+}
+
+/**
+ * Every `depends_on` edge whose dependency lands on a `tui` worker, in task-list
+ * order then `depends_on` order (TUI spec item 13).
+ *
+ * ## Why this is a REFUSAL and not another warning
+ *
+ * `dispatch --auto` drives a dispatched task to a terminal state by polling for
+ * the task record the supervisor writes when it settles an epoch. A tui worker
+ * has no epoch to settle: `sendViaPane` writes the schema placeholder `0` and
+ * says so in as many words, and `supervisor/index.ts` refuses the RPC dispatch
+ * path for this worker outright. So a dependent is not merely waiting on a
+ * COARSER signal — it is waiting on one that cannot be attributed to the
+ * attempt it is waiting for. The unattended-run warning one file over is a
+ * warning because an operator can knowingly accept its costs; this cannot be
+ * knowingly accepted, because there is no version of it that works.
+ *
+ * ## THE HONEST BOUND, which is narrower than the sentence in the spec
+ *
+ * This can only see a dependency that is PINNED — `spec.worker !== null`. An
+ * unpinned task names no worker at authoring time, so whether it would land on
+ * a tui worker is not a fact that exists yet.
+ *
+ * That is not the hole it looks like. The scheduler never ASSIGNS an unpinned
+ * task to a tui worker: `dispatch --auto`'s `SchedulerIO.dispatch` rejects the
+ * pane route with `pane_mode_tui_is_not_auto_schedulable` before any envelope is
+ * built. So the unpinned edge this cannot see is also the edge that cannot form.
+ * The pinned one is exactly the case that WOULD form and WOULD hang, which is
+ * why it is the one refused. Recorded rather than left implicit, because the
+ * bound of a guard is the part most likely to be misremembered as wider.
+ *
+ * Pure and exported separately from the constructor that throws, so both the
+ * edge-finding and the refusal are probeable without a fleet, and so a caller
+ * that wants to REPORT the edges rather than die on them has something to call.
+ */
+export function tuiDependencyEdges(
+  tasks: readonly TaskSpec[],
+  tuiWorkers: ReadonlySet<string>,
+): TuiDependencyEdge[] {
+  /*
+   * Empty set short-circuits to empty — the shape of every fleet that has no
+   * tui worker, which is every fleet in this repository today.
+   *
+   * A FAST PATH, NOT A GUARD, and the difference is worth stating because it
+   * decides whether anything should probe it. Deleting this line changes no
+   * answer: the loop below would run, `tuiWorkers.has(...)` would be false for
+   * every edge, and the result would still be `[]`. Measured as exactly that —
+   * the mutation was applied and the suite stayed green, which is correct
+   * rather than a missing probe. It is here so a reader can see the rpc case
+   * reaching no branch below, and for nothing else.
+   */
+  if (tuiWorkers.size === 0) return [];
+  const pinned = new Map<string, string>();
+  for (const t of tasks) {
+    if (t.worker !== null) pinned.set(t.id, t.worker);
+  }
+  const out: TuiDependencyEdge[] = [];
+  // Task-list order, then `depends_on` order — the same tie-break every ordered
+  // answer in this file uses, so the reported edges do not reshuffle run to run.
+  for (const t of tasks) {
+    for (const dep of t.depends_on) {
+      const worker = pinned.get(dep);
+      if (worker !== undefined && tuiWorkers.has(worker)) {
+        out.push({ dependent: t.id, dependency: dep, worker });
+      }
+    }
+  }
+  return out;
+}
 
 /**
  * Whether a DONE dependency lets its dependents run.
@@ -53,8 +173,30 @@ export class TaskGraph {
   /** dependency id -> ids of tasks that name it in depends_on. */
   readonly #dependents = new Map<string, string[]>();
 
-  /** The list must already be validated (tasklist.ts): ids unique, deps known, acyclic. */
-  constructor(tasks: readonly TaskSpec[]) {
+  /**
+   * The list must already be validated (tasklist.ts): ids unique, deps known,
+   * acyclic.
+   *
+   * `tuiWorkers` is the fleet's `pane_mode: tui` workers, and the refusal is
+   * IN THE CONSTRUCTOR rather than a separate call the scheduler has to
+   * remember (TUI spec item 13). A free-standing `assertNoTuiDependency` would
+   * be one refactor away from being dropped from its single call site with
+   * every test still green — the shape this repo has now caught twice, in
+   * `up.ts`'s deleted `ensureEgressNetwork` call and in `attachViewer` having
+   * no production caller at all. Here the only way to build a graph is to
+   * answer the question.
+   *
+   * It DEFAULTS TO EMPTY, and that default is the rpc guarantee: a caller that
+   * says nothing about pane modes gets exactly the behaviour every caller had
+   * before this parameter existed, with `tuiDependencyEdges` short-circuiting
+   * before it reads a single task. Every existing test constructs this class
+   * with one argument.
+   */
+  constructor(tasks: readonly TaskSpec[], tuiWorkers: ReadonlySet<string> = new Set()) {
+    // Before any node is built: a refusal that left a half-populated graph
+    // behind it would be a graph some caller could still go on to schedule.
+    const bad = tuiDependencyEdges(tasks, tuiWorkers);
+    if (bad.length > 0) throw new TuiDependencyError(bad);
     this.#order = tasks.map((t) => t.id);
     for (const t of tasks) {
       this.#nodes.set(t.id, {

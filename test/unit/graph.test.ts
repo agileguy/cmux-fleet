@@ -11,8 +11,13 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { ScheduledTaskSchema, TaskSpecSchema, type TaskSpec, type Verdict } from "../../src/contracts.ts";
-import { TaskGraph, dependencySatisfied } from "../../src/orchestrate/graph.ts";
+import { EXIT, ScheduledTaskSchema, TaskSpecSchema, type TaskSpec, type Verdict } from "../../src/contracts.ts";
+import {
+  TaskGraph,
+  TuiDependencyError,
+  dependencySatisfied,
+  tuiDependencyEdges,
+} from "../../src/orchestrate/graph.ts";
 
 function spec(id: string, deps: string[] = [], extra: Record<string, unknown> = {}): TaskSpec {
   return TaskSpecSchema.parse({ id, title: id, brief: `do ${id}`, depends_on: deps, ...extra });
@@ -181,5 +186,130 @@ describe("terminal accounting and the snapshot seam", () => {
     expect(() => g.markDispatched("b", "w", "b")).toThrow(/not ready/);
     g.markSettled("a", "success");
     expect(() => g.markSettled("a", "success")).toThrow(/twice/);
+  });
+});
+
+/**
+ * `depends_on` may not name a task running on a `pane_mode: tui` worker
+ * (TUI spec item 13, SRD §3.5).
+ *
+ * The refusal is in the CONSTRUCTOR, so these tests are about what can and
+ * cannot be BUILT. The valuable arms are the ones that must still build: the
+ * default constructor, an rpc pin while a tui worker exists elsewhere, and a
+ * tui task that is itself a dependent. A guard that refused those would make
+ * `dispatch --auto` unusable for every fleet in this repository, which is a far
+ * worse failure than the hang it prevents.
+ */
+describe("a dependency on a tui worker's task is refused (TUI spec item 13)", () => {
+  const TUI = new Set(["w-tui"]);
+
+  /**
+   * THE CONTROL, and the one to keep if the rest were cut. Every `TaskGraph` in
+   * this file and in `scheduler.ts` before this parameter existed is built with
+   * one argument, and must keep behaving identically.
+   */
+  test("the one-argument constructor is unchanged: no set, no refusal", () => {
+    const g = new TaskGraph([spec("a", [], { worker: "w-tui" }), spec("b", ["a"])]);
+    expect(states(g)).toEqual({ a: "ready", b: "waiting" });
+  });
+
+  test("an rpc fleet builds even with dependencies pinned everywhere", () => {
+    const g = new TaskGraph(
+      [spec("a", [], { worker: "w1" }), spec("b", ["a"], { worker: "w2" })],
+      new Set<string>(),
+    );
+    expect(states(g)).toEqual({ a: "ready", b: "waiting" });
+  });
+
+  test("a dependent on a tui-pinned task is refused, naming both tasks and the worker", () => {
+    let err: unknown;
+    try {
+      new TaskGraph([spec("a", [], { worker: "w-tui" }), spec("b", ["a"])], TUI);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(TuiDependencyError);
+    const e = err as TuiDependencyError;
+    // Exit 2 through the structural `ExitCoded` protocol, like TaskListError —
+    // an authoring mistake, not an environment failure.
+    expect(e.exitCode).toBe(EXIT.USAGE);
+    expect(e.edges).toEqual([{ dependent: "b", dependency: "a", worker: "w-tui" }]);
+    expect(e.message).toContain("'b'");
+    expect(e.message).toContain("'a'");
+    expect(e.message).toContain("w-tui");
+
+    /**
+     * And the REASON, which is the whole difference between this and a
+     * warning. A message that only said "not allowed" would satisfy every
+     * assertion above; the operator needs to know that there is no epoch to
+     * fence the wait to, because that is what makes it unfixable rather than
+     * inadvisable.
+     */
+    expect(e.message).toContain("no epoch is allocated");
+    expect(e.message).toContain("transcript");
+    // …and the way out, or the refusal is a wall.
+    expect(e.message).toContain("Pin the dependency to an rpc worker");
+  });
+
+  /**
+   * The edge has a DIRECTION, and getting it backwards would refuse the very
+   * shape the mode is for: a person drives a tui worker on the last task of a
+   * chain, after the automated work it builds on has landed.
+   */
+  test("a tui task that DEPENDS on others is fine — only being depended ON is refused", () => {
+    const g = new TaskGraph(
+      [spec("a"), spec("b", ["a"], { worker: "w-tui" })],
+      TUI,
+    );
+    expect(states(g)).toEqual({ a: "ready", b: "waiting" });
+  });
+
+  /**
+   * THE HONEST BOUND, asserted rather than only described in the docblock. An
+   * unpinned dependency names no worker at authoring time, so this cannot see
+   * it — and does not pretend to. It is not a hole, because
+   * `SchedulerIO.dispatch` rejects the pane route with
+   * `pane_mode_tui_is_not_auto_schedulable`, so the edge this cannot see is
+   * also the edge that cannot form.
+   */
+  test("an UNPINNED dependency is not refused, even with a tui worker in the fleet", () => {
+    const g = new TaskGraph([spec("a"), spec("b", ["a"])], TUI);
+    expect(states(g)).toEqual({ a: "ready", b: "waiting" });
+  });
+
+  test("a dependency pinned to an rpc worker is not refused while a tui worker exists", () => {
+    const g = new TaskGraph(
+      [spec("a", [], { worker: "w1" }), spec("b", ["a"]), spec("c", [], { worker: "w-tui" })],
+      TUI,
+    );
+    expect(states(g)).toEqual({ a: "ready", b: "waiting", c: "ready" });
+  });
+
+  test("every bad edge is reported, in task-list then depends_on order", () => {
+    const edges = tuiDependencyEdges(
+      [
+        spec("t1", [], { worker: "w-tui" }),
+        spec("t2", [], { worker: "w-tui2" }),
+        // `depends_on` order inside one task is the inner tie-break: t2 before
+        // t1 here, and that is the order the answer must come back in.
+        spec("t3", ["t2", "t1"]),
+        spec("t4", ["t1"]),
+      ],
+      new Set(["w-tui", "w-tui2"]),
+    );
+    expect(edges).toEqual([
+      { dependent: "t3", dependency: "t2", worker: "w-tui2" },
+      { dependent: "t3", dependency: "t1", worker: "w-tui" },
+      { dependent: "t4", dependency: "t1", worker: "w-tui" },
+    ]);
+  });
+
+  test("an empty tui set finds nothing, whatever the list looks like", () => {
+    expect(
+      tuiDependencyEdges(
+        [spec("a", [], { worker: "w-tui" }), spec("b", ["a"])],
+        new Set<string>(),
+      ),
+    ).toEqual([]);
   });
 });

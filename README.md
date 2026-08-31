@@ -11,6 +11,13 @@ A pane is a *view*, not a channel. Every control-plane fact comes from the Pi RP
 session transcript, or the worker's outbox — never from scraped pane text. Closing a pane, or
 never opening one, changes nothing about a run.
 
+**With one deliberate exception, which is the whole of `pane_mode: tui`.** That mode hands a
+worker's pane the container's own terminal, so for those workers the pane *is* the channel: there
+is no RPC stream, dispatch is keystrokes, completion is read out of the transcript, and closing the
+pane is believed to stop the worker. It is a degraded mode for attended debugging, not the
+supported path — and it is degraded in writing: `pifleet report` names the ten guarantees it gives
+up, per run, with a sentence an operator can act on for each.
+
 ## Install
 
 ```bash
@@ -55,7 +62,12 @@ started them. `up` is not "fire and forget": it returns only once every worker h
 
 ## Status
 
-All six phases are done. 2510 tests pass, 123 skip, 0 fail across 166 files (`test` job, CI on `main`).
+All six phases are done, and `pane_mode: tui` with them. 2881 tests pass, 124 skip, 0 fail across
+190 files — `test/unit` 2277, `test/integration` 587 (+124 skipped behind Docker/oMLX gates),
+`test/e2e` 17. **Measured on a developer host on 2026-08-31, not read off a CI run**, because the
+figure this replaces said "`test` job, CI on `main`" and this branch is not `main`; the honest
+provenance is the one that was available. CI runs the same three suites plus a Docker `container`
+job, an `omlx-live` job and a `load` job, none of which are counted above.
 
 | Phase | Deliverable | State |
 |---|---|---|
@@ -66,21 +78,37 @@ All six phases are done. 2510 tests pass, 123 skip, 0 fail across 166 files (`te
 | 4 | Panes | done — cmux/tmux backends, `attach`, live pane viewer |
 | 5 | Orchestration | done — `dispatch --auto` DAG scheduling, `pifleet report`, `pifleet logs` |
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
+| — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-No ISA done-condition criterion is unattempted — there are zero `[ ]`. Four are graded `[~]`
+No ISA done-condition criterion is unattempted — there are zero `[ ]`. Nine are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
-falls short of the standard: ISC-331 has one unexercised surface (a live round trip); and
-ISC-344, ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was
-shipped cannot observe a worker obeying it. The two that left this list on 2026-08-30 — ISC-306
-and ISC-339 — were scope decisions rather than defects, and closed when the owner made the
-decision each entry named as its closing condition.
+falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
+ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
+cannot observe a worker obeying it; and the five filed on 2026-08-31 for `pane_mode: tui` —
+ISC-377, ISC-378, ISC-379, ISC-380 and ISC-387 — are partial for one shared reason, that the mode's
+subject is a pseudo-TTY and the suites cannot open one. **No test in this repo attaches a real pane to a
+real container.** The attach argv, the `ctrl-]` detach key and the `docker kill --signal=INT` stop
+were each measured live against pi 0.79.6 on one machine on 2026-08-31; nothing re-runs those
+measurements, and what CI re-checks is the argv the code builds, not the terminal it produces.
+**ISC-387 is what that gap costs, and it was filed after the mode had already been declared
+built.** Running a tui worker at a real pane found two defects in a path that had been designed,
+reviewed, probed and merged green: tmux exits 0 for an unknown key name and *types it*, so
+`shift+enter` appeared in the pane as nine characters while every assertion on pifleet's own argv
+stayed correct; and cmux's dispatch was refused by pifleet's *own* identifier guard, whose grammar
+has no `+`, at step 2 of a 29-step plan with two lines of the prompt already typed. Each backend
+now translates one fleet-wide key vocabulary or refuses — but the vocabulary itself is still a
+measurement nothing re-runs, which is why the criterion is `[~]`.
+ISC-372 was filed `[~]` the same day and closed hours later, when `up` gained the check against the
+*effective* backend that the entry had named as its own closing condition. The two that left this
+list on 2026-08-30 — ISC-306 and ISC-339 — were scope decisions rather than defects, and closed
+when the owner made the decision each entry named as its closing condition.
 
 Two are retired `[-]` — ISC-307 and ISC-360 — a marker introduced by ISC-368 on 2026-08-30 for a
 criterion whose *premise* was superseded rather than left unproved. ISC-307 is about a secret's
 value reaching an env file, and secrets are delivered as read-only files now (ISC-337); ISC-360 is
 about an SRD erratum recording task-scoped cloud authorization as designed-but-not-built, and the
 owner withdrew the mechanism (ISC-366). Retired criteria are excluded from `progress:` on both
-sides — `356/360` counts the live set, and the frontmatter's `retired: 2` says where the rest
+sides — `369/377` counts the live set, and the frontmatter's `retired: 2` says where the rest
 went. Retiring is not closing, is not deleting (both entries keep their text and their live
 guards), and is refused for a criterion that is merely hard: `test/unit/isa-retired.test.ts`
 rejects any retirement that does not name a closed criterion that names it back.

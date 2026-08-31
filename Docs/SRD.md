@@ -171,22 +171,76 @@ The supervisor runs `docker run -i --name pifleet-<run>-<worker> …` and speaks
 
 ### 3.5 Pane modes — and what `tui` voids
 
+> **BUILT 2026-08-31** (ISA Group W, ISC-370..ISC-386). This section was designed and, until
+> Phase 1, read by nothing: `config/load.ts` set `paneMode` and no consumer existed, so a
+> `fleet.yaml` saying `pane_mode: tui` validated, rendered an argv identical to `rpc`'s, and
+> launched an ordinary RPC worker. **Two of this section's own claims did not survive being
+> built, and both corrections are carried below rather than filed as errata**, because a reader
+> arrives at this table to decide something.
+
+**ERRATUM 1 — there is no `--mode tui`.** The row below used to read "`docker attach` to a
+TUI-mode container", which describes a flag that does not exist. Measured against the shipped
+worker image (`pifleet/pi-worker:0.79.6-base`), `pi --help` offers exactly `text (default), json,
+or rpc`. **Pi's TUI is its DEFAULT mode plus a real terminal.** A `tui` worker is therefore the
+same argv as an `rpc` worker with `--mode rpc` *omitted* and the container given a TTY (`-i -t`) —
+Pi needs no new flag and no `--mode` value. §162's constraint is what everything else follows
+from: *a TTY has one owner*.
+
 | Mode | Pane runs | Dispatch | Harvest | Use |
 |---|---|---|---|---|
 | `rpc` *(default)* | viewer tailing `events.jsonl` | control socket → RPC `prompt` | outbox + transcript + git | automation |
-| `tui` *(attended)* | `docker attach` to a TUI-mode container | `cmux send` + `send-key enter` | outbox + transcript + git — **identical** | pair-working, demos |
+| `tui` *(attended)* | `docker attach --detach-keys=ctrl-]` to a container running Pi's **default** mode on a real pty | `cmux send` per line, `send-key shift+enter` between them, `send-key enter` to submit — see erratum 3 | outbox + transcript + git — **identical** | pair-working, demos |
 
-The harvest path is identical in both modes because `--session-id` is chosen before launch. `tui` is therefore cheap — but **not free**, and v1.1 was wrong to say it cost "a weaker dispatch path and nothing else." In `tui` mode the supervisor does not own Pi's stdin, so the following are **void**:
+The harvest path is identical in both modes because `--session-id` is chosen before launch. `tui`
+is therefore cheap — but **not free**, and v1.1 was wrong to say it cost "a weaker dispatch path
+and nothing else." In `tui` mode the supervisor owns **none of the worker's three streams**, so
+the following are void. Each row now carries the reason the build MEASURED, which in three places
+is not the reason this table first gave:
 
-| Voided in `tui` | Consequence |
+| Voided in `tui` | Consequence, as built |
 |---|---|
-| RPC `abort` | interrupt via `docker kill --signal=INT`, not the pane |
-| `get_session_stats` polling | cost accounted by summing `usage` from the transcript instead |
-| `extension_ui_request` answering | a dialog blocks until Dan answers it — acceptable only because it is attended |
-| `queue_update` consumption, epoch fencing (§7.5) | completion is transcript-derived, coarser |
-| F15 and the "closing a pane doesn't stop the worker" criterion | **false** in tui mode — the pane owns the attach |
+| RPC `abort` | `docker kill --signal=INT` — and it is a **stop, not a turn-interrupt**. See erratum 2. Pi's turn-interrupt is the ESCAPE keystroke, which travels through the pane as a byte and which no `pifleet` command can send. |
+| `get_session_stats` polling | cost summed from the transcript's `usage`. Structural rather than merely unwired: there is no control plane to poll, so `harvest/usage.ts`'s max-merge is permanently one-armed for these workers. (F12 records that nothing polls it for `rpc` workers either.) |
+| `extension_ui_request` answering | a dialog blocks until a person answers it — acceptable only because the mode is attended by construction. Leave a `tui` worker unwatched and a dialog stalls it for the rest of the run. |
+| `queue_update` consumption, epoch fencing (§7.5) | **no epoch is allocated at all.** "Transcript-derived, coarser" understated it: with no epoch there is no `already_completed`, so a re-dispatch of the same task file types the prompt a second time and **runs the task twice**, and the harvest accepts whichever `result.json` lands last. |
+| No ack on dispatch | `accepted: true` means `cmux` exited 0 — bytes reached a pty. It does not prove Pi read them, that a turn started, or that the program on that terminal is still Pi. `prompt_rejected` cannot happen, so its absence is not evidence that nothing refused. |
+| ISC-95, "never glob for a session file" | `get_state` is an RPC method a `tui` worker has no channel for, so the transcript is found by **suffix match** on `_<session-id>.jsonl` — non-recursive, bounded by a worker id unique within the run, newest-of-several returned *with the count*. Weaker than a path Pi stated itself. |
+| F15 and the "closing a pane doesn't stop the worker" criterion | **false** in tui mode — the pane owns the attach. **ASSERTED, NOT MEASURED:** `--sig-proxy` is left at docker's default and no probe has closed a tui pane and then inspected the container. |
 
-Therefore: `tui` workers may not be the target of a `depends_on` edge, and `pifleet up` warns when a `tui` worker is configured in an unattended run.
+**ERRATUM 2 — the interrupt path works, for a reason this section did not have.** The design above
+was challenged on the grounds that `docker kill` signals **PID 1 only** and the Dockerfile starts
+tini **without `-g`**, which would make `docker kill --signal=INT` a no-op. Both of those facts are
+correct, and the conclusion does not follow: **tini forwards the signal to the entrypoint shell,
+whose existing `trap forward TERM INT HUP` converts it to `kill -TERM` on the worker, and Pi exits
+cleanly.** The effect reaches the worker; only the signal does not. The trap is therefore
+**load-bearing rather than an obstacle** — dropping `INT` from it would create the no-op that was
+feared. Measured 2026-08-31, one fresh container in the production tui shape per row: no signal →
+`Running=true`; `--signal=INT` at PID 1 → `Running=false ExitCode=0`; `--signal=TERM` → same;
+`kill -INT` at Pi directly → `ExitCode=130`, and a second INT 150 ms later changes nothing because
+there is nothing left to send it to. A person's **Ctrl-C in an attached pane does not kill the
+worker** either: Pi's TUI holds the pty in raw mode (`-isig`, measured against a `cat` control arm
+that shows `isig`), so the tty driver generates no SIGINT for the trap to catch.
+
+**ERRATUM 3 — "`send-key enter`" is not a portable instruction, and both backends proved it in a
+live run rather than in the suite.** A prompt is more than one line, so the dispatch cell above
+needed a *separator* key as well as a submit key, and the two backends spell keys in **disjoint
+vocabularies**: measured 2026-08-31 against a real cmux surface, `send-key shift+enter` → `rc=0`
+and `send-key S-Enter` → `rc=1 invalid_params: Unknown key`; measured against a real tmux pane,
+`send-keys S-Enter` sends the key and **`send-keys shift+enter` exits 0 and types the nine
+characters into the pane.** The fleet therefore carries ONE key vocabulary (`src/util/pane-text.ts`:
+`enter`, `shift+enter`, `escape`, `tab`) and every backend translates it or **refuses** — a
+pass-through fallback is what produced `t-live-1shift+entershift+enter…` in a real pane. **Both
+defects were invisible to a green suite**, and differently: tmux's was a backend that exits 0 while
+doing the wrong thing, so no assertion on our own argv could see it; cmux's was our *own*
+`assertCmuxValue` grammar, which has no `+` and so refused the key at **step 2 of 29** with two
+lines of the operator's prompt already typed and unwithdrawable. That grammar was NOT widened — it
+guards surface ids, workspace refs and status keys, and flag injection is not a key-specific
+hazard — so keys pass a closed allow-list of their own instead.
+
+Therefore: `tui` workers may not be the target of a `depends_on` edge, and `pifleet up` warns when
+a `tui` worker is configured in an unattended run. **Both guards are built**, and `up` additionally
+refuses a `tui` worker on the *effective* `headless` backend — `config validate` can only see a
+document that names `headless`, and `--backend headless` typed at `up` is a different surface.
 
 ---
 
@@ -233,7 +287,7 @@ Verified behaviour:
 | `cmux focus-pane --pane <ref>` / `focus-panel` | `pifleet attach` | required |
 | `cmux respawn-pane --workspace <id> --surface <id> --command <text>` | **starts the viewer in a split pane** — without it, panes are empty shells | **required** |
 | `cmux rename-tab --workspace <id> --surface <id> --title <text>` | labels a pane with its worker id; best-effort, a failure costs a label | optional |
-| `cmux send [--surface]` / `send-key [--surface]` | **`tui` mode only** | optional |
+| `cmux send [--surface]` / `send-key [--surface]` | **`tui` mode only.** `send-key` takes cmux's own spelling — `shift+enter` accepted, `S-Enter` rejected `invalid_params: Unknown key` (measured 2026-08-31); see §3.5 erratum 3 | optional |
 | `cmux set-status <k> <v> [--icon --color --priority]`, `clear-status`, `list-status` | per-worker sidebar pill, keyed by worker id | optional |
 | `cmux set-progress <0..1> [--label]`, `clear-progress` | run progress (**singular per workspace**) | optional |
 | `cmux notify --title --body` | run finished / worker failed | optional |
@@ -2119,7 +2173,7 @@ The `pifleet-worker` skill and the commit template forbid `Co-Authored-By`, "Gen
 | F12 | Cost runaway | **NOT BUILT** — no 60s sampler exists; all nine `get_session_stats` references in `src/` are comments, and `src/harvest/usage.ts` records that the only executable one in the repository is the RESPONDER in the test double | reservation + ceiling halt (**the 80% soft-stop was never implemented and its config key was removed — ISC-280**) |
 | F13 | Provider rate-limit / transient error | `auto_retry_*` | **NOT BUILT** — no backoff and no retry-count escalation to `blocked`; `grep -rniE backoff src/` returns nothing |
 | F14 | Session file rewritten, not appended | inode/size change | `(dev,ino,size,offset)` tracking (§8.3) |
-| F15 | Pane closed by Dan | surface missing | supervisor is detached — unaffected (**rpc mode only**) |
+| F15 | Pane closed by Dan | surface missing | supervisor is detached — unaffected (**rpc mode only**). In `pane_mode: tui` the pane OWNS the `docker attach`, so closing it is believed to stop the worker — **asserted, never measured**: `--sig-proxy` sits at docker's default and no probe has closed a tui pane and inspected the container. `report` says so per-run (ISC-382). |
 | F16 | Secrets rendered into a pane | — | no provider key exists in the container (§12.4) |
 | F17 | Stale checkouts accumulate | `StaleWorktreeError` refuses to adopt one at `up` (§9.2 erratum — `git worktree prune` retired with `git worktree add`) | two-phase `down`; refuse dirty without `--force` |
 | F18 | Orchestrator crashes mid-run | ledger + registry on disk | detached supervisors; replayable `wait`; idempotent dispatch |
