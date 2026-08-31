@@ -126,18 +126,157 @@ export { workerContainerName } from "../run/paths.ts";
 import { workerContainerName } from "../run/paths.ts";
 
 /**
- * What the pane runs while a person owns it: an interactive shell inside the
- * worker's container — same workspace, same tools, same (absent) credentials.
+ * What the pane runs while a person owns an **rpc** worker: an interactive
+ * shell inside the worker's container — same workspace, same tools, same
+ * (absent) credentials.
  *
- * NOT `docker attach`: the SRD's §3.5 sketch attaches to a TUI-mode Pi, but
- * this fleet launches Pi in RPC mode with the supervisor holding stdin, and
- * attaching a human keyboard to a JSONL protocol stream would corrupt the
- * control plane on the first keystroke. `docker exec` gives the person hands
- * inside the same boundary without touching Pi's pipes, which is what keeps
- * dispatch, abort and harvest working while the pane is attended.
+ * NOT `docker attach`, **for an `rpc` worker**. That worker's Pi is launched
+ * with `--mode rpc` and the supervisor holds stdin as a pipe, so attaching a
+ * human keyboard to a JSONL protocol stream would corrupt the control plane on
+ * the first keystroke. `docker exec` gives the person hands inside the same
+ * boundary without touching Pi's pipes, which is what keeps dispatch, abort and
+ * harvest working while the pane is attended.
+ *
+ * ## The refusal was RESTATED, not relaxed (TUI spec item 9)
+ *
+ * It used to read as a flat rule — "NOT `docker attach`" with no worker named —
+ * and as a flat rule it is now false. It was written when every worker was an
+ * rpc worker, so the qualifier cost nothing and was left off. `pane_mode: tui`
+ * makes the qualifier load-bearing: a tui worker omits `--mode rpc`, has no
+ * JSONL stream, and no supervisor holding its stdin (`supervisor/index.ts`
+ * launches it detached and tracks it by name), so there is nothing for a
+ * keystroke to corrupt. Its TTY is the whole point of the mode.
+ *
+ * The refusal still governs every rpc worker, which is every worker a default
+ * config produces, and `attachArgv` below is the ONLY sanctioned exception.
+ * Nothing here became optional; it acquired the scope it always had.
  */
 export function interactiveArgv(runId: string, workerId: string): string[] {
   return ["docker", "exec", "-it", workerContainerName(runId, workerId), "bash"];
+}
+
+/**
+ * The sequence that detaches a pane from a tui worker — **measured, not
+ * chosen** (TUI spec item 4).
+ *
+ * `docker attach` defaults to `ctrl-p,ctrl-q`, and **Pi binds ctrl-p.**
+ * Measured 2026-08-31 against the real image
+ * (`pifleet/pi-worker:0.79.6-base-28cde8879cf9`), one fresh container in the
+ * tui shape per arm, the attach client on a real pty, one byte delivered per
+ * arm. The signal is bytes the TUI emits in the 4 s after delivery — a bound
+ * key repaints, an ignored one is silent:
+ *
+ *   control: nothing delivered              delta =    0   (noise floor is 0)
+ *   '/'      (a documented Pi keybind)      delta = 3602   (instrument works)
+ *   ctrl-p   (0x10)                         delta = 5153   -> "Only one model
+ *                                                             available"
+ *   ctrl-]   (0x1d), passed through to Pi   delta =   10   (no visible text)
+ *
+ * The negative control fixes the noise floor at zero and the positive control
+ * proves the instrument can see a reaction at all, so ctrl-p's 5153 bytes are
+ * a reaction and ctrl-]'s 10 are not. ctrl-p drives Pi's MODEL SWITCHER; its
+ * repaint says so in as many words. Left on the default, an operator reaching
+ * for that keybind would arm docker's detach state machine instead, and a pane
+ * that eats a keybind of the program it is showing is a broken pane.
+ *
+ * `ctrl-]` was then proven to work as an escape hatch rather than merely to be
+ * ignored, with a control arm that differs in ONE variable — the byte sent:
+ *
+ *   --detach-keys=ctrl-]  send 0x1d   client detached = YES, worker alive
+ *   --detach-keys=ctrl-]  send 'x'    client detached = NO   (control)
+ *
+ * Without that control the detach arm's exit would equally support "this
+ * client exits on any input".
+ *
+ * WHY ctrl-] AND NOT ctrl-\, which is also unbound. `container/interrupt.ts`
+ * records two windows where Pi's raw mode does NOT hold — container startup
+ * before Pi sets it, and Pi's `!` bash escape. ISIG is on in those windows, so
+ * ctrl-\ is SIGQUIT to the pty's foreground group, which the entrypoint's
+ * `trap forward TERM INT HUP` turns into a dead worker. ctrl-] is 0x1d, which
+ * no termios control character claims in either mode, and it is the escape
+ * telnet and rlogin have used for the same job for decades.
+ *
+ * **DOES NOT CLAIM** that ctrl-] is unbound in every future Pi. It is unbound
+ * in 0.79.6, which is the version this image pins; a Pi that binds it would
+ * need this measurement re-run, which is why the arms are written down rather
+ * than summarised as "we picked ctrl-]".
+ */
+export const DETACH_KEYS = "ctrl-]";
+
+/**
+ * How long the pane waits for its container before giving up, in seconds.
+ *
+ * The wait exists because of a REAL ordering, read out of `up.ts` rather than
+ * assumed: the pane is created, then the supervisor is launched with
+ * `launchDetached`, then this argv is attached. `launchDetached` returns when
+ * the supervisor PROCESS is spawned — the supervisor then reads the launch
+ * record and runs `docker run -d` itself, so at attach time the container
+ * reliably does not exist yet. A bare `docker attach` here would not race; it
+ * would fail every single time with `No such container`.
+ *
+ * Two minutes because the first container of a run pays for image checks and
+ * mount setup, and because the cost of waiting too long is a pane that says it
+ * is waiting, while the cost of waiting too little is a pane that gives up on
+ * a worker that was about to start.
+ */
+export const ATTACH_WAIT_SECONDS = 120;
+
+/**
+ * What a **tui** worker's pane runs: `docker attach` onto Pi's own TTY.
+ *
+ * This is the exception `interactiveArgv`'s docblock names, and it is the
+ * whole of spec item 9. A tui worker's container is created detached with
+ * `-i -t` and Pi runs its default (TUI) mode on a pseudo-TTY inside; attaching
+ * is what puts that terminal in the operator's pane. `docker exec … bash`
+ * would give a shell NEXT TO Pi, which is a different and useless thing here —
+ * the operator would be looking at a prompt while the agent they came to drive
+ * runs unseen on a terminal nobody holds.
+ *
+ * ## It waits for the container rather than racing it
+ *
+ * See `ATTACH_WAIT_SECONDS` for the ordering that makes this mandatory. The
+ * wait is the same shape as the two the viewer already uses for the same class
+ * of reason — `tail -F` over a file that need not exist, and `logs --follow`
+ * waiting for an events file the supervisor has not written yet. A pane whose
+ * first act is to fail is not a pane.
+ *
+ * The give-up is LOUD and the pane SURVIVES it. On timeout the pane prints
+ * which container it waited for and how long, and does not exit — an operator
+ * who finds an empty pane learns nothing, and one whose pane vanished cannot
+ * even read the diagnosis. `up` records a failed viewer and carries on either
+ * way; that non-fatal property is preserved here rather than relied upon.
+ *
+ * ## The container name is an ARGUMENT, never shell syntax
+ *
+ * `sh -c <script> <argv0> <name>` puts the name in `"$1"`. Interpolating it
+ * into the script would make every run id and worker id shell syntax, which is
+ * the same mistake `backends/cmux/index.ts` describes at length in
+ * `attachViewer` — it writes the argv to a 0700 script and spawns it by path
+ * precisely so that config strings never become code.
+ *
+ * **DOES NOT CLAIM** the pane outlives the worker. When Pi exits, the attach
+ * ends and the pane closes with it — SRD §3.5 already records this as voided
+ * in `tui` ("closing a pane doesn't stop the worker" is false here; the pane
+ * owns the attach). The final screen is lost with it, and the transcript, not
+ * the pane, is where a finished tui worker is read.
+ */
+export function attachArgv(runId: string, workerId: string): string[] {
+  const container = workerContainerName(runId, workerId);
+  // `"$1"` throughout: see the docblock. `exec` so the pane's process IS the
+  // attach — no stray shell per pane, and signals reach docker unchanged.
+  const script =
+    `n=0; ` +
+    `while [ "$n" -lt ${ATTACH_WAIT_SECONDS} ]; do ` +
+    `if [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; then ` +
+    `exec docker attach --detach-keys=${DETACH_KEYS} "$1"; ` +
+    `fi; ` +
+    `n=$((n+1)); sleep 1; ` +
+    `done; ` +
+    `echo "pifleet: container $1 did not start within ${ATTACH_WAIT_SECONDS}s; ` +
+    `nothing to attach to. The worker may have failed to launch - see supervisor.log."; ` +
+    // Hold the pane open so the line above can actually be read.
+    `while true; do sleep 3600; done`;
+  return ["sh", "-c", script, "pifleet-attach", container];
 }
 
 /** Resolved relative to this module so the CLI entry needs no lookup. */
