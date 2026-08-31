@@ -192,12 +192,34 @@ export async function createOperations(
  * that workspace and reported "already in place — changed nothing", which was
  * true and useless.
  *
- * The escape hatch is a CLOSE-then-build rather than a respawn of each pane,
+ * The escape hatch replaces the WORKSPACE rather than respawning each pane,
  * because the pane SET is part of the plan: a console built by an older version
  * may have a different number of panes in different places, and respawning the
  * ones that happen to exist would leave a half-migrated layout that matches
- * neither version. Closing is also the operation an operator can reason about —
- * it is what they would do by hand.
+ * neither version.
+ *
+ * ## BUILD FIRST, CLOSE SECOND — and the first version had this backwards
+ *
+ * Closing first is the obvious order and it is wrong. MEASURED 2026-08-30, on
+ * the operator's own console: `operations` was the ONLY workspace, closing it
+ * left the cmux app with no window, and the very next call failed with
+ * `unavailable: TabManager not available`. So did every call after it — even
+ * `workspace list` — because a windowless cmux has no tab manager to answer
+ * with. The flag whose entire job is to repair a stale console had destroyed a
+ * working one and left nothing able to rebuild it; recovery took `cmux <path>`
+ * from a shell, which is exactly the manual step this script exists to spare.
+ *
+ * The argument FOR closing first was that `findOperations` matches an exact
+ * title, so building first leaves two workspaces briefly wearing one name. That
+ * is true and it is the lesser risk by a wide margin: the window is a few
+ * hundred milliseconds inside one function, nothing re-queries by title during
+ * it, and the old id is already in hand — so the close targets a captured
+ * UUID and cannot pick the wrong one. Weigh a transient ambiguity nothing
+ * observes against a destroyed console that cannot be rebuilt, and the order
+ * is not a close call.
+ *
+ * If the create THROWS, the old console is still standing. That is the right
+ * failure: a stale console beats no console, which is the whole lesson above.
  */
 export async function ensureOperations(
   client: CmuxClient,
@@ -209,10 +231,10 @@ export async function ensureOperations(
     await client.runOk(selectWorkspaceArgv(existing));
     return { created: false, workspaceId: existing };
   }
-  // Closed BEFORE the build, and the order is forced: `findOperations` matches
-  // on an exact title, so building first would leave two workspaces wearing the
-  // same name and make the next `findOperations` ambiguous — the duplicate this
-  // whole function exists to prevent, created by the flag that repairs it.
+  const built = await createOperations(client, opts);
+  // By CAPTURED ID, never by a re-query: the only moment two workspaces share
+  // this title is between these two lines, and resolving the name here is the
+  // one thing that could close the console just built.
   if (existing !== null) await client.runOk(workspaceCloseArgv(existing));
-  return createOperations(client, opts);
+  return built;
 }
