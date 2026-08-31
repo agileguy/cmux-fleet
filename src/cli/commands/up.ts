@@ -347,6 +347,99 @@ const POLL_MS = 100;
  */
 const DEFAULT_BACKEND = "headless";
 
+/** A backend kind, plus the input that decided it. */
+export interface RequestedBackend {
+  kind: "cmux" | "tmux" | "headless";
+  /** Named as an operator would say it, because refusals below quote it. */
+  source: "--backend" | "backend.kind" | "the built-in default";
+}
+
+/**
+ * THE ONE PLACE THE BACKEND IS CHOSEN (ISC-271), as a function.
+ *
+ *     explicit --backend  >  the config's backend.kind  >  DEFAULT_BACKEND
+ *
+ * The expression is unchanged; what is new is that it now also reports WHICH
+ * of the three terms answered, and that it is callable without an `up`.
+ *
+ * The SOURCE is not decoration. `DEFAULT_BACKEND` is `headless`, so a config
+ * that sets `pane_mode: tui` and says nothing about a backend is refused by
+ * `assertTuiBackendPossible` below for a reason no line of that config
+ * contains. "backend is headless" would send the operator to grep their
+ * fleet.yaml for a word that is not in it; "the built-in default" tells them
+ * what to actually do.
+ *
+ * Pure and exported for the reason `panePresentationArgv` is: the precedence IS
+ * the criterion, and a test that re-declared it would prove only that its own
+ * copy is self-consistent. The integration suite's ISC-271 block still grades
+ * the wiring through `run.json`, which is what makes this more than a
+ * self-consistent pair.
+ */
+export function resolveRequestedBackend(args: {
+  flag: "cmux" | "tmux" | "headless" | undefined;
+  configKind: "cmux" | "tmux" | "headless" | null;
+}): RequestedBackend {
+  if (args.flag !== undefined) return { kind: args.flag, source: "--backend" };
+  if (args.configKind !== null) return { kind: args.configKind, source: "backend.kind" };
+  return { kind: DEFAULT_BACKEND, source: "the built-in default" };
+}
+
+/**
+ * Refuse a `tui` worker on the EFFECTIVE headless backend (TUI spec item 4,
+ * second half) — the residual Phase 1 declared and could not close.
+ *
+ * ## What the schema can see, and what it cannot
+ *
+ * `config/schema.ts` refuses a document that SAYS `backend.kind: headless`
+ * beside a `pane_mode: tui` worker, and that is all it can ever refuse.
+ * `backend.kind` is `.optional()` and an absent block means UNSET (ISC-271), so
+ * TWO shapes reach a headless backend without the word appearing anywhere the
+ * schema is looking:
+ *
+ *   1. `--backend headless` typed at `up`, which beats any config; and
+ *   2. **a config that says nothing at all** — because `DEFAULT_BACKEND` is
+ *      `headless`, which is what every run in this repository has been getting.
+ *
+ * The second is the one worth pausing on. Phase 1's note names only the flag,
+ * and the default is the commoner accident by a wide margin: an operator adds
+ * `pane_mode: tui` to a working fleet.yaml, changes nothing else, and gets a
+ * config the schema passes and a run with no pane to attach to.
+ *
+ * ## Why a refusal and not a warning
+ *
+ * `headless` has no pane. `up`'s own `createPane` returns a null surface, so
+ * `panePresentationArgv` has nothing to attach `docker attach` to; the
+ * container comes up with `-i -t` and Pi renders a TUI onto a terminal nobody
+ * holds; `pifleet tui --worker` refuses it ("no pane to hand over") and
+ * `pifleet dispatch` refuses it ("a tui worker's prompt has nowhere to go").
+ * Every downstream command already says no. Without this the operator learns
+ * that one command at a time, after the fleet is up, which is the "quiet
+ * failure" shape SRD §5.9 exists to prevent.
+ *
+ * The refusal is EXIT.USAGE for the same reason the schema's is: nothing is
+ * wrong with the host, the combination cannot work.
+ */
+export function assertTuiBackendPossible(args: {
+  tuiWorkers: readonly string[];
+  backend: RequestedBackend;
+}): void {
+  if (args.backend.kind !== "headless") return;
+  if (args.tuiWorkers.length === 0) return;
+  const ids = args.tuiWorkers.join(", ");
+  throw new CliError(
+    `refusing to start: ${args.tuiWorkers.length} worker(s) resolve to pane_mode: tui ` +
+      `(${ids}), but this run's backend is headless — chosen by ${args.backend.source}.\n` +
+      `  A tui worker's pane IS its terminal: up gives its container a TTY and the pane runs ` +
+      `docker attach onto Pi. A headless run creates no pane, so there is nothing to attach, ` +
+      `nothing to type into, and no way to reach the worker at all — pifleet tui refuses it ` +
+      `("no pane to hand over") and pifleet dispatch refuses it ("nowhere to go").\n` +
+      `  Pass --backend cmux (or tmux), or set pane_mode: rpc for these workers.\n` +
+      `  config/schema.ts refuses this at parse time only when the document SAYS ` +
+      `backend.kind: headless; ${args.backend.source} is the surface it cannot see.`,
+    EXIT.USAGE,
+  );
+}
+
 /**
  * Register `pifleet up` (SRD §10): build the run directory, start the daemon
  * and one detached supervisor per worker, and wait for the fleet to go idle.
@@ -875,10 +968,20 @@ export function register(program: Command): void {
        * `kind` alone leaves three documented options that change nothing.
        */
       const configBackend: "cmux" | "tmux" | "headless" | null = loadedConfig?.config.backend.kind ?? null;
-      const requestedBackend = opts.backend ?? configBackend ?? DEFAULT_BACKEND;
+      /**
+       * The precedence moved into `resolveRequestedBackend` so that the guards
+       * below can quote WHICH input answered. `opts.backend` was validated
+       * against `isBackendKind` at the top of this action, which is what makes
+       * the narrowing here a restatement rather than an assumption.
+       */
+      const backendChoice = resolveRequestedBackend({
+        flag: opts.backend as "cmux" | "tmux" | "headless" | undefined,
+        configKind: configBackend,
+      });
+      const requestedBackend = backendChoice.kind;
 
       /**
-       * THE PHASE 4 PANE-MODE GUARDS (TUI spec item 12).
+       * THE PHASE 4 PANE-MODE GUARDS (TUI spec items 12 and 4).
        *
        * WHAT HAS ALREADY HAPPENED AT THIS POINT, stated rather than left for a
        * reader to discover: the run directory exists and the image gate has
@@ -889,6 +992,14 @@ export function register(program: Command): void {
        * `workersDir` and an empty ledger.
        */
       const tuiWorkers = loadedConfig === null ? [] : tuiWorkerIds(loadedConfig, workers);
+      /**
+       * Spec item 4's second half, and it runs BEFORE the warning because a
+       * refusal supersedes advice: a run that cannot start does not also need
+       * telling what it would have given up. Phase 1 declared this residual
+       * openly — the schema can only see a document that SAYS headless — and
+       * this is the EFFECTIVE-backend check it asked for.
+       */
+      assertTuiBackendPossible({ tuiWorkers, backend: backendChoice });
       /**
        * Spec item 12 — a WARNING, never a refusal. An operator may know
        * exactly what they are doing: launching a tui fleet from a script and

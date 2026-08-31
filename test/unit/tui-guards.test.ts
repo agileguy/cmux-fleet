@@ -19,7 +19,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { loadConfig, type LoadedConfig } from "../../src/config/load.ts";
+import { EXIT } from "../../src/contracts.ts";
 import {
+  assertTuiBackendPossible,
+  resolveRequestedBackend,
   runIsUnattended,
   tuiWorkerIds,
   unattendedTuiWarning,
@@ -177,5 +180,122 @@ describe("unattendedTuiWarning says what is given up", () => {
     expect(w).toContain("closing it stops the worker");
     // …and the action, which is what makes it a warning rather than a lament.
     expect(w).toContain("pifleet attach --worker w1");
+  });
+});
+
+/**
+ * A `tui` worker on the EFFECTIVE headless backend is refused (TUI spec item 4,
+ * second half) — the residual Phase 1 declared and could not close.
+ *
+ * `test/unit/config.test.ts` holds the other end of this: it asserts that the
+ * SCHEMA still does not refuse a document with no backend block, and its
+ * comment now points here rather than at `pifleet tui --worker`. The two are
+ * not in tension — `parseConfig` has no `--backend` and no `DEFAULT_BACKEND`,
+ * so the check could only ever have lived where the effective value exists.
+ */
+describe("resolveRequestedBackend reports WHICH input answered (ISC-271)", () => {
+  test("the flag beats a config, which beats the built-in default", () => {
+    expect(resolveRequestedBackend({ flag: "tmux", configKind: "cmux" })).toEqual({
+      kind: "tmux",
+      source: "--backend",
+    });
+    expect(resolveRequestedBackend({ flag: undefined, configKind: "cmux" })).toEqual({
+      kind: "cmux",
+      source: "backend.kind",
+    });
+    expect(resolveRequestedBackend({ flag: undefined, configKind: null })).toEqual({
+      kind: "headless",
+      source: "the built-in default",
+    });
+  });
+
+  /**
+   * The flag wins even when it names the SAME kind the config does, and the
+   * source must say so. An implementation that compared values rather than
+   * consulting precedence would answer `backend.kind` here and put the wrong
+   * remedy in the refusal below.
+   */
+  test("an explicit flag is still the flag when it agrees with the config", () => {
+    expect(resolveRequestedBackend({ flag: "headless", configKind: "headless" })).toEqual({
+      kind: "headless",
+      source: "--backend",
+    });
+  });
+});
+
+describe("a tui worker on the effective headless backend is refused", () => {
+  const HEADLESS_BY_FLAG = { kind: "headless", source: "--backend" } as const;
+  const HEADLESS_BY_DEFAULT = { kind: "headless", source: "the built-in default" } as const;
+
+  /**
+   * THE CONTROL, and the reason this guard is dangerous if it is wrong.
+   * `headless` is `DEFAULT_BACKEND` — it is what every run in this repository
+   * and every test in this suite has been getting. A refusal that fired on an
+   * rpc fleet would block all of them.
+   */
+  test("a headless run with no tui worker is not refused", () => {
+    expect(() =>
+      assertTuiBackendPossible({ tuiWorkers: [], backend: HEADLESS_BY_DEFAULT }),
+    ).not.toThrow();
+    expect(() =>
+      assertTuiBackendPossible({ tuiWorkers: [], backend: HEADLESS_BY_FLAG }),
+    ).not.toThrow();
+  });
+
+  test("a tui worker on cmux or tmux is not refused", () => {
+    for (const kind of ["cmux", "tmux"] as const) {
+      expect(() =>
+        assertTuiBackendPossible({
+          tuiWorkers: ["w1"],
+          backend: { kind, source: "--backend" },
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  /**
+   * DIRECTION ONE — `--backend headless` typed at `up`, which is the surface
+   * Phase 1 named. Exit 2, because nothing is wrong with the host.
+   */
+  test("--backend headless with a tui worker is refused, naming the flag", () => {
+    let err: unknown;
+    try {
+      assertTuiBackendPossible({ tuiWorkers: ["w1", "w2"], backend: HEADLESS_BY_FLAG });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    expect((err as { exitCode: number }).exitCode).toBe(EXIT.USAGE);
+    const m = (err as Error).message;
+    expect(m).toContain("2 worker(s)");
+    expect(m).toContain("w1, w2");
+    // WHICH input chose headless — without it the operator greps a fleet.yaml
+    // for a word that is not in it.
+    expect(m).toContain("--backend");
+    // The reason, and the way out.
+    expect(m).toContain("docker attach");
+    expect(m).toContain("--backend cmux");
+    expect(m).toContain("pane_mode: rpc");
+  });
+
+  /**
+   * DIRECTION TWO, and the commoner accident by a wide margin. Phase 1's note
+   * names only the flag; because `DEFAULT_BACKEND` is `headless`, a fleet.yaml
+   * that adds `pane_mode: tui` and changes nothing else lands here — a document
+   * the schema passes, on a backend no line of it mentions. The message has to
+   * say where headless came from or it is unactionable.
+   */
+  test("a config that says nothing about a backend is refused, naming the default", () => {
+    let err: unknown;
+    try {
+      assertTuiBackendPossible({ tuiWorkers: ["w1"], backend: HEADLESS_BY_DEFAULT });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    const m = (err as Error).message;
+    expect(m).toContain("the built-in default");
+    // It must NOT claim the operator typed a flag they did not type.
+    expect(m).not.toContain("chosen by --backend");
   });
 });
