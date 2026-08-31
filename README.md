@@ -80,13 +80,18 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-No ISA done-condition criterion is unattempted — there are zero `[ ]`. Nine are graded `[~]`
+No ISA done-condition criterion is unattempted — there are zero `[ ]`. Eight are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
-cannot observe a worker obeying it; and the five filed on 2026-08-31 for `pane_mode: tui` —
-ISC-377, ISC-378, ISC-379, ISC-380 and ISC-387 — are partial for one shared reason, that the mode's
-subject is a pseudo-TTY and the suites cannot open one. **No test in this repo attaches a real pane to a
+cannot observe a worker obeying it; and the four still open from 2026-08-31 for `pane_mode: tui` —
+ISC-377, ISC-378, ISC-379 and ISC-387 — are partial for one shared reason, that the mode's
+subject is a pseudo-TTY and the suites cannot open one. ISC-380 was the fifth and **closed the same
+day**: its stated closing condition was the only one of the five that did not need a terminal, and
+`test/integration/tui-dispatch-pane.test.ts` now drives `dispatch` at a tui worker through the REAL
+tmux backend with a fake `tmux` binary on `PATH` — proving that the typed bytes reconstruct the
+rendered prompt, that the keys arrive in tmux's spelling, and that the CLI and the ledger both
+report `via: pane` with no epoch. **No test in this repo attaches a real pane to a
 real container.** The attach argv, the `ctrl-]` detach key and the `docker kill --signal=INT` stop
 were each measured live against pi 0.79.6 on one machine on 2026-08-31; nothing re-runs those
 measurements, and what CI re-checks is the argv the code builds, not the terminal it produces.
