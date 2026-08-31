@@ -12,7 +12,9 @@
  *  - a worker naming an unknown role (ISC-68);
  *  - a role that claims `read_only: true` while its merged tools include
  *    `bash` (ISC-59) — a "read-only" reviewer that can `cd /` and `git push`
- *    was an actual finding against v1.1's example (SRD §6.2).
+ *    was an actual finding against v1.1's example (SRD §6.2);
+ *  - a worker that resolves to `pane_mode: tui` in a shape that has no pane:
+ *    the `oneshot` lifecycle, or a `headless` backend (SRD §3.5).
  */
 
 import { z } from "zod";
@@ -806,6 +808,97 @@ export const FleetConfigSchema = z
               : `worker "${w.id}" resolves to read_only: true with "bash" in its tools — a shell can write; drop one`,
         });
       }
+    });
+
+    // ------------------------------------------------------------------
+    // `pane_mode: tui` combined with something that has no pane (SRD §3.5)
+    // ------------------------------------------------------------------
+    //
+    // `tui` is not a Pi flag. Measured against `pi --help` in the shipped
+    // worker image (`pifleet/pi-worker:0.79.6-base`), the only modes are
+    // `--mode <text|json|rpc>`; a TUI worker is the SAME argv with `--mode rpc`
+    // OMITTED, in a container that was given a TTY. So `pane_mode` does not
+    // select a feature Pi either has or lacks — it selects WHO OWNS THE
+    // CONTAINER'S STDIN, and SRD §162 is the constraint that follows: "a TTY
+    // has one owner. Pi's RPC mode needs stdin/stdout as pipes; a TUI needs
+    // them as a terminal."
+    //
+    // Two configurations therefore describe a worker that cannot exist, and
+    // both are refused HERE rather than at `up`, for the reason `httpUrl` and
+    // `egressRuleHost` above are: a `config validate` failure names the field
+    // and the file, whereas the same refusal inside `up` arrives after
+    // containers, worktrees and panes already exist, and a person reading it
+    // has to work backwards to the line that caused it.
+    //
+    // What this check does NOT claim: `backend.kind` is OPTIONAL (see
+    // `BackendSchema` — absent means UNSET, and `up`'s precedence is
+    // `--backend > backend.kind > DEFAULT_BACKEND`). So this catches the
+    // document that SAYS headless; it cannot see a `--backend headless`
+    // typed at `up`, which is a different surface with its own reader.
+    // `pifleet tui --worker` refuses a headless worker at runtime regardless
+    // (`cli/commands/tui.ts`, EXIT.BACKEND_UNAVAILABLE), so the runtime floor
+    // is unchanged by this being a partial check — it is an EARLIER refusal
+    // for the case the config states outright, not the only one.
+    const paneModeIssues = (
+      subject: string,
+      paneMode: "rpc" | "tui" | undefined,
+      kind: "persistent" | "oneshot" | undefined,
+      at: Array<string | number>,
+    ): void => {
+      // Resolved the way `load.ts` resolves them, so what is judged here is
+      // what a worker would actually be launched as. Testing the raw key
+      // would miss every combination assembled ACROSS levels — which is the
+      // shape the read_only guard above was originally caught getting wrong.
+      if ((paneMode ?? "rpc") !== "tui") return;
+
+      if ((kind ?? "persistent") === "oneshot") {
+        ctx.addIssue({
+          code: "custom",
+          path: at,
+          message:
+            `${subject} resolves to pane_mode: tui with kind: oneshot — a oneshot worker ` +
+            `runs one container per task as \`pi -p --mode json\` (SRD §6.4), and \`-p\` is ` +
+            `Pi's documented non-interactive mode: "process prompt and exit". There is no ` +
+            `interactive session for a pane to attach to, and the container is gone before ` +
+            `anyone could type into it. Set kind: persistent, or leave pane_mode at rpc.`,
+        });
+      }
+
+      if (cfg.backend.kind === "headless") {
+        ctx.addIssue({
+          code: "custom",
+          path: at,
+          message:
+            `${subject} resolves to pane_mode: tui, but backend.kind is headless — a tui ` +
+            `worker's pane runs \`docker attach\` on its container (SRD §3.5) and the ` +
+            `headless backend creates no pane at all, so there is nothing to attach and no ` +
+            `hand could reach the worker. Choose backend.kind cmux or tmux, or leave ` +
+            `pane_mode at rpc.`,
+        });
+      }
+    };
+
+    for (const [name, role] of Object.entries(cfg.roles)) {
+      paneModeIssues(
+        `role "${name}"`,
+        role.pane_mode ?? cfg.defaults.pane_mode,
+        role.kind ?? cfg.defaults.kind,
+        ["roles", name, "pane_mode"],
+      );
+    }
+    // Checked at BOTH levels, like the read_only guard above, because either
+    // can complete the combination on its own: a role that pairs them is
+    // broken wherever it is copied, and a worker override can pair them
+    // against a role that did not.
+    cfg.workers.forEach((w, i) => {
+      const role = cfg.roles[w.role];
+      if (!role) return; // already reported above
+      paneModeIssues(
+        `worker "${w.id}"`,
+        w.pane_mode ?? role.pane_mode ?? cfg.defaults.pane_mode,
+        w.kind ?? role.kind ?? cfg.defaults.kind,
+        ["workers", i, "pane_mode"],
+      );
     });
   });
 

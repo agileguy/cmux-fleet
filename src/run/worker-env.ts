@@ -425,6 +425,30 @@ export function buildWorkerEnv(
      */
     PIFLEET_HONEYPOT: "1",
     /*
+     * WHICH OF THE TWO STDIN CONTRACTS `docker/entrypoint.sh` installs for
+     * this worker (SRD §3.5, §162 — `pane_mode`).
+     *
+     * `tui` is not a Pi flag: `pi --help` in the shipped image offers
+     * `--mode <text|json|rpc>` and nothing else, so a TUI worker is the same
+     * argv with `--mode rpc` omitted, in a container that has a TTY. What
+     * actually differs at runtime is who owns stdin — the supervisor's pipe or
+     * a person's terminal — and that decision is made in the entrypoint, which
+     * cannot see `fleet.yaml`. This variable is how it learns.
+     *
+     * Written for BOTH modes rather than only for `tui`, even though the
+     * entrypoint defaults an absent value to `rpc`. The env file is a durable
+     * artifact under the run directory that `status` and `report` read back
+     * months later, and "the key is missing" and "the key says rpc" are the
+     * same launch but not the same evidence: the first cannot distinguish a
+     * worker that was launched as rpc from one launched by a pifleet that did
+     * not have pane modes yet.
+     *
+     * It travels here rather than as a `-e` flag for exactly the reason
+     * `PIFLEET_HONEYPOT` above does: `buildDockerArgv` emits NO `-e` at all
+     * and `test/unit/container-env.test.ts` asserts the count is ZERO.
+     */
+    PIFLEET_PANE_MODE: w.paneMode,
+    /*
      * WHICH of this file's entries are credentials, by name.
      *
      * Declared HERE, empty, and filled in at the bottom of this function once

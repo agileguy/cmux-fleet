@@ -31,6 +31,14 @@
 #                          comes up without this set is NOT silently fine — it
 #                          reports as `unwatched` in `pifleet report`, which is
 #                          the whole point of the third state.
+#   PIFLEET_PANE_MODE      "tui" or "rpc" (SRD §3.5). Decides WHICH OF THE TWO
+#                          STDIN CONTRACTS is installed below — see the long
+#                          block above the launch. UNSET means "rpc", so every
+#                          container built before this variable existed, and
+#                          every probe that does not set it (`image verify`,
+#                          the acceptance containers, test/integration/
+#                          honeypot.test.ts), keeps exactly the plumbing it
+#                          has always had.
 #   PIFLEET_WORKER_BIN     test seam: binary to exec instead of pi (ISC-39/40
 #                          verification needs to observe the rendered file, and
 #                          pi itself cannot print it)
@@ -140,19 +148,82 @@ fi
 # startup` with no other symptom anywhere. This shipped; `container-live` is
 # what caught it.
 #
-# `exec 3<&0` then `<&3` is an EXPLICIT redirection, which is exactly what the
-# rule above exempts. `<&0` alone is not reliable here — the default is applied
-# to the asynchronous list before redirections are processed, so the saved
-# duplicate is the form that survives it. Measured both ways in the real image:
-# `cat &` reads nothing, `exec 3<&0; cat <&3 &` reads the piped line.
+# WHICH redirection survives that rule is the whole of the branch below, and
+# the two arms want opposite things (SRD §162: "a TTY has one owner. Pi's RPC
+# mode needs stdin/stdout as pipes; a TUI needs them as a terminal").
 #
-# The parent's copy is closed immediately after. It is not needed again, and a
-# stray duplicate of the read end is the kind of thing that quietly changes who
-# holds a pipe open.
-exec 3<&0
-"${PIFLEET_WORKER_BIN:-pi}" "$@" <&3 &
-worker_pid=$!
-exec 3<&-
+# rpc (the default): `exec 3<&0` then `<&3` is an EXPLICIT redirection, which
+# is exactly what the rule above exempts. `<&0` alone is not reliable here —
+# the default is applied to the asynchronous list before redirections are
+# processed, so the saved duplicate is the form that survives it. Measured both
+# ways in the real image: `cat &` reads nothing, `exec 3<&0; cat <&3 &` reads
+# the piped line. The parent's copy is closed immediately after. It is not
+# needed again, and a stray duplicate of the read end is the kind of thing that
+# quietly changes who holds a pipe open.
+#
+# tui: that plumbing is the WRONG contract, not merely an unnecessary one. Two
+# measured reasons, taken in a `docker run -t` container (bash 5.2.37, the same
+# major version the image carries; `readlink /proc/self/fd/0` in the child):
+#
+#   child &                          fd0=/dev/null      — the rule above
+#   exec 3<&0; child <&3 &           fd0=/dev/pts/0  fd3=PRESENT
+#   child < /dev/tty &               fd0=/dev/tty    fd3=absent
+#
+#  1. The child of the `<&3` form inherits fd 3 as well as fd 0, because the
+#     fork happens before the parent's `exec 3<&-`. It is a second, undeclared
+#     handle on the terminal held by a process whose whole job is to own it.
+#  2. It is a DUPLICATE of the supervisor's own descriptor rather than the
+#     worker's own open of the terminal, which is the opposite of the one-owner
+#     property §162 asks for.
+#
+# So a tui worker is given the controlling terminal BY NAME. `/dev/tty` is an
+# explicit redirection, so it survives the asynchronous-list rule exactly as
+# `<&3` does — the worker is still supervised, and the honeypot guarantee
+# above (ISC-125) is untouched, which is why this is a redirect swap rather
+# than a foreground `exec`.
+#
+# It is guarded rather than attempted, and the guard is the point: the launch
+# plane is what gives a tui container `-i -t`, and if it did not, `/dev/tty`
+# either fails to open or (worse) resolves somewhere no person is looking. A
+# TUI whose keyboard is a closed pipe is not a degraded pane, it is a worker
+# nobody can drive that reports itself running. Exit 72 rather than 71 so that
+# a container-side refusal here is not read as the escape-attempt listener
+# failing to arm, which is the only other thing 71 means.
+#
+# WHAT THIS BRANCH DOES NOT ADDRESS: the `trap forward TERM INT HUP` above
+# still converts a SIGINT into a SIGTERM on the worker. In rpc mode nothing
+# types into the container so that never fires; in tui mode a person's Ctrl-C
+# is delivered by the tty driver to the whole foreground process group — the
+# supervisor AND the worker share it (measured in the same container: shell and
+# async child both report pgrp 1, and the pty's foreground group is 1) — so the
+# worker receives the interrupt directly and is then ALSO sent SIGTERM by this
+# trap. Deciding what a tui interrupt should be is SRD §3.5's "interrupt via
+# `docker kill --signal=INT`" and belongs with the abort path that implements
+# it; note that `docker kill` signals PID 1 only and tini here is started
+# without `-g`, so that route reaches this shell and not the worker. Both ends
+# of that contract have to move together, and neither moves here.
+if [ "${PIFLEET_PANE_MODE:-rpc}" = "tui" ]; then
+  # Both halves are checked because they can disagree: `-t 0` says the stdin we
+  # were handed is a terminal, `/dev/tty` says this process has a controlling
+  # one to reopen. A container with neither is the misconfiguration; a
+  # container with only one is a shape nobody has produced and this refuses to
+  # guess at.
+  # `2>/dev/null` is written BEFORE the input redirection on purpose:
+  # redirections are applied left to right, so stderr has to be silenced first
+  # or bash's own "cannot open /dev/tty" reaches the operator ahead of the
+  # sentence below, which says considerably more.
+  if [ ! -t 0 ] || ! : 2>/dev/null < /dev/tty; then
+    echo "pifleet: PIFLEET_PANE_MODE=tui but this container has no terminal on stdin — a tui worker is launched with 'docker run -i -t' and attached to with 'docker attach' (SRD §3.5); without a TTY its keyboard would be a pipe nobody is holding" >&2
+    exit 72
+  fi
+  "${PIFLEET_WORKER_BIN:-pi}" "$@" < /dev/tty &
+  worker_pid=$!
+else
+  exec 3<&0
+  "${PIFLEET_WORKER_BIN:-pi}" "$@" <&3 &
+  worker_pid=$!
+  exec 3<&-
+fi
 
 # `wait -n -p` returns as soon as EITHER child exits and names which one. A
 # return above 128 with no pid is a trapped signal, not an exit, so the loop

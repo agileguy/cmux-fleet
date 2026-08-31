@@ -158,6 +158,39 @@ describe("the --env-file contract with docker/entrypoint.sh", () => {
   });
 
   /**
+   * `pane_mode` reaches the container or it means nothing (SRD §3.5).
+   *
+   * `docker/entrypoint.sh` installs one of two stdin contracts — the `exec
+   * 3<&0` … `<&3` plumbing that `pi --mode rpc`'s JSONL protocol needs, or the
+   * `< /dev/tty` redirect a person driving a terminal needs — and it cannot
+   * read `fleet.yaml`. This variable is the only thing that tells it which.
+   *
+   * Asserted as the literal strings the script branches on, for the same
+   * reason `PIFLEET_HONEYPOT` is asserted as `"1"` above: the entrypoint
+   * compares against `tui` exactly, so any other spelling silently selects the
+   * RPC plumbing and produces a "tui" worker whose keyboard is a pipe nobody
+   * holds — running perfectly, and undriveable.
+   */
+  test("carries the resolved pane mode to the entrypoint, in both modes", async () => {
+    const loaded = await load(
+      baseDoc({
+        backend: { kind: "cmux" },
+        roles: { eng: {}, attended: { pane_mode: "tui" } },
+        workers: [
+          { id: "w1", role: "eng" },
+          { id: "wt", role: "attended" },
+        ],
+      }),
+    );
+    expect(buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {}).vars["PIFLEET_PANE_MODE"]).toBe(
+      "rpc",
+    );
+    expect(buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), {}).vars["PIFLEET_PANE_MODE"]).toBe(
+      "tui",
+    );
+  });
+
+  /**
    * `models_allowlist` is a GATE on what a worker may be configured with
    * (ISC-190), not a list to register. Registering it would hand every worker
    * a provider entry for models it is not permitted to use.
