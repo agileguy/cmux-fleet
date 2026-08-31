@@ -1072,6 +1072,21 @@ export async function materializeWorkerInputs(
        * value, so there is no redaction to remember.
        */
       secret_names: envPlan.secretNames,
+      /*
+       * The pane mode travels with the argv for the third time on this record,
+       * and for the third instance of one reason: `up` resolved it in a cwd and
+       * environment the detached supervisor does not share.
+       *
+       * `w.paneMode` is `resolveWorker`'s output — the same value `render.ts`
+       * read one call earlier to decide whether the argv carries `-t`. Taking
+       * it from the same struct in the same scope is what makes the two
+       * agree: a supervisor that launches detached while the argv lacks `-t`
+       * gets a container with no pseudo-TTY and no Pi TUI in it, and a
+       * supervisor that launches in the foreground while the argv HAS `-t`
+       * gets `the input device is not a TTY` and no container at all. Neither
+       * failure names `pane_mode`.
+       */
+      pane_mode: w.paneMode,
     };
     if (opts.writeLaunchRecord === true) {
       await establishing(`the launch record for ${workerId}`, async () => {

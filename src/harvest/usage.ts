@@ -28,6 +28,33 @@
  * work that would read the number, and ISC-114 records that `safety/budget.ts`
  * has no production importer either.
  *
+ * ## Source 1 is VOID in `pane_mode: tui`, not merely unwired (SRD §3.5)
+ *
+ * The paragraph above describes source 1 as absent today and wireable later.
+ * That is true of an `rpc` worker and FALSE of a `tui` one, and the difference
+ * is structural rather than a matter of sequencing: a tui worker runs Pi
+ * without `--mode rpc` and the supervisor holds none of its three streams, so
+ * there is no control plane to ask. §3.5 lists `get_session_stats` polling
+ * among the guarantees the mode gives up, and names the transcript as what
+ * replaces it. For those workers the transcript is not the source that happens
+ * to run — it is the only source that CAN run, for the life of the run.
+ *
+ * The consequence is a CONSTRAINT ON A FUTURE EDIT, which is why it is
+ * recorded at the definition rather than left to whoever wires source 1: when
+ * source 1 does arrive it must stay one arm of the max below and must never
+ * become a preferred or authoritative source. A merge that preferred it would
+ * read `state.usage` for a tui worker, find the schema default forever, and
+ * report every such worker as having spent nothing — an under-count feeding a
+ * ceiling, which is precisely the ISC-115 failure the max rule exists to
+ * prevent, arriving through a door that did not exist when the rule was
+ * written. `test/unit/tui-cost.test.ts` pins the chain end to end.
+ *
+ * NOT CLAIMED: that a tui worker's transcript can be FOUND. `session_path` is
+ * recorded verbatim from an RPC `get_state` reply (ISC-95), so for a tui
+ * worker it is null and the summing below has no input. Locating that file
+ * without RPC is the same problem as transcript-derived completion and belongs
+ * with it, in the supervisor.
+ *
  * The load-bearing fact: **local models are unpriced**. oMLX has no price
  * table, so `cost` is 0 on every response no matter how many tokens burned
  * (SRD §5.9). A ceiling that watches dollars therefore never trips locally —

@@ -140,32 +140,64 @@ the whole mode is pointless.
 still takes the RPC path (the risk here is a refactor that quietly routes both modes
 through the new one).
 
-### 2.8 THE INTERRUPT PATH — SRD §3.5 cannot work as written
+### 2.8 THE INTERRUPT PATH — RESOLVED 2026-08-31, and this section was WRONG
 
-Measured 2026-08-31 by the engineer who built the entrypoint branch. §3.5 says a tui worker
-is interrupted with `docker kill --signal=INT`. Two independent reasons that does not reach
-the worker today, and they pull in OPPOSITE directions:
+**Read the resolution, not the alarm.** What follows first is what this section claimed
+before anyone measured it; it is kept because two of its three claims are false and a reader
+who meets them again elsewhere should know they were tested.
 
-- `docker kill` signals **PID 1 only**, and the Dockerfile starts tini **without `-g`**
-  (`ENTRYPOINT ["/usr/bin/tini","--", …]`), so the INT lands on the entrypoint shell and
-  never on the worker.
-- `docker/entrypoint.sh` already carries `trap forward TERM INT HUP`, which converts any INT
-  into a **SIGTERM on the worker**. Measured in a `-t` container: the shell and its async
-  child share pgrp 1, which is also the pty's foreground group — so a person's **Ctrl-C in
-  an attached pane** is delivered to the worker AND triggers that trap. In rpc mode nothing
-  ever types into the container, so this has never fired. In tui mode Ctrl-C would KILL the
-  worker rather than interrupt the turn.
+The original claim: SRD §3.5's `docker kill --signal=INT` cannot reach the worker, because
+`docker kill` signals **PID 1 only** and the Dockerfile starts tini **without `-g`**; and
+separately, `entrypoint.sh`'s `trap forward TERM INT HUP` means a person's **Ctrl-C in an
+attached pane** would be double-delivered and KILL the worker. Pi's response to a double INT
+was recorded as unmeasured, and the choice was framed as a product decision.
 
-The choice is a product decision and both ends must move together:
+**Measured against the real image, one fresh container in the production tui shape per row:**
 
-| option | `docker kill --signal=INT` | a person's Ctrl-C in the pane |
-|---|---|---|
-| supervisor ignores INT | becomes a silent no-op | works — reaches Pi as an interrupt |
-| supervisor forwards INT | works | double-delivers |
+```
+control: no signal at all           Running=true
+docker kill --signal=INT   (PID 1)  Running=false ExitCode=0
+docker kill --signal=TERM  (PID 1)  Running=false ExitCode=0
+kill -INT  <entrypoint shell>       Running=false ExitCode=0
+kill -INT  <pi>  (single)           Running=false ExitCode=130
+kill -INT  <pi>  (double, 150ms)    Running=false ExitCode=130
+kill -TERM <pi>                     Running=false ExitCode=0
+```
 
-Pi's response to a double INT is **unmeasured**; measure it before choosing. Whoever takes
-item 8 takes this with it — shipping the abort path without resolving it gives a pane whose
-Ctrl-C kills the agent.
+Three corrections, each overturning something above:
+
+1. **`docker kill --signal=INT` is not a no-op — it stops the worker.** The PID-1 and
+   no-`-g` facts are both right; the step this section missed is the one after. tini forwards
+   to the entrypoint shell, whose existing `trap forward TERM INT HUP` converts it to
+   `kill -TERM` on the worker, and Pi exits cleanly on TERM. **The effect reaches the worker;
+   only the signal does not.** The trap is therefore load-bearing rather than an obstacle —
+   dropping `INT` from it would CREATE the no-op this section feared.
+2. **SIGINT is not an interrupt for Pi, it is a kill.** Direct INT ends it with 130, and a
+   second INT changes nothing because there is nothing left to send it to. The double-INT
+   question does not arise. Pi's turn-interrupt is the **ESCAPE keystroke**, which travels
+   through the pane as a byte, not through the kernel as a signal.
+3. **A person's Ctrl-C in an attached pane does NOT kill the worker.** Pi's TUI holds the pty
+   in **raw mode**. Measured with `stty -a` against a control arm differing in exactly one
+   variable — which binary owns the terminal:
+
+   ```
+   worker = pi   (production tui shape)  ->  -isig  (ISIG DISABLED)
+   worker = cat  (PIFLEET_WORKER_BIN)    ->   isig  (ISIG enabled)
+   ```
+
+   With ISIG off the tty driver generates no SIGINT at all, so the trap cannot fire from a
+   keystroke and there is no double delivery. **This section's second bullet described the
+   control arm, not what a tui worker runs.** Its process groups were also wrong: measured
+   pgrp is 7 for both the shell and Pi, not 1.
+
+**So item 8 is the verb §3.5 already names, and no entrypoint change is required.** Not
+claimed: this is a STOP, not a turn-interrupt, and `abort`'s JSON says `via` so the two stay
+distinguishable. Raw mode is Pi's and holds only while Pi's TUI owns the terminal — the
+startup window and Pi's `!` bash escape were not measured, and nothing here depends on them.
+
+The lesson is the one this repo keeps relearning: the alarm above was reasoning about a
+pty, and the table is evidence about one. **A control arm that differs in a single variable
+is what separated them**, and no amount of re-reading the entrypoint would have.
 
 ## Phase 3 — Presentation and dispatch
 
