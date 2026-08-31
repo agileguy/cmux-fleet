@@ -484,6 +484,34 @@ export const WorkerLaunchSchema = z
      */
     secret_names: z.array(shortStr).max(MAX_ITEMS).default([]),
     /**
+     * The subset of `secret_names` the fleet declared `credential: false` —
+     * delivered to the worker, and NOT used as a needle by the sweep.
+     *
+     * ## Why it is recorded rather than read from config at harvest time
+     *
+     * The same rule `secret_names` is here for, and `harvest/needles.ts` states
+     * it: a harvester is handed a RUN DIRECTORY, not a workspace, and a run
+     * outlives the `fleet.yaml` that produced it. A declaration read from
+     * config at harvest time would sweep a two-week-old run against today's
+     * document — or against no document at all, from a machine that never had
+     * one — and the failure would be silent in the dangerous direction, since a
+     * name that stopped being declared starts being swept and a name that
+     * started being declared stops.
+     *
+     * ## Why the exception is per-NAME and per-RUN rather than a global rule
+     *
+     * The sweep's needles are the values of what one worker was granted. There
+     * is no property of a VALUE that says "public endpoint" — an eight-byte
+     * floor already drops the region names and flags, and everything above it
+     * looks alike. So the operator says which, once, in the document that
+     * granted it, and `up` writes the answer beside the grant.
+     *
+     * Defaulted to `[]`, so every record written before this field existed
+     * parses as "every grant is a credential" — the conservative reading, and
+     * the one that keeps an old run's sweep exactly as wide as it was.
+     */
+    non_credential_secrets: z.array(shortStr).max(MAX_ITEMS).default([]),
+    /**
      * The worker's `pane_mode` (SRD §3.5), recorded rather than re-derived.
      *
      * The supervisor needs this before it spawns anything: a `tui` worker is

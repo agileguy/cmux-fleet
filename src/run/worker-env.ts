@@ -78,6 +78,7 @@
 import { writeFile, chmod, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
+import { nonCredentialSecretNames, secretGrantNames } from "../config/schema.ts";
 import { ConfigError } from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
 import {
@@ -197,6 +198,21 @@ export interface WorkerEnvPlan {
    * adding one the intersection never approved.
    */
   secretFiles: readonly SecretFile[];
+  /**
+   * The subset of `secretNames` the fleet declared `credential: false`.
+   *
+   * Names only, and it is a SUBSET of `secretNames` rather than a copy of the
+   * fleet-wide declaration: a name this worker was never granted has nothing
+   * to say about this worker's sweep, and recording one would put a variable
+   * in the run record that the run never delivered.
+   *
+   * It exists here so `materialize.ts` can write it into `launch.json`. The
+   * harvester is handed a RUN DIRECTORY, not a workspace — `harvest/needles.ts`
+   * states the rule — so a declaration that lived only in config would be
+   * unreadable at harvest time, and a run would be swept against a fleet.yaml
+   * that had since changed or moved.
+   */
+  nonCredentialSecretNames: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +684,8 @@ export function buildWorkerEnv(
     ...RESERVED_PROXY_VARS,
     apiKeyEnvName,
   ]);
-  const allowlist = loaded.config.secrets.env_allowlist;
+  const allowlist = secretGrantNames(loaded.config.secrets.env_allowlist);
+  const notCredentials = new Set(nonCredentialSecretNames(loaded.config.secrets.env_allowlist));
   const secretNames: string[] = [];
   const secretFiles: SecretFile[] = [];
   const missing: string[] = [];
@@ -753,6 +770,9 @@ export function buildWorkerEnv(
     apiKeyEnvName,
     secretNames,
     secretFiles,
+    // Intersected with what this worker was actually granted, not copied from
+    // the fleet-wide declaration — see the field's docblock.
+    nonCredentialSecretNames: secretNames.filter((n) => notCredentials.has(n)),
   };
 }
 

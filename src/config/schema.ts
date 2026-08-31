@@ -542,12 +542,95 @@ export const CloudSchema = z
   .strict()
   .prefault({});
 
+/**
+ * One entry on `secrets.env_allowlist`: a bare name, or a name that says it is
+ * not a credential.
+ *
+ * ## Why the long form exists, and what it does NOT change
+ *
+ * `secrets:` is the only per-worker delivery channel this fleet has, so a
+ * variable that must reach a worker has to be listed here whether or not it is
+ * secret. `TICKET_BASE_URL` is the standing example and `fleet.example.yaml`
+ * has argued the point in a comment since the channel was written: a public
+ * endpoint on this list "is harmless but is not what this list is for".
+ *
+ * It was not harmless. `harvest/needles.ts` sweeps every granted VALUE through
+ * `findCredentialLeaks`, and a ticket worker's artifacts legitimately contain
+ * the endpoint they were pointed at — so every `ticket-ops.json` was refused
+ * as carrying a credential and every verdict clamped. A detector that fires on
+ * every honest run is the same defect as one that never fires, one sign
+ * flipped.
+ *
+ * `credential: false` says one thing and only one thing: **do not use this
+ * value as a needle.** Delivery is untouched — the name is still granted, the
+ * worker still gets a 0444 file and a `<NAME>_FILE` pointer, and every
+ * reserved-name and allowlist check applies exactly as before. It buys no
+ * privilege; it forfeits a check.
+ *
+ * The DEFAULT is `true`, and a bare string means `true`. An operator who adds
+ * a real credential and writes nothing extra gets it swept, which is the
+ * direction a mistake has to fall.
+ */
+export const SecretEntrySchema = z.union([
+  shortStr,
+  z
+    .object({
+      name: shortStr,
+      /**
+       * `false` means "delivered, not swept". Defaulting to `true` makes the
+       * long form safe to reach for — an operator who writes `{name: X}` to
+       * add a comment does not silently disarm the sweep for X.
+       */
+      credential: z.boolean().default(true),
+    })
+    .strict(),
+]);
+
+export type SecretEntry = z.infer<typeof SecretEntrySchema>;
+
+/** The granted NAMES, in order, whichever form each entry took. */
+export function secretGrantNames(entries: readonly SecretEntry[]): string[] {
+  return entries.map((e) => (typeof e === "string" ? e : e.name));
+}
+
+/** The subset declared `credential: false` — the names the sweep skips. */
+export function nonCredentialSecretNames(entries: readonly SecretEntry[]): string[] {
+  return entries.flatMap((e) => (typeof e === "string" || e.credential ? [] : [e.name]));
+}
+
 export const SecretsSchema = z
   .object({
     /** NEVER provider keys — see SRD §12.4. */
-    env_allowlist: z.array(shortStr).max(64).default([]),
+    env_allowlist: z.array(SecretEntrySchema).max(64).default([]),
   })
   .strict()
+  /**
+   * A name may not appear twice with different answers.
+   *
+   * `[X, {name: X, credential: false}]` has no defensible reading: the sweep
+   * would take whichever the implementation happened to look at first, and the
+   * operator's intent is unrecoverable from the document. Refusing at
+   * `config validate` is cheap; a fleet that quietly disarmed a sweep because
+   * of list order is not.
+   */
+  .superRefine((v, ctx) => {
+    const seen = new Map<string, boolean>();
+    for (const e of v.env_allowlist) {
+      const name = typeof e === "string" ? e : e.name;
+      const isCredential = typeof e === "string" ? true : e.credential;
+      const prior = seen.get(name);
+      if (prior !== undefined && prior !== isCredential) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["env_allowlist"],
+          message:
+            `secrets.env_allowlist lists ${name} twice with different credential settings — ` +
+            `say once whether it is swept`,
+        });
+      }
+      seen.set(name, isCredential);
+    }
+  })
   .prefault({});
 
 // ---------------------------------------------------------------------------

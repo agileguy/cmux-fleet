@@ -1073,6 +1073,13 @@ export async function materializeWorkerInputs(
        */
       secret_names: envPlan.secretNames,
       /*
+       * Written HERE, beside the grant it qualifies, for the reason the field's
+       * own docblock gives: the harvester reads a run directory, not a config.
+       * A declaration left in `fleet.yaml` would be unreadable at harvest time
+       * and would silently re-widen or re-narrow an old run's sweep.
+       */
+      non_credential_secrets: envPlan.nonCredentialSecretNames,
+      /*
        * The pane mode travels with the argv for the third time on this record,
        * and for the third instance of one reason: `up` resolved it in a cwd and
        * environment the detached supervisor does not share.
