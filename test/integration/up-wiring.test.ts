@@ -3831,3 +3831,135 @@ describe("which input decides the backend (ISC-271)", () => {
     cliBudget(1),
   );
 });
+
+/**
+ * `up` WARNS when a `tui` worker is launched into an unattended run
+ * (TUI spec item 12), and says nothing for every other fleet.
+ *
+ * ## Why this is a CLI test and not another unit test
+ *
+ * `unattendedTuiWarning` and `runIsUnattended` are pure and are probed
+ * exhaustively in `test/unit/tui-guards.test.ts`. The criterion is about
+ * `pifleet up`, and this file's own header records what happens when the two
+ * are confused: the `ensureEgressNetwork` and `detectRepoHazards` calls were
+ * both deleted from `up.ts` with the whole suite green, because both controls
+ * were tested as modules and held in place by nothing. Deleting the
+ * `process.stderr.write(tuiWarning)` line would be that defect wearing a new
+ * name, and only a run of the real CLI can see it.
+ *
+ * ## The exit both arms end on is deliberate, and is NOT the tui guard
+ *
+ * Both tests point `llm.base_url` at a dead port, so both runs end at the
+ * ISC-53 native-tool-call probe with exit 3 — an unrelated failure STRICTLY
+ * LATER in `up` than the warning. That is what makes the pair a controlled
+ * comparison: the two runs differ in exactly one field of YAML, travel the
+ * identical path, and reach the identical exit, so any difference on stderr is
+ * the warning and nothing else. Letting a fleet actually come up would have
+ * cost a real backend, a real pane and ninety seconds to observe one string.
+ *
+ * `--backend cmux` and not `headless`, because a tui worker on the EFFECTIVE
+ * headless backend is refused (spec item 4's second half) by a guard that
+ * fires earlier and would mask this one.
+ *
+ * **NOT COVERED HERE:** the attended arm. `spawnCli` gives the child three
+ * pipes, so every run in this file is unattended by `runIsUnattended`'s stream
+ * test and there is no pty to hand it. That a person at a terminal gets NO
+ * warning is pinned in the unit suite only.
+ */
+describe("up warns about a tui worker in an unattended run (TUI spec item 12)", () => {
+  /** A base_url that is real, free, and listening to nothing. */
+  async function deadModelUrl(): Promise<string> {
+    const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+    // `host.docker.internal` for the reason the ISC-53 test above records at
+    // length: the probe runs from inside the egress network, and
+    // `omlxRelayTarget` refuses any other host — a loopback spelling would
+    // fail at the RELAY, one step earlier, with the same exit code.
+    const url = `http://host.docker.internal:${probe.port}/v1`;
+    await probe.stop(true);
+    return url;
+  }
+
+  test(
+    "a pane_mode: tui worker gets a warning naming what the mode gives up",
+    async () => {
+      const rig = await makeRig();
+      const cfg = join(rig.base, "tui-unattended.yaml");
+      await writeFile(
+        cfg,
+        fleetYaml(rig.repo, {
+          requireNativeToolCalls: true,
+          llmBaseUrl: await deadModelUrl(),
+          roleFields: ["pane_mode: tui"],
+        }),
+      );
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        cfg,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "cmux",
+      ]);
+
+      // The run ended where both arms of this pair end — after the warning.
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+
+      // The worker, by name, and the count.
+      expect(up.stderr).toContain("pane_mode: tui");
+      expect(up.stderr).toContain("eng-1");
+      expect(up.stderr).toContain("1 worker(s)");
+      /**
+       * And WHAT IS GIVEN UP. "Say what is being given up, not just that
+       * something is" is the requirement; a warning that said only
+       * "unattended tui run" would satisfy every assertion above this comment.
+       */
+      expect(up.stderr).toContain("pane_mode_tui_is_not_auto_schedulable");
+      expect(up.stderr).toContain("docker kill --signal=INT");
+      expect(up.stderr).toContain("transcript-derived");
+
+      // On stderr, so a `--json` consumer's one-object stdout stays one object.
+      expect(up.stdout).not.toContain("pane_mode");
+    },
+    cliBudget(1),
+  );
+
+  /**
+   * THE CONTROL, and the assertion worth keeping if the rest were cut. It
+   * differs from the arm above in ONE field of YAML. Every fleet anyone has
+   * ever run is this shape, so a guard that fires here fires on everything.
+   */
+  test(
+    "an rpc fleet — every fleet in this repository — gets no warning at all",
+    async () => {
+      const rig = await makeRig();
+      const cfg = join(rig.base, "rpc-unattended.yaml");
+      await writeFile(
+        cfg,
+        fleetYaml(rig.repo, {
+          requireNativeToolCalls: true,
+          llmBaseUrl: await deadModelUrl(),
+        }),
+      );
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        cfg,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "cmux",
+      ]);
+
+      // Non-vacuous: the run really did travel the same path to the same exit,
+      // so "no warning" is a difference in OUTPUT rather than in how far the
+      // two runs got.
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+      expect(up.stderr).toContain("oMLX");
+
+      expect(up.stderr).not.toContain("pane_mode");
+      expect(up.stderr).not.toContain("docker kill --signal=INT");
+    },
+    cliBudget(1),
+  );
+});
