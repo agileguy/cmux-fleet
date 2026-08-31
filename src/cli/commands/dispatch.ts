@@ -448,9 +448,22 @@ async function sendViaPane(args: {
     // `pane_mode: tui` on a headless backend at config time, so reaching here
     // means the effective backend was chosen at `up` (the residual TUI-SPEC
     // Phase 1 records as necessarily partial until Phase 4).
+    /*
+     * An ADOPTED pane is a different sentence, and the difference matters to
+     * whoever is reading it. "Nowhere to go" is right for a headless run with
+     * no pane at all. When `up --attach-here` handed a terminal to this
+     * worker there IS a pane — a person is looking at it — and what they need
+     * to be told is that they are the dispatcher, not that something is
+     * missing. Same refusal, same exit code; only the diagnosis changes.
+     */
     throw new CliError(
-      `worker ${worker} is pane_mode: tui but its backend is ${presentation.backend} with no ` +
-        `surface — a tui worker's prompt has nowhere to go`,
+      presentation.adopted_terminal
+        ? `worker ${worker} is pane_mode: tui with an ADOPTED terminal — its pane is the ` +
+          `terminal that ran up --attach-here, and pifleet has no surface id to type into. ` +
+          `Type the prompt at that terminal; there is no epoch and nothing to fence, so a ` +
+          `dispatch here could not have been deduplicated anyway.`
+        : `worker ${worker} is pane_mode: tui but its backend is ${presentation.backend} with no ` +
+          `surface — a tui worker's prompt has nowhere to go`,
       EXIT.BACKEND_UNAVAILABLE,
     );
   }

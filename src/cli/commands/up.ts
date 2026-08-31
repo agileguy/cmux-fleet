@@ -13,7 +13,8 @@ import {
   runBudgetRecord,
   writePresentation,
 } from "../../run/state.ts";
-import { attachArgv, enterTui } from "../../attended/mode.ts";
+import { attachArgv, enterTui, DETACH_KEYS } from "../../attended/mode.ts";
+import { adoptRefusal, adoptRefusalMessage, adoptedAttachArgv } from "../../attended/adopt.ts";
 // The driver that changes no pane. Imported from the `tui` command rather than
 // re-declared, because it is an ASSERTION about a tui worker's pane — that
 // entering attended mode must not respawn a pane which is already a person's
@@ -453,7 +454,23 @@ export function resolveRequestedBackend(args: {
 export function assertTuiBackendPossible(args: {
   tuiWorkers: readonly string[];
   backend: RequestedBackend;
+  /**
+   * `--attach-here` was passed AND survived its own guard.
+   *
+   * The exemption is narrow on purpose. This guard's premise was that
+   * "headless" means no pane exists; adoption is the case where a pane exists
+   * and pifleet did not create it (`attended/adopt.ts`). `assertAttachHere`
+   * runs FIRST and has already established there is exactly one tui worker on
+   * a real terminal, so by the time this sees `true` the sentence below —
+   * "there is nothing to attach" — is simply false.
+   *
+   * Defaulted `false` so every existing caller and fixture keeps the original
+   * refusal without being edited, which is what makes this an added branch
+   * rather than a weakened one.
+   */
+  attachHere?: boolean;
 }): void {
+  if (args.attachHere === true) return;
   if (args.backend.kind !== "headless") return;
   if (args.tuiWorkers.length === 0) return;
   const ids = args.tuiWorkers.join(", ");
@@ -469,6 +486,38 @@ export function assertTuiBackendPossible(args: {
       `backend.kind: headless; ${args.backend.source} is the surface it cannot see.`,
     EXIT.USAGE,
   );
+}
+
+/**
+ * Refuse `--attach-here` when this process cannot hand over its terminal.
+ *
+ * A thin throwing wrapper over `adoptRefusal`, kept here for the reason
+ * `assertTuiBackendPossible` is here: the DECISION is pure and lives in
+ * `attended/adopt.ts` where it can be reddened clause by clause, and the CLI
+ * owns only the exit code. `EXIT.USAGE` for the same reason its neighbour
+ * uses it — nothing is wrong with the host, the combination cannot work.
+ *
+ * Runs BEFORE `assertTuiBackendPossible`, and the order is load-bearing: this
+ * one is what licenses that one's exemption, so a run that fails here must
+ * never have reached the branch that trusts it.
+ */
+export function assertAttachHere(args: {
+  attachHere: boolean;
+  tuiWorkers: readonly string[];
+  backend: RequestedBackend;
+  stdinIsTty: boolean;
+  stdoutIsTty: boolean;
+}): void {
+  if (!args.attachHere) return;
+  const refusal = adoptRefusal({
+    tuiWorkers: args.tuiWorkers,
+    backendKind: args.backend.kind,
+    backendSource: args.backend.source,
+    stdinIsTty: args.stdinIsTty,
+    stdoutIsTty: args.stdoutIsTty,
+  });
+  if (refusal === null) return;
+  throw new CliError(`refusing to start: ${adoptRefusalMessage(refusal)}`, EXIT.USAGE);
 }
 
 /**
@@ -505,9 +554,13 @@ export function register(program: Command): void {
     .option("--workers <ids>", "comma-separated subset of workers (default: every worker in workers:)")
     .option("--backend <kind>", `cmux|tmux|headless (default: ${DEFAULT_BACKEND})`)
     .option("--backend-fallback <kind>", "backend to use if the primary is unavailable")
+    .option(
+      "--attach-here",
+      "hand THIS terminal to the run's single pane_mode: tui worker (headless backend only)",
+    )
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean }) => {
+    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean; attachHere?: boolean }) => {
       /**
        * `--backend` carries NO commander default any more (ISC-271, and the
        * same shape as ISC-61 one option up).
@@ -1030,7 +1083,23 @@ export function register(program: Command): void {
        * openly — the schema can only see a document that SAYS headless — and
        * this is the EFFECTIVE-backend check it asked for.
        */
-      assertTuiBackendPossible({ tuiWorkers, backend: backendChoice });
+      /**
+       * Adoption is checked FIRST because it is what licenses the exemption in
+       * the guard below. `--attach-here` on a run that cannot support it must
+       * fail on its own terms — naming the terminal, the worker count or the
+       * backend — rather than falling through to a message about headless
+       * panes that would not describe what the operator did wrong.
+       */
+      const attachHere = opts.attachHere === true;
+      assertAttachHere({
+        attachHere,
+        tuiWorkers,
+        backend: backendChoice,
+        // `isTTY` is `true | undefined` on a Node/Bun stream, never `false`.
+        stdinIsTty: process.stdin.isTTY === true,
+        stdoutIsTty: process.stdout.isTTY === true,
+      });
+      assertTuiBackendPossible({ tuiWorkers, backend: backendChoice, attachHere });
       /**
        * Spec item 12 — a WARNING, never a refusal. An operator may know
        * exactly what they are doing: launching a tui fleet from a script and
@@ -1731,6 +1800,22 @@ export function register(program: Command): void {
           workspace_ref: workspace.id,
           surface_ref: pane.id,
           window_ref: null,
+          /*
+           * The terminal that ran `up` is this worker's pane.
+           *
+           * `tuiWorkers.includes(workerId)` and not the bare flag:
+           * `assertAttachHere` has already established there is exactly ONE
+           * tui worker when `attachHere` is true, so this marks that worker
+           * and no other. An rpc worker in the same run keeps a record that
+           * says what it is — a headless run with no pane — because that is
+           * still true of it.
+           *
+           * `surface_ref` stays null and is not an oversight: there is no id
+           * a later process could send bytes to. `dispatch` reads exactly that
+           * and refuses, which is correct for this mode — the person holding
+           * the terminal is the dispatcher.
+           */
+          adopted_terminal: attachHere && tuiWorkers.includes(workerId),
         });
         const { pid, pgid, started } = await processLauncher.launchDetached({
           runId,
@@ -2081,6 +2166,87 @@ export function register(program: Command): void {
         for (const w of launched) {
           process.stdout.write(`  ${w.id}: supervisor pid ${w.pid} (pgid ${w.pgid}) idle\n`);
         }
+      }
+
+      /**
+       * HAND THIS TERMINAL TO THE WORKER — the last thing `up` does, and it
+       * blocks until the operator detaches.
+       *
+       * ## Why here and not earlier
+       *
+       * After the idle wait, which is what lets the attach be a bare
+       * `docker attach` rather than the polling wrapper `attachArgv` needs: a
+       * backend pane is created BEFORE its container exists and would race the
+       * launch, whereas by this line every worker has been observed idle, so
+       * the container is running and answering.
+       *
+       * It is also after the summary print, deliberately. The operator sees
+       * the run id and the supervisor pids BEFORE their terminal is taken
+       * over — if the attach then fails, or Pi's first frame is a mess, the
+       * information they need to go look at the run is already on screen and
+       * above the scrollback the TUI is about to paint over.
+       *
+       * ## The record is written before the terminal is taken
+       *
+       * `enterTui` first, for the ordering reason `attended/mode.ts` states
+       * and `up`'s pane path already follows: the record may OVERCLAIM
+       * attendance and must never underclaim it. A crash between these two
+       * lines leaves a run marked attended that nobody is looking at, which is
+       * the harmless direction; the reverse would let a run somebody is typing
+       * into report as untouched.
+       *
+       * `PANE_ALREADY_ATTENDED` because `enterTui`'s default pane action is
+       * `docker exec -it … bash`, which here would open a shell instead of
+       * showing Pi. There is no pane to change: this process IS it.
+       */
+      if (attachHere) {
+        const workerId = tuiWorkers[0]!;
+        const wp = workerPaths(run, workerId);
+        try {
+          await enterTui({
+            run,
+            workerId,
+            backend: PANE_ALREADY_ATTENDED,
+            /*
+             * `id: null` is the honest value and it is what makes
+             * `PANE_ALREADY_ATTENDED` safe: there is no backend-native pane to
+             * name, because the pane is this process's own terminal. A driver
+             * that tried to act on it would have nothing to act on.
+             */
+            pane: { backend: "headless", id: null },
+            paneMode: "tui",
+          });
+        } catch (err) {
+          /*
+           * Non-fatal, exactly as the pane path's record write is: a missing
+           * record costs an understated report, and refusing to attach over
+           * it would deny the operator the thing they asked for to protect a
+           * file. Said on stderr rather than swallowed.
+           */
+          process.stderr.write(
+            `pifleet: could not record ${workerId} as attended ` +
+              `(${err instanceof Error ? err.message : String(err)}); attaching anyway\n`,
+          );
+        }
+        const argv = adoptedAttachArgv(runId, workerId);
+        process.stdout.write(
+          `\nattaching this terminal to ${workerId} — detach with ${DETACH_KEYS} ` +
+            `(the worker keeps running; ${wp.dir} holds its record)\n`,
+        );
+        const child = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+        const code = await child.exited;
+        /*
+         * Detaching is a SUCCESS, and docker's exit code cannot tell it from a
+         * failure — `--detach-keys` returns 0, and so does a container that
+         * exited while attached. The message says which state the worker is in
+         * rather than guessing from the code, because those two need different
+         * things from the operator next.
+         */
+        process.stdout.write(
+          `\ndetached from ${workerId} (docker attach exit ${code}). ` +
+            `The worker is unchanged: pifleet status --run ${runId} to see it, ` +
+            `pifleet up --attach-here to come back.\n`,
+        );
       }
     });
 }

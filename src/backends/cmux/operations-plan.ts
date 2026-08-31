@@ -132,6 +132,18 @@ export interface OperationsPlanOptions {
   readonly configPath?: string;
   /** `up --backend`. `headless` because the fleet must not open panes of its own. */
   readonly backend?: string;
+  /**
+   * Pane 1 hands ITSELF to the agent, rather than tailing its log.
+   *
+   * Set when the console's agent worker resolves to `pane_mode: tui`. The two
+   * settings look contradictory and are not: `--backend headless` says pifleet
+   * must not open windows under the console, and `--attach-here` says the
+   * window it must not open already exists — this pane. `up`'s own guards
+   * enforce the rest (exactly one tui worker, a real terminal), so a plan that
+   * sets this on a run that cannot support it produces a refusal naming the
+   * reason rather than a pane that quietly does the wrong thing.
+   */
+  readonly attachHere?: boolean;
   /** Git pane refresh interval. */
   readonly gitPollSeconds?: number;
 }
@@ -190,6 +202,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
     throw new Error(`operations: refusing git poll interval ${String(poll)} — must be a positive whole number of seconds`);
   }
 
+  const attachHere = opts.attachHere ?? false;
   const up = pifleetCommand(repoRoot, [
     "up",
     "--workers",
@@ -198,6 +211,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
     backend,
     "--config",
     configPath,
+    ...(attachHere ? ["--attach-here"] : []),
   ]);
   const status = statusWatchCommand(repoRoot, poll);
   /*
@@ -217,7 +231,11 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
        * THREE STAGES, each a deliberate step down, and the pane never lands on
        * a host prompt while anything above it is still available.
        *
-       *   1. `up`      — stand the worker up.
+       *   1. `up`      — stand the worker up. With `attachHere` it ALSO hands
+       *                  this pane to the worker and blocks there, so stage 1
+       *                  is Pi's own interface and stage 2 is what you drop to
+       *                  when you detach. Without it, `up` returns immediately
+       *                  and stage 2 is the whole life of the pane.
        *   2. VIEWER    — `logs --follow --render`, which BLOCKS. This is what
        *                  the pane shows for its whole life: it sits on an idle
        *                  worker waiting, and prints the agent's events as they
@@ -233,10 +251,13 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
        * ## The pane is deliberately NOT a shell "to Pi", because there is no
        * ## such thing here
        *
-       * `interactiveArgv`'s docblock states it: this fleet launches Pi in RPC
-       * MODE with the supervisor holding stdin, so attaching a human keyboard
-       * to that JSONL protocol stream would corrupt the control plane on the
-       * first keystroke. Stage 3 puts a person inside the same boundary without
+       * `interactiveArgv`'s docblock states it: an RPC worker launches Pi with
+       * the supervisor holding stdin, so attaching a human keyboard to that
+       * JSONL protocol stream would corrupt the control plane on the first
+       * keystroke. **That is a statement about `pane_mode: rpc`, not about
+       * this pane** — a `tui` worker has no control plane to corrupt, which is
+       * exactly what `attachHere` above turns on and what SRD §3.5 gave up to
+       * get it. Stage 3 puts a person inside the same boundary without
        * touching Pi's pipes, which is what keeps dispatch, steer, abort and
        * harvest working while someone is typing. Talking TO the agent mid-turn
        * is `steer`; watching it is stage 2.

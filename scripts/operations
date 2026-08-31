@@ -23,6 +23,7 @@
 import { dirname, resolve } from "node:path";
 
 import { CmuxClient } from "../src/backends/cmux/client.ts";
+import { loadConfig, resolveWorker } from "../src/config/load.ts";
 import { EXIT } from "../src/contracts.ts";
 import { OPERATIONS_WORKSPACE, operationsPanes } from "../src/backends/cmux/operations-plan.ts";
 import { cmuxReachable, ensureOperations } from "../src/backends/cmux/operations.ts";
@@ -72,10 +73,37 @@ async function main(argv: string[]): Promise<number> {
     ...(pollFlag === undefined ? {} : { gitPollSeconds: Number(pollFlag) }),
   };
 
+  /**
+   * Does pane 1's agent want Pi's own interface?
+   *
+   * READ FROM THE CONFIG rather than asked for with a flag, because the answer
+   * is already written down: a worker is `pane_mode: tui` or it is not, and
+   * making the operator restate it on the command line is how the two get to
+   * disagree. A tui worker with a log-tail pane shows nothing; an rpc worker
+   * with `--attach-here` is refused by `up` (correctly — there would be no
+   * TTY inside the container to attach to).
+   *
+   * Failure is NOT fatal and is not silent either. `--dry-run` must work with
+   * no config at all, and a console that refuses to open because a fleet.yaml
+   * moved is worse than one that opens with a log tail — but an operator who
+   * expected a TUI needs to know why they got a viewer.
+   */
+  let attachHere = false;
+  try {
+    const loaded = await loadConfig(opts.configPath ?? `${repoRoot}/fleet.yaml`);
+    const agent = (opts.workers ?? [])[0] ?? "tick-1";
+    attachHere = resolveWorker(loaded, agent).paneMode === "tui";
+  } catch (err) {
+    process.stderr.write(
+      `operations: could not read pane_mode from the config ` +
+        `(${err instanceof Error ? err.message : String(err)}); pane 1 will tail the log\n`,
+    );
+  }
+
   // Built before the cmux probe on purpose: a bad `--workers` or `--poll` is
   // an argv mistake, and diagnosing it must not depend on whether the GUI
   // happens to be running.
-  const panes = operationsPanes(opts);
+  const panes = operationsPanes({ ...opts, attachHere });
 
   if (argv.includes("--dry-run")) {
     process.stdout.write(`workspace: ${OPERATIONS_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
@@ -101,7 +129,7 @@ async function main(argv: string[]): Promise<number> {
   // older version of this script, is adopted forever and reported as "already
   // in place — changed nothing", which is true and useless.
   const recreate = argv.includes("--recreate");
-  const result = await ensureOperations(client, opts, recreate);
+  const result = await ensureOperations(client, { ...opts, attachHere }, recreate);
   process.stdout.write(
     result.created
       ? `operations: ${recreate ? "rebuilt" : "created"} workspace ${result.workspaceId} ` +
