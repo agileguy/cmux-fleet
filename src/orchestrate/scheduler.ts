@@ -106,6 +106,27 @@ export interface SchedulerIO {
    * leave the run polling a task that will never settle.
    */
   killWedged?(worker: string, taskId: string): Promise<void>;
+  /**
+   * `worker`'s pane mode, as `up` actually launched it (TUI spec item 13).
+   *
+   * On `SchedulerIO` rather than derived here, because it is a READ of run
+   * state — `launch.json`, through `launchPaneMode` — exactly like `readSettled`
+   * and `eventSilenceMs` beside it, and this module's header rule is that all
+   * I/O arrives through this interface.
+   *
+   * Optional, and its absence is the rpc guarantee rather than a gap: with no
+   * adapter the tui set is empty, `TaskGraph`'s refusal short-circuits before
+   * it reads a task, and the schedule is byte-for-byte the one every caller got
+   * before this seam existed. Every unit test of this module omits it.
+   *
+   * `"unknown"` — record and argv marks disagreeing — is NOT treated as tui.
+   * The refusal below is about a wait that provably cannot be fenced, and a
+   * worker whose mode is in doubt has not been shown to be that worker; the
+   * launch record's own contradiction is refused where it matters, at
+   * `planDispatch` and `planInterrupt`, with a message about the contradiction
+   * rather than about dependencies.
+   */
+  paneMode?(worker: string): Promise<"rpc" | "tui" | "unknown">;
   sleep(ms: number): Promise<void>;
   /**
    * Monotonic-ish milliseconds, injected rather than read from the clock so
@@ -545,7 +566,30 @@ export async function runSchedule(
     }
   }
 
-  const graph = new TaskGraph(tasks);
+  /**
+   * The fleet's `pane_mode: tui` workers, resolved HERE — beside the pin
+   * refusal above, and before the graph exists (TUI spec item 13).
+   *
+   * The comment on that refusal is the whole argument for this position:
+   * "discovering it on task four leaves three tasks running toward consumers
+   * that cannot exist". An edge onto a tui worker is the same authoring error
+   * with a worse ending — the consumer does not merely fail, it waits on a
+   * completion signal that no epoch can be tied to, so the task sits in
+   * `running` until the stall policy kills it and the diagnosis names a stall
+   * rather than the dependency.
+   *
+   * Only PINNED tasks can be affected, so only their workers are asked. That is
+   * strictly fewer `launch.json` reads than `workers` would be, and it means a
+   * fleet whose task list pins nothing performs no I/O here at all.
+   */
+  const tuiWorkers = new Set<string>();
+  if (io.paneMode !== undefined) {
+    const pinned = [...new Set(tasks.map((t) => t.worker).filter((w): w is string => w !== null))];
+    for (const worker of pinned.sort()) {
+      if ((await io.paneMode(worker)) === "tui") tuiWorkers.add(worker);
+    }
+  }
+  const graph = new TaskGraph(tasks, tuiWorkers);
   /** Task id -> assigned worker, insertion-ordered — the settle-poll order. */
   /** Workers already warned, so `onStallWarn` fires once per (worker, task). */
   const warned = new Set<string>();

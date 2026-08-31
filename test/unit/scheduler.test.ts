@@ -469,3 +469,100 @@ describe("a stalled fleet is refused rather than polled forever", () => {
     expect(out.schedule.every((t) => t.state === "done")).toBe(true);
   });
 });
+
+/**
+ * The scheduler CONSULTS `paneMode` and refuses the schedule before dispatching
+ * anything (TUI spec item 13).
+ *
+ * `TaskGraph`'s constructor is what refuses, and `graph.test.ts` proves that
+ * refusal exhaustively. What only this file can see is the WIRING: the lines in
+ * `runSchedule` that resolve the tui set and pass it to the constructor could
+ * both be deleted and every graph test would stay green, because the graph
+ * would simply be built with the empty default. That is the same dead-wiring
+ * disease `up-wiring.test.ts` was written for.
+ *
+ * The dispatch log is the load-bearing assertion in both arms. An exit code
+ * alone cannot tell "refused before anything ran" from "ran and then failed",
+ * and the whole value of an authoring-time refusal is the first one.
+ */
+describe("the scheduler refuses a tui dependency before dispatching (TUI spec item 13)", () => {
+  /** A fleet that can answer what `up` launched each worker as. */
+  class PaneModeFleet extends FakeFleet {
+    constructor(
+      workers: string[],
+      private readonly modes: Record<string, "rpc" | "tui" | "unknown">,
+    ) {
+      super(workers);
+    }
+    paneMode(worker: string): Promise<"rpc" | "tui" | "unknown"> {
+      this.log.push(`paneMode:${worker}`);
+      return Promise.resolve(this.modes[worker] ?? "rpc");
+    }
+  }
+
+  test("a dependent on a task pinned to a tui worker refuses, and nothing is dispatched", async () => {
+    const fleet = new PaneModeFleet(["w1", "w-tui"], { "w-tui": "tui" });
+    const err = await runSchedule(
+      [spec("a", [], { worker: "w-tui" }), spec("b", ["a"])],
+      fleet,
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).not.toBeNull();
+    expect((err as Error).message).toContain("w-tui");
+    expect((err as Error).message).toContain("no epoch is allocated");
+    expect((err as { exitCode: number }).exitCode).toBe(EXIT.USAGE);
+
+    // The seam WAS consulted — otherwise the refusal above could only have come
+    // from somewhere else — and nothing was dispatched.
+    expect(fleet.log).toContain("paneMode:w-tui");
+    expect(fleet.log.filter((l) => l.startsWith("dispatch:"))).toEqual([]);
+  });
+
+  /**
+   * THE CONTROL. The same list, the same seam, the same pin — the ONE variable
+   * changed is what `up` launched `w-tui` as. A guard that refused here would
+   * refuse every fleet, since `rpc` is what every worker in this repository is.
+   */
+  test("the identical schedule runs when that worker is rpc", async () => {
+    const fleet = new PaneModeFleet(["w1", "w-tui"], { "w-tui": "rpc" });
+    const { schedule, exit } = await runSchedule(
+      [spec("a", [], { worker: "w-tui" }), spec("b", ["a"])],
+      fleet,
+    );
+    expect(exit).toBe(EXIT.SUCCESS);
+    expect(schedule.every((t) => t.state === "done")).toBe(true);
+    expect(fleet.log).toContain("dispatch:a->w-tui");
+  });
+
+  /**
+   * A worker whose launch record and argv marks disagree is `unknown`, and
+   * `unknown` is NOT tui. The refusal is about a wait that provably cannot be
+   * fenced; a worker whose mode is in doubt has not been shown to be that
+   * worker, and the contradiction is refused where it belongs — at
+   * `planDispatch`, with a message about the contradiction.
+   */
+  test("an unknown pane mode does not trip the dependency refusal", async () => {
+    const fleet = new PaneModeFleet(["w1", "w-odd"], { "w-odd": "unknown" });
+    const { exit } = await runSchedule(
+      [spec("a", [], { worker: "w-odd" }), spec("b", ["a"])],
+      fleet,
+    );
+    expect(exit).toBe(EXIT.SUCCESS);
+  });
+
+  /**
+   * An IO with no `paneMode` at all is every existing caller and every other
+   * test in this file. It must schedule exactly as it always did.
+   */
+  test("an IO without the seam schedules unchanged", async () => {
+    const fleet = new FakeFleet(["w1", "w-tui"]);
+    const { exit, schedule } = await runSchedule(
+      [spec("a", [], { worker: "w-tui" }), spec("b", ["a"])],
+      fleet,
+    );
+    expect(exit).toBe(EXIT.SUCCESS);
+    expect(schedule.every((t) => t.state === "done")).toBe(true);
+  });
+});

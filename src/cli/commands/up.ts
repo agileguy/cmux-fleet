@@ -13,7 +13,12 @@ import {
   runBudgetRecord,
   writePresentation,
 } from "../../run/state.ts";
-import { attachArgv } from "../../attended/mode.ts";
+import { attachArgv, enterTui } from "../../attended/mode.ts";
+// The driver that changes no pane. Imported from the `tui` command rather than
+// re-declared, because it is an ASSERTION about a tui worker's pane — that
+// entering attended mode must not respawn a pane which is already a person's
+// `docker attach` — and two spellings of it could disagree.
+import { PANE_ALREADY_ATTENDED } from "./tui.ts";
 import { launchPaneMode } from "../../container/interrupt.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import {
@@ -147,8 +152,173 @@ export function panePresentationArgv(args: {
   runId: string;
   workerId: string;
 }): readonly string[] {
-  const mode = args.launch === null ? "rpc" : launchPaneMode(args.launch);
-  return mode === "tui" ? attachArgv(args.runId, args.workerId) : args.viewer;
+  return panePresentationIsAttach(args)
+    ? attachArgv(args.runId, args.workerId)
+    : args.viewer;
+}
+
+/**
+ * Is this worker's pane a person's `docker attach`, rather than the read-only
+ * viewer?
+ *
+ * Extracted from `panePresentationArgv` above rather than re-tested at the
+ * second call site, and that is the entire point of it existing. Two decisions
+ * now hang on this one question — which argv the pane runs, and whether the
+ * attended record is written at `up` time — and they MUST NOT be able to
+ * disagree. A worker whose pane is an attach but whose run reports unattended
+ * is the gap this closes; a worker recorded as attended whose pane is the
+ * read-only viewer is the same lie pointing the other way.
+ *
+ * Sharing the predicate makes both impossible by construction instead of by
+ * two matching conditionals that a later edit could drift apart. The pane argv
+ * and the attendance record are one decision with two consequences.
+ *
+ * `launch === null` is `rpc`: the `PIFLEET_PI_COMMAND` double has no container
+ * and therefore no TTY — the same reading `planInterrupt(null)` settled on.
+ */
+export function panePresentationIsAttach(args: {
+  launch: WorkerLaunch | null;
+}): boolean {
+  return args.launch !== null && launchPaneMode(args.launch) === "tui";
+}
+
+/**
+ * Which of `workerIds` this config resolves to `pane_mode: tui`.
+ *
+ * One resolution, consumed by both Phase 4 guards below (the unattended
+ * warning, spec item 12) and by nothing else — `up`'s per-worker record is
+ * written from the LAUNCH RECORD via `launchPaneMode`, not from here, because
+ * by that point the argv exists and the argv is the stronger witness.
+ *
+ * `resolveWorker` rather than a walk of `config.workers`: `pane_mode` is
+ * assembled across `defaults` -> `roles` -> the worker override (`config/load.ts`
+ * `pick`), and re-deriving that merge here is exactly the second copy
+ * `assertSecretsResolvable`'s docblock argues against — a guard with its own
+ * spelling of "is this worker tui" can drift from the one that renders the
+ * argv, and the drift is silent in the direction that matters.
+ *
+ * IDS THE CONFIG DOES NOT DEFINE are skipped, by the same MEMBERSHIP test and
+ * the same `defined` set `assertModelsAllowed` uses. An id that exists only on
+ * the command line — the `PIFLEET_PI_COMMAND` double — has no role and so no
+ * `pane_mode` to resolve; that worker is `rpc` by construction (it has no
+ * container and therefore no TTY), which is the reading `planInterrupt(null)`
+ * and `panePresentationArgv` both already settled on.
+ */
+export function tuiWorkerIds(loaded: LoadedConfig, workerIds: readonly string[]): string[] {
+  const defined = new Set(loaded.config.workers.map((w) => w.id));
+  const out: string[] = [];
+  for (const workerId of workerIds) {
+    if (!defined.has(workerId)) continue;
+    if (resolveWorker(loaded, workerId).paneMode === "tui") out.push(workerId);
+  }
+  return out;
+}
+
+/**
+ * Whether nothing about this `up` invocation says a person is present
+ * (TUI spec item 12).
+ *
+ * ## The question this can and cannot answer
+ *
+ * `tui` is the mode whose entire value is a person at a keyboard, so "was this
+ * started by a person" is the question the warning turns on. Nothing in a run
+ * directory can answer it; the only evidence `up` has is the shape of its own
+ * invocation, and there are exactly two usable facts:
+ *
+ *  - **`--json`.** The operator asked for machine-readable output, which names
+ *    a machine consumer. A script pipes this to `jq`; a person reading panes
+ *    does not.
+ *  - **No terminal anywhere on this process.** `isTTY` on all three standard
+ *    streams. CI, a cron entry, a detached wrapper and a `nohup` all present as
+ *    three pipes; a person at a shell has at least one terminal even when they
+ *    redirect the other two (`pifleet up > out.txt` keeps stdin and stderr).
+ *
+ * EITHER ALONE IS ENOUGH, and that is a deliberate choice to OVERWARN. A
+ * spurious warning costs an operator one paragraph on stderr — `pifleet up
+ * --json | jq` typed at a real terminal will get one. A missed warning costs a
+ * fleet of workers in a mode nobody is driving, discovered at the deadline.
+ * The asymmetry is the same one `attended/mode.ts` is built on, pointed the
+ * other way: that record must never underclaim attendance, so this must never
+ * underclaim its absence.
+ *
+ * **DOES NOT CLAIM** to know whether a person is still there. It cannot see an
+ * operator who starts a fleet from a terminal and walks away, and it cannot see
+ * one who arrives ten minutes later with `pifleet attach`. Both are false
+ * answers this function will give, and neither is closable from here — which is
+ * the reason spec item 12 asks for a WARNING and not a refusal.
+ */
+export function runIsUnattended(args: {
+  json: boolean;
+  stdinIsTty: boolean;
+  stdoutIsTty: boolean;
+  stderrIsTty: boolean;
+}): boolean {
+  if (args.json) return true;
+  return !(args.stdinIsTty || args.stdoutIsTty || args.stderrIsTty);
+}
+
+/**
+ * The warning `up` prints when a `tui` worker is launched into an unattended
+ * run (TUI spec item 12) — or `null` when there is nothing to say.
+ *
+ * ## It names what is GIVEN UP, not that something is
+ *
+ * "warning: tui worker in an unattended run" is a sentence an operator can only
+ * act on by going and reading SRD §3.5. The costs below are that table made
+ * concrete, and each one is a thing this build actually does:
+ *
+ *  - `dispatch --auto` refuses the worker outright with
+ *    `pane_mode_tui_is_not_auto_schedulable` (`cli/commands/dispatch.ts`), so an
+ *    auto schedule silently routes around it.
+ *  - A plain `pifleet dispatch` DOES reach it — the prompt is typed into the
+ *    pane — but with `epoch: null` and no ack: `cmux` exiting 0 means bytes
+ *    reached a pty, not that Pi read them. Re-dispatching the same task runs it
+ *    twice; the `already_completed` replay that makes that a no-op on the rpc
+ *    path (ISC-85) does not exist here.
+ *  - A blocking `extension_ui_request` waits for a person to answer a dialog.
+ *    §3.5 calls that "acceptable only because attended" — unattended it is a
+ *    worker stopped until the run's `ui_request_timeout` fires.
+ *  - `pifleet abort` is `docker kill --signal=INT`, which through the
+ *    entrypoint's trap STOPS the worker (`container/interrupt.ts`, measured).
+ *    It is not a turn-interrupt; Pi's turn-interrupt is the ESCAPE keystroke,
+ *    which needs a keyboard.
+ *  - Completion is transcript-derived and coarser, because the epoch fence
+ *    (SRD §7.5) is voided in this mode.
+ *  - The pane OWNS the attach. Closing it stops the worker — F15 is false here,
+ *    and it is false whether or not anyone is watching.
+ *
+ * The headline is the last line rather than the first: every cost above is paid
+ * for a benefit that only exists when someone is at the keyboard.
+ *
+ * Pure, and returns the text rather than writing it, for the reason
+ * `panePresentationArgv` is pure: the decision is the whole of the risk, and a
+ * function that wrote to stderr could only be probed by capturing a stream.
+ */
+export function unattendedTuiWarning(args: {
+  tuiWorkers: readonly string[];
+  unattended: boolean;
+}): string | null {
+  if (!args.unattended) return null;
+  if (args.tuiWorkers.length === 0) return null;
+  const n = args.tuiWorkers.length;
+  return (
+    [
+      `warning: ${n} worker(s) resolve to pane_mode: tui (${args.tuiWorkers.join(", ")}) and ` +
+        `nothing about this invocation says a person is here to drive their panes`,
+      `  a tui worker has no RPC control plane, so this run gives up:`,
+      `    dispatch --auto  will not schedule it (pane_mode_tui_is_not_auto_schedulable)`,
+      `    dispatch         types into the pane with epoch null and no ack; a re-dispatch`,
+      `                     runs the task twice (no already_completed replay, ISC-85)`,
+      `    ui requests      a blocking dialog waits for a person until ui_request_timeout`,
+      `    abort            is docker kill --signal=INT: a STOP of the worker, not a`,
+      `                     turn-interrupt (that is the ESCAPE key, and needs a keyboard)`,
+      `    completion       is transcript-derived and coarser; the epoch fence is void`,
+      `    the pane         OWNS the attach, so closing it stops the worker`,
+      `  every one of those is paid for a benefit only a person at the keyboard collects.`,
+      `  Take a pane with: pifleet attach --worker ${args.tuiWorkers[0]}`,
+      `  or set pane_mode: rpc for workers this run will drive over the control plane.`,
+    ].join("\n") + "\n"
+  );
 }
 
 export function assertModelsAllowed(loaded: LoadedConfig, workerIds: readonly string[]): void {
@@ -207,6 +377,99 @@ const POLL_MS = 100;
  * run in this repository has been getting.
  */
 const DEFAULT_BACKEND = "headless";
+
+/** A backend kind, plus the input that decided it. */
+export interface RequestedBackend {
+  kind: "cmux" | "tmux" | "headless";
+  /** Named as an operator would say it, because refusals below quote it. */
+  source: "--backend" | "backend.kind" | "the built-in default";
+}
+
+/**
+ * THE ONE PLACE THE BACKEND IS CHOSEN (ISC-271), as a function.
+ *
+ *     explicit --backend  >  the config's backend.kind  >  DEFAULT_BACKEND
+ *
+ * The expression is unchanged; what is new is that it now also reports WHICH
+ * of the three terms answered, and that it is callable without an `up`.
+ *
+ * The SOURCE is not decoration. `DEFAULT_BACKEND` is `headless`, so a config
+ * that sets `pane_mode: tui` and says nothing about a backend is refused by
+ * `assertTuiBackendPossible` below for a reason no line of that config
+ * contains. "backend is headless" would send the operator to grep their
+ * fleet.yaml for a word that is not in it; "the built-in default" tells them
+ * what to actually do.
+ *
+ * Pure and exported for the reason `panePresentationArgv` is: the precedence IS
+ * the criterion, and a test that re-declared it would prove only that its own
+ * copy is self-consistent. The integration suite's ISC-271 block still grades
+ * the wiring through `run.json`, which is what makes this more than a
+ * self-consistent pair.
+ */
+export function resolveRequestedBackend(args: {
+  flag: "cmux" | "tmux" | "headless" | undefined;
+  configKind: "cmux" | "tmux" | "headless" | null;
+}): RequestedBackend {
+  if (args.flag !== undefined) return { kind: args.flag, source: "--backend" };
+  if (args.configKind !== null) return { kind: args.configKind, source: "backend.kind" };
+  return { kind: DEFAULT_BACKEND, source: "the built-in default" };
+}
+
+/**
+ * Refuse a `tui` worker on the EFFECTIVE headless backend (TUI spec item 4,
+ * second half) — the residual Phase 1 declared and could not close.
+ *
+ * ## What the schema can see, and what it cannot
+ *
+ * `config/schema.ts` refuses a document that SAYS `backend.kind: headless`
+ * beside a `pane_mode: tui` worker, and that is all it can ever refuse.
+ * `backend.kind` is `.optional()` and an absent block means UNSET (ISC-271), so
+ * TWO shapes reach a headless backend without the word appearing anywhere the
+ * schema is looking:
+ *
+ *   1. `--backend headless` typed at `up`, which beats any config; and
+ *   2. **a config that says nothing at all** — because `DEFAULT_BACKEND` is
+ *      `headless`, which is what every run in this repository has been getting.
+ *
+ * The second is the one worth pausing on. Phase 1's note names only the flag,
+ * and the default is the commoner accident by a wide margin: an operator adds
+ * `pane_mode: tui` to a working fleet.yaml, changes nothing else, and gets a
+ * config the schema passes and a run with no pane to attach to.
+ *
+ * ## Why a refusal and not a warning
+ *
+ * `headless` has no pane. `up`'s own `createPane` returns a null surface, so
+ * `panePresentationArgv` has nothing to attach `docker attach` to; the
+ * container comes up with `-i -t` and Pi renders a TUI onto a terminal nobody
+ * holds; `pifleet tui --worker` refuses it ("no pane to hand over") and
+ * `pifleet dispatch` refuses it ("a tui worker's prompt has nowhere to go").
+ * Every downstream command already says no. Without this the operator learns
+ * that one command at a time, after the fleet is up, which is the "quiet
+ * failure" shape SRD §5.9 exists to prevent.
+ *
+ * The refusal is EXIT.USAGE for the same reason the schema's is: nothing is
+ * wrong with the host, the combination cannot work.
+ */
+export function assertTuiBackendPossible(args: {
+  tuiWorkers: readonly string[];
+  backend: RequestedBackend;
+}): void {
+  if (args.backend.kind !== "headless") return;
+  if (args.tuiWorkers.length === 0) return;
+  const ids = args.tuiWorkers.join(", ");
+  throw new CliError(
+    `refusing to start: ${args.tuiWorkers.length} worker(s) resolve to pane_mode: tui ` +
+      `(${ids}), but this run's backend is headless — chosen by ${args.backend.source}.\n` +
+      `  A tui worker's pane IS its terminal: up gives its container a TTY and the pane runs ` +
+      `docker attach onto Pi. A headless run creates no pane, so there is nothing to attach, ` +
+      `nothing to type into, and no way to reach the worker at all — pifleet tui refuses it ` +
+      `("no pane to hand over") and pifleet dispatch refuses it ("nowhere to go").\n` +
+      `  Pass --backend cmux (or tmux), or set pane_mode: rpc for these workers.\n` +
+      `  config/schema.ts refuses this at parse time only when the document SAYS ` +
+      `backend.kind: headless; ${args.backend.source} is the surface it cannot see.`,
+    EXIT.USAGE,
+  );
+}
 
 /**
  * Register `pifleet up` (SRD §10): build the run directory, start the daemon
@@ -686,6 +949,113 @@ export function register(program: Command): void {
       }
 
       /**
+       * THE ONE PLACE THE BACKEND IS CHOSEN (ISC-271).
+       *
+       *     explicit --backend  >  the config's backend.kind  >  DEFAULT_BACKEND
+       *
+       * All three terms are now here. The middle one was absent until the
+       * schema could express it, and the reason is worth keeping: while
+       * `BackendSchema.kind` carried `.default("cmux")` these three documents
+       * parsed to BYTE-IDENTICAL `config.backend` objects, all three carrying
+       * `kind: "cmux"` —
+       *
+       *     (no backend: block at all)
+       *     backend: {}
+       *     backend: {kind: cmux}
+       *
+       * — so consuming it would not have honoured the configs that SET `kind`.
+       * It would have forced cmux onto every `fleet.yaml` in existence,
+       * turning every run on a cmux-less host into exit 3 via
+       * `resolveBackendWithFallback`. That is a silent SCHEMA-default override
+       * replacing a silent FLAG-default override: the defect relocated, not
+       * removed.
+       *
+       * `kind` is now `.optional()`, so an absent block means UNSET and this
+       * expression can read it. Both halves are mutation-proved: un-wiring
+       * this line turns the config-honoured test red (`Expected "cmux",
+       * Received "headless"`), and restoring `.default("cmux")` in the schema
+       * turns the no-backend-block test red (`Expected "headless", Received
+       * "cmux"`) — the blast radius above, caught rather than described.
+       *
+       * The witness is `run.json`'s `backend`, written from `requestedBackend`
+       * BELOW, before `resolveBackendWithFallback`. `--json`'s `backend`
+       * reports what was RESOLVED, which depends on what the host can run, so
+       * it cannot grade this criterion portably.
+       *
+       * ## It MOVED here from beside `runDoc`, and the move is the point
+       *
+       * The expression is unchanged and `runDoc` still reads it, so nothing
+       * about ISC-271 is affected. What the position buys is the pane-mode
+       * guards below, which need the EFFECTIVE backend and are worth nothing
+       * if they arrive late: from this line down `up` creates the egress
+       * network, adopts or starts the relay CONTAINER, and asks the model
+       * server one probe per worker. A config that can never work should not
+       * pay for any of that first. This is the earliest line at which the
+       * answer exists — `loadedConfig` is final one block above.
+       *
+       * NOT FIXED HERE, and named so it is filed rather than forgotten:
+       * `workspace`, `split` and `focus_on_dispatch` in the same
+       * `BackendSchema` block still have no config reader anywhere. Wiring
+       * `kind` alone leaves three documented options that change nothing.
+       */
+      const configBackend: "cmux" | "tmux" | "headless" | null = loadedConfig?.config.backend.kind ?? null;
+      /**
+       * The precedence moved into `resolveRequestedBackend` so that the guards
+       * below can quote WHICH input answered. `opts.backend` was validated
+       * against `isBackendKind` at the top of this action, which is what makes
+       * the narrowing here a restatement rather than an assumption.
+       */
+      const backendChoice = resolveRequestedBackend({
+        flag: opts.backend as "cmux" | "tmux" | "headless" | undefined,
+        configKind: configBackend,
+      });
+      const requestedBackend = backendChoice.kind;
+
+      /**
+       * THE PHASE 4 PANE-MODE GUARDS (TUI spec items 12 and 4).
+       *
+       * WHAT HAS ALREADY HAPPENED AT THIS POINT, stated rather than left for a
+       * reader to discover: the run directory exists and the image gate has
+       * run. Nothing is DETACHED — no daemon, no supervisor, no pane, no
+       * relay — so a refusal from here leaves the same "nothing launched"
+       * state `assertModelsAllowed` and `assertImagesReady` leave, which is
+       * the property `up-wiring.test.ts` asserts by reading an empty
+       * `workersDir` and an empty ledger.
+       */
+      const tuiWorkers = loadedConfig === null ? [] : tuiWorkerIds(loadedConfig, workers);
+      /**
+       * Spec item 4's second half, and it runs BEFORE the warning because a
+       * refusal supersedes advice: a run that cannot start does not also need
+       * telling what it would have given up. Phase 1 declared this residual
+       * openly — the schema can only see a document that SAYS headless — and
+       * this is the EFFECTIVE-backend check it asked for.
+       */
+      assertTuiBackendPossible({ tuiWorkers, backend: backendChoice });
+      /**
+       * Spec item 12 — a WARNING, never a refusal. An operator may know
+       * exactly what they are doing: launching a tui fleet from a script and
+       * then walking over to the panes is a legitimate thing to do, and
+       * `runIsUnattended` cannot tell that from CI. Said on stderr NOW, for
+       * the reason the MLX override warning above gives — the ledger does not
+       * exist for another ~100 lines, and a warning that arrives after the
+       * decision is not a warning — and appended to the ledger below so the
+       * record survives the terminal scrollback.
+       */
+      const tuiWarning = unattendedTuiWarning({
+        tuiWorkers,
+        unattended: runIsUnattended({
+          json: opts.json === true,
+          // `isTTY` is `true | undefined` on a Node/Bun stream, never `false`.
+          stdinIsTty: process.stdin.isTTY === true,
+          stdoutIsTty: process.stdout.isTTY === true,
+          stderrIsTty: process.stderr.isTTY === true,
+        }),
+      });
+      // Stderr and not stdout, so `--json`'s one-object stream stays one
+      // object — and `--json` is itself one of the two things that trip this.
+      if (tuiWarning !== null) process.stderr.write(tuiWarning);
+
+      /**
        * The egress network must exist, and must be INTERNAL, before any
        * container is attached to it.
        *
@@ -817,48 +1187,6 @@ export function register(program: Command): void {
        * means creation never completed. Only one of those should read as
        * "there is nothing on disk to reap".
        */
-      /**
-       * THE ONE PLACE THE BACKEND IS CHOSEN (ISC-271).
-       *
-       *     explicit --backend  >  the config's backend.kind  >  DEFAULT_BACKEND
-       *
-       * All three terms are now here. The middle one was absent until the
-       * schema could express it, and the reason is worth keeping: while
-       * `BackendSchema.kind` carried `.default("cmux")` these three documents
-       * parsed to BYTE-IDENTICAL `config.backend` objects, all three carrying
-       * `kind: "cmux"` —
-       *
-       *     (no backend: block at all)
-       *     backend: {}
-       *     backend: {kind: cmux}
-       *
-       * — so consuming it would not have honoured the configs that SET `kind`.
-       * It would have forced cmux onto every `fleet.yaml` in existence,
-       * turning every run on a cmux-less host into exit 3 via
-       * `resolveBackendWithFallback`. That is a silent SCHEMA-default override
-       * replacing a silent FLAG-default override: the defect relocated, not
-       * removed.
-       *
-       * `kind` is now `.optional()`, so an absent block means UNSET and this
-       * expression can read it. Both halves are mutation-proved: un-wiring
-       * this line turns the config-honoured test red (`Expected "cmux",
-       * Received "headless"`), and restoring `.default("cmux")` in the schema
-       * turns the no-backend-block test red (`Expected "headless", Received
-       * "cmux"`) — the blast radius above, caught rather than described.
-       *
-       * The witness is `run.json`'s `backend`, written from `requestedBackend`
-       * BELOW, before `resolveBackendWithFallback`. `--json`'s `backend`
-       * reports what was RESOLVED, which depends on what the host can run, so
-       * it cannot grade this criterion portably.
-       *
-       * NOT FIXED HERE, and named so it is filed rather than forgotten:
-       * `workspace`, `split` and `focus_on_dispatch` in the same
-       * `BackendSchema` block still have no config reader anywhere. Wiring
-       * `kind` alone leaves three documented options that change nothing.
-       */
-      const configBackend: "cmux" | "tmux" | "headless" | null = loadedConfig?.config.backend.kind ?? null;
-      const requestedBackend = opts.backend ?? configBackend ?? DEFAULT_BACKEND;
-
       const runDoc: Record<string, unknown> = {
         schema: "pifleet.run/v1",
         run_id: runId,
@@ -921,6 +1249,19 @@ export function register(program: Command): void {
         await ledger.append("mlx_training_guard_overridden", {
           detail: { matches: mlxTraining.map((m) => ({ pid: m.pid, command: m.command })) },
         });
+      }
+      /**
+       * The durable half of the unattended-tui warning, on the same terms as
+       * the MLX one above: stderr is where the operator reads it, the ledger is
+       * where `report` reads it months later. A run that launched a mode whose
+       * guarantees depend on a person, with no evidence of a person, should not
+       * have that fact live only in a scrollback buffer.
+       *
+       * The row carries the WORKERS and not the prose. The sentence is this
+       * build's wording and will be reworded; the list of workers is the fact.
+       */
+      if (tuiWarning !== null) {
+        await ledger.append("tui_unattended", { detail: { workers: tuiWorkers } });
       }
       if (egressNetwork !== null) {
         await ledger.append("egress_network_ready", {
@@ -1507,6 +1848,65 @@ export function register(program: Command): void {
               pane,
               [...panePresentationArgv({ launch, viewer, runId, workerId })],
             );
+
+            /**
+             * A `tui` worker is ATTENDED FROM THE MOMENT ITS PANE EXISTS
+             * (TUI spec item 4 — the residual gap Phase 3 found and stated).
+             *
+             * ## The gap
+             *
+             * `pifleet tui --worker <id>` writes the attended record. That is
+             * the right moment for an `rpc` worker, where entering attended
+             * mode is a deliberate act: the pane is a read-only viewer until a
+             * person asks for it, and the command IS the asking.
+             *
+             * A `tui` worker has no such moment. Its pane runs `docker attach`
+             * onto Pi's own terminal from the instant `up` creates it — the
+             * line directly above this one — so the keyboard is already wired
+             * to the agent. Waiting for the command meant that between `up`
+             * and an operator remembering to run it, a run somebody was
+             * actively typing into reported as UNATTENDED.
+             *
+             * That is the one direction `attended/mode.ts` is built to make
+             * impossible. Read its module docblock: both orderings there are
+             * chosen so the record can OVERCLAIM attendance and never
+             * underclaim it, because a run a person touched must never be able
+             * to present as untouched. The gap inverted exactly that, and it
+             * did so silently — `report` would have said "unattended" about a
+             * pane with hands on it.
+             *
+             * ## Why `enterTui` and not a direct write
+             *
+             * `enterTui` is the only sanctioned writer of that record, and
+             * routing through it is what keeps this from becoming a second
+             * spelling of the attended schema that drifts from the first. It
+             * writes the record BEFORE touching the pane, so the ordering
+             * guarantee holds here too.
+             *
+             * `PANE_ALREADY_ATTENDED` is the driver Phase 3 built for the same
+             * reason it is needed here: `enterTui`'s default pane action is
+             * `interactiveArgv`, `docker exec -it … bash`, which run against a
+             * tui worker would REPLACE the person's window onto Pi with a
+             * shell. The pane this function just attached is already the
+             * intended one; there is nothing to change.
+             *
+             * ## Failure is non-fatal, deliberately
+             *
+             * Inside the same `try` as the pane attach, and reported through
+             * the same `viewer_failed` ledger entry. `up.ts` already holds that
+             * a missing view must never take down a working run, and a missing
+             * RECORD is strictly less serious than a missing pane. The cost of
+             * the failure is a report that understates attendance — the very
+             * thing this closes — so it is logged rather than swallowed.
+             */
+            if (panePresentationIsAttach({ launch })) {
+              await enterTui({
+                run,
+                workerId,
+                backend: PANE_ALREADY_ATTENDED,
+                pane,
+              });
+            }
           } catch (err) {
             await ledger.append("viewer_failed", {
               worker: workerId,
