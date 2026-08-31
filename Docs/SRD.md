@@ -189,7 +189,7 @@ from: *a TTY has one owner*.
 | Mode | Pane runs | Dispatch | Harvest | Use |
 |---|---|---|---|---|
 | `rpc` *(default)* | viewer tailing `events.jsonl` | control socket → RPC `prompt` | outbox + transcript + git | automation |
-| `tui` *(attended)* | `docker attach --detach-keys=ctrl-]` to a container running Pi's **default** mode on a real pty | `cmux send` + `send-key enter` | outbox + transcript + git — **identical** | pair-working, demos |
+| `tui` *(attended)* | `docker attach --detach-keys=ctrl-]` to a container running Pi's **default** mode on a real pty | `cmux send` per line, `send-key shift+enter` between them, `send-key enter` to submit — see erratum 3 | outbox + transcript + git — **identical** | pair-working, demos |
 
 The harvest path is identical in both modes because `--session-id` is chosen before launch. `tui`
 is therefore cheap — but **not free**, and v1.1 was wrong to say it cost "a weaker dispatch path
@@ -220,6 +220,22 @@ feared. Measured 2026-08-31, one fresh container in the production tui shape per
 there is nothing left to send it to. A person's **Ctrl-C in an attached pane does not kill the
 worker** either: Pi's TUI holds the pty in raw mode (`-isig`, measured against a `cat` control arm
 that shows `isig`), so the tty driver generates no SIGINT for the trap to catch.
+
+**ERRATUM 3 — "`send-key enter`" is not a portable instruction, and both backends proved it in a
+live run rather than in the suite.** A prompt is more than one line, so the dispatch cell above
+needed a *separator* key as well as a submit key, and the two backends spell keys in **disjoint
+vocabularies**: measured 2026-08-31 against a real cmux surface, `send-key shift+enter` → `rc=0`
+and `send-key S-Enter` → `rc=1 invalid_params: Unknown key`; measured against a real tmux pane,
+`send-keys S-Enter` sends the key and **`send-keys shift+enter` exits 0 and types the nine
+characters into the pane.** The fleet therefore carries ONE key vocabulary (`src/util/pane-text.ts`:
+`enter`, `shift+enter`, `escape`, `tab`) and every backend translates it or **refuses** — a
+pass-through fallback is what produced `t-live-1shift+entershift+enter…` in a real pane. **Both
+defects were invisible to a green suite**, and differently: tmux's was a backend that exits 0 while
+doing the wrong thing, so no assertion on our own argv could see it; cmux's was our *own*
+`assertCmuxValue` grammar, which has no `+` and so refused the key at **step 2 of 29** with two
+lines of the operator's prompt already typed and unwithdrawable. That grammar was NOT widened — it
+guards surface ids, workspace refs and status keys, and flag injection is not a key-specific
+hazard — so keys pass a closed allow-list of their own instead.
 
 Therefore: `tui` workers may not be the target of a `depends_on` edge, and `pifleet up` warns when
 a `tui` worker is configured in an unattended run. **Both guards are built**, and `up` additionally
@@ -271,7 +287,7 @@ Verified behaviour:
 | `cmux focus-pane --pane <ref>` / `focus-panel` | `pifleet attach` | required |
 | `cmux respawn-pane --workspace <id> --surface <id> --command <text>` | **starts the viewer in a split pane** — without it, panes are empty shells | **required** |
 | `cmux rename-tab --workspace <id> --surface <id> --title <text>` | labels a pane with its worker id; best-effort, a failure costs a label | optional |
-| `cmux send [--surface]` / `send-key [--surface]` | **`tui` mode only** | optional |
+| `cmux send [--surface]` / `send-key [--surface]` | **`tui` mode only.** `send-key` takes cmux's own spelling — `shift+enter` accepted, `S-Enter` rejected `invalid_params: Unknown key` (measured 2026-08-31); see §3.5 erratum 3 | optional |
 | `cmux set-status <k> <v> [--icon --color --priority]`, `clear-status`, `list-status` | per-worker sidebar pill, keyed by worker id | optional |
 | `cmux set-progress <0..1> [--label]`, `clear-progress` | run progress (**singular per workspace**) | optional |
 | `cmux notify --title --body` | run finished / worker failed | optional |
