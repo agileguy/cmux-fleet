@@ -20,8 +20,13 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import { loadConfig, type LoadedConfig } from "../../src/config/load.ts";
 import { EXIT } from "../../src/contracts.ts";
+import { readFileSync } from "node:fs";
+import { WorkerLaunchSchema, type WorkerLaunch } from "../../src/contracts.ts";
+import { stripComments } from "../support/source-structure.ts";
 import {
   assertTuiBackendPossible,
+  panePresentationArgv,
+  panePresentationIsAttach,
   resolveRequestedBackend,
   runIsUnattended,
   tuiWorkerIds,
@@ -297,5 +302,132 @@ describe("a tui worker on the effective headless backend is refused", () => {
     expect(m).toContain("the built-in default");
     // It must NOT claim the operator typed a flag they did not type.
     expect(m).not.toContain("chosen by --backend");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 4 — the pane argv and the attendance record are ONE decision
+// ---------------------------------------------------------------------------
+
+/**
+ * The residual attendance gap, and the shape that closes it.
+ *
+ * Phase 3 built the pane routing and then said plainly what it had NOT closed:
+ * the attended record is written only when an operator runs `pifleet tui`, so
+ * between `up` and that command a `tui` run somebody was already typing into
+ * reported as UNATTENDED. `attended/mode.ts`'s module docblock is built around
+ * making exactly that impossible — both of its orderings are chosen so the
+ * record can OVERCLAIM attendance and never underclaim it.
+ *
+ * The fix is not a second conditional in `up`. It is ONE predicate, consumed
+ * twice: `panePresentationArgv` asks it to pick the argv, and the record write
+ * asks it whether to fire. Two matching conditionals would close the gap today
+ * and reopen it the first time one of them was edited — and the reopened gap is
+ * silent, because a pane with hands on it looks no different in any artifact
+ * from one without.
+ *
+ * These probes therefore assert the COUPLING, not just the two answers. The
+ * mutation they exist to catch is "the predicate is inlined back into one of
+ * the call sites", which is the refactor a reader would think harmless.
+ */
+describe("the pane argv and the attendance record share one predicate", () => {
+  const VIEWER = ["env", "PIFLEET_RUNS_DIR=/runs", "bun", "cli", "logs"] as const;
+
+  const rec = (paneMode: "rpc" | "tui", argv: string[]): WorkerLaunch =>
+    WorkerLaunchSchema.parse({
+      kind: "container",
+      argv,
+      container: "pifleet-r1-w1",
+      image: "pifleet/pi-worker:test",
+      pane_mode: paneMode,
+    });
+
+  const TUI_ARGV = ["docker", "run", "-i", "-t", "--rm", "img", "pi", "--session-id", "w1"];
+  const RPC_ARGV = ["docker", "run", "-i", "--rm", "img", "pi", "--mode", "rpc", "--session-id", "w1"];
+
+  test("a tui worker attaches, and is therefore attended", () => {
+    const launch = rec("tui", TUI_ARGV);
+    expect(panePresentationIsAttach({ launch })).toBe(true);
+    expect(panePresentationArgv({ launch, viewer: VIEWER, runId: "r1", workerId: "w1" })).not.toBe(
+      VIEWER,
+    );
+  });
+
+  test("an rpc worker gets the viewer, and is therefore NOT attended", () => {
+    const launch = rec("rpc", RPC_ARGV);
+    expect(panePresentationIsAttach({ launch })).toBe(false);
+    // Identity: the router is incapable of rebuilding the viewer argv.
+    expect(panePresentationArgv({ launch, viewer: VIEWER, runId: "r1", workerId: "w1" })).toBe(
+      VIEWER,
+    );
+  });
+
+  /**
+   * The `PIFLEET_PI_COMMAND` double: no container, therefore no TTY, therefore
+   * no pane to attend. The same reading `planInterrupt(null)` settled on after
+   * it was found refusing a worker that had a perfectly good control socket.
+   */
+  test("a worker with no launch record is neither attached nor attended", () => {
+    expect(panePresentationIsAttach({ launch: null })).toBe(false);
+    expect(
+      panePresentationArgv({ launch: null, viewer: VIEWER, runId: "r1", workerId: "w1" }),
+    ).toBe(VIEWER);
+  });
+
+  /**
+   * A record whose field and argv marks disagree takes the read-only arm in
+   * BOTH consequences. Refusing to guess is the established answer here
+   * (`launchPaneMode` returns `"unknown"`), and the safe reading of unknown is
+   * the one that changes nothing: a viewer pane, and no attendance claimed.
+   */
+  test("a record that disagrees with its argv attaches nothing and claims nothing", () => {
+    for (const launch of [rec("tui", RPC_ARGV), rec("rpc", TUI_ARGV)]) {
+      expect(panePresentationIsAttach({ launch })).toBe(false);
+      expect(
+        panePresentationArgv({ launch, viewer: VIEWER, runId: "r1", workerId: "w1" }),
+      ).toBe(VIEWER);
+    }
+  });
+
+  /**
+   * THE COUPLING ITSELF, read off the source.
+   *
+   * The two behavioural probes above would both stay green if the predicate
+   * were inlined back into `panePresentationArgv` and a separate `=== "tui"`
+   * test written at the record call site. They agree today; nothing would keep
+   * them agreeing. This asserts there is ONE predicate and that both consumers
+   * go through it.
+   */
+  test("both consumers call the predicate; neither re-tests the mode itself", () => {
+    const src = stripComments(
+      readFileSync(join(new URL("../../", import.meta.url).pathname, "src/cli/commands/up.ts"), "utf8"),
+    );
+    // Exactly one definition.
+    expect([...src.matchAll(/export function panePresentationIsAttach\(/g)]).toHaveLength(1);
+    // The router delegates rather than testing the mode inline.
+    expect(src).toMatch(/return panePresentationIsAttach\(args\)/);
+    // The record write is guarded by the same predicate.
+    expect(src).toMatch(/if \(panePresentationIsAttach\(\{ launch \}\)\) \{/);
+    // `launchPaneMode` is consulted in ONE place in this file — the predicate.
+    expect([...src.matchAll(/launchPaneMode\(/g)]).toHaveLength(1);
+  });
+
+  /**
+   * The record is written through `enterTui` with the no-pane driver, not by a
+   * second spelling of the attended schema, and not with a driver that would
+   * respawn the pane into `docker exec … bash` — which would destroy the very
+   * window the mode exists to provide.
+   */
+  test("the record goes through enterTui with the pane-preserving driver", () => {
+    const src = stripComments(
+      readFileSync(join(new URL("../../", import.meta.url).pathname, "src/cli/commands/up.ts"), "utf8"),
+    );
+    const call = /if \(panePresentationIsAttach\(\{ launch \}\)\) \{([\s\S]*?)\n            \}/.exec(src);
+    expect(call, "the attendance write could not be located").not.toBeNull();
+    const body = call![1] ?? "";
+    expect(body).toContain("enterTui");
+    expect(body).toContain("PANE_ALREADY_ATTENDED");
+    // No hand-rolled record write beside the sanctioned one.
+    expect(src).not.toContain("ATTENDED_SCHEMA");
   });
 });

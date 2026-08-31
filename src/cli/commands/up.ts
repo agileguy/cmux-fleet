@@ -13,7 +13,12 @@ import {
   runBudgetRecord,
   writePresentation,
 } from "../../run/state.ts";
-import { attachArgv } from "../../attended/mode.ts";
+import { attachArgv, enterTui } from "../../attended/mode.ts";
+// The driver that changes no pane. Imported from the `tui` command rather than
+// re-declared, because it is an ASSERTION about a tui worker's pane — that
+// entering attended mode must not respawn a pane which is already a person's
+// `docker attach` — and two spellings of it could disagree.
+import { PANE_ALREADY_ATTENDED } from "./tui.ts";
 import { launchPaneMode } from "../../container/interrupt.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import {
@@ -147,8 +152,34 @@ export function panePresentationArgv(args: {
   runId: string;
   workerId: string;
 }): readonly string[] {
-  const mode = args.launch === null ? "rpc" : launchPaneMode(args.launch);
-  return mode === "tui" ? attachArgv(args.runId, args.workerId) : args.viewer;
+  return panePresentationIsAttach(args)
+    ? attachArgv(args.runId, args.workerId)
+    : args.viewer;
+}
+
+/**
+ * Is this worker's pane a person's `docker attach`, rather than the read-only
+ * viewer?
+ *
+ * Extracted from `panePresentationArgv` above rather than re-tested at the
+ * second call site, and that is the entire point of it existing. Two decisions
+ * now hang on this one question — which argv the pane runs, and whether the
+ * attended record is written at `up` time — and they MUST NOT be able to
+ * disagree. A worker whose pane is an attach but whose run reports unattended
+ * is the gap this closes; a worker recorded as attended whose pane is the
+ * read-only viewer is the same lie pointing the other way.
+ *
+ * Sharing the predicate makes both impossible by construction instead of by
+ * two matching conditionals that a later edit could drift apart. The pane argv
+ * and the attendance record are one decision with two consequences.
+ *
+ * `launch === null` is `rpc`: the `PIFLEET_PI_COMMAND` double has no container
+ * and therefore no TTY — the same reading `planInterrupt(null)` settled on.
+ */
+export function panePresentationIsAttach(args: {
+  launch: WorkerLaunch | null;
+}): boolean {
+  return args.launch !== null && launchPaneMode(args.launch) === "tui";
 }
 
 /**
@@ -1817,6 +1848,65 @@ export function register(program: Command): void {
               pane,
               [...panePresentationArgv({ launch, viewer, runId, workerId })],
             );
+
+            /**
+             * A `tui` worker is ATTENDED FROM THE MOMENT ITS PANE EXISTS
+             * (TUI spec item 4 — the residual gap Phase 3 found and stated).
+             *
+             * ## The gap
+             *
+             * `pifleet tui --worker <id>` writes the attended record. That is
+             * the right moment for an `rpc` worker, where entering attended
+             * mode is a deliberate act: the pane is a read-only viewer until a
+             * person asks for it, and the command IS the asking.
+             *
+             * A `tui` worker has no such moment. Its pane runs `docker attach`
+             * onto Pi's own terminal from the instant `up` creates it — the
+             * line directly above this one — so the keyboard is already wired
+             * to the agent. Waiting for the command meant that between `up`
+             * and an operator remembering to run it, a run somebody was
+             * actively typing into reported as UNATTENDED.
+             *
+             * That is the one direction `attended/mode.ts` is built to make
+             * impossible. Read its module docblock: both orderings there are
+             * chosen so the record can OVERCLAIM attendance and never
+             * underclaim it, because a run a person touched must never be able
+             * to present as untouched. The gap inverted exactly that, and it
+             * did so silently — `report` would have said "unattended" about a
+             * pane with hands on it.
+             *
+             * ## Why `enterTui` and not a direct write
+             *
+             * `enterTui` is the only sanctioned writer of that record, and
+             * routing through it is what keeps this from becoming a second
+             * spelling of the attended schema that drifts from the first. It
+             * writes the record BEFORE touching the pane, so the ordering
+             * guarantee holds here too.
+             *
+             * `PANE_ALREADY_ATTENDED` is the driver Phase 3 built for the same
+             * reason it is needed here: `enterTui`'s default pane action is
+             * `interactiveArgv`, `docker exec -it … bash`, which run against a
+             * tui worker would REPLACE the person's window onto Pi with a
+             * shell. The pane this function just attached is already the
+             * intended one; there is nothing to change.
+             *
+             * ## Failure is non-fatal, deliberately
+             *
+             * Inside the same `try` as the pane attach, and reported through
+             * the same `viewer_failed` ledger entry. `up.ts` already holds that
+             * a missing view must never take down a working run, and a missing
+             * RECORD is strictly less serious than a missing pane. The cost of
+             * the failure is a report that understates attendance — the very
+             * thing this closes — so it is logged rather than swallowed.
+             */
+            if (panePresentationIsAttach({ launch })) {
+              await enterTui({
+                run,
+                workerId,
+                backend: PANE_ALREADY_ATTENDED,
+                pane,
+              });
+            }
           } catch (err) {
             await ledger.append("viewer_failed", {
               worker: workerId,
