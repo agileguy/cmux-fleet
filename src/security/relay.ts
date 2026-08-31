@@ -350,6 +350,26 @@ export interface RelayUpstream {
  * has a resolvable LAN name should still write its ADDRESS here — the name buys
  * nothing at this layer and costs the failure mode above.
  *
+ * ## The SECOND reason, measured 2026-08-30, which is the stronger one
+ *
+ * The mDNS argument above is machine-specific and could in principle be fixed
+ * by a better resolver. This one cannot be, and it is structural: the relay
+ * PUBLISHES `llm.base_url`'s host as an alias on the internal bridge
+ * (`relayListenAliases`), and it is attached to that bridge itself. So the
+ * relay resolves its own published name TO ITSELF.
+ *
+ * Measured with a splice container aliased `inference.agileguy.ca`, dialing
+ * that same name as its upstream:
+ *
+ *     from the bridge   getent hosts inference.agileguy.ca -> 172.19.0.3
+ *     from the RELAY    dns.lookup("inference.agileguy.ca") -> 172.19.0.3  (itself)
+ *     client            fetch -> Connect Timeout after 10s
+ *
+ * Every forwarded connection loops back into the relay's own listener. It is
+ * not a resolution error and not a refusal — it is a hang, on the one path a
+ * fleet cannot run without, and nothing in `docker logs` says why. An IP
+ * literal has nothing to resolve and therefore cannot loop.
+ *
  * An explicit port is REQUIRED, with no default. A bare host would have to
  * inherit a port from somewhere, and every candidate source is the `base_url`
  * this field exists to stop deriving things from.
@@ -581,14 +601,50 @@ export function omlxRelayTarget(cfg: RelayConfigView): RelayTarget {
 }
 
 /**
- * The port the relay must ACCEPT on — parsed from `llm.base_url`.
+ * The endpoint the relay must PUBLISH and ACCEPT on — parsed from `llm.base_url`.
  *
- * Still `base_url` and deliberately so: a worker connects to the literal port
- * in its own `base_url`, so that is the port the relay has to be listening on.
+ * Still `base_url` and deliberately so: a worker connects to the literal host
+ * and port in its own `base_url`, so those are what the relay has to answer to.
  * Port handling mirrors `policyFromConfig` exactly (explicit port, else 443 for
  * https and 80 otherwise) rather than inventing a second rule.
+ *
+ * ## The host is no longer pinned to the built-in alias (ISC-369)
+ *
+ * It used to THROW on any host but `RELAY_LISTEN_ALIAS`, and the reasoning was
+ * sound for the mechanism that existed: that alias was the only name attached
+ * to the internal bridge, so a `base_url` naming anything else described a
+ * listener no worker could resolve. The pin was enforcing a consequence of
+ * `relayConnectArgv`'s hardcoded alias list, not a property of the network.
+ *
+ * Deriving the alias list from THIS field instead (`relayListenAliases`) makes
+ * the invariant hold by construction rather than by refusal: whatever host a
+ * worker is told to dial is the host the relay publishes. The check that used
+ * to say "it must be this one name" now says "it must be a name that can be
+ * published, and must not shadow one that already means something else".
+ *
+ * ## What this unlocks, and it is the reason the pin came out
+ *
+ * A `base_url` of `https://inference.agileguy.ca/v1` with a `relay_upstream` of
+ * that endpoint's ADDRESS. The relay splices raw TCP, so TLS runs END TO END
+ * between the worker and the real origin — the worker sends the correct SNI and
+ * validates the real certificate, because as far as it is concerned it dialed
+ * the real name. Measured 2026-08-30 from inside `pifleet-egress`: `200`, 229ms,
+ * 32 models, `Qwen3.5-35B-A3B-8bit` present. Nothing in the relay parses,
+ * terminates or re-originates the TLS; it cannot, and that is the property that
+ * makes this safe to allow.
+ *
+ * The control ran in the same breath and matters as much: an UNALIASED public
+ * name from the same bridge still fails to resolve at all
+ * (`getaddrinfo EAI_AGAIN example.com`). Publishing one name does not open the
+ * bridge; it opens that name, to the one upstream `egress.allow` authorized.
  */
-function relayListenPort(cfg: RelayConfigView): number {
+interface RelayListenEndpoint {
+  /** Normalized `base_url` host — the name the relay publishes on the bridge. */
+  readonly host: string;
+  readonly port: number;
+}
+
+function relayListenEndpoint(cfg: RelayConfigView): RelayListenEndpoint {
   let url: URL;
   try {
     url = new URL(cfg.llm.base_url);
@@ -599,6 +655,11 @@ function relayListenPort(cfg: RelayConfigView): number {
   // dot or an upper-case spelling cannot read as a different host here while
   // reading as an allowed one there.
   const host = normalizeHost(url.hostname);
+  if (host === null) {
+    throw new Error(
+      `relay: llm.base_url host ${JSON.stringify(url.hostname)} is not a valid hostname`,
+    );
+  }
   if (host === LEGACY_RELAY_LISTEN_ALIAS) {
     // Accepted, and SAID SO. `relayConnectArgv` still attaches this name, so
     // the fleet works — but silently accepting a spelling that is on its way
@@ -610,19 +671,99 @@ function relayListenPort(cfg: RelayConfigView): number {
         `port and llm.relay_upstream are unaffected.\n`,
     );
   } else if (host !== RELAY_LISTEN_ALIAS) {
-    throw new Error(
-      `relay: llm.base_url host ${JSON.stringify(url.hostname)} is not ${RELAY_LISTEN_ALIAS} — ` +
-        `${RELAY_LISTEN_ALIAS} is the only name resolvable from the internal bridge, so a ` +
-        `base_url naming anything else is a listener no worker can reach. To point the fleet ` +
-        `at an oMLX on another machine, leave base_url alone and set llm.relay_upstream ` +
-        `(SRD §5.9) — base_url describes what WORKERS dial, not where the model server is.`,
-    );
+    // A published endpoint. Two things it may not be, and both are refusals
+    // rather than warnings because each produces a fleet that comes up and
+    // then fails somewhere the message would not point at.
+    //
+    // An IP LITERAL cannot be a Docker network alias at all — `docker network
+    // connect --alias 1.2.3.4` is accepted by the CLI and answers nothing, so
+    // the worker's dial would leave the bridge and be dropped. Refusing here
+    // turns a silent black hole into a sentence.
+    if (isIP(host) !== 0) {
+      throw new Error(
+        `relay: llm.base_url host ${JSON.stringify(url.hostname)} is an IP literal. base_url is ` +
+          `the name WORKERS dial and the relay publishes it as a Docker network alias, which ` +
+          `cannot be an address. Use ${RELAY_LISTEN_ALIAS} (and set llm.relay_upstream to the ` +
+          `address), or a DNS name the relay can publish.`,
+      );
+    }
+    // LOOPBACK NAMES resolve inside the worker before DNS is ever consulted,
+    // so publishing one as a bridge alias produces a name that answers — as
+    // the worker's own loopback, where nothing is listening. That is a
+    // connection refused against a relay reported healthy, and it is
+    // indistinguishable from a dead model server. RFC 6761 reserves the whole
+    // `localhost` tree for exactly this resolution behaviour, so the subtree
+    // goes with the name.
+    //
+    // A SINGLE-LABEL name is refused with it. Docker's embedded DNS will
+    // publish one, but a worker's resolver may append a search domain first and
+    // reach something else entirely — a name whose meaning depends on
+    // `/etc/resolv.conf` is not a name this can promise resolves to the relay.
+    if (host === "localhost" || host.endsWith(".localhost") || !host.includes(".")) {
+      throw new Error(
+        `relay: llm.base_url host ${JSON.stringify(host)} cannot be published as the relay's ` +
+          `listen alias — loopback names resolve inside the worker before DNS, and a ` +
+          `single-label name resolves through whatever search domain the container inherits. ` +
+          `Use ${RELAY_LISTEN_ALIAS}, or a dotted DNS name the relay can publish unambiguously.`,
+      );
+    }
+    // SHADOWING. Publishing a name on the internal bridge makes that name mean
+    // "the relay's TCP splice" for every worker on it. For the proxy alias and
+    // for any `egress.google_hosts` entry the name already means something
+    // else — the CONNECT proxy, and the destinations it is allowed to reach —
+    // so republishing it would silently re-point traffic the operator
+    // authorized through one mechanism into a different one.
+    const shadowed = [PROXY_LISTEN_ALIAS, ...cfg.egress.google_hosts]
+      .map((h) => normalizeHost(h))
+      .filter((h): h is string => h !== null && h === host);
+    if (shadowed.length > 0) {
+      throw new Error(
+        `relay: llm.base_url host ${JSON.stringify(host)} would shadow a name that already has ` +
+          `a meaning on the egress bridge (${shadowed.join(", ")}). Publishing it as the relay's ` +
+          `listen alias re-points traffic the CONNECT proxy is meant to carry into the TCP ` +
+          `splice, which forwards to llm.relay_upstream and nowhere else. Choose another name.`,
+      );
+    }
   }
   const port = url.port !== "" ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
   if (!validPort(port)) {
     throw new Error(`relay: llm.base_url has an invalid port ${JSON.stringify(url.port)}`);
   }
-  return port;
+  return { host, port };
+}
+
+function relayListenPort(cfg: RelayConfigView): number {
+  return relayListenEndpoint(cfg).port;
+}
+
+/**
+ * Every name the relay must answer to on the INTERNAL bridge (ISC-369).
+ *
+ * ONE derivation, consumed by `relayConnectArgv`. The list used to be three
+ * hardcoded constants in that function, which is what forced `relayListenPort`
+ * to refuse any `base_url` naming something else: the alias set could not
+ * follow the config, so the config was made to follow the alias set.
+ *
+ * Ordered and de-duplicated so the argv is stable across runs — an argv that
+ * reorders for no reason cannot be pinned byte-for-byte, and the byte-for-byte
+ * pin is what stops an alias silently disappearing from a launch.
+ */
+export function relayListenAliases(cfg: RelayConfigView): string[] {
+  const { host } = relayListenEndpoint(cfg);
+  const aliases = [
+    RELAY_LISTEN_ALIAS,
+    LEGACY_RELAY_LISTEN_ALIAS,
+    // ISC-263: the name `HTTPS_PROXY` resolves to. Attached unconditionally
+    // rather than only when a proxy is configured — an alias costs nothing,
+    // and a worker whose env names a host that does not resolve fails with DNS
+    // noise instead of the connection-refused that says "no proxy here".
+    PROXY_LISTEN_ALIAS,
+  ];
+  // Appended, never inserted: the three built-ins keep their positions so an
+  // existing pinned argv stays valid, and a published endpoint is visibly the
+  // thing this config added.
+  if (!aliases.includes(host)) aliases.push(host);
+  return aliases;
 }
 
 /**
@@ -871,6 +1012,25 @@ export function relayRunArgv(
     // so this is defence in depth against a NAT change, not a live break.
     "--sysctl",
     "net.ipv4.ip_forward=0",
+    // The relay runs as `--user node` with `--cap-drop ALL`, and a published
+    // `https://` endpoint puts its listen port at 443 — which an unprivileged
+    // process cannot bind. The container would `docker run -d` fine and die on
+    // EACCES milliseconds later, reported as "exited immediately after start".
+    //
+    // A SYSCTL rather than `--cap-add NET_BIND_SERVICE`, and the difference is
+    // the whole point: the capability would let this process bind any
+    // privileged port AND is a capability the hardened posture above
+    // deliberately drops. This lowers the unprivileged floor inside THIS
+    // container's network namespace and grants nothing else — the cap set stays
+    // empty. Measured 2026-08-30: `cap-drop ALL --user node` plus this sysctl
+    // binds 443 and serves; without it the same container cannot.
+    //
+    // Emitted unconditionally rather than only for low ports. A relay is a
+    // shared, durable container that `up` ADOPTS by name, so a conditional flag
+    // would make two configs produce two different containers under one name
+    // and hand the second fleet whichever one happened to be created first.
+    "--sysctl",
+    "net.ipv4.ip_unprivileged_port_start=0",
     // The same limits every worker gets (SRD §5.6). The relay sits on the same
     // bridge as the workers and OUTLIVES all of them, so exempting it from the
     // resource posture it shares a network with was an inconsistency, not a
@@ -935,22 +1095,24 @@ export function relayRunArgv(
  * validation. Both are attached so neither spelling can produce a worker that
  * comes up and cannot reach its model server.
  */
-export function relayConnectArgv(egressNetwork: string, containerName: string): string[] {
+export function relayConnectArgv(
+  egressNetwork: string,
+  containerName: string,
+  aliases: readonly string[],
+): string[] {
   assertDockerName("network", egressNetwork);
   assertDockerName("container", containerName);
+  // An empty list would produce a `docker network connect` with no `--alias` at
+  // all: a relay reachable only by container name, every worker failing to
+  // resolve its model server, and an exit code of 0 saying it went fine. The
+  // alias IS the mechanism, so nothing may call this without one.
+  if (aliases.length === 0) {
+    throw new Error("relay: refusing to attach the relay with no listen alias");
+  }
   return [
     "network",
     "connect",
-    "--alias",
-    RELAY_LISTEN_ALIAS,
-    "--alias",
-    LEGACY_RELAY_LISTEN_ALIAS,
-    // ISC-263: the name `HTTPS_PROXY` resolves to. Attached unconditionally
-    // rather than only when a proxy is configured — an alias costs nothing,
-    // and a worker whose env names a host that does not resolve fails with DNS
-    // noise instead of the connection-refused that says "no proxy here".
-    "--alias",
-    PROXY_LISTEN_ALIAS,
+    ...aliases.flatMap((a) => ["--alias", a]),
     egressNetwork,
     containerName,
   ];
@@ -1428,13 +1590,19 @@ export async function ensureEgressRelay(
     await docker(exec, relayRemoveArgv(containerName), 60_000).catch(() => undefined);
   };
 
-  const connected = await docker(exec, relayConnectArgv(egressNetwork, containerName), 60_000);
+  const aliases = relayListenAliases(cfg);
+  const connected = await docker(
+    exec,
+    relayConnectArgv(egressNetwork, containerName, aliases),
+    60_000,
+  );
   if (connected.code !== 0) {
     await destroy();
     throw new Error(
-      `relay: 'docker network connect --alias ${RELAY_LISTEN_ALIAS} ${egressNetwork} ` +
-        `${containerName}' failed: ${connected.stderr.trim() || "(no stderr)"} — without this ` +
-        `alias no worker can resolve ${RELAY_LISTEN_ALIAS}. The half-created relay was removed.`,
+      `relay: 'docker network connect' for ${egressNetwork}/${containerName} failed: ` +
+        `${connected.stderr.trim() || "(no stderr)"} — without these aliases ` +
+        `(${aliases.join(", ")}) no worker can resolve its model server. The half-created ` +
+        `relay was removed.`,
     );
   }
 

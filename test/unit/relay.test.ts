@@ -30,6 +30,7 @@ import {
   relayUpstreamFor,
   relayConnectArgv,
   relayContainerName,
+  relayListenAliases,
   relayTargetsDrifted,
   relayInspectArgv,
   relayRemoveArgv,
@@ -125,19 +126,80 @@ describe("omlxRelayTarget", () => {
     ).toBe(RELAY_DEFAULT_DIAL_HOST);
   });
 
-  test("REFUSES a base_url pointing anywhere other than the Docker host", () => {
-    // This relay is single-purpose. A target built for `10.0.0.5:8000` would
-    // be forwarded from a listener that no worker can ever reach, because the
-    // only names aliased onto the internal bridge are `omlx.pifleet.internal`
-    // and its legacy spelling — so the fleet would report a working relay and
-    // every worker would fail to resolve its model server. Refusing loudly is
-    // the only honest answer.
-    expect(() => omlxRelayTarget(cfg("http://10.0.0.5:8000/v1"))).toThrow(
-      /omlx\.pifleet\.internal/,
-    );
-    expect(() => omlxRelayTarget(cfg("http://localhost:8000/v1"))).toThrow(
-      /omlx\.pifleet\.internal/,
-    );
+  test("REFUSES a base_url host the relay cannot publish as an alias", () => {
+    // The rule used to be "it must be `omlx.pifleet.internal`", enforcing a
+    // consequence of `relayConnectArgv`'s hardcoded alias list rather than a
+    // property of the network. ISC-369 derives the alias list from this field
+    // instead, so the question became "can this name be published, and does it
+    // already mean something else" — and these three cannot or do.
+    //
+    // An IP LITERAL is not an alias Docker will answer for, so the worker's
+    // dial leaves the bridge and is dropped: a black hole under a relay
+    // reported healthy.
+    expect(() => omlxRelayTarget(cfg("http://10.0.0.5:8000/v1"))).toThrow(/IP literal/);
+    // LOOPBACK resolves inside the worker before DNS is consulted, so the name
+    // answers — as the worker's own loopback, where nothing listens.
+    expect(() => omlxRelayTarget(cfg("http://localhost:8000/v1"))).toThrow(/loopback/);
+    // SINGLE-LABEL resolves through whatever search domain the container
+    // inherited, which is not a promise this code can keep.
+    expect(() => omlxRelayTarget(cfg("http://omlx:8000/v1"))).toThrow(/single-label/);
+  });
+
+  test("ACCEPTS a published endpoint, and the listen port follows the scheme", () => {
+    // The case ISC-369 exists for: `base_url` names a real, publicly-resolvable
+    // HTTPS endpoint. The relay publishes that name on the bridge and splices
+    // raw TCP to `relay_upstream`, so TLS runs end to end and the worker
+    // validates the real certificate against the real name. Measured live
+    // 2026-08-30 from inside `pifleet-egress`: 200, 229ms, 32 models.
+    const c = {
+      ...cfg("https://inference.agileguy.ca/v1"),
+      llm: { base_url: "https://inference.agileguy.ca/v1", relay_upstream: "104.21.70.27:443" },
+      egress: { google_hosts: [], allow: [{ host: "104.21.70.27", port: 443 }] },
+    };
+    // 443 from the scheme, with no explicit port — the same rule
+    // `policyFromConfig` uses, not a second one.
+    expect(omlxRelayTarget(c)).toEqual({
+      listenPort: 443,
+      host: "104.21.70.27",
+      port: 443,
+      name: "omlx",
+    });
+    // …and the published name is what the relay will answer to, APPENDED to
+    // the three built-ins rather than replacing them.
+    expect(relayListenAliases(c)).toEqual([
+      "omlx.pifleet.internal",
+      "host.docker.internal",
+      "egress.pifleet.internal",
+      "inference.agileguy.ca",
+    ]);
+  });
+
+  test("a published endpoint may not SHADOW a name the proxy already owns", () => {
+    // Publishing a name on the bridge re-points it at the TCP splice, which
+    // forwards to `relay_upstream` and nowhere else. For the proxy alias and
+    // for any `egress.google_hosts` entry the name already means the CONNECT
+    // proxy, so republishing it silently reroutes traffic the operator
+    // authorized through one mechanism into a different one.
+    const shadow = (host: string, google: string[]) => () =>
+      omlxRelayTarget({
+        llm: { base_url: `https://${host}/v1`, relay_upstream: "104.21.70.27:443" },
+        egress: { google_hosts: google, allow: [{ host: "104.21.70.27", port: 443 }] },
+      });
+    expect(shadow("egress.pifleet.internal", [])).toThrow(/shadow/);
+    expect(shadow("oauth2.googleapis.com", ["oauth2.googleapis.com"])).toThrow(/shadow/);
+    // The control: the SAME name is fine when nothing else claims it, so the
+    // refusal is about the collision and not about the string.
+    expect(shadow("oauth2.googleapis.com", [])).not.toThrow();
+  });
+
+  test("the built-in alias set is unchanged for a config that does not publish one", () => {
+    // The regression this pairs with: appending a published endpoint must not
+    // disturb the three names every existing fleet already depends on.
+    expect(relayListenAliases(cfg("http://omlx.pifleet.internal:8000/v1"))).toEqual([
+      "omlx.pifleet.internal",
+      "host.docker.internal",
+      "egress.pifleet.internal",
+    ]);
   });
 
   test("an unparseable base_url throws rather than yielding a targetless relay", () => {
@@ -234,6 +296,11 @@ describe("relayRunArgv", () => {
       "no-new-privileges",
       "--sysctl",
       "net.ipv4.ip_forward=0",
+      // ISC-369: 443 is a privileged port and the relay runs `--user node` with
+      // `--cap-drop ALL`. A sysctl rather than `--cap-add NET_BIND_SERVICE` —
+      // the cap set stays empty and only this netns's unprivileged floor moves.
+      "--sysctl",
+      "net.ipv4.ip_unprivileged_port_start=0",
       "--pids-limit",
       "512",
       "--memory",
@@ -601,6 +668,43 @@ describe("the LAN upstream gate — MUTATION PROOF of non-vacuity (ISC-253, ISC-
     ).toBe("http://10.0.0.5:8000/v1");
   });
 
+  test("a PUBLISHED endpoint is returned verbatim, even though relay_upstream is set", () => {
+    // ISC-369, and the ORDER of the branches is the whole assertion. A fleet
+    // on a published endpoint always has `relay_upstream` set — the relay
+    // cannot dial a name it publishes to itself — so the `relay_upstream`
+    // branch would otherwise win and hand a host-side prober
+    // `https://104.21.70.27:443/v1`.
+    //
+    // Dialing an HTTPS origin BY ADDRESS presents no SNI and validates a
+    // certificate issued for the NAME, so `doctor` would report a TLS failure
+    // on a fleet whose workers are talking to that server perfectly well. That
+    // is the `hostFacingBaseUrl` mistake ISC-260 deleted, arriving through the
+    // other branch.
+    expect(
+      hostReachableBaseUrl({
+        llm: {
+          base_url: "https://inference.agileguy.ca/v1",
+          relay_upstream: "104.21.70.27:443",
+        },
+      }),
+    ).toBe("https://inference.agileguy.ca/v1");
+  });
+
+  test("…and a BRIDGE alias with relay_upstream still follows the upstream", () => {
+    // The control for the test above: the early return must be reachable ONLY
+    // for a published endpoint. Returning `base_url` verbatim here would probe
+    // `omlx.pifleet.internal` from the host, a name the host cannot resolve —
+    // exactly what ISC-264 measured and fixed.
+    expect(
+      hostReachableBaseUrl({
+        llm: {
+          base_url: `http://${RELAY_LISTEN_ALIAS}:8000/v1`,
+          relay_upstream: "192.168.86.49:8000",
+        },
+      }),
+    ).toBe("http://192.168.86.49:8000/v1");
+  });
+
   test("the listen alias and the dial host are DIFFERENT strings, on purpose", () => {
     expect(RELAY_LISTEN_ALIAS).not.toBe(RELAY_DEFAULT_DIAL_HOST);
     // And the legacy spelling is the dial host's string, which is precisely why
@@ -788,7 +892,13 @@ describe("relay docker argv, remaining", () => {
     // the old name needs it to RESOLVE and not merely to validate. Asserted as
     // an exact argv rather than a `toContain`, so DROPPING one is a failure —
     // which is the whole risk here, and the assertion a laxer check would miss.
-    expect(relayConnectArgv(NET, "relay-x")).toEqual([
+    expect(
+      relayConnectArgv(NET, "relay-x", [
+        "omlx.pifleet.internal",
+        "host.docker.internal",
+        "egress.pifleet.internal",
+      ]),
+    ).toEqual([
       "network",
       "connect",
       "--alias",
@@ -805,12 +915,19 @@ describe("relay docker argv, remaining", () => {
     ]);
   });
 
+  test("an empty alias list is REFUSED, not silently attached without one", () => {
+    // The one shape that produces a `docker network connect` exiting 0 while
+    // leaving every worker unable to resolve its model server. Now that the
+    // list is derived rather than hardcoded, a derivation bug could produce it.
+    expect(() => relayConnectArgv(NET, "relay-x", [])).toThrow(/no listen alias/);
+  });
+
   test("inspect and remove are plain, validated argv", () => {
     expect(relayInspectArgv("relay-x")).toEqual(["inspect", "relay-x"]);
     expect(relayRemoveArgv("relay-x")).toEqual(["rm", "-f", "relay-x"]);
     expect(() => relayInspectArgv("-flag")).toThrow(/name/);
     expect(() => relayRemoveArgv("-flag")).toThrow(/name/);
-    expect(() => relayConnectArgv(NET, "-flag")).toThrow(/name/);
+    expect(() => relayConnectArgv(NET, "-flag", ["omlx.pifleet.internal"])).toThrow(/name/);
   });
 });
 

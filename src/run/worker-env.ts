@@ -83,6 +83,7 @@ import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
 import {
   LEGACY_RELAY_LISTEN_ALIAS,
   PROXY_LISTEN_ALIAS,
+  relayListenAliases,
   PROXY_LISTEN_PORT,
   RELAY_LISTEN_ALIAS,
 } from "../security/relay.ts";
@@ -580,21 +581,46 @@ export function buildWorkerEnv(
      * not the only thing standing between a worker and a 403 on every
      * inference call.
      *
-     * ## Why NO_PROXY names both relay aliases
+     * ## Why NO_PROXY names EVERY relay listen alias
      *
      * `proxyPolicyFor` deliberately carries no `llm` rule, so a model request
      * that DID enter the proxy would be denied `default-deny` — every worker
      * stalling with no tool calls, which is §5.9's exact quiet-failure shape.
-     * Both spellings are listed because ISC-264's transition means a config
-     * may still name the legacy alias, and a worker whose `models.json` says
-     * one name while `NO_PROXY` lists the other is the same failure with an
-     * extra step.
+     * Both built-in spellings are listed because ISC-264's transition means a
+     * config may still name the legacy alias, and a worker whose `models.json`
+     * says one name while `NO_PROXY` lists the other is the same failure with
+     * an extra step.
+     *
+     * ## Derived from `relayListenAliases`, not from the two constants (ISC-369)
+     *
+     * It used to be the constants, which was complete only while the relay's
+     * alias set WAS those constants. Once `llm.base_url` may name a published
+     * endpoint the relay also answers to, a hardcoded list silently omits it —
+     * and the omission is invisible to every worker WITHOUT `egress_access`,
+     * because those have no `HTTPS_PROXY` to be captured by.
+     *
+     * MEASURED on the first live bring-up against `https://inference.agileguy.ca`
+     * on 2026-08-30. `up` reported success — its probe container carries no
+     * proxy env and dialed the alias directly — while inside the ticketing
+     * worker, the one role with `egress_access: true`:
+     *
+     *     getent hosts inference.agileguy.ca -> 172.19.0.2   (the relay: correct)
+     *     curl https://inference.agileguy.ca/v1/models
+     *       -> curl: (56) CONNECT tunnel failed, response 403
+     *
+     * curl honoured `HTTPS_PROXY`, the request entered the CONNECT proxy, and
+     * `proxyPolicyFor` denied it — a fleet that comes up green and cannot
+     * reach its model server, on exactly the role the operations console runs.
+     * One derivation for what the relay ANSWERS TO and what must bypass the
+     * proxy is what stops the two disagreeing again.
      */
     vars["HTTPS_PROXY"] = `http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`;
     vars["https_proxy"] = vars["HTTPS_PROXY"];
-    vars["NO_PROXY"] = [RELAY_LISTEN_ALIAS, LEGACY_RELAY_LISTEN_ALIAS, "localhost", "127.0.0.1"].join(
-      ",",
-    );
+    vars["NO_PROXY"] = [
+      ...relayListenAliases(loaded.config).filter((a) => a !== PROXY_LISTEN_ALIAS),
+      "localhost",
+      "127.0.0.1",
+    ].join(",");
     vars["no_proxy"] = vars["NO_PROXY"];
   }
 

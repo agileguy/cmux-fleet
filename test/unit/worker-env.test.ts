@@ -28,6 +28,7 @@ import {
   PROXY_LISTEN_PORT,
   RELAY_LISTEN_ALIAS,
   proxyPolicyFor,
+  relayListenAliases,
 } from "../../src/security/relay.ts";
 
 function baseDoc(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -369,6 +370,62 @@ describe("ISC-263: a cloud_access worker is routed through the CONNECT proxy", (
     const exempt = plan.vars["NO_PROXY"]!.split(",");
     expect(exempt).toContain(RELAY_LISTEN_ALIAS);
     expect(exempt).toContain(LEGACY_RELAY_LISTEN_ALIAS);
+    expect(plan.vars["no_proxy"]).toBe(plan.vars["NO_PROXY"]);
+  });
+
+  /**
+   * ISC-369 — a PUBLISHED endpoint is exempted too, because the relay answers
+   * to it and `proxyPolicyFor` does not.
+   *
+   * ## The measurement, which is why this is a test and not a comment
+   *
+   * `NO_PROXY` was built from the two relay constants, and that was complete
+   * only while the relay's alias set WAS those constants. Once `llm.base_url`
+   * may name an endpoint the relay also publishes, a hardcoded list omits it.
+   *
+   * The omission is invisible from every vantage `up` has: a worker WITHOUT
+   * `egress_access` has no `HTTPS_PROXY` to be captured by, and the mandatory
+   * §5.9 probe runs in a container that carries no proxy env either. So the
+   * first live bring-up against `https://inference.agileguy.ca` reported
+   * SUCCESS, while inside the ticketing worker — the one role with
+   * `egress_access: true`, and the role the operations console runs:
+   *
+   *     getent hosts inference.agileguy.ca -> 172.19.0.2   (the relay: correct)
+   *     curl https://inference.agileguy.ca/v1/models
+   *       -> curl: (56) CONNECT tunnel failed, response 403
+   *
+   * curl honoured `HTTPS_PROXY`, the request entered the CONNECT proxy, and
+   * the policy — which deliberately carries no `llm` rule — denied it. A green
+   * `up` over a worker that cannot reach its model server.
+   *
+   * The assertion is on the DERIVATION, not on the string: it compares against
+   * `relayListenAliases` minus the proxy's own name, so re-hardcoding the list
+   * turns this red even if someone hardcodes the right answer for one config.
+   */
+  test("NO_PROXY exempts a PUBLISHED base_url host, not just the built-in aliases", async () => {
+    const loaded = await load(
+      baseDoc({
+        llm: {
+          model: "TestModel",
+          base_url: "https://inference.agileguy.ca/v1",
+          relay_upstream: "104.21.70.27:443",
+        },
+        egress: { allow: [{ host: "104.21.70.27", port: 443 }] },
+      }),
+    );
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wc"), {});
+    const exempt = plan.vars["NO_PROXY"]!.split(",");
+    expect(exempt).toContain("inference.agileguy.ca");
+    // The proxy's OWN alias must never be exempted — `HTTPS_PROXY` points at
+    // it, and a client that bypasses its own proxy address reaches nothing.
+    expect(exempt).not.toContain(PROXY_LISTEN_ALIAS);
+    // One derivation, checked as one: every name the relay answers to except
+    // the proxy alias, in order, plus the loopback pair.
+    expect(exempt).toEqual([
+      ...relayListenAliases(loaded.config).filter((a) => a !== PROXY_LISTEN_ALIAS),
+      "localhost",
+      "127.0.0.1",
+    ]);
     expect(plan.vars["no_proxy"]).toBe(plan.vars["NO_PROXY"]);
   });
 
