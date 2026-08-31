@@ -12,6 +12,7 @@ import {
   type TaskEnvelope,
   type TaskSpec,
   type Verdict,
+  type WorkerLaunch,
 } from "../../contracts.ts";
 import {
   inboxTaskPath,
@@ -33,11 +34,18 @@ import { LedgerWriter } from "../../run/ledger.ts";
 import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { composeBrief } from "../../roles/index.ts";
 import { controlCall } from "../../supervisor/launch.ts";
+import { renderPrompt } from "../../supervisor/index.ts";
+import { launchPaneMode } from "../../container/interrupt.ts";
+import { loadBackend } from "../../backends/registry.ts";
+import { assertPaneTypeableLine } from "../../util/pane-text.ts";
+import { nextAttendedRecord, readAttended } from "./steer.ts";
 import {
   readBudgetState,
+  readPresentation,
   readRunBudgetPolicy,
   readRunWorktrees,
   readTaskRecord,
+  readWorkerLaunch,
   readWorkerState,
 } from "../../run/state.ts";
 import { processStartTime, SocketRequestError } from "../../run/registry.ts";
@@ -132,6 +140,16 @@ export interface SendOutcome {
   /** Recorded verdict, present on `already_completed`. */
   verdict: string | null;
   error: string | null;
+  /**
+   * WHICH operation happened — `abort.ts`'s precedent, for its reason.
+   *
+   * Both routes can answer `accepted: true`, and they are not making the same
+   * claim: `rpc` means the supervisor allocated an epoch, wrote a durable fence
+   * and Pi acked the prompt; `pane` means `cmux` exited 0 having typed bytes
+   * into a pty. Reporting the second as the first would let an operator believe
+   * a fence exists that could stop a double run. See `sendViaPane`.
+   */
+  via: "rpc" | "pane";
 }
 
 /** The control socket did not answer — a fact about the worker, not the task. */
@@ -153,6 +171,329 @@ export class WorkerUnreachableError extends Error {
     this.name = "WorkerUnreachableError";
     this.neverDelivered = cause instanceof SocketRequestError && cause.neverDelivered;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The pane route (SRD §3.5, TUI spec item 10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which control plane a dispatch to this worker must use.
+ *
+ * Same three-arm shape as `container/interrupt.ts`'s `InterruptPlan`, and for
+ * the same reason: the third arm must not be folded into either other. A worker
+ * whose launch record and rendered argv DISAGREE about its pane mode is not a
+ * worker whose mode is in doubt — it is one that cannot work — and guessing
+ * would either type a prompt into a pane that does not exist or send an RPC to
+ * a socket nobody is listening on.
+ *
+ * ## `launch === null` is `rpc`, and that is a correction
+ *
+ * The absent record is the `PIFLEET_PI_COMMAND` double. `abort.ts` originally
+ * read that absence as "no control plane at all", reasoning that a double has
+ * no container to signal — a true premise with the wrong conclusion, because
+ * the double also has a live supervisor holding a real RPC control socket. Two
+ * ISC-81 integration tests went red on it and no unit test did, because the
+ * unit test asserted the refusal and so pinned the defect in place. The
+ * supervisor states the same answer from its own side (`supervisor/index.ts`:
+ * *"`launch === null` … is `rpc` and cannot be anything else"*), and this
+ * function agrees with it rather than re-deriving it.
+ */
+export type DispatchRoute =
+  /** The control socket, unchanged — every `rpc` worker and the double. */
+  | { kind: "rpc" }
+  /** A `tui` worker: keystrokes into its pane. */
+  | { kind: "pane" }
+  /** Neither route is available, with the reason an operator can act on. */
+  | { kind: "unavailable"; reason: string };
+
+/**
+ * Decide how one worker's prompt reaches it, from the launch record only.
+ *
+ * Read off what `up` ACTUALLY RAN, never off config: `up` resolved the mode in
+ * a cwd and environment this process does not share. `launchPaneMode` is
+ * imported rather than reproduced — it owns the field-plus-two-marks agreement
+ * rule and the reasons for it, and a second copy here is how the CLI and the
+ * abort path would start disagreeing about which plane a worker has.
+ */
+export function planDispatch(launch: WorkerLaunch | null): DispatchRoute {
+  if (launch === null) return { kind: "rpc" };
+  const mode = launchPaneMode(launch);
+  if (mode === "rpc") return { kind: "rpc" };
+  if (mode === "tui") return { kind: "pane" };
+  return {
+    kind: "unavailable",
+    reason:
+      "launch argv carries neither a consistent rpc nor a consistent tui shape " +
+      "(--mode rpc and -t disagree) — refusing to guess which control plane this worker has",
+  };
+}
+
+/** A prompt this route cannot type without changing what it says. */
+export class UntypeablePromptError extends Error {
+  readonly exitCode = EXIT.USAGE;
+  constructor(worker: string, line: number, why: string) {
+    super(
+      `worker ${worker} is pane_mode: tui, so its prompt is typed into a terminal, and ` +
+        `line ${line} of the rendered prompt cannot be typed as written: ${why}. ` +
+        `Nothing was sent — the pane is untouched.`,
+    );
+    this.name = "UntypeablePromptError";
+  }
+}
+
+/** One step of the pane plan: literal text, or a key event. */
+export type PaneKeystroke = { kind: "text"; text: string } | { kind: "key"; key: string };
+
+/**
+ * The complete keystroke plan for one prompt — built and VALIDATED in full
+ * before its first byte is sent.
+ *
+ * ## Why a multi-line prompt is not one `cmux send`
+ *
+ * Measured 2026-08-31 against the real Pi TUI (v0.79.6, the shipped worker
+ * image, a cmux pane running `docker attach`), one fresh container per arm:
+ *
+ *   send `ARMD text in the box`, no key   ->  text sits in Pi's prompt box
+ *   then send-key `enter`                 ->  box CLEARS: submitted
+ *   send `ARMB first line<LF>ARMB second` ->  box holds only `ARMB second`
+ *   send `ARMC first line\nARMC second`   ->  box holds only `ARMC second`
+ *
+ * Rows 3 and 4 are the failure this function exists to prevent: the first line
+ * was submitted as a turn of its own and the REST OF THE OPERATOR'S INTENT was
+ * left sitting unsent in the box, with `cmux send` exiting 0. A dispatch that
+ * looked successful would have delivered a fragment. Row 4 is the nastier of
+ * the two because the text never contained a newline at all — cmux converts the
+ * two-character sequence `\n` to Enter, and `assertCmuxSendText` refuses it for
+ * that reason.
+ *
+ * ## What makes multi-line possible at all
+ *
+ *   send `ARME line one`, send-key `shift+enter`, send `ARME line two`
+ *     ->  Pi's prompt box holds BOTH lines, unsubmitted
+ *
+ * So `shift+enter` inserts a newline in Pi's composer without submitting.
+ * cmux emits it as `ESC [ 27;2;13 ~` (measured against a plain `read`, which
+ * ignored it — it is an escape sequence, not a newline byte), and Pi binds it.
+ * That is the whole mechanism: one `send` per line, `shift+enter` between them,
+ * a single `enter` at the end, and exactly one turn results.
+ *
+ * ## Validate everything, THEN send anything
+ *
+ * The plan is built completely — every line through `assertCmuxSendText` —
+ * before the caller executes any of it. A prompt with an untypeable line on
+ * page three must not leave two pages of it half-typed in a person's pane: an
+ * operator who then presses Enter submits a truncated brief that this command
+ * has no record of. All-or-nothing is the only shape that makes the refusal
+ * meaningful.
+ *
+ * An EMPTY line contributes only its `shift+enter`. `assertCmuxSendText`
+ * refuses empty text (cmux answers `Error: send requires text`), and a blank
+ * line in markdown is a paragraph break rather than something to type.
+ *
+ * **NOT CLAIMED:** that the plan's execution is atomic. Each step is a separate
+ * `cmux` invocation with no ack, so a failure midway leaves a partial prompt in
+ * the box. That is reported (the caller names the step that failed) but it
+ * cannot be rolled back — nothing here can un-type a keystroke.
+ */
+export function paneKeystrokes(worker: string, prompt: string): PaneKeystroke[] {
+  const lines = prompt.split("\n");
+  const plan: PaneKeystroke[] = [];
+  lines.forEach((line, i) => {
+    if (i > 0) plan.push({ kind: "key", key: "shift+enter" });
+    if (line === "") return;
+    try {
+      // The SAME predicate `sendArgv` enforces (`util/pane-text.ts`), applied
+      // one layer up so the refusal happens before any byte is typed rather
+      // than partway through. One definition, so the gate cannot become laxer
+      // than the backstop.
+      assertPaneTypeableLine("prompt line", line);
+    } catch (err) {
+      throw new UntypeablePromptError(worker, i + 1, err instanceof Error ? err.message : String(err));
+    }
+    plan.push({ kind: "text", text: line });
+  });
+  plan.push({ kind: "key", key: "enter" });
+  return plan;
+}
+
+/**
+ * Type one envelope's prompt into a `tui` worker's pane.
+ *
+ * ## What this records, and what it can no longer promise (question (a))
+ *
+ * SRD §3.5 voids `queue_update` and epoch fencing for this mode and calls
+ * completion "transcript-derived, coarser". This is that sentence in code, and
+ * the honest version of it is blunter than the SRD's:
+ *
+ *  - **There is no epoch.** The supervisor is the sole epoch allocator (SRD
+ *    §7.5) and it allocates inside the RPC `dispatch` handler, which this
+ *    worker does not have — `supervisor/index.ts` refuses that path outright
+ *    with `pane_mode_tui_has_no_rpc_dispatch`. So the envelope keeps the schema
+ *    placeholder 0, in the inbox record AND in the rendered prompt, and nothing
+ *    will ever replace it.
+ *
+ *    That is CONSISTENT rather than merely absent, and the consistency is
+ *    load-bearing: `harvest/outbox.ts` refuses a result whose envelope epoch
+ *    differs from the inbox record's (`envelope epoch N is stale (expected M)`),
+ *    so writing 0 in one place and rendering something else in the other would
+ *    clamp a completed task to `verdict=unknown` — the exact live failure
+ *    `test/unit/prompt-identity.test.ts` records. Both are 0 here, so the
+ *    harvest correlates.
+ *
+ *    What is LOST is what the number was FOR. 0 cannot distinguish attempt 1
+ *    from attempt 2, so a re-dispatch of the same task file types the prompt a
+ *    second time, runs it a second time, and the harvest accepts whichever
+ *    `result.json` lands last. On the rpc path `already_completed` and the
+ *    attempt-id replay make that a no-op (ISC-85); here neither exists.
+ *
+ *  - **There is no ack.** `accepted: true` on the rpc path means the supervisor
+ *    recorded a durable fence and Pi acked the prompt. Here it means `cmux`
+ *    exited 0 on each of N invocations — bytes reached a pty. It does not prove
+ *    Pi read them, that a turn started, or that the program on that terminal is
+ *    Pi at all. The JSON says `via: "pane"` so the two claims are never
+ *    confused for each other, and `epoch` is `null` rather than 0 so no reader
+ *    can mistake the placeholder for a fence.
+ *
+ *  - **`prompt_rejected` cannot happen.** Pi has no way to refuse a keystroke,
+ *    so the absence of that outcome here is not evidence that nothing refused.
+ *
+ *  - **Completion is transcript-derived.** `wait` and the harvest settle from
+ *    the session file (`supervisor/tui.ts`'s `classifyTuiTurn`), which is
+ *    coarser than the rpc path's double-correlated `get_state` probe.
+ *
+ * ## It writes an attended record
+ *
+ * A prompt typed into a terminal is a human's keystrokes arriving outside the
+ * fenced control plane — the same act `steer` records, and `nextAttendedRecord`
+ * is imported from there rather than copied so the two cannot drift. The
+ * transcript now holds an operator-authored message no fence saw, and `report`
+ * must be able to say so. Its `tui`-record case returns null and touches
+ * nothing, which is what keeps a dispatch from stamping `left_at` on a pane a
+ * person is still driving.
+ *
+ * **NOT CLAIMED:** that this closes the invariant for a `pane_mode: tui`
+ * worker. Its pane runs `docker attach` from the moment `up` creates it, so a
+ * person can type into it having run no pifleet command at all — and until they
+ * do, the run still presents as unattended. Closing that needs the record
+ * written at `up` time; see `cli/commands/tui.ts` for the same residual stated
+ * from the other end.
+ */
+async function sendViaPane(args: {
+  run: RunPaths;
+  worker: string;
+  envelope: TaskEnvelope;
+  ledger: LedgerWriter;
+}): Promise<SendOutcome> {
+  const { run, worker, envelope } = args;
+  const wp = workerPaths(run, worker);
+
+  const presentation = await readPresentation(wp);
+  if (presentation === null) {
+    throw new CliError(
+      `worker ${worker} is pane_mode: tui but has no presentation record in run ${run.runId}; ` +
+        `there is no pane to type into`,
+      EXIT.USAGE,
+    );
+  }
+  if (presentation.backend === "headless" || presentation.surface_ref === null) {
+    // The mode's own contradiction, named. `config/validate.ts` refuses
+    // `pane_mode: tui` on a headless backend at config time, so reaching here
+    // means the effective backend was chosen at `up` (the residual TUI-SPEC
+    // Phase 1 records as necessarily partial until Phase 4).
+    throw new CliError(
+      `worker ${worker} is pane_mode: tui but its backend is ${presentation.backend} with no ` +
+        `surface — a tui worker's prompt has nowhere to go`,
+      EXIT.BACKEND_UNAVAILABLE,
+    );
+  }
+
+  const backend = await loadBackend(presentation.backend);
+  if (backend.sendText === undefined || backend.sendKey === undefined) {
+    throw new CliError(
+      `backend ${presentation.backend} cannot type into a pane (no sendText/sendKey), so it ` +
+        `cannot dispatch to the pane_mode: tui worker ${worker}`,
+      EXIT.BACKEND_UNAVAILABLE,
+    );
+  }
+  const pane = { backend: presentation.backend, id: presentation.surface_ref };
+
+  /**
+   * The SAME document the rpc route delivers, from the SAME renderer.
+   *
+   * Not a pane-specific abbreviation: `sendTaskEnvelope`'s own docblock says a
+   * task file must not behave differently depending on who sent it, and a
+   * prompt that dropped the fenced identity block would leave the worker unable
+   * to bind `<task-id>` and `<outbox>` — it would do the work and write it
+   * nowhere the harvest looks.
+   *
+   * `epoch: envelope.epoch` and not a literal 0, so that if this route ever
+   * does acquire an allocator the prompt follows it. Today it is 0 by the same
+   * placeholder that reaches the inbox record, which is what makes the two
+   * agree.
+   */
+  const prompt = renderPrompt({ ...envelope, epoch: envelope.epoch });
+  const plan = paneKeystrokes(worker, prompt);
+
+  for (const [i, step] of plan.entries()) {
+    try {
+      if (step.kind === "text") await backend.sendText(pane, step.text);
+      else await backend.sendKey(pane, step.key);
+    } catch (err) {
+      /**
+       * A partial prompt is now sitting in the pane, and saying so is the whole
+       * point of this catch. There is no way to un-type it, and an operator who
+       * does not know it is there will press Enter on a truncated brief.
+       */
+      throw new CliError(
+        `worker ${worker}: pane dispatch failed at step ${i + 1} of ${plan.length} ` +
+          `(${step.kind}): ${String(err)}. Part of the prompt is now in the pane and cannot be ` +
+          `withdrawn — clear it before retrying`,
+        EXIT.BACKEND_UNAVAILABLE,
+      );
+    }
+  }
+
+  // The durable dispatch record (SRD §7.1). Epoch 0 verbatim — see the
+  // docblock: it is the placeholder nothing will replace, and it must be the
+  // same 0 the prompt carried or the harvest calls the result stale.
+  await writeJsonAtomic(inboxTaskPath(run, envelope.task_id), envelope);
+  /**
+   * `dispatched`, the same event name the rpc route appends, so every existing
+   * reader still sees every dispatch — `abort_sent`'s precedent, for its
+   * reason. `epoch` is OMITTED rather than set to 0: a reader that sees the
+   * field expects a fence, and there is none.
+   */
+  await args.ledger.append("dispatched", {
+    worker,
+    task_id: envelope.task_id,
+    detail: {
+      via: "pane",
+      backend: presentation.backend,
+      surface: presentation.surface_ref,
+      steps: plan.length,
+      lines: plan.filter((s) => s.kind === "text").length,
+    },
+  });
+
+  const record = nextAttendedRecord(
+    await readAttended(wp.attendedJson),
+    worker,
+    new Date().toISOString(),
+  );
+  if (record !== null) await writeJsonAtomic(wp.attendedJson, record);
+
+  return {
+    accepted: true,
+    // NOT 0. The placeholder is what the envelope and the prompt carry; `null`
+    // here is this route saying it allocated nothing.
+    epoch: null,
+    replayed: false,
+    reason: null,
+    verdict: null,
+    error: null,
+    via: "pane",
+  };
 }
 
 /**
@@ -273,6 +614,31 @@ export async function sendTaskEnvelope(args: {
     throw new CliError(`invalid task envelope: ${String(err)}`, EXIT.USAGE);
   }
 
+  /**
+   * WHICH plane this prompt travels on, decided from the launch record.
+   *
+   * Placed here, in THE dispatch path, for the reason the worktree lookup above
+   * gives: `--auto` and single-task `dispatch` both come through this function,
+   * and a second resolution in one of them is how the two modes start
+   * disagreeing about the same worker.
+   *
+   * A read failure is NOT silently an rpc worker. `readWorkerLaunch` throws on
+   * a damaged record and returns null only for an absent one, and those two
+   * mean different things: absent is the `PIFLEET_PI_COMMAND` double (rpc);
+   * damaged is a worker whose plane is unknown, and this is the one place that
+   * can still refuse before a prompt goes somewhere wrong.
+   */
+  const route = planDispatch(await readWorkerLaunch(workerPaths(run, worker)));
+  if (route.kind === "unavailable") {
+    throw new CliError(
+      `worker ${worker} in run ${run.runId} cannot be dispatched to: ${route.reason}`,
+      EXIT.USAGE,
+    );
+  }
+  if (route.kind === "pane") {
+    return sendViaPane({ run, worker, envelope, ledger: args.ledger });
+  }
+
   let reply: Record<string, unknown>;
   try {
     reply = await controlCall(run, worker, {
@@ -297,6 +663,7 @@ export async function sendTaskEnvelope(args: {
       reason: null,
       verdict: null,
       error: null,
+      via: "rpc",
     };
   }
   return {
@@ -306,6 +673,7 @@ export async function sendTaskEnvelope(args: {
     reason: String(reply["reason"] ?? "rejected"),
     verdict: typeof reply["verdict"] === "string" ? reply["verdict"] : null,
     error: typeof reply["error"] === "string" ? reply["error"] : null,
+    via: "rpc",
   };
 }
 
@@ -395,7 +763,16 @@ export function register(program: Command): void {
             epoch: outcome.epoch,
             attempt_id: attemptId,
             replayed: outcome.replayed,
-            summary: `dispatched ${taskId} to ${opts.worker} (epoch ${outcome.epoch})`,
+            // `via` distinguishes two different claims that share a field —
+            // see `SendOutcome.via`.
+            via: outcome.via,
+            summary:
+              outcome.via === "pane"
+                ? // No epoch, and the sentence says why rather than printing
+                  // `epoch null` and leaving an operator to wonder.
+                  `typed ${taskId} into ${opts.worker}'s pane (no epoch — a tui worker has no ` +
+                  `control socket and nothing allocated a fence)`
+                : `dispatched ${taskId} to ${opts.worker} (epoch ${outcome.epoch})`,
           });
           return;
         }
@@ -593,6 +970,49 @@ async function dispatchAuto(opts: { run?: string; tasks?: string; worker?: strin
     },
 
     async dispatch(spec: TaskSpec, worker: string, taskId: string): Promise<DispatchAnswer> {
+      /**
+       * `--auto` never types into a person's pane.
+       *
+       * Not squeamishness — the loop could not FINISH one. `runSchedule` drives
+       * a dispatched task to a terminal state by polling `readSettled`, which
+       * reads the task record the supervisor writes when it settles an epoch.
+       * A pane-typed prompt never reaches the supervisor at all (it refuses the
+       * RPC path with `pane_mode_tui_has_no_rpc_dispatch` and settles a tui
+       * worker from its transcript, with no task id to file it under), so no
+       * task record can ever appear and the task would sit in `running` until
+       * the stall policy killed it. A rejection names the reason in one line;
+       * a hang names nothing.
+       *
+       * THE ALTERNATIVE REJECTED: reporting a tui worker as `busy` from
+       * `workerHealth`, so the scheduler never offers it work. That reads
+       * tidier and is worse — a task PINNED to that worker (`spec.worker`)
+       * would then wait for an idle it can never reach, converting this visible
+       * rejection into the invisible hang it exists to avoid. Health is left
+       * telling the truth about the process; routing is refused here, where the
+       * refusal is attached to a task and can be reported.
+       *
+       * An unreadable launch record is left to `sendTaskEnvelope`, which
+       * already refuses it with the reason. Only the pane route is decided
+       * here, because only the pane route is a scheduling question.
+       */
+      const route = planDispatch(
+        await readWorkerLaunch(workerPaths(run, worker)).catch(() => null),
+      );
+      if (route.kind === "pane") {
+        const reason = "pane_mode_tui_is_not_auto_schedulable";
+        await ledger.append("dispatch_rejected", {
+          worker,
+          task_id: taskId,
+          detail: {
+            reason,
+            note:
+              "a tui worker is prompted through its pane and settles from its transcript; " +
+              "--auto cannot observe that task reaching a terminal state",
+          },
+        });
+        return { kind: "rejected", reason };
+      }
+
       let outcome: SendOutcome;
       try {
         outcome = await sendTaskEnvelope({

@@ -15,6 +15,7 @@
  */
 
 import { realExec, type Exec, type ExecResult } from "../../container/run.ts";
+import { assertPaneTypeableLine } from "../../util/pane-text.ts";
 
 /**
  * Identifiers that ride the cmux command line as VALUES. cmux parses argv
@@ -278,22 +279,23 @@ export function readScreenArgv(surfaceId: string, lines?: number): string[] {
  * notifications) keep the leading-dash rule untouched; nothing about their
  * grammar changed.
  *
- * The length cap and the control-character rule are duplicated from
- * `assertCmuxText` rather than delegated, because delegating would re-impose
- * the dash rule this function exists to drop. The duplication is two
- * predicates and is pinned by tests on both functions.
+ * The length cap and the control-character rule are NOT delegated to
+ * `assertCmuxText` — delegating would re-impose the dash rule this function
+ * exists to drop. They live in `util/pane-text.ts` instead, with the
+ * measurements, because `cli/commands/dispatch.ts` has to apply the identical
+ * rule BEFORE it types the first line of a multi-line prompt and ISC-137
+ * forbids it from importing anything under `src/backends/cmux/`. One
+ * definition, two call sites on opposite sides of that seam.
+ *
+ * The wrapper survives rather than being inlined at the call site so the
+ * refusal still says `cmux:` — the operator is being told which tool refused,
+ * and `sendArgv` is the only place this grammar is enforced.
  */
 export function assertCmuxSendText(what: string, v: string): void {
-  if (v.length === 0 || v.length > 1024 || /[\x00-\x1f\x7f]/.test(v)) {
-    throw new Error(
-      `cmux: refusing ${what} ${JSON.stringify(v.slice(0, 64))} — empty, over 1024 characters, or carrying control characters`,
-    );
-  }
-  if (/\\[nrt]/.test(v)) {
-    throw new Error(
-      `cmux: refusing ${what} ${JSON.stringify(v.slice(0, 64))} — cmux send turns \\n and \\r into Enter and \\t into Tab, ` +
-        `so this text would submit a fragment and leave the rest unsent`,
-    );
+  try {
+    assertPaneTypeableLine(what, v);
+  } catch (err) {
+    throw new Error(`cmux: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
