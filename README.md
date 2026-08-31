@@ -11,6 +11,13 @@ A pane is a *view*, not a channel. Every control-plane fact comes from the Pi RP
 session transcript, or the worker's outbox — never from scraped pane text. Closing a pane, or
 never opening one, changes nothing about a run.
 
+**With one deliberate exception, which is the whole of `pane_mode: tui`.** That mode hands a
+worker's pane the container's own terminal, so for those workers the pane *is* the channel: there
+is no RPC stream, dispatch is keystrokes, completion is read out of the transcript, and closing the
+pane is believed to stop the worker. It is a degraded mode for attended debugging, not the
+supported path — and it is degraded in writing: `pifleet report` names the ten guarantees it gives
+up, per run, with a sentence an operator can act on for each.
+
 ## Install
 
 ```bash
@@ -66,6 +73,7 @@ All six phases are done. 2510 tests pass, 123 skip, 0 fail across 166 files (`te
 | 4 | Panes | done — cmux/tmux backends, `attach`, live pane viewer |
 | 5 | Orchestration | done — `dispatch --auto` DAG scheduling, `pifleet report`, `pifleet logs` |
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
+| — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
 No ISA done-condition criterion is unattempted — there are zero `[ ]`. Nine are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
