@@ -2,12 +2,19 @@ import type { Command } from "commander";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { CliError } from "../index.ts";
-import { EXIT } from "../../contracts.ts";
+import { EXIT, type WorkerLaunch } from "../../contracts.ts";
 import { Stopwatch } from "../../rpc/client.ts";
 import { newRunId, runPaths, runsRoot, workerPaths } from "../../run/paths.ts";
 import { materializeWorkerInputs } from "../../run/materialize.ts";
 import { buildWorkerEnv } from "../../run/worker-env.ts";
-import { readWorkerState, runBudgetRecord, writePresentation } from "../../run/state.ts";
+import {
+  readWorkerLaunch,
+  readWorkerState,
+  runBudgetRecord,
+  writePresentation,
+} from "../../run/state.ts";
+import { attachArgv } from "../../attended/mode.ts";
+import { launchPaneMode } from "../../container/interrupt.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import {
   identityAlive,
@@ -98,6 +105,52 @@ const CLI_ENTRY = join(import.meta.dir, "..", "index.ts");
  * Anything in `workers:` must resolve, and a failure to resolve propagates
  * exactly as it would without this feature.
  */
+/**
+ * Which argv a worker's pane runs (TUI spec item 9).
+ *
+ * A `tui` worker's pane attaches to Pi's own TTY; every other worker's pane
+ * runs the read-only viewer it always has. The `viewer` argv is passed IN
+ * rather than built here so that this function cannot change it: the rpc pane
+ * has to stay byte for byte what it is today, and the surest way to guarantee
+ * that is for the routing code to be incapable of touching it.
+ *
+ * Exported because the decision is the whole of the risk in this phase. The
+ * tui pane has no behaviour to regress — it did not exist — while routing BOTH
+ * modes through one new call site is exactly the refactor that quietly sends
+ * every worker down the new path. Inline in the 1600-line command body that
+ * would only be reachable by a live `up` against a real container; as a pure
+ * function both arms are pinned by a unit probe.
+ *
+ * ## The mode is READ, never sniffed
+ *
+ * `launchPaneMode` is the resolver the interrupt path already uses: the
+ * recorded `launch.pane_mode` field LEADS and the argv marks (`--mode rpc`,
+ * `-t`) only veto. Deliberately not a second `pane_mode === "tui"` test
+ * written here — `materialize.ts` makes this argument about the launch argv,
+ * that two independent computations of one fact are two things that can
+ * disagree after an edit, and a pane routed by the loser of that disagreement
+ * certifies the wrong control plane.
+ *
+ * `unknown` — record and marks disagreeing — takes the VIEWER, the read-only
+ * arm. A pane showing logs for a worker whose mode is in doubt costs a view;
+ * attaching a keyboard to what might be an RPC control plane costs the run.
+ *
+ * `launch === null` is the `PIFLEET_PI_COMMAND` double. It starts no container
+ * but DOES have a live supervisor and control socket, so **a worker with no
+ * container is an rpc worker** and takes the viewer — the same reading
+ * `planInterrupt(null)` settled on, which previously refused here from a true
+ * premise and a wrong conclusion.
+ */
+export function panePresentationArgv(args: {
+  launch: WorkerLaunch | null;
+  viewer: readonly string[];
+  runId: string;
+  workerId: string;
+}): readonly string[] {
+  const mode = args.launch === null ? "rpc" : launchPaneMode(args.launch);
+  return mode === "tui" ? attachArgv(args.runId, args.workerId) : args.viewer;
+}
+
 export function assertModelsAllowed(loaded: LoadedConfig, workerIds: readonly string[]): void {
   const defined = new Set(loaded.config.workers.map((w) => w.id));
   for (const workerId of workerIds) {
@@ -1416,6 +1469,19 @@ export function register(program: Command): void {
         if (pane.id !== null) {
           try {
             /**
+             * A `tui` worker's pane attaches to Pi's own TTY; every other
+             * worker's pane runs the viewer below, unchanged. The decision
+             * lives in `panePresentationArgv` — see its docblock for why the
+             * mode is read off the launch record rather than sniffed off the
+             * argv, and why an unreadable mode takes the read-only arm.
+             *
+             * The branch is HERE and not inside `attachViewer` because the
+             * backends are argv-generic by design: cmux and tmux both take
+             * "run this argv in that pane", and neither should learn what a
+             * pane mode is.
+             */
+            const launch = await readWorkerLaunch(wp);
+            /**
              * `env PIFLEET_RUNS_DIR=…` because the pane does NOT inherit this
              * process's environment. Panes are children of a long-lived
              * cmux/tmux server that was started before this run existed, so a
@@ -1424,7 +1490,7 @@ export function register(program: Command): void {
              * or nothing at all. `--run` is passed for the same reason:
              * "the most recent run" is a different answer in a stale server.
              */
-            await backend.attachViewer(pane, [
+            const viewer = [
               "env",
               `PIFLEET_RUNS_DIR=${root}`,
               process.execPath,
@@ -1436,7 +1502,11 @@ export function register(program: Command): void {
               runId,
               "--follow",
               "--render",
-            ]);
+            ];
+            await backend.attachViewer(
+              pane,
+              [...panePresentationArgv({ launch, viewer, runId, workerId })],
+            );
           } catch (err) {
             await ledger.append("viewer_failed", {
               worker: workerId,
