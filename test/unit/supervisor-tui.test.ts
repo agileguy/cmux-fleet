@@ -541,3 +541,102 @@ describe("the supervisor branches on pane_mode", () => {
     expect(body).toContain("clearInterval(transcriptPoll)");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The other end of the wire
+// ---------------------------------------------------------------------------
+
+/**
+ * `up` WRITES the mode the supervisor reads. Found by a surviving mutation.
+ *
+ * Every probe above this line grades the READER: the supervisor branches on
+ * `launch.pane_mode`, reaches the detacher only through that test, and keeps
+ * the RPC client on the other arm. Not one of them grades the WRITER. Deleting
+ * `pane_mode: w.paneMode` from `materialize.ts` — the single line that puts the
+ * mode on the record at all — left the entire unit suite green, `supervisor-
+ * tui.test.ts` and `materialize.test.ts` included, 82 tests passing on a fleet
+ * that could no longer launch a TUI.
+ *
+ * It is silent rather than loud because `WorkerLaunchSchema` DEFAULTS the field
+ * to `"rpc"`, and that default is correct — a record written before the field
+ * existed describes an rpc worker and must keep parsing. The cost is that a
+ * missing write is indistinguishable from an old record: every tui worker
+ * would launch in the foreground with `-t` on its argv and die on `the input
+ * device is not a TTY`, and nothing in the failure would name `pane_mode`.
+ *
+ * So this reads the record BACK off disk rather than asserting on the object
+ * that built it. `WorkerLaunchSchema.parse` runs between the two, which is
+ * where the default is applied — an assertion on the in-memory literal would
+ * pass without ever proving the field survives the round trip that the
+ * supervisor actually performs.
+ *
+ * Both directions, because one alone is half a probe: a writer hard-coded to
+ * `"tui"` passes the tui case, and the default passes the rpc case with no
+ * writer at all.
+ */
+describe("the launch record carries the mode up resolved", () => {
+  test("a tui worker's record says tui, and a default worker's says rpc", async () => {
+    const { runPaths, workerPaths } = await import("../../src/run/paths.ts");
+    const { materializeWorkerInputs } = await import("../../src/run/materialize.ts");
+    const { readWorkerLaunch } = await import("../../src/run/state.ts");
+    const { parseConfig } = await import("../../src/config/load.ts");
+    const { stringify } = await import("yaml");
+
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-panemode-"));
+    const runsDir = join(dir, "runs");
+    // `materializeWorkerInputs` guards its writes against `runsRoot()`, so the
+    // environment has to name the same root this test uses. Restored after.
+    const prev = process.env["PIFLEET_RUNS_DIR"];
+    const prevSkills = process.env["PIFLEET_SKILLS_DIR"];
+    process.env["PIFLEET_RUNS_DIR"] = runsDir;
+    delete process.env["PIFLEET_SKILLS_DIR"];
+    try {
+      await mkdir(join(dir, "roles"), { recursive: true });
+      await writeFile(join(dir, "roles", "eng.md"), "Engineer role briefing.\n");
+
+      const path = join(dir, "fleet.yaml");
+      await writeFile(
+        path,
+        stringify({
+          version: 2,
+          name: "pane-mode-fixture",
+          docker: { pi_version: "0.79.6" },
+          run: { repo: ".", budget: { tokens_ceiling: 1_000_000 } },
+          llm: { model: "FixtureModel" },
+          roles: { eng: { append_system_prompt_file: "./roles/eng.md" } },
+          workers: [
+            // The tui worker is named first so a writer that reads the wrong
+            // element of the array cannot pass by luck of ordering.
+            { id: "tui-1", role: "eng", pane_mode: "tui" },
+            { id: "rpc-1", role: "eng" },
+          ],
+        }),
+      );
+      const loaded = await parseConfig(await Bun.file(path).text(), path);
+      const run = runPaths("pm-run", runsDir);
+      await mkdir(run.root, { recursive: true });
+      await materializeWorkerInputs(loaded, run, ["tui-1", "rpc-1"], async () => {}, {
+        writeLaunchRecord: true,
+      });
+
+      const tui = await readWorkerLaunch(workerPaths(run, "tui-1"));
+      const rpc = await readWorkerLaunch(workerPaths(run, "rpc-1"));
+      expect(tui, "no launch record was written for tui-1").not.toBeNull();
+      expect(rpc, "no launch record was written for rpc-1").not.toBeNull();
+      expect(tui!.pane_mode).toBe("tui");
+      expect(rpc!.pane_mode).toBe("rpc");
+
+      // And the two halves of the launch agree. This is the disagreement the
+      // supervisor cannot detect and cannot survive: `-t` with a foreground
+      // spawn is `the input device is not a TTY`, and a detached spawn without
+      // `-t` is a container with no pseudo-TTY and no Pi TUI inside it.
+      expect(tui!.argv).toContain("-t");
+      expect(rpc!.argv).not.toContain("-t");
+    } finally {
+      if (prev === undefined) delete process.env["PIFLEET_RUNS_DIR"];
+      else process.env["PIFLEET_RUNS_DIR"] = prev;
+      if (prevSkills === undefined) delete process.env["PIFLEET_SKILLS_DIR"];
+      else process.env["PIFLEET_SKILLS_DIR"] = prevSkills;
+    }
+  }, 30_000);
+});
