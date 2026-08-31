@@ -1984,6 +1984,8 @@ export function renderPrompt(envelope: {
   acceptance: string[];
   task_id: string;
   outbox: string;
+  worker: string;
+  epoch: number;
 }): string {
   const acceptance =
     envelope.acceptance.length > 0
@@ -2011,9 +2013,12 @@ export function renderPrompt(envelope: {
     "```\n" +
     `task_id: ${envelope.task_id}\n` +
     `outbox:  ${envelope.outbox}\n` +
+    `worker:  ${envelope.worker}\n` +
+    `epoch:   ${envelope.epoch}\n` +
     "```\n\n" +
-    `These are the values the mounted documents refer to as \`<task-id>\` and \`<outbox>\`. ` +
-    `Neither is derivable from the title.`;
+    `These are the values the mounted documents refer to as \`<task-id>\` and \`<outbox>\`, ` +
+    `and the ones the ticket-ops artifact schema requires as \`worker\` and \`epoch\`. ` +
+    `None is derivable from the title.`;
   return `# ${envelope.title}\n\n${envelope.brief}${acceptance}${identity}`;
 }
 
