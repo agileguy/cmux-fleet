@@ -305,6 +305,28 @@ if [ "${PIFLEET_PANE_MODE:-rpc}" = "tui" ]; then
     echo "pifleet: PIFLEET_PANE_MODE=tui but this container has no terminal on stdin — a tui worker is launched with 'docker run -i -t' and attached to with 'docker attach' (SRD §3.5); without a TTY its keyboard would be a pipe nobody is holding" >&2
     exit 72
   fi
+  # Wipe the pane before the agent takes it over.
+  #
+  # A tui worker's pane is a STANDING SURFACE a person reads all day, and
+  # everything this container printed on its way up — the honeypot's arming
+  # line, any future startup chatter — sits above Pi's first draw forever. The
+  # host side already clears before `up` runs (`up --attach-clear`), but that
+  # happens BEFORE the container exists, so it cannot reach anything printed
+  # from inside it. This is the container-side half of the same idea.
+  #
+  # DELIBERATELY NOT SILENCING THE WRITERS INSTEAD. The honeypot's `armed at`
+  # line is on stderr on purpose and `test/integration/honeypot.test.ts`
+  # asserts it: it is what distinguishes "the detector moved to the right
+  # stream" from "the detector stopped announcing itself", and only the first
+  # was ever the fix. The line still goes to stderr, still reaches
+  # `docker logs`; it just does not stay on screen.
+  #
+  # tui ARM ONLY, and that is the point rather than an accident. The rpc arm's
+  # stdout IS the JSONL protocol, so writing an escape sequence anywhere near
+  # it is the exact defect the honeypot line already caused once. Aimed at
+  # /dev/tty rather than stdout for the same reason, and guarded so a terminal
+  # that will not take it cannot stop the worker launching.
+  printf '\033[2J\033[3J\033[H' > /dev/tty 2>/dev/null || true
   "${PIFLEET_WORKER_BIN:-pi}" "$@" < /dev/tty &
   worker_pid=$!
 else

@@ -27,6 +27,7 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -112,6 +113,68 @@ async function runEntrypoint(
 
   return { code, stderr, evidence: seen };
 }
+
+/**
+ * The pane wipe belongs to ONE arm, and which one is a correctness question.
+ *
+ * A tui worker's pane is a standing surface, so anything the container printed
+ * on its way up — the honeypot's `armed at` line, any future startup chatter —
+ * would sit above Pi's first draw for the life of the pane. Clearing fixes
+ * that. Writing the same escape sequence in the RPC arm would be the defect
+ * that already shipped once from this file: an rpc worker's STDOUT IS the JSONL
+ * protocol, and one stray sequence ahead of Pi's first message kills the worker
+ * during startup with nothing anywhere saying why.
+ *
+ * READ OUT OF THE SOURCE, and the reason is stated rather than glossed: the tui
+ * arm needs a CONTROLLING TERMINAL, which a unit test has none of — every
+ * behavioural probe in this file drives the rpc arm or the tui arm's REFUSAL.
+ * So this is a shape assertion, and it is the weaker half deliberately: the
+ * functional guard on the half that can break a run already exists, in
+ * `test/integration/honeypot.test.ts`, which asserts an rpc worker's stdout
+ * carries the worker's bytes and NOTHING ELSE with `toBe` rather than
+ * `toContain` — an escape sequence leaking into that arm reddens it.
+ */
+describe("the pane wipe is tui-only", () => {
+  const script = readFileSync(ENTRYPOINT, "utf8");
+
+  /**
+   * Sliced from the pane-mode `if` OUTWARD, not matched with a regex over the
+   * whole file.
+   *
+   * The first shape of this test used `/\nelse\n([\s\S]*?)\nfi\n/` for the rpc
+   * arm and was WRONG: the script has an earlier if/else — the writable
+   * agent-dir probe — so the match landed on that block, and a mutation that
+   * added a screen clear to the real rpc arm passed. Caught by mutating rather
+   * than by reading, which is the only reason it is not still passing.
+   */
+  const start = script.indexOf('if [ "${PIFLEET_PANE_MODE:-rpc}" = "tui" ]; then');
+  const block = script.slice(start);
+  const elseAt = block.indexOf("\nelse\n");
+  const fiAt = block.indexOf("\nfi\n", elseAt);
+  const tuiArm = block.slice(0, elseAt);
+  const rpcArm = block.slice(elseAt, fiAt);
+
+  test("the arms were actually located", () => {
+    // Without this the two assertions below pass vacuously on empty strings.
+    expect(start).toBeGreaterThan(-1);
+    expect(elseAt).toBeGreaterThan(-1);
+    expect(fiAt).toBeGreaterThan(elseAt);
+    expect(tuiArm).toContain("/dev/tty");
+    expect(rpcArm).toContain("exec 3<&0");
+  });
+
+  test("the tui arm clears the terminal before launching the worker", () => {
+    expect(tuiArm).toContain("[2J");
+    // Aimed at the terminal by NAME, not at stdout — the same one-owner rule
+    // that makes the tui arm redirect the worker from /dev/tty.
+    expect(tuiArm).toMatch(/\[2J[\s\S]*?> \/dev\/tty/);
+  });
+
+  test("the rpc arm writes no escape sequence at all", () => {
+    expect(rpcArm).not.toContain("[2J");
+    expect(rpcArm).not.toContain("\\033");
+  });
+});
 
 describe("PIFLEET_PANE_MODE selects the stdin contract (SRD §3.5)", () => {
   /**
