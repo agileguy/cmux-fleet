@@ -78,7 +78,7 @@ import { stringify } from "yaml";
 import { LlmSchema } from "../../src/config/schema.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
 import { buildPiArgv } from "../../src/config/render.ts";
-import { buildWorkerEnv } from "../../src/run/worker-env.ts";
+import { buildWorkerEnv, secretContainerPath } from "../../src/run/worker-env.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ENTRYPOINT = join(REPO_ROOT, "docker", "entrypoint.sh");
@@ -160,8 +160,17 @@ async function render(
    * depth for the same reason the identifier guard was: the entrypoint reads an
    * ENVIRONMENT VARIABLE, not config, so a hand-assembled env file, a future
    * harness, or a supervisor bug can still hand it anything at all.
+   *
+   * `undefined` REMOVES a variable the plan produced, and that spelling was
+   * added when the host half of D8 landed. The docblock above used to say
+   * `buildWorkerEnv` "does not yet emit `PIFLEET_LLM_API_KEY_FILE`"; it does
+   * now, so a test that needs the entrypoint to meet a POINTERLESS environment
+   * can no longer get one by simply not asking for it. Overwriting with `""` is
+   * not the same thing and would not do: an empty pointer is a value the
+   * entrypoint treats as "no credential configured", which is the behaviour
+   * under test rather than the fixture for it.
    */
-  envOverride: Record<string, string> = {},
+  envOverride: Record<string, string | undefined> = {},
 ): Promise<{ argvProvider: string; models: ModelsJson | null; code: number; stderr: string }> {
   const loaded = await parseConfig(stringify(doc), "/tmp/fleet.yaml");
   const w = resolveWorker(loaded, "w1");
@@ -189,8 +198,40 @@ async function render(
     PATH: process.env["PATH"] ?? "/usr/bin:/bin",
     HOME: dir,
     PIFLEET_WORKER_BIN: standIn,
-    ...envOverride,
   };
+
+  /**
+   * THE HARNESS PLAYS `materialize.ts` AND THE MOUNT, because the host half of
+   * D8 now makes it have to.
+   *
+   * `buildWorkerEnv` emits `PIFLEET_LLM_API_KEY_FILE=/secrets/<NAME>` and hands
+   * the VALUE back separately on `plan.secretFiles`, exactly as `up` does — the
+   * supervisor writes those files and Docker mounts them at `/secrets`. Neither
+   * step exists here, and `/secrets` cannot be created on a developer Mac or a
+   * non-root runner, so without this every test in this file that is not about
+   * credentials met a pointer with nothing behind it and got the entrypoint's
+   * own exit 73. Correct refusals, wrong subject.
+   *
+   * So each planned secret file is written to this test's directory and any var
+   * pointing at its container path is re-aimed at the host copy. The rewrite is
+   * driven by `secretContainerPath(name)` rather than by matching `/secrets/`
+   * as text, so it follows the one function that decides that path instead of
+   * re-deciding it here.
+   */
+  const secretsDir = join(dir, "secrets");
+  await mkdir(secretsDir, { recursive: true });
+  for (const sf of plan.secretFiles) {
+    const hostPath = join(secretsDir, sf.name);
+    await writeFile(hostPath, sf.value);
+    const containerPath = secretContainerPath(sf.name);
+    for (const [k, v] of Object.entries(env)) {
+      if (v === containerPath) env[k] = hostPath;
+    }
+  }
+  for (const [k, v] of Object.entries(envOverride)) {
+    if (v === undefined) delete env[k];
+    else env[k] = v;
+  }
 
   const p = Bun.spawn(["bash", ENTRYPOINT], {
     env,
@@ -285,10 +326,22 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
   /**
    * DEFECT A IS GONE RATHER THAN MOVED, and this is the test that says so.
    *
-   * The environment channel is fully populated — `buildWorkerEnv` writes
-   * `OMLX_API_KEY=KEY-FROM-THE-ENVIRONMENT` and `PIFLEET_LLM_API_KEY_ENV=
-   * OMLX_API_KEY`, exactly what a real `up` produces today — and there is NO
-   * pointer. A correct D8 entrypoint renders an EMPTY key from that.
+   * THE ENVIRONMENT IT MEETS IS NOW HAND-ASSEMBLED, and that change is the host
+   * half of D8 reporting itself. This test used to read `render(baseDoc(), {
+   * OMLX_API_KEY: ... })` and rely on `buildWorkerEnv` to populate the
+   * environment channel "exactly what a real `up` produces today". A real `up`
+   * no longer produces that: `worker-env.ts` puts NO credential in the
+   * environment under any name and emits `PIFLEET_LLM_API_KEY_FILE` instead, so
+   * the old call produced a POINTED environment with no file behind it and the
+   * entrypoint correctly refused it with exit 73.
+   *
+   * The scenario is therefore built explicitly rather than borrowed: the
+   * pointer deleted, the operator's variable and the old `_ENV` indirection
+   * both present and populated. That it can no longer be reached through
+   * `buildWorkerEnv` is exactly what ISC-407 asserts, and it is the reason this
+   * test keeps its value rather than losing it — it is now a probe of the
+   * ENTRYPOINT ALONE, against an environment only a hand-written env file, a
+   * future harness or a supervisor bug could hand it.
    *
    * Asserting the absence is the only way to keep the fix permanent. A read
    * that consults the file first and the environment second would pass every
@@ -299,7 +352,15 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
    * the empty-key one ISC-406 fixed.
    */
   test("the credential no longer travels in the environment at all", async () => {
-    const r = await render(baseDoc(), { OMLX_API_KEY: "KEY-FROM-THE-ENVIRONMENT" });
+    const r = await render(
+      baseDoc(),
+      { OMLX_API_KEY: "KEY-FROM-THE-ENVIRONMENT" },
+      {
+        PIFLEET_LLM_API_KEY_FILE: undefined,
+        OMLX_API_KEY: "KEY-FROM-THE-ENVIRONMENT",
+        PIFLEET_LLM_API_KEY_ENV: "OMLX_API_KEY",
+      },
+    );
     expect(r.code).toBe(0);
     expect(r.models).not.toBeNull();
     expect(r.models!.providers["omlx"]!.apiKey).toBe("");
