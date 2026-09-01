@@ -171,6 +171,97 @@ jq '.QueryResult | {total: .TotalResultCount, got: (.Results|length), errors: .E
   with `TotalResultCount: 33, open defects visible: 5` as the evidence. Two numbers that
   contradict the claim they were offered to support. Grading yourself is not checking yourself.
 
+## Resolving what the request meant, before you query for it
+
+Two words in almost every request are lookups, not literals. Both fail silently when assumed:
+the query succeeds, the rows are real, and they are the wrong rows.
+
+**"me" / "my" / "mine" — ask who the credential is.**
+
+```bash
+curl -sS --fail-with-body --max-time 30 --config /tmp/ticket.curlrc \
+     -H 'Accept: application/json' -G "${BASE_URL}/user" \
+     --data-urlencode 'fetch=UserName,DisplayName,ObjectID,UserProfile' -o /tmp/me.json
+```
+
+Filter on `Owner.ObjectID` with that id. `Owner.UserName` also works and is more readable in a
+query; `Owner` compared to a bare string matches nothing and errors on nothing. `UserProfile` is
+a reference — fetch it in a second call to reach `DefaultProject`, which you need below.
+
+**"this iteration" / "this sprint" / "the current one" — resolve BY DATE.**
+
+```bash
+curl -sS --fail-with-body --max-time 30 --config /tmp/ticket.curlrc \
+     -H 'Accept: application/json' -G "${BASE_URL}/iteration" \
+     --data-urlencode 'query=(((StartDate) <= "2026-09-01") AND ((EndDate) >= "2026-09-01"))' \
+     --data-urlencode 'fetch=Name,StartDate,EndDate,Project' \
+     --data-urlencode 'pagesize=200' -o /tmp/it.json
+```
+
+Two traps, and they compound:
+
+- **A "current" flag is ambiguous by construction.** On a day that is one iteration's end date
+  and the next one's start date, BOTH are marked current. Dates disambiguate; the flag does not.
+- **Iteration names are not unique.** Roughly one iteration object exists per project, all
+  sharing the sprint's name, so a date query returns many. Keep the one whose `Project` matches
+  the user's `DefaultProject`. A newly-opened sprint may exist as only one object until other
+  projects create theirs, so a single result is not proof you filtered correctly.
+
+**Name the iteration you settled on, with its dates, in the artifact.** It is a conclusion you
+reached, not an input you were given, and it is the one thing a reader cannot re-derive from
+your output if you omit it.
+
+## Which endpoint, and what "below Accepted" means
+
+| Ask about | Endpoint |
+|---|---|
+| stories and defects together | `${BASE_URL}/artifact` |
+| stories only | `${BASE_URL}/hierarchicalrequirement` |
+| defects only | `${BASE_URL}/defect` |
+| tasks only | `${BASE_URL}/task` |
+
+`ScheduleState` is an ORDERED enum — `Idea`, `Defined`, `In-Progress`, `Completed`, `Accepted`,
+then released states — and Rally compares it ordinally. "Everything not yet accepted" is
+`(ScheduleState < "Accepted")`, one term, not a disjunction of the four you happen to remember.
+
+**Tasks have no `ScheduleState`.** They carry `State` (`Defined`/`In-Progress`/`Completed`), so
+a `ScheduleState` filter against `${BASE_URL}/task` is a malformed query — which Rally answers `200` with a
+non-empty `Errors` array and zero results, i.e. indistinguishable from "no tasks" unless you
+read `Errors`. And **a task's `Iteration` is read through from its parent**: moving a story
+carries its tasks, and a task cannot be moved independently.
+
+## Child objects are separate queries
+
+A detailed fetch of one work item returns its own fields. It does not return its children.
+
+- **Tasks:** query `${BASE_URL}/task` with `(WorkProduct.FormattedID = "<id>")`. The parent side has no
+  usable expansion; go from the task side.
+- **Defects:** `${BASE_URL}/defect` with the same `WorkProduct` traversal.
+- **Discussion:** measured 2026-09-01 — `discussion`, `post` and `DiscussionPost` are all
+  REJECTED as artifact types on this endpoint. A run that tried all three reported the failure
+  rather than reporting "no comments", which is the correct outcome and the reason this line
+  exists. **Until a working spelling is recorded here, "no discussion" is not a finding you can
+  make** — report that you could not query it.
+
+## Creating a work item
+
+Four fields carry nearly every request: a title, an iteration, an owner, an estimate. The wire
+names are not what the request calls them:
+
+| Asked for | Field | Value shape |
+|---|---|---|
+| title | `Name` | string |
+| iteration | `Iteration` | the iteration's `_ref`, not its name |
+| owner / "assigned to me" | `Owner` | the user's `_ref` |
+| points / estimate | `PlanEstimate` | number |
+| "file a defect" | — | POST to `${BASE_URL}/defect` rather than `${BASE_URL}/hierarchicalrequirement` |
+| environment (defects) | `Environment` | string; ask the server for its allowed values first |
+
+**Reference fields take a `_ref`, not a name.** Resolve the iteration and the user first — the
+two lookups above give you both — and pass the `_ref` from those responses. A name string in a
+reference field is rejected, or worse, accepted and dropped by a sanitizer, which is exactly
+what the read-back check below exists to catch.
+
 ## Rich text is HTML, and you do not write HTML
 
 Some fields on these objects are plain strings — a state, an owner, a point estimate. Those you
