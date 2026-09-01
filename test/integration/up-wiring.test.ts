@@ -47,6 +47,14 @@ import { mergeLedger } from "../../src/run/ledger.ts";
 import { readRunBudgetPolicy, readRunWorktrees } from "../../src/run/state.ts";
 import { inspectCloneDirt } from "../../src/run/worktree.ts";
 import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
+// ISC-410's expected names are DERIVED, never typed: a literal would still pass
+// if the composition changed, and `up` would then be creating names this file
+// never looks for.
+import {
+  providerNetworkName,
+  relayContainerName,
+  uplinkNetworkName,
+} from "../../src/security/relay.ts";
 // The ISC-56 decoy waits for its own process to become visible to the very
 // scan `up` runs, rather than sleeping a hopeful interval — see
 // `startDecoyTrainingRun`.
@@ -842,6 +850,14 @@ interface FleetOptions {
   /** `llm.provider`. Must be a key of `providers` when that map is written. */
   llmProvider?: string;
   /**
+   * `egress.allow` entries. Omitted by default — the flat fixture's relay
+   * carries `host.docker.internal`, which the default policy already permits.
+   *
+   * A providers map needs one entry per relay target, because `ensureBridgeRelay`
+   * refuses to forward a destination `decide()` denies.
+   */
+  egressAllow?: { host: string; port: number }[];
+  /**
    * `PIFLEET_SHIM_NETWORK_ABSENT`: make the shimmed daemon report a network
    * absent until it has been created, so `network create` is observable.
    * See the `inspect` branch of `writeDockerShim` for why it is opt-in.
@@ -1075,6 +1091,15 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
         // can leave a declared provider unselected.
         `${w.model === undefined ? "" : `, model: ${w.model}`}}`,
     ),
+    // LAST, after the whole `workers:` sequence — a top-level key emitted
+    // between two list entries would silently truncate it.
+    ...(opts.egressAllow === undefined
+      ? []
+      : [
+          "egress:",
+          "  allow:",
+          ...opts.egressAllow.map((a) => `    - {host: ${a.host}, port: ${a.port}}`),
+        ]),
     "",
   ].join("\n");
 }
@@ -4191,5 +4216,186 @@ describe("up refuses a tui worker on the effective headless backend (TUI spec it
       await expectNothingLaunched(rig);
     },
     cliBudget(1),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ISC-410 — a DECLARED provider nothing resolves to is inert, ON THE `up` PATH
+// ---------------------------------------------------------------------------
+
+/**
+ * `test/unit/relay-provider-bridges.test.ts` already proves the PLAN omits an
+ * unused provider, and that the plan's input comes from workers the real config
+ * loader resolved rather than from `Object.keys(llm.providers)`. That is a
+ * strong pin on `egressBridgePlan` and it is not what this block adds.
+ *
+ * What nothing re-checked is that **`up` creates from the plan**. `up.ts` walks
+ * `egressBridges` twice — once to `ensureEgressNetwork` every bridge, once to
+ * `ensureBridgeRelay` every bridge — and either loop rewritten to walk the
+ * DECLARED providers instead leaves `egressBridgePlan` untouched, every unit
+ * test green, and ISC-410 false on the only path an operator ever runs. That is
+ * this file's founding defect class verbatim: a control tested exhaustively as
+ * a module and held in place by nothing.
+ *
+ * The criterion's own probe is `docker network ls` and `docker ps` on a live
+ * three-provider fleet. This runs the REAL `up` against the PATH shim instead,
+ * so it needs no daemon and lands in the fast job — and it pays for that with
+ * `shimNetworkAbsent`, which makes the shimmed daemon report a network absent
+ * until it has been created. Without it every `ensureEgressNetwork` takes its
+ * adopt branch, no `network create` is ever issued, and the strongest available
+ * assertion would be about which names `up` MENTIONED.
+ *
+ * ## Anti-vacuity, which is the whole risk in a negative claim
+ *
+ * "The string is absent from the log" passes trivially if the log is empty, if
+ * `up` exited before the bridge loop, or if the config never reached that code.
+ * So the absence is asserted alongside positives read out of THE SAME LOG: the
+ * log is non-empty, and both USED providers' bridges, uplinks and relays were
+ * created by name. A run that never got near the loop fails those before it
+ * reaches the negative, which is the point — the positives are not decoration,
+ * they are what makes the negative mean anything.
+ *
+ * Every expected name is DERIVED, through the same `providerNetworkName` /
+ * `uplinkNetworkName` / `relayContainerName` the product composes with. A
+ * literal would still pass if the composition changed, and `up` would then be
+ * creating names this test never looks for.
+ */
+describe("a declared-but-unused provider creates nothing (ISC-410)", () => {
+  /**
+   * Two providers a worker names, one nothing names. The unused key is LAST so
+   * a plan built from `Object.keys` would put it last too — an off-by-one that
+   * dropped the final entry would then pass this test for the wrong reason —
+   * and the three names are chosen so no derived name is a substring of any
+   * other, which is what keeps `toContain` from being satisfied by an overlap.
+   */
+  const PROVIDERS = [
+    {
+      name: "alpha",
+      hosted: false,
+      baseUrl: "http://alpha.house.test:8000/v1",
+      apiKeyEnv: "ALPHA_API_KEY",
+      relayUpstream: "192.168.86.49:8000",
+    },
+    {
+      name: "bravo",
+      hosted: true,
+      baseUrl: "https://bravo.example.test/v1",
+      apiKeyEnv: "BRAVO_API_KEY",
+      relayUpstream: "104.18.0.1:443",
+    },
+    {
+      name: "charlie",
+      hosted: true,
+      baseUrl: "https://charlie.example.test/v1",
+      apiKeyEnv: "CHARLIE_API_KEY",
+      relayUpstream: "104.18.0.2:443",
+    },
+  ];
+
+  const USED = ["alpha", "bravo"];
+  const UNUSED = "charlie";
+
+  test(
+    "three declared, two resolved: only the two resolved bridges are created",
+    async () => {
+      const rig = await makeRig({
+        providers: PROVIDERS,
+        llmProvider: "alpha",
+        shimNetworkAbsent: true,
+        /**
+         * EVERY provider's upstream is allowed, INCLUDING the unused one.
+         *
+         * The two used providers need it — `ensureBridgeRelay` refuses to
+         * forward a destination the policy denies. Charlie does not need it and
+         * that is exactly why it is here: with charlie's upstream denied, "no
+         * network for charlie" would have a second, duller explanation, and a
+         * `up` that DID iterate declared providers would fail on the policy
+         * before it ever reached a `network create`. Allowing it removes the
+         * alternative and leaves only the claim under test.
+         */
+        egressAllow: PROVIDERS.map((p) => ({
+          host: p.relayUpstream.split(":")[0]!,
+          port: Number(p.relayUpstream.split(":")[1]),
+        })),
+        // `eng-1` inherits `llm.provider: alpha`; `eng-2` SELECTS bravo through
+        // its model prefix. Nothing anywhere selects charlie.
+        extraWorkers: [{ id: "eng-2", role: "engineer", model: "bravo/wiring-test-model" }],
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,eng-2",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      // `toMatchObject` on the pair rather than `toBe` on the code alone: a
+      // refusal here is almost always a fixture problem (an unallowed relay
+      // target, an undeclared provider), and the diff quotes `stderr` so the
+      // cause is named HERE instead of being reconstructed from an exit code.
+      // stderr is carried, never asserted — an unrelated warning must not turn
+      // this test red.
+      expect({ code: up.code, stderr: up.stderr }).toMatchObject({ code: EXIT.SUCCESS });
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      const calls = await readDockerCalls(rig);
+      // ANTI-VACUITY 1. An absent or empty log satisfies every negative below
+      // without `up` having run a single docker command.
+      expect(calls.length).toBeGreaterThan(0);
+
+      const created = calls
+        .filter((l) => l.startsWith("network create "))
+        .map((l) => l.split(/\s+/).at(-1));
+
+      // ANTI-VACUITY 2. The POSITIVE half, from the same log: both resolved
+      // providers' bridges — and their uplinks — were created BY NAME. An `up`
+      // that exited before the bridge loop, or one whose config never carried
+      // the providers map, fails here rather than passing the negative below.
+      for (const p of USED) {
+        const net = providerNetworkName(NETWORK, p);
+        expect(created).toContain(net);
+        expect(created).toContain(uplinkNetworkName(net));
+      }
+
+      // …and each of those bridges got its relay STARTED, which is the second
+      // half of what a bridge is. `run` argv only: an `inspect` of the same
+      // name is `up` asking, not `up` creating.
+      for (const p of USED) {
+        const relay = relayContainerName(providerNetworkName(NETWORK, p));
+        expect(calls.some((l) => l.startsWith("run ") && l.includes(relay))).toBe(true);
+      }
+
+      // THE CRITERION. The declared-and-unused provider's derived names appear
+      // in NO docker argv of any kind — not created, not inspected, not
+      // connected, not run. Absence from the whole log is strictly stronger
+      // than absence from the create lines: `up` cannot have created a network
+      // it never named.
+      const unusedNet = providerNetworkName(NETWORK, UNUSED);
+      const unusedNames = [unusedNet, uplinkNetworkName(unusedNet), relayContainerName(unusedNet)];
+      for (const name of unusedNames) {
+        // Asserted per name rather than per line so a failure reports WHICH
+        // derived name leaked, not merely that some line was wrong.
+        expect(calls.filter((l) => l.includes(name))).toEqual([]);
+      }
+
+      // The same claim once more against the COUNT, because every assertion
+      // above is shaped "these are present / that one is not" and none of them
+      // would notice a third bridge under a name nothing here predicts. Two
+      // providers resolved: two bridges, two uplinks.
+      expect(created.filter((n) => n !== undefined && n.startsWith(`${NETWORK}-`)).length).toBe(4);
+
+      // And `up`'s own claim agrees with the daemon log. The ledger is the
+      // surface an operator reads; a fleet that created two bridges while
+      // reporting three would be lying in the direction ISC-410 cares about.
+      const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+      const readied = records
+        .filter((r) => r.actor === "cli-up" && r.event === "egress_network_ready")
+        .map((r) => r.detail?.["network"])
+        .sort();
+      expect(readied).toEqual(USED.map((p) => providerNetworkName(NETWORK, p)).sort());
+    },
+    90_000,
   );
 });
