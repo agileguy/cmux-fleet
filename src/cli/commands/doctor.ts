@@ -726,10 +726,14 @@ export function allowlistVerdicts(
     // exactly "the operator wrote a `:level`" — no second parse of the string.
     const asWritten = stripNamespace(entry);
     const namedALevel = asWritten !== model;
-    const served =
+    // Named `isServed` rather than `served`: a `const served` here would shadow
+    // this function's `served` PARAMETER inside the callback, and the next edit
+    // that reaches for the raw list one line earlier gets a TDZ error rather
+    // than the array.
+    const isServed =
       servedExact.has(model) ||
       (namedALevel ? servedExact.has(asWritten) : servedLevelRelaxed.has(model));
-    return { entry, model, served };
+    return { entry, model, served: isServed };
   });
 }
 
