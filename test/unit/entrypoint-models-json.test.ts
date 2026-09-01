@@ -26,6 +26,29 @@
  * human wrote in `fleet.yaml`. Mutating either side alone breaks the match;
  * mutating both breaks the anchor.
  *
+ * ## D8 (SRD-INFERENCE-PROVIDERS §6.6) — the credential channel is now a FILE
+ *
+ * ISC-406's fix made the entrypoint follow `PIFLEET_LLM_API_KEY_ENV` to the
+ * variable holding the value. D8 deletes that indirection rather than repairing
+ * it: the value is written to `/secrets/<NAME>` at `0444` and the environment
+ * carries `PIFLEET_LLM_API_KEY_FILE`, a fleet-owned FIXED name holding a PATH.
+ *
+ * **That is what makes Defect A permanent rather than patched**, and it is why
+ * the two `api_key_env`-reaches-`apiKey` tests below were REPLACED rather than
+ * kept alongside the new ones. Keeping an environment read as a fallback would
+ * resurrect the defect the moment the pointer failed to arrive — the entrypoint
+ * would silently read a different variable and render `apiKey: ""`, exit 0,
+ * nothing on stderr. The name must stop participating, so it is asserted to
+ * stop participating: `the credential no longer travels in the environment at
+ * all` hands the entrypoint a fully-populated environment channel and requires
+ * an EMPTY key out of it.
+ *
+ * The three failure branches — absent, empty, malformed pointer — are LOUD, per
+ * SRD §5.9's standing doctrine (`config validate` refuses a bad `relay_upstream`
+ * "so the failure becomes a sentence instead"). The reasoning is in the
+ * entrypoint's own comment; what these tests pin is that the sentence and the
+ * non-zero exit both actually happen, and that `models.json` is not written.
+ *
  * ## Why the real script, and the real env plan
  *
  * These run `docker/entrypoint.sh` itself under the host's bash with `HOME`
@@ -47,9 +70,9 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile, chmod } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile, chmod, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { stringify } from "yaml";
 
 import { LlmSchema } from "../../src/config/schema.ts";
@@ -62,8 +85,38 @@ const ENTRYPOINT = join(REPO_ROOT, "docker", "entrypoint.sh");
 
 const dirs: string[] = [];
 afterAll(async () => {
-  await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  // chmod back before rm: the unreadable-file case leaves a 0000 file, and on a
+  // non-root runner `rm -r` cannot traverse into a directory it cannot read.
+  await Promise.all(
+    dirs.splice(0).map(async (d) => {
+      await chmod(d, 0o755).catch(() => {});
+      await rm(d, { recursive: true, force: true });
+    }),
+  );
 });
+
+/**
+ * A credential file on disk, standing in for what `materialize.ts` writes into
+ * `WorkerPaths.secretsDir` and Docker mounts read-only at `/secrets`.
+ *
+ * NO TRAILING NEWLINE, and that is a property of the real writer rather than a
+ * convenience here: `writeWorkerSecretFiles` writes "the RAW value and NOTHING
+ * ELSE — no trailing newline, deliberately", because the documented
+ * `skills/ticket-ops` call concatenates those bytes into a `curl --config`
+ * header line. A fixture that added one would let a `read`-based entrypoint pass
+ * a test the real mount would fail.
+ */
+async function keyFile(
+  value: string,
+  opts: { name?: string; mode?: number } = {},
+): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "pifleet-cred-"));
+  dirs.push(dir);
+  const path = join(dir, opts.name ?? "OMLX_API_KEY");
+  await writeFile(path, value);
+  if (opts.mode !== undefined) await chmod(path, opts.mode);
+  return path;
+}
 
 function baseDoc(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -96,12 +149,17 @@ async function render(
   /**
    * Written over the plan's own vars, AFTER `buildWorkerEnv` produced them.
    *
-   * Needed because `config/schema.ts` now refuses a malformed or reserved
-   * `api_key_env` at parse time, so a doc can no longer carry one this far —
-   * and the entrypoint's identifier guard is still real defence in depth. It
-   * reads an ENVIRONMENT VARIABLE, not config, so a hand-assembled env file, a
-   * future harness, or a supervisor bug can still hand it a bad name. This is
-   * the only way left to exercise that path.
+   * This is how the D8 pointer arrives. `buildWorkerEnv` does not yet emit
+   * `PIFLEET_LLM_API_KEY_FILE` — the host half of D8 is a separate change — so
+   * the container half is exercised the way the entrypoint will actually meet
+   * it: a fleet-owned name carrying a path, written over a real plan.
+   *
+   * It is also the only way left to hand the entrypoint a BAD pointer.
+   * `config/schema.ts` refuses a malformed or reserved `api_key_env` at parse
+   * time, so a doc cannot carry one this far, and the path guard is defence in
+   * depth for the same reason the identifier guard was: the entrypoint reads an
+   * ENVIRONMENT VARIABLE, not config, so a hand-assembled env file, a future
+   * harness, or a supervisor bug can still hand it anything at all.
    */
   envOverride: Record<string, string> = {},
 ): Promise<{ argvProvider: string; models: ModelsJson | null; code: number; stderr: string }> {
@@ -201,33 +259,71 @@ describe("ISC-401: the resolved provider reaches Pi's argv AND models.json", () 
   });
 });
 
-describe("ISC-406: models.json carries the key under the CONFIGURED name", () => {
+describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FILE", () => {
   /**
-   * §2.2's probe, inverted.
+   * THE ASSERTION D8 EXISTS FOR: the file's contents reach `apiKey`.
    *
-   * The SRD ran the entrypoint's `jq -n` under `env -i` with `api_key_env:
-   * OLLAMA_API_KEY` and a supervisor that delivered `OLLAMA_API_KEY` and
-   * nothing else, and got `"apiKey": ""`. This asserts the opposite outcome
-   * through the same channel, end to end: `buildWorkerEnv` chooses the name,
-   * the entrypoint has to find the value under it.
+   * §2.2's probe, inverted again and through the new channel. `hostEnv` is
+   * EMPTY — no credential exists anywhere in the environment — so the only way
+   * a non-empty key can appear in `models.json` is if the entrypoint opened the
+   * file and read it. Bun replaces the environment wholesale (`env -i`), so
+   * nothing from the developer's shell can supply one either.
    *
-   * `OMLX_API_KEY` IS DELIBERATELY ABSENT from `hostEnv`, and that absence is
-   * the whole test. Leaving it set would let the old hardcoded read succeed and
-   * the probe would prove nothing — which is precisely how the defect survived
-   * this long.
-   *
-   * The failure it prevents is silent: the entrypoint's guard tests the base
-   * URL and the model list and NOT the key, so the container boots, `up`
-   * reports success, and the worker authenticates as nobody.
+   * The value is deliberately not a plausible key: if this string appears, it
+   * came from the file this test wrote and from nowhere else.
    */
-  test("a renamed api_key_env still reaches apiKey", async () => {
-    const r = await render(baseDoc({ llm: { model: "TestModel", api_key_env: "OLLAMA_API_KEY" } }), {
-      OLLAMA_API_KEY: "KEY-FOR-RENAMED",
-    });
+  test("the credential is read from the file the pointer names", async () => {
+    const path = await keyFile("KEY-FROM-THE-FILE");
+    const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_FILE: path });
+    expect(r.code).toBe(0);
     expect(r.models).not.toBeNull();
     const provider = r.models!.providers["omlx"]!;
     expect(provider.apiKey).not.toBe("");
-    expect(provider.apiKey).toBe("KEY-FOR-RENAMED");
+    expect(provider.apiKey).toBe("KEY-FROM-THE-FILE");
+  });
+
+  /**
+   * DEFECT A IS GONE RATHER THAN MOVED, and this is the test that says so.
+   *
+   * The environment channel is fully populated — `buildWorkerEnv` writes
+   * `OMLX_API_KEY=KEY-FROM-THE-ENVIRONMENT` and `PIFLEET_LLM_API_KEY_ENV=
+   * OMLX_API_KEY`, exactly what a real `up` produces today — and there is NO
+   * pointer. A correct D8 entrypoint renders an EMPTY key from that.
+   *
+   * Asserting the absence is the only way to keep the fix permanent. A read
+   * that consults the file first and the environment second would pass every
+   * other test in this describe and quietly restore the defect: the day the
+   * pointer failed to arrive on a path that should set it, the entrypoint would
+   * fall back to a variable that happens to be present and authenticate the
+   * worker with the wrong credential — a 401 strictly harder to diagnose than
+   * the empty-key one ISC-406 fixed.
+   */
+  test("the credential no longer travels in the environment at all", async () => {
+    const r = await render(baseDoc(), { OMLX_API_KEY: "KEY-FROM-THE-ENVIRONMENT" });
+    expect(r.code).toBe(0);
+    expect(r.models).not.toBeNull();
+    expect(r.models!.providers["omlx"]!.apiKey).toBe("");
+  });
+
+  /**
+   * …and the operator's chosen NAME does not participate either, even when it
+   * is present and holds a different value.
+   *
+   * This is the sharper arm of the test above: the pointer IS set and correct,
+   * and the environment simultaneously offers a renamed credential the old code
+   * path would have followed. The file has to win outright. An implementation
+   * that preferred the environment, or that concatenated the two, is red here
+   * while the previous test could still be green.
+   */
+  test("a populated api_key_env cannot override the file", async () => {
+    const path = await keyFile("KEY-FROM-THE-FILE");
+    const r = await render(
+      baseDoc({ llm: { model: "TestModel", api_key_env: "OLLAMA_API_KEY" } }),
+      { OLLAMA_API_KEY: "KEY-FROM-THE-ENVIRONMENT" },
+      { PIFLEET_LLM_API_KEY_FILE: path },
+    );
+    expect(r.code).toBe(0);
+    expect(r.models!.providers["omlx"]!.apiKey).toBe("KEY-FROM-THE-FILE");
   });
 
   /**
@@ -270,62 +366,178 @@ describe("ISC-406: models.json carries the key under the CONFIGURED name", () =>
   });
 
   /**
-   * The default fleet, unchanged. Green before the fix and after it, and kept
-   * because the indirection is new machinery on the path every worker takes.
+   * A KEYLESS FLEET IS A SUPPORTED CONFIGURATION, and the absent POINTER is how
+   * it is expressed. This is the distinction the whole failure design turns on.
+   *
+   * A local oMLX with no credential is legitimate — SRD §5.9's own default
+   * shape — and `worker-env.ts` already states the convention for it: it "omits
+   * the variable entirely rather than writing it blank". Under D8 the analogue
+   * is to omit the POINTER. So an absent pointer means "no credential was
+   * configured", renders an empty key, and exits 0.
+   *
+   * It is also the shape the non-supervisor callers take. `image verify` and
+   * the acceptance containers run this script with no worker env file at all,
+   * and `test/integration/image.test.ts` exercises exactly that. If an absent
+   * pointer were fatal, `image verify` would stop working.
+   *
+   * A pointer that IS set and cannot be honoured is the opposite event and is
+   * treated as such below: it means the host wrote a promise it did not keep.
    */
-  test("the default api_key_env still reaches apiKey", async () => {
-    const r = await render(baseDoc(), { OMLX_API_KEY: "KEY-FOR-SELF-HOSTED" });
-    expect(r.models!.providers["omlx"]!.apiKey).toBe("KEY-FOR-SELF-HOSTED");
-  });
-
-  /**
-   * A keyless fleet must still BOOT, and this is where bash 3.2 and bash 5.2
-   * part company.
-   *
-   * A local oMLX with no credential is legitimate, so `worker-env.ts` omits the
-   * variable entirely rather than writing it blank. The entrypoint then
-   * indirects on a name nothing holds. Measured under `env -i` and `set -eu`:
-   *
-   *   bash 3.2.57 (macOS host)      ${!name:-} -> ""                      exit 0
-   *   bash 5.2.15 (bookworm image)  unset name is fine; a MALFORMED name is
-   *                                 "invalid variable name", exit 1
-   *
-   * so the entrypoint tests the name against ENV_KEY_RE's own pattern before
-   * indirecting. HONEST LIMIT: on a bash-3.2 host the malformed-name half of
-   * this is weak, because 3.2 forgives what 5.2 refuses. In CI it is not —
-   * `ubuntu-latest` runs bash 5, which is also what the image runs, and an
-   * unguarded indirection fails this case there under `set -e`.
-   */
-  test("a keyless fleet renders an empty key rather than failing to boot", async () => {
+  test("no pointer at all is a keyless fleet, not a failure", async () => {
     const r = await render(baseDoc(), {});
     expect(r.code).toBe(0);
     expect(r.models!.providers["omlx"]!.apiKey).toBe("");
   });
 
   /**
-   * The entrypoint's identifier guard, exercised THROUGH THE ENVIRONMENT rather
-   * than through config — because config can no longer produce this.
+   * THE ABSENT-FILE DECISION, pinned in both directions.
    *
-   * `schema.ts` refuses a malformed `api_key_env` at parse time now, which is
-   * the right altitude: it names the field and the file to the operator. This
-   * test therefore writes the pointer directly, which is what a hand-assembled
-   * env file or a supervisor bug would do, and asserts the property that made
-   * the guard worth having in the first place: **the container BOOTS.**
+   * A pointer naming a file that is not there is not "no credential" — it is
+   * the host side failing to write what its own environment says it wrote.
+   * Inheriting the empty-key behaviour would reproduce §2.2's silent failure
+   * verbatim on a new channel: `models.json` still written, Pi still registers
+   * the provider, the container still boots, `up` still reports success, and
+   * the first symptom is an authentication error at generation time inside a
+   * container on a worker that looks healthy.
    *
-   * That is not cosmetic. Measured, bash 3.2.57 (macOS) returns "" and exits 0
-   * for a malformed name while bash 5.2.15 (the bookworm image) errors and
-   * exits 1 — so under this file's `set -eu` an unguarded indirection refuses
-   * to start the container on the image that actually ships, while passing on a
-   * developer's Mac. `TARGET[0]` is the sharper case and the regex blocks it
-   * too: bash treats it as an array subscript and RETURNS a value rather than
-   * erroring, so it would have succeeded silently.
+   * SRD §5.9 has a standing answer for this shape. A `relay_upstream` hostname
+   * "produces a relay that starts cleanly, reports ready, and then fails every
+   * connection with a resolution error no operator-facing surface shows.
+   * `config validate` refuses it, so the failure becomes a sentence instead."
+   * This is the same trade at the container's altitude.
+   *
+   * Three things are asserted, and dropping any one of them lets a plausible
+   * wrong implementation through: the exit is non-zero, the sentence NAMES THE
+   * PATH so an operator can act on it, and `models.json` IS NOT WRITTEN — a
+   * refusal that still left a file behind would let Pi start against a
+   * half-configured provider on the next container start.
    */
-  test("a malformed api_key_env degrades to an empty key, not a dead container", async () => {
-    for (const bad of ["not-an-ident", "TARGET[0]", "$OMLX_API_KEY"]) {
-      const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_ENV: bad });
-      expect(r.code, `${bad} killed the container`).toBe(0);
-      expect(r.models!.providers["omlx"]!.apiKey, `${bad} produced a key`).toBe("");
+  test("a pointer at a file that is not there refuses loudly", async () => {
+    const r = await render(baseDoc(), {}, {
+      PIFLEET_LLM_API_KEY_FILE: "/nonexistent-pifleet-secrets/OMLX_API_KEY",
+    });
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("/nonexistent-pifleet-secrets/OMLX_API_KEY");
+    expect(r.stderr).toContain("PIFLEET_LLM_API_KEY_FILE");
+    expect(r.models).toBeNull();
+  });
+
+  /**
+   * An EMPTY file is the same event as a missing one, and it is called out
+   * separately because it is the one an implementation is most likely to let
+   * through: `cat` on an empty file succeeds, so every existence check passes
+   * and the render proceeds with `apiKey: ""`.
+   *
+   * That is Defect A's exact output reached by a different route. The host's
+   * convention is omit-don't-blank, so a file that exists and holds nothing is
+   * a broken promise rather than a configured absence.
+   */
+  test("an empty credential file refuses loudly", async () => {
+    const path = await keyFile("");
+    const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_FILE: path });
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(path);
+    expect(r.models).toBeNull();
+  });
+
+  /**
+   * The refusal is INDEPENDENT OF THE RENDER GUARD, and that independence is
+   * the structural half of the fix.
+   *
+   * §2.2's diagnosis of why Defect A was silent is precise: "the guard above
+   * the block is `[ -n BASE_URL ] && [ -n MODELS ]` — it does not test the
+   * key". Putting the credential check inside that guard would leave the
+   * credential's health contingent on two unrelated variables, which is the
+   * same coupling reached from the other side. A broken pointer is a broken
+   * pointer whether or not this worker was going to render a provider.
+   */
+  test("a broken pointer refuses even when models.json would not be rendered", async () => {
+    const r = await render(baseDoc(), {}, {
+      PIFLEET_LLM_BASE_URL: "",
+      PIFLEET_LLM_MODELS: "",
+      PIFLEET_LLM_API_KEY_FILE: "/nonexistent-pifleet-secrets/OMLX_API_KEY",
+    });
+    expect(r.code).not.toBe(0);
+    expect(r.models).toBeNull();
+  });
+
+  /**
+   * THE PATH GUARD, and it replaces the identifier guard rather than joining
+   * it — the same defence at the same altitude, against a strictly worse
+   * consequence.
+   *
+   * The old guard tested a NAME and degraded a bad one to an empty key. A bad
+   * PATH cannot be degraded the same way, because the failure it admits is not
+   * "no value" but "SOME OTHER FILE'S value". `/secrets` is a shared namespace
+   * — `secretFilePath()` puts every Class 3 grant at `/secrets/<name>` and D8
+   * puts Class 1 in the same directory — and `models.json` lands on a named
+   * volume that outlives `--rm`. A pointer that escapes the mount turns the
+   * credential channel into a read primitive whose output is persisted.
+   *
+   * `..` is rejected as a SEGMENT rather than as a substring: a legitimate
+   * secret name can contain dots, and a substring test would refuse it.
+   * `/secrets/..` is included because it passes a naive "one segment below the
+   * mount" check — it has no slash of its own.
+   */
+  test("a traversing, relative or non-file pointer refuses loudly", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pifleet-cred-dir-"));
+    dirs.push(dir);
+    const bad = [
+      "/secrets/../etc/hosts", // escapes the mount by traversal
+      "/secrets/..", // one segment, and still an escape
+      "../../etc/hosts", // not absolute
+      "secrets/OMLX_API_KEY", // not absolute
+      dir, // exists and is readable, but is not a regular file
+    ];
+    for (const p of bad) {
+      const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_FILE: p });
+      expect(r.code, `${p} was accepted`).not.toBe(0);
+      expect(r.models, `${p} rendered a provider`).toBeNull();
     }
+  });
+
+  /**
+   * A SYMLINKED pointer is refused, mirroring the host's own rule.
+   *
+   * `materialize.ts` already calls `refuseSymlinkDestination` on the secrets
+   * directory and on every file in it, so the host refuses to WRITE through a
+   * link. This is the same rule applied at the read end, and it is not
+   * redundant: the host guards the directory it creates, while the entrypoint
+   * is handed a path by an environment variable and has no idea what produced
+   * it. A link is how a shape-valid path reaches a file the shape check
+   * cleared, so the two checks catch different things.
+   */
+  test("a symlinked pointer refuses loudly", async () => {
+    const real = await keyFile("KEY-BEHIND-A-LINK", { name: "REAL_KEY" });
+    const link = join(dirname(real), "LINKED_KEY");
+    await symlink(real, link);
+    const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_FILE: link });
+    expect(r.code).not.toBe(0);
+    expect(r.models).toBeNull();
+  });
+
+  /**
+   * An UNREADABLE file refuses loudly rather than rendering an empty key.
+   *
+   * HONEST LIMIT, stated rather than hidden: this asserts nothing when the test
+   * runs as root, because root reads a `0000` file and the branch is never
+   * entered. It is guarded rather than skipped silently so a reader can see the
+   * condition, and the branch it covers is reachable in the real container —
+   * the secrets mount is read-only and the worker does not run as root.
+   *
+   * (The spelling above is deliberate. `anti-criteria.test.ts`'s ISC-165 guard
+   * chunks test files on the `test(` boundary, so a docstring lands in the
+   * PRECEDING test's body; the literal mount-flag token in prose here made the
+   * symlink test above read as a read-only-mount refusal that never reads back.
+   * These tests are about a credential PATH, not about a mount, so the word is
+   * spelled out rather than the guard loosened.)
+   */
+  test("an unreadable credential file refuses loudly", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const path = await keyFile("KEY-NOBODY-CAN-READ", { mode: 0o000 });
+    const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_FILE: path });
+    expect(r.code).not.toBe(0);
+    expect(r.models).toBeNull();
   });
 
   /** …and the same names are refused far earlier, where the operator is told. */
