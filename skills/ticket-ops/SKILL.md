@@ -160,19 +160,44 @@ rally-cli tickets show S529596 --format json 2>/dev/null > /tmp/one.json
 | `--ticket-type userstory\|defect\|task\|testcase` | one type |
 | `--query "<WSAPI>"` | anything the flags cannot express |
 
-**`--state` takes ONE state, and "not Accepted" is not a state.** `ScheduleState` is an ordered
-enum — `Idea`, `Defined`, `In-Progress`, `Completed`, `Accepted`, then released states. There are
-two correct ways to ask for everything below `Accepted`, and one wrong one:
+### `--query` REPLACES every other filter. It does not combine with them.
+
+**This is the single most dangerous thing in the tool, and it fails by returning MORE rather than
+by erroring.** Measured 2026-09-01, on this workspace:
+
+| Command | Rows |
+|---|---|
+| `tickets --current-iteration --my-tickets` | **28** |
+| `tickets --my-tickets --query '(ScheduleState < "Accepted")'` | **19,439** |
+
+The second is not "my non-Accepted tickets". It is every non-Accepted artifact in the workspace:
+`--my-tickets` was silently discarded, and so was the iteration. It takes about a minute, it
+exits 0, and `success` is `true`. A worker that piped it into `jq` and counted would report a
+number with total confidence.
+
+So: **if you pass `--query`, it must carry EVERY term itself** — owner, iteration and state — or
+you have widened the question instead of narrowing it. When in doubt, do not pass it.
+
+### "Not Accepted" — the shape that is actually correct
+
+`--state` takes ONE state, and "not Accepted" is not a state. `ScheduleState` is an ordered
+enum — `Idea`, `Defined`, `In-Progress`, `Completed`, `Accepted`, then released states.
+
+**Narrow with the flags, then partition what came back:**
 
 ```bash
-# Server-side, one term. Rally compares the enum ordinally.
-rally-cli tickets --current-iteration --my-tickets \
-    --query '(ScheduleState < "Accepted")' --format json 2>/dev/null
-
-# Or fetch the scoped set and partition it — legitimate ONLY because every
-# narrowing flag above is already applied, so this filters a COMPLETE answer.
-jq '[.data[] | select(.state != "Accepted")]' /tmp/q.json
+rally-cli tickets --current-iteration --my-tickets --format json 2>/dev/null > /tmp/q.json
+jq -r '[.data[] | select(.state != "Accepted")] | .[] | "\(.formatted_id)  \(.state)  \(.name)"' /tmp/q.json
 ```
+
+This is not the "download a collection and grep it" the next rule forbids, and the difference is
+worth being precise about: every narrowing the QUESTION contains — owner, iteration — was applied
+by the server, so `/tmp/q.json` is the complete answer to a scoped question and the `jq` splits a
+set you already hold. Grepping is wrong when the server was never asked; partitioning is right
+when it was asked everything it could be.
+
+**Always report both halves** — how many came back and how many survived the partition. "28
+tickets in the iteration, 8 not Accepted" is checkable; "8 tickets" is not.
 
 **Filter on the server. Never fetch an unfiltered collection and grep it.** That is the failure
 this rule exists for: a run that pulled pages out of 59,616 objects and grepped for an owner name
@@ -188,12 +213,16 @@ answer.
 and whose `queried` array holds 5 is contradicting itself in the half that gets read
 mechanically.
 
-**`--query` is the escape hatch, and its grammar is unforgiving.** Every binary operator must be
-parenthesised, the whole expression included: `(A AND B)` is REJECTED, `((A) AND (B))` works, and
-three terms nest pairwise — `(((A) AND (B)) AND (C))`. A flat `AND` list fails in a way that
-reads exactly like the feature being absent, and a run once concluded from that "Rally WSAPI does
-not support AND" and reported a wrong count with confidence. Traverse references with dots:
-`Owner.UserName`, not `Owner`, which matches nothing and errors on nothing.
+**`--query`'s grammar is unforgiving, on top of it replacing your other filters.** Every binary
+operator must be parenthesised, the whole expression included: `(A AND B)` is REJECTED,
+`((A) AND (B))` works, and three terms nest pairwise — `(((A) AND (B)) AND (C))`. A flat `AND`
+list fails in a way that reads exactly like the feature being absent, and a run once concluded
+from that "Rally WSAPI does not support AND" and reported a wrong count with confidence. Traverse
+references with dots: `Owner.UserName`, not `Owner`, which matches nothing and errors on nothing.
+
+Between the grammar and the override, a self-contained `--query` is three nested terms you have
+to get right in one go. Reach for it only when the flags genuinely cannot express the question,
+and say in the artifact that you did.
 
 ## Other objects
 

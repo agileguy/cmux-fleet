@@ -198,6 +198,51 @@ describe("the skill documents the CLI that actually ships", () => {
     expect(SKILL).toContain("snake_case");
   });
 
+  /**
+   * THE TRAP THAT WAS MEASURED, and the reason this block is not decoration.
+   *
+   * The first draft of this skill recommended
+   * `--current-iteration --my-tickets --query '(ScheduleState < "Accepted")'`
+   * as the server-side way to ask for unfinished work. `--query` REPLACES the
+   * other filters rather than combining with them: that command returned
+   * 19,439 rows where the flags alone returned 28 — every non-Accepted
+   * artifact in the workspace — in about a minute, exit 0, `success: true`.
+   *
+   * It is the exact failure this whole design is built against: an unscoped
+   * query does not fail, it succeeds at something else. It reached the
+   * document the same way `Authorization: Token` did — written from a plausible
+   * reading of `--help` and never run — and it was caught by running it.
+   *
+   * So the warning is pinned, and so are the two measured numbers, because a
+   * warning without them is an assertion the next reader has to take on faith.
+   */
+  it("warns that --query replaces the other filters, with the measured counts", () => {
+    expect(SKILL).toContain("`--query` REPLACES every other filter");
+    expect(SKILL).toContain("19,439");
+    expect(SKILL).toContain("28");
+  });
+
+  it("does not recommend combining --query with the narrowing flags", () => {
+    // The specific line that was wrong. Any COPYABLE example putting a
+    // narrowing flag and --query in one command is the defect returning.
+    //
+    // Markdown table rows are excluded, and only those: the warning above is
+    // a two-row table that SHOWS the bad command beside its row count, which
+    // is the evidence for the warning and must not be graded as a
+    // recommendation. Same shape as the shim's header documenting the leaking
+    // spellings it prevents — prose about the trap is not the trap.
+    const copyable = SKILL.split("\n").filter(
+      (l) => l.includes("--query") && !l.trimStart().startsWith("|"),
+    );
+    expect(copyable.length, "no --query lines found at all — the extractor is wrong").toBeGreaterThan(0);
+    for (const l of copyable) {
+      expect(
+        l.includes("--my-tickets") || l.includes("--current-iteration"),
+        `this line recommends the override trap: ${l}`,
+      ).toBe(false);
+    }
+  });
+
   it("still requires the artifact pair, which the transport change does not touch", () => {
     expect(SKILL).toContain("ticket-ops.json");
     expect(SKILL).toContain("A run that writes only `ticket-ops.md` FAILS");
