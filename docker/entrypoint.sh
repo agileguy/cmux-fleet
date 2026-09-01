@@ -19,10 +19,26 @@
 # plus an explicit apt install).
 #
 # Environment contract (injected by the supervisor via --env-file):
-#   PIFLEET_LLM_PROVIDER   provider name, default "omlx"
+#   PIFLEET_LLM_PROVIDER   provider name, default "omlx". THE WORKER'S RESOLVED
+#                          provider, not the fleet-wide one: a worker's `model:`
+#                          may carry a `provider/` prefix that overrides
+#                          `llm.provider`, and the same resolved value is what
+#                          `config/render.ts` puts on `pi --provider`. The two
+#                          have to name the same provider or Pi is launched
+#                          naming one its own models.json does not define.
 #   PIFLEET_LLM_BASE_URL   e.g. http://host.docker.internal:8000/v1
 #   PIFLEET_LLM_MODELS     comma-separated model ids; EMPTY means "render nothing"
-#   OMLX_API_KEY           local server credential (not a billing key — SRD §5.9)
+#   PIFLEET_LLM_API_KEY_ENV
+#                          The NAME of the variable holding the provider
+#                          credential — `llm.api_key_env`, default
+#                          `OMLX_API_KEY`. A NAME, never a value; the value
+#                          arrives separately under the name this points at.
+#                          See the render block below for why the indirection
+#                          exists and why a second copy of the value would be
+#                          the wrong fix.
+#   <that name>            The provider credential itself. For today's default
+#                          fleet that is `OMLX_API_KEY`, a local server
+#                          credential and not a billing key (SRD §5.9).
 #   PIFLEET_HONEYPOT       "1" arms the escape-attempt listener and makes its
 #                          death fatal. UNSET means no listener at all, which is
 #                          how `image verify` and the acceptance containers run:
@@ -69,11 +85,70 @@ fi
 # JSON string escaping right in shell. A provider with an empty models list is
 # never written: Pi would refuse to register it, and an empty-but-present file
 # reads as "configured" to a human debugging the container.
+#
+# ## The credential is found THROUGH ITS NAME, not under a name this file knows
+#
+# `llm.api_key_env` exists precisely so the variable is NOT fixed, and
+# `run/worker-env.ts` honours it — it writes the key as `vars[apiKeyEnvName]`.
+# This block used to read a literal `${OMLX_API_KEY:-}`, and the two agreed only
+# because both strings happened to be `OMLX_API_KEY`. Reproduced under `env -i`
+# before the fix: a fleet with `api_key_env: OLLAMA_API_KEY`, whose supervisor
+# delivered `OLLAMA_API_KEY` and nothing else, rendered `"apiKey": ""`.
+#
+# It failed SILENTLY, which is the part that matters. The guard below tests the
+# base URL and the model list and NOT the key, so models.json is still written,
+# Pi still registers the provider, the container still boots and `up` still
+# reports success. The first symptom is an authentication error at generation
+# time, inside a container, on a worker that looks healthy — and against a
+# metered provider that reads at first glance as a billing problem.
+#
+# ## Why the NAME travels and not a second copy of the value
+#
+# The obvious fix is for the supervisor to also export the key under a fixed
+# fleet-owned alias. ISC-31 forbids it — "`docker inspect` shows no cloud
+# provider key in any container's environment (only `OMLX_API_KEY`)" — and it is
+# right to: an alias puts one credential in the environment TWICE, doubling the
+# surface of every `env` dump and crash serialisation to save this file one
+# indirection. One value under one name, and a pointer for this file to find it.
+#
+# ## `${!name}` rather than `eval`, and the guard around it
+#
+# Indirect expansion does not EVALUATE. `api_key_env` is a bare `shortStr` in
+# `config/schema.ts` with no identifier check, so an `eval` here would execute
+# whatever an operator's fleet.yaml put in that field.
+#
+# The identifier guard is not defensive padding — bash 3.2 and bash 5.2 DISAGREE
+# here, and the image has the one that bites. Measured, `env -i`, this file's
+# `set -eu`, with the name set to `not-an-ident`:
+#
+#   bash 3.2.57 (macOS host)     ${!name:-} -> ""          exit 0
+#   bash 5.2.15 (bookworm image) ${!name:-} -> "invalid variable name", exit 1
+#
+# The `:-` rescues an UNSET name on both, but only 3.2 forgives a malformed one,
+# so the naive port passes on a developer's Mac and, under `set -e`, refuses to
+# boot the container on the image it actually ships to. That state is reachable:
+# a non-identifier `api_key_env` is refused by `serializeEnvFile`'s ENV_KEY_RE
+# only when the host HAS that variable, because only then is it written as an
+# env-file KEY. When the host does not have it, nothing refuses it and the bad
+# name arrives here. Testing the name first — with ENV_KEY_RE's own pattern, so
+# both ends of this channel apply one rule — degrades that case to an empty key,
+# exactly as today, instead of to a worker that will not start.
+#
+# The `:-OMLX_API_KEY` default is the same compatibility rule `PIFLEET_PANE_MODE`
+# documents above: a container started by a supervisor that predates this
+# variable sees it unset, and `OMLX_API_KEY` is the schema default that every
+# such fleet was running. It is a fallback for an absent pointer, not a second
+# place the name is decided — a supervisor that sets it always wins.
+api_key_env="${PIFLEET_LLM_API_KEY_ENV:-OMLX_API_KEY}"
+api_key=""
+if [[ "${api_key_env}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  api_key="${!api_key_env:-}"
+fi
 if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
   jq -n \
     --arg provider "${PIFLEET_LLM_PROVIDER:-omlx}" \
     --arg baseUrl "${PIFLEET_LLM_BASE_URL}" \
-    --arg apiKey "${OMLX_API_KEY:-}" \
+    --arg apiKey "${api_key}" \
     --arg models "${PIFLEET_LLM_MODELS}" \
     '{
       providers: {

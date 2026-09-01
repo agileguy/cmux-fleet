@@ -411,9 +411,80 @@ export function buildWorkerEnv(
   const apiKey = hostEnv[apiKeyEnvName];
 
   const vars: Record<string, string> = {
-    // The three the entrypoint reads to render models.json.
-    PIFLEET_LLM_PROVIDER: llm.provider,
+    /*
+     * The four the entrypoint reads to render models.json.
+     *
+     * `w.provider`, THE WORKER'S RESOLVED VALUE, not `llm.provider`.
+     *
+     * A worker's `model:` may carry a `provider/` prefix, and `resolveWorker`
+     * resolves it through `decomposeModel` onto `ResolvedWorker.provider`. That
+     * resolved value is what `config/render.ts` puts on `pi --provider`, and
+     * this variable is what `docker/entrypoint.sh` uses as the provider KEY in
+     * models.json — so the two have to be the same string or Pi is launched
+     * naming a provider its own config file does not define.
+     *
+     * This read `llm.provider` — the FLEET-WIDE value — and measured with a
+     * worker whose role model was `ollama/gpt-oss:120b-cloud`, the join came
+     * apart exactly there: `--provider ollama` on the argv, `"omlx"` as the
+     * only key in models.json. The prefix resolved to the flag and stopped.
+     *
+     * It never showed up because with ONE provider configured the fleet-wide
+     * and per-worker values agree by coincidence — the same shape of
+     * coincidence `relayGatePolicy` was caught in by ISC-264, and the reason
+     * the probe for this compares the two rendered strings rather than
+     * asserting either one against a constant.
+     */
+    PIFLEET_LLM_PROVIDER: w.provider,
     PIFLEET_LLM_BASE_URL: llm.base_url,
+    /*
+     * The NAME of the variable the key below travels under — never its value.
+     *
+     * `docker/entrypoint.sh` renders models.json's `apiKey` field, and it read
+     * a hardcoded `${OMLX_API_KEY:-}` while this module has always written the
+     * key under `llm.api_key_env`, whatever the operator configured it to be.
+     * The two agreed only because both strings happened to be `OMLX_API_KEY`.
+     * A fleet that renamed the variable — which `api_key_env` exists precisely
+     * to permit — got `"apiKey": ""` in models.json, silently: the entrypoint's
+     * guard tests the base URL and the model list and not the key, so the
+     * container boots, `up` reports success, and the worker authenticates as
+     * nobody until something asks it to generate.
+     *
+     * ## Why a name and not a second copy of the value
+     *
+     * The shorter fix is to ALSO write the key under a fixed fleet-owned alias,
+     * and ISC-31 forbids it: "`docker inspect` shows no cloud provider key in
+     * any container's environment (only `OMLX_API_KEY`)". An alias puts one
+     * credential in the container's environment twice, widening every `env`
+     * dump and crash serialisation that discloses it, to spare the entrypoint a
+     * single indirection. The credential keeps exactly one name; this says
+     * which name that is.
+     *
+     * Written UNCONDITIONALLY, including when the host had no key at all. The
+     * pointer is not the key and discloses nothing, and an env file that always
+     * carries it is a durable artifact `status` and `report` read back months
+     * later in which "the fleet configured this name" and "this pifleet
+     * predated the variable" are distinguishable — the same evidence argument
+     * `PIFLEET_PANE_MODE` and `PIFLEET_PI_THEME` below are written on.
+     *
+     * Not secret-shaped, and that is deliberate rather than lucky:
+     * `container-env.test.ts:isSecretShaped` matches names ending in `_KEY`,
+     * `_SECRET`, `_TOKEN` and friends, and a pointer named `..._API_KEY` would
+     * read to that guard — and to a person — as the thing it exists to avoid
+     * carrying. `_ENV` names it for what it holds and matches the schema field
+     * it is copied from, so a reader traces it in one hop.
+     *
+     * ONE HAZARD LEFT UNCLOSED, and named rather than silently inherited.
+     * `api_key_env` is a bare `shortStr` in `config/schema.ts` — no identifier
+     * check, no reserved-name check — so a fleet may point it at a variable
+     * this block already assigns, and `vars[apiKeyEnvName]` below then
+     * overwrites that variable with the key. That is not new: the same config
+     * has always been able to clobber `PIFLEET_LLM_MODELS`. This adds one more
+     * name to that surface, and it degrades safely — the entrypoint indirects
+     * on a credential, finds nothing, and renders `apiKey: ""` — but the real
+     * repair is a reserved-name refusal on `api_key_env` at parse time, which
+     * belongs in the schema and not here.
+     */
+    PIFLEET_LLM_API_KEY_ENV: apiKeyEnvName,
     /*
      * The worker's OWN model, not `llm.models_allowlist`.
      *
