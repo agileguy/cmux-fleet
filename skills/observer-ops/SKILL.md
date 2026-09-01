@@ -1,6 +1,6 @@
 ---
 name: observer-ops
-description: How the observer role writes its result — the observer-ops.json/.md artifact pair, the mode: deploy and mode: inquiry task shapes, and where the fuller procedural content (target resolution, channel reconciliation, the degradation ladder) belongs. Mounted for the observer role.
+description: How the observer role writes its result — the observer-ops.json/.md artifact pair, the deploy and inquiry task shapes, and where the fuller procedural content (target resolution, channel reconciliation, the degradation ladder) belongs. Mounted for the observer role.
 ---
 
 # observer-ops
