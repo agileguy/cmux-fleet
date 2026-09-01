@@ -80,11 +80,11 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-Twenty-one criteria are unattempted `[ ]` — ISC-402..ISC-404, ISC-407..ISC-423 and ISC-424, from the block
+Twenty criteria are unattempted `[ ]` — ISC-402..ISC-404 and ISC-407..ISC-423, from the block
 ISC-401..ISC-423 filed 2026-09-01 as the done-condition for per-worker inference providers
-(`Docs/SRD-INFERENCE-PROVIDERS.md`). Three of that block are already answered: ISC-401 and ISC-406
-closed with the two latent defects they name, and ISC-405 is `[~]` below. Every criterion filed
-before the block has been attempted. Ten are graded `[~]`
+(`Docs/SRD-INFERENCE-PROVIDERS.md`). Four of that block are already answered: ISC-401 and ISC-406
+closed with the two latent defects they name, and ISC-405 and ISC-424 are `[~]` below. Every criterion filed
+before the block has been attempted. Eleven are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
@@ -131,12 +131,23 @@ the re-grade rather than letting it drift green. The two that left this
 list on 2026-08-30 — ISC-306 and ISC-339 — were scope decisions rather than defects, and closed
 when the owner made the decision each entry named as its closing condition.
 
+**ISC-424 is the eleventh, and it is `[~]` because the criterion names two harms and only one is
+closed.** `doctor` no longer certifies a model the server does not serve: the served side stopped
+running through `decomposeModel`, so an allowlist entry spelled `:high` is no longer matched by a
+server offering `:low`. That half is mutation-proved — restoring the pre-fix `doctor.ts` under the
+four new rows in `test/unit/doctor-allowlist.test.ts` turns exactly those four red. The other half
+is the allowlist GATE, and it is untouched: a worker on `p/m:low` is still admitted against an
+allowlist naming only `:high`, because `resolveWorker` strips the tag before `assertModelAllowed`
+sees it. That is Defect C, it needs the `tag_style` predicate wired, and it is pinned here by a
+tripwire asserting the gate still admits what `doctor` now refuses — so closing Defect C turns the
+test red and forces the re-grade. Half a criterion is not a criterion.
+
 Two are retired `[-]` — ISC-307 and ISC-360 — a marker introduced by ISC-368 on 2026-08-30 for a
 criterion whose *premise* was superseded rather than left unproved. ISC-307 is about a secret's
 value reaching an env file, and secrets are delivered as read-only files now (ISC-337); ISC-360 is
 about an SRD erratum recording task-scoped cloud authorization as designed-but-not-built, and the
 owner withdrew the mechanism (ISC-366). Retired criteria are excluded from `progress:` on both
-sides — `382/414` counts the live set, and the frontmatter's `retired: 2` says where the rest
+sides — `384/415` counts the live set, and the frontmatter's `retired: 2` says where the rest
 went. Retiring is not closing, is not deleting (both entries keep their text and their live
 guards), and is refused for a criterion that is merely hard: `test/unit/isa-retired.test.ts`
 rejects any retirement that does not name a closed criterion that names it back.
