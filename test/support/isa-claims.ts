@@ -290,13 +290,21 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
       "src/security/relay.ts",
       "src/run/worker-env.ts",
     ],
-    // FOUR, and the number is a measurement rather than a guess: the registry
-    // greps a COMMENT-MASKED mirror, so the three prose mentions of this name
-    // do not count. What remains is the exported definition, the call in
-    // `ensureEgressRelay`, the import into worker-env and its use there — a
-    // count rather than a mere presence check, because dropping the worker-env
-    // side is precisely the failure that shipped green.
-    expect: 4,
+    // FIVE since D7 (2026-09-01), and the number is a measurement rather than a
+    // guess: the registry greps a COMMENT-MASKED mirror, so the prose mentions
+    // of this name do not count. What remains is the exported definition, the
+    // call in `ensureEgressRelay`, the call in `egressBridgePlan` that gives
+    // each provider's relay its own alias set, the import into worker-env and
+    // its use there.
+    //
+    // A count rather than a mere presence check, because dropping the
+    // worker-env side is precisely the failure that shipped green — and the
+    // count had to MOVE for that to keep being true. Left at 4, deleting the
+    // worker-env use leaves exactly four occurrences behind, since the import
+    // survives it unused, and this guard would go green on the one defect it
+    // was written for. Verified by mutation on 2026-09-01 rather than reasoned:
+    // at 5 that deletion is red.
+    expect: 5,
   },
   {
     isc: "ISC-369",
