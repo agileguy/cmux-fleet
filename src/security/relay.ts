@@ -320,6 +320,69 @@ export type RelayConfigView = EgressConfigView & {
   llm: { base_url: string; relay_upstream?: string | null };
 };
 
+/**
+ * The endpoint half of ONE `llm.providers` entry (§6.2) — the only two fields
+ * of a provider block this module has any business reading.
+ *
+ * Structural like everything else here, and deliberately NARROWER than
+ * `ProviderSchema`: `api_key_env`, `hosted`, `models_allowlist` and `tag_style`
+ * are statements about credentials and about what the fleet will tolerate, and
+ * none of them changes a network name, a listen alias or a dial target. Naming
+ * them here would invite this file to grow an opinion about them.
+ */
+export type ProviderRelayView = {
+  base_url: string;
+  relay_upstream?: string | null;
+};
+
+/**
+ * The whole `llm:` block as D7 needs to see it: the flat keys, plus the map.
+ *
+ * `providers` is optional because §6.1 keeps the flat keys as the DEFAULT
+ * PROVIDER'S SHORTHAND rather than deprecating them — a `fleet.yaml` with no
+ * map is a one-provider fleet spelled the old way, and it must keep working
+ * byte-for-byte.
+ */
+export type FleetRelayConfigView = RelayConfigView & {
+  llm: {
+    base_url: string;
+    relay_upstream?: string | null;
+    providers?: Readonly<Record<string, ProviderRelayView>> | undefined;
+  };
+};
+
+/**
+ * Everything D7 derives for ONE provider in use — the unit `up` loops over.
+ *
+ * Returned as a record rather than left as four call sites computing four
+ * strings, because the four are only correct TOGETHER: `uplink` and `relay` are
+ * derived from `network`, and `aliases` and `targets` are derived from `view`.
+ * A caller that composed `network` itself and then asked for the relay name
+ * from something else would be the ISC-264 shape again.
+ *
+ * `targets` is a LIST holding exactly one entry, and the length is the point.
+ * §6.5.4's whole claim about D7 is that one relay per provider restores "exactly
+ * one destination" — a claim about a COUNT, which a singular field would make
+ * unfalsifiable. A future change that puts a second provider on one relay shows
+ * up here as a length of two, and ISC-409's probe fails.
+ */
+export interface ProviderBridge {
+  /** The `llm.providers` key, or the fleet's `llm.provider` for a flat config. */
+  readonly provider: string;
+  /** This provider's egress network — what its workers attach to. */
+  readonly network: string;
+  /** `uplinkNetworkName(network)`. */
+  readonly uplink: string;
+  /** `relayContainerName(network)`. */
+  readonly relay: string;
+  /** Every name this provider's relay answers to on ITS bridge, and no other. */
+  readonly aliases: readonly string[];
+  /** Exactly one — see above. */
+  readonly targets: readonly RelayTarget[];
+  /** The projected view `ensureEgressRelay` is called with (§6.5.4). */
+  readonly view: RelayConfigView;
+}
+
 /** A fully-resolved dial target: an explicit host and an explicit port. */
 export interface RelayUpstream {
   readonly host: string;
@@ -594,6 +657,39 @@ export function relayContainerName(egressNetwork: string): string {
 }
 
 /**
+ * ONE provider's egress network — `<docker.network>-<provider>` (D7, §6.5.2).
+ *
+ * The third derivation in this trio and the one that makes the other two
+ * per-provider without either of them changing a line: `uplinkNetworkName` and
+ * `relayContainerName` are pure functions of a network name, so composing one
+ * more level in FRONT of them turns a fleet-wide uplink and a fleet-wide relay
+ * into a per-provider pair for free. That is the property §6.5.2 leans on when
+ * it calls D7 cheap, and it is why this is a separate function rather than an
+ * argument threaded through those two.
+ *
+ * The header's promise survives it — *"the exact strings are always recoverable
+ * from `fleet.yaml` alone, with no hunting through `docker ps`"*. There are
+ * simply more of them now, one set per provider key the operator wrote.
+ *
+ * Validated after composition for the same reason `uplinkNetworkName` is, and
+ * here the check finally earns its keep rather than merely being consistent: a
+ * provider key is OPERATOR-CHOSEN, so `pifleet-egress-relay-<network>-<provider>`
+ * is the first composed name in this codebase that a long config value can push
+ * past Docker's limit (§6.5.2). It fails at `up` naming the composed string,
+ * which is the right failure.
+ */
+export function providerNetworkName(egressNetwork: string, provider: string): string {
+  assertDockerName("network", egressNetwork);
+  // The provider key alone, before composition. A key Docker would never
+  // accept produces a message about the key rather than about a string the
+  // operator never typed.
+  assertDockerName("network", provider);
+  const name = `${egressNetwork}-${provider}`;
+  assertDockerName("network", name);
+  return name;
+}
+
+/**
  * Derive the oMLX forward from `llm.base_url` — never a hardcoded 8000.
  *
  * Port handling mirrors `policyFromConfig` exactly (explicit port, else 443
@@ -787,6 +883,142 @@ export function relayListenAliases(cfg: RelayConfigView): string[] {
   // thing this config added.
   if (!aliases.includes(host)) aliases.push(host);
   return aliases;
+}
+
+/**
+ * Project the fleet config down to the `RelayConfigView` for ONE provider.
+ *
+ * **This one function is why D7 changed nothing downstream of it.** §6.5.4's
+ * claim — *"`ensureEgressRelay`'s `const targets = [target] as const` needs no
+ * change at all"* — is only true because the per-provider-ness is resolved
+ * HERE, before the relay code runs, rather than by teaching every function
+ * below about a map. `omlxRelayTarget`, `relayListenEndpoint`,
+ * `relayListenAliases`, `relayGatePolicy` and `ensureEgressRelay` all keep
+ * reading a single `llm.base_url` and a single `llm.relay_upstream`; they are
+ * simply handed a different pair per provider.
+ *
+ * ## The `egress` half is carried through UNPROJECTED, and that is D7's bound
+ *
+ * `egress.allow` and `egress.google_hosts` stay fleet-wide, so every provider's
+ * relay is judged against the SAME operator-authored allowlist and every
+ * provider's CONNECT proxy enforces the same policy. §6.5.5 states the bound
+ * exactly: **D7 partitions MODEL reachability, not ALL reachability.** Splitting
+ * `egress.allow` per provider would be a second, unrequested feature, and it
+ * would quietly weaken `relayGatePolicy` — an operator's single hand-written
+ * allow entry is what authorizes a dial target, and per-provider allowlists is
+ * how one of them ends up authorizing nothing.
+ *
+ * ## Why a missing key THROWS instead of falling back to the flat block
+ *
+ * Inheriting the flat block is how a second provider silently acquires oMLX's
+ * URL — the exact failure `ProviderSchema` refuses field by field when it
+ * declines to copy the defaults down. The schema already refuses a worker whose
+ * `provider` is not declared, so reaching here with an unknown key means the two
+ * disagree, and a fleet that comes up pointing the wrong way is worse than one
+ * that does not come up.
+ */
+export function relayViewForProvider(cfg: FleetRelayConfigView, provider: string): RelayConfigView {
+  const providers = cfg.llm.providers;
+  // No map: §6.1's shorthand. The flat keys ARE this provider's block, so the
+  // config is already its own view and pre-D7 fleets behave identically.
+  if (providers === undefined) return cfg;
+  const block = providers[provider];
+  if (block === undefined) {
+    throw new Error(
+      `relay: worker resolves to provider ${JSON.stringify(provider)}, which llm.providers does ` +
+        `not declare — declared: ${Object.keys(providers).join(", ") || "(none)"}. The relay ` +
+        `will not fall back to the flat llm.base_url: that is how a second provider silently ` +
+        `acquires the default endpoint, and its credential with it.`,
+    );
+  }
+  return {
+    llm: { base_url: block.base_url, relay_upstream: block.relay_upstream ?? null },
+    egress: cfg.egress,
+  };
+}
+
+/**
+ * The one target ONE provider's relay carries, named after the provider.
+ *
+ * Split from `omlxRelayTarget` rather than parameterising it, because the NAME
+ * is the whole difference and `omlxRelayTarget`'s `"omlx"` is load-bearing for a
+ * flat fleet: the name is serialized into `PIFLEET_RELAY_TARGETS` and compared
+ * by `relayTargetsDrifted`, so renaming it on the flat path would report every
+ * existing relay as drifted and cycle it on the next `up` for no reason at all.
+ */
+export function providerRelayTarget(view: RelayConfigView, provider: string): RelayTarget {
+  const listenPort = relayListenPort(view);
+  const upstream = relayUpstreamFor(view, listenPort);
+  return { listenPort, host: upstream.host, port: upstream.port, name: provider };
+}
+
+/**
+ * Every bridge this run must stand up — one per provider IN USE (D7, §6.5.2).
+ *
+ * `resolved` is the provider each of THIS RUN'S workers resolves to, in launch
+ * order, duplicates and all. That argument shape is the containment property
+ * ISC-410 names, and it is worth being precise about why: the plan is built from
+ * what workers RESOLVED TO, never from `Object.keys(llm.providers)`. A provider
+ * an operator declared and no worker selected therefore contributes no network,
+ * no uplink, no relay container and no listen alias — there is no code path by
+ * which its name reaches Docker at all. **The fleet-wide design could not express
+ * that**: it published every declared endpoint as an alias on one shared bridge,
+ * so declaring a provider WAS opening a route to it for every worker on the
+ * fleet, whether or not anything used it (§6.5.1).
+ *
+ * Ordered and de-duplicated, in the same first-wins way `relayListenAliases` is
+ * and for the same reason: `up` walks this list creating networks and
+ * containers, and a list that reorders between runs makes an idempotent
+ * operation look like a changing one in the ledger.
+ *
+ * ## The flat config is NOT composed, and that is a decision
+ *
+ * With no `llm.providers` map the network stays the operator's `docker.network`
+ * verbatim instead of becoming `<network>-omlx`. §6.5.2's table states the
+ * composition unconditionally, but §6.1 is the governing sentence: the flat keys
+ * are *"retained as the default provider's shorthand"*, so a fleet with no map
+ * has exactly one provider and NOTHING TO PARTITION. Composing anyway would
+ * rename the network and the relay of every fleet that never asked for this
+ * feature, strand the relay each of them is running behind a name nothing looks
+ * for any more, and buy precisely nothing — D7's property is that reach tracks
+ * SELECTION, and where there is one provider every worker selects it.
+ *
+ * The cost, stated because it is real: writing a `providers:` map that declares
+ * a single endpoint identical to the flat keys DOES move the network. That is
+ * the migration, not an accident — opting into the map is opting into
+ * per-provider bridges — and it is one rule with one boundary rather than a
+ * per-field guess about which shape the operator meant.
+ */
+export function egressBridgePlan(
+  cfg: FleetRelayConfigView,
+  egressNetwork: string,
+  resolved: readonly string[],
+): ProviderBridge[] {
+  const flat = cfg.llm.providers === undefined;
+  const seen = new Set<string>();
+  const plan: ProviderBridge[] = [];
+  for (const provider of resolved) {
+    if (seen.has(provider)) continue;
+    seen.add(provider);
+    const view = relayViewForProvider(cfg, provider);
+    const network = flat ? egressNetwork : providerNetworkName(egressNetwork, provider);
+    plan.push({
+      provider,
+      network,
+      uplink: uplinkNetworkName(network),
+      relay: relayContainerName(network),
+      // Derived from THIS provider's view, so a provider's hostname is
+      // published on its own bridge and on no other — and so `NO_PROXY` can be
+      // built per network rather than per fleet (§6.5.5).
+      aliases: relayListenAliases(view),
+      // `omlxRelayTarget` on the flat path keeps the name `"omlx"` that every
+      // running relay already has stamped in `PIFLEET_RELAY_TARGETS`; see
+      // `providerRelayTarget` for why that is not cosmetic.
+      targets: [flat ? omlxRelayTarget(view) : providerRelayTarget(view, provider)],
+      view,
+    });
+  }
+  return plan;
 }
 
 /**
