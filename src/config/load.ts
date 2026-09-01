@@ -196,29 +196,74 @@ export interface ModelSpec {
  * honoured when it names a real thinking level: model ids routinely contain
  * `:` -adjacent punctuation and a typo must surface as "unknown model" at the
  * server, not as a silently swallowed suffix.
+ *
+ * `isTagStyleProvider` turns that suffix parsing off for ONE provider
+ * (SRD-INFERENCE-PROVIDERS §2.4 "Defect C", D12). Some vendors spell a model
+ * id `name:tag` — Ollama's entire catalogue does, `gpt-oss:120b` and
+ * `qwen3.5:397b` — and the six thinking levels are ordinary words in a
+ * namespace the VENDOR owns, so a colliding tag is one rename away rather than
+ * hypothetical. Measured on the unfixed code, `ollama/some-model:high`
+ * resolved to model `some-model` with thinking `high`: the tag was gone and a
+ * level had been invented out of it. That failure does not surface here. It
+ * surfaces at the far end as `model-not-found` against a name the operator can
+ * read back off their `fleet.yaml` and see is correct, which is the most
+ * expensive shape a config bug can take.
+ *
+ * WHY A PREDICATE RATHER THAN A BOOLEAN. The flag belongs to the provider, and
+ * the provider is not something the CALLER knows — it is discovered in here,
+ * from the `provider/` prefix, falling back to the fleet default. A boolean
+ * parameter would oblige every caller to split that prefix itself first, just
+ * to decide what to pass, which is a second spelling of the split this
+ * function exists to own; ISC-264 is the standing record of what two
+ * spellings of one value cost to unpick. A predicate lets the caller answer
+ * only once the answer is knowable.
+ *
+ * It is also the narrowest thing that composes with §6.1's `llm.providers`
+ * map, which is a later phase and deliberately NOT built here: when that map
+ * lands it feeds this in one line — `(p) => cfg.llm.providers[p]?.tag_style
+ * === true` — with no change to this signature and no second reader of the
+ * block. Taking the map itself would mean inventing that block's type now, in
+ * the one file that must not be the place it is defined.
+ *
+ * OMITTED means "no provider is tag-style", which is exactly the behaviour
+ * this function had before the parameter existed, so every existing caller
+ * keeps its meaning unedited.
+ *
+ * THE PREFIX IS NOW SPLIT FIRST — the two steps traded places, because the
+ * provider has to be known before the flag can be consulted about it. The
+ * reordering is behaviour-preserving rather than merely believed to be. The
+ * only input on which the two orders could diverge is one whose LAST colon
+ * sits before the slash and whose suffix still parses as a level; that suffix
+ * necessarily contains the slash, and all six levels are single slash-free
+ * words, so it can never parse. In the other direction, truncating a trailing
+ * `:level` cannot move the FIRST `/`, since a level contains none. Both halves
+ * are pinned by tests rather than left as this paragraph.
  */
 export function decomposeModel(
   raw: string,
   fallbackProvider: string,
   mergedThinking: ThinkingLevel | undefined,
+  isTagStyleProvider?: (provider: string) => boolean,
 ): ModelSpec {
   let provider = fallbackProvider;
   let model = raw;
   let thinking = mergedThinking;
 
-  const colon = model.lastIndexOf(":");
-  if (colon !== -1) {
-    const suffix = model.slice(colon + 1);
-    if (ThinkingLevelSchema.safeParse(suffix).success) {
-      thinking = suffix as ThinkingLevel;
-      model = model.slice(0, colon);
-    }
-  }
-
   const slash = model.indexOf("/");
   if (slash > 0) {
     provider = model.slice(0, slash);
     model = model.slice(slash + 1);
+  }
+
+  if (!isTagStyleProvider?.(provider)) {
+    const colon = model.lastIndexOf(":");
+    if (colon !== -1) {
+      const suffix = model.slice(colon + 1);
+      if (ThinkingLevelSchema.safeParse(suffix).success) {
+        thinking = suffix as ThinkingLevel;
+        model = model.slice(0, colon);
+      }
+    }
   }
 
   return { provider, model, thinking };

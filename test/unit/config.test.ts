@@ -339,6 +339,104 @@ describe("merge: model decomposition (§6.1 exception 2)", () => {
 });
 
 /**
+ * ISC-405 / SRD-INFERENCE-PROVIDERS §2.4 "Defect C", D12 — a tag-style
+ * provider's `:tag` is not eaten by the thinking-suffix parser.
+ *
+ * Some vendors spell a model id `name:tag`; Ollama's whole catalogue does
+ * (`gpt-oss:120b`, `qwen3.5:397b`). The six thinking levels are ordinary words
+ * in a namespace the VENDOR owns, so a tag that collides is a rename away.
+ * Measured on the unfixed code, `ollama/some-model:high` resolved to model
+ * `some-model` with thinking `high` — the tag gone and a level invented from
+ * it — and the failure surfaces at the far end as `model-not-found` against a
+ * name the operator can read back off their `fleet.yaml` and see is correct.
+ *
+ * BOTH DIRECTIONS ARE GRADED, and that is the point of the block rather than
+ * thoroughness for its own sake: a suite that only asserts the flag-ON case
+ * cannot tell "reads the flag" apart from "never strips a suffix", and one
+ * that only asserts flag-OFF cannot tell it from "always strips". Either
+ * single-sided half passes under an implementation that ignores the argument
+ * entirely, which is precisely the mutation this criterion exists to catch.
+ */
+describe("tag-style providers keep their :tag (ISC-405)", () => {
+  /** The criterion's own probe, both ways round. */
+  test("the flag decides whether `p/m:high` keeps its tag", () => {
+    const tagged = decomposeModel("p/m:high", "omlx", undefined, () => true);
+    expect(tagged.provider).toBe("p");
+    expect(tagged.model).toBe("m:high");
+    expect(tagged.thinking).toBeUndefined();
+
+    const plain = decomposeModel("p/m:high", "omlx", undefined, () => false);
+    expect(plain.provider).toBe("p");
+    expect(plain.model).toBe("m");
+    expect(plain.thinking).toBe("high");
+  });
+
+  test("omitting the predicate is exactly today's behaviour", () => {
+    // Every existing caller passes three arguments and must keep its meaning
+    // without an edit, so ABSENT has to mean "no provider is tag-style" —
+    // not "unknown", and not a refusal.
+    const spec = decomposeModel("p/m:high", "omlx", undefined);
+    expect(spec.model).toBe("m");
+    expect(spec.thinking).toBe("high");
+  });
+
+  test("the predicate is asked about the RESOLVED provider, not the fallback", () => {
+    // The flag belongs to the provider the model actually names. An
+    // implementation that consults the fleet default instead still passes the
+    // one-provider tests above, and is wrong for every prefixed model — which
+    // is the whole population this defect affects.
+    const asked: string[] = [];
+    decomposeModel("ollama/m:high", "omlx", undefined, (p) => {
+      asked.push(p);
+      return false;
+    });
+    expect(asked).toEqual(["ollama"]);
+  });
+
+  test("the flag is per provider, not fleet-wide", () => {
+    // D12's ruling is a per-provider opt-out: oMLX must be unaffected by a
+    // hosted provider next to it in the same fleet. A predicate that answered
+    // the same for both would satisfy neither half of §6.2's table.
+    const isTagStyle = (p: string) => p === "ollama";
+    expect(decomposeModel("ollama/m:high", "omlx", undefined, isTagStyle).model).toBe("m:high");
+    expect(decomposeModel("omlx/m:high", "omlx", undefined, isTagStyle).model).toBe("m");
+  });
+
+  test("an unprefixed model is judged by the fallback provider's flag", () => {
+    // `model: gpt-oss:120b` with no prefix resolves to `llm.provider`, so that
+    // is the provider whose flag decides — otherwise the shorthand every
+    // single-provider fleet uses would be the one spelling the fix misses.
+    const spec = decomposeModel("m:high", "ollama", undefined, (p) => p === "ollama");
+    expect(spec.provider).toBe("ollama");
+    expect(spec.model).toBe("m:high");
+    expect(spec.thinking).toBeUndefined();
+  });
+
+  test("a tag-style provider still honours the merged thinking: key", () => {
+    // D12 names the cost plainly: the `:thinking` SUFFIX is unavailable on
+    // these providers and the operator must use the key. Turning the suffix
+    // off must not also discard the key — that would take away the only
+    // remaining way to set the level.
+    const spec = decomposeModel("p/m:high", "omlx", "low", () => true);
+    expect(spec.model).toBe("m:high");
+    expect(spec.thinking).toBe("low");
+  });
+
+  /**
+   * The prefix is split BEFORE the suffix is stripped, which is a reordering
+   * of the original body. It is behaviour-preserving rather than merely
+   * believed to be, and this pins the one input where the two orders could
+   * conceivably diverge: a colon sitting inside the PROVIDER segment.
+   */
+  test("a colon in the provider segment is untouched by either order", () => {
+    const spec = decomposeModel("weird:high/m", "omlx", undefined);
+    expect(spec.provider).toBe("weird:high");
+    expect(spec.model).toBe("m");
+    expect(spec.thinking).toBeUndefined();
+  });
+});
+
+/**
  * ISC-190 / ISC-52 — `models_allowlist` is ENFORCED, not merely accepted.
  *
  * The field has been in the schema since v2 and nothing read it, so a typo'd
