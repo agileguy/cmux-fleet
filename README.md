@@ -80,16 +80,17 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-Eight criteria are unattempted `[ ]` — ISC-410, ISC-414..ISC-417, ISC-419, ISC-421 and ISC-423,
+Seven criteria are unattempted `[ ]` — ISC-414..ISC-417, ISC-419, ISC-421 and ISC-423,
 from the block ISC-401..ISC-425 filed 2026-09-01 as the done-condition for per-worker inference
-providers (`Docs/SRD-INFERENCE-PROVIDERS.md`). Seventeen of that block are answered: ISC-401 and ISC-406 closed with the two latent
+providers (`Docs/SRD-INFERENCE-PROVIDERS.md`). Eighteen of that block are answered: ISC-401 and ISC-406 closed with the two latent
 defects they name, Phase 2 closed ISC-402, ISC-403, ISC-404, ISC-405 and ISC-420 when the
 `llm.providers` map landed and `resolveWorker` began reading it, Phase 3 closed ISC-407,
 ISC-408 and ISC-422 by moving the provider credential out of the environment entirely — it is
 written to a `0444` file in the worker's secret store and reaches the container as a PATH under a
 fleet-owned variable, with the entrypoint's environment read removed rather than demoted to a
-fallback, and Phase 4 closed ISC-409, ISC-411, ISC-412 and ISC-413 by giving each provider IN USE
-its own egress bridge and its own relay carrying exactly one target. **That last distinction is the phase's real content.** A file-then-environment fallback
+fallback, and Phase 4 closed ISC-409..ISC-413 plus ISC-418 and ISC-425 by giving each provider IN USE
+its own egress bridge, its own relay carrying exactly one target, and its own credential in both
+the worker and the tool-call gate. **That last distinction is the phase's real content.** A file-then-environment fallback
 would have looked like robustness and quietly restored the defect ISC-406 had just closed: on the
 first day the pointer failed to arrive, a worker also holding `OMLX_API_KEY` through `secrets:`
 would have authenticated to its configured provider with the LOCAL credential — a wrong-credential
@@ -143,7 +144,7 @@ criterion whose *premise* was superseded rather than left unproved. ISC-307 is a
 value reaching an env file, and secrets are delivered as read-only files now (ISC-337); ISC-360 is
 about an SRD erratum recording task-scoped cloud authorization as designed-but-not-built, and the
 owner withdrew the mechanism (ISC-366). Retired criteria are excluded from `progress:` on both
-sides — `399/416` counts the live set, and the frontmatter's `retired: 2` says where the rest
+sides — `400/416` counts the live set, and the frontmatter's `retired: 2` says where the rest
 went. Retiring is not closing, is not deleting (both entries keep their text and their live
 guards), and is refused for a criterion that is merely hard: `test/unit/isa-retired.test.ts`
 rejects any retirement that does not name a closed criterion that names it back.
