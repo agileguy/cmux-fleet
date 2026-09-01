@@ -11,6 +11,8 @@ import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stringify } from "yaml";
+
+import { LlmSchema } from "../../src/config/schema.ts";
 import {
   ConfigError,
   ConfigValidationError,
@@ -357,6 +359,38 @@ describe("merge: model decomposition (§6.1 exception 2)", () => {
  * single-sided half passes under an implementation that ignores the argument
  * entirely, which is precisely the mutation this criterion exists to catch.
  */
+/**
+ * THE TRIPWIRE FOR ISC-405, and it asserts an ABSENCE on purpose.
+ *
+ * ISC-405 is graded `[~]`, not `[x]`. The mechanism below is built and
+ * mutation-proved, but the criterion's headline says "on a `tag_style: true`
+ * provider" and no such provider can currently be SPELLED: there is no config
+ * surface for the flag, so nothing in production passes the predicate and
+ * Defect C is still live end to end.
+ *
+ * This repo's rule for a criterion blocked by something else is to pin its
+ * probe to the BLOCKER's absence, so that removing the blocker turns the guard
+ * RED and forces a re-grade. Left as a passing test of the mechanism alone,
+ * ISC-405 would drift green the moment `llm.providers` landed, and nobody
+ * would be told the headline had finally become checkable.
+ *
+ * So: when this test fails because `providers` appeared in `LlmSchema`, that
+ * is the signal working. Wire the predicate to the real config, write the
+ * end-to-end assertion, re-grade ISC-405, and delete this test.
+ */
+describe("ISC-405 is still blocked, and this is what unblocks it", () => {
+  test("`llm.providers` is not in the schema yet — landing it must fail here", () => {
+    const keys = Object.keys((LlmSchema as unknown as { shape: Record<string, unknown> }).shape);
+    // Anti-vacuity: if the shape ever stops being readable this way, the
+    // assertion below would pass against an empty list and prove nothing.
+    expect(keys, "LlmSchema.shape is unreadable — this tripwire is vacuous").toContain("base_url");
+    expect(
+      keys,
+      "`llm.providers` has landed: wire the tag_style predicate to it, assert Defect C end to end, re-grade ISC-405, and delete this test",
+    ).not.toContain("providers");
+  });
+});
+
 describe("tag-style providers keep their :tag (ISC-405)", () => {
   /** The criterion's own probe, both ways round. */
   test("the flag decides whether `p/m:high` keeps its tag", () => {

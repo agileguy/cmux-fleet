@@ -80,9 +80,9 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-Twenty-three criteria are unattempted `[ ]` — ISC-401..ISC-423, filed 2026-09-01 as the
+Twenty-two criteria are unattempted `[ ]` — ISC-401..ISC-423, filed 2026-09-01 as the
 done-condition for per-worker inference providers (`Docs/SRD-INFERENCE-PROVIDERS.md`) and not yet
-built. Every criterion filed before that block has been attempted. Nine are graded `[~]`
+built. Every criterion filed before that block has been attempted. Ten are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
