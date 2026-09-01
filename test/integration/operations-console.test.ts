@@ -45,24 +45,37 @@ describe("the operations console's pane 1", () => {
   test("resolves obs-1's pane_mode from the config and attaches Pi's interface", async () => {
     const out = await dryRun(["--config", "fleet.example.yaml"]);
     const pane1 = out.split("pane 2")[0]!;
-    // One `up` stands both console workers up; the observer leads because it
-    // is the attach target and the pane this command belongs to.
-    expect(pane1).toContain("'up' '--workers' 'obs-1,tick-1'");
+    // This pane's `up` names THIS pane's worker and no other. `--attach-here`
+    // hands over the terminal of the process that runs it, and one process has
+    // one terminal — so two attended panes are two `up` invocations and two
+    // runs, which is why `status` grew `--all`. An earlier design stood both
+    // console workers up from pane 1 (`'obs-1,tick-1'`); that could not give
+    // pane 2 a keyboard, and this assertion is what pins the replacement.
+    expect(pane1).toContain("'up' '--workers' 'obs-1'");
     expect(pane1).toContain("'--attach-here'");
     expect(pane1).toContain("'logs' '--worker' 'obs-1' '--follow' '--render'");
   }, cliBudget(1));
 
   /**
    * The negative direction, and the one that would have caught the original
-   * defect. `tick-1` resolves to `pane_mode: rpc`, so naming it must produce
-   * the viewer pane — no `--attach-here`. Asserting only the positive case
-   * cannot tell "resolved from the config" apart from "always attaches".
+   * defect. A worker resolving to `pane_mode: rpc` must produce the viewer
+   * pane — no `--attach-here`. Asserting only the positive case cannot tell
+   * "resolved from the config" apart from "always attaches".
+   *
+   * `obs-2` is the worker to ask, and deliberately so: it carries the SAME
+   * ROLE as obs-1 and differs from it only in a per-worker `pane_mode`. So a
+   * script that resolved the mode from the role — the nearest wrong thing to
+   * do, and the shape of the original defect — answers `tui` here and fails.
+   *
+   * It replaces `tick-1`, which was rpc when this was written and is now `tui`
+   * in `fleet.example.yaml`: the console gained a second attended pane, and
+   * this test kept asserting the old fleet rather than the current one.
    */
   test("a worker that resolves to rpc gets the viewer, not an attach", async () => {
-    const out = await dryRun(["--config", "fleet.example.yaml", "--workers", "tick-1"]);
+    const out = await dryRun(["--config", "fleet.example.yaml", "--workers", "obs-2"]);
     const pane1 = out.split("pane 2")[0]!;
-    expect(pane1).toContain("'up' '--workers' 'tick-1'");
+    expect(pane1).toContain("'up' '--workers' 'obs-2'");
     expect(pane1).not.toContain("'--attach-here'");
-    expect(pane1).toContain("'logs' '--worker' 'tick-1' '--follow' '--render'");
+    expect(pane1).toContain("'logs' '--worker' 'obs-2' '--follow' '--render'");
   }, cliBudget(1));
 });
