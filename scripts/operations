@@ -123,6 +123,36 @@ async function main(argv: string[]): Promise<number> {
     return EXIT.SUCCESS;
   }
 
+  /*
+   * `--recreate` stops the run the OLD panes created, before the new ones make
+   * another.
+   *
+   * Without this, `--recreate` leaks a run every time: the panes are torn down
+   * but the containers they started keep running, unattached, until something
+   * else stops them. Four accumulated in one session, one of them for ten
+   * hours.
+   *
+   * The leak is not just untidy, it corrupts the new console. A run directory
+   * outlives its run, so `status` keeps reporting the old run and `logs`
+   * resolves "the most recent run" to whichever exists at the instant a pane
+   * asks. With two runs in flight, the ticketing pane latched onto the older
+   * one and tailed a log file that had stopped growing — a pane that reads as
+   * a hung worker while the observer beside it is healthy.
+   *
+   * Only on `--recreate`. Adoption must not touch a running fleet: the whole
+   * point of the default path is that a second `operations` changes nothing.
+   */
+  if (argv.includes("--recreate")) {
+    const runId = (await runOutput(repoRoot, ["status", "--json"]))
+      .match(/"run_id":"([^"]+)"/)?.[1];
+    if (runId !== undefined) {
+      process.stderr.write(`operations: stopping the previous run ${runId} before rebuilding\n`);
+      // Best effort. A run that cannot be stopped is worth a line, not a
+      // refusal to open the console the operator asked for.
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
+  }
+
   const client = new CmuxClient();
   if (!(await cmuxReachable(client))) {
     process.stderr.write(
@@ -158,4 +188,19 @@ try {
   const msg = err instanceof Error ? err.message : String(err);
   process.stderr.write(`${msg.startsWith("operations:") ? msg : `operations: ${msg}`}\n`);
   process.exit(EXIT.USAGE);
+}
+
+/** Run a `pifleet` subcommand and return its stdout, swallowing failure. */
+async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
+  try {
+    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out;
+  } catch {
+    return "";
+  }
 }

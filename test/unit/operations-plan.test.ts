@@ -130,6 +130,30 @@ describe("the observer pane", () => {
    * differ by one flag, so a plan that ignored the option entirely would still
    * satisfy an assertion that only looked at the tui case.
    */
+  /**
+   * The ticketing pane waits for its worker to be ALIVE, and then pins the run.
+   *
+   * Both halves are load-bearing and both come from a live failure. A run's
+   * directory outlives the run, so `status` keeps reporting a torn-down run's
+   * workers as `"alive":false,"phase":"dead"` — a wait that only checked the
+   * worker was MENTIONED passed instantly against a corpse, and `logs` then
+   * tailed a finished log file that never grew. Twice, the pane sat showing
+   * events minutes older than the run the console had just created while the
+   * observer beside it was healthy.
+   *
+   * `--run "$r"` is the second half: without it `logs` re-resolves the most
+   * recent run on every invocation and can drift onto a later one.
+   */
+  test("the ticketing pane waits for a LIVE worker and pins the run it found", () => {
+    const cmd = paneNamed("ticketing").command;
+    const second = DEFAULT_OPERATIONS_WORKERS[1]!;
+    expect(cmd).toContain(`'"id":"${second}","alive":true'`);
+    expect(cmd).toContain('--run "$r"');
+    // Mentioning the worker is NOT the condition — that is the bug this
+    // replaced, and a wait that greps the bare id passes against a dead run.
+    expect(cmd).not.toContain(`grep -q '${second}'`);
+  });
+
   test("attachHere puts Pi's own interface in pane 1, and its absence does not", () => {
     expect(paneNamed("observer", { attachHere: true }).command).toContain("'--attach-here'");
     expect(paneNamed("observer", { attachHere: false }).command).not.toContain("'--attach-here'");

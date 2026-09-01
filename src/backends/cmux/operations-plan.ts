@@ -284,12 +284,48 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
    * upwards of twenty seconds on a cold image.
    */
   const second = workers[1];
+  /*
+   * Reading `status --json` with `sed`/`grep`, not `jq`: `jq` is not something
+   * a host is guaranteed to have, and a pane whose first command is `command
+   * not found` is a dead pane that looks configured.
+   */
+  const statusJson = `${pifleetCommand(repoRoot, ["status", "--json"])} 2>/dev/null`;
+  const runIdOf = `${statusJson} | sed -n 's/.*"run_id":"\\([^"]*\\)".*/\\1/p'`;
   const secondPane = second === undefined
     ? null
     : {
-        wait: `until ${pifleetCommand(repoRoot, ["status"])} 2>/dev/null | grep -q ${shellQuote([second])}; do sleep 2; done`,
-        viewer: pifleetCommand(repoRoot, ["logs", "--worker", second, "--follow", "--render"]),
-        shell: pifleetCommand(repoRoot, ["shell", "--worker", second]),
+        /*
+         * Wait for the second worker to be ALIVE, not merely mentioned.
+         *
+         * "Wait until a run mentions tick-1" is the obvious condition and it is
+         * wrong twice over. A run's directory outlives the run, so `status`
+         * keeps reporting a torn-down run's workers — with `"alive":false,
+         * "phase":"dead"` — and the condition passes instantly against a
+         * corpse. `logs` then tails that run's finished log file, which never
+         * grows, and the pane reads as a hung worker.
+         *
+         * MEASURED, twice, from a live console: the ticketing pane sat showing
+         * events stamped three and then six minutes older than the run the
+         * console had just created, while the observer beside it was healthy.
+         *
+         * Liveness is also why this is not "wait for the run id to CHANGE",
+         * which was the first fix and can hang outright: if `up` finishes
+         * before this pane starts, the id it captured is already the new one
+         * and it waits forever for a further change that never comes. A worker
+         * being alive is true immediately in that case.
+         */
+        wait:
+          `until ${statusJson} | grep -q ${shellQuote([`"id":"${second}","alive":true`])}` +
+          ` ; do sleep 2 ; done ; r="$(${runIdOf})"`,
+        /*
+         * `--run "$r"` pins it. Without it `logs` re-resolves the most recent
+         * run on every invocation, so the pane could still drift onto a later
+         * run started by something else entirely.
+         */
+        viewer:
+          pifleetCommand(repoRoot, ["logs", "--worker", second, "--follow", "--render"]) +
+          ` --run "$r"`,
+        shell: pifleetCommand(repoRoot, ["shell", "--worker", second]) + ` --run "$r"`,
       };
 
   return [
