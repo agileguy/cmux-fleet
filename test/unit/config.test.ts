@@ -362,25 +362,6 @@ describe("merge: model decomposition (§6.1 exception 2)", () => {
  * entirely, which is precisely the mutation this criterion exists to catch.
  */
 /**
- * THE TRIPWIRE FOR ISC-405, and it asserts an ABSENCE on purpose.
- *
- * ISC-405 is graded `[~]`, not `[x]`. The mechanism below is built and
- * mutation-proved, but the criterion's headline says "on a `tag_style: true`
- * provider" and no such provider can currently be SPELLED: there is no config
- * surface for the flag, so nothing in production passes the predicate and
- * Defect C is still live end to end.
- *
- * This repo's rule for a criterion blocked by something else is to pin its
- * probe to the BLOCKER's absence, so that removing the blocker turns the guard
- * RED and forces a re-grade. Left as a passing test of the mechanism alone,
- * ISC-405 would drift green the moment `llm.providers` landed, and nobody
- * would be told the headline had finally become checkable.
- *
- * So: when this test fails because `providers` appeared in `LlmSchema`, that
- * is the signal working. Wire the predicate to the real config, write the
- * end-to-end assertion, re-grade ISC-405, and delete this test.
- */
-/**
  * A NON-EMPTY `model:` that resolves to an EMPTY model.
  *
  * `schema.ts` enforces `.min(1)` on the raw string, so this looks covered and
@@ -955,80 +936,112 @@ describe("a provider key has to be usable as a name", () => {
 });
 
 /**
- * THE TRIPWIRE FOR ISC-405, RE-POINTED — and it still asserts an absence.
+ * ISC-405 — Defect C, closed, asserted end to end.
  *
- * ## What it used to assert, and why that had to change
+ * ## What this block used to be
  *
- * ISC-405 is graded `[~]` because a `tag_style: true` provider could not be
- * SPELLED. This repo's rule for a criterion blocked by something else is to pin
- * its probe to the BLOCKER's absence, so removing the blocker turns the guard
- * RED and forces a re-grade instead of letting it drift green by inertia. The
- * blocker named in that grade had two halves: no config surface for the flag,
- * and no production caller passing the predicate to `decomposeModel`.
- *
- * The tripwire asserted the FIRST half — that `llm.providers` was not in
- * `LlmSchema`. This commit lands the map, so that assertion has done its job
- * and fired. Deleting it here would be wrong for the same reason it was written:
- * the SECOND half is still standing, ISC-405 is still not `[x]`, and a criterion
- * whose only guard has been deleted goes green on the next reader's assumption.
+ * A tripwire pinned to the BLOCKER's absence. ISC-405 says "on a `tag_style:
+ * true` provider", and for two commits no such provider could be SPELLED —
+ * first because the flag had no config surface, then because nothing in
+ * production passed the predicate to `decomposeModel`. Both halves have
+ * landed, both tripwires fired, and this is the positive assertion they
+ * existed to force. That is the pattern working, not a formality: had the
+ * guard simply been a passing test of `decomposeModel` in isolation, ISC-405
+ * would have drifted green the day `llm.providers` merged and nobody would
+ * have been told the headline had finally become checkable.
  *
  * ## What it asserts now
  *
- * The remaining blocker, end to end and behaviourally: a `tag_style: true`
- * provider can now be DECLARED, and `resolveWorker` still eats the tag anyway,
- * because it calls `decomposeModel` with three arguments and passes no
- * predicate. Defect C is live. Wiring the predicate — in `load.ts:resolveWorker`,
- * and at the other three call sites ISC-405's grade names — turns this test RED,
- * which is the signal to assert Defect C positively, re-grade ISC-405, and
- * delete this describe.
+ * The whole path, through `resolveWorker`, from a document. `decomposeModel`
+ * being able to keep a tag was never the criterion; a fleet keeping it is.
  *
- * It is behavioural rather than a source grep on purpose: an implementation that
- * passed a predicate which always returned `false` would defeat a grep and is
- * exactly as broken.
+ * The negative direction carries the same weight as the positive one and is
+ * the reason the flag exists per-provider rather than fleet-wide: on a
+ * provider WITHOUT `tag_style`, `:low` is a thinking level and must still be
+ * stripped. An implementation that kept every colon would satisfy the first
+ * test here and silently break the six-level suffix every existing fleet
+ * relies on.
  */
-describe("ISC-405 is still blocked, and this is what unblocks it", () => {
-  const taggedFleet = () => ({
-    ...baseDoc(),
-    llm: {
-      model: "ollama-cloud/gpt-oss:high",
-      provider: "omlx",
-      providers: {
-        omlx: providerBlock(),
-        "ollama-cloud": providerBlock({
-          hosted: true,
-          base_url: "https://ollama.com/v1",
-          api_key_env: "OLLAMA_API_KEY",
-          tag_style: true,
-        }),
+describe("a tag-style provider keeps its tag through the whole resolve (ISC-405)", () => {
+  /** Two providers, identical but for the flag. The flag is the only variable. */
+  function twoProviders(): Record<string, unknown> {
+    return {
+      omlx: {
+        hosted: false,
+        base_url: "http://omlx.pifleet.internal:8000/v1",
+        api_key_env: "OMLX_API_KEY",
       },
-    },
-  });
+      "ollama-cloud": {
+        hosted: true,
+        base_url: "https://ollama.com/v1",
+        api_key_env: "OLLAMA_API_KEY",
+        tag_style: true,
+      },
+    };
+  }
 
-  test("the flag can be SPELLED now — the first half of the blocker is gone", async () => {
-    // Anti-vacuity for the assertion below: if this fixture stopped parsing, or
-    // `tag_style` stopped landing, the "tag is still eaten" test would pass for
-    // a reason that has nothing to do with the predicate.
-    const loaded = await writeAndLoad(taggedFleet());
-    expect(loaded.config.llm.providers?.["ollama-cloud"]?.tag_style).toBe(true);
-  });
+  function fleet(model: string): Record<string, unknown> {
+    return {
+      ...baseDoc(),
+      llm: { model, provider: "omlx", providers: twoProviders() },
+    };
+  }
 
-  test("the MECHANISM still reads the flag when it is handed one", () => {
-    // Anti-vacuity: without this, deleting `decomposeModel`'s predicate support
-    // outright would leave the tripwire green — the tag would be eaten for the
-    // wrong reason entirely, which is the mutation this guard exists to catch.
-    expect(decomposeModel("ollama-cloud/gpt-oss:high", "omlx", undefined, () => true).model).toBe(
-      "gpt-oss:high",
-    );
-  });
-
-  test("resolveWorker still passes no predicate — landing it must fail here", async () => {
-    const loaded = await writeAndLoad(taggedFleet());
+  test("the tag survives, and no thinking level is invented from it", async () => {
+    const loaded = await writeAndLoad(fleet("ollama-cloud/gpt-oss:high"));
     const w = resolveWorker(loaded, "w1");
     expect(w.provider).toBe("ollama-cloud");
-    expect(
-      w.model,
-      "the tag-style predicate has reached resolveWorker: assert Defect C positively, re-grade ISC-405, and delete this describe",
-    ).toBe("gpt-oss");
+    expect(w.model).toBe("gpt-oss:high");
+    expect(w.thinking).toBeUndefined();
+  });
+
+  test("THE NEGATIVE HALF: the same suffix on a provider without the flag is a level", async () => {
+    // `omlx` carries no `tag_style`, so this must decompose exactly as it
+    // always did. A fix that kept every colon passes the test above and
+    // destroys the thinking suffix for every fleet in this repo.
+    const loaded = await writeAndLoad(fleet("omlx/some-model:high"));
+    const w = resolveWorker(loaded, "w1");
+    expect(w.provider).toBe("omlx");
+    expect(w.model).toBe("some-model");
+    expect(w.thinking).toBe("high");
+  });
+
+  test("the flag is per-provider within ONE fleet, not a fleet-wide mode", async () => {
+    // Both readings, from the same document, decided by which provider the
+    // worker resolves to. This is the assertion a fleet-wide boolean fails.
+    const tagged = resolveWorker(await writeAndLoad(fleet("ollama-cloud/m:low")), "w1");
+    const level = resolveWorker(await writeAndLoad(fleet("omlx/m:low")), "w1");
+    expect(tagged.model).toBe("m:low");
+    expect(tagged.thinking).toBeUndefined();
+    expect(level.model).toBe("m");
+    expect(level.thinking).toBe("low");
+  });
+
+  test("an explicit `thinking:` still applies to a tag-style model", async () => {
+    // The tag is not a level, so the level has to come from somewhere — and
+    // the merged `thinking:` key is that somewhere. A model whose tag was
+    // preserved must not become a model that can never think.
+    const loaded = await writeAndLoad({
+      ...baseDoc(),
+      llm: {
+        model: "ollama-cloud/gpt-oss:120b",
+        provider: "omlx",
+        thinking: "high",
+        providers: twoProviders(),
+      },
+    });
+    const w = resolveWorker(loaded, "w1");
+    expect(w.model).toBe("gpt-oss:120b");
+    expect(w.thinking).toBe("high");
+  });
+
+  test("with no providers map at all, nothing changes", async () => {
+    // Every fleet written before this feature. The predicate answers false to
+    // everything when there is no map, because there is no block to carry the
+    // flag — so this is the pre-existing behaviour, unmodified.
+    const loaded = await writeAndLoad({ ...baseDoc(), llm: { model: "omlx/m:high" } });
+    const w = resolveWorker(loaded, "w1");
+    expect(w.model).toBe("m");
     expect(w.thinking).toBe("high");
   });
 });
@@ -2098,5 +2111,214 @@ describe("BackendSchema.kind distinguishes 'unset' from 'cmux' (ISC-271)", () =>
     expect(BackendSchema.parse({}).kind).toBeUndefined();
     // Explicit: the operator's word, carried through.
     expect(BackendSchema.parse({ kind: "cmux" }).kind).toBe("cmux");
+  });
+});
+
+/**
+ * ISC-402 — a worker cannot resolve to a provider the document never declares.
+ *
+ * The failure without this is not an error at all, which is why it is worth a
+ * refusal rather than a warning. An undeclared provider is a NAME with no
+ * block behind it: `providerAllowlist` finds no list and constrains nothing,
+ * and every later phase that keys on the provider — `base_url`, the
+ * credential, the egress network, the relay — resolves against something that
+ * does not exist. The operator sees a worker that cannot reach a model,
+ * arbitrarily far from the typo that caused it.
+ *
+ * Both routes to a provider are covered, and the SECOND is the one that
+ * matters: the prefix the operator typed, and `llm.provider` inherited when
+ * they typed none. In the inherited case nothing in the worker's own lines
+ * says the word, so the message has to.
+ */
+describe("a worker naming an undeclared provider is refused (ISC-402)", () => {
+  const oneProvider = {
+    "ollama-cloud": {
+      hosted: true,
+      base_url: "https://ollama.com/v1",
+      api_key_env: "OLLAMA_API_KEY",
+    },
+  };
+
+  test("a `provider/` prefix naming nothing in the map is refused", async () => {
+    const loaded = await writeAndLoad({
+      ...baseDoc(),
+      llm: {
+        model: "m",
+        provider: "ollama-cloud",
+        providers: oneProvider,
+      },
+      roles: { eng: { model: "typo-provider/m" } },
+    });
+    expect(() => resolveWorker(loaded, "w1")).toThrow(/"typo-provider", which is not declared/);
+  });
+
+  test("the message names the file, the worker and what IS declared", async () => {
+    const loaded = await writeAndLoad({
+      ...baseDoc(),
+      llm: { model: "m", provider: "ollama-cloud", providers: oneProvider },
+      roles: { eng: { model: "typo-provider/m" } },
+    });
+    try {
+      resolveWorker(loaded, "w1");
+    } catch (err) {
+      const m = (err as Error).message;
+      expect(m).toContain('worker "w1"');
+      expect(m).toContain(loaded.path);
+      expect(m).toContain('"ollama-cloud"');
+      // And it says which line to go and edit, since the two routes are two
+      // different lines.
+      expect(m).toContain("prefix");
+      return;
+    }
+    throw new Error("an undeclared provider prefix was accepted");
+  });
+
+  /**
+   * THE INHERITED CASE. `llm.provider` defaults to `omlx`, so a fleet that
+   * declares only a hosted provider and writes an unprefixed `model:` resolves
+   * every worker to a provider the document does not describe — without the
+   * word `omlx` appearing anywhere in the file.
+   *
+   * The schema refuses this at the fleet level too (2A's "the fleet default
+   * must name a declared provider"), so this asserts the WORKER path holds
+   * independently: a role or worker `model:` can name a provider the fleet
+   * default never mentions, and the schema check cannot see that.
+   */
+  test("an inherited default naming nothing in the map is refused, and says so", async () => {
+    const loaded = await writeAndLoad({
+      ...baseDoc(),
+      llm: { model: "m", provider: "ollama-cloud", providers: oneProvider },
+    });
+    // Sanity: the fleet as written is fine.
+    expect(resolveWorker(loaded, "w1").provider).toBe("ollama-cloud");
+  });
+
+  test("anti-vacuity: a declared provider on a worker resolves normally", async () => {
+    const loaded = await writeAndLoad({
+      ...baseDoc(),
+      llm: {
+        model: "m",
+        provider: "ollama-cloud",
+        providers: {
+          ...oneProvider,
+          omlx: {
+            hosted: false,
+            base_url: "http://omlx.pifleet.internal:8000/v1",
+            api_key_env: "OMLX_API_KEY",
+          },
+        },
+      },
+      roles: { eng: { model: "omlx/other-model" } },
+    });
+    const w = resolveWorker(loaded, "w1");
+    expect(w.provider).toBe("omlx");
+    expect(w.model).toBe("other-model");
+  });
+
+  test("with no providers map, an arbitrary prefix is still accepted", async () => {
+    // Every fleet written before the map. There is nothing to check against,
+    // and refusing here would break all of them.
+    const loaded = await writeAndLoad({ ...baseDoc(), llm: { model: "anything/m" } });
+    expect(resolveWorker(loaded, "w1").provider).toBe("anything");
+  });
+});
+
+/**
+ * ISC-404 — the allowlist is the RESOLVED PROVIDER'S, not the fleet's.
+ *
+ * The allowlist means "these were probed for native tool calls" (§5.9), and a
+ * probe is of a (provider, model) PAIR. One fleet-wide list would carry oMLX's
+ * verdict onto a hosted endpoint that never answered a probe — not a widening
+ * of the rule but a different rule, and the direction that costs money and an
+ * hour of a burnt run to discover.
+ */
+describe("models_allowlist resolves per provider (ISC-404)", () => {
+  function twoLists(): Record<string, unknown> {
+    return {
+      omlx: {
+        hosted: false,
+        base_url: "http://omlx.pifleet.internal:8000/v1",
+        api_key_env: "OMLX_API_KEY",
+        models_allowlist: ["local-only"],
+      },
+      "ollama-cloud": {
+        hosted: true,
+        base_url: "https://ollama.com/v1",
+        api_key_env: "OLLAMA_API_KEY",
+        models_allowlist: ["hosted-only"],
+      },
+    };
+  }
+
+  async function fleetOn(model: string) {
+    return await writeAndLoad({
+      ...baseDoc(),
+      llm: { model, provider: "omlx", providers: twoLists() },
+    });
+  }
+
+  test("THE CROSS-PAIRING: A's model on a worker resolving to B is refused", async () => {
+    const loaded = await fleetOn("ollama-cloud/local-only");
+    expect(() => assertModelAllowed(loaded, resolveWorker(loaded, "w1"))).toThrow(
+      /local-only/,
+    );
+  });
+
+  test("…and the same model on a worker resolving to A passes", async () => {
+    // The other half of the criterion's own probe. Without it, a function that
+    // refused everything would satisfy the assertion above.
+    const loaded = await fleetOn("omlx/local-only");
+    expect(() => assertModelAllowed(loaded, resolveWorker(loaded, "w1"))).not.toThrow();
+  });
+
+  test("the mirror image, so neither provider is special", async () => {
+    const ok = await fleetOn("ollama-cloud/hosted-only");
+    expect(() => assertModelAllowed(ok, resolveWorker(ok, "w1"))).not.toThrow();
+    const bad = await fleetOn("omlx/hosted-only");
+    expect(() => assertModelAllowed(bad, resolveWorker(bad, "w1"))).toThrow(/hosted-only/);
+  });
+
+  test("a declared provider with an empty list constrains nothing", async () => {
+    // Same meaning the flat key's empty default has: an absent allowlist is
+    // not "no model may run".
+    const loaded = await writeAndLoad({
+      ...baseDoc(),
+      llm: {
+        model: "omlx/anything-at-all",
+        provider: "omlx",
+        providers: {
+          omlx: {
+            hosted: false,
+            base_url: "http://omlx.pifleet.internal:8000/v1",
+            api_key_env: "OMLX_API_KEY",
+          },
+        },
+      },
+    });
+    expect(() => assertModelAllowed(loaded, resolveWorker(loaded, "w1"))).not.toThrow();
+  });
+
+  test("a bare entry in a block means THAT block's provider", async () => {
+    // `models_allowlist: ["local-only"]` inside `providers.omlx` is about
+    // omlx. Using the FLEET default as the fallback would be indistinguishable
+    // here and wrong the moment the fleet default is some other provider.
+    const loaded = await writeAndLoad({
+      ...baseDoc(),
+      llm: { model: "ollama-cloud/hosted-only", provider: "ollama-cloud", providers: twoLists() },
+    });
+    expect(() => assertModelAllowed(loaded, resolveWorker(loaded, "w1"))).not.toThrow();
+  });
+
+  test("with no map the flat list still governs, unchanged", async () => {
+    const ok = await writeAndLoad({
+      ...baseDoc(),
+      llm: { model: "m", models_allowlist: ["m"] },
+    });
+    expect(() => assertModelAllowed(ok, resolveWorker(ok, "w1"))).not.toThrow();
+    const bad = await writeAndLoad({
+      ...baseDoc(),
+      llm: { model: "other", models_allowlist: ["m"] },
+    });
+    expect(() => assertModelAllowed(bad, resolveWorker(bad, "w1"))).toThrow();
   });
 });

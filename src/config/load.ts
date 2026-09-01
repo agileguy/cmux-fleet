@@ -269,6 +269,49 @@ export function decomposeModel(
   return { provider, model, thinking };
 }
 
+/**
+ * The `tag_style` predicate for one fleet, in the shape `decomposeModel` takes.
+ *
+ * This is the composition `decomposeModel`'s docstring promises when it argues
+ * for a predicate over a boolean, and it is deliberately the ONLY place that
+ * reads `tag_style`. Three call sites need the same answer — `resolveWorker`,
+ * `assertModelAllowed` and `doctor`'s allowlist verdict — and they must not
+ * disagree: `doctor` answering `false` where `up` answers `true` is precisely
+ * the shape ISC-256 exists to forbid, a green `doctor` over a config `up`
+ * refuses. One function, three callers, no second reading of the flag.
+ *
+ * A fleet with no `providers` map answers `false` to everything, which is the
+ * behaviour every existing config had before the map existed. That is not a
+ * defensive default: with no map there is no block to carry the flag, so
+ * `false` is the only answer that is actually true.
+ */
+export function tagStyleProviders(config: FleetConfig): (provider: string) => boolean {
+  const providers = config.llm.providers;
+  if (providers === undefined) return () => false;
+  return (provider) => providers[provider]?.tag_style === true;
+}
+
+/**
+ * The models allowlist governing ONE provider, from whichever spelling the
+ * document used.
+ *
+ * With a `providers` map the list lives in the block; without one it is the
+ * flat key, meaning the block for `llm.provider` (§6.1). ISC-403 refuses both
+ * spellings at once, so exactly one of these branches describes any given
+ * document and there is no merge to get wrong.
+ *
+ * Shared by `assertModelAllowed` and by `doctor`, and that sharing is the
+ * point rather than a convenience: ISC-256 requires `doctor`'s verdict and
+ * `up`'s gate to agree on the same config, and the cheapest way for them to
+ * disagree is to read the allowlist from two places while a fleet is being
+ * migrated from the flat keys to the map.
+ */
+export function providerAllowlist(config: FleetConfig, provider: string): readonly string[] {
+  const providers = config.llm.providers;
+  if (providers === undefined) return config.llm.models_allowlist;
+  return providers[provider]?.models_allowlist ?? [];
+}
+
 // ---------------------------------------------------------------------------
 // The merge
 // ---------------------------------------------------------------------------
@@ -373,7 +416,7 @@ export function resolveWorker(loaded: LoadedConfig, id: string): ResolvedWorker 
   // merged `thinking:` key, wherever either was written.
   const mergedModel = pick("model", entry, role, d) ?? config.llm.model;
   const mergedThinking = pick("thinking", entry, role, d) ?? config.llm.thinking;
-  const spec = decomposeModel(mergedModel, config.llm.provider, mergedThinking);
+  const spec = decomposeModel(mergedModel, config.llm.provider, mergedThinking, tagStyleProviders(config));
 
   /*
    * A NON-EMPTY `model:` can decompose to an EMPTY model, and the failure is
@@ -407,6 +450,45 @@ export function resolveWorker(loaded: LoadedConfig, id: string): ResolvedWorker 
       `worker "${entry.id}" has model: "${mergedModel}", which resolves to an empty model name. ` +
         `A "provider/" prefix and a ":thinking" suffix each consume their side of the string; ` +
         `written like this there is nothing left between them. Name a model.`,
+    );
+  }
+
+  /*
+   * ISC-402: a worker cannot resolve to a provider the document never declares.
+   *
+   * Only when a `providers` map exists. Without one there is nothing to check
+   * against — every existing `fleet.yaml` names its provider in the flat keys
+   * or not at all — and refusing here would break each of them.
+   *
+   * The provider reaches this line from one of two places and both must be
+   * covered: a `provider/` prefix the operator typed on THIS worker's `model:`,
+   * or `llm.provider` inherited when they typed no prefix. The second is the
+   * one worth naming, because nothing in the file says the word and the
+   * operator is reading a `model:` line that looks complete.
+   *
+   * Without this, an undeclared provider is not an error at all: it is a name
+   * with no block behind it, so `assertModelAllowed` finds no allowlist and
+   * constrains nothing, and every later phase that keys on the provider —
+   * `base_url`, the credential, the egress network, the relay — resolves
+   * against a block that does not exist. The failure surfaces as a worker that
+   * cannot reach a model, arbitrarily far from the typo.
+   *
+   * The message names the FILE because `config validate` may be run against a
+   * path the operator did not type, and the FIELD because `model:` and
+   * `llm.provider` are different lines to go fix.
+   */
+  const declared = config.llm.providers;
+  if (declared !== undefined && declared[spec.provider] === undefined) {
+    const known = Object.keys(declared);
+    const wrotePrefix = mergedModel.indexOf("/") > 0;
+    const field = wrotePrefix ? `the "${spec.provider}/" prefix on worker "${entry.id}"'s model:` : `llm.provider`;
+    throw new ConfigError(
+      `worker "${entry.id}" resolves to provider "${spec.provider}", which is not declared in ` +
+        `llm.providers in ${loaded.path}. It comes from ${field}. ` +
+        (wrotePrefix
+          ? ``
+          : `The worker's model: "${mergedModel}" names no provider, so it inherits the fleet default. `) +
+        `Declared: ${known.length === 0 ? "(none)" : known.map((k) => JSON.stringify(k)).join(", ")}.`,
     );
   }
 
@@ -493,10 +575,48 @@ export class ModelNotAllowedError extends ConfigError {
  * is the dead-rule shape `EgressRuleSchema` already refuses to ship.
  */
 export function assertModelAllowed(loaded: LoadedConfig, worker: ResolvedWorker): void {
-  const allowlist = loaded.config.llm.models_allowlist;
+  const { llm } = loaded.config;
+  /*
+   * ISC-404: the list is the RESOLVED PROVIDER'S, not the fleet's.
+   *
+   * With a `providers` map the allowlist moved inside the block, and reading
+   * the flat key here would have made one fleet-wide list govern every
+   * provider — so a model probed against oMLX would authorize the same name on
+   * a hosted endpoint that never answered a probe. The allowlist's whole
+   * meaning is "these were probed for native tool calls (SRD §5.9)", and a
+   * probe is of a (provider, model) PAIR; carrying the verdict across
+   * providers is not a widening of the rule, it is a different rule.
+   *
+   * A declared provider with an empty `models_allowlist` constrains nothing,
+   * exactly as the flat key's empty default does. A provider that is not in
+   * the map cannot reach here at all — `resolveWorker` refuses it above — so
+   * the `?? []` is unreachable-by-construction rather than a fallback with an
+   * opinion, and it stays because `??` is cheaper to read than an assertion
+   * that restates a guarantee enforced in another function.
+   */
+  const allowlist = providerAllowlist(loaded.config, worker.provider);
   if (allowlist.length === 0) return;
-  const fallback = loaded.config.llm.provider;
-  const permitted = allowlist.map((e) => decomposeModel(e, fallback, undefined).model);
+  /*
+   * The fallback provider for an entry that names none: the block's own key
+   * with a map, the fleet default without one. Inside `providers.ollama.
+   * models_allowlist`, a bare `gpt-oss` means ollama's — there is no other
+   * provider that entry could be about — and using the fleet default there
+   * would prefix hosted entries with the local provider's name.
+   */
+  const fallback = llm.providers ? worker.provider : llm.provider;
+  const isTagStyle = tagStyleProviders(loaded.config);
+  /*
+   * ISC-424's GATE HALF. Both sides decompose with the SAME predicate, so on a
+   * tag-style provider `p/m:high` and `p/m:low` are two models and the second
+   * is refused by a list naming only the first. Before the predicate reached
+   * here the tag was eaten on both sides, both became `m`, and the gate
+   * admitted a tag variant nobody had probed — the allowlist is the fleet's
+   * record of what WAS probed (ISC-190), so admitting an unprobed variant is
+   * the gate failing at the one thing it is for. `doctor` reads the same flag
+   * through the same helper, which is what keeps its verdict and this refusal
+   * from disagreeing.
+   */
+  const permitted = allowlist.map((e) => decomposeModel(e, fallback, undefined, isTagStyle).model);
   if (permitted.includes(worker.model)) return;
   throw new ModelNotAllowedError(worker.id, worker.model, allowlist);
 }

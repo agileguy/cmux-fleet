@@ -5,7 +5,14 @@ import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT, type ExitCode } from "../../contracts.ts";
 import { loadBackend } from "../../backends/registry.ts";
-import { ConfigError, decomposeModel, loadConfig, type LoadedConfig } from "../../config/load.ts";
+import {
+  ConfigError,
+  decomposeModel,
+  loadConfig,
+  providerAllowlist,
+  tagStyleProviders,
+  type LoadedConfig,
+} from "../../config/load.ts";
 import { resolveAllWorkers } from "../../config/load.ts";
 import { ThinkingLevelSchema } from "../../config/schema.ts";
 import type { FleetConfig, Toolchain } from "../../config/schema.ts";
@@ -708,6 +715,7 @@ export function allowlistVerdicts(
   allowlist: readonly string[],
   served: readonly string[],
   fallbackProvider: string,
+  isTagStyleProvider?: (provider: string) => boolean,
 ): AllowlistVerdict[] {
   /* What the server literally offers, minus the repo-id namespace only. */
   const servedExact = new Set<string>();
@@ -721,7 +729,7 @@ export function allowlistVerdicts(
   }
 
   return allowlist.map((entry) => {
-    const { model } = decomposeModel(entry, fallbackProvider, undefined);
+    const { model } = decomposeModel(entry, fallbackProvider, undefined, isTagStyleProvider);
     // `decomposeModel` splits the prefix the same way, so a difference here is
     // exactly "the operator wrote a `:level`" — no second parse of the string.
     const asWritten = stripNamespace(entry);
@@ -1161,9 +1169,27 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
      * fallback instead of leaving a provider invented for a config that does
      * not exist, which would be a lie the day someone loosened the gate above.
      */
-    const allowlist = loaded?.config.llm.models_allowlist ?? [];
+    /*
+     * The allowlist comes through `providerAllowlist` rather than off the flat
+     * key, so a fleet that has moved to `llm.providers` is checked instead of
+     * silently reporting an empty list. `doctor` probes ONE endpoint, so the
+     * provider it asks about is the fleet default — the block whose `base_url`
+     * this report is about. Probing each declared provider at its own endpoint
+     * is D16's job, not this line's, and until then a mapped fleet gets its
+     * default provider checked honestly rather than every provider checked
+     * badly.
+     */
+    const allowlist =
+      loaded === null ? [] : providerAllowlist(loaded.config, loaded.config.llm.provider);
     if (loaded !== null && allowlist.length > 0 && report.models.length > 0) {
-      report.allowlist = allowlistVerdicts(allowlist, report.models, loaded.config.llm.provider);
+      report.allowlist = allowlistVerdicts(
+        allowlist,
+        report.models,
+        loaded.config.llm.provider,
+        // The SAME predicate the gate uses, through the same helper. Two
+        // readings of `tag_style` is how `doctor` and `up` come to disagree.
+        tagStyleProviders(loaded.config),
+      );
       report.allowlistChecked = true;
     }
   } catch (err) {
@@ -1579,7 +1605,11 @@ export function register(program: Command): void {
          * checked" and "all fine" are different facts and silence would read
          * as the second.
          */
-        const declared = loaded?.config.llm.models_allowlist ?? [];
+        // Through the same helper as the verdict above, and for the same
+        // reason: reading the flat key here would print "0 entries" for a
+        // mapped fleet whose report already carries verdicts.
+        const declared =
+          loaded === null ? [] : providerAllowlist(loaded.config, loaded.config.llm.provider);
         if (declared.length > 0) {
           if (!omlx.allowlistChecked) {
             console.log(

@@ -508,32 +508,112 @@ describe("a colon tag is identity on the served side (ISC-424)", () => {
    * native tool calls (ISC-190), so an unprobed tag variant walks straight
    * through.
    *
-   * It cannot be closed from `doctor.ts`, and not because of a scope rule.
-   * Measured 2026-09-01:
+   * The gate is now CLOSED, and this block asserts it positively rather than
+   * as the absence it used to pin.
+   *
+   * It could not be closed from `doctor.ts`, and not for a scope reason.
+   * Measured on the unfixed tree:
    *
    *     resolveWorker("ollama/gpt-oss:low") -> model "gpt-oss", thinking "low"
    *
-   * The tag is already gone by the time `assertModelAllowed` runs, so the gate
-   * has nothing left to discriminate on — the information was destroyed one
-   * function upstream. Preserving it requires `resolveWorker` to know the
-   * provider is tag-style, which requires the `llm.providers` map (ISC-405,
-   * Phase 2) that deliberately does not exist yet. So `doctor` is now STRICTER
-   * than `up` on exactly this shape. That asymmetry is the correct state
-   * rather than a new contradiction: the ISC-256 ↔ ISC-52 block above pins
-   * agreement on ids whose decoration is unambiguous, and this is the one
-   * shape where it is not — the stricter half is the half that is right.
+   * The tag was gone before `assertModelAllowed` ran, so the gate had nothing
+   * left to discriminate on — the information was destroyed one function
+   * upstream. Preserving it needs `resolveWorker` to know the provider is
+   * tag-style, which needed the `llm.providers` map. Both have landed, so this
+   * test flipped from "the hole is still open" to "the hole is shut", which is
+   * exactly what pinning it to the blocker's absence was for.
    *
-   * Per this repo's rule that a blocked criterion's probe is pinned to the
-   * BLOCKER's absence, this asserts the hole is still open. Closing the gate
-   * turns this test RED, which is what forces ISC-424 to be re-graded rather
-   * than left green by inertia.
+   * The two halves below are the whole assertion. `tag_style: true` must
+   * REFUSE, and a provider WITHOUT the flag must still ADMIT — because
+   * `:low` really is a thinking level there, and a gate that refused both
+   * would pass the first assertion while breaking every fleet in the repo.
    */
-  test("TRIPWIRE: up's gate still admits the tag variant doctor now refuses", async () => {
+  test("up's gate refuses the tag variant on a tag-style provider (ISC-424)", async () => {
     const allowlist = ["ollama/gpt-oss:high"];
     const loaded = await parseConfig(
       stringify({
         version: 2,
         name: "isc-424-gate",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: {
+          model: "DefaultModel",
+          provider: "ollama",
+          providers: {
+            ollama: {
+              hosted: true,
+              base_url: "https://ollama.com/v1",
+              api_key_env: "OLLAMA_API_KEY",
+              tag_style: true,
+              models_allowlist: allowlist,
+            },
+          },
+        },
+        roles: { eng: { model: "ollama/gpt-oss:low" } },
+        workers: [{ id: "w1", role: "eng" }],
+      }),
+      "/nonexistent/fleet.yaml",
+    );
+    const worker = resolveWorker(loaded, "w1");
+
+    // The tag SURVIVES the merge now, which is the information the gate needs.
+    expect(worker.model).toBe("gpt-oss:low");
+    expect(worker.thinking).toBeUndefined();
+
+    // …so an allowlist naming only `:high` refuses it. This is the line that
+    // used to assert `.not.toThrow()`.
+    expect(() => assertModelAllowed(loaded, worker)).toThrow(/gpt-oss:low/);
+
+    // The exact spelling on the list is still admitted, so the gate is
+    // discriminating rather than refusing everything with a colon in it.
+    const okDoc = await parseConfig(
+      stringify({
+        version: 2,
+        name: "isc-424-gate-ok",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: {
+          model: "DefaultModel",
+          provider: "ollama",
+          providers: {
+            ollama: {
+              hosted: true,
+              base_url: "https://ollama.com/v1",
+              api_key_env: "OLLAMA_API_KEY",
+              tag_style: true,
+              models_allowlist: allowlist,
+            },
+          },
+        },
+        roles: { eng: { model: "ollama/gpt-oss:high" } },
+        workers: [{ id: "w1", role: "eng" }],
+      }),
+      "/nonexistent/fleet.yaml",
+    );
+    expect(() => assertModelAllowed(okDoc, resolveWorker(okDoc, "w1"))).not.toThrow();
+
+    // And `doctor` agrees with the gate on the same config, through the same
+    // predicate — the ISC-256 asymmetry this block used to document is gone.
+    expect(
+      allowlistVerdicts(allowlist, ["gpt-oss:low"], "ollama", () => true)[0]!.served,
+    ).toBe(false);
+  });
+
+  /**
+   * ANTI-VACUITY, and the direction that would break every existing fleet.
+   *
+   * With no `providers` map there is no `tag_style`, `:low` is a thinking
+   * level, and `ollama/gpt-oss:low` IS `gpt-oss` — which an allowlist naming
+   * `ollama/gpt-oss:high` permits, because thinking is a flag and not identity.
+   * A fix that made the gate refuse on any colon would satisfy the test above
+   * and fail here.
+   */
+  test("without tag_style the same pair is still admitted, because :low is a level", async () => {
+    const allowlist = ["ollama/gpt-oss:high"];
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "isc-424-no-map",
         docker: { pi_version: "0.79.6" },
         run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
         llm: { model: "DefaultModel", models_allowlist: allowlist },
@@ -543,15 +623,8 @@ describe("a colon tag is identity on the served side (ISC-424)", () => {
       "/nonexistent/fleet.yaml",
     );
     const worker = resolveWorker(loaded, "w1");
-
-    // The information the gate would need is destroyed upstream, in `load.ts`.
     expect(worker.model).toBe("gpt-oss");
     expect(worker.thinking).toBe("low");
-
-    // So the gate admits it. When it stops, this line fails and ISC-424 is done.
     expect(() => assertModelAllowed(loaded, worker)).not.toThrow();
-
-    // And `doctor`, which CAN still see the tag, refuses — the half fixed here.
-    expect(allowlistVerdicts(allowlist, ["gpt-oss:low"], "omlx")[0]!.served).toBe(false);
   });
 });
