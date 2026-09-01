@@ -548,7 +548,7 @@ ENTRYPOINT ["/usr/bin/tini","--","pi"]
 
 Notes:
 - `tini` as PID 1 so signals reach `pi` and zombies are reaped — without it `docker kill --signal=INT` does not interrupt cleanly.
-- Fixed uid `10001` matters on Colima/virtiofs: bind-mounted worktrees must be writable by the container user and by Dan on the host. `pifleet doctor` verifies write-through in both directions.
+- Fixed uid `10001` matters on Colima/virtiofs: bind-mounted worktrees must be writable by the container user and by the operator on the host. `pifleet doctor` verifies write-through in both directions.
 - `--ignore-scripts` on both npm installs (Pi's own doc uses it) — install-time scripts are an unnecessary supply-chain surface.
 - `CLOUDSDK_CONFIG` points at a **container-local writable** gcloud config so the CLI can write its token cache without any host config being mounted (§5.8).
 - Pinning `PI_VERSION` is mandatory: §4.2's entire protocol contract is version-specific, and this document is already one casualty of assuming otherwise.
@@ -609,7 +609,7 @@ always present will look for a `/secrets` that a worker granted nothing never re
 | `<run-dir>/workers/<worker>/cloud-allow` | `/policy/cloud-allow` | **ro** | always | the verbgate's policy (§5.10). **Read-only and separate from `/outbox` on purpose** — it used to be read out of `/outbox`, which the worker owns, so the subject of the policy could rewrite the policy and the task-scoped cloud grant was a suggestion rather than a control |
 | `<run-dir>/workers/<worker>/task-policy` | `/policy/task` | **ro** | always | the task id and epoch the verbgate stamps on every ledger row (§5.10). Rewritten IN PLACE by the supervisor at each dispatch and cleared at settle — never tmp+rename, because a bind mount pins the inode. Not environment: a container outlives any one epoch, and a worker can rewrite its own environment — ISC-362 |
 | `<run-dir>/workers/<worker>/secrets` | `/secrets` | **ro** | only when the worker was granted ≥1 `secrets:` name | granted credentials, one file per name at 0444, reached through `<NAME>_FILE` — §12.4 |
-| *(named volume)* `pifleet-piagent-<worker>` | `/home/pi/.pi/agent` | rw | always | container-local Pi state — **never the host `~/.pi/agent`**, which holds Dan's auth and sessions |
+| *(named volume)* `pifleet-piagent-<worker>` | `/home/pi/.pi/agent` | rw | always | container-local Pi state — **never the host `~/.pi/agent`**, which holds the operator's auth and sessions |
 | `<run-dir>/workers/<worker>/system-append.md` | `/briefing/system-append.md` | **ro** | only when a briefing fragment exists | the single concatenated `--append-system-prompt` file — §6.3 |
 | `<run-dir>/workers/<worker>/kubeconfig` | `/home/pi/.kube/config` | **ro** | only when `cloud.kubeconfig` is set **and** the worker has `cloud_access` | a filtered copy, never the host `~/.kube/config` wholesale |
 
@@ -668,13 +668,13 @@ docker run -i --rm \
 
 ### 5.8 Google credentials — inherited from the launching Claude instance
 
-Workers inherit Dan's Google identity via **Application Default Credentials**, so `gcloud`, `kubectl`, and Vertex-backed models work inside a container without a separate service account. **One mode.**
+Workers inherit the operator's Google identity via **Application Default Credentials**, so `gcloud`, `kubectl`, and Vertex-backed models work inside a container without a separate service account. **One mode.**
 
 | Mode | Mechanism | TTL | Default |
 |---|---|---|---|
 | **`token`** | supervisor runs `gcloud auth application-default print-access-token` on the **host** and injects it as `CLOUDSDK_AUTH_ACCESS_TOKEN` + `GOOGLE_OAUTH_ACCESS_TOKEN`, refreshing every 45 min | **~1 h** (measured: `expires_in: 3599`) | ✅ |
 
-**Why `token` is the only mode.** The local ADC file is `type: authorized_user` and contains a **`refresh_token`** — a non-expiring credential for Dan's whole Google account. Any worker with `bash` can `cat` a mounted file and exfiltrate it, and a leaked refresh token outlives the run, the container, and the fleet. A one-hour access token is a bounded blast radius.
+**Why `token` is the only mode.** The local ADC file is `type: authorized_user` and contains a **`refresh_token`** — a non-expiring credential for the operator's whole Google account. Any worker with `bash` can `cat` a mounted file and exfiltrate it, and a leaked refresh token outlives the run, the container, and the fleet. A one-hour access token is a bounded blast radius.
 
 > **AMENDED 2026-08-25 (ISC-268): `file` mode is REMOVED, not deferred.**
 >
@@ -712,11 +712,11 @@ Workers inherit Dan's Google identity via **Application Default Credentials**, s
 > an account-wide refresh token — an impersonated or external-account
 > credential — which is a §5.8 design question, not a re-enable.
 
-**Never mounted:** the host `~/.config/gcloud` directory. It holds `credentials.db`, `legacy_credentials/`, and `access_tokens.db` — the full gcloud auth store for *every* account Dan has logged in, which is strictly more powerful than ADC itself. Only the single ADC artifact crosses the boundary, and `CLOUDSDK_CONFIG` gives the container its own writable config dir (§5.2).
+**Never mounted:** the host `~/.config/gcloud` directory. It holds `credentials.db`, `legacy_credentials/`, and `access_tokens.db` — the full gcloud auth store for *every* account the operator has logged in, which is strictly more powerful than ADC itself. Only the single ADC artifact crosses the boundary, and `CLOUDSDK_CONFIG` gives the container its own writable config dir (§5.2).
 
-**Scoping.** `cloud.quota_project` sets `CLOUDSDK_CORE_PROJECT` and the ADC quota project (locally: `gen-lang-client-0675968762`). Where a scoped service account exists, `cloud.impersonate_service_account` is strongly preferred — the supervisor mints an impersonated token instead of a user token, and the worker inherits only that SA's roles rather than Dan's full authority.
+**Scoping.** `cloud.quota_project` sets `CLOUDSDK_CORE_PROJECT` and the ADC quota project (set per-deployment in the gitignored `fleet.yaml`). Where a scoped service account exists, `cloud.impersonate_service_account` is strongly preferred — the supervisor mints an impersonated token instead of a user token, and the worker inherits only that SA's roles rather than the operator's full authority.
 
-**This is a real privilege grant, stated plainly:** a worker with `bash` and `cloud_access: true` can do anything Dan's Google identity can do, for the lifetime of its token. It is off per role by default (`cloud_access: false`), and `pifleet up` prints the granted identity, project, and mode so the grant is never silent.
+**This is a real privilege grant, stated plainly:** a worker with `bash` and `cloud_access: true` can do anything the operator's Google identity can do, for the lifetime of its token. It is off per role by default (`cloud_access: false`), and `pifleet up` prints the granted identity, project, and mode so the grant is never silent.
 
 ### 5.9 The LLM is a private oMLX instance
 
@@ -815,7 +815,7 @@ Two guards, because a startup probe alone can be passed by a model that then dri
 
 ### 5.10 Mutating cloud verbs are gated
 
-§12.4 grants a `cloud_access` worker Dan's Google identity for up to an hour. A worker with `bash` could then run `kubectl delete`, `helm uninstall`, or `gcloud compute instances delete` against live infrastructure — and unlike a bad code edit, that is not recoverable from a git branch. **Read verbs flow freely; mutating verbs require per-task authorization.**
+§12.4 grants a `cloud_access` worker the operator's Google identity for up to an hour. A worker with `bash` could then run `kubectl delete`, `helm uninstall`, or `gcloud compute instances delete` against live infrastructure — and unlike a bad code edit, that is not recoverable from a git branch. **Read verbs flow freely; mutating verbs require per-task authorization.**
 
 **Mechanism.** The real binaries are moved to `/usr/local/libexec/<name>.real` at image build; a single `verbgate` shim takes their names on `PATH`. The shim classifies `argv` and either execs the real binary or refuses with exit 77 and a ledger entry.
 
@@ -839,7 +839,7 @@ gcloud|kubectl|helm  <verb> …
 "cloud_allow": ["kubectl rollout restart", "kubectl scale"]
 ```
 
-Matching is on the **normalized verb prefix** (`kubectl rollout restart`), not a regex over the whole command line — a substring match would be trivially defeated by flag reordering. `cloud_allow: ["*"]` exists for a task Dan explicitly wants unrestricted, and `up` prints every worker whose tasks carry it.
+Matching is on the **normalized verb prefix** (`kubectl rollout restart`), not a regex over the whole command line — a substring match would be trivially defeated by flag reordering. `cloud_allow: ["*"]` exists for a task the operator explicitly wants unrestricted, and `up` prints every worker whose tasks carry it.
 
 **What this does and does not buy.** It stops the *casual* destructive action — the confused agent, the over-eager cleanup, the injected instruction that says "delete the failing deployment." It does **not** stop a determined one: the worker has `bash`, so `/usr/local/libexec/kubectl.real` is directly reachable, and a token in the environment can be used with `curl` against the API directly. Closing that requires the credential to be scoped rather than the command line filtered — which is why `impersonate_service_account` remains the stronger control and the wrapper is defence-in-depth on top of it, not a substitute for it.
 
@@ -996,7 +996,7 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — §5
 cloud:
   adc: true                  # inherit the launching Claude instance's Google identity
   adc_mode: token            # the only mode: a ~1h access token (§5.8)
-  quota_project: gen-lang-client-0675968762
+  quota_project: example-project-000000
   impersonate_service_account: null    # strongly preferred where one exists
   kubeconfig: null           # path to a FILTERED kubeconfig; never the host default
   token_refresh: 45m
@@ -1361,6 +1361,7 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
   "epoch": 1, "completed_epochs": [], "task_id": "T-004",
   "session_path": "/Users/dan/.pifleet/runs/<run-id>/sessions/2026-07-26T14-02-19-530Z_<run-id>--eng-1.jsonl",
   "session_present": true,
+  "transcript_activity": {"entries": 1462, "last_growth_at": "2026-07-26T14:09:05Z"},
   "last_event": "tool_execution_end", "last_event_at": "2026-07-26T14:09:03Z",
   "heartbeat_at": "2026-07-26T14:09:07Z",
   "turns": 12, "tool_calls": 41, "tool_errors": 2,
@@ -1405,6 +1406,25 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
 > persist its high-water mark must stop allocating epochs (`src/supervisor/index.ts:612-613`). §7.5's
 > "recorded in `state.json` before the `prompt` is written" is true and incomplete — it names the
 > advisory copy and omits the authoritative one.
+
+> **Added 2026-09-01 — `transcript_activity`, and it exists because every other field in this block
+> describes an EPOCH.**
+>
+> `phase`, `task_id`, `epoch` and `completed_epochs` all answer "where is this worker in a dispatched
+> task". A `tui` worker a person types into is never in one: §3.5's pane route allocates no epoch, so
+> `phase` reads `idle` for the whole life of the run and is correct every time it does. Observed on
+> the operations console 2026-09-01 as `tick-1: idle task=- supervisor=up` printed beside a pane that
+> was mid-turn with a 300 KB transcript still growing — three true fields, and no field that could
+> have said so.
+>
+> `{entries, last_growth_at}` is recorded by the `tui` transcript poll, which already reads both
+> facts to settle epochs, and is written only when the count moves so a 500 ms poll does not become a
+> state write twice a second. `null` means NOT MEASURED — an `rpc` worker, whose `phase` is already
+> the honest answer — and is rendered as silence rather than as zero; `last_growth_at: null` inside a
+> present object means the poll has watched and seen no write, which is a different claim and reads
+> differently. `status` renders it as a trailing `transcript 3s ago` and carries it in `--json`.
+> Nothing routes on it: `wait`, `report` and the ledger continue to read `phase`, which is why the
+> fix is a new field rather than a wider `phase`.
 
 ### 7.7 Ledger and registry
 
@@ -1851,13 +1871,13 @@ This is a deliberate exception, not an oversight. Dan's requirement is that work
 |---|---|
 | `adc_mode: token` (the only mode) | container holds a **~1 h access token**, not the non-expiring `refresh_token` — measured `expires_in: 3599` |
 | `cloud_access: false` by default | only roles that explicitly opt in get any Google credential at all |
-| host `~/.config/gcloud` never mounted | `credentials.db`, `legacy_credentials/`, and `access_tokens.db` — every account Dan has logged in — stay out of every container |
-| `impersonate_service_account` | where an SA exists, the worker inherits *its* roles, not Dan's |
+| host `~/.config/gcloud` never mounted | `credentials.db`, `legacy_credentials/`, and `access_tokens.db` — every account the operator has logged in — stay out of every container |
+| `impersonate_service_account` | where an SA exists, the worker inherits *its* roles, not the operator's |
 | `quota_project` | pins billing/quota attribution |
 | egress allowlist | the bridge restricts where a token can be used |
 | `up` prints the granted identity, project, and mode | the grant is never silent |
 
-**Stated plainly:** a worker with `bash` and `cloud_access: true` can do anything Dan's Google identity can do, for up to an hour. Containment reduces exposure; it does not eliminate it. Roles that do not need cloud access must not be given it, and `config validate` warns when `cloud_access: true` is combined with a repo the run does not own.
+**Stated plainly:** a worker with `bash` and `cloud_access: true` can do anything the operator's Google identity can do, for up to an hour. Containment reduces exposure; it does not eliminate it. Roles that do not need cloud access must not be given it, and `config validate` warns when `cloud_access: true` is combined with a repo the run does not own.
 
 **Both classes:** `env_allowlist` never includes provider keys; the Docker socket is never mounted (that is host root); `GIT_CONFIG_GLOBAL` points at a per-run scratch config with **no credential helper and no push remotes**, so a push cannot authenticate even if attempted.
 
@@ -2461,7 +2481,7 @@ Runnable on `headless` against `pifleet-fake-pi` except where marked.
 12. The host `~/.config/gcloud` directory is not mounted in any container (`docker inspect` mount list).
 13. A role with `cloud_access: false` has no Google credential and `gcloud auth print-access-token` fails.
 14. After `token_refresh` elapses, a `gcloud` call inside a long-running container still succeeds (token was re-injected).
-15. With `impersonate_service_account` set, the token's identity is the SA, not Dan's account.
+15. With `impersonate_service_account` set, the token's identity is the SA, not the operator's account.
 16. `up` prints the granted identity, project, and ADC mode for every `cloud_access` worker.
 17. A container completes a model call against `host.docker.internal:8000` with no route to the public internet.
 18. A model outside `models_allowlist` is refused at `up` with exit 2.

@@ -130,6 +130,109 @@ RUN if [ -n "${EXTRA_APT_PACKAGES}" ]; then \
 # --ignore-scripts: install-time scripts are an unnecessary supply-chain surface.
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
 
+# Pi TUI colour themes (src/config/themes.ts holds the reasoning and the names).
+#
+# Pi ships exactly two, `dark` and `light`, and `light` is not a usable second
+# choice: a Pi theme defines no page background, so it paints light-mode ink
+# onto whatever the terminal already has. The operations console runs two
+# attended panes side by side and needs them tellable apart, so the image
+# carries a bundle of well-known palettes.
+#
+# WHAT WAS READ BEFORE TRUSTING THIS, because it is third-party code entering
+# every worker container. The published 0.1.6 tarball is 19 files: 16 theme
+# JSONs, README, an MIT LICENSE, package.json. It carries NO JavaScript at all,
+# no `scripts` block (so no pre/post-install hook — `--ignore-scripts` below is
+# belt to that braces), no dependencies, no `bin`, no `main`: nothing in it is
+# executable or require-able. Every theme file is pure ASCII with no control
+# characters, which matters more than it sounds — theme values are emitted to
+# the terminal as escape sequences, so a smuggled ESC would be terminal
+# injection — and every value is a hex colour, an integer 0-255, or a reference
+# to that file's own `vars`.
+#
+# The version is PINNED and must equal `PI_THEMES_VERSION` in
+# src/config/themes.ts; test/unit/themes.test.ts asserts the two agree. One
+# immutable tarball per version is all the pin buys. It is not a claim that some
+# future version is safe, and bumping it means reading the tarball again.
+#
+# COPIED OUT of the npm tree, then uninstalled, for two reasons: /home/pi/.pi/
+# agent is Pi's own custom-theme directory and is a named volume at run time,
+# which would mask anything baked at that path; and leaving the package in the
+# global tree would give the same 16 themes two possible discovery routes.
+#
+# The `test -f` loop is the load-bearing half. It is the second arrow in
+# themes.ts's `THEME_NAMES → Dockerfile → image` chain: a bundle that renamed or
+# dropped a file fails the BUILD here, instead of shipping a worker whose
+# configured theme silently falls back to the default.
+ARG PI_THEMES_VERSION=0.1.6
+RUN set -eux; \
+    npm install -g --ignore-scripts @firstpick/pi-themes-bundle@${PI_THEMES_VERSION}; \
+    mkdir -p /opt/pifleet; \
+    cp -R "$(npm root -g)/@firstpick/pi-themes-bundle/themes" /opt/pifleet/themes; \
+    npm uninstall -g --ignore-scripts @firstpick/pi-themes-bundle; \
+    for t in catppuccin-latte catppuccin-mocha crimson-noir dracula everforest-dark \
+             gruvbox-dark gruvbox-light matrix nord one-dark rose-pine rose-pine-dawn \
+             solarized-dark solarized-light tokyo-night tokyo-night-storm; do \
+      test -f "/opt/pifleet/themes/${t}.json"; \
+    done; \
+    chmod -R a+rX /opt/pifleet
+
+# The ticket CLI (src/config/ticket-cli.ts holds the pin; skills/ticket-ops
+# says how to drive it).
+#
+# THIS REVERSES A DECISION THE SKILL USED TO ARGUE FOR, and the reversal is
+# recorded rather than quietly applied. `skills/ticket-ops/SKILL.md` said "there
+# is no ticket CLI in the image and there is not going to be one", on two
+# grounds: a vendor CLI "puts a vendor's name in the image hash and in a public
+# repository", and it pins the fleet to whatever that CLI calls an update. The
+# first ground is spent — this repository is private, and the skill has named
+# `rally1.rallydev.com` since 2026-08-30, so the vendor is already here. The
+# second is real and is answered by the pin below rather than by abstention.
+#
+# WHAT IT BUYS, which is the reason the owner asked for it: the hand-rolled curl
+# path had to be TAUGHT the vendor — which URL segment is a user story, that a
+# FormattedID is not an object id, which fields must be in `fetch=` or the reply
+# is tens of kilobytes. Every one of those was a sentence in a document that
+# nothing re-ran, and one of them (`Authorization: Token`, which Rally answers
+# with an HTML login page) was wrong for months because no credential existed to
+# exercise it. A CLI moves that knowledge behind a command that fails loudly.
+#
+# PINNED TO A COMMIT, not a tag or a branch. A tag is a moving reference: the
+# same `v1.2.0` can be re-pointed, and an image rebuilt a month later would
+# install different code under an unchanged Dockerfile. The commit is what makes
+# `docker/Dockerfile`'s digest a real input to the image hash.
+#
+# ITS OWN VIRTUALENV at /opt/pifleet/rally-cli, not the system python, so the
+# `python` toolchain variant's site-packages stay the operator's to use —
+# textual, httpx and pydantic are this tool's dependencies, not the fleet's, and
+# a worker doing Python work must not find them already resolved at versions it
+# did not choose. Only the entry point is published onto PATH.
+ARG TICKET_CLI_REPO=https://github.com/dan-elliott-appneta/rally-cli.git
+ARG TICKET_CLI_COMMIT=38a3b5e462393259c215ddc6babae505d62be1e2
+ARG TICKET_CLI_VERSION=1.2.0
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends python3 python3-venv; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 -m venv /opt/pifleet/rally-cli; \
+    /opt/pifleet/rally-cli/bin/pip install --no-cache-dir --quiet --upgrade pip; \
+    /opt/pifleet/rally-cli/bin/pip install --no-cache-dir --quiet \
+        "git+${TICKET_CLI_REPO}@${TICKET_CLI_COMMIT}"; \
+    chmod -R a+rX /opt/pifleet/rally-cli; \
+    # The load-bearing half, and it asserts the VERSION rather than presence.
+    # `pip install` of a git ref succeeds for any commit that builds, so a
+    # mis-typed sha would produce a working image running something else
+    # entirely. This is the same arrow the themes block's `test -f` loop is:
+    # a pin that nothing re-reads at build time is a comment.
+    #
+    # Run against the REAL entry point, not the PATH name: the shim below
+    # refuses to exec without delivered configuration, which no build has.
+    /opt/pifleet/rally-cli/bin/rally-cli --version | grep -qF "version ${TICKET_CLI_VERSION}"
+
+# The shim that configures it. On PATH as `rally-cli`, so a worker never types
+# the credential — see the file's own header for why this is a shim and not a
+# paragraph in the skill.
+COPY --chmod=0755 docker/ticket-cli /usr/local/bin/rally-cli
+
 # Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl/rg/fd
 # (§5.3). Executing each one at build time is the difference between an image
 # that *contains* the tools and an image where they *run*: the relocation above
@@ -145,6 +248,7 @@ RUN set -eux; \
     rg --version >/dev/null; \
     fd --version >/dev/null; \
     fdfind --version >/dev/null; \
+    /opt/pifleet/rally-cli/bin/rally-cli --version >/dev/null; \
     pi --version >/dev/null
 
 # Non-root, fixed uid so bind-mount ownership is deterministic on Colima/virtiofs.

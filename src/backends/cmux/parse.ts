@@ -178,6 +178,47 @@ export function parseListPanes(stdout: string): PaneListed[] {
   return out;
 }
 
+/** One pane's vertical extent, in the pixel space `list-panes --json` reports. */
+export interface PaneGeometry {
+  paneId: string;
+  y: number;
+  height: number;
+}
+
+/**
+ * `list-panes --json` → the container's height plus each pane's vertical box.
+ *
+ * Separate from {@link parseListPanes} because it needs fields that call does
+ * not: identity is enough to focus a pane, and nothing but layout wants pixels.
+ */
+export function parsePaneGeometry(stdout: string): {
+  containerHeight: number;
+  panes: PaneGeometry[];
+} {
+  const o = asObject("list-panes output", stdout);
+  const frame = o["container_frame"];
+  const list = o["panes"];
+  if (typeof frame !== "object" || frame === null || !Array.isArray(list)) {
+    throw new CmuxParseError("list-panes output (no container_frame or panes)", stdout);
+  }
+  const h = (frame as Record<string, unknown>)["height"];
+  if (typeof h !== "number") {
+    throw new CmuxParseError("list-panes output (container_frame has no height)", stdout);
+  }
+  const panes: PaneGeometry[] = [];
+  for (const entry of list) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    const paneId = pick(e, ["id", "ref"]);
+    const box = e["pixel_frame"];
+    if (paneId === null || typeof box !== "object" || box === null) continue;
+    const b = box as Record<string, unknown>;
+    if (typeof b["y"] !== "number" || typeof b["height"] !== "number") continue;
+    panes.push({ paneId, y: b["y"], height: b["height"] });
+  }
+  return { containerHeight: h, panes };
+}
+
 export interface SplitCreated {
   paneId: string;
   surfaceId: string;

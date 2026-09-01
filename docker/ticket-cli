@@ -1,0 +1,90 @@
+#!/bin/sh
+# ticket-cli — the ticket CLI, already configured (SRD §5.3).
+#
+# Installed on PATH as `rally-cli`; the real entry point lives in its own
+# virtualenv at /opt/pifleet/rally-cli/bin/rally-cli. Everything this shim does
+# is translate the fleet's secret DELIVERY into the CLI's configuration and
+# exec. It parses no arguments, gates nothing, and refuses nothing that reaches
+# it — see `verbgate` for the file in this image that is a control.
+#
+# ## Why a shim and not documentation
+#
+# The CLI reads `RALLY_APIKEY` from its environment (click `envvar=`), and the
+# fleet deliberately does NOT put credentials in a worker's environment: a
+# secret arrives as a 0444 file with a `<NAME>_FILE` pointer, precisely so that
+# `env`, `set` and a stray expansion cannot sweep the value into a transcript.
+#
+# Bridging those two by hand is a line of shell the WORKER would have to write,
+# and every spelling of it is a leak waiting for one bad turn:
+#
+#   rally-cli --apikey "$(cat "$TICKET_API_TOKEN_FILE")"   ← argv; `ps` sees it
+#   export RALLY_APIKEY="$(cat ...)"                       ← `env` sees it, for
+#                                                            the rest of the turn
+#   set -a; . /secrets/token.env; set +a                    ← same, plus a file
+#                                                            format nothing owns
+#
+# The shim does it once, in ITS OWN process, and execs. The worker never types
+# the credential, never holds it in a variable, and cannot leak it by accident —
+# only deliberately, by reading the file, which it could always do. That is the
+# same boundary `verbgate` draws: this removes the casual disclosure, not the
+# determined one.
+#
+# The construction it replaced was `curl --config`, which had the same property
+# for the same reason. This is that idea moved one process outward.
+#
+# ## Why unset configuration is fatal rather than defaulted
+#
+# An unconfigured CLI does not fail — it SUCCEEDS at something else. With no
+# project it queries the whole workspace; measured 2026-09-01, an iteration
+# summary asked without one returned 49 projects and roughly 180 people, and
+# read as a plausible answer. With no credential it would 401, which is at
+# least loud, but the scoping values fail silently and are the dangerous half.
+#
+# So every value is required, and a missing one exits 78 with a message naming
+# WHICH — because the fix differs: an absent `_FILE` variable means the worker's
+# `secrets:` selector did not name it, and an unreadable file means the fleet's
+# `env_allowlist` did not permit it. Both are `blocked` for a worker's verdict,
+# never `failed`.
+set -eu
+
+REAL=/opt/pifleet/rally-cli/bin/rally-cli
+
+die() {
+  # Never interpolates a VALUE, only a variable NAME and a path. A message that
+  # echoed the credential to explain that the credential was wrong would be the
+  # one disclosure this whole file exists to prevent.
+  printf 'rally-cli: %s\n' "$1" >&2
+  printf 'rally-cli: this is `blocked`, not `failed` — the fleet did not deliver the configuration.\n' >&2
+  exit 78
+}
+
+# Reads a delivered value. `$1` is the variable NAME the fleet sets to a path.
+#
+# Written as a function returning on stdout, with every call substituted into an
+# assignment below, because the alternative — `eval` over a name — would let a
+# variable's CONTENTS become code.
+read_delivered() {
+  eval "path=\${$1:-}"
+  [ -n "${path}" ] || die "$1 is not set; this worker's secrets: selector does not name it"
+  [ -r "${path}" ] || die "$1 names ${path}, which cannot be read"
+  cat "${path}"
+}
+
+RALLY_APIKEY=$(read_delivered TICKET_API_TOKEN_FILE)
+
+# The CLI wants a HOSTNAME; the fleet delivers a full WSAPI base URL, because
+# that is what the `curl` path needed and other roles' base URLs keep the same
+# shape. Stripping the scheme and path here keeps one spelling in the config.
+RALLY_SERVER=$(read_delivered TICKET_BASE_URL_FILE | sed -E 's#^[a-z]+://##; s#/.*$##')
+[ -n "${RALLY_SERVER}" ] || die "TICKET_BASE_URL_FILE holds no hostname"
+
+RALLY_WORKSPACE=$(read_delivered TICKET_WORKSPACE_FILE)
+RALLY_PROJECT=$(read_delivered TICKET_PROJECT_FILE)
+
+export RALLY_APIKEY RALLY_SERVER RALLY_WORKSPACE RALLY_PROJECT
+
+# `exec`, so the CLI inherits this process rather than becoming its child. The
+# shim leaves no parent holding the credential in memory, the CLI's exit status
+# is the shim's, and a signal from the supervisor reaches the thing doing the
+# work instead of a shell that would have to forward it.
+exec "${REAL}" "$@"

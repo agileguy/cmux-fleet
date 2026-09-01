@@ -191,6 +191,37 @@ describe("the --env-file contract with docker/entrypoint.sh", () => {
   });
 
   /**
+   * The theme travels as a NAME, and an unset one travels as "".
+   *
+   * The empty string is not a stand-in for "unset" here, it is the signal:
+   * `docker/entrypoint.sh` writes Pi's `settings.json` theme key only when this
+   * arrives non-empty, so "" means "leave the operator's own /settings choice
+   * alone". If this ever defaulted to a name, a theme picked by hand inside a
+   * pane would be silently overwritten on every container start.
+   */
+  test("PIFLEET_PI_THEME carries the resolved name, and empty when none resolved", async () => {
+    const loaded = await load(
+      baseDoc({
+        backend: { kind: "cmux" },
+        roles: { plain: {}, tinted: { pane_mode: "tui", theme: "dracula" } },
+        workers: [
+          { id: "w1", role: "plain" },
+          { id: "wt", role: "tinted" },
+        ],
+      }),
+    );
+    expect(buildWorkerEnv(loaded, resolveWorker(loaded, "wt"), {}).vars["PIFLEET_PI_THEME"]).toBe(
+      "dracula",
+    );
+    // Present-and-empty, NOT absent: the env file is a durable artifact read
+    // back later, and a missing key cannot be told apart from a pifleet that
+    // predated themes.
+    const plain = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {}).vars;
+    expect(plain["PIFLEET_PI_THEME"]).toBe("");
+    expect(Object.hasOwn(plain, "PIFLEET_PI_THEME")).toBe(true);
+  });
+
+  /**
    * `models_allowlist` is a GATE on what a worker may be configured with
    * (ISC-190), not a list to register. Registering it would hand every worker
    * a provider entry for models it is not permitted to use.

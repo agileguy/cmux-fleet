@@ -106,6 +106,23 @@ export function newSplitArgv(workspaceId: string, surfaceId: string, dir: SplitD
   return ["new-split", dir, "--workspace", workspaceId, "--surface", surfaceId, "--focus", "false", ...JSON_IDS];
 }
 
+/**
+ * `resize-pane --pane <id> -U|-D|-L|-R --amount <n>`.
+ *
+ * `--amount` is PIXELS, not rows or cells, measured against the container
+ * frame `list-panes --json` reports. That is not documented in `--help` and it
+ * is the sort of thing a caller assumes wrongly: an `--amount 5` meant as five
+ * rows moves the divider five pixels, which looks like the command silently
+ * doing nothing on a 34px cell.
+ */
+export function resizePaneArgv(
+  paneId: string,
+  dir: "U" | "D" | "L" | "R",
+  amount: number,
+): string[] {
+  return ["resize-pane", "--pane", paneId, `-${dir}`, "--amount", String(Math.round(amount))];
+}
+
 export function focusPaneArgv(paneId: string): string[] {
   assertCmuxValue("pane id", paneId);
   return ["focus-pane", "--pane", paneId];

@@ -133,9 +133,51 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
 cloud:
   adc: true                  # inherit the launching Claude instance's Google identity
   adc_mode: token            # token (1h, default) | file (refresh token — opt-in)
-  quota_project: gen-lang-client-0675968762
+  # An OBVIOUS EXAMPLE VALUE, on the same rule `egress.allow` states below:
+  # a copy of this file that is never edited must fail closed rather than
+  # bill or scope against someone else's project. Your real project id
+  # belongs in `fleet.yaml`, which is gitignored.
+  #
+  # It must also belong to the ADC identity the fleet inherits — the two move
+  # together, and a quota project from a different account is refused at the
+  # first API call rather than at launch.
+  quota_project: example-project-000000
   impersonate_service_account: null    # strongly preferred where one exists
-  kubeconfig: null           # path to a FILTERED kubeconfig; never the host default
+  # A FILTERED kubeconfig; never the host default.
+  #
+  # THREE THINGS HAVE TO BE TRUE FOR kubectl TO WORK FROM A WORKER, and the
+  # first two are not obvious enough to leave undocumented — each fails in a way
+  # that reads as one of the others.
+  #
+  # 1. THE EXEC PLUGIN CANNOT BE THE VENDOR'S DEFAULT. A managed-Kubernetes
+  #    kubeconfig authenticates through an exec plugin that shells out to the
+  #    cloud CLI to mint a token — and that call is a CREDENTIAL-PRINTING verb,
+  #    which `docker/verbgate` classifies as MUTATING on purpose. So the plugin
+  #    exits non-zero and kubectl reports a plugin failure, which looks like a
+  #    broken image and is actually the gate working. Point the kubeconfig's
+  #    `user.exec` at the token the supervisor ALREADY injects instead:
+  #
+  #      command: /bin/sh
+  #      args: ["-c", "printf '{\"apiVersion\":\"client.authentication.k8s.io/v1\",
+  #             \"kind\":\"ExecCredential\",\"status\":{\"token\":\"%s\"}}'
+  #             \"$(cat \"$CLOUDSDK_AUTH_ACCESS_TOKEN_FILE\")\""]
+  #
+  #    No new verb, no second credential path, and nothing to widen: that token
+  #    is in the container already because `cloud_access: true` put it there.
+  #    Note the copy is taken at `up` time, so editing this file needs a relaunch.
+  #
+  # 2. THE CONTROL PLANE MUST BE IN `egress.allow`. The bridge is deny-all and
+  #    kubectl dials the master through the CONNECT proxy, so an unlisted master
+  #    comes back `Forbidden` — the PROXY's 403, not the cluster's, and
+  #    indistinguishable from an RBAC denial unless you know to look. List the
+  #    ADDRESS, because the address is what the CONNECT names.
+  #
+  # 3. THE ADC IDENTITY MUST BE ONE THE CLUSTER KNOWS. The fleet inherits the
+  #    HOST's application-default credential — which is not necessarily the
+  #    account `gcloud auth list` shows as active. When it is the wrong one the
+  #    error finally names it, and that error is the good outcome: it means the
+  #    other two are already right.
+  kubeconfig: null
   token_refresh: 45m
 
 secrets:
@@ -182,6 +224,49 @@ secrets:
     # string above means `true`.
     - name: TICKET_BASE_URL
       credential: false
+    # The ticket CLI's two SCOPING values — which workspace, which project.
+    # Not credentials either, and here for the same reason `TICKET_BASE_URL` is:
+    # `secrets:` is the only per-worker delivery channel there is.
+    #
+    # They exist because the image now carries a ticket CLI (§5.3), and a query
+    # that names no project is not a narrower query — it is a WORKSPACE-WIDE
+    # one. Measured 2026-09-01: an iteration summary asked without a project
+    # returned 49 projects and roughly 180 people, and read as a plausible
+    # answer to the question that was asked. An unscoped query does not fail; it
+    # succeeds at something else, which is the failure mode worth spending a
+    # delivery slot on.
+    #
+    # `credential: false` for the same reason as the base URL, and it matters
+    # MORE here: a ticket artifact legitimately names the project it queried, so
+    # sweeping the project name as a needle would refuse every honest run.
+    - name: TICKET_WORKSPACE
+      credential: false
+    - name: TICKET_PROJECT
+      credential: false
+    #
+    # `observer`'s own three pairs, added for the same delivery reason and
+    # carrying the SAME trap one order of magnitude wider — three base URLs
+    # instead of one. THE FAILURE THIS RECORDS: before the `credential: false`
+    # erratum above existed, every `TICKET_BASE_URL` was granted as a bare
+    # string, so it swept as a credential — and a ticket worker's artifacts
+    # legitimately NAME the endpoint they queried. Every `ticket-ops.json`
+    # that did its job honestly was refused as leaking a credential, every
+    # refusal was recorded as a discrepancy nothing caused, and every verdict
+    # clamped on evidence that was never a leak. `observer`'s reports are
+    # WORSE hit if this is not learned here: a build URL or a dashboard link
+    # is close to the single most useful line in a deploy report, and this
+    # role carries three base URLs rather than one. So the tokens are bare
+    # strings (swept, as a credential must be) and the base URLs say up front
+    # that they are not needles.
+    - CI_CD_TOKEN
+    - CI_BUILD_TOKEN
+    - GRAFANA_TOKEN
+    - name: CI_CD_BASE_URL
+      credential: false
+    - name: CI_BUILD_BASE_URL
+      credential: false
+    - name: GRAFANA_BASE_URL
+      credential: false
 
 # Extra holes in the deny-all bridge. Empty by default, and every entry here is
 # a decision rather than a detail.
@@ -213,6 +298,18 @@ egress:
     # That refusal is correct and deliberate: a rule the matcher can never
     # match silently denies the destination it was written for.
     - {host: tickets.example.com, port: 443}
+    #
+    # `observer`'s destination classes (§6.4) — one exact host, one port,
+    # exactly like the rule above; a host with any port is a tunnel, not an
+    # allowance. FOUR new rules, not five: the fifth class in §6.4's table is
+    # Google's own API endpoints (container/logging/monitoring/auth), and
+    # `egress.google_hosts` already grants `*.googleapis.com` plus the two
+    # auth hosts by default (below) — a fifth entry here would be the same
+    # destination twice, not a narrower one.
+    - {host: ci-cd.example.com, port: 443}        # the CD pipeline API — §5.1
+    - {host: ci-build.example.com, port: 443}     # image-build server, D4 — build-failure logs
+    - {host: k8s-control.example.com, port: 443}  # a control-plane endpoint — kubectl, helm
+    - {host: grafana.example.com, port: 443}      # dashboard + datasource checks
 
 # Which changed files count as the EXAM rather than the answer (§6.5, §8.2a). A
 # diff touching one caps the verdict at `unknown`: a worker that can rewrite the
@@ -274,15 +371,29 @@ roles:
     cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
     isolation: worktree                   # manifest/IaC edits land on a branch
     append_system_prompt_file: ./roles/sre.md
-  investigator:                           # read-only diagnosis; never mutates
+  observer:                               # read-only diagnostic role — replaces
+                                           # `investigator` in this same change (D2);
+                                           # deploy watches AND ad-hoc service inquiries,
+                                           # one skill bundle, `mode` picks the shape
     model: Qwen3.5-35B-A3B-8bit
-    thinking: high
-    toolchain: base
-    tools: [read, bash, grep, find, ls]   # bash for kubectl/gcloud READ verbs
-    skills: [pifleet-worker]
-    cloud_access: true
-    isolation: none
-    append_system_prompt_file: ./roles/investigator.md
+    thinking: high                        # reconciling four disagreeing channels is the job
+    toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
+    tools: [read, write, bash, grep, find, ls]   # write is for the outbox artifact only
+    skills: [pifleet-worker, observer-ops]
+    cloud_access: true                    # ADC, read verbs only — §5.10 refuses every mutation
+    egress_access: true                   # a ROUTE to the proxy; destinations are egress.allow
+    secrets:                              # two CI dialects, one dashboard — §6.4/§6.5
+      - CI_CD_TOKEN
+      - CI_CD_BASE_URL
+      - CI_BUILD_TOKEN
+      - CI_BUILD_BASE_URL
+      - GRAFANA_TOKEN
+      - GRAFANA_BASE_URL
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    pane_mode: rpc                        # tui allocates no epoch — a re-dispatched watch
+                                           # pass would run twice; see the schema-level warning
+                                           # this config would otherwise trip (SRD §6.2, §7.5)
+    append_system_prompt_file: ./roles/observer.md
   verifier:                               # confirms a remediation actually worked
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: base
@@ -343,12 +454,18 @@ roles:
     # a timeout deep inside an HTTP call. So is a name that is set nowhere in
     # the operator's environment, and so is a file that cannot be written.
     #
-    # This worker therefore receives TICKET_API_TOKEN_FILE and
-    # TICKET_BASE_URL_FILE, each naming a path under /secrets. It receives
-    # neither value in its environment. `skills/ticket-ops/SKILL.md` documents
-    # the `curl --config` form that turns the first of those files into a
-    # request header without the value passing through a shell variable.
-    secrets: [TICKET_API_TOKEN, TICKET_BASE_URL]
+    # This worker therefore receives TICKET_API_TOKEN_FILE, TICKET_BASE_URL_FILE,
+    # TICKET_WORKSPACE_FILE and TICKET_PROJECT_FILE, each naming a path under
+    # /secrets. It receives none of the VALUES in its environment.
+    # `skills/ticket-ops/SKILL.md` documents the `.env` form that turns the
+    # first of those files into the CLI's configuration without the value
+    # passing through a shell variable — the same construction the `curl
+    # --config` block used before the image carried a CLI, for the same reason.
+    #
+    # All four are requested TOGETHER because three of them are useless alone: a
+    # credential with no endpoint cannot dial, and an endpoint with no project
+    # answers a workspace-wide question instead of the one asked.
+    secrets: [TICKET_API_TOKEN, TICKET_BASE_URL, TICKET_WORKSPACE, TICKET_PROJECT]
     # Sets HTTPS_PROXY so this worker has a ROUTE to the bridge proxy. It grants
     # no destination by itself — `egress.allow` above decides those, fleet-wide —
     # and it grants no Google identity. That separation is the whole point of the
@@ -356,15 +473,76 @@ roles:
     egress_access: true
 
 workers:
-  # 6 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
+  # 8 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
   # admission control does the queuing against the single oMLX server.
   - {id: sre-1,  role: sre}
   - {id: sre-2,  role: sre}
-  - {id: inv-1,  role: investigator}
+  # obs-1 overrides the role's `pane_mode: rpc` because it is the OPERATIONS
+  # CONSOLE's worker: `scripts/operations` resolves pane 1 by reading this
+  # worker's resolved pane_mode, and only `tui` makes that pane Pi's own
+  # interface rather than a rendered tail of its log.
+  #
+  # The override is on the WORKER and must stay there. Moving it up to the
+  # role would put every observer on tui, and tui allocates no epoch: with
+  # no `already_completed` fence a re-dispatched pass runs the same task
+  # twice, which an observer watch — built on repeated dispatch of
+  # near-identical tasks (§7.5) — is the least able role to afford.
+  # obs-1 is the one a human watches; obs-2 takes the dispatched passes.
+  # `up` permits exactly one tui worker in a fleet, and this is it.
+  # THEMES: the two attended panes sit side by side in one window, so they are
+  # given different palettes — an operator glancing at the console should not
+  # have to read a title bar to know which agent they are typing at. Pi ships
+  # only `dark` and `light`, and `light` is not a usable second choice: a Pi
+  # theme sets no page background, so it paints light-mode ink onto a dark
+  # terminal. Both names below come from the bundle baked into the image
+  # (src/config/themes.ts); `catppuccin` alone is NOT a name, the bundle
+  # distinguishes -mocha from -latte.
+  #
+  # -latte is one of the bundle's four LIGHT themes and is an operator's
+  # deliberate choice here, not an oversight: it tunes its ink for a light
+  # background, and a Pi theme sets no background of its own, so it only reads
+  # well in a pane whose terminal is light. Chosen anyway.
+  - {id: obs-1,  role: observer, pane_mode: tui, theme: catppuccin-mocha}
+  - {id: obs-2,  role: observer}
+  # Two, not one: observer is read-only, so a watch on one target can proceed
+  # while an inquiry about another is answered (§6.2).
   - {id: ver-1,  role: verifier}
-  - {id: eng-1,  role: engineer}
-  - {id: rev-1,  role: reviewer}
+  # ---- the `development` console's four seats ----
+  #
+  # All four are pane_mode: tui, because that console is FOUR KEYBOARDS. Each
+  # attended pane runs its own `up` (--attach-here hands over the terminal of
+  # the process that runs it, and one process has one terminal), so this is
+  # four runs — `status --all` reports them together, `--recreate` tears them
+  # down, and `dispatch` refuses all four in favour of typing into the pane.
+  #
+  # A DISTINCT THEME EACH, and with four panes that is no longer decoration:
+  # two engineers running the same role differ in nothing else on screen, so
+  # the palette is the only thing that says which container a pane belongs to
+  # before you read the title. All four are DARK themes — a Pi theme sets no
+  # page background, so a light one (catppuccin-latte, gruvbox-light, the two
+  # solarized-lights) paints light-mode ink onto whatever the terminal already
+  # is. tick-1 takes that trade knowingly; these do not.
+  #
+  # THE THROUGHPUT COST, stated rather than discovered: these four plus the
+  # operations console's two are six Pi processes against one oMLX server, and
+  # run.max_concurrent bounds each RUN, not the host. Six panes generating at
+  # once is six concurrent requests.
+  - {id: eng-1,  role: engineer, pane_mode: tui, theme: tokyo-night}
+  - {id: eng-2,  role: engineer, pane_mode: tui, theme: gruvbox-dark}
+  # The `tester` role existed with no worker to run it; the development
+  # console is what it was waiting for.
+  - {id: tst-1,  role: tester,   pane_mode: tui, theme: everforest-dark}
+  # reviewer carries NO bash (§12.1) and that is unchanged here: a tui pane is
+  # a person's keyboard on Pi's own interface, not a widening of the agent's
+  # tool grant. `pifleet shell` still reaches the container, because that is
+  # the FLEET exec'ing in, not a tool the reviewer may call.
+  - {id: rev-1,  role: reviewer,  pane_mode: tui, theme: nord}
   # One, not two. A second concurrent writer against the same ticket system is
   # a way to interleave two workers' edits on one object, and nothing in the
   # fleet serialises them.
-  - {id: tick-1, role: ticketing}
+  # pane_mode: tui so the operations console's pane runs Pi's own interface
+  # rather than a rendered tail. Each attended pane runs its OWN `up`,
+  # because --attach-here hands over the terminal of the process that runs
+  # it and one process has one terminal — so two attended panes are two
+  # runs, which `status --all` reports and `--recreate` tears down.
+  - {id: tick-1, role: ticketing, pane_mode: tui, theme: catppuccin-latte}

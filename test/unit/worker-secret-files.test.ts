@@ -66,6 +66,8 @@ const REAL_SKILL = join(import.meta.dir, "..", "..", "skills", "pifleet-worker",
  */
 const TOKEN = "tok-canary-6b1f-4ac9-never-in-any-environment";
 const BASE_URL = "https://tickets.example.invalid/api/v2";
+const WORKSPACE = "WS-canary-never-in-any-environment";
+const PROJECT = "PR-canary-never-in-any-environment";
 
 const cleanups: string[] = [];
 afterAll(async () => {
@@ -80,6 +82,12 @@ async function examplePlan() {
   return buildWorkerEnv(loaded, resolveWorker(loaded, "tick-1"), {
     TICKET_API_TOKEN: TOKEN,
     TICKET_BASE_URL: BASE_URL,
+    // The ticket CLI's scoping values, added 2026-09-01. Supplied because
+    // `buildWorkerEnv` REFUSES a worker whose `secrets:` names something the
+    // host does not set — a launch that proceeded without them would query an
+    // unscoped workspace, which returns rows rather than an error.
+    TICKET_WORKSPACE: WORKSPACE,
+    TICKET_PROJECT: PROJECT,
   });
 }
 

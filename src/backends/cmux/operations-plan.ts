@@ -70,12 +70,46 @@ export const OPERATIONS_WORKSPACE = "operations";
 /**
  * The workers pane 1 brings up when the caller names none.
  *
- * `tick-1` is `fleet.yaml`'s ticketing worker. This is a LIST rather than a
- * single id because `up --workers` already takes a set (ISC-61) and the
- * operations console has no business being narrower than the command it drives
- * — naming two workers here is a config edit, not a code change.
+ * `obs-1` LEADS, and the order is load-bearing twice over: `workers[0]` is the
+ * worker whose `pane_mode` decides whether the top-right pane is Pi's own
+ * interface, and it is the worker that pane shows. `tick-1` follows so the same
+ * `up` stands the ticketing worker up for the top-LEFT pane.
+ *
+ * `obs-1` is `fleet.yaml`'s console observer. It leads because the top-right is
+ * the pane a human actually watches, and `observer` is the role whose work
+ * is worth watching in real time — a deploy being followed through a pipeline,
+ * or a service being interrogated. `tick-1`, the previous default, does its
+ * work in one burst and then has nothing to show.
+ *
+ * `obs-1` specifically, NOT the `observer` role: the role resolves to
+ * `pane_mode: rpc` and must keep doing so, because `tui` allocates no epoch and
+ * an observer watch is built on re-dispatching near-identical tasks (§7.5). The
+ * override lives on this ONE worker, which is the console's and is not what the
+ * orchestrator re-dispatches to; `obs-2` inherits `rpc` and takes that traffic.
+ * `up`'s own guard permits exactly one tui worker, so this is also the seat that
+ * choice occupies.
+ *
+ * This is a LIST rather than a single id because `up --workers` already takes a
+ * set (ISC-61) and the operations console has no business being narrower than
+ * the command it drives — naming two workers here is a config edit, not a code
+ * change.
  */
-export const DEFAULT_OPERATIONS_WORKERS: readonly string[] = ["tick-1"];
+export const DEFAULT_OPERATIONS_WORKERS: readonly string[] = ["obs-1", "tick-1"];
+
+/**
+ * How much of the console's height the TOP row gets.
+ *
+ * The two top panes are the ones with something to read — an agent's own
+ * interface and a second agent's rendered output. The bottom two are a status
+ * table and a git log, both of which say what they have to say in a handful of
+ * lines and then repeat. An even split spends half the window on the half that
+ * needs least.
+ *
+ * Applied after the panes exist rather than as a split option, because
+ * `new-split` takes no size: it halves, and the layout is corrected afterwards
+ * against the container height cmux reports.
+ */
+export const OPERATIONS_TOP_FRACTION = 2 / 3;
 
 /** Seconds between refreshes of the git pane. */
 export const DEFAULT_GIT_POLL_SECONDS = 5;
@@ -106,6 +140,16 @@ export interface OperationsPane {
    * ```
    */
   readonly split: SplitDirection | null;
+  /**
+   * Which EARLIER pane this one is split off, as an index into this array.
+   * Omitted means the previous pane, which is the common case.
+   *
+   * A 2x2 cannot be built from "always the previous one". Splitting the four
+   * panes in reading order walks off the end of the shape: pane 4 has to land
+   * under pane 2, not beside pane 3. So the bottom-right pane names its anchor
+   * and every other pane keeps the default.
+   */
+  readonly splitFrom?: number;
 }
 
 export interface OperationsPlanOptions {
@@ -133,17 +177,24 @@ export interface OperationsPlanOptions {
   /** `up --backend`. `headless` because the fleet must not open panes of its own. */
   readonly backend?: string;
   /**
-   * Pane 1 hands ITSELF to the agent, rather than tailing its log.
+   * Which of `workers` resolve to `pane_mode: tui`, and so want Pi's own
+   * interface in their pane rather than a rendered tail of their log.
    *
-   * Set when the console's agent worker resolves to `pane_mode: tui`. The two
-   * settings look contradictory and are not: `--backend headless` says pifleet
-   * must not open windows under the console, and `--attach-here` says the
-   * window it must not open already exists — this pane. `up`'s own guards
-   * enforce the rest (exactly one tui worker, a real terminal), so a plan that
-   * sets this on a run that cannot support it produces a refusal naming the
-   * reason rather than a pane that quietly does the wrong thing.
+   * A SET, not a boolean, because each agent pane runs its OWN `up`.
+   * `--attach-here` hands over the terminal of the process that runs it, and
+   * one process has one terminal — `attended/adopt.ts` refuses with "can hand
+   * over ONE terminal and this run has N tui workers". Two attended panes are
+   * therefore two `up` invocations and two runs; no arrangement of a single run
+   * gives two people two keyboards.
+   *
+   * `--backend headless` and `--attach-here` look contradictory and are not:
+   * headless says pifleet must not open windows under the console, and
+   * attach-here says the window it must not open already exists — this pane.
+   * `up`'s own guards enforce the rest, so a plan that sets this on a run that
+   * cannot support it produces a refusal naming the reason rather than a pane
+   * that quietly does the wrong thing.
    */
-  readonly attachHere?: boolean;
+  readonly tuiWorkers?: readonly string[];
   /** Git pane refresh interval. */
   readonly gitPollSeconds?: number;
 }
@@ -176,6 +227,83 @@ export function pifleetCommand(repoRoot: string, argv: readonly string[]): strin
 }
 
 /**
+ * One AGENT pane's whole command — the three-stage ladder, for one worker.
+ *
+ * Hoisted out of {@link operationsPanes} because there is now a second
+ * workspace built from the same rung. Two copies of this string is two places
+ * for `--attach-clear` to go missing from one of them, and the difference
+ * would show only as a banner in one console and not the other.
+ *
+ * ## ONE `up` PER AGENT PANE, each naming only its own worker
+ *
+ * A single `up` naming several cannot attach them all — `--attach-here` hands
+ * over the terminal of the process that runs it, and one process has one
+ * terminal, so `attended/adopt.ts` refuses with "can hand over ONE terminal and
+ * this run has N tui workers". N attended panes are therefore N runs, which is
+ * why `status` grew `--all` and why `--recreate` stops every live run rather
+ * than only the newest.
+ *
+ * ## The rungs, each a deliberate step down
+ *
+ *   1. `up`      — stand the worker up. With `attach` it ALSO hands this pane
+ *                  to the worker and blocks there, so stage 1 is Pi's own
+ *                  interface and stage 2 is what you drop to when you detach.
+ *                  Without it, `up` returns at once and stage 2 is the pane's
+ *                  whole life.
+ *   2. VIEWER    — `logs --follow --render`, which BLOCKS. It sits on an idle
+ *                  worker and prints events as they happen. It never exits.
+ *   3. SHELL     — Ctrl-C out of the viewer and the pane is an interactive
+ *                  shell INSIDE the worker's container: same mounts, same
+ *                  egress policy, same absent credentials as the agent.
+ *   4. host `$SHELL` — only if all three are unavailable, which in practice
+ *                  means `up` refused.
+ *
+ * `;` and not `&&` throughout: a failed `up` must still leave a usable shell.
+ * With `&&` a fleet that refuses admission closes the pane, taking the error
+ * message with it. Measured on the first live run, where `up` did refuse and
+ * the shell was what made the refusal readable.
+ *
+ * NO `--run` PINNING on the fallbacks, and that is a knowing limit. Each pane
+ * creates its own run, so "the most recent run" is genuinely ambiguous between
+ * panes. The fallbacks are the FAILURE path — reached only once `up` has
+ * exited — and a wrong-run `logs` there fails loudly and drops to the shell
+ * rung, which is what the ladder is for. The primary path, `up --attach-here`,
+ * is unambiguous: it attaches the run it just made.
+ */
+export function agentPaneCommand(args: {
+  readonly repoRoot: string;
+  readonly worker: string;
+  readonly backend: string;
+  readonly configPath: string;
+  /** Whether this worker resolves to `pane_mode: tui` and wants Pi's own UI. */
+  readonly attach: boolean;
+}): string {
+  const { repoRoot, worker, backend, configPath, attach } = args;
+  const up = pifleetCommand(repoRoot, [
+    "up",
+    "--workers",
+    worker,
+    "--backend",
+    backend,
+    "--config",
+    configPath,
+    // `--attach-clear` rides with `--attach-here` and never alone. At a command
+    // line `up`'s report is worth reading; in a standing pane it is a banner
+    // carried above the agent for the life of the console.
+    ...(attach ? ["--attach-here", "--attach-clear"] : []),
+  ]);
+  // `clear` first, for the LOGIN SHELL's own banner — "Last login: …" and "You
+  // have mail." come from the shell cmux spawns, before any of this runs, so
+  // `--attach-clear` cannot reach them and this cannot reach what `up` prints.
+  // Two sources, two fixes; removing either leaves half the banner on screen.
+  return (
+    `clear ; ${up} ; ` +
+    `${pifleetCommand(repoRoot, ["logs", "--worker", worker, "--follow", "--render"])} ; ` +
+    `${pifleetCommand(repoRoot, ["shell", "--worker", worker])} ; exec $SHELL -i`
+  );
+}
+
+/**
  * The three panes, in creation order.
  *
  * ORDER IS PART OF THE CONTRACT. `scripts/operations` consumes the first pane
@@ -202,17 +330,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
     throw new Error(`operations: refusing git poll interval ${String(poll)} — must be a positive whole number of seconds`);
   }
 
-  const attachHere = opts.attachHere ?? false;
-  const up = pifleetCommand(repoRoot, [
-    "up",
-    "--workers",
-    workers.join(","),
-    "--backend",
-    backend,
-    "--config",
-    configPath,
-    ...(attachHere ? ["--attach-here"] : []),
-  ]);
+  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
   const status = statusWatchCommand(repoRoot, poll);
   /*
    * The AGENT half of pane 1. `workers[0]` — the pane shows one worker, and
@@ -221,12 +339,37 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
    * there is already one of those below.
    */
   const agent = workers[0]!;
-  const viewer = pifleetCommand(repoRoot, ["logs", "--worker", agent, "--follow", "--render"]);
-  const shell = pifleetCommand(repoRoot, ["shell", "--worker", agent]);
+
+  /*
+   * Each agent pane's own three-stage ladder. `up` for its worker, then the
+   * rendered viewer, then a shell inside its container.
+   *
+   * NO `--run` PINNING on the fallbacks, and that is a knowing limit rather
+   * than an oversight. Each pane creates its own run, so "the most recent run"
+   * is genuinely ambiguous between two panes, and resolving the run that holds
+   * a given worker needs more JSON handling than belongs in shell text typed
+   * into a pane. The fallbacks are the FAILURE path — reached only when `up`
+   * has exited — and a wrong-run `logs` there fails loudly and drops to the
+   * shell rung, which is the behaviour the ladder is built for. The primary
+   * path, `up --attach-here`, is unambiguous: it attaches the run it just made.
+   */
+  const ladder = (worker: string): string =>
+    agentPaneCommand({ repoRoot, worker, backend, configPath, attach: tuiWorkers.has(worker) });
+
+  /*
+   * The SECOND agent pane. `workers[1]` when there is one — the console shows
+   * two agents side by side across the top, and this is the left-hand one.
+   *
+   * It runs its OWN `up`, because that is the only way it can be Pi's interface
+   * rather than a tail: `--attach-here` hands over the terminal of the process
+   * that runs it. The cost is a second run, which `status --all` reports and
+   * `--recreate` tears down.
+   */
+  const second = workers[1];
 
   return [
     {
-      title: "ticketing",
+      title: "observer",
       /*
        * THREE STAGES, each a deliberate step down, and the pane never lands on
        * a host prompt while anything above it is still available.
@@ -268,16 +411,39 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
        * that has a hole where its console was. Measured on the first live run,
        * where `up` did refuse and the shell was what made the refusal readable.
        */
-      command: `${envPreamble()} ${up} ; ${viewer} ; ${shell} ; exec $SHELL -i`,
+      command: `${envPreamble()} ${ladder(agent)}`,
       // The initial surface: the whole workspace until something splits it.
+      //
+      // The OBSERVER holds it, not the ticketing pane on its left, and that is
+      // forced rather than chosen. This is the pane that runs `up`, `up` is
+      // what `--attach-here` belongs to, and `--attach-here` hands the terminal
+      // to the run's single `pane_mode: tui` worker. Only the pane running `up`
+      // can be Pi's own interface, so the pane that must be Pi's interface is
+      // the one that starts.
       split: null,
     },
+    ...(second === undefined
+      ? []
+      : [
+          {
+            title: "ticketing",
+            /*
+             * The same three-stage ladder the observer pane uses, for this
+             * pane's own worker and its own run. See `second` above for why it
+             * runs its own `up` rather than sharing one.
+             */
+            command: `${envPreamble()} ${ladder(second)}`,
+            // LEFT of the observer, which puts ticketing on the left of the top
+            // row and leaves the observer on the right.
+            split: "left" as const,
+          },
+        ]),
     {
       title: "fleet-status",
       command: status,
-      // DOWN off pane 1, which is what makes ticketing the top HALF rather
-      // than a column: the first split decides the major axis, and everything
-      // after it lands inside the half this one created.
+      // DOWN off the pane before it — ticketing when there are two agent panes,
+      // the observer when there is only one. Either way it lands in the bottom
+      // of the LEFT column, because the pane it splits is the left one.
       split: "down",
     },
     {
@@ -287,12 +453,154 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       // that failed to apply cannot silently redirect the pane at something
       // else. `watchDir`, never `repoRoot` — see the field's docblock.
       command: gitWatchCommand(watchDir, poll),
-      // RIGHT off fleet-status, so the two lower panes tile side by side in the
-      // bottom half. Splitting right off pane 1 instead would put git-watch in
-      // the top row beside ticketing, which is the layout this replaced.
-      split: "right",
+      // DOWN off the OBSERVER — pane index 0 — and this is the one pane that
+      // cannot use the default anchor. Splitting off the previous pane
+      // (fleet-status) would stack a third row inside the left column; what is
+      // wanted is the bottom of the RIGHT column, under the observer.
+      //
+      // With one agent pane there is no right column, so it falls back to the
+      // previous pane and the old two-up bottom row is what comes out.
+      split: second === undefined ? "right" : "down",
+      ...(second === undefined ? {} : { splitFrom: 0 }),
     },
   ];
+}
+
+/**
+ * The `development` workspace's `--name`, and its idempotency key.
+ *
+ * Exact-matched on `custom_title` for the reason {@link OPERATIONS_WORKSPACE}
+ * records. The two consoles are siblings and must never adopt each other, which
+ * exact matching on two distinct names gives for free.
+ */
+export const DEVELOPMENT_WORKSPACE = "development";
+
+/**
+ * The four workers the development console stands up, in PANE ORDER.
+ *
+ * ```
+ * +---------------+---------------+
+ * |     eng-1     |     eng-2     |
+ * +---------------+---------------+
+ * |     tst-1     |     rev-1     |
+ * +---------------+---------------+
+ * ```
+ *
+ * Two engineers on top because that is the pair a person actually alternates
+ * between — two changes in flight, each with its own container and its own
+ * branch. The tester and the reviewer sit under them because their work is
+ * downstream of it and is read in bursts rather than watched.
+ *
+ * ALL FOUR ARE ATTENDED, which is the whole difference from `operations`: this
+ * console is four keyboards, so it is four runs. `status --all` is what reports
+ * them together and `--recreate` is what tears them down; there is no
+ * arrangement of one run that gives four panes four keyboards.
+ *
+ * THE COST, stated plainly: four attended workers plus the operations
+ * console's two is six Pi processes against one oMLX server, and
+ * `run.max_concurrent` bounds each RUN rather than the host. Admission control
+ * cannot queue across runs, so six panes generating at once is six concurrent
+ * requests. That is a throughput decision the operator makes by opening this
+ * console, not something the plan can bound.
+ */
+export const DEFAULT_DEVELOPMENT_WORKERS: readonly string[] = [
+  "eng-1",
+  "eng-2",
+  "tst-1",
+  "rev-1",
+];
+
+/**
+ * The development console's panes are EQUAL, and `null` says so.
+ *
+ * `new-split` halves, so four panes built as two columns each split once are
+ * already four quarters — the correction {@link OPERATIONS_TOP_FRACTION} exists
+ * for is one this layout does not need. `null` skips the resize entirely rather
+ * than asking for a fraction of `1/2` and relying on the sub-pixel guard to
+ * make it a no-op: a value that happens to round to nothing is indistinguishable
+ * from one that was computed wrongly, and this is a stated requirement.
+ *
+ * The operations console is uneven on purpose because its bottom row is a
+ * status table and a git log — two panes that say their piece in a handful of
+ * lines. Every pane here is an agent, so every pane has as much to show as
+ * every other, and there is nothing to favour.
+ */
+export const DEVELOPMENT_TOP_FRACTION: number | null = null;
+
+/** The largest 2x2 there is. A fifth pane has nowhere in this shape to go. */
+const DEVELOPMENT_MAX_PANES = 4;
+
+/**
+ * The development console's panes, in creation order.
+ *
+ * ORDER IS PART OF THE CONTRACT, as it is for {@link operationsPanes}: pane 1
+ * consumes the workspace's initial surface, and is the pane the operator lands
+ * in.
+ *
+ * ## Why the split sequence is a table and not a rule
+ *
+ * A 2x2 cannot be built from "always split the previous pane". Walking the four
+ * in reading order runs off the shape at pane 4, which has to land under pane 2
+ * rather than beside pane 3 — so the bottom row names its anchor explicitly.
+ * `operationsPanes` learned the same lesson at its git pane; this is that
+ * knowledge applied to a layout that is 2x2 all the way down:
+ *
+ * ```
+ *   1: the initial surface          2: "right" off 1
+ *   3: "down" off 1  (splitFrom 0)  4: "down" off 2  (splitFrom 1)
+ * ```
+ *
+ * Fewer than four workers degrades to the prefix of that sequence rather than
+ * refusing, so `--workers eng-1,eng-2` gives a clean side-by-side pair. More
+ * than four IS refused: there is no fifth quarter, and silently stacking a
+ * third row would produce a console that does not match its own docblock.
+ */
+export function developmentPanes(opts: OperationsPlanOptions): OperationsPane[] {
+  const repoRoot = opts.repoRoot;
+  const workers = opts.workers ?? DEFAULT_DEVELOPMENT_WORKERS;
+  const backend = opts.backend ?? "headless";
+  const configPath = opts.configPath ?? `${repoRoot}/fleet.yaml`;
+
+  if (workers.length === 0) {
+    throw new Error("development: refusing an empty --workers set — name at least one worker");
+  }
+  if (workers.length > DEVELOPMENT_MAX_PANES) {
+    throw new Error(
+      `development: refusing ${workers.length} workers — the console is a 2x2 and holds ` +
+        `at most ${DEVELOPMENT_MAX_PANES}`,
+    );
+  }
+  for (const w of workers) assertPlainValue("worker id", w);
+  assertPlainValue("backend", backend);
+
+  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
+
+  // Index 0 is `split: null` and takes the initial surface; the rest are read
+  // straight off this table. Kept beside the docblock's diagram deliberately —
+  // the two have to agree, and they cannot if the sequence is computed.
+  const shape: readonly { split: SplitDirection; splitFrom?: number }[] = [
+    { split: "right" },
+    { split: "down", splitFrom: 0 },
+    { split: "down", splitFrom: 1 },
+  ];
+
+  return workers.map((worker, i) => ({
+    // TITLED BY WORKER ID, not by role, and this console is why the two
+    // consoles differ on it. `operations` holds one worker per role and can
+    // call a pane `observer`; this one holds TWO engineers, so a role title
+    // would print `engineer` on both and leave the operator guessing which
+    // container a pane belongs to. The id is also what `dispatch --worker`
+    // takes, so the title is the argument.
+    title: worker,
+    command: `${envPreamble()} ${agentPaneCommand({
+      repoRoot,
+      worker,
+      backend,
+      configPath,
+      attach: tuiWorkers.has(worker),
+    })}`,
+    ...(i === 0 ? { split: null } : shape[i - 1]!),
+  }));
 }
 
 /**
@@ -344,13 +652,37 @@ export function envPreamble(): string {
  * first still holds a long-running process whose output nobody re-reads, and
  * the second is not installed by default on macOS.
  */
+/**
+ * A poll loop that redraws ONLY when the output changed.
+ *
+ * `while :; do clear; cmd; sleep n; done` repaints every tick whether or not
+ * anything moved, and on a standing console that is a visible flash several
+ * times a minute against panes whose content is usually identical — the fleet
+ * is idle and the branch has not moved. The flash is also the only motion in
+ * the window, so it reads as activity when there is none.
+ *
+ * Capturing into a variable and comparing costs one thing worth naming: a
+ * command writing to a pipe rather than a terminal turns its colour off. Any
+ * caller that wants colour has to ask for it explicitly — see the git loop.
+ *
+ * `|| true` so a command that exits non-zero leaves the loop running. Without
+ * it the pane dies on the first refresh after a `down`, which is exactly when
+ * an operator looks at it.
+ */
+function redrawOnChange(body: string, pollSeconds: number): string {
+  return (
+    `prev=''; while :; do out="$(${body} 2>&1)" || true; ` +
+    `if [ "$out" != "$prev" ]; then clear; printf '%s\\n' "$out"; prev="$out"; fi; ` +
+    `sleep ${pollSeconds}; done`
+  );
+}
+
 export function statusWatchCommand(repoRoot: string, pollSeconds: number): string {
-  const status = pifleetCommand(repoRoot, ["status"]);
-  // `|| true` so a `status` that exits non-zero — no run yet, a run directory
-  // half-written — leaves the loop running. Without it the pane dies on the
-  // first refresh after a `down`, which is exactly when an operator looks at
-  // it. The message still prints; only the exit code is swallowed.
-  return `while :; do clear; ${status} || true; sleep ${pollSeconds}; done`;
+  // `--all`, because the console stands up one run per attached pane: a status
+  // pane showing only the newest would report half the console and look, to
+  // the operator, like the other half had died.
+  const status = pifleetCommand(repoRoot, ["status", "--all"]);
+  return redrawOnChange(status, pollSeconds);
 }
 
 /**
@@ -369,9 +701,14 @@ export function gitWatchCommand(watchDir: string, pollSeconds: number): string {
   // failure a screenshot cannot distinguish from success. `git -c core.pager=`
   // and `GIT_PAGER=cat` both work too; this is the shortest, and it survives a
   // user's `[pager]` config, which an unset environment variable does not.
-  const g = `git --no-pager -C ${shellQuote([watchDir])}`;
-  return (
-    `while :; do clear; ${g} status --short --branch; echo; ` +
-    `${g} log --oneline -10; sleep ${pollSeconds}; done`
+  //
+  // `-c color.ui=always` is required BECAUSE of the redraw-on-change loop: the
+  // output is captured into a variable to compare it, and git turns colour off
+  // when its stdout is not a terminal. Without this the flicker fix would
+  // silently take the branch and commit colouring with it.
+  const g = `git --no-pager -c color.ui=always -C ${shellQuote([watchDir])}`;
+  return redrawOnChange(
+    `${g} status --short --branch; echo; ${g} log --oneline -10`,
+    pollSeconds,
   );
 }

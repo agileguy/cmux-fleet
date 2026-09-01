@@ -108,6 +108,13 @@ export const BUILD_CONTEXT_ASSETS = [
   // nothing was watching, which is the highest-consequence staleness this hash
   // exists to prevent, alongside a stale verb gate.
   "honeypot.cjs",
+  // The ticket CLI's configuration shim. It is what turns four delivered
+  // `_FILE` paths into the CLI's environment, so an image carrying a stale copy
+  // is one whose ticket worker reads a credential from the wrong variable, or
+  // queries an unscoped workspace because the project mapping moved — and the
+  // second of those returns rows rather than an error. A hash that did not
+  // cover this file would let that ship under an unchanged tag.
+  "ticket-cli",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 

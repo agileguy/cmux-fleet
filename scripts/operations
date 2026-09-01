@@ -25,12 +25,16 @@ import { dirname, resolve } from "node:path";
 import { CmuxClient } from "../src/backends/cmux/client.ts";
 import { loadConfig, resolveWorker } from "../src/config/load.ts";
 import { EXIT } from "../src/contracts.ts";
-import { OPERATIONS_WORKSPACE, operationsPanes } from "../src/backends/cmux/operations-plan.ts";
+import {
+  DEFAULT_OPERATIONS_WORKERS,
+  OPERATIONS_WORKSPACE,
+  operationsPanes,
+} from "../src/backends/cmux/operations-plan.ts";
 import { cmuxReachable, ensureOperations } from "../src/backends/cmux/operations.ts";
 
 const USAGE = `Usage: scripts/operations [options]
 
-  --workers <ids>   comma-separated pifleet workers for pane 1 (default: tick-1)
+  --workers <ids>   comma-separated pifleet workers for pane 1 (default: obs-1)
   --backend <kind>  pifleet backend for pane 1 (default: headless)
   --config <path>   fleet.yaml for pane 1 (default: <repo>/fleet.yaml)
   --poll <seconds>  git pane refresh interval (default: 5)
@@ -88,22 +92,31 @@ async function main(argv: string[]): Promise<number> {
    * moved is worse than one that opens with a log tail — but an operator who
    * expected a TUI needs to know why they got a viewer.
    */
-  let attachHere = false;
+  let tuiWorkers: string[] = [];
   try {
     const loaded = await loadConfig(opts.configPath ?? `${repoRoot}/fleet.yaml`);
-    const agent = (opts.workers ?? [])[0] ?? "tick-1";
-    attachHere = resolveWorker(loaded, agent).paneMode === "tui";
+    // EVERY console worker, not just the first. Each agent pane runs its own
+    // `up` and attaches its own terminal, so each one's pane_mode has to be
+    // resolved separately — a single answer taken from workers[0] would decide
+    // one pane's mode from another pane's worker. That is not hypothetical:
+    // this read a hardcoded "tick-1" while the plan had moved to obs-1, so the
+    // console brought up obs-1 and rendered it as a log tail.
+    //
+    // DEFAULT_OPERATIONS_WORKERS, never a second literal: `operationsPanes`
+    // falls back to that same list when `--workers` is absent.
+    const set = opts.workers ?? DEFAULT_OPERATIONS_WORKERS;
+    tuiWorkers = set.filter((w) => resolveWorker(loaded, w).paneMode === "tui");
   } catch (err) {
     process.stderr.write(
       `operations: could not read pane_mode from the config ` +
-        `(${err instanceof Error ? err.message : String(err)}); pane 1 will tail the log\n`,
+        `(${err instanceof Error ? err.message : String(err)}); the agent panes will tail their logs\n`,
     );
   }
 
   // Built before the cmux probe on purpose: a bad `--workers` or `--poll` is
   // an argv mistake, and diagnosing it must not depend on whether the GUI
   // happens to be running.
-  const panes = operationsPanes({ ...opts, attachHere });
+  const panes = operationsPanes({ ...opts, tuiWorkers });
 
   if (argv.includes("--dry-run")) {
     process.stdout.write(`workspace: ${OPERATIONS_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
@@ -111,6 +124,40 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(`pane ${i + 1} (${p.title}):\n  ${p.command}\n\n`);
     }
     return EXIT.SUCCESS;
+  }
+
+  /*
+   * `--recreate` stops the run the OLD panes created, before the new ones make
+   * another.
+   *
+   * Without this, `--recreate` leaks a run every time: the panes are torn down
+   * but the containers they started keep running, unattached, until something
+   * else stops them. Four accumulated in one session, one of them for ten
+   * hours.
+   *
+   * The leak is not just untidy, it corrupts the new console. A run directory
+   * outlives its run, so `status` keeps reporting the old run and `logs`
+   * resolves "the most recent run" to whichever exists at the instant a pane
+   * asks. With two runs in flight, the ticketing pane latched onto the older
+   * one and tailed a log file that had stopped growing — a pane that reads as
+   * a hung worker while the observer beside it is healthy.
+   *
+   * Only on `--recreate`. Adoption must not touch a running fleet: the whole
+   * point of the default path is that a second `operations` changes nothing.
+   */
+  if (argv.includes("--recreate")) {
+    // EVERY live run, not the newest. The console stands up one run per
+    // attended pane, so stopping only the most recent leaves the other pane's
+    // containers behind — the leak this exists to close, halved.
+    const ids = [
+      ...(await runOutput(repoRoot, ["status", "--all", "--json"])).matchAll(/"run_id":"([^"]+)"/g),
+    ].map((m) => m[1]!);
+    for (const runId of ids) {
+      process.stderr.write(`operations: stopping run ${runId} before rebuilding\n`);
+      // Best effort. A run that cannot be stopped is worth a line, not a
+      // refusal to open the console the operator asked for.
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
   }
 
   const client = new CmuxClient();
@@ -129,7 +176,7 @@ async function main(argv: string[]): Promise<number> {
   // older version of this script, is adopted forever and reported as "already
   // in place — changed nothing", which is true and useless.
   const recreate = argv.includes("--recreate");
-  const result = await ensureOperations(client, { ...opts, attachHere }, recreate);
+  const result = await ensureOperations(client, { ...opts, tuiWorkers }, recreate);
   process.stdout.write(
     result.created
       ? `operations: ${recreate ? "rebuilt" : "created"} workspace ${result.workspaceId} ` +
@@ -148,4 +195,19 @@ try {
   const msg = err instanceof Error ? err.message : String(err);
   process.stderr.write(`${msg.startsWith("operations:") ? msg : `operations: ${msg}`}\n`);
   process.exit(EXIT.USAGE);
+}
+
+/** Run a `pifleet` subcommand and return its stdout, swallowing failure. */
+async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
+  try {
+    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out;
+  } catch {
+    return "";
+  }
 }

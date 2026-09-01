@@ -8,7 +8,7 @@
  * the wrong pane and looks, on screen, exactly like a pane that did not start.
  *
  * The idempotency assertions are the reason this file exists. This console
- * holds a live ticketing container and a shell an operator may have typed into;
+ * holds a live observer container and a shell an operator may have typed into;
  * from the outside, "refresh it" and "destroy it" are the same call. Proved by
  * mutation: making `ensureOperations` fall through to `createOperations` when a
  * workspace already exists reddens the first two tests below.
@@ -17,6 +17,7 @@ import { describe, expect, test } from "bun:test";
 
 import { CmuxClient } from "../../src/backends/cmux/client.ts";
 import type { ExecResult } from "../../src/container/run.ts";
+import { DEFAULT_OPERATIONS_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
 import { cmuxReachable, ensureOperations, selectWorkspaceArgv } from "../../src/backends/cmux/operations.ts";
 
 const REPO = "/Users/x/repos/cmux-fleet";
@@ -96,7 +97,7 @@ describe("an operations workspace that already exists is left alone", () => {
   test("…unless --recreate, which BUILDS first and closes the old one second", async () => {
     // The gap adoption cannot reach, measured on the live console 2026-08-30:
     // `findOperations` matches a workspace TITLE, and a pane's contents are not
-    // part of that. A console whose ticketing pane held a dead `up` from before
+    // part of that. A console whose observer pane held a dead `up` from before
     // `envPreamble` existed, and whose status pane was watching a run six days
     // old, was adopted by every later `operations` and reported "already in
     // place — changed nothing". True, and useless.
@@ -161,7 +162,7 @@ describe("an operations workspace that already exists is left alone", () => {
 });
 
 describe("creating the workspace", () => {
-  test("issues one create, two splits and three respawns, in pane order", async () => {
+  test("issues one create, three splits and four respawns, in pane order", async () => {
     const { client, calls } = fakeCmux();
 
     const result = await ensureOperations(client, OPTS);
@@ -179,9 +180,19 @@ describe("creating the workspace", () => {
       "new-split",
       "rename-tab",
       "respawn-pane",
+      "new-split",
+      "rename-tab",
+      "respawn-pane",
       "select-workspace",
       "list-panes",
       "focus-pane",
+      // The SECOND `list-panes` reads pane geometry for the top-row resize.
+      // No `resize-pane` follows it here: this fake returns no
+      // `container_frame`, the geometry parse throws, and the resize is
+      // best-effort by design — a console whose panes are all correct but
+      // evenly split is fully usable, so a cosmetic failure must not take the
+      // workspace down with it. The call being ISSUED is what this pins.
+      "list-panes",
     ]);
   });
 
@@ -217,16 +228,25 @@ describe("creating the workspace", () => {
 
     const respawns = calls.filter((c) => verb(["cmux", ...c]) === "respawn-pane");
     const surfaceOf = (c: string[]) => c[c.indexOf("--surface") + 1];
-    // surf-0 is the create's own surface; surf-1 and surf-2 come from the
-    // splits. A stale anchor would repeat an id here.
-    expect(respawns.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2"]);
+    // surf-0 is the create's own surface; the rest come from splits. A stale
+    // anchor would repeat an id here.
+    expect(respawns.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2", "surf-3"]);
 
     const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
-    // `down` then `right` — ticketing takes the top half, and the second split
-    // lands INSIDE the half the first one made because it anchors on surf-1,
-    // not surf-0. Anchoring both on surf-0 would tile all three in a row.
-    expect(splits.map((c) => c[1])).toEqual(["down", "right"]);
-    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1"]);
+    expect(splits.map((c) => c[1])).toEqual(["left", "down", "down"]);
+    /*
+     * THE ANCHORS ARE THE WHOLE TEST, and the third is why `splitFrom` exists.
+     *
+     *   left  off surf-0 — ticketing lands to the LEFT of the observer
+     *   down  off surf-1 — fleet-status lands under TICKETING, the left column
+     *   down  off surf-0 — git-watch lands under the OBSERVER, the right column
+     *
+     * That last one does not anchor on the pane before it. Splitting off
+     * surf-2 would stack a third row inside the left column and leave the
+     * right column full height — a 3+1 layout that still passes any assertion
+     * checking only the directions.
+     */
+    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-0"]);
   });
 
   test("each pane is renamed before its shell is replaced", async () => {
@@ -235,18 +255,25 @@ describe("creating the workspace", () => {
     const titles = calls
       .filter((c) => verb(["cmux", ...c]) === "rename-tab")
       .map((c) => c[c.indexOf("--title") + 1]);
-    expect(titles).toEqual(["ticketing", "fleet-status", "git-watch"]);
+    expect(titles).toEqual(["observer", "ticketing", "fleet-status", "git-watch"]);
   });
 
-  test("the ticketing command reaches pane 1 and the git loop reaches pane 3", async () => {
+  test("each pane's command reaches the pane that was created for it", async () => {
     const { client, calls } = fakeCmux();
     await ensureOperations(client, OPTS);
     const commands = calls
       .filter((c) => verb(["cmux", ...c]) === "respawn-pane")
       .map((c) => c[c.indexOf("--command") + 1]!);
-    expect(commands[0]).toContain("'--workers' 'tick-1'");
-    expect(commands[1]).toContain("'status'");
-    expect(commands[2]).toContain(`-C '${CWD}'`);
+    // The head of DEFAULT_OPERATIONS_WORKERS, not a literal. This assertion
+    // named "tick-1" by hand and went stale the moment the default moved,
+    // which is the same second-copy defect that let the console bring up one
+    // worker while resolving its pane mode from another.
+    // One worker per agent pane, each with its own `up` — two attended panes
+    // are two runs, because --attach-here hands over one process's terminal.
+    expect(commands[0]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[0]}'`);
+    expect(commands[1]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[1]}'`);
+    expect(commands[2]).toContain("'status'");
+    expect(commands[3]).toContain(`-C '${CWD}'`);
   });
 });
 

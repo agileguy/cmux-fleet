@@ -164,7 +164,12 @@ describe("the status action actually consults the live-run selector", () => {
     // Order matters and is asserted as order: `latestRunId ?? latestLiveRunId`
     // would type-check, read plausibly, and restore the exact defect — the
     // newest directory would win again and the live run would never be reached.
-    const resolution = /opts\.run\s*\?\?\s*\(await latestLiveRunId\(root\)\)\s*\?\?\s*\(await latestRunId\(root\)\)/;
+    //
+    // The chain moved into a `resolveRunIds` helper when `--all` landed, so the
+    // pattern no longer starts at `opts.run`. What it still pins is the part
+    // that carries the defect: the two selectors, in this order, in one
+    // expression.
+    const resolution = /\(await latestLiveRunId\(root\)\)\s*\?\?\s*\(await latestRunId\(root\)\)/;
     expect(SRC).toMatch(resolution);
   });
 
@@ -172,6 +177,21 @@ describe("the status action actually consults the live-run selector", () => {
     // The clause that keeps this a NARROWING and not a hijack: an operator who
     // named a run gets that run, alive or dead, which is what makes a
     // post-mortem `status --run <finished>` still work.
-    expect(SRC).toMatch(/opts\.run\s*\?\?/);
+    //
+    // Asserted as an EARLY RETURN now rather than as the head of a `??` chain.
+    // The two spellings mean the same thing, and this is the one in the source;
+    // what must not happen is `--run` being consulted after either selector.
+    expect(SRC).toMatch(/if \(opts\.run !== undefined\) return \[opts\.run\];/);
+    // And it is reached BEFORE either selector runs.
+    expect(SRC.indexOf("opts.run !== undefined")).toBeLessThan(SRC.indexOf("liveRunIds(root)"));
+    expect(SRC.indexOf("opts.run !== undefined")).toBeLessThan(SRC.indexOf("latestLiveRunId(root)"));
+  });
+
+  test("`--all` prefers live runs but never returns an empty report", () => {
+    // The fallback is what keeps `--all` usable on a fleet that is entirely
+    // down: with no live run it drops through to the same single-run resolution
+    // a bare `status` uses, rather than printing nothing and exiting clean —
+    // which would read as "no problems" instead of "nothing is running".
+    expect(SRC).toMatch(/if \(live\.length > 0\) return live;/);
   });
 });

@@ -1,0 +1,216 @@
+#!/usr/bin/env bun
+/**
+ * `scripts/development` — open the standing four-pane development console.
+ *
+ *   ./scripts/development                          # eng-1, eng-2, tst-1, rev-1
+ *   ./scripts/development --workers eng-1,eng-2
+ *   ./scripts/development --dry-run                # print the plan, touch nothing
+ *
+ * Four EQUAL panes, two engineers across the top and a tester and a reviewer
+ * beneath them, each one running Pi's own interface for its worker:
+ *
+ * ```
+ * +---------------+---------------+
+ * |     eng-1     |     eng-2     |
+ * +---------------+---------------+
+ * |     tst-1     |     rev-1     |
+ * +---------------+---------------+
+ * ```
+ *
+ * ## How this differs from `scripts/operations`, and why it is a sibling
+ *
+ * `operations` is one console with two agent panes and two watch panes; this is
+ * four agent panes and no watch panes. So there is no `--poll` here — nothing
+ * polls — and the status table stays where it is, in the operations console,
+ * reporting `--all` runs including these four.
+ *
+ * The two scripts are deliberately separate ENTRY POINTS over one shared
+ * builder (`ensureWorkspace`, given a `WorkspaceSpec`). A single script with a
+ * `--workspace` flag would make "which console am I opening" a value the
+ * operator has to get right on every invocation, and getting it wrong adopts or
+ * rebuilds the other one.
+ *
+ * Running it twice is safe and is the expected way to get back to the console:
+ * a `development` workspace that already exists is selected, not rebuilt. See
+ * `src/backends/cmux/operations.ts` for why rebuilding would be destruction.
+ *
+ * Only I/O lives here — argv parsing, the process exit, and the printing. The
+ * decisions are in `src/backends/cmux/operations-plan.ts` and
+ * `src/backends/cmux/operations.ts`, where `test/unit/development-plan.test.ts`
+ * and `test/unit/operations-workspace.test.ts` re-check them on every run.
+ */
+
+import { dirname, resolve } from "node:path";
+
+import { CmuxClient } from "../src/backends/cmux/client.ts";
+import { loadConfig, resolveWorker } from "../src/config/load.ts";
+import { EXIT } from "../src/contracts.ts";
+import {
+  DEFAULT_DEVELOPMENT_WORKERS,
+  DEVELOPMENT_WORKSPACE,
+  developmentPanes,
+} from "../src/backends/cmux/operations-plan.ts";
+import { cmuxReachable, ensureDevelopment } from "../src/backends/cmux/operations.ts";
+import { runsHoldingAny } from "../src/run/status-runs.ts";
+
+const USAGE = `Usage: scripts/development [options]
+
+  --workers <ids>   comma-separated pifleet workers, in pane order
+                    (default: ${DEFAULT_DEVELOPMENT_WORKERS.join(",")}; at most 4)
+  --backend <kind>  pifleet backend (default: headless)
+  --config <path>   fleet.yaml (default: <repo>/fleet.yaml)
+  --dry-run         print the pane plan and exit without touching cmux
+  --recreate        close an existing development workspace and rebuild it
+  -h, --help        this message
+`;
+
+function flag(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(name);
+  if (i === -1) return undefined;
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith("--")) {
+    throw new Error(`${name} needs a value`);
+  }
+  return v;
+}
+
+async function main(argv: string[]): Promise<number> {
+  if (argv.includes("-h") || argv.includes("--help")) {
+    process.stdout.write(USAGE);
+    return EXIT.SUCCESS;
+  }
+
+  // `scripts/` sits directly under the repository root.
+  const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+  const watchDir = process.cwd();
+
+  const workersFlag = flag(argv, "--workers");
+
+  const opts = {
+    repoRoot,
+    watchDir,
+    ...(workersFlag === undefined
+      ? {}
+      : {
+          workers: workersFlag
+            .split(",")
+            .map((w) => w.trim())
+            .filter((w) => w !== ""),
+        }),
+    ...(flag(argv, "--backend") === undefined ? {} : { backend: flag(argv, "--backend")! }),
+    ...(flag(argv, "--config") === undefined ? {} : { configPath: flag(argv, "--config")! }),
+  };
+
+  /**
+   * Which of these workers want Pi's own interface.
+   *
+   * READ FROM THE CONFIG rather than assumed, even though all four defaults are
+   * `pane_mode: tui`. Assuming it here would put `--attach-here` on a worker
+   * that resolves to `rpc`, and `up` refuses that — correctly, there is no TTY
+   * inside an rpc container to hand over — so a single edit in `fleet.yaml`
+   * would turn one pane into a refusal that names a flag the operator never
+   * typed. `operations` learned this the other way round, by resolving the mode
+   * from a worker its pane never showed.
+   *
+   * Failure is NOT fatal and not silent either: `--dry-run` must work with no
+   * config at all, and a console that opens with log tails beats one that
+   * refuses because a fleet.yaml moved.
+   */
+  let tuiWorkers: string[] = [];
+  try {
+    const loaded = await loadConfig(opts.configPath ?? `${repoRoot}/fleet.yaml`);
+    const set = opts.workers ?? DEFAULT_DEVELOPMENT_WORKERS;
+    tuiWorkers = set.filter((w) => resolveWorker(loaded, w).paneMode === "tui");
+  } catch (err) {
+    process.stderr.write(
+      `development: could not read pane_mode from the config ` +
+        `(${err instanceof Error ? err.message : String(err)}); the panes will tail their logs\n`,
+    );
+  }
+
+  // Built before the cmux probe on purpose: a bad `--workers` is an argv
+  // mistake, and diagnosing it must not depend on whether the GUI is running.
+  const panes = developmentPanes({ ...opts, tuiWorkers });
+
+  if (argv.includes("--dry-run")) {
+    process.stdout.write(`workspace: ${DEVELOPMENT_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
+    for (const [i, p] of panes.entries()) {
+      process.stdout.write(`pane ${i + 1} (${p.title}):\n  ${p.command}\n\n`);
+    }
+    return EXIT.SUCCESS;
+  }
+
+  /*
+   * `--recreate` stops the runs the OLD panes created, before the new ones make
+   * more.
+   *
+   * FOUR runs here, not two, which makes the leak this closes correspondingly
+   * worse: without it every rebuild strands four unattached containers, and the
+   * stale run directories make `logs --worker` resolve "the most recent run" to
+   * whichever of them still exists.
+   *
+   * `--run` is passed per id rather than a bare `down`, and only runs holding
+   * one of THIS console's workers are stopped — the operations console's runs
+   * are somebody else's and must survive a development rebuild.
+   */
+  if (argv.includes("--recreate")) {
+    const mine = new Set(opts.workers ?? DEFAULT_DEVELOPMENT_WORKERS);
+    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
+    for (const runId of runsHoldingAny(json, mine)) {
+      process.stderr.write(`development: stopping run ${runId} before rebuilding\n`);
+      // Best effort. A run that cannot be stopped is worth a line, not a
+      // refusal to open the console the operator asked for.
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
+  }
+
+  const client = new CmuxClient();
+  if (!(await cmuxReachable(client))) {
+    process.stderr.write(
+      "development: no cmux is listening on ~/.local/state/cmux/cmux.sock.\n" +
+        "Start the cmux app, then run this again.\n",
+    );
+    return EXIT.BACKEND_UNAVAILABLE;
+  }
+
+  const recreate = argv.includes("--recreate");
+  const result = await ensureDevelopment(client, { ...opts, tuiWorkers }, recreate);
+  process.stdout.write(
+    result.created
+      ? `development: ${recreate ? "rebuilt" : "created"} workspace ${result.workspaceId} ` +
+        `with ${panes.length} panes\n`
+      : `development: workspace ${result.workspaceId} is already in place — selected it, ` +
+        `changed nothing (use --recreate to rebuild its panes)\n`,
+  );
+  return EXIT.SUCCESS;
+}
+
+/**
+ * Run a `pifleet` subcommand and return its stdout, swallowing failure.
+ *
+ * `stderr: "ignore"` is what makes stdout a clean JSON document for
+ * `runsHoldingAny` — `status` writes its warnings to the other stream. A
+ * failure returns `""`, which parses to no runs and therefore stops nothing;
+ * see that function's docblock for why that is the right way to fail here.
+ */
+async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
+  try {
+    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out;
+  } catch {
+    return "";
+  }
+}
+
+try {
+  process.exit(await main(process.argv.slice(2)));
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`${msg.startsWith("development:") ? msg : `development: ${msg}`}\n`);
+  process.exit(EXIT.USAGE);
+}

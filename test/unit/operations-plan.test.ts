@@ -38,6 +38,20 @@ const CWD = "/Users/x/repos/somewhere-else";
 const plan = (over: Partial<Parameters<typeof operationsPanes>[0]> = {}) =>
   operationsPanes({ repoRoot: REPO, watchDir: CWD, ...over });
 
+/**
+ * Panes BY TITLE, never by index.
+ *
+ * The console's shape has changed twice — three panes to four, and the agent
+ * pane from the top half to the top-right — and each time every positional
+ * assertion in this file broke at once while testing nothing new. A title is
+ * what the pane IS; its index is where it happened to land.
+ */
+const paneNamed = (title: string, over: Partial<Parameters<typeof operationsPanes>[0]> = {}) => {
+  const found = plan(over).find((p) => p.title === title);
+  if (found === undefined) throw new Error(`no pane titled ${title}`);
+  return found;
+};
+
 describe("the workspace identity", () => {
   test("is the literal name the idempotency check matches on", () => {
     // Both `scripts/operations` and `findOperations` read this constant, so it
@@ -48,29 +62,34 @@ describe("the workspace identity", () => {
 });
 
 describe("the pane set", () => {
-  test("is exactly three panes, in a fixed order", () => {
+  test("is exactly four panes, in creation order", () => {
     // Order is contract: pane 1 consumes the workspace's initial surface and is
     // where the operator lands.
-    expect(plan().map((p) => p.title)).toEqual(["ticketing", "fleet-status", "git-watch"]);
+    expect(plan().map((p) => p.title)).toEqual([
+      "observer",
+      "ticketing",
+      "fleet-status",
+      "git-watch",
+    ]);
   });
 
-  test("ticketing takes the whole top half; the other two tile beneath it", () => {
+  test("the observer pane takes the whole top half; the other two tile beneath it", () => {
     // The requested shape:
     //
     //   +-------------------------------+
-    //   |          ticketing            |
+    //   |           observer            |
     //   +---------------+---------------+
     //   |  fleet-status |   git-watch   |
     //   +---------------+---------------+
     //
     // `null` then `down` then `right` is the ONLY sequence that produces it,
-    // and each element is load-bearing. `down` first is what makes ticketing a
+    // and each element is load-bearing. `down` first is what makes pane 1 a
     // half rather than a column — the first split decides the major axis. The
     // `right` that follows lands INSIDE the half `down` created, because each
     // pane is split off the previous one; a `right` off pane 1 instead would
-    // put git-watch in the top row beside ticketing, which is the layout this
+    // put git-watch in the top row beside pane 1, which is the layout this
     // replaced and which no assertion on directions alone would catch.
-    expect(plan().map((p) => p.split)).toEqual([null, "down", "right"]);
+    expect(plan().map((p) => p.split)).toEqual([null, "left", "down", "down"]);
   });
 
   test("exactly one pane is split off nothing — the initial surface is consumed once", () => {
@@ -78,7 +97,7 @@ describe("the pane set", () => {
     // leave the workspace's own surface as a stray idle shell beside three
     // others.
     expect(plan().filter((p) => p.split === null).length).toBe(1);
-    expect(plan()[0]!.split).toBeNull();
+    expect(paneNamed("observer").split).toBeNull();
   });
 
   test("every command is something cmux will accept as --command text", () => {
@@ -90,17 +109,86 @@ describe("the pane set", () => {
   });
 });
 
-describe("pane 1 — the ticketing agent", () => {
-  test("brings up the ticketing worker and nothing else by default", () => {
-    expect(DEFAULT_OPERATIONS_WORKERS).toEqual(["tick-1"]);
-    expect(plan()[0]!.command).toContain("'up' '--workers' 'tick-1'");
+describe("the observer pane", () => {
+  test("each agent pane runs its OWN `up`, naming only its own worker", () => {
+    // Two attended panes are two runs. `--attach-here` hands over the terminal
+    // of the process that runs it, and one process has one terminal:
+    // attended/adopt.ts refuses with "can hand over ONE terminal and this run
+    // has N tui workers". A single `up` naming both cannot attach both.
+    expect(DEFAULT_OPERATIONS_WORKERS).toEqual(["obs-1", "tick-1"]);
+    expect(paneNamed("observer").command).toContain("'up' '--workers' 'obs-1'");
+    expect(paneNamed("ticketing").command).toContain("'up' '--workers' 'tick-1'");
+    // And NEITHER names both — a combined set is the shape that cannot attach.
+    for (const t of ["observer", "ticketing"]) {
+      expect(paneNamed(t).command).not.toContain("'obs-1,tick-1'");
+    }
+  });
+
+  /**
+   * Pane 1 is the pane a human watches, and it must carry Pi's own interface
+   * rather than a rendered tail. `attachHere` is what selects that.
+   *
+   * The false half is asserted alongside it deliberately: the two commands
+   * differ by one flag, so a plan that ignored the option entirely would still
+   * satisfy an assertion that only looked at the tui case.
+   */
+  /**
+   * Attachment is per pane, resolved from each worker's own `pane_mode`.
+   *
+   * This replaced a wait-then-tail arrangement in which only one pane ran `up`
+   * and the other waited for that run. Two defects lived there and are worth
+   * keeping named: a run directory outlives its run, so `status` reports a
+   * torn-down run's workers as `"alive":false,"phase":"dead"` and a wait that
+   * only checked the worker was MENTIONED passed instantly against a corpse;
+   * and `logs` then tailed a finished log file that never grew, so the pane
+   * read as a hung worker while the pane beside it was healthy. Giving each
+   * pane its own `up` removes the wait, and with it both failures.
+   */
+  test("only the workers that resolve to tui get --attach-here", () => {
+    expect(paneNamed("observer", { tuiWorkers: ["obs-1"] }).command).toContain("'--attach-here'");
+    expect(paneNamed("ticketing", { tuiWorkers: ["obs-1"] }).command).not.toContain(
+      "'--attach-here'",
+    );
+    expect(paneNamed("ticketing", { tuiWorkers: ["obs-1", "tick-1"] }).command).toContain(
+      "'--attach-here'",
+    );
+    // The empty set is asserted too: a plan ignoring the option entirely would
+    // satisfy an assertion that only ever looked at the attached case.
+    expect(paneNamed("observer", { tuiWorkers: [] }).command).not.toContain("'--attach-here'");
+  });
+
+  test("attachHere puts Pi's own interface in pane 1, and its absence does not", () => {
+    expect(paneNamed("observer", { tuiWorkers: DEFAULT_OPERATIONS_WORKERS }).command).toContain("'--attach-here'");
+    expect(paneNamed("observer", { tuiWorkers: [] }).command).not.toContain("'--attach-here'");
+  });
+
+  /**
+   * `scripts/operations` decides pane 1's MODE by resolving one worker's
+   * pane_mode, while `operationsPanes` builds pane 1's COMMAND from this list.
+   * They must name the same worker or the console asks for one and renders the
+   * other -- which is exactly what happened: the script carried its own literal
+   * "tick-1" fallback after the plan had moved to obs-1, so the pane brought up
+   * obs-1 and then tailed its log, because tick-1 resolves to rpc.
+   *
+   * The script now reads DEFAULT_OPERATIONS_WORKERS. This pins the property the
+   * fix relies on, so a future edit cannot silently desynchronise the two again.
+   */
+  test("the observer pane shows the HEAD of DEFAULT_OPERATIONS_WORKERS, and no second literal", () => {
+    const head = DEFAULT_OPERATIONS_WORKERS[0]!;
+    expect(paneNamed("observer").command).toContain(`'logs' '--worker' '${head}'`);
+    expect(paneNamed("observer").command).toContain(`'shell' '--worker' '${head}'`);
+    // And the ticketing pane shows the SECOND, never the head — the two panes
+    // reading the same worker is the shape this layout exists to avoid.
+    const second = DEFAULT_OPERATIONS_WORKERS[1]!;
+    expect(paneNamed("ticketing").command).toContain(`'logs' '--worker' '${second}'`);
+    expect(paneNamed("ticketing").command).not.toContain(`'logs' '--worker' '${head}'`);
   });
 
   test("names the CLI by absolute path under the repo, because pifleet is not on PATH", () => {
     // Measured 2026-08-30: `which pifleet` finds nothing — the package is
     // `private: true` and its bin entry is never linked. A pane invoking a bare
     // `pifleet` would work only on a machine where somebody had linked it.
-    const cmd = plan()[0]!.command;
+    const cmd = paneNamed("observer").command;
     expect(cmd).toContain("bun run ");
     expect(cmd).toContain(`'${REPO}/src/cli/index.ts'`);
   });
@@ -110,7 +198,7 @@ describe("pane 1 — the ticketing agent", () => {
     // profile sources that file, and `up` warned the worker "will only reach a
     // server that needs none" — which against an endpoint that does need one
     // is every request refused.
-    const cmd = plan()[0]!.command;
+    const cmd = paneNamed("observer").command;
     expect(cmd).toContain(`[ -f "$HOME/.env" ]`);
     // `set -a` is the load-bearing half: `up` is a CHILD, and a sourced
     // variable that is not exported is invisible to it. Sourcing without it
@@ -120,7 +208,7 @@ describe("pane 1 — the ticketing agent", () => {
   });
 
   test("drops to an interactive shell, and does so even when up fails", () => {
-    const cmd = plan()[0]!.command;
+    const cmd = paneNamed("observer").command;
     // The pane must survive `up` returning — a pane whose command exits is a
     // pane cmux tears down, and this one is the dispatch console.
     expect(cmd).toContain("exec $SHELL -i");
@@ -133,20 +221,25 @@ describe("pane 1 — the ticketing agent", () => {
   test("takes a collection of workers, not just one", () => {
     // `up --workers` is a SET (ISC-61); the console has no business being
     // narrower than the command it drives.
-    expect(plan({ workers: ["tick-1", "sre-1"] })[0]!.command).toContain(
-      "'--workers' 'tick-1,sre-1'",
+    // The set spreads ACROSS panes now, one worker each, rather than into one
+    // `--workers` list — that is what makes each pane separately attachable.
+    expect(paneNamed("observer", { workers: ["tick-1", "sre-1"] }).command).toContain(
+      "'--workers' 'tick-1'",
+    );
+    expect(paneNamed("ticketing", { workers: ["tick-1", "sre-1"] }).command).toContain(
+      "'--workers' 'sre-1'",
     );
   });
 
   test("runs headless, so the fleet does not open panes of its own", () => {
     // A cmux-backed `up` inside a cmux pane would build a second workspace
     // beside this one — the console would appear to duplicate itself.
-    expect(plan()[0]!.command).toContain("'--backend' 'headless'");
+    expect(paneNamed("observer").command).toContain("'--backend' 'headless'");
   });
 
   test("defaults its config to the repo's fleet.yaml and accepts an override", () => {
-    expect(plan()[0]!.command).toContain(`'--config' '${REPO}/fleet.yaml'`);
-    expect(plan({ configPath: "/tmp/other.yaml" })[0]!.command).toContain("'--config' '/tmp/other.yaml'");
+    expect(paneNamed("observer").command).toContain(`'--config' '${REPO}/fleet.yaml'`);
+    expect(paneNamed("observer", { configPath: "/tmp/other.yaml" }).command).toContain("'--config' '/tmp/other.yaml'");
   });
 
   test("refuses an empty worker set rather than launching the whole fleet", () => {
@@ -161,13 +254,13 @@ describe("pane 1 — the ticketing agent", () => {
   });
 });
 
-describe("pane 1 — the agent", () => {
+describe("the agent pane", () => {
   test("stages are up → viewer → container shell → host shell, in that order", () => {
     // The requirement, and it is an ORDER: the pane must never land on a host
     // prompt while anything above it is still available. A viewer placed after
     // the shell, or a host `$SHELL` reached before the container one, both
     // type-check and both give back the terminal the console exists to replace.
-    const cmd = plan()[0]!.command;
+    const cmd = paneNamed("observer").command;
     const at = (needle: string) => cmd.indexOf(needle);
     expect(at("'up'")).toBeGreaterThan(-1);
     expect(at("'up'")).toBeLessThan(at("'logs'"));
@@ -180,7 +273,7 @@ describe("pane 1 — the agent", () => {
     // dispatch; without it `logs` prints the backlog and exits, and the pane
     // falls straight through to the shell. `--render` is the difference between
     // an operator reading events and an operator reading raw JSONL.
-    const cmd = plan()[0]!.command;
+    const cmd = paneNamed("observer").command;
     expect(cmd).toContain("'logs'");
     expect(cmd).toContain("'--follow'");
     expect(cmd).toContain("'--render'");
@@ -190,7 +283,7 @@ describe("pane 1 — the agent", () => {
     // A pane shows one worker. Hardcoding `tick-1` would silently show the
     // wrong agent for `--workers rev-1`, with the pane looking perfectly
     // healthy while tailing a worker nobody asked about.
-    const cmd = plan({ workers: ["rev-1", "eng-1"] })[0]!.command;
+    const cmd = paneNamed("observer", { workers: ["rev-1", "eng-1"] }).command;
     expect(cmd).toContain("'logs' '--worker' 'rev-1'");
     expect(cmd).toContain("'shell' '--worker' 'rev-1'");
     expect(cmd).not.toContain("'--worker' 'eng-1'");
@@ -207,19 +300,19 @@ describe("pane 1 — the agent", () => {
     // `[ -f "$HOME/.env" ] && . "$HOME/.env"`, which is a legitimate guard and
     // not a stage separator. An assertion that cannot tell the two apart would
     // have had to be deleted or weakened; scoping it to the stages keeps it.
-    const cmd = plan()[0]!.command;
+    const cmd = paneNamed("observer").command;
     expect(cmd.slice(cmd.indexOf("'up'"))).not.toContain("&&");
   });
 });
 
-describe("pane 2 — fleet status", () => {
+describe("the fleet-status pane", () => {
   test("refreshes forever, so the pane cannot print once and close", () => {
     // The original requirement, unchanged: `pifleet status` on its own prints
     // once and exits, which closes the pane — the same defect as pane 1's, in a
     // place with no shell after it. What changed is HOW it keeps running.
-    const cmd = plan()[1]!.command;
-    expect(cmd).toMatch(/^while :; do/);
-    expect(cmd).toContain("'status'");
+    const cmd = paneNamed("fleet-status").command;
+    expect(cmd).toMatch(/^prev=''; while :; do/);
+    expect(cmd).toContain("'status' '--all'");
   });
 
   test("CLEARS before each refresh — a standing pane is read at a glance", () => {
@@ -228,33 +321,32 @@ describe("pane 2 — fleet status", () => {
     // blocks scrolled past each other, so the pane was a transcript of how long
     // a dead worker had been dead rather than a display of the fleet. Only the
     // last screen is ever read; everything above it is cost with no reader.
-    expect(plan()[1]!.command).toContain("clear;");
+    expect(paneNamed("fleet-status").command).toContain("clear;");
     // And specifically NOT the built-in watch, which is the form that appends.
-    expect(plan()[1]!.command).not.toContain("--watch");
+    expect(paneNamed("fleet-status").command).not.toContain("--watch");
   });
 
   test("survives a status that exits non-zero", () => {
     // Without `|| true` the loop dies on the first refresh after a `down` —
     // exactly when an operator looks at it — leaving a pane that stopped
     // updating and does not say so.
-    expect(plan()[1]!.command).toContain("|| true");
+    expect(paneNamed("fleet-status").command).toContain("|| true");
   });
 
   test("polls on the SAME interval as the git pane, from the same flag", () => {
     // One `--poll` governs both, so a `down` appears in the two panes at the
     // same moment rather than in whichever happens to poll first.
-    const panes = plan({ gitPollSeconds: 11 });
-    expect(panes[1]!.command).toContain("sleep 11");
-    expect(panes[2]!.command).toContain("sleep 11");
+    expect(paneNamed("fleet-status", { gitPollSeconds: 11 }).command).toContain("sleep 11");
+    expect(paneNamed("git-watch", { gitPollSeconds: 11 }).command).toContain("sleep 11");
   });
 });
 
-describe("pane 3 — the git watch", () => {
+describe("the git-watch pane", () => {
   test("reports on the INVOCATION directory, never on cmux-fleet", () => {
     // The requirement, and the one most easily got wrong: this console is a
     // place to stand while working on some other repository. Proved by
     // mutation — passing `repoRoot` here reddens.
-    const cmd = plan()[2]!.command;
+    const cmd = paneNamed("git-watch").command;
     expect(cmd).toContain(`-C '${CWD}'`);
     expect(cmd).not.toContain(REPO);
   });
@@ -264,7 +356,7 @@ describe("pane 3 — the git watch", () => {
     // terminal on stdout, started `less`, and the pane sat at `(END)` waiting
     // for a keypress. It showed a plausible commit list and refreshed never —
     // a hang that looks exactly like a working watch.
-    const cmd = plan()[2]!.command;
+    const cmd = paneNamed("git-watch").command;
     const gitCalls = [...cmd.matchAll(/git\s+(\S+)/g)].map((m) => m[1]);
     expect(gitCalls.length, "no git invocations found — the probe has rotted").toBeGreaterThanOrEqual(2);
     // EVERY invocation, not just the log: `status` pages too once its output
@@ -273,24 +365,37 @@ describe("pane 3 — the git watch", () => {
   });
 
   test("is a shell loop, because macOS has no watch(1)", () => {
-    const cmd = plan()[2]!.command;
-    expect(cmd).toMatch(/^while :; do/);
+    const cmd = paneNamed("git-watch").command;
+    expect(cmd).toMatch(/^prev=''; while :; do/);
     // procps' `watch` is the obvious way to write this and fails on tick one
     // here with `command not found`, leaving a dead pane that looks configured.
     expect(cmd).not.toMatch(/\bwatch\b/);
   });
 
   test("shows branch and recent history, and clears before printing", () => {
-    const cmd = plan()[2]!.command;
+    const cmd = paneNamed("git-watch").command;
     expect(cmd).toContain("status --short --branch");
     expect(cmd).toContain("log --oneline -10");
-    // Clearing after printing leaves the pane blank between ticks, which reads
-    // as a hung console.
-    expect(cmd.indexOf("clear")).toBeLessThan(cmd.indexOf("status --short"));
+    /*
+     * `clear` is immediately followed by the print, with nothing between them.
+     *
+     * The original rule was "clear BEFORE running the command", because a loop
+     * that cleared after printing left the pane blank for the length of the
+     * command and read as a hung console. The redraw-on-change loop inverts the
+     * order — the command has to run before its output can be compared — and
+     * satisfies the original requirement a stronger way: the output is already
+     * in hand when `clear` fires, so the blank window is not shortened, it does
+     * not exist. That is what this asserts, rather than a position that no
+     * longer means what it used to.
+     */
+    expect(cmd).toContain(`clear; printf '%s\\n' "$out"`);
+    // And the command runs into a capture, not straight at the terminal —
+    // which is what makes an unchanged tick draw nothing at all.
+    expect(cmd).toMatch(/out="\$\(git/);
   });
 
   test("takes a poll interval and refuses a nonsensical one", () => {
-    expect(plan({ gitPollSeconds: 30 })[2]!.command).toContain("sleep 30");
+    expect(paneNamed("git-watch", { gitPollSeconds: 30 }).command).toContain("sleep 30");
     // A zero or fractional interval is a busy loop on the operator's machine.
     expect(() => plan({ gitPollSeconds: 0 })).toThrow(/positive whole number/);
     expect(() => plan({ gitPollSeconds: 1.5 })).toThrow(/positive whole number/);

@@ -497,6 +497,66 @@ describe("the supervisor branches on pane_mode", () => {
     expect(SUPERVISOR).not.toMatch(/classifyTuiTurn\(tuiReader\.entries\)/);
   });
 
+  /**
+   * Activity is recorded ABOVE the epoch gate, and the position is the fix.
+   *
+   * The console read `tick-1: idle task=- supervisor=up` beside a pane that was
+   * mid-turn, because everything below `const live = em.live` is EPOCH work and
+   * an attended pane has no epoch — `dispatch` refuses the socket route for a
+   * tui worker, so `em.live` is null on every poll of the workers this field
+   * exists for. Recorded below the gate it would be written for exactly the
+   * workers that already report their state some other way, and never for the
+   * ones that do not.
+   *
+   * `tui-transcript-activity.test.ts` is the behavioural half and is what
+   * actually caught the misplacement; this states the property in the file it
+   * constrains, so a future reordering is red in the fast suite too.
+   */
+  test("transcript activity is recorded before the epoch gate, not after it", () => {
+    const loop = /const transcriptPoll[\s\S]*?\}, TUI_POLL_MS\);/.exec(SUPERVISOR);
+    expect(loop, "the transcript poll could not be located").not.toBeNull();
+    const body = loop![0];
+
+    const write = body.indexOf("state.transcript_activity = {");
+    const gate = body.indexOf("const live = em.live;");
+    expect(write, "nothing in the poll writes state.transcript_activity").toBeGreaterThan(-1);
+    expect(gate, "the epoch gate could not be located").toBeGreaterThan(-1);
+    expect(
+      write,
+      "state.transcript_activity is written below `const live = em.live` — for a worker a " +
+        "person types into, em.live is always null, so it would never be written at all.",
+    ).toBeLessThan(gate);
+
+    /**
+     * And it is FLUSHED — asserted HERE because nothing behavioural can.
+     *
+     * Deleting the flush was mutated and the integration probe stayed GREEN:
+     * the heartbeat writes the whole state file every `HEARTBEAT_MS` (250 ms),
+     * faster than this poll's 500 ms, so the field reaches disk either way.
+     * That makes the call a deliberate redundancy rather than a load-bearing
+     * one, and a redundancy no test names is a line the next reader deletes as
+     * dead. What it buys is that this field's durability does not depend on a
+     * different interval's body staying unconditional.
+     */
+    expect(body.slice(write)).toContain("void flushState();");
+  });
+
+  /**
+   * The write is conditional, because the poll is not.
+   *
+   * `flushState` is a tmp + fsync + rename + directory fsync of the whole state
+   * file, and the poll runs every `TUI_POLL_MS` — 500 ms. Unconditional, this
+   * would be two durable writes a second for the life of every attended run,
+   * to record that nothing changed.
+   */
+  test("the state file is written only when the entry count moves", () => {
+    expect(SUPERVISOR).toMatch(/if \(seen === null \|\| seen\.entries !== count\) \{/);
+    // `grew`, not `entries !== count`, dates the growth: a count that went DOWN
+    // is a different transcript, and dating it would report a shrinking file as
+    // activity.
+    expect(SUPERVISOR).toMatch(/last_growth_at: grew \? isoNow\(\)/);
+  });
+
   test("a transcript-derived completion settles through the one settle()", () => {
     const loop = /const transcriptPoll[\s\S]*?\}, TUI_POLL_MS\);/.exec(SUPERVISOR);
     expect(loop, "the transcript poll could not be located").not.toBeNull();

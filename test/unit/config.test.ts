@@ -26,7 +26,16 @@ import { resolveHarnessPatterns } from "../../src/harvest/patterns.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
-import { BackendSchema, parseDuration } from "../../src/config/schema.ts";
+import {
+  BackendSchema,
+  kubeconfigScopeWarning,
+  observerTuiEpochWarning,
+  observerTuiWorkers,
+  unknownThemeWarning,
+  unknownThemeWorkers,
+  parseDuration,
+  workersMissingKubeconfig,
+} from "../../src/config/schema.ts";
 import { omlxRelayTarget } from "../../src/security/relay.ts";
 import { EXIT } from "../../src/contracts.ts";
 
@@ -80,24 +89,60 @@ async function expectIssue(doc: unknown, path: string, messageFragment?: string)
 // ---------------------------------------------------------------------------
 
 describe("worked example", () => {
-  // ISC-67: all six SRD roles load from the shipped default config.
+  // ISC-67: all seven shipped roles load from the shipped default config.
+  // observer replaces investigator (SRD-OBSERVER-001 D2) — ISC-391.
   test("fleet.example.yaml loads with all seven shipped roles", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
-      ["engineer", "investigator", "reviewer", "sre", "tester", "ticketing", "verifier"].sort(),
+      ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "verifier"].sort(),
     );
-    expect(loaded.config.workers).toHaveLength(7);
-    // Every worker resolves without error.
-    const resolved = resolveAllWorkers(loaded);
-    expect(resolved.map((w) => w.id)).toEqual([
+    // Every worker resolves without error, and the SET is asserted rather than
+    // its size. A bare `toHaveLength` fails on a number when a worker is added
+    // or dropped, which says how many changed and never which — and the two
+    // consoles now differ only by which ids they name, so which is the whole
+    // question. The count comes off this list, so there is one place to edit.
+    const expected = [
       "sre-1",
       "sre-2",
-      "inv-1",
+      "obs-1",
+      "obs-2",
       "ver-1",
+      // The `development` console's four seats. eng-2 and tst-1 exist for it;
+      // the `tester` role had no worker at all before it.
       "eng-1",
+      "eng-2",
+      "tst-1",
       "rev-1",
       "tick-1",
-    ]);
+    ];
+    expect(loaded.config.workers).toHaveLength(expected.length);
+    const resolved = resolveAllWorkers(loaded);
+    expect(resolved.map((w) => w.id)).toEqual(expected);
+  });
+
+  /**
+   * Every ATTENDED pane is tellable apart from every other at a glance.
+   *
+   * With one attended console holding two panes this was a nicety. With two
+   * consoles holding six between them — and TWO OF THEM running the same role,
+   * so identical in every other on-screen respect — the palette is the only
+   * thing that says which container a pane belongs to before you read the
+   * title. A duplicate theme is therefore a defect, not an aesthetic choice,
+   * and nothing else in the suite would notice one.
+   *
+   * Asserted on RESOLVED workers because `defaults <- roles <- worker` is where
+   * a theme could be inherited rather than set, and two workers inheriting one
+   * role's theme is exactly how a duplicate would arrive.
+   */
+  test("no two attended workers share a theme", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const attended = resolveAllWorkers(loaded).filter((w) => w.paneMode === "tui");
+    // Anti-vacuity: an empty or single-element set passes any uniqueness check.
+    expect(attended.length).toBeGreaterThan(1);
+    const themes = attended.map((w) => w.theme);
+    // Named in the failure, not just counted, so the message says WHICH pair.
+    expect(themes.filter((t) => t === undefined)).toEqual([]);
+    expect(new Set(themes).size, `themes were ${themes.join(", ")}`).toBe(themes.length);
   });
 
   test("the ticketing role gets no Google identity and no worktree (ISC-326)", async () => {
@@ -684,6 +729,224 @@ describe("pane_mode: tui is refused where there is no pane (SRD §3.5)", () => {
     const loaded = await writeAndLoad(doc);
     expect(loaded.config.backend.kind).toBeUndefined();
     expect(resolveWorker(loaded, "w1").paneMode).toBe("tui");
+  });
+});
+
+/**
+ * The two non-fatal config warnings SRD-OBSERVER-001 section 6.2/6.6 call for
+ * (section 13's "Config." bullet) — ISC-392, ISC-393. Neither fails
+ * `.safeParse`, so these call the pure functions directly rather than going
+ * through `expectIssue`, on the same reasoning `tui-guards.test.ts` uses for
+ * `unattendedTuiWarning`: a document that trips one of these must still load.
+ */
+describe("cloud_access without cloud.kubeconfig warns, never refuses (SRD-OBSERVER-001 §6.6)", () => {
+  test("a role resolving cloud_access: true with no cloud.kubeconfig is named", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: { cloud_access: true } };
+    const loaded = await writeAndLoad(doc);
+    expect(loaded.config.cloud.kubeconfig).toBeNull();
+    const missing = workersMissingKubeconfig(loaded.config);
+    expect(missing).toEqual(["w1"]);
+    const warning = kubeconfigScopeWarning(missing);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("w1");
+    expect(warning).toContain("cloud.kubeconfig");
+  });
+
+  test("the same document still loads — this is a warning, not a schema refusal", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: { cloud_access: true } };
+    // Must not throw.
+    await writeAndLoad(doc);
+  });
+
+  test("cloud.kubeconfig set clears the warning even with cloud_access: true", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: { cloud_access: true } };
+    doc["cloud"] = { kubeconfig: "/run/pifleet/kubeconfig" };
+    const loaded = await writeAndLoad(doc);
+    expect(workersMissingKubeconfig(loaded.config)).toEqual([]);
+    expect(kubeconfigScopeWarning(workersMissingKubeconfig(loaded.config))).toBeNull();
+  });
+
+  test("cloud_access: false raises nothing, kubeconfig unset or not", async () => {
+    const doc = baseDoc();
+    const loaded = await writeAndLoad(doc);
+    expect(workersMissingKubeconfig(loaded.config)).toEqual([]);
+  });
+
+  test("a worker-level override completes the grant a role left unset", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng", cloud_access: true }];
+    const loaded = await writeAndLoad(doc);
+    expect(workersMissingKubeconfig(loaded.config)).toEqual(["w1"]);
+  });
+});
+
+describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER-001 §6.2, §7.5)", () => {
+  test("an observer role resolving pane_mode: tui is named, and the mechanism is stated", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { observer: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    const loaded = await writeAndLoad(doc);
+    const tuiWorkers = observerTuiWorkers(loaded.config);
+    expect(tuiWorkers).toEqual(["obs-1"]);
+    const warning = observerTuiEpochWarning(tuiWorkers);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("obs-1");
+    // The mechanism, not just the fact — this is what a reader has to act on.
+    expect(warning).toMatch(/no epoch/);
+    expect(warning).toMatch(/already_completed/);
+    expect(warning).toMatch(/twice/);
+  });
+
+  test("the same document still loads — this is a warning, not a schema refusal", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { observer: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    // Must not throw, unlike the tui+oneshot / tui+headless refusals above.
+    await writeAndLoad(doc);
+  });
+
+  test("pane_mode: tui on a DIFFERENT role's name raises nothing", async () => {
+    // Keyed to the literal role name "observer" — the hazard is a property of
+    // what the observer-ops skill does, not a generic fact this schema can
+    // derive from any read-only role.
+    const doc = baseDoc();
+    doc["roles"] = { eng: { pane_mode: "tui" } };
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual([]);
+  });
+
+  test("observer at pane_mode: rpc (the shipped default) raises nothing", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { observer: {} };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * The shipped example deliberately DOES carry one tui observer, and this
+   * asserts exactly which. `obs-1` is the operations console's worker —
+   * `scripts/operations` resolves pane 1's mode from it, and only `tui` makes
+   * that pane Pi's own interface rather than a rendered log tail.
+   *
+   * Asserting the identity rather than a count is the point. `up` permits
+   * exactly one tui worker in a fleet, so this is a seat with room for one, and
+   * a bare count cannot tell "obs-1 holds it" apart from "someone moved the
+   * override onto obs-2, or up onto the role". The role-level case is the one
+   * that matters: on the role it would apply to every observer, and tui
+   * allocates no epoch, so a re-dispatched watch pass would run twice.
+   */
+  test("fleet.example.yaml ships exactly one tui observer, and it is the console's", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    expect(observerTuiWorkers(loaded.config)).toEqual(["obs-1"]);
+    expect(resolveWorker(loaded, "obs-2").paneMode).toBe("rpc");
+  });
+});
+
+describe("theme resolves three-level and warns on a name the image lacks", () => {
+  test("a worker override beats the role, which beats defaults", async () => {
+    const doc = baseDoc();
+    doc["defaults"] = { theme: "nord" };
+    doc["roles"] = { eng: { theme: "gruvbox-dark" }, obs: {} };
+    doc["workers"] = [
+      { id: "w1", role: "eng", theme: "dracula" },
+      { id: "w2", role: "eng" },
+      { id: "w3", role: "obs" },
+    ];
+    const loaded = await writeAndLoad(doc);
+    expect(resolveWorker(loaded, "w1").theme).toBe("dracula");
+    expect(resolveWorker(loaded, "w2").theme).toBe("gruvbox-dark");
+    expect(resolveWorker(loaded, "w3").theme).toBe("nord");
+  });
+
+  /**
+   * UNSET must stay unset, not become "dark".
+   *
+   * `docker/entrypoint.sh` writes Pi's `settings.json` `theme` key only when
+   * the value is non-empty, so an absent theme means "leave whatever the
+   * operator picked with /settings alone". A default resolved here would
+   * overwrite that hand-made choice on every container start, which is a
+   * setting that silently will not stick.
+   */
+  test("no theme anywhere resolves to undefined, not to a default", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng" }];
+    const loaded = await writeAndLoad(doc);
+    expect(resolveWorker(loaded, "w1").theme).toBeUndefined();
+  });
+
+  test("an unknown name on a tui worker warns and names both worker and theme", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng", pane_mode: "tui", theme: "catppuccin" }];
+    const loaded = await writeAndLoad(doc);
+    const bad = unknownThemeWorkers(loaded.config);
+    expect(bad).toEqual([{ id: "w1", theme: "catppuccin" }]);
+    const warning = unknownThemeWarning(bad);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("w1");
+    expect(warning).toContain("catppuccin");
+    // The consequence, which is the part a reader has to act on: it does not
+    // fail, it looks like every other pane.
+    expect(warning).toMatch(/default theme/);
+    // And the way out — the real names, since a near-miss spelling is the
+    // overwhelmingly likely cause.
+    expect(warning).toContain("catppuccin-mocha");
+  });
+
+  test("the same document still loads — a colour scheme must not refuse a fleet", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng", pane_mode: "tui", theme: "nope" }];
+    await writeAndLoad(doc);
+  });
+
+  /**
+   * An rpc worker renders no pane, so its theme is unobservable and warning
+   * about it is noise. This is not hypothetical tidiness: `defaults.theme`
+   * lands on EVERY worker in the fleet, so without this filter one typo in
+   * defaults would print a line naming every worker that exists.
+   */
+  test("an unknown name on an rpc worker raises nothing", async () => {
+    const doc = baseDoc();
+    doc["defaults"] = { theme: "nope" };
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng" }];
+    const loaded = await writeAndLoad(doc);
+    expect(unknownThemeWorkers(loaded.config)).toEqual([]);
+    expect(unknownThemeWarning([])).toBeNull();
+  });
+
+  test("Pi's own built-ins are accepted, not just the bundle", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng", pane_mode: "tui", theme: "dark" }];
+    const loaded = await writeAndLoad(doc);
+    expect(unknownThemeWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * The shipped example's two attended panes must carry DIFFERENT themes.
+   *
+   * Asserting the two names rather than merely "both set" is the point: the
+   * whole reason the key exists is that an operator glancing at a two-pane
+   * console can tell which agent they are typing at, and two panes that both
+   * resolved to the same name would satisfy every weaker assertion while
+   * failing the only requirement.
+   */
+  test("fleet.example.yaml gives its two attended panes different themes", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const obs = resolveWorker(loaded, "obs-1").theme;
+    const tick = resolveWorker(loaded, "tick-1").theme;
+    expect(obs).toBe("catppuccin-mocha");
+    expect(tick).toBe("catppuccin-latte");
+    expect(obs).not.toBe(tick);
+    expect(unknownThemeWorkers(loaded.config)).toEqual([]);
   });
 });
 

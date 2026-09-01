@@ -804,7 +804,15 @@ jobs:
           #     bun test test/integration/{image,verbgate,egress,adc,relay,probe-in-network,container-env,container-launch,doctor-preflight,control-socket-uid,full-chain,acceptance-container,honeypot,hostile-pi,mount-preflight-remote}.test.ts
           #     -> 6 pass, 123 skip, 0 fail. Ran 129 tests across 15 files.
           # Four added gated cases, four more skips, pass unmoved at 6.
-          TOTAL_EXPECTED: "129"
+          #
+          # 2026-08-31, same method and same conditions: 130. The one added case
+          # is verbgate.test.ts's D5 probe (gcloud logging read admitted without
+          # loosening the credential-minting or positional-verb refusals). It is
+          # inside this file's `describe.skipIf(!DOCKER)`, so with the gate unset
+          # it collects as a skip: 6 pass, 124 skip, 0 fail, 130 across 15 files.
+          # Pass unmoved at 6 again, which is the check that the added case is
+          # gated like its neighbours rather than accidentally ungated.
+          TOTAL_EXPECTED: "130"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

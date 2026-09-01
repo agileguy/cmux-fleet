@@ -1020,6 +1020,48 @@ export async function registryCall(
  * after everything has settled behaves exactly as it always did. This narrows
  * WHICH run is chosen when several exist; it never makes `status` refuse one.
  */
+/**
+ * Every run that still has at least one live worker, oldest first.
+ *
+ * {@link latestLiveRunId} answers "which run should a bare command act on";
+ * this answers "what is running right now", which is a different question the
+ * moment a console stands up more than one run. The operations console does
+ * exactly that: one `up` per attached pane, because `--attach-here` hands over
+ * the terminal of the process that runs it and one process has one terminal.
+ *
+ * Liveness is the SAME (pid, start-time) identity check the snapshot uses, for
+ * the reason stated below — a run this selector called live and the table then
+ * called `gone` would be the defect wearing a different mask.
+ */
+export async function liveRunIds(root: string = runsRoot()): Promise<string[]> {
+  const runs = await runIdsAscending(root);
+  const live: string[] = [];
+  for (const runId of runs) {
+    const run = runPaths(runId, root);
+    const registry = await readRegistry(run);
+    let workerIds: string[];
+    try {
+      workerIds = (await readdir(run.workersDir)).filter((w) => !w.startsWith("."));
+    } catch {
+      continue;
+    }
+    for (const id of workerIds) {
+      const state = await readWorkerState(workerPaths(run, id));
+      if (state === null) continue;
+      const registered = registry?.workers[id];
+      const alive =
+        registered !== undefined
+          ? await identityAlive({ pid: registered.pid, started: registered.started })
+          : (await processStartTime(state.pid)) !== null;
+      if (alive) {
+        live.push(runId);
+        break;
+      }
+    }
+  }
+  return live;
+}
+
 export async function latestLiveRunId(root: string = runsRoot()): Promise<string | null> {
   const runs = await runIdsAscending(root);
   for (let i = runs.length - 1; i >= 0; i--) {
