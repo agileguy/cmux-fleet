@@ -573,6 +573,8 @@ describe("the shipped example's ticketing worker (ISC-330)", () => {
     return buildWorkerEnv(loaded, resolveWorker(loaded, "tick-1"), {
       TICKET_API_TOKEN: TOKEN,
       TICKET_BASE_URL: "https://tickets.example.com",
+      TICKET_WORKSPACE: "WS-Example",
+      TICKET_PROJECT: "PR-Example",
     });
   }
 
@@ -589,7 +591,12 @@ describe("the shipped example's ticketing worker (ISC-330)", () => {
       secretContainerPath("TICKET_API_TOKEN"),
     );
     expect(plan.secretFiles).toContainEqual({ name: "TICKET_API_TOKEN", value: TOKEN });
-    expect(plan.secretNames).toEqual(["TICKET_API_TOKEN", "TICKET_BASE_URL"]);
+    expect(plan.secretNames).toEqual([
+      "TICKET_API_TOKEN",
+      "TICKET_BASE_URL",
+      "TICKET_WORKSPACE",
+      "TICKET_PROJECT",
+    ]);
   });
 
   /**

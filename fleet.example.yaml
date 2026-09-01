@@ -224,6 +224,25 @@ secrets:
     # string above means `true`.
     - name: TICKET_BASE_URL
       credential: false
+    # The ticket CLI's two SCOPING values — which workspace, which project.
+    # Not credentials either, and here for the same reason `TICKET_BASE_URL` is:
+    # `secrets:` is the only per-worker delivery channel there is.
+    #
+    # They exist because the image now carries a ticket CLI (§5.3), and a query
+    # that names no project is not a narrower query — it is a WORKSPACE-WIDE
+    # one. Measured 2026-09-01: an iteration summary asked without a project
+    # returned 49 projects and roughly 180 people, and read as a plausible
+    # answer to the question that was asked. An unscoped query does not fail; it
+    # succeeds at something else, which is the failure mode worth spending a
+    # delivery slot on.
+    #
+    # `credential: false` for the same reason as the base URL, and it matters
+    # MORE here: a ticket artifact legitimately names the project it queried, so
+    # sweeping the project name as a needle would refuse every honest run.
+    - name: TICKET_WORKSPACE
+      credential: false
+    - name: TICKET_PROJECT
+      credential: false
     #
     # `observer`'s own three pairs, added for the same delivery reason and
     # carrying the SAME trap one order of magnitude wider — three base URLs
@@ -435,12 +454,18 @@ roles:
     # a timeout deep inside an HTTP call. So is a name that is set nowhere in
     # the operator's environment, and so is a file that cannot be written.
     #
-    # This worker therefore receives TICKET_API_TOKEN_FILE and
-    # TICKET_BASE_URL_FILE, each naming a path under /secrets. It receives
-    # neither value in its environment. `skills/ticket-ops/SKILL.md` documents
-    # the `curl --config` form that turns the first of those files into a
-    # request header without the value passing through a shell variable.
-    secrets: [TICKET_API_TOKEN, TICKET_BASE_URL]
+    # This worker therefore receives TICKET_API_TOKEN_FILE, TICKET_BASE_URL_FILE,
+    # TICKET_WORKSPACE_FILE and TICKET_PROJECT_FILE, each naming a path under
+    # /secrets. It receives none of the VALUES in its environment.
+    # `skills/ticket-ops/SKILL.md` documents the `.env` form that turns the
+    # first of those files into the CLI's configuration without the value
+    # passing through a shell variable — the same construction the `curl
+    # --config` block used before the image carried a CLI, for the same reason.
+    #
+    # All four are requested TOGETHER because three of them are useless alone: a
+    # credential with no endpoint cannot dial, and an endpoint with no project
+    # answers a workspace-wide question instead of the one asked.
+    secrets: [TICKET_API_TOKEN, TICKET_BASE_URL, TICKET_WORKSPACE, TICKET_PROJECT]
     # Sets HTTPS_PROXY so this worker has a ROUTE to the bridge proxy. It grants
     # no destination by itself — `egress.allow` above decides those, fleet-wide —
     # and it grants no Google identity. That separation is the whole point of the

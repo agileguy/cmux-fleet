@@ -254,33 +254,24 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     isc: "ISC-344",
     grade: "[~]",
     claim:
-      "BOTH canonical calls in the mounted skill carry `--max-time`, so every shape a worker " +
-      "copies is a bounded one. A lower count means a documented example went back to an " +
-      "unbounded request — which inside a container does not fail but HANGS, leaving the " +
-      "supervisor nothing but silence and killing the run with no reason recorded. Still " +
-      "`[~]`: this pins the EXAMPLES, not the calls a worker actually issues. " +
-      "WENT FROM 1 TO 2 ON 2026-08-30, when a Rally query section was added after a live run " +
-      "reported 5 where the answer was 8. The number is a count of BOUNDED examples and " +
-      "therefore a floor on the good shape, NOT a ceiling on the bad one: an unbounded " +
-      "example added beside these two would leave this green. That was equally true at 1 and " +
-      "is written down here rather than discovered later. " +
-      "WENT FROM 2 TO 3 ON 2026-08-30, when the artifact-shape section landed — three live " +
-      "runs had written `{summary, query, defects, writes_made}` and failed " +
-      "`TicketOpsArtifactSchema` on the same four fields, because the skill documented at " +
-      "length what the artifact is FOR and never what it must CONTAIN. Its worked example " +
-      "carries a `commands:` entry, which is a third bounded shape a worker copies.",
-    // The pattern deliberately starts at `curl` rather than at `--max-time`:
-    // a pattern leading with `-` is consumed by grep as an OPTION, which is how
-    // this claim failed the first time it ran. It failed loudly, which is the
-    // guard doing its job — but a claim that cannot express its own subject is
-    // worth a comment so the next one is not written the same way.
-    argv: [
-      "grep",
-      "-nF",
-      "curl -sS --fail-with-body --max-time 60 --config",
-      "skills/ticket-ops/SKILL.md",
-    ],
-    expect: 3,
+      "The mounted skill states that requests are BOUNDED and names where the bound comes " +
+      "from, so a worker does not re-add one or assume there is none. Empty means the " +
+      "guarantee was dropped from the bundle a worker actually receives. " +
+      "SUPERSEDED 2026-09-01, and the supersession is the interesting part. This claim used " +
+      "to count `--max-time` in the skill's canonical `curl` examples — it went 1 -> 2 -> 3 as " +
+      "sections were added — and it recorded its own weakness at the time: the number was a " +
+      "floor on the good shape and NOT a ceiling on the bad one, so an unbounded example " +
+      "beside the others would have left it green. The image now carries `rally-cli`, there " +
+      "are no `curl` examples left to count, and the bound moved INTO the tool: httpx " +
+      "`DEFAULT_TIMEOUT = 30.0` with tenacity `stop_after_attempt(3)` and backoff capped at " +
+      "10s (read in the pinned commit on 2026-09-01), so the worst case per command is about " +
+      "100 seconds and always terminates. That is strictly stronger than a flag a worker had " +
+      "to remember. Still `[~]`, and for a SHARPER reason than before: this pins the " +
+      "SENTENCE, and the mechanism it describes lives in a third-party repository this tree " +
+      "cannot re-read. A bump of TICKET_CLI_COMMIT that removed the timeout would leave this " +
+      "green.",
+    argv: ["grep", "-nF", "Every request is already bounded", "skills/ticket-ops/SKILL.md"],
+    expect: 1,
   },
   {
     isc: "ISC-369",
