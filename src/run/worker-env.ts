@@ -465,6 +465,22 @@ export function buildWorkerEnv(
      */
     PIFLEET_PANE_MODE: w.paneMode,
     /*
+     * The Pi colour theme this worker's pane should render in, by name.
+     *
+     * EMPTY STRING when no theme resolved, rather than an omitted key, and the
+     * two are not interchangeable at the far end. `docker/entrypoint.sh` writes
+     * the `theme` key into Pi's `settings.json` only when this is non-empty —
+     * so "" means "leave alone whatever the operator picked with `/settings`",
+     * while a name means "this pane is claimed by config". Writing a default
+     * here would silently overwrite a hand-made choice on every restart.
+     *
+     * Present for rpc workers too, on the same evidence argument
+     * `PIFLEET_PANE_MODE` above makes: the env file is a durable artifact
+     * `status` and `report` read back later, and a missing key cannot be told
+     * apart from a pifleet that predated themes.
+     */
+    PIFLEET_PI_THEME: w.theme ?? "",
+    /*
      * WHICH of this file's entries are credentials, by name.
      *
      * Declared HERE, empty, and filled in at the bottom of this function once

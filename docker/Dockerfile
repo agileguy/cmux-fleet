@@ -130,6 +130,52 @@ RUN if [ -n "${EXTRA_APT_PACKAGES}" ]; then \
 # --ignore-scripts: install-time scripts are an unnecessary supply-chain surface.
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
 
+# Pi TUI colour themes (src/config/themes.ts holds the reasoning and the names).
+#
+# Pi ships exactly two, `dark` and `light`, and `light` is not a usable second
+# choice: a Pi theme defines no page background, so it paints light-mode ink
+# onto whatever the terminal already has. The operations console runs two
+# attended panes side by side and needs them tellable apart, so the image
+# carries a bundle of well-known palettes.
+#
+# WHAT WAS READ BEFORE TRUSTING THIS, because it is third-party code entering
+# every worker container. The published 0.1.6 tarball is 19 files: 16 theme
+# JSONs, README, an MIT LICENSE, package.json. It carries NO JavaScript at all,
+# no `scripts` block (so no pre/post-install hook — `--ignore-scripts` below is
+# belt to that braces), no dependencies, no `bin`, no `main`: nothing in it is
+# executable or require-able. Every theme file is pure ASCII with no control
+# characters, which matters more than it sounds — theme values are emitted to
+# the terminal as escape sequences, so a smuggled ESC would be terminal
+# injection — and every value is a hex colour, an integer 0-255, or a reference
+# to that file's own `vars`.
+#
+# The version is PINNED and must equal `PI_THEMES_VERSION` in
+# src/config/themes.ts; test/unit/themes.test.ts asserts the two agree. One
+# immutable tarball per version is all the pin buys. It is not a claim that some
+# future version is safe, and bumping it means reading the tarball again.
+#
+# COPIED OUT of the npm tree, then uninstalled, for two reasons: /home/pi/.pi/
+# agent is Pi's own custom-theme directory and is a named volume at run time,
+# which would mask anything baked at that path; and leaving the package in the
+# global tree would give the same 16 themes two possible discovery routes.
+#
+# The `test -f` loop is the load-bearing half. It is the second arrow in
+# themes.ts's `THEME_NAMES → Dockerfile → image` chain: a bundle that renamed or
+# dropped a file fails the BUILD here, instead of shipping a worker whose
+# configured theme silently falls back to the default.
+ARG PI_THEMES_VERSION=0.1.6
+RUN set -eux; \
+    npm install -g --ignore-scripts @firstpick/pi-themes-bundle@${PI_THEMES_VERSION}; \
+    mkdir -p /opt/pifleet; \
+    cp -R "$(npm root -g)/@firstpick/pi-themes-bundle/themes" /opt/pifleet/themes; \
+    npm uninstall -g --ignore-scripts @firstpick/pi-themes-bundle; \
+    for t in catppuccin-latte catppuccin-mocha crimson-noir dracula everforest-dark \
+             gruvbox-dark gruvbox-light matrix nord one-dark rose-pine rose-pine-dawn \
+             solarized-dark solarized-light tokyo-night tokyo-night-storm; do \
+      test -f "/opt/pifleet/themes/${t}.json"; \
+    done; \
+    chmod -R a+rX /opt/pifleet
+
 # Every toolchain variant must carry a working gcloud/kubectl/helm/jq/curl/rg/fd
 # (§5.3). Executing each one at build time is the difference between an image
 # that *contains* the tools and an image where they *run*: the relocation above

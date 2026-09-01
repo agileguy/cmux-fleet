@@ -6,6 +6,8 @@ import {
   kubeconfigScopeWarning,
   observerTuiEpochWarning,
   observerTuiWorkers,
+  unknownThemeWarning,
+  unknownThemeWorkers,
   workersMissingKubeconfig,
 } from "../../config/schema.ts";
 
@@ -34,6 +36,7 @@ export function register(program: Command): void {
         const warnings = [
           kubeconfigScopeWarning(workersMissingKubeconfig(loaded.config)),
           observerTuiEpochWarning(observerTuiWorkers(loaded.config)),
+          unknownThemeWarning(unknownThemeWorkers(loaded.config)),
         ].filter((w): w is string => w !== null);
         const summary = {
           valid: true,

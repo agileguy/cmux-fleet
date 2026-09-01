@@ -256,6 +256,17 @@ export interface ResolvedWorker {
   secrets: string[];
   isolation: Isolation;
   paneMode: "rpc" | "tui";
+  /**
+   * Pi TUI colour theme, or `undefined` for Pi's own default.
+   *
+   * Left OPTIONAL rather than defaulted to `"dark"` here, and the distinction
+   * is load-bearing at the other end: `docker/entrypoint.sh` only writes the
+   * `theme` key into `settings.json` when this arrives non-empty, so an
+   * unset theme leaves whatever the operator selected inside Pi with
+   * `/settings` alone. Defaulting it here would silently overwrite that
+   * choice on every container start.
+   */
+  theme?: string;
   kind: "persistent" | "oneshot";
   readOnly: boolean;
   /** defaults → role → worker, file before inline at each level. */
@@ -339,6 +350,9 @@ export function resolveWorker(loaded: LoadedConfig, id: string): ResolvedWorker 
     secrets: [...(pick("secrets", entry, role, d) ?? [])],
     isolation: pick("isolation", entry, role, d) ?? config.run.isolation,
     paneMode: pick("pane_mode", entry, role, d) ?? "rpc",
+    // No `?? "dark"`: see the field's docstring — absent means "leave Pi's own
+    // selection alone", which is not the same as choosing Pi's default.
+    ...(pick("theme", entry, role, d) === undefined ? {} : { theme: pick("theme", entry, role, d)! }),
     kind: pick("kind", entry, role, d) ?? "persistent",
     readOnly: pick("read_only", entry, role, d) ?? false,
     // Briefings CONCATENATE across levels by design — the one deliberate

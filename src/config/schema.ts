@@ -21,6 +21,7 @@ import { z } from "zod";
 import { MAX_ITEMS, SESSION_ID_RE, workerId } from "../contracts.ts";
 import { ruleHostError } from "../security/egress.ts";
 import { relayUpstreamError } from "../security/relay.ts";
+import { KNOWN_THEMES, knownTheme } from "./themes.ts";
 
 // ---------------------------------------------------------------------------
 // Durations
@@ -134,6 +135,25 @@ export const RoleFieldsSchema = z
     secrets: z.array(shortStr).max(64).optional(),
     isolation: IsolationSchema.optional(),
     pane_mode: z.enum(["rpc", "tui"]).optional(),
+    /**
+     * Pi TUI colour theme, by name (`config/themes.ts`).
+     *
+     * A free string rather than a `z.enum` of the 16 bundled names, and that is
+     * a deliberate refusal to make this schema the authority. The names that
+     * actually resolve are a property of the IMAGE — Pi reads them out of
+     * `/opt/pifleet/themes` at start — and an enum here would refuse a theme an
+     * operator legitimately added to a rebuilt image, at parse time, with no
+     * way to say yes. So an unrecognised name WARNS (`unknownThemeWarning`
+     * below) and the run proceeds: the worst case is a pane in the default
+     * theme, which is cosmetic, and refusing a whole fleet over a cosmetic
+     * mismatch is the larger error.
+     *
+     * Meaningful only where a person is looking at the pane, i.e. `pane_mode:
+     * tui`. It is not refused on an rpc worker — the resolution is three-level,
+     * so `defaults.theme` naturally lands on workers that will never render it,
+     * and warning about every one of those would be noise about nothing.
+     */
+    theme: shortStr.optional(),
     kind: z.enum(["persistent", "oneshot"]).optional(),
     /**
      * Accepted for §6.2 compatibility, but the renderer passes
@@ -1118,5 +1138,52 @@ export function observerTuiEpochWarning(workerIds: readonly string[]): string | 
     `a re-dispatched pass runs the same task twice. An observer watch is built on repeated ` +
     `dispatch of near-identical tasks (§7.5), which makes this the role least able to afford ` +
     `it. Set pane_mode: rpc unless a person is deliberately driving this pane by hand.\n`
+  );
+}
+
+/**
+ * Worker ids whose resolved `theme` is a name this image cannot resolve.
+ *
+ * Returned as `{id, theme}` pairs rather than bare ids because the operator's
+ * next question is always "what did I type?", and a typo like `dracular` is
+ * only diagnosable next to the name that was asked for.
+ *
+ * Only workers that will actually RENDER a theme are considered — `pane_mode:
+ * tui`. The resolution is three-level, so a `defaults.theme` lands on every rpc
+ * worker in the fleet as well, and warning about panes that do not exist would
+ * bury the one line that matters under a dozen that do not.
+ */
+export function unknownThemeWorkers(cfg: FleetConfig): { id: string; theme: string }[] {
+  const out: { id: string; theme: string }[] = [];
+  for (const w of cfg.workers) {
+    const role = cfg.roles[w.role];
+    if (!role) continue;
+    if ((pickRoleField(w, role, cfg.defaults, "pane_mode") ?? "rpc") !== "tui") continue;
+    const theme = pickRoleField(w, role, cfg.defaults, "theme");
+    if (theme !== undefined && !knownTheme(theme)) out.push({ id: w.id, theme });
+  }
+  return out;
+}
+
+/**
+ * The warning `unknownThemeWorkers` renders, or `null`.
+ *
+ * WARNS rather than refuses, for the reason the `theme` key's own docstring
+ * gives: the set of resolvable names is a property of the image, not of this
+ * schema, and a fleet refused at parse time over a colour scheme is a worse
+ * outcome than a pane that opens in Pi's default. The names are listed because
+ * the overwhelmingly likely cause is a spelling — `catppuccin` alone, say,
+ * where the bundle distinguishes `catppuccin-mocha` from `catppuccin-latte`.
+ */
+export function unknownThemeWarning(
+  workers: readonly { id: string; theme: string }[],
+): string | null {
+  if (workers.length === 0) return null;
+  const named = workers.map((w) => `${w.id}: "${w.theme}"`).join(", ");
+  return (
+    `warning: ${workers.length} tui worker(s) name a theme this image does not carry (${named})\n` +
+    `  Pi falls back to its default theme, so the pane opens and looks like every other pane — ` +
+    `which is the failure this is worth a line about, because two panes meant to be tellable ` +
+    `apart quietly stop being so. Known names: ${KNOWN_THEMES.join(", ")}.\n`
   );
 }

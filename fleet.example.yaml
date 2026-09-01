@@ -422,7 +422,15 @@ workers:
   # near-identical tasks (§7.5) — is the least able role to afford.
   # obs-1 is the one a human watches; obs-2 takes the dispatched passes.
   # `up` permits exactly one tui worker in a fleet, and this is it.
-  - {id: obs-1,  role: observer, pane_mode: tui}
+  # THEMES: the two attended panes sit side by side in one window, so they are
+  # given different palettes — an operator glancing at the console should not
+  # have to read a title bar to know which agent they are typing at. Pi ships
+  # only `dark` and `light`, and `light` is not a usable second choice: a Pi
+  # theme sets no page background, so it paints light-mode ink onto a dark
+  # terminal. Both names below come from the bundle baked into the image
+  # (src/config/themes.ts); `catppuccin` alone is NOT a name, the bundle
+  # distinguishes -mocha from -latte.
+  - {id: obs-1,  role: observer, pane_mode: tui, theme: catppuccin-mocha}
   - {id: obs-2,  role: observer}
   # Two, not one: observer is read-only, so a watch on one target can proceed
   # while an inquiry about another is answered (§6.2).
@@ -437,4 +445,4 @@ workers:
   # because --attach-here hands over the terminal of the process that runs
   # it and one process has one terminal — so two attended panes are two
   # runs, which `status --all` reports and `--recreate` tears down.
-  - {id: tick-1, role: ticketing, pane_mode: tui}
+  - {id: tick-1, role: ticketing, pane_mode: tui, theme: dracula}

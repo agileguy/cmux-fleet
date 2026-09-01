@@ -31,6 +31,8 @@ import {
   kubeconfigScopeWarning,
   observerTuiEpochWarning,
   observerTuiWorkers,
+  unknownThemeWarning,
+  unknownThemeWorkers,
   parseDuration,
   workersMissingKubeconfig,
 } from "../../src/config/schema.ts";
@@ -808,6 +810,109 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(observerTuiWorkers(loaded.config)).toEqual(["obs-1"]);
     expect(resolveWorker(loaded, "obs-2").paneMode).toBe("rpc");
+  });
+});
+
+describe("theme resolves three-level and warns on a name the image lacks", () => {
+  test("a worker override beats the role, which beats defaults", async () => {
+    const doc = baseDoc();
+    doc["defaults"] = { theme: "nord" };
+    doc["roles"] = { eng: { theme: "gruvbox-dark" }, obs: {} };
+    doc["workers"] = [
+      { id: "w1", role: "eng", theme: "dracula" },
+      { id: "w2", role: "eng" },
+      { id: "w3", role: "obs" },
+    ];
+    const loaded = await writeAndLoad(doc);
+    expect(resolveWorker(loaded, "w1").theme).toBe("dracula");
+    expect(resolveWorker(loaded, "w2").theme).toBe("gruvbox-dark");
+    expect(resolveWorker(loaded, "w3").theme).toBe("nord");
+  });
+
+  /**
+   * UNSET must stay unset, not become "dark".
+   *
+   * `docker/entrypoint.sh` writes Pi's `settings.json` `theme` key only when
+   * the value is non-empty, so an absent theme means "leave whatever the
+   * operator picked with /settings alone". A default resolved here would
+   * overwrite that hand-made choice on every container start, which is a
+   * setting that silently will not stick.
+   */
+  test("no theme anywhere resolves to undefined, not to a default", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng" }];
+    const loaded = await writeAndLoad(doc);
+    expect(resolveWorker(loaded, "w1").theme).toBeUndefined();
+  });
+
+  test("an unknown name on a tui worker warns and names both worker and theme", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng", pane_mode: "tui", theme: "catppuccin" }];
+    const loaded = await writeAndLoad(doc);
+    const bad = unknownThemeWorkers(loaded.config);
+    expect(bad).toEqual([{ id: "w1", theme: "catppuccin" }]);
+    const warning = unknownThemeWarning(bad);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("w1");
+    expect(warning).toContain("catppuccin");
+    // The consequence, which is the part a reader has to act on: it does not
+    // fail, it looks like every other pane.
+    expect(warning).toMatch(/default theme/);
+    // And the way out — the real names, since a near-miss spelling is the
+    // overwhelmingly likely cause.
+    expect(warning).toContain("catppuccin-mocha");
+  });
+
+  test("the same document still loads — a colour scheme must not refuse a fleet", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng", pane_mode: "tui", theme: "nope" }];
+    await writeAndLoad(doc);
+  });
+
+  /**
+   * An rpc worker renders no pane, so its theme is unobservable and warning
+   * about it is noise. This is not hypothetical tidiness: `defaults.theme`
+   * lands on EVERY worker in the fleet, so without this filter one typo in
+   * defaults would print a line naming every worker that exists.
+   */
+  test("an unknown name on an rpc worker raises nothing", async () => {
+    const doc = baseDoc();
+    doc["defaults"] = { theme: "nope" };
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng" }];
+    const loaded = await writeAndLoad(doc);
+    expect(unknownThemeWorkers(loaded.config)).toEqual([]);
+    expect(unknownThemeWarning([])).toBeNull();
+  });
+
+  test("Pi's own built-ins are accepted, not just the bundle", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng", pane_mode: "tui", theme: "dark" }];
+    const loaded = await writeAndLoad(doc);
+    expect(unknownThemeWorkers(loaded.config)).toEqual([]);
+  });
+
+  /**
+   * The shipped example's two attended panes must carry DIFFERENT themes.
+   *
+   * Asserting the two names rather than merely "both set" is the point: the
+   * whole reason the key exists is that an operator glancing at a two-pane
+   * console can tell which agent they are typing at, and two panes that both
+   * resolved to the same name would satisfy every weaker assertion while
+   * failing the only requirement.
+   */
+  test("fleet.example.yaml gives its two attended panes different themes", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const obs = resolveWorker(loaded, "obs-1").theme;
+    const tick = resolveWorker(loaded, "tick-1").theme;
+    expect(obs).toBe("catppuccin-mocha");
+    expect(tick).toBe("dracula");
+    expect(obs).not.toBe(tick);
+    expect(unknownThemeWorkers(loaded.config)).toEqual([]);
   });
 });
 

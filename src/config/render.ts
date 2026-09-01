@@ -51,6 +51,7 @@ import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
 import { ConfigError, expandPath, resolveWorker, type LoadedConfig, type ResolvedWorker } from "./load.ts";
 import type { Toolchain } from "./schema.ts";
+import { THEMES_DIR } from "./themes.ts";
 
 /** Container path the briefing file is mounted at. */
 export const BRIEFING_MOUNT = "/briefing/system-append.md";
@@ -165,6 +166,23 @@ export function buildPiArgv(w: ResolvedWorker, hasBriefing: boolean): string[] {
   // `.pi/extensions/*.ts` that Pi would otherwise execute in-process. `--skill`
   // stays additive under `--no-skills`, so nothing configured is lost.
   argv.push("--no-extensions", "--no-skills", "--no-context-files");
+  /*
+   * Where the bundled colour themes live (`config/themes.ts`).
+   *
+   * UNCONDITIONAL, which is the same rule the discovery denials above follow
+   * and is deliberate on two counts. It keeps the argv identical in both pane
+   * modes, which the block above this function requires of every flag that is
+   * not the mode switch itself. And it means the 16 bundled names are
+   * selectable from inside a pane with `/settings`, not only from `fleet.yaml`
+   * — an operator retinting a pane by hand should not need a config edit and a
+   * relaunch.
+   *
+   * Safe against an older image that has no such directory: measured against
+   * Pi 0.79.6, a `--theme` path that does not exist is ignored silently rather
+   * than refused. Worth knowing rather than assuming, because the failure it
+   * would otherwise cause is every worker in the fleet declining to start.
+   */
+  argv.push("--theme", THEMES_DIR);
   argv.push("--provider", w.provider);
   argv.push("--model", w.model);
   if (w.thinking !== undefined) argv.push("--thinking", w.thinking);

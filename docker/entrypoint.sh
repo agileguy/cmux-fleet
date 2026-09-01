@@ -39,6 +39,12 @@
 #                          the acceptance containers, test/integration/
 #                          honeypot.test.ts), keeps exactly the plumbing it
 #                          has always had.
+#   PIFLEET_PI_THEME       Pi colour theme name, or "" for "no opinion". Pi has
+#                          no theme env var, so this is written into
+#                          settings.json below. EMPTY is not the same as unset-
+#                          and-defaulted: it leaves an operator's own /settings
+#                          choice in place, which a default would overwrite on
+#                          every restart.
 #   PIFLEET_WORKER_BIN     test seam: binary to exec instead of pi (ISC-39/40
 #                          verification needs to observe the rendered file, and
 #                          pi itself cannot print it)
@@ -80,6 +86,69 @@ if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
         }
       }
     }' > "${agent_dir}/models.json"
+fi
+
+# --- select the Pi colour theme ----------------------------------------------
+# Pi has no PI_THEME environment variable; the ONLY way to select a theme
+# non-interactively is the `theme` key in settings.json, so this writes it.
+# The theme FILES are baked into the image at /opt/pifleet/themes and are put on
+# Pi's discovery path by `--theme`, which `config/render.ts` passes in the flag
+# list — a name selected here that was never discovered leaves Pi on its
+# default.
+#
+# MERGED, not overwritten, and that is the whole reason this is four lines
+# rather than one. settings.json is Pi's OWN state file: it persists the model,
+# the thinking level, the last changelog seen and anything else `/settings`
+# touches, and it lives on a per-worker named volume that outlives the run. A
+# `jq -n` here — the shape the models.json block above uses, which is correct
+# there because that file is entirely ours — would silently discard all of it on
+# every container start.
+#
+# Absent or empty means LEAVE IT ALONE. That is the difference between "config
+# claims this pane's colours" and "config has no opinion"; defaulting to `dark`
+# would take the second case and overwrite a theme the operator chose by hand.
+#
+# The `|| echo '{}'` guards a settings.json that is not valid JSON — a
+# half-written file from a killed container, say. Under `set -e` a jq parse
+# failure here would kill the worker before it started, which is a container
+# that does not boot because a colour scheme could not be applied. Losing the
+# malformed file's contents is the lesser harm and the only recoverable one.
+# TWO KEYS, TWO DIFFERENT OWNERSHIP RULES, and the difference is the reason
+# this is one block rather than two one-liners:
+#
+#   theme         CONFIG IS AUTHORITATIVE. Written on every start when the
+#                 variable is non-empty, so a fleet.yaml edit takes effect on
+#                 the next `up` without anyone touching the volume.
+#   quietStartup  A SEEDED DEFAULT. Written only when settings.json does not
+#                 exist yet — i.e. once per worker volume — so an operator who
+#                 turns the listing back on inside the pane keeps it.
+#
+# quietStartup is set at all because of what loading themes DOES to a pane. Pi
+# prints an inventory of loaded resources at startup, and it is skipped when
+# there is nothing to inventory — so putting 16 themes on the discovery path
+# turned a three-line header into an eleven-line one, in the two standing panes
+# whose whole complaint was startup text. Quiet suppresses the LISTING only:
+# Pi's startup call passes `showDiagnosticsWhenQuiet: true`, so resource
+# collisions and load errors still print, and ctrl+o still shows the full
+# listing on demand. That is the trade — an inventory nobody reads goes away,
+# and the diagnostics that would explain a missing skill do not.
+settings="${agent_dir}/settings.json"
+if [ ! -f "${settings}" ]; then
+  echo '{"quietStartup":true}' > "${settings}" 2>/dev/null || true
+fi
+
+if [ -n "${PIFLEET_PI_THEME:-}" ]; then
+  existing='{}'
+  if [ -f "${settings}" ]; then
+    existing="$(jq '.' "${settings}" 2>/dev/null || echo '{}')"
+  fi
+  if printf '%s' "${existing}" \
+     | jq --arg t "${PIFLEET_PI_THEME}" '. + {theme: $t}' > "${settings}.new" 2>/dev/null; then
+    mv "${settings}.new" "${settings}"
+  else
+    rm -f "${settings}.new"
+    echo "pifleet: could not select theme ${PIFLEET_PI_THEME} (settings.json unwritable); the pane will use Pi's default" >&2
+  fi
 fi
 
 # --- supervise the honeypot and the worker (ISC-125) -------------------------
