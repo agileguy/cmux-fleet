@@ -41,8 +41,15 @@ import {
   RELAY_NAME_PREFIX,
   type FleetRelayConfigView,
 } from "../../src/security/relay.ts";
+import {
+  ensureBridgeRelay,
+  ensureEgressRelay,
+  RELAY_TARGETS_ENV,
+  type ProviderBridge,
+} from "../../src/security/relay.ts";
 import { assertDockerName } from "../../src/security/docker-names.ts";
 import { EXIT } from "../../src/contracts.ts";
+import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
 
 const NET = "pifleet-egress";
 
@@ -884,5 +891,175 @@ describe("ISC-412: an over-long provider key is refused naming llm.providers", (
     // about the fixture being malformed.
     providers["fits"] = { base_url: "https://api.fits.test/v1", relay_upstream: "198.51.100.8:443" };
     expect(() => egressBridgePlan(cfg, NET, ["fits"])).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The relay carries the PLAN'S target, rather than deriving a second one
+// ---------------------------------------------------------------------------
+
+/**
+ * A defect these tests did not have and a live bring-up did.
+ *
+ * `egressBridgePlan` computes `ProviderBridge.targets` through
+ * `providerRelayTarget`, which names the target after the provider. Everything
+ * above asserts on that field. **Nothing in production read it.**
+ * `ensureEgressRelay` derived its own target through `omlxRelayTarget`, which
+ * stamps `name: "omlx"` unconditionally, so two real relays came up as
+ *
+ *     …-ollama-cloud  [{"listenPort":443,"host":"34.36.133.15","name":"omlx"}]
+ *     …-vendor-b      [{"listenPort":443,"host":"160.79.104.10","name":"omlx"}]
+ *
+ * Right host, right port, wrong name, on both. Twenty-one green probes in this
+ * file could not see it, because every one of them compared the plan with
+ * itself. The lesson is the assertion surface, not the arithmetic: these tests
+ * read what would be STAMPED INTO THE CONTAINER, which is the artifact an
+ * operator and `pifleet report` actually see.
+ *
+ * ## Is the name load-bearing or cosmetic? Both, in the worst combination
+ *
+ * `formatRelayTarget` is `name:listenPort->host:port` and it is the DRIFT KEY —
+ * `relayTargetsDrifted` sorts and compares exactly those strings. So the name
+ * is load-bearing. But `ensureEgressRelay` computed the live side and the
+ * wanted side through the same wrong derivation, so the two agreed and drift
+ * detection stayed silent. A load-bearing field, mislabelled identically on
+ * both sides of its own comparison, is invisible to everything except a human
+ * reading the ledger — and that is precisely who cannot tell which provider a
+ * relay serves when every one of them says `omlx`.
+ */
+describe("a relay is stamped with ITS provider's target name, not omlx", () => {
+  /**
+   * A daemon that reports no existing relay, so every call takes the CREATE
+   * path and the `docker run` argv is available to assert on.
+   */
+  function daemon() {
+    const calls: string[][] = [];
+    let inspects = 0;
+    const exec = async (argv: string[]) => {
+      calls.push(argv);
+      if (isMountProbe(argv)) return answerMountProbe(argv);
+      if (argv[1] === "inspect") {
+        inspects += 1;
+        // First inspect: nothing there, so the CREATE path runs and its
+        // `docker run` argv is what these tests read. Later ones are the
+        // post-start re-inspect, which must report a RUNNING container or
+        // `ensure` tears down what it just built.
+        if (inspects === 1) return { code: 1, stdout: "[]", stderr: "No such object" };
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              Name: `/${argv[2]}`,
+              Id: "abc123",
+              State: { Running: true },
+              Config: { Env: [] },
+            },
+          ]),
+          stderr: "",
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    return { calls, exec: exec as unknown as Parameters<typeof ensureEgressRelay>[2] };
+  }
+
+  /** The `PIFLEET_RELAY_TARGETS` value this run would stamp into the container. */
+  function stampedTargets(calls: string[][]): Array<{ name: string; host: string; port: number }> {
+    const run = calls.find((c) => c[1] === "run" && !isMountProbe(c));
+    if (run === undefined) throw new Error("no `docker run` was issued for the relay");
+    const prefix = `${RELAY_TARGETS_ENV}=`;
+    const row = run.find((a) => a.startsWith(prefix));
+    if (row === undefined) throw new Error(`no ${RELAY_TARGETS_ENV} in the relay argv`);
+    return JSON.parse(row.slice(prefix.length));
+  }
+
+  const planFor = (provider: string): ProviderBridge => {
+    const bridge = egressBridgePlan(threeProviders(), NET, [provider])[0];
+    if (bridge === undefined) throw new Error(`no bridge planned for ${provider}`);
+    return bridge;
+  };
+
+  /**
+   * THE CRITERION. The name in the container's env is the provider's.
+   *
+   * Asserted for TWO different providers, because a single one is satisfiable
+   * by any constant that happens to match it — which is exactly how `"omlx"`
+   * survived.
+   */
+  test("each provider's relay is stamped with its own name", async () => {
+    for (const provider of ["ollama-cloud", "spare-vendor"]) {
+      const { calls, exec } = daemon();
+      const status = await ensureBridgeRelay(planFor(provider), exec);
+      const stamped = stampedTargets(calls);
+      expect(stamped).toHaveLength(1);
+      expect(stamped[0]?.name).toBe(provider);
+      // The name reaches the LEDGER by the same value, since `up` reports
+      // `status.targets` through `formatRelayTarget`.
+      expect(status.targets.map((t) => t.name)).toEqual([provider]);
+      // Anti-vacuity, and the exact string the defect produced.
+      expect(stamped[0]?.name).not.toBe("omlx");
+    }
+  });
+
+  /**
+   * The host and port were always right — this pins that the fix did not trade
+   * one derivation for another that gets the name right and the address wrong.
+   */
+  test("the stamped target still carries this provider's own upstream", async () => {
+    const { calls, exec } = daemon();
+    await ensureBridgeRelay(planFor("ollama-cloud"), exec);
+    const stamped = stampedTargets(calls);
+    expect(stamped[0]?.host).toBe("104.18.0.1");
+    expect(stamped[0]?.port).toBe(443);
+    // …and it is not the flat block's, which is what a fallback would produce.
+    expect(stamped[0]?.host).not.toBe("omlx.legacy.test");
+  });
+
+  /**
+   * THE FLAT PATH MUST NOT MOVE.
+   *
+   * Every relay already running on an operator's machine has `"name":"omlx"`
+   * in its env, and the name is part of the drift key. A build that renamed the
+   * flat target would report all of them as drifted and cycle live relays on
+   * the next `up` — cutting the model server out from under running workers to
+   * fix a label. `egressBridgePlan` chooses `omlxRelayTarget` for a flat fleet
+   * for exactly this reason, and this is the test that says so.
+   */
+  test("a flat fleet's relay is still stamped omlx, byte for byte", async () => {
+    const flat: FleetRelayConfigView = {
+      llm: { base_url: "http://omlx.pifleet.internal:8000/v1", relay_upstream: null },
+      egress: { google_hosts: [], allow: [] },
+    };
+    const bridge = egressBridgePlan(flat, NET, ["omlx"])[0];
+    if (bridge === undefined) throw new Error("no bridge planned for the flat fleet");
+    // The flat fleet is not composed, so its relay is the one already running.
+    expect(bridge.network).toBe(NET);
+    const { calls, exec } = daemon();
+    await ensureBridgeRelay(bridge, exec);
+    expect(stampedTargets(calls)[0]?.name).toBe("omlx");
+  });
+
+  /**
+   * The SEAM, pinned deliberately.
+   *
+   * `ensureEgressRelay`'s target argument has to stay optional — a dozen
+   * callers predate it — and an optional argument that must be passed for
+   * correctness is one that will eventually be forgotten. It already was: that
+   * is this whole defect. `ensureBridgeRelay` takes the target from the bridge
+   * so there is nothing for `up` to omit, and this test is what fails if
+   * someone unwinds it back to a two-argument call.
+   */
+  test("calling the relay WITHOUT the plan's target is what reintroduces omlx", async () => {
+    const bridge = planFor("ollama-cloud");
+    const viaSeam = daemon();
+    await ensureBridgeRelay(bridge, viaSeam.exec);
+    expect(stampedTargets(viaSeam.calls)[0]?.name).toBe("ollama-cloud");
+
+    // The same bridge, the same view, the target left off — the call `up` used
+    // to make. This is the defect, reproduced, so the seam's value is measured
+    // rather than asserted.
+    const viaView = daemon();
+    await ensureEgressRelay(bridge.view, bridge.network, viaView.exec);
+    expect(stampedTargets(viaView.calls)[0]?.name).toBe("omlx");
   });
 });

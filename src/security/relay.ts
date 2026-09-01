@@ -1840,14 +1840,64 @@ export async function inspectRelayContainer(
  * that cannot be attributed to it would be a guess. The ledger keeps it
  * answerable after the fact, which is what it was always for.
  */
+export async function ensureBridgeRelay(
+  bridge: ProviderBridge,
+  exec: Exec = realExec,
+): Promise<RelayStatus> {
+  /*
+   * The ONE call `up` makes, and the reason it exists is that the argument it
+   * carries was previously forgettable.
+   *
+   * `ensureEgressRelay`'s fourth parameter has to be optional — a dozen callers
+   * predate it and the flat path must keep deriving `"omlx"` — and an optional
+   * argument that must be passed for correctness is an argument that will
+   * eventually not be. That is precisely how `ProviderBridge.targets` came to
+   * be a field the tests asserted on and production ignored. Here the plan's
+   * target is not passed by a caller at all; it is taken from the bridge, which
+   * is the only thing that ever had the right answer.
+   */
+  return ensureEgressRelay(bridge.view, bridge.network, exec, bridge.targets[0]);
+}
+
 export async function ensureEgressRelay(
   cfg: RelayConfigView,
   egressNetwork: string,
   exec: Exec = realExec,
+  planned?: RelayTarget,
 ): Promise<RelayStatus> {
+  /*
+   * THE PLAN'S TARGET, not a second derivation of it (D7).
+   *
+   * `omlxRelayTarget` stamps `name: "omlx"` UNCONDITIONALLY — the constant is
+   * load-bearing on the flat path and wrong on every other one. So while
+   * `relayViewForProvider` gave this function the right host and the right
+   * port, a two-provider fleet came up with both relays labelled `omlx`:
+   *
+   *     …-ollama-cloud  [{"listenPort":443,"host":"34.36.133.15","name":"omlx"}]
+   *     …-vendor-b      [{"listenPort":443,"host":"160.79.104.10","name":"omlx"}]
+   *
+   * measured on real containers, not inferred. `egressBridgePlan` had already
+   * computed the correct per-provider target into `ProviderBridge.targets`, and
+   * NOTHING IN PRODUCTION READ THAT FIELD: the tests asserted on it, and the
+   * relay derived its own. Two derivations of one fact that agree in the suite
+   * and disagree in the shipped artifact — the shape this repo has closed twice
+   * already, for the `/secrets` mount and for the worker's network, both times
+   * by deleting the second derivation rather than by keeping them in step.
+   *
+   * The fallback is NOT a convenience. Every relay running on an operator's
+   * machine today has `"name":"omlx"` stamped in its env, and the name is part
+   * of `formatRelayTarget`, which is the drift key: a caller that stopped
+   * producing that string would report every one of them as drifted and cycle
+   * live relays on the next `up`. So the flat path keeps deriving exactly what
+   * it always did, and `egressBridgePlan` — which already chooses
+   * `omlxRelayTarget` for a flat fleet for this same reason — passes it back in
+   * unchanged.
+   */
+  const target = planned ?? omlxRelayTarget(cfg);
   // Config first, Docker second: an unusable `llm.base_url` should fail before
-  // this function has created anything at all.
-  const target = omlxRelayTarget(cfg);
+  // this function has created anything at all. Still true when the target came
+  // from the plan — `egressBridgePlan` derives it through the same
+  // `relayListenEndpoint`, one step earlier and before any daemon call.
   const targets = [target] as const;
   // …and POLICY before Docker too. Judged against `relayGatePolicy`, NOT
   // `policyFromConfig` — the latter derives its `llm` rule from config fields

@@ -55,7 +55,7 @@ import { containerFetch } from "../../security/probe-transport.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
 import {
   egressBridgePlan,
-  ensureEgressRelay,
+  ensureBridgeRelay,
   formatRelayTarget,
   type ProviderBridge,
   type RelayStatus,
@@ -1262,13 +1262,20 @@ export function register(program: Command): void {
        * one unchanged, and `down` never tears it down, for the same reason it
        * never removes the egress network.
        *
-       * **`ensureEgressRelay` is called unchanged, once per bridge, with that
-       * bridge's PROJECTED view** (§6.5.4). The per-provider-ness lives in
-       * `relayViewForProvider`, so the sentence in this file's sibling header —
-       * *"the single container that re-opens exactly one destination"* —
-       * survives D7 rather than being retired by it. Each of these relays still
-       * carries exactly one target; there are simply as many relays as there
-       * are providers a worker asked for.
+       * **The relay is built once per bridge, from that bridge's PROJECTED
+       * view AND that bridge's own target** (§6.5.4). The per-provider-ness
+       * lives in `relayViewForProvider` and in `egressBridgePlan`, so the
+       * sentence in this file's sibling header — *"the single container that
+       * re-opens exactly one destination"* — survives D7 rather than being
+       * retired by it. Each of these relays still carries exactly one target;
+       * there are simply as many relays as there are providers a worker asked
+       * for.
+       *
+       * An earlier revision of this comment said `ensureEgressRelay` was
+       * "called unchanged", and that was true and was the bug: called with the
+       * view alone it re-derived its target through `omlxRelayTarget` and
+       * labelled every provider's relay `omlx`. `ensureBridgeRelay` takes the
+       * target from the bridge so there is no argument for a caller to omit.
        *
        * Each forwards ITS OWN provider ONLY. The Google endpoints in
        * `egress.google_hosts` remain policy-level allow rules with no live
@@ -1278,7 +1285,7 @@ export function register(program: Command): void {
       const egressRelays: Array<{ bridge: ProviderBridge; status: RelayStatus }> = [];
       for (const bridge of egressBridges) {
         try {
-          egressRelays.push({ bridge, status: await ensureEgressRelay(bridge.view, bridge.network) });
+          egressRelays.push({ bridge, status: await ensureBridgeRelay(bridge) });
         } catch (err) {
           // `err.message` rather than `String(err)`: these errors already
           // begin "egress: " / "relay: ", and `String(err)` prepends
