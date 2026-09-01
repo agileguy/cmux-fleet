@@ -25,12 +25,16 @@ import { dirname, resolve } from "node:path";
 import { CmuxClient } from "../src/backends/cmux/client.ts";
 import { loadConfig, resolveWorker } from "../src/config/load.ts";
 import { EXIT } from "../src/contracts.ts";
-import { OPERATIONS_WORKSPACE, operationsPanes } from "../src/backends/cmux/operations-plan.ts";
+import {
+  DEFAULT_OPERATIONS_WORKERS,
+  OPERATIONS_WORKSPACE,
+  operationsPanes,
+} from "../src/backends/cmux/operations-plan.ts";
 import { cmuxReachable, ensureOperations } from "../src/backends/cmux/operations.ts";
 
 const USAGE = `Usage: scripts/operations [options]
 
-  --workers <ids>   comma-separated pifleet workers for pane 1 (default: tick-1)
+  --workers <ids>   comma-separated pifleet workers for pane 1 (default: obs-1)
   --backend <kind>  pifleet backend for pane 1 (default: headless)
   --config <path>   fleet.yaml for pane 1 (default: <repo>/fleet.yaml)
   --poll <seconds>  git pane refresh interval (default: 5)
@@ -91,7 +95,13 @@ async function main(argv: string[]): Promise<number> {
   let attachHere = false;
   try {
     const loaded = await loadConfig(opts.configPath ?? `${repoRoot}/fleet.yaml`);
-    const agent = (opts.workers ?? [])[0] ?? "tick-1";
+    // DEFAULT_OPERATIONS_WORKERS, never a second literal. `operationsPanes`
+    // falls back to that same list when `--workers` is absent, so a
+    // hardcoded id here decides pane 1's MODE from one worker while its
+    // COMMAND targets another. That is not hypothetical: this line read
+    // "tick-1" while the plan had moved to obs-1, so the console asked for
+    // obs-1 and then rendered it as a log tail because tick-1 is rpc.
+    const agent = (opts.workers ?? DEFAULT_OPERATIONS_WORKERS)[0]!;
     attachHere = resolveWorker(loaded, agent).paneMode === "tui";
   } catch (err) {
     process.stderr.write(

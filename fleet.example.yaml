@@ -410,7 +410,19 @@ workers:
   # admission control does the queuing against the single oMLX server.
   - {id: sre-1,  role: sre}
   - {id: sre-2,  role: sre}
-  - {id: obs-1,  role: observer}
+  # obs-1 overrides the role's `pane_mode: rpc` because it is the OPERATIONS
+  # CONSOLE's worker: `scripts/operations` resolves pane 1 by reading this
+  # worker's resolved pane_mode, and only `tui` makes that pane Pi's own
+  # interface rather than a rendered tail of its log.
+  #
+  # The override is on the WORKER and must stay there. Moving it up to the
+  # role would put every observer on tui, and tui allocates no epoch: with
+  # no `already_completed` fence a re-dispatched pass runs the same task
+  # twice, which an observer watch — built on repeated dispatch of
+  # near-identical tasks (§7.5) — is the least able role to afford.
+  # obs-1 is the one a human watches; obs-2 takes the dispatched passes.
+  # `up` permits exactly one tui worker in a fleet, and this is it.
+  - {id: obs-1,  role: observer, pane_mode: tui}
   - {id: obs-2,  role: observer}
   # Two, not one: observer is read-only, so a watch on one target can proceed
   # while an inquiry about another is answered (§6.2).

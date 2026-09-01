@@ -51,24 +51,24 @@ describe("the pane set", () => {
   test("is exactly three panes, in a fixed order", () => {
     // Order is contract: pane 1 consumes the workspace's initial surface and is
     // where the operator lands.
-    expect(plan().map((p) => p.title)).toEqual(["ticketing", "fleet-status", "git-watch"]);
+    expect(plan().map((p) => p.title)).toEqual(["observer", "fleet-status", "git-watch"]);
   });
 
-  test("ticketing takes the whole top half; the other two tile beneath it", () => {
+  test("the observer pane takes the whole top half; the other two tile beneath it", () => {
     // The requested shape:
     //
     //   +-------------------------------+
-    //   |          ticketing            |
+    //   |           observer            |
     //   +---------------+---------------+
     //   |  fleet-status |   git-watch   |
     //   +---------------+---------------+
     //
     // `null` then `down` then `right` is the ONLY sequence that produces it,
-    // and each element is load-bearing. `down` first is what makes ticketing a
+    // and each element is load-bearing. `down` first is what makes pane 1 a
     // half rather than a column — the first split decides the major axis. The
     // `right` that follows lands INSIDE the half `down` created, because each
     // pane is split off the previous one; a `right` off pane 1 instead would
-    // put git-watch in the top row beside ticketing, which is the layout this
+    // put git-watch in the top row beside pane 1, which is the layout this
     // replaced and which no assertion on directions alone would catch.
     expect(plan().map((p) => p.split)).toEqual([null, "down", "right"]);
   });
@@ -90,10 +90,41 @@ describe("the pane set", () => {
   });
 });
 
-describe("pane 1 — the ticketing agent", () => {
-  test("brings up the ticketing worker and nothing else by default", () => {
-    expect(DEFAULT_OPERATIONS_WORKERS).toEqual(["tick-1"]);
-    expect(plan()[0]!.command).toContain("'up' '--workers' 'tick-1'");
+describe("pane 1 — the observer agent", () => {
+  test("brings up the observer worker and nothing else by default", () => {
+    expect(DEFAULT_OPERATIONS_WORKERS).toEqual(["obs-1"]);
+    expect(plan()[0]!.command).toContain("'up' '--workers' 'obs-1'");
+  });
+
+  /**
+   * Pane 1 is the pane a human watches, and it must carry Pi's own interface
+   * rather than a rendered tail. `attachHere` is what selects that.
+   *
+   * The false half is asserted alongside it deliberately: the two commands
+   * differ by one flag, so a plan that ignored the option entirely would still
+   * satisfy an assertion that only looked at the tui case.
+   */
+  test("attachHere puts Pi's own interface in pane 1, and its absence does not", () => {
+    expect(plan({ attachHere: true })[0]!.command).toContain("'--attach-here'");
+    expect(plan({ attachHere: false })[0]!.command).not.toContain("'--attach-here'");
+  });
+
+  /**
+   * `scripts/operations` decides pane 1's MODE by resolving one worker's
+   * pane_mode, while `operationsPanes` builds pane 1's COMMAND from this list.
+   * They must name the same worker or the console asks for one and renders the
+   * other -- which is exactly what happened: the script carried its own literal
+   * "tick-1" fallback after the plan had moved to obs-1, so the pane brought up
+   * obs-1 and then tailed its log, because tick-1 resolves to rpc.
+   *
+   * The script now reads DEFAULT_OPERATIONS_WORKERS. This pins the property the
+   * fix relies on, so a future edit cannot silently desynchronise the two again.
+   */
+  test("pane 1 targets the head of DEFAULT_OPERATIONS_WORKERS and no second literal", () => {
+    const head = DEFAULT_OPERATIONS_WORKERS[0]!;
+    expect(plan()[0]!.command).toContain(`'up' '--workers' '${head}'`);
+    expect(plan()[0]!.command).toContain(`'logs' '--worker' '${head}'`);
+    expect(plan()[0]!.title).toBe("observer");
   });
 
   test("names the CLI by absolute path under the repo, because pifleet is not on PATH", () => {

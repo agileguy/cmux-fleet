@@ -70,12 +70,26 @@ export const OPERATIONS_WORKSPACE = "operations";
 /**
  * The workers pane 1 brings up when the caller names none.
  *
- * `tick-1` is `fleet.yaml`'s ticketing worker. This is a LIST rather than a
- * single id because `up --workers` already takes a set (ISC-61) and the
- * operations console has no business being narrower than the command it drives
- * — naming two workers here is a config edit, not a code change.
+ * `obs-1` is `fleet.yaml`'s console observer. It is the default because pane 1
+ * is the pane a human actually watches, and `observer` is the role whose work
+ * is worth watching in real time — a deploy being followed through a pipeline,
+ * or a service being interrogated. `tick-1`, the previous default, does its
+ * work in one burst and then has nothing to show.
+ *
+ * `obs-1` specifically, NOT the `observer` role: the role resolves to
+ * `pane_mode: rpc` and must keep doing so, because `tui` allocates no epoch and
+ * an observer watch is built on re-dispatching near-identical tasks (§7.5). The
+ * override lives on this ONE worker, which is the console's and is not what the
+ * orchestrator re-dispatches to; `obs-2` inherits `rpc` and takes that traffic.
+ * `up`'s own guard permits exactly one tui worker, so this is also the seat that
+ * choice occupies.
+ *
+ * This is a LIST rather than a single id because `up --workers` already takes a
+ * set (ISC-61) and the operations console has no business being narrower than
+ * the command it drives — naming two workers here is a config edit, not a code
+ * change.
  */
-export const DEFAULT_OPERATIONS_WORKERS: readonly string[] = ["tick-1"];
+export const DEFAULT_OPERATIONS_WORKERS: readonly string[] = ["obs-1"];
 
 /** Seconds between refreshes of the git pane. */
 export const DEFAULT_GIT_POLL_SECONDS = 5;
@@ -226,7 +240,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
 
   return [
     {
-      title: "ticketing",
+      title: "observer",
       /*
        * THREE STAGES, each a deliberate step down, and the pane never lands on
        * a host prompt while anything above it is still available.
