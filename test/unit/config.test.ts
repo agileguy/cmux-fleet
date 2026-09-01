@@ -96,19 +96,53 @@ describe("worked example", () => {
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
       ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "verifier"].sort(),
     );
-    expect(loaded.config.workers).toHaveLength(8);
-    // Every worker resolves without error.
-    const resolved = resolveAllWorkers(loaded);
-    expect(resolved.map((w) => w.id)).toEqual([
+    // Every worker resolves without error, and the SET is asserted rather than
+    // its size. A bare `toHaveLength` fails on a number when a worker is added
+    // or dropped, which says how many changed and never which — and the two
+    // consoles now differ only by which ids they name, so which is the whole
+    // question. The count comes off this list, so there is one place to edit.
+    const expected = [
       "sre-1",
       "sre-2",
       "obs-1",
       "obs-2",
       "ver-1",
+      // The `development` console's four seats. eng-2 and tst-1 exist for it;
+      // the `tester` role had no worker at all before it.
       "eng-1",
+      "eng-2",
+      "tst-1",
       "rev-1",
       "tick-1",
-    ]);
+    ];
+    expect(loaded.config.workers).toHaveLength(expected.length);
+    const resolved = resolveAllWorkers(loaded);
+    expect(resolved.map((w) => w.id)).toEqual(expected);
+  });
+
+  /**
+   * Every ATTENDED pane is tellable apart from every other at a glance.
+   *
+   * With one attended console holding two panes this was a nicety. With two
+   * consoles holding six between them — and TWO OF THEM running the same role,
+   * so identical in every other on-screen respect — the palette is the only
+   * thing that says which container a pane belongs to before you read the
+   * title. A duplicate theme is therefore a defect, not an aesthetic choice,
+   * and nothing else in the suite would notice one.
+   *
+   * Asserted on RESOLVED workers because `defaults <- roles <- worker` is where
+   * a theme could be inherited rather than set, and two workers inheriting one
+   * role's theme is exactly how a duplicate would arrive.
+   */
+  test("no two attended workers share a theme", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    const attended = resolveAllWorkers(loaded).filter((w) => w.paneMode === "tui");
+    // Anti-vacuity: an empty or single-element set passes any uniqueness check.
+    expect(attended.length).toBeGreaterThan(1);
+    const themes = attended.map((w) => w.theme);
+    // Named in the failure, not just counted, so the message says WHICH pair.
+    expect(themes.filter((t) => t === undefined)).toEqual([]);
+    expect(new Set(themes).size, `themes were ${themes.join(", ")}`).toBe(themes.length);
   });
 
   test("the ticketing role gets no Google identity and no worktree (ISC-326)", async () => {

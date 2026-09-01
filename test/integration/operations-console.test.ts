@@ -22,8 +22,8 @@ import { cliBudget } from "../support/budget.ts";
 
 const REPO = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
 
-async function dryRun(args: readonly string[]): Promise<string> {
-  const proc = Bun.spawn(["bun", "run", "scripts/operations", ...args, "--dry-run"], {
+async function dryRun(args: readonly string[], script = "scripts/operations"): Promise<string> {
+  const proc = Bun.spawn(["bun", "run", script, ...args, "--dry-run"], {
     cwd: REPO,
     stdout: "pipe",
     stderr: "pipe",
@@ -78,4 +78,71 @@ describe("the operations console's pane 1", () => {
     expect(pane1).not.toContain("'--attach-here'");
     expect(pane1).toContain("'logs' '--worker' 'obs-2' '--follow' '--render'");
   }, cliBudget(1));
+});
+
+/**
+ * `scripts/development`, through the same seam.
+ *
+ * ## Why the script and not only the plan
+ *
+ * `development-plan.test.ts` pins what `developmentPanes` returns. That is the
+ * plan, and a plan is correct for inputs the SCRIPT may never compute — the
+ * exact gap that let `operations` resolve one pane's mode from another pane's
+ * worker while every unit assertion stayed green.
+ *
+ * There is a second reason here, and it is sharper: `scripts/**` is NOT in
+ * `tsconfig.json`'s `include`, so no `tsc` run reads these two files at all.
+ * They are extensionless bun scripts and the compiler cannot glob them without
+ * a suffix. Nothing type-checks them; executing one is the only thing that
+ * does. That is not hypothetical either — the first draft of
+ * `scripts/development` called a `runOutput` helper it never defined, and
+ * `bun run typecheck` was clean.
+ *
+ * **WHAT THIS STILL DOES NOT REACH:** the `--recreate` branch. `--dry-run`
+ * returns before it, so the teardown path — the one that decides which runs to
+ * stop — is exercised only by `status-runs.test.ts` against the function it
+ * delegates to. The decision is unit-covered; the wiring to it is not.
+ */
+describe("the development console's four panes", () => {
+  test(
+    "resolves every worker's pane_mode from the config and attaches all four",
+    async () => {
+      const out = await dryRun(["--config", "fleet.example.yaml"], "scripts/development");
+      expect(out).toContain("workspace: development");
+      for (const w of ["eng-1", "eng-2", "tst-1", "rev-1"]) {
+        expect(out, `${w} has no pane`).toContain(`(${w}):`);
+        expect(out).toContain(`'up' '--workers' '${w}'`);
+      }
+      // Four keyboards is the whole point, so four attaches.
+      expect((out.match(/'--attach-here'/g) ?? []).length).toBe(4);
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "refuses a fifth worker rather than laying out a shape it does not have",
+    async () => {
+      // Through the SCRIPT, so the refusal is proved to reach an operator as a
+      // non-zero exit and a sentence rather than as a stack trace. `dryRun`
+      // asserts exit 0, so this spawns directly.
+      const proc = Bun.spawn(
+        [
+          "bun",
+          "run",
+          "scripts/development",
+          "--workers",
+          "eng-1,eng-2,tst-1,rev-1,sre-1",
+          "--dry-run",
+        ],
+        { cwd: REPO, stdout: "pipe", stderr: "pipe" },
+      );
+      const [err, code] = await Promise.all([
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(code).not.toBe(0);
+      expect(err).toContain("2x2 and holds at most 4");
+    },
+    cliBudget(1),
+  );
 });

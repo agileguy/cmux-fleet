@@ -507,8 +507,36 @@ workers:
   # Two, not one: observer is read-only, so a watch on one target can proceed
   # while an inquiry about another is answered (§6.2).
   - {id: ver-1,  role: verifier}
-  - {id: eng-1,  role: engineer}
-  - {id: rev-1,  role: reviewer}
+  # ---- the `development` console's four seats ----
+  #
+  # All four are pane_mode: tui, because that console is FOUR KEYBOARDS. Each
+  # attended pane runs its own `up` (--attach-here hands over the terminal of
+  # the process that runs it, and one process has one terminal), so this is
+  # four runs — `status --all` reports them together, `--recreate` tears them
+  # down, and `dispatch` refuses all four in favour of typing into the pane.
+  #
+  # A DISTINCT THEME EACH, and with four panes that is no longer decoration:
+  # two engineers running the same role differ in nothing else on screen, so
+  # the palette is the only thing that says which container a pane belongs to
+  # before you read the title. All four are DARK themes — a Pi theme sets no
+  # page background, so a light one (catppuccin-latte, gruvbox-light, the two
+  # solarized-lights) paints light-mode ink onto whatever the terminal already
+  # is. tick-1 takes that trade knowingly; these do not.
+  #
+  # THE THROUGHPUT COST, stated rather than discovered: these four plus the
+  # operations console's two are six Pi processes against one oMLX server, and
+  # run.max_concurrent bounds each RUN, not the host. Six panes generating at
+  # once is six concurrent requests.
+  - {id: eng-1,  role: engineer, pane_mode: tui, theme: tokyo-night}
+  - {id: eng-2,  role: engineer, pane_mode: tui, theme: gruvbox-dark}
+  # The `tester` role existed with no worker to run it; the development
+  # console is what it was waiting for.
+  - {id: tst-1,  role: tester,   pane_mode: tui, theme: everforest-dark}
+  # reviewer carries NO bash (§12.1) and that is unchanged here: a tui pane is
+  # a person's keyboard on Pi's own interface, not a widening of the agent's
+  # tool grant. `pifleet shell` still reaches the container, because that is
+  # the FLEET exec'ing in, not a tool the reviewer may call.
+  - {id: rev-1,  role: reviewer,  pane_mode: tui, theme: nord}
   # One, not two. A second concurrent writer against the same ticket system is
   # a way to interleave two workers' edits on one object, and nothing in the
   # fleet serialises them.

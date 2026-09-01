@@ -56,11 +56,53 @@ import {
   type PaneListed,
 } from "./parse.ts";
 import {
+  DEVELOPMENT_TOP_FRACTION,
+  DEVELOPMENT_WORKSPACE,
   OPERATIONS_TOP_FRACTION,
   OPERATIONS_WORKSPACE,
+  developmentPanes,
   operationsPanes,
+  type OperationsPane,
   type OperationsPlanOptions,
 } from "./operations-plan.ts";
+
+/**
+ * Everything that differs between one standing console and another.
+ *
+ * The BUILDER below is identical for both — create a workspace, consume its
+ * initial surface, split the rest off in the directions the plan names, rename,
+ * respawn, focus pane 1. Only three things vary, and they are exactly these
+ * three. Adding a fourth console is then a value in this file rather than a
+ * second copy of `createWorkspace`, which is the copy that would drift: the
+ * BUILD-FIRST-CLOSE-SECOND order below is a measured lesson, and a second
+ * builder is a second place to get it backwards.
+ */
+export interface WorkspaceSpec {
+  /** `--name`, and the exact `custom_title` adoption matches on. */
+  readonly name: string;
+  /** The plan. */
+  readonly panes: (opts: OperationsPlanOptions) => OperationsPane[];
+  /**
+   * Fraction of the height the TOP row gets, or `null` to leave the halves
+   * `new-split` produces alone. See {@link DEVELOPMENT_TOP_FRACTION} for why a
+   * console of equal panes says `null` rather than `1/2`.
+   */
+  readonly topFraction: number | null;
+}
+
+/** The day-to-day console: one agent pair on top, status and git below. */
+export const OPERATIONS_SPEC: WorkspaceSpec = {
+  name: OPERATIONS_WORKSPACE,
+  panes: operationsPanes,
+  topFraction: OPERATIONS_TOP_FRACTION,
+};
+
+/** The four-agent console: two engineers on top, tester and reviewer below. */
+export const DEVELOPMENT_SPEC: WorkspaceSpec = {
+  name: DEVELOPMENT_WORKSPACE,
+  panes: developmentPanes,
+  topFraction: DEVELOPMENT_TOP_FRACTION,
+};
 
 /**
  * `select-workspace <id>` — built here rather than in `client.ts` because the
@@ -108,10 +150,15 @@ export async function cmuxReachable(client: CmuxClient): Promise<boolean> {
   return r.code === 0;
 }
 
+/** The existing workspace with this exact `custom_title`, or null. */
+export async function findWorkspace(client: CmuxClient, name: string): Promise<string | null> {
+  const list = parseWorkspaceList(await client.runOk(workspaceListArgv()));
+  return findWorkspaceByTitle(list, name)?.id ?? null;
+}
+
 /** The existing `operations` workspace, or null. */
 export async function findOperations(client: CmuxClient): Promise<string | null> {
-  const list = parseWorkspaceList(await client.runOk(workspaceListArgv()));
-  return findWorkspaceByTitle(list, OPERATIONS_WORKSPACE)?.id ?? null;
+  return findWorkspace(client, OPERATIONS_WORKSPACE);
 }
 
 /**
@@ -123,16 +170,17 @@ export async function findOperations(client: CmuxClient): Promise<string | null>
  * the direction that pane's plan names; the directions are a property of the
  * layout and live in `operations-plan.ts`, not here.
  */
-export async function createOperations(
+export async function createWorkspace(
   client: CmuxClient,
+  spec: WorkspaceSpec,
   opts: OperationsPlanOptions,
 ): Promise<EnsureResult> {
-  const panes = operationsPanes(opts);
+  const panes = spec.panes(opts);
 
   // `--cwd` is the INVOCATION directory: panes 2 and 3 are about where the
   // operator is working, not about where this repository happens to live.
   const created = parseWorkspaceCreate(
-    await client.runOk(workspaceCreateArgv(OPERATIONS_WORKSPACE, opts.watchDir)),
+    await client.runOk(workspaceCreateArgv(spec.name, opts.watchDir)),
   );
   const wsId = created.workspaceId;
 
@@ -157,7 +205,7 @@ export async function createOperations(
         // error in the plan, not a cmux failure — say so here rather than
         // letting `new-split` refuse an undefined surface id.
         throw new Error(
-          `operations: pane '${pane.title}' names splitFrom ${String(pane.splitFrom)}, ` +
+          `${spec.name}: pane '${pane.title}' names splitFrom ${String(pane.splitFrom)}, ` +
             `which is not an earlier pane`,
         );
       }
@@ -191,7 +239,7 @@ export async function createOperations(
     created.surfaceId,
   );
   if (firstPaneId !== null) await client.runOk(focusPaneArgv(firstPaneId));
-  await applyTopFraction(client, wsId);
+  await applyTopFraction(client, wsId, spec.topFraction);
   return { created: true, workspaceId: wsId };
 }
 
@@ -212,12 +260,21 @@ export async function createOperations(
  * split is fully usable; refusing to return one because a cosmetic resize
  * failed would trade the whole feature for a nicety.
  */
-async function applyTopFraction(client: CmuxClient, wsId: string): Promise<void> {
+async function applyTopFraction(
+  client: CmuxClient,
+  wsId: string,
+  fraction: number | null,
+): Promise<void> {
+  // `null` is a console of EQUAL panes saying it wants the halves `new-split`
+  // already produced. Returning here rather than computing a delta of zero
+  // keeps "no correction wanted" distinguishable from "correction computed to
+  // nothing", which is the difference between a stated layout and a lucky one.
+  if (fraction === null) return;
   try {
     const geo: ReturnType<typeof parsePaneGeometry> = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
     if (geo.panes.length < 2) return;
     const topY = Math.min(...geo.panes.map((p) => p.y));
-    const target = geo.containerHeight * OPERATIONS_TOP_FRACTION;
+    const target = geo.containerHeight * fraction;
     for (const pane of geo.panes) {
       if (pane.y !== topY) continue;
       const delta = target - pane.height;
@@ -284,20 +341,46 @@ async function applyTopFraction(client: CmuxClient, wsId: string): Promise<void>
  * If the create THROWS, the old console is still standing. That is the right
  * failure: a stale console beats no console, which is the whole lesson above.
  */
-export async function ensureOperations(
+export async function ensureWorkspace(
   client: CmuxClient,
+  spec: WorkspaceSpec,
   opts: OperationsPlanOptions,
   recreate = false,
 ): Promise<EnsureResult> {
-  const existing = await findOperations(client);
+  const existing = await findWorkspace(client, spec.name);
   if (existing !== null && !recreate) {
     await client.runOk(selectWorkspaceArgv(existing));
     return { created: false, workspaceId: existing };
   }
-  const built = await createOperations(client, opts);
+  const built = await createWorkspace(client, spec, opts);
   // By CAPTURED ID, never by a re-query: the only moment two workspaces share
   // this title is between these two lines, and resolving the name here is the
   // one thing that could close the console just built.
   if (existing !== null) await client.runOk(workspaceCloseArgv(existing));
   return built;
+}
+
+/**
+ * {@link ensureWorkspace} for the operations console.
+ *
+ * Kept as a named entry point rather than folded into its caller: `operations`
+ * is the console this repository is driven from, and a bare `ensureWorkspace`
+ * call site would make the default one argument among three rather than the
+ * thing the script is for.
+ */
+export async function ensureOperations(
+  client: CmuxClient,
+  opts: OperationsPlanOptions,
+  recreate = false,
+): Promise<EnsureResult> {
+  return ensureWorkspace(client, OPERATIONS_SPEC, opts, recreate);
+}
+
+/** {@link ensureWorkspace} for the four-agent development console. */
+export async function ensureDevelopment(
+  client: CmuxClient,
+  opts: OperationsPlanOptions,
+  recreate = false,
+): Promise<EnsureResult> {
+  return ensureWorkspace(client, DEVELOPMENT_SPEC, opts, recreate);
 }

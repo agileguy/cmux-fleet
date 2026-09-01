@@ -227,6 +227,83 @@ export function pifleetCommand(repoRoot: string, argv: readonly string[]): strin
 }
 
 /**
+ * One AGENT pane's whole command — the three-stage ladder, for one worker.
+ *
+ * Hoisted out of {@link operationsPanes} because there is now a second
+ * workspace built from the same rung. Two copies of this string is two places
+ * for `--attach-clear` to go missing from one of them, and the difference
+ * would show only as a banner in one console and not the other.
+ *
+ * ## ONE `up` PER AGENT PANE, each naming only its own worker
+ *
+ * A single `up` naming several cannot attach them all — `--attach-here` hands
+ * over the terminal of the process that runs it, and one process has one
+ * terminal, so `attended/adopt.ts` refuses with "can hand over ONE terminal and
+ * this run has N tui workers". N attended panes are therefore N runs, which is
+ * why `status` grew `--all` and why `--recreate` stops every live run rather
+ * than only the newest.
+ *
+ * ## The rungs, each a deliberate step down
+ *
+ *   1. `up`      — stand the worker up. With `attach` it ALSO hands this pane
+ *                  to the worker and blocks there, so stage 1 is Pi's own
+ *                  interface and stage 2 is what you drop to when you detach.
+ *                  Without it, `up` returns at once and stage 2 is the pane's
+ *                  whole life.
+ *   2. VIEWER    — `logs --follow --render`, which BLOCKS. It sits on an idle
+ *                  worker and prints events as they happen. It never exits.
+ *   3. SHELL     — Ctrl-C out of the viewer and the pane is an interactive
+ *                  shell INSIDE the worker's container: same mounts, same
+ *                  egress policy, same absent credentials as the agent.
+ *   4. host `$SHELL` — only if all three are unavailable, which in practice
+ *                  means `up` refused.
+ *
+ * `;` and not `&&` throughout: a failed `up` must still leave a usable shell.
+ * With `&&` a fleet that refuses admission closes the pane, taking the error
+ * message with it. Measured on the first live run, where `up` did refuse and
+ * the shell was what made the refusal readable.
+ *
+ * NO `--run` PINNING on the fallbacks, and that is a knowing limit. Each pane
+ * creates its own run, so "the most recent run" is genuinely ambiguous between
+ * panes. The fallbacks are the FAILURE path — reached only once `up` has
+ * exited — and a wrong-run `logs` there fails loudly and drops to the shell
+ * rung, which is what the ladder is for. The primary path, `up --attach-here`,
+ * is unambiguous: it attaches the run it just made.
+ */
+export function agentPaneCommand(args: {
+  readonly repoRoot: string;
+  readonly worker: string;
+  readonly backend: string;
+  readonly configPath: string;
+  /** Whether this worker resolves to `pane_mode: tui` and wants Pi's own UI. */
+  readonly attach: boolean;
+}): string {
+  const { repoRoot, worker, backend, configPath, attach } = args;
+  const up = pifleetCommand(repoRoot, [
+    "up",
+    "--workers",
+    worker,
+    "--backend",
+    backend,
+    "--config",
+    configPath,
+    // `--attach-clear` rides with `--attach-here` and never alone. At a command
+    // line `up`'s report is worth reading; in a standing pane it is a banner
+    // carried above the agent for the life of the console.
+    ...(attach ? ["--attach-here", "--attach-clear"] : []),
+  ]);
+  // `clear` first, for the LOGIN SHELL's own banner — "Last login: …" and "You
+  // have mail." come from the shell cmux spawns, before any of this runs, so
+  // `--attach-clear` cannot reach them and this cannot reach what `up` prints.
+  // Two sources, two fixes; removing either leaves half the banner on screen.
+  return (
+    `clear ; ${up} ; ` +
+    `${pifleetCommand(repoRoot, ["logs", "--worker", worker, "--follow", "--render"])} ; ` +
+    `${pifleetCommand(repoRoot, ["shell", "--worker", worker])} ; exec $SHELL -i`
+  );
+}
+
+/**
  * The three panes, in creation order.
  *
  * ORDER IS PART OF THE CONTRACT. `scripts/operations` consumes the first pane
@@ -254,27 +331,6 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
   }
 
   const tuiWorkers = new Set(opts.tuiWorkers ?? []);
-  /*
-   * ONE `up` PER AGENT PANE, each naming only its own worker.
-   *
-   * A single `up` naming both cannot attach both — see `tuiWorkers` above. Two
-   * attended panes are two runs, which is why `status` grew `--all` and why
-   * `--recreate` stops every live run rather than only the newest.
-   */
-  const upFor = (worker: string): string =>
-    pifleetCommand(repoRoot, [
-      "up",
-      "--workers",
-      worker,
-      "--backend",
-      backend,
-      "--config",
-      configPath,
-      // `--attach-clear` rides with `--attach-here` and never alone. At a
-      // command line `up`'s report is worth reading; in a standing pane it is
-      // a banner carried above the agent for the life of the console.
-      ...(tuiWorkers.has(worker) ? ["--attach-here", "--attach-clear"] : []),
-    ]);
   const status = statusWatchCommand(repoRoot, poll);
   /*
    * The AGENT half of pane 1. `workers[0]` — the pane shows one worker, and
@@ -298,14 +354,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
    * path, `up --attach-here`, is unambiguous: it attaches the run it just made.
    */
   const ladder = (worker: string): string =>
-    // `clear` first, for the LOGIN SHELL's own banner — "Last login: …" and
-    // "You have mail." come from the shell cmux spawns, before any of this
-    // runs, so `--attach-clear` cannot reach them and this cannot reach what
-    // `up` prints. Two sources, two fixes; removing either leaves half the
-    // banner on screen.
-    `clear ; ${upFor(worker)} ; ` +
-    `${pifleetCommand(repoRoot, ["logs", "--worker", worker, "--follow", "--render"])} ; ` +
-    `${pifleetCommand(repoRoot, ["shell", "--worker", worker])} ; exec $SHELL -i`;
+    agentPaneCommand({ repoRoot, worker, backend, configPath, attach: tuiWorkers.has(worker) });
 
   /*
    * The SECOND agent pane. `workers[1]` when there is one — the console shows
@@ -415,6 +464,143 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       ...(second === undefined ? {} : { splitFrom: 0 }),
     },
   ];
+}
+
+/**
+ * The `development` workspace's `--name`, and its idempotency key.
+ *
+ * Exact-matched on `custom_title` for the reason {@link OPERATIONS_WORKSPACE}
+ * records. The two consoles are siblings and must never adopt each other, which
+ * exact matching on two distinct names gives for free.
+ */
+export const DEVELOPMENT_WORKSPACE = "development";
+
+/**
+ * The four workers the development console stands up, in PANE ORDER.
+ *
+ * ```
+ * +---------------+---------------+
+ * |     eng-1     |     eng-2     |
+ * +---------------+---------------+
+ * |     tst-1     |     rev-1     |
+ * +---------------+---------------+
+ * ```
+ *
+ * Two engineers on top because that is the pair a person actually alternates
+ * between — two changes in flight, each with its own container and its own
+ * branch. The tester and the reviewer sit under them because their work is
+ * downstream of it and is read in bursts rather than watched.
+ *
+ * ALL FOUR ARE ATTENDED, which is the whole difference from `operations`: this
+ * console is four keyboards, so it is four runs. `status --all` is what reports
+ * them together and `--recreate` is what tears them down; there is no
+ * arrangement of one run that gives four panes four keyboards.
+ *
+ * THE COST, stated plainly: four attended workers plus the operations
+ * console's two is six Pi processes against one oMLX server, and
+ * `run.max_concurrent` bounds each RUN rather than the host. Admission control
+ * cannot queue across runs, so six panes generating at once is six concurrent
+ * requests. That is a throughput decision the operator makes by opening this
+ * console, not something the plan can bound.
+ */
+export const DEFAULT_DEVELOPMENT_WORKERS: readonly string[] = [
+  "eng-1",
+  "eng-2",
+  "tst-1",
+  "rev-1",
+];
+
+/**
+ * The development console's panes are EQUAL, and `null` says so.
+ *
+ * `new-split` halves, so four panes built as two columns each split once are
+ * already four quarters — the correction {@link OPERATIONS_TOP_FRACTION} exists
+ * for is one this layout does not need. `null` skips the resize entirely rather
+ * than asking for a fraction of `1/2` and relying on the sub-pixel guard to
+ * make it a no-op: a value that happens to round to nothing is indistinguishable
+ * from one that was computed wrongly, and this is a stated requirement.
+ *
+ * The operations console is uneven on purpose because its bottom row is a
+ * status table and a git log — two panes that say their piece in a handful of
+ * lines. Every pane here is an agent, so every pane has as much to show as
+ * every other, and there is nothing to favour.
+ */
+export const DEVELOPMENT_TOP_FRACTION: number | null = null;
+
+/** The largest 2x2 there is. A fifth pane has nowhere in this shape to go. */
+const DEVELOPMENT_MAX_PANES = 4;
+
+/**
+ * The development console's panes, in creation order.
+ *
+ * ORDER IS PART OF THE CONTRACT, as it is for {@link operationsPanes}: pane 1
+ * consumes the workspace's initial surface, and is the pane the operator lands
+ * in.
+ *
+ * ## Why the split sequence is a table and not a rule
+ *
+ * A 2x2 cannot be built from "always split the previous pane". Walking the four
+ * in reading order runs off the shape at pane 4, which has to land under pane 2
+ * rather than beside pane 3 — so the bottom row names its anchor explicitly.
+ * `operationsPanes` learned the same lesson at its git pane; this is that
+ * knowledge applied to a layout that is 2x2 all the way down:
+ *
+ * ```
+ *   1: the initial surface          2: "right" off 1
+ *   3: "down" off 1  (splitFrom 0)  4: "down" off 2  (splitFrom 1)
+ * ```
+ *
+ * Fewer than four workers degrades to the prefix of that sequence rather than
+ * refusing, so `--workers eng-1,eng-2` gives a clean side-by-side pair. More
+ * than four IS refused: there is no fifth quarter, and silently stacking a
+ * third row would produce a console that does not match its own docblock.
+ */
+export function developmentPanes(opts: OperationsPlanOptions): OperationsPane[] {
+  const repoRoot = opts.repoRoot;
+  const workers = opts.workers ?? DEFAULT_DEVELOPMENT_WORKERS;
+  const backend = opts.backend ?? "headless";
+  const configPath = opts.configPath ?? `${repoRoot}/fleet.yaml`;
+
+  if (workers.length === 0) {
+    throw new Error("development: refusing an empty --workers set — name at least one worker");
+  }
+  if (workers.length > DEVELOPMENT_MAX_PANES) {
+    throw new Error(
+      `development: refusing ${workers.length} workers — the console is a 2x2 and holds ` +
+        `at most ${DEVELOPMENT_MAX_PANES}`,
+    );
+  }
+  for (const w of workers) assertPlainValue("worker id", w);
+  assertPlainValue("backend", backend);
+
+  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
+
+  // Index 0 is `split: null` and takes the initial surface; the rest are read
+  // straight off this table. Kept beside the docblock's diagram deliberately —
+  // the two have to agree, and they cannot if the sequence is computed.
+  const shape: readonly { split: SplitDirection; splitFrom?: number }[] = [
+    { split: "right" },
+    { split: "down", splitFrom: 0 },
+    { split: "down", splitFrom: 1 },
+  ];
+
+  return workers.map((worker, i) => ({
+    // TITLED BY WORKER ID, not by role, and this console is why the two
+    // consoles differ on it. `operations` holds one worker per role and can
+    // call a pane `observer`; this one holds TWO engineers, so a role title
+    // would print `engineer` on both and leave the operator guessing which
+    // container a pane belongs to. The id is also what `dispatch --worker`
+    // takes, so the title is the argument.
+    title: worker,
+    command: `${envPreamble()} ${agentPaneCommand({
+      repoRoot,
+      worker,
+      backend,
+      configPath,
+      attach: tuiWorkers.has(worker),
+    })}`,
+    ...(i === 0 ? { split: null } : shape[i - 1]!),
+  }));
 }
 
 /**
