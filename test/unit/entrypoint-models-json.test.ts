@@ -70,9 +70,9 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile, chmod, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile, chmod, symlink, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { stringify } from "yaml";
 
 import { LlmSchema } from "../../src/config/schema.ts";
@@ -476,18 +476,57 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
    *
    * `..` is rejected as a SEGMENT rather than as a substring: a legitimate
    * secret name can contain dots, and a substring test would refuse it.
-   * `/secrets/..` is included because it passes a naive "one segment below the
-   * mount" check — it has no slash of its own.
+   *
+   * EVERY PATH HERE RESOLVES TO A REAL, READABLE, NON-EMPTY FILE, and that is
+   * the whole design of the fixture rather than an incidental detail. This test
+   * was written first with the obvious spellings — `/secrets/../etc/hosts`,
+   * `/secrets/..`, `../../etc/hosts` — and MEASURED VACUOUS: deleting the
+   * traversal guard from the entrypoint left all 14 tests green. There is no
+   * `/secrets` on a developer Mac or a CI runner, so those paths were being
+   * refused by the existence check and the guard under test never ran. A
+   * refusal test whose subject does not exist proves only that nothing exists.
+   *
+   * So each case below is one the entrypoint would happily read if its own
+   * guard were removed, which is what makes removing the guard turn this red.
+   * The `/secrets/...` spellings are gone rather than kept alongside: they
+   * cannot fail here, and a case that cannot fail dilutes the ones that can.
    */
   test("a traversing, relative or non-file pointer refuses loudly", async () => {
+    const real = await keyFile("KEY-REACHED-THE-WRONG-WAY");
+    const credDir = dirname(real);
     const dir = await mkdtemp(join(tmpdir(), "pifleet-cred-dir-"));
     dirs.push(dir);
+    // Relative, and resolves: `Bun.spawn` inherits THIS process's cwd, so from
+    // the repo root that names a readable non-empty file and only the
+    // absolute-path guard can refuse it.
+    //
+    // THE PRECONDITION IS ASSERTED RATHER THAN ASSUMED, and this line is the
+    // whole reason: if a future harness change gives the spawn its own cwd,
+    // this path stops resolving and the entrypoint refuses it as "not an
+    // existing regular file" instead — the case would still pass, while
+    // testing a completely different branch. That is exactly how the
+    // `/secrets/..` spellings this fixture replaced were vacuous, so the same
+    // mistake is made loud here instead of measured later.
+    const relative = "docker/entrypoint.sh";
+    const resolved = await stat(join(process.cwd(), relative)).catch(() => null);
+    expect(
+      resolved?.isFile() === true && resolved.size > 0,
+      `${relative} does not resolve to a non-empty file from ${process.cwd()}, ` +
+        `so the relative-path case would exercise the existence check rather ` +
+        `than the absolute-path guard it was written for`,
+    ).toBe(true);
+
     const bad = [
-      "/secrets/../etc/hosts", // escapes the mount by traversal
-      "/secrets/..", // one segment, and still an escape
-      "../../etc/hosts", // not absolute
-      "secrets/OMLX_API_KEY", // not absolute
-      dir, // exists and is readable, but is not a regular file
+      // Traverses, and RESOLVES to the credential file. Only the `..` guard
+      // can refuse this one — every other check passes.
+      //
+      // Concatenated rather than `join`ed on purpose: `path.join` NORMALISES,
+      // so it collapses the `..` and hands the entrypoint a clean path. That
+      // silently disarmed this case on the first attempt.
+      `${credDir}/../${basename(credDir)}/OMLX_API_KEY`,
+      relative,
+      // Exists and is readable, but is not a regular file.
+      dir,
     ];
     for (const p of bad) {
       const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_FILE: p });
@@ -536,7 +575,14 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
     if (typeof process.getuid === "function" && process.getuid() === 0) return;
     const path = await keyFile("KEY-NOBODY-CAN-READ", { mode: 0o000 });
     const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_FILE: path });
-    expect(r.code).not.toBe(0);
+    // 73 SPECIFICALLY, not merely non-zero, and that is what makes the `if !`
+    // around the read load-bearing. A bare assignment would also produce a
+    // non-zero exit — `set -e` and cat's own status — but it would be cat's
+    // code with bash's diagnostic, and the operator would get neither the
+    // sentence nor a code distinguishable from the honeypot's 71 and the
+    // missing-terminal 72.
+    expect(r.code).toBe(73);
+    expect(r.stderr).toContain(path);
     expect(r.models).toBeNull();
   });
 

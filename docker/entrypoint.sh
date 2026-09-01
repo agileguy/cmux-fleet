@@ -210,14 +210,32 @@ if [ -n "${api_key_file}" ]; then
   if [ ! -f "${api_key_file}" ]; then
     refuse_key_file "is not an existing regular file"
   fi
-  if [ ! -r "${api_key_file}" ]; then
-    refuse_key_file "is not readable"
-  fi
-  # Command substitution strips trailing newlines, which is what this wants
-  # both ways round: `writeWorkerSecretFiles` writes "the RAW value and NOTHING
-  # ELSE — no trailing newline, deliberately", and a file that acquired one
-  # anyway must not put it inside the JSON string.
-  if ! api_key="$(cat "${api_key_file}")"; then
+  # THE READ IS THE READABILITY CHECK. An explicit `[ ! -r ]` stood here and was
+  # deleted after a mutation measured it dead: removing it changed no observable
+  # behaviour, because `cat` fails on the same file and this branch refuses
+  # identically. It was strictly worse than the read it guarded — it cannot see
+  # a file that is readable but not openable, and it leaves a TOCTOU window
+  # between the test and the open that the read does not have.
+  #
+  # `if !` rather than a bare assignment, because under `set -e` a failing
+  # command substitution aborts the script with bash's own diagnostic and cat's
+  # exit status: measured, a 0000 file then exits 1 instead of 73, and the
+  # operator gets neither the sentence nor a code distinguishable from any other
+  # bash failure.
+  #
+  # HONEST ACCOUNT OF WHY THIS ONE AND NOT `-r`, because the measurement does
+  # not settle it and a reader should not think it did. The two are REDUNDANT:
+  # with `-r` restored, deleting this `if !` is still green, and with this `if !`
+  # present, deleting `-r` was still green. Either alone yields exit 73. Keeping
+  # the read is a judgement call — it covers strictly more (a file readable but
+  # not openable, an I/O error part-way through, and the TOCTOU window `-r`
+  # opens between its test and this open) — not something the tests force.
+  #
+  # Command substitution strips trailing newlines, which is what this wants both
+  # ways round: `writeWorkerSecretFiles` writes "the RAW value and NOTHING ELSE
+  # — no trailing newline, deliberately", and a file that acquired one anyway
+  # must not put it inside the JSON string.
+  if ! api_key="$(cat "${api_key_file}" 2>/dev/null)"; then
     refuse_key_file "could not be read"
   fi
   if [ -z "${api_key}" ]; then
