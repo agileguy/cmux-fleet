@@ -8,18 +8,117 @@
     "single_branch": true
   },
   "total_phases": 8,
-  "current_phase": 1,
-  "completed_phases": [],
+  "current_phase": 3,
+  "completed_phases": [
+    {
+      "n": 1,
+      "name": "The three latent defects (D13 prerequisites)",
+      "commits": 6,
+      "branch_range": "2f552dc..8bc13b8",
+      "closed": [
+        "ISC-401",
+        "ISC-406"
+      ],
+      "graded_tilde": [
+        "ISC-405"
+      ],
+      "filed_during_review": [
+        "ISC-424"
+      ],
+      "review": "two reviewers; reorder cleared by 61882-input differential; entrypoint guard cleared in the real image; found and fixed the api_key_env clobber hole and the empty-model hole",
+      "tests": "2429 pass / 0 fail"
+    },
+    {
+      "n": 2,
+      "name": "llm.providers map, schema and resolution",
+      "commits": 6,
+      "branch_range": "380e4fb..a82e252",
+      "closed": [
+        "ISC-402",
+        "ISC-403",
+        "ISC-404",
+        "ISC-405",
+        "ISC-420",
+        "ISC-424"
+      ],
+      "graded_tilde": [],
+      "review": "integrated 2A+2B by cherry-pick; every claim re-proved independently by mutation with checksum-verified restores; found and fixed a shadowed `served` binding (TDZ trap) and an orphaned docblock left above an unrelated describe",
+      "suite": "3117 pass / 135 skip / 0 fail",
+      "note": "ISC-402's CLI probe is the one that mattered: unit tests pinned the refusal, nothing pinned that `config validate` ever reached it, and it did not -- validate printed ok: for documents `up` refused"
+    }
+  ],
   "status": "in_progress",
   "phases": [
-    {"n": 1, "name": "The three latent defects (D13 prerequisites)", "isc": ["ISC-401", "ISC-405", "ISC-406"]},
-    {"n": 2, "name": "llm.providers map, schema and resolution", "isc": ["ISC-402", "ISC-403", "ISC-404", "ISC-420"]},
-    {"n": 3, "name": "Credential channel as a file pointer (D8)", "isc": ["ISC-407", "ISC-408"]},
-    {"n": 4, "name": "Per-provider networks and relays (D7)", "isc": ["ISC-409", "ISC-410", "ISC-411", "ISC-412", "ISC-413"]},
-    {"n": 5, "name": "relay_upstream resolved at up, hosted only (D9)", "isc": []},
-    {"n": 6, "name": "The loud gates, not refusals (D10)", "isc": ["ISC-414", "ISC-415", "ISC-416", "ISC-417"]},
-    {"n": 7, "name": "Per-provider probe and budget (D16)", "isc": ["ISC-418", "ISC-419"]},
-    {"n": 8, "name": "Harvest sweep for Class 1 keys (D15)", "isc": ["ISC-421", "ISC-422", "ISC-423"]}
+    {
+      "n": 1,
+      "name": "The three latent defects (D13 prerequisites)",
+      "isc": [
+        "ISC-401",
+        "ISC-405",
+        "ISC-406"
+      ]
+    },
+    {
+      "n": 2,
+      "name": "llm.providers map, schema and resolution",
+      "isc": [
+        "ISC-402",
+        "ISC-403",
+        "ISC-404",
+        "ISC-420"
+      ]
+    },
+    {
+      "n": 3,
+      "name": "Credential channel as a file pointer (D8)",
+      "isc": [
+        "ISC-407",
+        "ISC-408"
+      ]
+    },
+    {
+      "n": 4,
+      "name": "Per-provider networks and relays (D7)",
+      "isc": [
+        "ISC-409",
+        "ISC-410",
+        "ISC-411",
+        "ISC-412",
+        "ISC-413"
+      ]
+    },
+    {
+      "n": 5,
+      "name": "relay_upstream resolved at up, hosted only (D9)",
+      "isc": []
+    },
+    {
+      "n": 6,
+      "name": "The loud gates, not refusals (D10)",
+      "isc": [
+        "ISC-414",
+        "ISC-415",
+        "ISC-416",
+        "ISC-417"
+      ]
+    },
+    {
+      "n": 7,
+      "name": "Per-provider probe and budget (D16)",
+      "isc": [
+        "ISC-418",
+        "ISC-419"
+      ]
+    },
+    {
+      "n": 8,
+      "name": "Harvest sweep for Class 1 keys (D15)",
+      "isc": [
+        "ISC-421",
+        "ISC-422",
+        "ISC-423"
+      ]
+    }
   ],
-  "notes": "ISC-31 and ISC-140 are pre-existing criteria at risk; ISC-31 to be restated AFTER the code lands, per SRD section 10."
+  "notes": "ISC-31 restated AFTER the code lands per SRD section 10; ISC-140 at risk. RECURRING SETUP HAZARD: agent worktrees are cut from stale bases -- make every agent print `git log --oneline -1` on turn one and say so. PHASE 3 HAZARD briefed to 3A: materialize.ts writes the secret store behind `w.secrets.length > 0` and render.ts gates the /secrets mount on the SAME predicate; a Class 1 key with no Class 3 secrets needs both widened or the pointer aims at an unmounted directory. Engineer/Architect agent maxTurns raised 50 -> 75 in ~/.claude/agents/ on owner request."
 }
