@@ -51,6 +51,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, chmod } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
+
+import { LlmSchema } from "../../src/config/schema.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
 import { buildPiArgv } from "../../src/config/render.ts";
 import { buildWorkerEnv } from "../../src/run/worker-env.ts";
@@ -91,6 +93,17 @@ interface ModelsJson {
 async function render(
   doc: Record<string, unknown>,
   hostEnv: Record<string, string | undefined>,
+  /**
+   * Written over the plan's own vars, AFTER `buildWorkerEnv` produced them.
+   *
+   * Needed because `config/schema.ts` now refuses a malformed or reserved
+   * `api_key_env` at parse time, so a doc can no longer carry one this far —
+   * and the entrypoint's identifier guard is still real defence in depth. It
+   * reads an ENVIRONMENT VARIABLE, not config, so a hand-assembled env file, a
+   * future harness, or a supervisor bug can still hand it a bad name. This is
+   * the only way left to exercise that path.
+   */
+  envOverride: Record<string, string> = {},
 ): Promise<{ argvProvider: string; models: ModelsJson | null; code: number; stderr: string }> {
   const loaded = await parseConfig(stringify(doc), "/tmp/fleet.yaml");
   const w = resolveWorker(loaded, "w1");
@@ -118,6 +131,7 @@ async function render(
     PATH: process.env["PATH"] ?? "/usr/bin:/bin",
     HOME: dir,
     PIFLEET_WORKER_BIN: standIn,
+    ...envOverride,
   };
 
   const p = Bun.spawn(["bash", ENTRYPOINT], {
@@ -288,9 +302,38 @@ describe("ISC-406: models.json carries the key under the CONFIGURED name", () =>
     expect(r.models!.providers["omlx"]!.apiKey).toBe("");
   });
 
+  /**
+   * The entrypoint's identifier guard, exercised THROUGH THE ENVIRONMENT rather
+   * than through config — because config can no longer produce this.
+   *
+   * `schema.ts` refuses a malformed `api_key_env` at parse time now, which is
+   * the right altitude: it names the field and the file to the operator. This
+   * test therefore writes the pointer directly, which is what a hand-assembled
+   * env file or a supervisor bug would do, and asserts the property that made
+   * the guard worth having in the first place: **the container BOOTS.**
+   *
+   * That is not cosmetic. Measured, bash 3.2.57 (macOS) returns "" and exits 0
+   * for a malformed name while bash 5.2.15 (the bookworm image) errors and
+   * exits 1 — so under this file's `set -eu` an unguarded indirection refuses
+   * to start the container on the image that actually ships, while passing on a
+   * developer's Mac. `TARGET[0]` is the sharper case and the regex blocks it
+   * too: bash treats it as an array subscript and RETURNS a value rather than
+   * erroring, so it would have succeeded silently.
+   */
   test("a malformed api_key_env degrades to an empty key, not a dead container", async () => {
-    const r = await render(baseDoc({ llm: { model: "TestModel", api_key_env: "not-an-ident" } }), {});
-    expect(r.code).toBe(0);
-    expect(r.models!.providers["omlx"]!.apiKey).toBe("");
+    for (const bad of ["not-an-ident", "TARGET[0]", "$OMLX_API_KEY"]) {
+      const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_ENV: bad });
+      expect(r.code, `${bad} killed the container`).toBe(0);
+      expect(r.models!.providers["omlx"]!.apiKey, `${bad} produced a key`).toBe("");
+    }
+  });
+
+  /** …and the same names are refused far earlier, where the operator is told. */
+  test("config refuses the malformed and reserved names outright", () => {
+    for (const bad of ["not-an-ident", "TARGET[0]", "PIFLEET_LLM_MODELS", "PATH"]) {
+      const r = LlmSchema.safeParse({ model: "m", api_key_env: bad });
+      expect(r.success, `schema accepted api_key_env: ${bad}`).toBe(false);
+    }
+    expect(LlmSchema.safeParse({ model: "m", api_key_env: "OLLAMA_API_KEY" }).success).toBe(true);
   });
 });

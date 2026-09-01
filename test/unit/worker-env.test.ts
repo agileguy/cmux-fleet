@@ -127,16 +127,26 @@ describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
 
 describe("the --env-file contract with docker/entrypoint.sh", () => {
   /**
-   * The three names the entrypoint actually branches on. It guards with
-   * `[ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]`
-   * before writing models.json at all, so either one missing is silent.
+   * The FOUR names the entrypoint reads. It was three until 2026-09-01, when
+   * `PIFLEET_LLM_API_KEY_ENV` was added to close Defect A — and this docblock
+   * still said "three" afterwards while the file it pins had grown a fourth
+   * branch. That is the staleness this whole describe block exists to prevent,
+   * so the count is asserted now rather than described.
+   *
+   * The guard is `[ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n
+   * "${PIFLEET_LLM_MODELS:-}" ]` before writing models.json at all, so either
+   * one missing is silent — which is why `resolveWorker` now refuses a model:
+   * that decomposes to an empty string, the only reachable way to empty
+   * `PIFLEET_LLM_MODELS` from config.
    */
-  test("emits the provider, base URL and model names the entrypoint reads", async () => {
+  test("emits the four names the entrypoint reads", async () => {
     const loaded = await load(baseDoc());
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
     expect(plan.vars["PIFLEET_LLM_PROVIDER"]).toBe("omlx");
     expect(plan.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://omlx.pifleet.internal:8000/v1");
     expect(plan.vars["PIFLEET_LLM_MODELS"]).toBe("TestModel");
+    // The pointer, not the value — it names the variable the key arrives in.
+    expect(plan.vars["PIFLEET_LLM_API_KEY_ENV"]).toBe("OMLX_API_KEY");
   });
 
   /**

@@ -134,11 +134,31 @@ fi
 # both ends of this channel apply one rule — degrades that case to an empty key,
 # exactly as today, instead of to a worker that will not start.
 #
-# The `:-OMLX_API_KEY` default is the same compatibility rule `PIFLEET_PANE_MODE`
-# documents above: a container started by a supervisor that predates this
-# variable sees it unset, and `OMLX_API_KEY` is the schema default that every
-# such fleet was running. It is a fallback for an absent pointer, not a second
-# place the name is decided — a supervisor that sets it always wins.
+# ## The `:-OMLX_API_KEY` default, and why its FIRST justification was wrong
+#
+# This comment used to call it the same compatibility rule `PIFLEET_PANE_MODE`
+# documents above — "a supervisor that predates this variable sees it unset".
+# **That case cannot arise through `pifleet up`.** This file is in
+# `BUILD_CONTEXT_ASSETS` and is hashed into the image tag, precisely so an edited
+# entrypoint yields a different tag, and `assertImagesReady` refuses a tag that
+# is not built. An older supervisor computes an older hash and cannot ask for
+# this entrypoint's image at all.
+#
+# The default is kept because a DIFFERENT caller relies on it: the non-supervisor
+# path — `image verify` and the acceptance containers — runs this script without
+# a worker env file, and `test/integration/image.test.ts` exercises exactly that
+# inside the real image with the pointer unset.
+#
+# **What it costs, stated because a fallback that masks is how Defect A comes
+# back.** If the pointer fails to arrive on a path that SHOULD set it, this
+# silently reads a different variable and renders `apiKey: ""` — Defect A
+# verbatim, exit 0, nothing on stderr. Worse, if the worker also holds
+# `OMLX_API_KEY` through `secrets:`, it authenticates to the configured provider
+# with the LOCAL oMLX credential: a wrong-credential 401, strictly harder to
+# diagnose than the empty-key one this change fixed. The supervisor path is
+# covered by `worker-env.ts` writing the pointer unconditionally and by the
+# contract test that asserts all four names, so the exposure is bounded to
+# callers that never had a pointer to lose.
 api_key_env="${PIFLEET_LLM_API_KEY_ENV:-OMLX_API_KEY}"
 api_key=""
 if [[ "${api_key_env}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then

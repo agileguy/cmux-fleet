@@ -228,7 +228,7 @@ describe("reading the network back out of a launch record", () => {
           name: "acc-net",
           docker: { pi_version: "0.79.6", network: "pifleet-egress" },
           run: { root: "./decoy", repo: ".", budget: { tokens_ceiling: 1_000_000 } },
-          llm: { model: "M", api_key_env: "PIFLEET_TEST_KEY" },
+          llm: { model: "M", api_key_env: "ACCEPTANCE_TEST_KEY" },
           roles: { eng: { model: "M", append_system_prompt_file: "./roles/eng.md" } },
           workers: [{ id: "eng-1", role: "eng" }],
         }),

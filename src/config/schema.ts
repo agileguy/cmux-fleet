@@ -473,6 +473,37 @@ const httpUrl = z.string().url().superRefine((raw, ctx) => {
   }
 });
 
+/**
+ * A name Docker will accept as an environment variable identifier.
+ *
+ * Exported because `run/worker-env.ts` needs the same rule when it serialises
+ * the env file, and two spellings of one constant is the failure ISC-264 was
+ * filed for.
+ */
+export const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Namespaces the fleet owns outright. Prefixes rather than a name list because
+ * the list is the part that drifts: `PIFLEET_HONEYPOT` arrived after the other
+ * three `PIFLEET_*` vars and would have had to be remembered here.
+ *
+ * `CLOUDSDK_`/`GOOGLE_` are wider than `CREDENTIAL_ENV_VARS` on purpose — that
+ * set names four variables and gcloud reads dozens, so pinning only the four
+ * would leave `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` refused and its neighbours
+ * open.
+ */
+export const RESERVED_ENV_PREFIXES = ["PIFLEET_", "GIT_CONFIG_", "CLOUDSDK_", "GOOGLE_"] as const;
+
+/**
+ * Names with no shared prefix that the container's own environment depends on.
+ * Deliberately short: this list only has to cover what a plausible `api_key_env`
+ * typo could hit, and everything the FLEET assigns is caught by the prefixes
+ * above instead.
+ */
+export const RESERVED_ENV_NAMES: readonly string[] = [
+  "PATH", "HOME", "SHELL", "USER", "LANG", "TERM",
+];
+
 export const LlmSchema = z
   .object({
     /** oMLX — on the Docker host, or on a trusted LAN peer (§5.9). */
@@ -515,8 +546,65 @@ export const LlmSchema = z
      * deliberately not derivable from this one.
      */
     relay_upstream: relayUpstream.nullable().default(null),
-    /** Names the env var; the value never appears in config (SRD §12.4). */
-    api_key_env: shortStr.default("OMLX_API_KEY"),
+    /**
+     * Names the env var; the value never appears in config (SRD §12.4).
+     *
+     * ## Why this is validated here and not left to `shortStr`
+     *
+     * This string becomes an environment variable NAME inside the worker, and
+     * until 2026-09-01 nothing checked it — while the same repo already refused
+     * exactly these names when they arrived through `secrets:`
+     * (`worker-env.ts`'s `SecretReservedNameError`). Two doors into the same
+     * namespace, one guarded.
+     *
+     * The gap was measured, not imagined. `api_key_env: PIFLEET_LLM_MODELS`
+     * parsed, and `worker-env` then overwrote the model list with the
+     * credential; the entrypoint's guard tests only non-emptiness, so it
+     * rendered:
+     *
+     *   {"apiKey":"<the key>","models":[{"id":"<the key>","name":"<the key>"}]}
+     *
+     * The credential became a model id, on a NAMED VOLUME that outlives the
+     * container's `--rm`. Nothing noticed: `missingApiKey` was false, the env
+     * file serialised cleanly, and the ISC-31 test still passed because it
+     * asserts how MANY variables hold the credential, not which. The runtime
+     * symptom was `model-not-found`, which reads as a fleet.yaml typo.
+     * `PIFLEET_LLM_BASE_URL` does the same to the endpoint, and `PATH` and
+     * `HOME` were accepted too.
+     *
+     * A malformed name was the other half: the entrypoint's identifier guard
+     * discards it and renders an empty key, silently. Refusing at parse time is
+     * the only place the operator learns which field is wrong.
+     */
+    api_key_env: shortStr.default("OMLX_API_KEY").superRefine((name, ctx) => {
+      if (!ENV_VAR_NAME_RE.test(name)) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            `llm.api_key_env must be an environment variable NAME — got "${name}", which is not a ` +
+            `valid identifier. The value is read from the host environment under this name; it is ` +
+            `never written in config.`,
+        });
+        return;
+      }
+      const prefix = RESERVED_ENV_PREFIXES.find((p) => name.startsWith(p));
+      if (prefix !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            `llm.api_key_env must not start with "${prefix}" — got "${name}". That namespace is ` +
+            `assigned by the fleet itself, and a collision overwrites the variable the worker ` +
+            `needs with the credential.`,
+        });
+      } else if (RESERVED_ENV_NAMES.includes(name)) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            `llm.api_key_env must not be "${name}" — the container's own environment depends on ` +
+            `it, and overwriting it with the credential breaks the worker before it starts.`,
+        });
+      }
+    }),
     model: z.string().min(1).max(256),
     thinking: ThinkingLevelSchema.optional(),
     models_allowlist: z.array(shortStr).max(64).default([]),

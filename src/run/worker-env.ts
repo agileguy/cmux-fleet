@@ -473,16 +473,30 @@ export function buildWorkerEnv(
      * carrying. `_ENV` names it for what it holds and matches the schema field
      * it is copied from, so a reader traces it in one hop.
      *
-     * ONE HAZARD LEFT UNCLOSED, and named rather than silently inherited.
-     * `api_key_env` is a bare `shortStr` in `config/schema.ts` — no identifier
-     * check, no reserved-name check — so a fleet may point it at a variable
-     * this block already assigns, and `vars[apiKeyEnvName]` below then
-     * overwrites that variable with the key. That is not new: the same config
-     * has always been able to clobber `PIFLEET_LLM_MODELS`. This adds one more
-     * name to that surface, and it degrades safely — the entrypoint indirects
-     * on a credential, finds nothing, and renders `apiKey: ""` — but the real
-     * repair is a reserved-name refusal on `api_key_env` at parse time, which
-     * belongs in the schema and not here.
+     * THE HAZARD THIS USED TO NAME IS NOW CLOSED IN THE SCHEMA, and the note it
+     * used to carry was WRONG in a way worth recording, because the wrongness is
+     * what kept the repair deferred.
+     *
+     * It said a colliding `api_key_env` "degrades safely — the entrypoint
+     * indirects on a credential, finds nothing, and renders `apiKey: \"\"`".
+     * That is true of the READ half only. The WRITE half — `vars[apiKeyEnvName]`
+     * below — lands on whatever name was given, and the entrypoint's guard tests
+     * only non-emptiness. Measured against the real script with
+     * `api_key_env: PIFLEET_LLM_MODELS`:
+     *
+     *   {"apiKey":"<the key>","models":[{"id":"<the key>","name":"<the key>"}]}
+     *
+     * The credential became a model id, written to a NAMED VOLUME that outlives
+     * the container's `--rm`, and nothing noticed: `missingApiKey` was false, the
+     * env file serialised cleanly, and ISC-31's test passed because it asserts
+     * how MANY variables hold the credential, not which. `HOME` yielded
+     * `"apiKey": "/home/pi"`; `PATH` was accepted too.
+     *
+     * `config/schema.ts` now refuses the whole class at parse time —
+     * `ENV_VAR_NAME_RE`, `RESERVED_ENV_PREFIXES`, `RESERVED_ENV_NAMES` — which is
+     * where the operator can be told which field is wrong. That is the same
+     * guard `secrets:` grants have always had (`SecretReservedNameError`); the
+     * defect was two doors into one namespace with only one of them watched.
      */
     PIFLEET_LLM_API_KEY_ENV: apiKeyEnvName,
     /*

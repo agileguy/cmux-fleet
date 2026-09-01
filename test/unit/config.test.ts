@@ -378,6 +378,42 @@ describe("merge: model decomposition (§6.1 exception 2)", () => {
  * is the signal working. Wire the predicate to the real config, write the
  * end-to-end assertion, re-grade ISC-405, and delete this test.
  */
+/**
+ * A NON-EMPTY `model:` that resolves to an EMPTY model.
+ *
+ * `schema.ts` enforces `.min(1)` on the raw string, so this looks covered and
+ * is not: `omlx/` and `:high` are both non-empty and both decompose to `""`,
+ * because the prefix split and the thinking strip each consume their side and
+ * leave nothing between them.
+ *
+ * The reason it is a refusal rather than a warning is what happened next.
+ * `PIFLEET_LLM_MODELS=""` makes the entrypoint's `[ -n ... ]` guard false, so
+ * NO `models.json` is written at all — exit 0, nothing on stderr — while argv
+ * still carries `--model ""`. Nothing in `src/` reads the rendered file back
+ * and the container is `--rm`, so from the host "no file", "empty key" and
+ * "wrong provider" are indistinguishable. The only thing in front of it,
+ * `assertModelsSupportToolCalls`, returns early when
+ * `require_native_tool_calls: false`, which is supported — and then the fleet
+ * comes up clean and can reach no model at all, from a one-character typo.
+ */
+describe("a model that resolves to nothing is refused, not shipped", () => {
+  for (const bad of ["omlx/", ":high", "omlx/:high"]) {
+    test(`model: ${JSON.stringify(bad)} is refused at resolve time`, async () => {
+      const loaded = await writeAndLoad({ ...baseDoc(), llm: { model: bad } });
+      expect(() => resolveWorker(loaded, "w1")).toThrow(/resolves to an empty model name/);
+    });
+  }
+
+  test("a normal model still resolves — the guard is not swallowing everything", async () => {
+    // Anti-vacuity: a refusal that fired on every input would pass the three
+    // cases above and break every fleet in the repo.
+    const loaded = await writeAndLoad({ ...baseDoc(), llm: { model: "omlx/gpt-oss:120b" } });
+    const w = resolveWorker(loaded, "w1");
+    expect(w.model).toBe("gpt-oss:120b");
+    expect(w.provider).toBe("omlx");
+  });
+});
+
 describe("ISC-405 is still blocked, and this is what unblocks it", () => {
   test("`llm.providers` is not in the schema yet — landing it must fail here", () => {
     const keys = Object.keys((LlmSchema as unknown as { shape: Record<string, unknown> }).shape);

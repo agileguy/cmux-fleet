@@ -375,6 +375,41 @@ export function resolveWorker(loaded: LoadedConfig, id: string): ResolvedWorker 
   const mergedThinking = pick("thinking", entry, role, d) ?? config.llm.thinking;
   const spec = decomposeModel(mergedModel, config.llm.provider, mergedThinking);
 
+  /*
+   * A NON-EMPTY `model:` can decompose to an EMPTY model, and the failure is
+   * completely silent — which is why this refuses here rather than trusting
+   * `schema.ts`'s `.min(1)`.
+   *
+   * `schema.ts` enforces `min(1)` on the raw string, so `model: ""` is already
+   * refused. But `omlx/` and `:high` are both non-empty and both decompose to
+   * `model: ""` — the prefix split and the thinking strip each consume their
+   * side and leave nothing between them. Measured:
+   *
+   *   "omlx/"      -> { provider: "omlx", model: "" }
+   *   ":high"      -> { provider: "omlx", model: "", thinking: "high" }
+   *
+   * What happens next is the whole reason this is a refusal. `worker-env` sets
+   * `PIFLEET_LLM_MODELS=""`, so the entrypoint's
+   * `[ -n "${PIFLEET_LLM_MODELS:-}" ]` guard is FALSE and **no `models.json` is
+   * written at all** — exit 0, nothing on stderr. `render.ts` still pushes
+   * `--model ""`. Nothing in `src/` ever reads the rendered file back, and the
+   * container is `--rm`, so "no file", "empty key" and "wrong provider" are
+   * indistinguishable from the host. The one thing standing in front of it,
+   * `assertModelsSupportToolCalls`, returns early whenever
+   * `require_native_tool_calls: false` — a documented, supported setting — and
+   * then the fleet comes up clean and can reach no model at all.
+   *
+   * That is this file's own stated worst case, reachable from a one-character
+   * typo, so it fails at parse time naming the worker and the string.
+   */
+  if (spec.model === "") {
+    throw new ConfigError(
+      `worker "${entry.id}" has model: "${mergedModel}", which resolves to an empty model name. ` +
+        `A "provider/" prefix and a ":thinking" suffix each consume their side of the string; ` +
+        `written like this there is nothing left between them. Name a model.`,
+    );
+  }
+
   return {
     id: entry.id,
     role: entry.role,

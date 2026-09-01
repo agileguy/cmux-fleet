@@ -80,9 +80,11 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-Twenty criteria are unattempted `[ ]` — ISC-401..ISC-423, filed 2026-09-01 as the
-done-condition for per-worker inference providers (`Docs/SRD-INFERENCE-PROVIDERS.md`) and not yet
-built. Every criterion filed before that block has been attempted. Ten are graded `[~]`
+Twenty-one criteria are unattempted `[ ]` — ISC-402..ISC-404, ISC-407..ISC-423 and ISC-424, from the block
+ISC-401..ISC-423 filed 2026-09-01 as the done-condition for per-worker inference providers
+(`Docs/SRD-INFERENCE-PROVIDERS.md`). Three of that block are already answered: ISC-401 and ISC-406
+closed with the two latent defects they name, and ISC-405 is `[~]` below. Every criterion filed
+before the block has been attempted. Ten are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
@@ -115,7 +117,17 @@ had no reason to. Measured by driving this repo's own `parseConfig`, `omlxRelayT
 second half of the sentence — the two-place authorization — survives intact, which is why `[~]` and not
 `[ ]`; nothing re-checks the word *never*, which is why not `[x]`.
 ISC-372 was filed `[~]` the same day and closed hours later, when `up` gained the check against the
-*effective* backend that the entry had named as its own closing condition. The two that left this
+*effective* backend that the entry had named as its own closing condition.
+
+**ISC-405 is the tenth, and it is `[~]` for the opposite reason to the other nine.** They are
+criteria whose behaviour is built and whose evidence falls short. This one's evidence is complete —
+the mechanism is mutation-proved in both directions — but its *subject* does not exist yet: the
+criterion says "on a `tag_style: true` provider", and there is no config surface for that flag until
+`llm.providers` lands, so nothing in production passes the predicate and the defect it names is
+still live end to end. Grading it `[x]` would close a criterion whose stated subject cannot be
+spelled. Its probe is pinned to the BLOCKER's absence instead — `test/unit/config.test.ts` asserts
+`llm.providers` is not in the schema — so landing the provider map turns that test red and forces
+the re-grade rather than letting it drift green. The two that left this
 list on 2026-08-30 — ISC-306 and ISC-339 — were scope decisions rather than defects, and closed
 when the owner made the decision each entry named as its closing condition.
 
