@@ -54,8 +54,10 @@ import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
 import { containerFetch } from "../../security/probe-transport.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
 import {
+  egressBridgePlan,
   ensureEgressRelay,
   formatRelayTarget,
+  type ProviderBridge,
   type RelayStatus,
 } from "../../security/relay.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
@@ -211,6 +213,39 @@ export function tuiWorkerIds(loaded: LoadedConfig, workerIds: readonly string[])
   for (const workerId of workerIds) {
     if (!defined.has(workerId)) continue;
     if (resolveWorker(loaded, workerId).paneMode === "tui") out.push(workerId);
+  }
+  return out;
+}
+
+/**
+ * The provider each of `workerIds` resolves to — in launch order, duplicates
+ * kept. The input to `egressBridgePlan`, and the reason D7's containment
+ * property is a fact about this run rather than about the config file.
+ *
+ * **`resolveWorker`, not `Object.keys(config.llm.providers)`, and the
+ * difference is the whole of ISC-410.** The keys of the map are what an
+ * operator DECLARED; this is what workers SELECTED. Building the bridge plan
+ * from the declaration would put a network, a relay and a published listen
+ * alias behind a provider nothing in the fleet uses — which is precisely what
+ * the fleet-wide design did (§6.5.1: declaring a provider published its
+ * hostname on the one shared bridge for every worker on it), and precisely what
+ * D7 exists to stop.
+ *
+ * `resolveWorker` for the same reason `tuiWorkerIds` uses it: `provider` is
+ * assembled across `defaults` -> `roles` -> the worker override, and a second
+ * spelling of that merge here would be a guard that can disagree with the
+ * resolver that renders the argv.
+ *
+ * IDS THE CONFIG DOES NOT DEFINE are skipped, by the same membership test —
+ * the `PIFLEET_PI_COMMAND` double has no role, no provider and no container to
+ * attach to a network.
+ */
+export function resolvedProviders(loaded: LoadedConfig, workerIds: readonly string[]): string[] {
+  const defined = new Set(loaded.config.workers.map((w) => w.id));
+  const out: string[] = [];
+  for (const workerId of workerIds) {
+    if (!defined.has(workerId)) continue;
+    out.push(resolveWorker(loaded, workerId).provider);
   }
   return out;
 }
@@ -1129,20 +1164,67 @@ export function register(program: Command): void {
       if (tuiWarning !== null) process.stderr.write(tuiWarning);
 
       /**
-       * The egress network must exist, and must be INTERNAL, before any
+       * THE BRIDGE PLAN — one egress network and one relay per provider IN USE
+       * (D7, SRD §6.5.2).
+       *
+       * Built from the providers this run's workers RESOLVED TO, so a provider
+       * declared in `llm.providers` that nothing selected reaches no line
+       * below: no `ensureEgressNetwork`, no `ensureEgressRelay`, no published
+       * alias, no ledger row. Under the fleet-wide design a declared provider
+       * was a route opened for every worker on the shared bridge whether or not
+       * anything used it (§6.5.1); here the declaration is inert until a worker
+       * names it.
+       *
+       * A flat `fleet.yaml` with no `providers` map yields exactly ONE bridge,
+       * on `docker.network` verbatim — see `egressBridgePlan` for why that case
+       * is not composed. Everything below therefore does for a pre-D7 fleet
+       * precisely what the single-network code it replaced did.
+       */
+      let egressBridges: readonly ProviderBridge[] = [];
+      if (egressNetwork !== null && loadedConfig !== null) {
+        try {
+          egressBridges = egressBridgePlan(
+            loadedConfig.config,
+            egressNetwork,
+            resolvedProviders(loadedConfig, workers),
+          );
+        } catch (err) {
+          // A composed name Docker will not take, or a worker resolving to an
+          // undeclared provider. Both are config errors and neither has created
+          // anything yet, which is why the plan is built before the first
+          // daemon call rather than lazily inside the loop.
+          throw new CliError(err instanceof Error ? err.message : String(err), EXIT.USAGE);
+        }
+      }
+
+      /**
+       * Each of those networks must exist, and must be INTERNAL, before any
        * container is attached to it.
        *
-       * `render.ts` already puts every worker on `docker.network`, so the
+       * `render.ts` already puts every worker on a fleet network, so the
        * attachment was never the gap — creation was. An absent network makes
        * `docker run` fail, which is loud and fine. A network of that name that
        * someone created WITHOUT `--internal` is the dangerous case: every
        * worker gets unrestricted egress while the fleet reports deny-all, and
        * nothing anywhere would say so. `ensureEgressNetwork` refuses to adopt
        * one rather than quietly using it (SRD §5.6, §12).
+       *
+       * THE EMPTY-PLAN CASE still runs that check, on the base network. A
+       * configured run whose named workers are all undefined in `fleet.yaml`
+       * has no provider to resolve and so no bridge — but `docker.network` may
+       * still exist on this host, and skipping the adopt-refusal because this
+       * particular run happened to launch nothing would drop a security check
+       * on a network the next run will use. No relay is created for it: a
+       * network nothing is attached to needs no forward.
        */
-      let egressInternal: boolean | null = null;
-      let egressGatewayBlocked: string | null = null;
-      if (egressNetwork !== null) {
+      const egressNetworks: Array<{ network: string; internal: boolean | null; gateway: string | null }> = [];
+      const plannedNetworks =
+        egressBridges.length > 0
+          ? egressBridges.map((b) => b.network)
+          : egressNetwork !== null
+            ? [egressNetwork]
+            : [];
+      for (const network of plannedNetworks) {
         try {
           /**
            * `ensureEgressNetwork` now guarantees BOTH halves of the posture:
@@ -1153,10 +1235,14 @@ export function register(program: Command): void {
            * is delivered through INPUT and never evaluated. Either half
            * missing throws here rather than starting a fleet that reports
            * deny-all while workers reach the host's sshd.
+           *
+           * Per network and not once: two providers are two bridges with two
+           * gateways, and a fleet that verified containment on one of them
+           * while the other's gateway was open would report a posture it does
+           * not have.
            */
-          const net = await ensureEgressNetwork(egressNetwork);
-          egressInternal = net.internal;
-          egressGatewayBlocked = net.gateway;
+          const net = await ensureEgressNetwork(network);
+          egressNetworks.push({ network, internal: net.internal, gateway: net.gateway });
         } catch (err) {
           // `err.message` rather than `String(err)`: these errors already
           // begin "egress: " / "relay: ", and `String(err)` prepends
@@ -1166,7 +1252,8 @@ export function register(program: Command): void {
       }
 
       /**
-       * …and the relay that reopens exactly one destination through it.
+       * …and the relay that reopens exactly one destination through each of
+       * them.
        *
        * The internal bridge denies the fleet's own model server along with
        * everything else, so without this every worker starts healthy and
@@ -1175,14 +1262,23 @@ export function register(program: Command): void {
        * one unchanged, and `down` never tears it down, for the same reason it
        * never removes the egress network.
        *
-       * It forwards oMLX ONLY. The Google endpoints in `egress.google_hosts`
-       * remain policy-level allow rules with no live relay path (ISC-253);
-       * a `cloud_access` worker on this bridge still cannot reach them.
+       * **`ensureEgressRelay` is called unchanged, once per bridge, with that
+       * bridge's PROJECTED view** (§6.5.4). The per-provider-ness lives in
+       * `relayViewForProvider`, so the sentence in this file's sibling header —
+       * *"the single container that re-opens exactly one destination"* —
+       * survives D7 rather than being retired by it. Each of these relays still
+       * carries exactly one target; there are simply as many relays as there
+       * are providers a worker asked for.
+       *
+       * Each forwards ITS OWN provider ONLY. The Google endpoints in
+       * `egress.google_hosts` remain policy-level allow rules with no live
+       * relay path (ISC-253); a `cloud_access` worker on any of these bridges
+       * still cannot reach them.
        */
-      let egressRelay: RelayStatus | null = null;
-      if (egressNetwork !== null && loadedConfig !== null) {
+      const egressRelays: Array<{ bridge: ProviderBridge; status: RelayStatus }> = [];
+      for (const bridge of egressBridges) {
         try {
-          egressRelay = await ensureEgressRelay(loadedConfig.config, egressNetwork);
+          egressRelays.push({ bridge, status: await ensureEgressRelay(bridge.view, bridge.network) });
         } catch (err) {
           // `err.message` rather than `String(err)`: these errors already
           // begin "egress: " / "relay: ", and `String(err)` prepends
@@ -1336,12 +1432,21 @@ export function register(program: Command): void {
       if (tuiWarning !== null) {
         await ledger.append("tui_unattended", { detail: { workers: tuiWorkers } });
       }
-      if (egressNetwork !== null) {
+      /**
+       * ONE ROW PER NETWORK, not one row naming a list.
+       *
+       * A flat fleet still writes exactly the row it always wrote, with the
+       * same three fields. A two-provider fleet writes two, and that is the
+       * shape a reader of the ledger needs: `internal` and `gateway_blocked`
+       * are facts about ONE bridge, and folding two bridges into one row would
+       * force a reader to guess which network an unblocked gateway belonged to.
+       */
+      for (const net of egressNetworks) {
         await ledger.append("egress_network_ready", {
-          detail: { network: egressNetwork, internal: egressInternal, gateway_blocked: egressGatewayBlocked },
+          detail: { network: net.network, internal: net.internal, gateway_blocked: net.gateway },
         });
       }
-      if (egressRelay !== null) {
+      for (const { bridge, status: egressRelay } of egressRelays) {
         /**
          * `script_sha256` and `targets` are recorded on EVERY run, adopted or
          * created, and that is the point rather than an accident.
@@ -1358,6 +1463,12 @@ export function register(program: Command): void {
         await ledger.append("egress_relay_ready", {
           detail: {
             name: egressRelay.name,
+            // Which provider this relay is FOR, and which network it is on.
+            // The name already encodes both, but only for a reader who knows
+            // the composition rule — and `report` reads these rows months
+            // later, when several relays differ by one suffix.
+            provider: bridge.provider,
+            network: bridge.network,
             created: egressRelay.created,
             script_sha256: egressRelay.scriptSha256,
             targets: egressRelay.targets.map(formatRelayTarget),

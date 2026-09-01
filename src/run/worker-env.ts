@@ -108,6 +108,7 @@ import {
   LEGACY_RELAY_LISTEN_ALIAS,
   PROXY_LISTEN_ALIAS,
   relayListenAliases,
+  relayViewForProvider,
   PROXY_LISTEN_PORT,
   RELAY_LISTEN_ALIAS,
 } from "../security/relay.ts";
@@ -823,8 +824,33 @@ export function buildWorkerEnv(
      */
     vars["HTTPS_PROXY"] = `http://${PROXY_LISTEN_ALIAS}:${PROXY_LISTEN_PORT}`;
     vars["https_proxy"] = vars["HTTPS_PROXY"];
+    /*
+     * ## And derived from THIS WORKER'S provider, not from the fleet (D7, §6.5.5)
+     *
+     * `relayListenAliases(loaded.config)` was fleet-wide, which was complete
+     * while there was one bridge. Under D7 a worker is on ITS OWN provider's
+     * network and its relay publishes ITS OWN provider's endpoint, so the
+     * fleet-wide list would name a hostname this worker has no route to.
+     *
+     * Harmless in ROUTING terms — a name that does not resolve on this bridge
+     * cannot be dialed whether or not `NO_PROXY` mentions it — and still wrong
+     * on two counts §6.5.5 names exactly. It puts another provider's hostname
+     * in the environment of a worker that cannot reach it, which is a
+     * disclosure with no purpose; and it makes `NO_PROXY` a SECOND derivation
+     * of a fact that now varies per network, which is the shape that produced
+     * ISC-264 and ISC-369 both times.
+     *
+     * It is also the alias half of ISC-410: a declared provider no worker
+     * resolves to must appear in NO worker's environment, and it cannot,
+     * because no worker's projection can name it.
+     *
+     * A flat config projects to itself, so a pre-D7 fleet gets the identical
+     * list it always got.
+     */
     vars["NO_PROXY"] = [
-      ...relayListenAliases(loaded.config).filter((a) => a !== PROXY_LISTEN_ALIAS),
+      ...relayListenAliases(relayViewForProvider(loaded.config, w.provider)).filter(
+        (a) => a !== PROXY_LISTEN_ALIAS,
+      ),
       "localhost",
       "127.0.0.1",
     ].join(",");
