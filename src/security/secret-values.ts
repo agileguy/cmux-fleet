@@ -186,14 +186,27 @@ export async function resolveGrantedSecretValues(
    * two files actually hold.
    *
    * They are not two layouts of the same set. The store holds the `secrets:`
-   * GRANTS. The env file additionally holds fleet-set credentials that were
-   * never grants and are still delivered as real variables — `OMLX_API_KEY`
-   * above all, which `SECRET_NAMES_VAR` arms the redactor for because it is a
-   * credential, but which has no file in the store because it is not a
-   * `secrets:` entry. Taking the store wholesale therefore DROPPED the LLM key
-   * from redaction: measured against the run that produced this module, where
-   * the fixed redactor armed the two grants and reported `OMLX_API_KEY`
-   * unresolved — a name the broken version had been scrubbing correctly.
+   * GRANTS. The env file additionally holds fleet-set values that were never
+   * grants. Taking the store wholesale therefore DROPPED the LLM key from
+   * redaction: measured against the run that produced this module, where the
+   * fixed redactor armed the two grants and reported `OMLX_API_KEY` unresolved
+   * — a name the broken version had been scrubbing correctly.
+   *
+   * D8 MOVED THE LLM KEY ACROSS THAT LINE, and the sentence recording it is
+   * corrected here rather than quietly dropped, because the correction is the
+   * interesting part. This block used to say the provider key "has no file in
+   * the store because it is not a `secrets:` entry" — true when the key was an
+   * environment value, and false since `worker-env.ts` began writing it to
+   * `<secretsDir>/<llm.api_key_env>` and pointing at it. So the key now
+   * resolves on the STORE arm, not the fallback arm, and that is exactly why
+   * the file is named for the operator's variable rather than for anything the
+   * fleet chose: `SECRET_NAMES_VAR` arms this resolver with `llm.api_key_env`'s
+   * spelling, and the store lookup is by that same name.
+   *
+   * The fallback is NOT thereby dead, and the code is unchanged. It still
+   * carries every fleet-set variable that is redactable and has no file, and it
+   * is what keeps a run recorded before D8 — or any future value delivered as a
+   * variable — resolvable rather than silently unscrubbed.
    *
    * The pointer worry it was guarding against does not exist, because the
    * fallback looks up the BARE name and a pointer is only ever stored under
