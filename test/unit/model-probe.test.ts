@@ -393,7 +393,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
   test("a passing model does not throw", async () => {
     const loaded = await load({});
     const { fetch } = jsonFetch(TOOL_CALL_BODY);
-    await assertModelsSupportToolCalls(loaded, ["w1"], fetch);
+    await assertModelsSupportToolCalls(loaded, ["w1"], () => fetch);
   });
 
   test("a prose model throws NativeToolCallRefusedError with exit 2", async () => {
@@ -401,7 +401,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
     const { fetch } = jsonFetch(PROSE_BODY);
     let caught: unknown;
     try {
-      await assertModelsSupportToolCalls(loaded, ["w1"], fetch);
+      await assertModelsSupportToolCalls(loaded, ["w1"], () => fetch);
     } catch (err) {
       caught = err;
     }
@@ -426,7 +426,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
     }) as FetchLike;
     let caught: unknown;
     try {
-      await assertModelsSupportToolCalls(loaded, ["w1"], fetch);
+      await assertModelsSupportToolCalls(loaded, ["w1"], () => fetch);
     } catch (err) {
       caught = err;
     }
@@ -450,7 +450,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
     const { fetch } = jsonFetch({
       choices: [{ message: { content: "<think>" }, finish_reason: "length" }],
     });
-    const err = await assertModelsSupportToolCalls(loaded, ["w1"], fetch).then(
+    const err = await assertModelsSupportToolCalls(loaded, ["w1"], () => fetch).then(
       () => null,
       (e: unknown) => e as Error & { exitCode?: number },
     );
@@ -471,7 +471,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
   test("a model the server does not serve exits 2, naming the config line", async () => {
     const loaded = await load({});
     const { fetch } = jsonFetch({ error: { message: "Model 'DefaultModel' not found" } }, 404);
-    const err = await assertModelsSupportToolCalls(loaded, ["w1"], fetch).then(
+    const err = await assertModelsSupportToolCalls(loaded, ["w1"], () => fetch).then(
       () => null,
       (e: unknown) => e as Error & { exitCode?: number },
     );
@@ -495,7 +495,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
       e.name = "TimeoutError";
       throw e;
     }) as FetchLike;
-    const err = await assertModelsSupportToolCalls(loaded, ["w1"], fetch).then(
+    const err = await assertModelsSupportToolCalls(loaded, ["w1"], () => fetch).then(
       () => null,
       (e: unknown) => e as Error & { exitCode?: number },
     );
@@ -510,7 +510,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
     const loaded = await load({ llm: { require_native_tool_calls: false } });
     const { fetch, calls } = jsonFetch(PROSE_BODY);
     // A prose-answering model must NOT refuse when the gate is off…
-    await assertModelsSupportToolCalls(loaded, ["w1"], fetch);
+    await assertModelsSupportToolCalls(loaded, ["w1"], () => fetch);
     // …and the network must not have been touched at all.
     expect(calls).toEqual([]);
   });
@@ -533,7 +533,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
       ],
     });
     const { fetch, calls } = jsonFetch(TOOL_CALL_BODY);
-    await assertModelsSupportToolCalls(loaded, ["w1", "w2", "w3"], fetch);
+    await assertModelsSupportToolCalls(loaded, ["w1", "w2", "w3"], () => fetch);
     expect(calls.length).toBe(1);
   });
 
@@ -546,7 +546,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
       ],
     });
     const { fetch, calls } = jsonFetch(TOOL_CALL_BODY);
-    await assertModelsSupportToolCalls(loaded, ["w1", "w2"], fetch);
+    await assertModelsSupportToolCalls(loaded, ["w1", "w2"], () => fetch);
     expect(calls.length).toBe(2);
   });
 
@@ -567,7 +567,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
      * `undefined.message` and thrown a TypeError had the gate ever failed to
      * refuse, reporting the wrong defect for the right failure.
      */
-    const err = await assertModelsSupportToolCalls(loaded, ["w1", "w2"], fetch).then(
+    const err = await assertModelsSupportToolCalls(loaded, ["w1", "w2"], () => fetch).then(
       () => null,
       (e: unknown) => e as Error,
     );
@@ -583,7 +583,7 @@ describe("assertModelsSupportToolCalls gates the launch path (ISC-53)", () => {
   test("an id absent from workers: is skipped, not refused", async () => {
     const loaded = await load({});
     const { fetch, calls } = jsonFetch(PROSE_BODY);
-    await assertModelsSupportToolCalls(loaded, ["ghost-1"], fetch);
+    await assertModelsSupportToolCalls(loaded, ["ghost-1"], () => fetch);
     expect(calls).toEqual([]);
   });
 });

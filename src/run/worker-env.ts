@@ -102,7 +102,7 @@ import { writeFile, chmod, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
 import { nonCredentialSecretNames, secretGrantNames } from "../config/schema.ts";
-import { ConfigError } from "../config/load.ts";
+import { ConfigError, providerApiKeyEnv } from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
 import {
   LEGACY_RELAY_LISTEN_ALIAS,
@@ -463,7 +463,23 @@ export function buildWorkerEnv(
   hostEnv: Record<string, string | undefined>,
 ): WorkerEnvPlan {
   const { llm, cloud } = loaded.config;
-  const apiKeyEnvName = llm.api_key_env;
+  /*
+   * THE WORKER'S PROVIDER'S key variable, not the fleet's (ISC-425).
+   *
+   * This line read `llm.api_key_env` and handed every worker the fleet default
+   * whatever it resolved to — so a worker on a hosted provider received the
+   * operator's own oMLX key, at 0444 behind a read-only mount, and
+   * `entrypoint.sh` wrote it into `models.json` under the hosted provider's
+   * name. Everything about the DELIVERY was right and the credential was
+   * wrong, which is why three green criteria (ISC-407, ISC-408, ISC-422) never
+   * saw it: each of them asks how the key travels, none asks whose it is.
+   *
+   * `providerApiKeyEnv` is imported rather than spelled out here because
+   * `assertModelsSupportToolCalls` needs the same answer: the gate that
+   * certifies a provider and the worker that dials it presenting different
+   * credentials is a fleet that passes `up` and 401s on its first turn.
+   */
+  const apiKeyEnvName = providerApiKeyEnv(loaded.config, w.provider);
   const apiKey = hostEnv[apiKeyEnvName];
   /*
    * "Is there a Class 1 key to deliver at all", asked ONCE.

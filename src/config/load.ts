@@ -312,6 +312,57 @@ export function providerAllowlist(config: FleetConfig, provider: string): readon
   return providers[provider]?.models_allowlist ?? [];
 }
 
+/**
+ * The host variable holding ONE provider's Class 1 key (ISC-425).
+ *
+ * ## The defect this exists to make unrepeatable
+ *
+ * `buildWorkerEnv` read `llm.api_key_env` — the FLEET-WIDE field — for every
+ * worker whatever provider it resolved to. Measured on a live two-provider
+ * run whose blocks named `OLLAMA_API_KEY` and `VENDOR_B_API_KEY`:
+ *
+ *     workers/d7a/secrets/  -r--r--r--  OMLX_API_KEY
+ *     workers/d7b/secrets/  -r--r--r--  OMLX_API_KEY
+ *
+ * Both got the fleet default. The file mode and the read-only mount were
+ * exactly what ISC-408 requires; the CREDENTIAL was the operator's own oMLX
+ * key, and `entrypoint.sh` then writes it into `models.json` under the
+ * worker's RESOLVED provider. A worker dialing a third party therefore held a
+ * local key under that third party's name, one request away from sending it.
+ *
+ * ## Why there is no fallback, and why that is the schema's own argument
+ *
+ * `ProviderSchema` makes `api_key_env` REQUIRED with no default, and says why:
+ * the flat keys' defaults "describe oMLX on the operator's own machine",
+ * so inheriting them into a provider block is wrong by construction. A `??
+ * config.llm.api_key_env` here would reintroduce precisely that inheritance
+ * through the back door — and silently, since the result is a real variable
+ * name that resolves to a real key. `relayViewForProvider` refuses the same
+ * fallback for the same reason and says so in its own message; this is that
+ * rule applied to the credential rather than to the endpoint.
+ *
+ * Shared by `buildWorkerEnv` and by `assertModelsSupportToolCalls`, and the
+ * sharing is the point: the gate that CERTIFIES a provider and the worker that
+ * DIALS it must present the same credential, and the cheapest way for them to
+ * disagree is to read the name from two places.
+ */
+export function providerApiKeyEnv(config: FleetConfig, provider: string): string {
+  const providers = config.llm.providers;
+  // §6.1's shorthand: with no map the flat keys ARE this provider's block, so
+  // the fleet-wide name is not an inheritance, it is the block's own value.
+  if (providers === undefined) return config.llm.api_key_env;
+  const block = providers[provider];
+  if (block === undefined) {
+    throw new ConfigError(
+      `worker resolves to provider ${JSON.stringify(provider)}, which llm.providers does not ` +
+        `declare — declared: ${Object.keys(providers).join(", ") || "(none)"}. The credential ` +
+        `will not fall back to llm.api_key_env: that is how a second provider silently acquires ` +
+        `the default key and carries it to someone else's endpoint.`,
+    );
+  }
+  return block.api_key_env;
+}
+
 // ---------------------------------------------------------------------------
 // The merge
 // ---------------------------------------------------------------------------

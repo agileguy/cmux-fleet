@@ -57,6 +57,7 @@ import {
   egressBridgePlan,
   ensureBridgeRelay,
   formatRelayTarget,
+  workerEgressNetwork,
   type ProviderBridge,
   type RelayStatus,
 } from "../../security/relay.ts";
@@ -1339,10 +1340,27 @@ export function register(program: Command): void {
        * error's own `exitCode` via the `ExitCoded` protocol.
        */
       if (loadedConfig !== null && egressNetwork !== null) {
-        await assertModelsSupportToolCalls(
-          loadedConfig,
-          workers,
-          containerFetch({ network: egressNetwork }),
+        /*
+         * ONE TRANSPORT PER PROVIDER, on that provider's own bridge (ISC-418).
+         *
+         * This was `containerFetch({ network: egressNetwork })` — one transport
+         * on `docker.network` — and under D7 that is the BASE bridge, which a
+         * providers-map fleet never creates. The probe container exited
+         * "network not found" and `up` could not stand such a fleet up at all
+         * with `require_native_tool_calls: true`; the workaround was to turn the
+         * gate off, which is the one thing §5.9 will not have.
+         *
+         * `workerEgressNetwork` rather than a third spelling of the composition:
+         * it already decides which bridge `egressBridgePlan` CREATES and which
+         * one `render.ts` ATTACHES a worker to, and a probe judging a third
+         * network would certify a path no worker takes.
+         */
+        const probeConfig = loadedConfig;
+        const probeNetwork = egressNetwork;
+        await assertModelsSupportToolCalls(loadedConfig, workers, (provider) =>
+          containerFetch({
+            network: workerEgressNetwork(probeConfig.config, probeNetwork, provider),
+          }),
         );
       }
 
