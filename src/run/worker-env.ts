@@ -34,12 +34,32 @@
  * (`CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`) belongs here; the token itself arrives at
  * runtime through `docker exec`, which leaves no artifact.
  *
- * The oMLX key is the deliberate exception and is not an inconsistency: SRD
- * §12.4 classifies it as Class 1 — no billing authority, no cloud identity, no
- * data at rest — and says plainly that it "is injected as an env var". The
- * §5.9 erratum narrows the claim to "no value off this LAN" for a LAN oMLX and
- * accepts that as a residual. So it is a secret, but a bounded one, and it is
- * the ONLY secret this file may carry.
+ * The oMLX key USED TO BE the deliberate exception, and D8 removed it, so this
+ * file now carries NO credential value of any kind.
+ *
+ * §12.4 collapsed Class 1 to a single environment variable on the explicit
+ * basis that the key "carries no billing authority — that part of the argument
+ * is unconditional". `llm.providers` admits a hosted provider whose key is a
+ * SUBSCRIPTION credential, so that sentence stopped being true and Class 1's
+ * argument had to be re-taken rather than inherited. SRD §6.6 re-takes it by
+ * keeping the RULE and changing the DELIVERY: the value is written to
+ * `<run-dir>/workers/<id>/secrets/<NAME>` at 0444 and reaches the container
+ * through the same read-only `/secrets` mount a `secrets:` grant uses, while
+ * the environment receives `PIFLEET_LLM_API_KEY_FILE` — a fleet-owned fixed
+ * name carrying a PATH, not the operator's variable name carrying a VALUE.
+ *
+ * It borrows Class 3's MECHANISM without entering its GRANT LIST, and that
+ * distinction is load-bearing rather than pedantic: `secretNames` is what the
+ * OPERATOR granted and `secretFiles` is what the worker HOLDS, so the key goes
+ * on the second and not the first. Widening `secretNames` to cover it would
+ * repeal §12.4's `env_allowlist` prohibition rather than keep it intact, and
+ * would make `launch.secret_names` claim a grant that never happened (ISC-422).
+ *
+ * The costs, stated rather than glossed: the key still reaches `models.json`
+ * on the worker's named volume because Pi reads that file and not the
+ * environment, and a worker with `bash` can `cat` the file. §12.4 already
+ * records the second one for Class 3 — "this narrows the accident, not the
+ * agent" — and it is not described here as if it were a seal.
  *
  * ## Mode 0600, and why that is not in tension with the container's uid
  *
@@ -48,8 +68,11 @@
  * key/value pairs over its API. So unlike `/policy/cloud-allow` or the
  * briefing — which are bind-mounted and therefore must be readable by uid
  * 10001 — this file is never opened by the worker and does not go through
- * `container/mounts.ts`. Nothing is lost by keeping it operator-only, and a
- * file holding even a Class 1 key should not be 0644 in a run directory.
+ * `container/mounts.ts`. Nothing is lost by keeping it operator-only. It held
+ * the Class 1 key when that argument was first written; under D8 it holds only
+ * pointers, and 0600 is KEPT rather than relaxed — the mode was never the
+ * thing protecting the key, and widening a durable run-directory artifact
+ * because it got less sensitive is a change with no benefit to weigh.
  *
  * ## `secrets:` values are NOT in the environment at all — they are FILES
  *
@@ -140,6 +163,38 @@ export function secretPointerName(name: string): string {
 export function secretContainerPath(name: string): string {
   return `${SECRETS_MOUNT}/${name}`;
 }
+
+/**
+ * The environment variable that POINTS AT the Class 1 provider key (D8).
+ *
+ * FLEET-OWNED AND FIXED, which is the whole of what it buys over the
+ * `<NAME>_FILE` convention a `secrets:` grant uses. `secretPointerName` derives
+ * its spelling from the operator's chosen variable name, so a consumer has to
+ * know that name to find the pointer — which is Defect A exactly:
+ * `docker/entrypoint.sh` hardcoded `${OMLX_API_KEY:-}` while this module wrote
+ * the key under whatever `llm.api_key_env` said, and the two agreed only
+ * because both strings happened to be `OMLX_API_KEY`. A fixed name ends that
+ * class of divergence permanently: the entrypoint stops needing to know the
+ * operator's spelling at all, because the indirection is a PATH and the name
+ * is the fleet's.
+ *
+ * The FILE it points at is still named for the operator's variable, and that
+ * is deliberate rather than an oversight. `security/secret-values.ts` resolves
+ * a redactable name to its value by reading `<secretsDir>/<name>`, and
+ * `SECRET_NAMES_VAR` arms the redactor with `llm.api_key_env`'s spelling — so
+ * naming the file after the variable is what keeps the log redactor able to
+ * see this credential after delivery moved. Naming it after the pointer would
+ * have blinded that reader silently, which is ISC-343 and ISC-345's recorded
+ * failure shape arriving a third time.
+ *
+ * Under the `PIFLEET_` prefix, so `RESERVED_ENV_PREFIXES` already refuses an
+ * operator naming a `secrets:` grant that collides with it, and so
+ * `container-env.test.ts:isSecretShaped` reads it for what it is. `_FILE` is
+ * the same suffix `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` carries and means the same
+ * thing there: the pointer whose whole purpose is to keep the value out of the
+ * environment.
+ */
+export const LLM_API_KEY_FILE_VAR = "PIFLEET_LLM_API_KEY_FILE";
 
 /**
  * One granted secret on its way to a file — the ONLY place in this plan a
@@ -409,6 +464,30 @@ export function buildWorkerEnv(
   const { llm, cloud } = loaded.config;
   const apiKeyEnvName = llm.api_key_env;
   const apiKey = hostEnv[apiKeyEnvName];
+  /*
+   * "Is there a Class 1 key to deliver at all", asked ONCE.
+   *
+   * Four things downstream depend on this answer — the 0444 file, the
+   * `PIFLEET_LLM_API_KEY_FILE` pointer, the redaction list, and the
+   * `missingApiKey` diagnostic — and each of them used to re-derive it, or to
+   * derive it from a proxy that happened to agree. One of those proxies
+   * (`apiKeyEnvName in vars`) stopped agreeing the moment the value left the
+   * environment, which is the defect this constant exists to make unrepeatable.
+   */
+  const deliversApiKey = apiKey !== undefined && apiKey !== "";
+
+  /*
+   * Declared HERE, above `vars`, rather than beside the `secrets:` loop that
+   * fills the rest of it.
+   *
+   * The Class 1 key is written into this array at the same `if` that writes
+   * its pointer into `vars` (see the D8 block below), and the two must be one
+   * statement rather than two that agree — a pointer without a file is a
+   * worker that starts, reads a perfectly well-formed path, and gets ENOENT
+   * inside its first authenticated call. The declaration moves up so that the
+   * decision does not have to be split across the function to reach it.
+   */
+  const secretFiles: SecretFile[] = [];
 
   const vars: Record<string, string> = {
     /*
@@ -639,11 +718,40 @@ export function buildWorkerEnv(
     vars["GIT_CONFIG_VALUE_0"] = "/workspace";
   }
 
-  // Class 1 (SRD §12.4). Written even when empty is NOT an option — see
-  // `missingApiKey` — so the key is omitted entirely rather than written blank,
-  // and the entrypoint's `[ -n "${…:-}" ]` guards then behave identically to a
-  // genuinely unset variable instead of seeing an empty string.
-  if (apiKey !== undefined && apiKey !== "") vars[apiKeyEnvName] = apiKey;
+  /*
+   * Class 1 (SRD §12.4), delivered as a FILE under D8 — the rule kept, the
+   * delivery changed.
+   *
+   * This line used to be `vars[apiKeyEnvName] = apiKey`, and the value leaving
+   * `vars` is the whole of ISC-407: `vars` is what `serializeEnvFile` renders
+   * and what `--env-file` carries, so a value never assigned into it cannot
+   * reach the environment of any process in the container. `env`, `set`,
+   * `echo $OMLX_API_KEY` and a serialised crash dump all stop disclosing it —
+   * precisely what ISC-337..342 bought for Class 3, now bought for the one
+   * credential every worker carries and none requested.
+   *
+   * ONE `if` producing BOTH effects, and that is a structural requirement
+   * rather than a tidiness preference. The pointer and the file are the two
+   * halves of one delivery; two conditions that merely agree today would
+   * eventually not, and the failure is silent in the usual direction — the
+   * pointer would look perfectly correct and the file behind it would not be
+   * there. `materialize.ts` re-checks the same join at the argv boundary,
+   * because this `if` cannot see whether the mount was emitted.
+   *
+   * Written even when empty is NOT an option — see `missingApiKey` — so a
+   * keyless fleet gets NEITHER the file NOR the pointer, rather than a pointer
+   * to an empty file. The entrypoint's `[ -n "${…:-}" ]` guard then behaves
+   * identically to a genuinely unset variable, which is what the old
+   * omit-rather-than-blank rule bought and is not given up here.
+   *
+   * NOT pushed onto `secretNames`. That list is what the OPERATOR granted, and
+   * the key is fleet-assigned material no worker requested (ISC-422); the
+   * `redactable` block below states the same split at length.
+   */
+  if (deliversApiKey) {
+    vars[LLM_API_KEY_FILE_VAR] = secretContainerPath(apiKeyEnvName);
+    secretFiles.push({ name: apiKeyEnvName, value: apiKey });
+  }
 
   /*
    * Class 2 — POINTERS ONLY, and only for a worker that opted in.
@@ -788,7 +896,8 @@ export function buildWorkerEnv(
   const allowlist = secretGrantNames(loaded.config.secrets.env_allowlist);
   const notCredentials = new Set(nonCredentialSecretNames(loaded.config.secrets.env_allowlist));
   const secretNames: string[] = [];
-  const secretFiles: SecretFile[] = [];
+  // `secretFiles` is declared at the top of this function and may ALREADY hold
+  // the Class 1 key — see the D8 block above. The grants below append to it.
   const missing: string[] = [];
   for (const requested of w.secrets) {
     // Dedupe silently: `secrets: [X, X]` is a typo with one obvious meaning,
@@ -858,16 +967,30 @@ export function buildWorkerEnv(
    * is a Class 1 credential (§12.4) that no worker requested and every worker
    * carries, so it belongs on the second list and would be a lie on the first.
    *
-   * Absent from `vars` when the host had no key — see `missingApiKey`, which
-   * is why the key is omitted entirely rather than written blank — so the
-   * membership test is over `vars`, not over `apiKeyEnvName` being a string.
+   * THE MEMBERSHIP TEST MOVED WITH THE DELIVERY, and getting this wrong would
+   * have been silent. It read `apiKeyEnvName in vars`, which was a correct
+   * proxy for "the key was delivered" only while the key WAS a variable. Under
+   * D8 it never is, so left alone it would have evaluated false on every run
+   * and dropped the provider key off the redaction list — the redactor would
+   * report itself armed for the grants and scrub nothing for the credential
+   * that matters most. That is `SECRET_NAMES_VAR`'s own predicted failure
+   * ("arms the redactor against a rotated value and reports itself as armed
+   * while scrubbing nothing") arriving through the change that was supposed to
+   * harden the same key. The test is now over the DELIVERY DECISION itself.
+   *
+   * The redactor still resolves this name to a value, and it resolves it
+   * BETTER than before: `security/secret-values.ts` reads `<secretsDir>/<name>`
+   * first and the env file only as a fallback, and the key now HAS a file in
+   * the store under exactly this name. It used to be resolvable only through
+   * that fallback, which is the path kept for run directories written by older
+   * versions of this CLI.
    */
-  const redactable = [...(apiKeyEnvName in vars ? [apiKeyEnvName] : []), ...secretNames];
+  const redactable = [...(deliversApiKey ? [apiKeyEnvName] : []), ...secretNames];
   vars[SECRET_NAMES_VAR] = redactable.join(",");
 
   return {
     vars,
-    missingApiKey: apiKey === undefined || apiKey === "",
+    missingApiKey: !deliversApiKey,
     apiKeyEnvName,
     secretNames,
     secretFiles,

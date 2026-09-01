@@ -39,6 +39,7 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { TASK_POLICY_MOUNT } from "../../src/run/task-policy.ts";
+import { SECRETS_MOUNT } from "../../src/run/worker-env.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
 import { BudgetStateSchema, EXIT, type LedgerRecord } from "../../src/contracts.ts";
 import { runPaths, workerBranch, workerPaths } from "../../src/run/paths.ts";
@@ -2681,6 +2682,19 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // gate holds its provenance file to the allow file's integrity bar, so a
     // writable one refuses every verb rather than yielding a forgeable ledger.
     [TASK_POLICY_MOUNT]: { directory: false, mode: 0o444 },
+    /*
+     * The secret store, present for EVERY worker since D8 — this rig's workers
+     * request no `secrets:` and still carry it, because the Class 1 provider
+     * key is delivered as a 0444 file in it and no worker requests that.
+     *
+     * 0755 on the DIRECTORY and not 0700: the mounted inode's own mode is the
+     * only one the container consults and it needs the execute bit to traverse
+     * to the files below. What 0700 was reaching for is bought one level up
+     * instead — `materialize.ts` tightens `<run>/workers/<id>` itself — which
+     * costs the container nothing because it enters at the mountpoint in its
+     * own namespace rather than walking the host chain.
+     */
+    [SECRETS_MOUNT]: { directory: true, mode: 0o755 },
     [BRIEFING_MOUNT]: { directory: false, mode: 0o644 },
     "/home/pi/.kube/config": { directory: false, mode: 0o644 },
   };

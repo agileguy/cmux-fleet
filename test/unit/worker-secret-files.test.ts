@@ -303,14 +303,32 @@ describe("ISC-340: the mount is read-only", () => {
   });
 
   /**
-   * A worker that asked for nothing gets NO mount, rather than an empty
-   * directory. A mount emitted unconditionally is one nobody notices has
-   * stopped tracking the thing it exists for.
+   * INVERTED BY D8, and the old assertion is recorded here because a silent
+   * flip would be indistinguishable from a regression.
+   *
+   * This read `a worker with no secrets: gets no mount at all`, on the rule
+   * that "a mount emitted unconditionally is one nobody notices has stopped
+   * tracking the thing it exists for". That rule was sound while `/secrets`
+   * meant WHAT THE OPERATOR GRANTED. §6.6 changed what it means: the Class 1
+   * provider key is now delivered as a 0444 file in this store, and NO worker
+   * requests it — `w.secrets` is empty for most workers that hold one. Under
+   * the old gate such a worker got a well-formed `PIFLEET_LLM_API_KEY_FILE`
+   * pointing into a directory that was never written and never mounted, which
+   * is the quiet failure §6.6 exists to remove.
+   *
+   * ISC-340's FIRST clause is untouched and is still probed by the two tests
+   * above: the mount is `:ro`, at the fixed container path, built from
+   * `workerPaths().secretsDir`. Only its second clause is superseded.
    */
-  test("a worker with no secrets: gets no mount at all", async () => {
+  test("a worker with no secrets: still gets the store, because it holds the Class 1 key", async () => {
     const loaded = await loadConfig(EXAMPLE);
     const rendered = await renderWorker(loaded, "eng-1", { runId: "secfiles-run" });
-    expect(rendered.docker.filter((a) => a.includes(SECRETS_MOUNT))).toEqual([]);
+    const secretsDir = workerPaths(runPaths("secfiles-run"), "eng-1").secretsDir;
+    // Present, and read-only — not merely present. A worker that requested no
+    // grant must not get a weaker mount than one that did.
+    expect(rendered.docker.filter((a) => a.includes(SECRETS_MOUNT))).toEqual([
+      `${secretsDir}:${SECRETS_MOUNT}:ro`,
+    ]);
   });
 });
 

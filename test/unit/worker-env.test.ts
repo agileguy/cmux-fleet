@@ -16,6 +16,8 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import { parseConfig, resolveWorker, ConfigError } from "../../src/config/load.ts";
 import {
+  LLM_API_KEY_FILE_VAR,
+  SECRETS_MOUNT,
   buildWorkerEnv,
   serializeEnvFile,
   writeWorkerEnvFile,
@@ -262,11 +264,47 @@ describe("the --env-file contract with docker/entrypoint.sh", () => {
     expect(serializeEnvFile(plan.vars)).not.toContain("OMLX_API_KEY=");
   });
 
-  test("a present key is carried, under the configured name", async () => {
+  /**
+   * REWRITTEN FOR D8, and the old assertion is quoted here because its
+   * inversion is the point rather than a detail.
+   *
+   * It read `expect(plan.vars["MY_KEY"]).toBe("s3cret")` — the key delivered as
+   * an environment VALUE under the operator's chosen name. §6.6 keeps the rule
+   * and changes the delivery: the value goes to a 0444 file in the worker's
+   * secret store and the environment receives a fleet-owned pointer. So the
+   * same fixture now asserts the opposite about `vars` and asserts the delivery
+   * happened somewhere else, rather than simply dropping the old line — a test
+   * that only stopped checking would be indistinguishable from a key that
+   * stopped being delivered at all.
+   */
+  test("a present key is delivered as a FILE, never as an environment value", async () => {
     const loaded = await load(baseDoc({ llm: { model: "TestModel", api_key_env: "MY_KEY" } }));
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), { MY_KEY: "s3cret" });
     expect(plan.missingApiKey).toBe(false);
-    expect(plan.vars["MY_KEY"]).toBe("s3cret");
+    // The operator's name no longer carries anything in the environment.
+    expect(Object.keys(plan.vars)).not.toContain("MY_KEY");
+    // The fleet-owned pointer carries the container path, and only the path.
+    expect(plan.vars[LLM_API_KEY_FILE_VAR]).toBe(`${SECRETS_MOUNT}/MY_KEY`);
+    // And the value is on the one field that may hold one, under the
+    // operator's name — which is what keeps the log redactor able to see it.
+    expect(plan.secretFiles).toEqual([{ name: "MY_KEY", value: "s3cret" }]);
+  });
+
+  /**
+   * The keyless fleet gets NEITHER half, and this pins the pairing rather than
+   * either half alone.
+   *
+   * A pointer written without a file is the ENOENT-inside-the-first-call shape
+   * §5.9 describes; a file written without a pointer is a credential on disk
+   * nothing reads. Both are produced by one `if` in `buildWorkerEnv`, and this
+   * is the probe that would notice if they were ever split into two.
+   */
+  test("an absent key produces neither the pointer nor the file", async () => {
+    const loaded = await load(baseDoc({ llm: { model: "TestModel", api_key_env: "MY_KEY" } }));
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    expect(plan.missingApiKey).toBe(true);
+    expect(Object.keys(plan.vars)).not.toContain(LLM_API_KEY_FILE_VAR);
+    expect(plan.secretFiles).toEqual([]);
   });
 });
 
