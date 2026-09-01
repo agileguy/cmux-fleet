@@ -80,19 +80,21 @@ async function expectIssue(doc: unknown, path: string, messageFragment?: string)
 // ---------------------------------------------------------------------------
 
 describe("worked example", () => {
-  // ISC-67: all six SRD roles load from the shipped default config.
+  // ISC-67: all seven shipped roles load from the shipped default config.
+  // observer replaces investigator (SRD-OBSERVER-001 D2) — ISC-391.
   test("fleet.example.yaml loads with all seven shipped roles", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
     expect(Object.keys(loaded.config.roles).sort()).toEqual(
-      ["engineer", "investigator", "reviewer", "sre", "tester", "ticketing", "verifier"].sort(),
+      ["engineer", "observer", "reviewer", "sre", "tester", "ticketing", "verifier"].sort(),
     );
-    expect(loaded.config.workers).toHaveLength(7);
+    expect(loaded.config.workers).toHaveLength(8);
     // Every worker resolves without error.
     const resolved = resolveAllWorkers(loaded);
     expect(resolved.map((w) => w.id)).toEqual([
       "sre-1",
       "sre-2",
-      "inv-1",
+      "obs-1",
+      "obs-2",
       "ver-1",
       "eng-1",
       "rev-1",

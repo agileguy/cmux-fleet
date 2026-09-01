@@ -986,3 +986,137 @@ export const FleetConfigSchema = z
   });
 
 export type FleetConfig = z.infer<typeof FleetConfigSchema>;
+
+// ---------------------------------------------------------------------------
+// Config warnings (SRD-OBSERVER-001 §6.2, §6.6) — deliberately NOT `superRefine`
+// ---------------------------------------------------------------------------
+//
+// Every issue above this point fails `.safeParse`. These two do not, and that
+// is the finding rather than an oversight: both name a document a real fleet
+// must stay free to run. `sre` ships with `cloud_access: true` and no
+// `cloud:` block in THIS file — refusing that would refuse the shipped
+// default. `pane_mode: tui` on `observer` is a choice an operator can make on
+// purpose — `scripts/operations` reads `resolveWorker(loaded, agent).paneMode
+// === "tui"` to decide whether its console owns a pane for exactly this role
+// — so a schema that refused it would make that console unbuildable. What
+// must not stay silent is the MECHANISM each one gives up, so both compute
+// text a caller prints, on `cli/commands/up.ts`'s `unattendedTuiWarning`
+// pattern, rather than an issue this schema could add.
+
+/**
+ * Resolve one `RoleFields` key through `defaults <- role <- worker`.
+ *
+ * A second copy of `config/load.ts`'s `pick`, not a shared import: `load.ts`
+ * imports FROM this module, and a function down here reaching back up for one
+ * three-line helper would be the drifting-copy shape this file's own header
+ * warns cross-field rules into `superRefine` to avoid. Three lines kept
+ * identical by inspection cost less than the cycle.
+ */
+function pickRoleField<K extends keyof RoleFields>(
+  worker: RoleFields,
+  role: RoleFields,
+  defaults: RoleFields,
+  key: K,
+): RoleFields[K] {
+  if (worker[key] !== undefined) return worker[key];
+  if (role[key] !== undefined) return role[key];
+  return defaults[key];
+}
+
+/**
+ * Worker ids resolving `cloud_access: true` while `cloud.kubeconfig` is unset
+ * (§6.6).
+ *
+ * §6.6 calls the filtered kubeconfig this role's SCOPE FENCE: the mount
+ * bounds which clusters a worker holding `bash` and a Google identity can
+ * reach, composing with the credential's own IAM scope rather than replacing
+ * it (§6.3). Its absence is not a missing convenience — `cloud.kubeconfig:
+ * null` mounts nothing, so `kubectl` falls through to whatever default
+ * config the image happens to carry, and a worker asked about one
+ * environment ends up holding every context the operator has ever
+ * authenticated against.
+ *
+ * Resolved at the WORKER, not the role block, for the reason `paneModeIssues`
+ * above is: a worker-level override can complete a grant the role left
+ * unset, and a check that only read `roles:` would miss it.
+ */
+export function workersMissingKubeconfig(cfg: FleetConfig): string[] {
+  if (cfg.cloud.kubeconfig !== null) return [];
+  const out: string[] = [];
+  for (const w of cfg.workers) {
+    const role = cfg.roles[w.role];
+    if (!role) continue; // an unknown role is already a superRefine issue
+    if (pickRoleField(w, role, cfg.defaults, "cloud_access") ?? false) out.push(w.id);
+  }
+  return out;
+}
+
+/**
+ * The warning `workersMissingKubeconfig` renders, or `null` when there is
+ * nothing to say.
+ *
+ * Names what is GIVEN UP rather than restating the config, on
+ * `unattendedTuiWarning`'s precedent — "warning: no kubeconfig set" sends an
+ * operator to re-read §6.6 to find out why that matters, and this sentence is
+ * the finding itself.
+ */
+export function kubeconfigScopeWarning(workerIds: readonly string[]): string | null {
+  if (workerIds.length === 0) return null;
+  const n = workerIds.length;
+  return (
+    `warning: ${n} worker(s) resolve cloud_access: true with cloud.kubeconfig unset ` +
+    `(${workerIds.join(", ")})\n` +
+    `  cloud.kubeconfig is this fleet's scope fence (SRD-OBSERVER-001 §6.6): unset, a worker ` +
+    `holding bash and a Google identity falls through to whatever kubeconfig the image happens ` +
+    `to carry, rather than a copy filtered to the contexts this fleet's tasks actually name — ` +
+    `the gap between a worker scoped to one environment and one holding every context the ` +
+    `operator has ever authenticated against. Set cloud.kubeconfig to a filtered copy, or accept ` +
+    `that these workers can reach every context it would otherwise exclude.\n`
+  );
+}
+
+/**
+ * Worker ids whose resolved role is literally `observer` and whose resolved
+ * `pane_mode` is `tui` (§6.2, §7.5).
+ *
+ * Keyed to the role's NAME rather than to a property this schema can derive,
+ * because the hazard is a fact about what the `observer-ops` skill DOES —
+ * repeatedly re-dispatching a near-identical watch task (§7.5) — and nothing
+ * in a `RoleFields` object says that. A fleet is free to name its read-only
+ * diagnostic role something else and accept a different risk profile; this
+ * only watches the name the shipped role actually uses.
+ */
+export function observerTuiWorkers(cfg: FleetConfig): string[] {
+  const out: string[] = [];
+  for (const w of cfg.workers) {
+    if (w.role !== "observer") continue;
+    const role = cfg.roles[w.role];
+    if (!role) continue;
+    const mode = pickRoleField(w, role, cfg.defaults, "pane_mode") ?? "rpc";
+    if (mode === "tui") out.push(w.id);
+  }
+  return out;
+}
+
+/**
+ * The warning `observerTuiWorkers` renders, or `null`.
+ *
+ * NOT a refusal — a fleet may deliberately want this pane visible, and
+ * `scripts/operations` already reads `paneMode === "tui"` to decide whether
+ * to attach one for exactly this role. What must not stay silent is the
+ * mechanism: `tui` allocates no epoch, so there is no `already_completed`
+ * fence, and a re-dispatched pass runs the same task twice. An observer
+ * watch is BUILT on repeated dispatch of near-identical tasks (§7.5), which
+ * makes this the one role least able to afford that gap.
+ */
+export function observerTuiEpochWarning(workerIds: readonly string[]): string | null {
+  if (workerIds.length === 0) return null;
+  const n = workerIds.length;
+  return (
+    `warning: ${n} observer worker(s) resolve pane_mode: tui (${workerIds.join(", ")})\n` +
+    `  tui allocates no epoch (SRD-OBSERVER-001 §6.2): there is no already_completed fence, so ` +
+    `a re-dispatched pass runs the same task twice. An observer watch is built on repeated ` +
+    `dispatch of near-identical tasks (§7.5), which makes this the role least able to afford ` +
+    `it. Set pane_mode: rpc unless a person is deliberately driving this pane by hand.\n`
+  );
+}

@@ -2,6 +2,12 @@ import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
 import { ConfigValidationError, loadConfig } from "../../config/load.ts";
+import {
+  kubeconfigScopeWarning,
+  observerTuiEpochWarning,
+  observerTuiWorkers,
+  workersMissingKubeconfig,
+} from "../../config/schema.ts";
 
 /**
  * Register `pifleet config` (SRD §10).
@@ -22,11 +28,19 @@ export function register(program: Command): void {
       }
       try {
         const loaded = await loadConfig(opts.config);
+        // Non-fatal (SRD-OBSERVER-001 §6.2, §6.6) — a document that trips
+        // these still validates; see `schema.ts` for why each is a warning
+        // and not a refusal.
+        const warnings = [
+          kubeconfigScopeWarning(workersMissingKubeconfig(loaded.config)),
+          observerTuiEpochWarning(observerTuiWorkers(loaded.config)),
+        ].filter((w): w is string => w !== null);
         const summary = {
           valid: true,
           path: loaded.path,
           roles: Object.keys(loaded.config.roles),
           workers: loaded.config.workers.map((w) => w.id),
+          warnings,
         };
         if (opts.json) {
           console.log(JSON.stringify(summary, null, 2));
@@ -35,6 +49,9 @@ export function register(program: Command): void {
           console.log(`  roles:   ${summary.roles.join(", ")}`);
           console.log(`  workers: ${summary.workers.join(", ")}`);
         }
+        // Stderr regardless of --json, on `unattendedTuiWarning`'s precedent:
+        // the JSON stream on stdout stays one object either way.
+        for (const w of warnings) process.stderr.write(w);
       } catch (err) {
         if (err instanceof ConfigValidationError) {
           if (opts.json) {

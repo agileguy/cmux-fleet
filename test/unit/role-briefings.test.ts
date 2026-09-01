@@ -46,7 +46,7 @@ describe("the shipped example names only things that exist", () => {
     // removing every briefing path — or renaming the key — goes red here.
     expect(checked.sort()).toEqual([
       "engineer",
-      "investigator",
+      "observer",
       "reviewer",
       "sre",
       "tester",
