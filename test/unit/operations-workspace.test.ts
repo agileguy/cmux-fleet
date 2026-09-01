@@ -268,8 +268,10 @@ describe("creating the workspace", () => {
     // named "tick-1" by hand and went stale the moment the default moved,
     // which is the same second-copy defect that let the console bring up one
     // worker while resolving its pane mode from another.
-    expect(commands[0]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS.join(",")}'`);
-    expect(commands[1]).toContain(`'--worker' '${DEFAULT_OPERATIONS_WORKERS[1]}'`);
+    // One worker per agent pane, each with its own `up` — two attended panes
+    // are two runs, because --attach-here hands over one process's terminal.
+    expect(commands[0]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[0]}'`);
+    expect(commands[1]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[1]}'`);
     expect(commands[2]).toContain("'status'");
     expect(commands[3]).toContain(`-C '${CWD}'`);
   });

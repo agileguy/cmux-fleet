@@ -92,28 +92,31 @@ async function main(argv: string[]): Promise<number> {
    * moved is worse than one that opens with a log tail — but an operator who
    * expected a TUI needs to know why they got a viewer.
    */
-  let attachHere = false;
+  let tuiWorkers: string[] = [];
   try {
     const loaded = await loadConfig(opts.configPath ?? `${repoRoot}/fleet.yaml`);
-    // DEFAULT_OPERATIONS_WORKERS, never a second literal. `operationsPanes`
-    // falls back to that same list when `--workers` is absent, so a
-    // hardcoded id here decides pane 1's MODE from one worker while its
-    // COMMAND targets another. That is not hypothetical: this line read
-    // "tick-1" while the plan had moved to obs-1, so the console asked for
-    // obs-1 and then rendered it as a log tail because tick-1 is rpc.
-    const agent = (opts.workers ?? DEFAULT_OPERATIONS_WORKERS)[0]!;
-    attachHere = resolveWorker(loaded, agent).paneMode === "tui";
+    // EVERY console worker, not just the first. Each agent pane runs its own
+    // `up` and attaches its own terminal, so each one's pane_mode has to be
+    // resolved separately — a single answer taken from workers[0] would decide
+    // one pane's mode from another pane's worker. That is not hypothetical:
+    // this read a hardcoded "tick-1" while the plan had moved to obs-1, so the
+    // console brought up obs-1 and rendered it as a log tail.
+    //
+    // DEFAULT_OPERATIONS_WORKERS, never a second literal: `operationsPanes`
+    // falls back to that same list when `--workers` is absent.
+    const set = opts.workers ?? DEFAULT_OPERATIONS_WORKERS;
+    tuiWorkers = set.filter((w) => resolveWorker(loaded, w).paneMode === "tui");
   } catch (err) {
     process.stderr.write(
       `operations: could not read pane_mode from the config ` +
-        `(${err instanceof Error ? err.message : String(err)}); pane 1 will tail the log\n`,
+        `(${err instanceof Error ? err.message : String(err)}); the agent panes will tail their logs\n`,
     );
   }
 
   // Built before the cmux probe on purpose: a bad `--workers` or `--poll` is
   // an argv mistake, and diagnosing it must not depend on whether the GUI
   // happens to be running.
-  const panes = operationsPanes({ ...opts, attachHere });
+  const panes = operationsPanes({ ...opts, tuiWorkers });
 
   if (argv.includes("--dry-run")) {
     process.stdout.write(`workspace: ${OPERATIONS_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
@@ -143,10 +146,14 @@ async function main(argv: string[]): Promise<number> {
    * point of the default path is that a second `operations` changes nothing.
    */
   if (argv.includes("--recreate")) {
-    const runId = (await runOutput(repoRoot, ["status", "--json"]))
-      .match(/"run_id":"([^"]+)"/)?.[1];
-    if (runId !== undefined) {
-      process.stderr.write(`operations: stopping the previous run ${runId} before rebuilding\n`);
+    // EVERY live run, not the newest. The console stands up one run per
+    // attended pane, so stopping only the most recent leaves the other pane's
+    // containers behind — the leak this exists to close, halved.
+    const ids = [
+      ...(await runOutput(repoRoot, ["status", "--all", "--json"])).matchAll(/"run_id":"([^"]+)"/g),
+    ].map((m) => m[1]!);
+    for (const runId of ids) {
+      process.stderr.write(`operations: stopping run ${runId} before rebuilding\n`);
       // Best effort. A run that cannot be stopped is worth a line, not a
       // refusal to open the console the operator asked for.
       await runOutput(repoRoot, ["down", "--run", runId]);
@@ -169,7 +176,7 @@ async function main(argv: string[]): Promise<number> {
   // older version of this script, is adopted forever and reported as "already
   // in place — changed nothing", which is true and useless.
   const recreate = argv.includes("--recreate");
-  const result = await ensureOperations(client, { ...opts, attachHere }, recreate);
+  const result = await ensureOperations(client, { ...opts, tuiWorkers }, recreate);
   process.stdout.write(
     result.created
       ? `operations: ${recreate ? "rebuilt" : "created"} workspace ${result.workspaceId} ` +

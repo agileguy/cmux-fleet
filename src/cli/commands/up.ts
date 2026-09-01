@@ -558,9 +558,13 @@ export function register(program: Command): void {
       "--attach-here",
       "hand THIS terminal to the run's single pane_mode: tui worker (headless backend only)",
     )
+    .option(
+      "--attach-clear",
+      "with --attach-here, clear the screen at handover so only the agent remains",
+    )
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean; attachHere?: boolean }) => {
+    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean; attachHere?: boolean; attachClear?: boolean }) => {
       /**
        * `--backend` carries NO commander default any more (ISC-271, and the
        * same shape as ISC-61 one option up).
@@ -2233,6 +2237,22 @@ export function register(program: Command): void {
           `\nattaching this terminal to ${workerId} — detach with ${DETACH_KEYS} ` +
             `(the worker keeps running; ${wp.dir} holds its record)\n`,
         );
+        /*
+         * `--attach-clear` wipes the screen in the instant between that notice
+         * and the handover, so what the operator ends up looking at is Pi and
+         * nothing else.
+         *
+         * OPT-IN, not the default. At a command line every line above is worth
+         * having — which image was verified, which secrets were granted by
+         * name, where the record lives, and the detach keys. In a standing
+         * console pane it is a banner scrolled past once and then carried
+         * above the agent for the life of the pane. The flag lets the two
+         * cases differ without either losing what it needs.
+         *
+         * Erase display, erase SCROLLBACK (3J — without it the banner is still
+         * one scroll away), then home the cursor.
+         */
+        if (opts.attachClear === true) process.stdout.write("\u001b[2J\u001b[3J\u001b[H");
         const child = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
         const code = await child.exited;
         /*

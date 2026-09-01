@@ -177,17 +177,24 @@ export interface OperationsPlanOptions {
   /** `up --backend`. `headless` because the fleet must not open panes of its own. */
   readonly backend?: string;
   /**
-   * Pane 1 hands ITSELF to the agent, rather than tailing its log.
+   * Which of `workers` resolve to `pane_mode: tui`, and so want Pi's own
+   * interface in their pane rather than a rendered tail of their log.
    *
-   * Set when the console's agent worker resolves to `pane_mode: tui`. The two
-   * settings look contradictory and are not: `--backend headless` says pifleet
-   * must not open windows under the console, and `--attach-here` says the
-   * window it must not open already exists — this pane. `up`'s own guards
-   * enforce the rest (exactly one tui worker, a real terminal), so a plan that
-   * sets this on a run that cannot support it produces a refusal naming the
-   * reason rather than a pane that quietly does the wrong thing.
+   * A SET, not a boolean, because each agent pane runs its OWN `up`.
+   * `--attach-here` hands over the terminal of the process that runs it, and
+   * one process has one terminal — `attended/adopt.ts` refuses with "can hand
+   * over ONE terminal and this run has N tui workers". Two attended panes are
+   * therefore two `up` invocations and two runs; no arrangement of a single run
+   * gives two people two keyboards.
+   *
+   * `--backend headless` and `--attach-here` look contradictory and are not:
+   * headless says pifleet must not open windows under the console, and
+   * attach-here says the window it must not open already exists — this pane.
+   * `up`'s own guards enforce the rest, so a plan that sets this on a run that
+   * cannot support it produces a refusal naming the reason rather than a pane
+   * that quietly does the wrong thing.
    */
-  readonly attachHere?: boolean;
+  readonly tuiWorkers?: readonly string[];
   /** Git pane refresh interval. */
   readonly gitPollSeconds?: number;
 }
@@ -246,17 +253,28 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
     throw new Error(`operations: refusing git poll interval ${String(poll)} — must be a positive whole number of seconds`);
   }
 
-  const attachHere = opts.attachHere ?? false;
-  const up = pifleetCommand(repoRoot, [
-    "up",
-    "--workers",
-    workers.join(","),
-    "--backend",
-    backend,
-    "--config",
-    configPath,
-    ...(attachHere ? ["--attach-here"] : []),
-  ]);
+  const tuiWorkers = new Set(opts.tuiWorkers ?? []);
+  /*
+   * ONE `up` PER AGENT PANE, each naming only its own worker.
+   *
+   * A single `up` naming both cannot attach both — see `tuiWorkers` above. Two
+   * attended panes are two runs, which is why `status` grew `--all` and why
+   * `--recreate` stops every live run rather than only the newest.
+   */
+  const upFor = (worker: string): string =>
+    pifleetCommand(repoRoot, [
+      "up",
+      "--workers",
+      worker,
+      "--backend",
+      backend,
+      "--config",
+      configPath,
+      // `--attach-clear` rides with `--attach-here` and never alone. At a
+      // command line `up`'s report is worth reading; in a standing pane it is
+      // a banner carried above the agent for the life of the console.
+      ...(tuiWorkers.has(worker) ? ["--attach-here", "--attach-clear"] : []),
+    ]);
   const status = statusWatchCommand(repoRoot, poll);
   /*
    * The AGENT half of pane 1. `workers[0]` — the pane shows one worker, and
@@ -265,68 +283,40 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
    * there is already one of those below.
    */
   const agent = workers[0]!;
-  const viewer = pifleetCommand(repoRoot, ["logs", "--worker", agent, "--follow", "--render"]);
-  const shell = pifleetCommand(repoRoot, ["shell", "--worker", agent]);
+
+  /*
+   * Each agent pane's own three-stage ladder. `up` for its worker, then the
+   * rendered viewer, then a shell inside its container.
+   *
+   * NO `--run` PINNING on the fallbacks, and that is a knowing limit rather
+   * than an oversight. Each pane creates its own run, so "the most recent run"
+   * is genuinely ambiguous between two panes, and resolving the run that holds
+   * a given worker needs more JSON handling than belongs in shell text typed
+   * into a pane. The fallbacks are the FAILURE path — reached only when `up`
+   * has exited — and a wrong-run `logs` there fails loudly and drops to the
+   * shell rung, which is the behaviour the ladder is built for. The primary
+   * path, `up --attach-here`, is unambiguous: it attaches the run it just made.
+   */
+  const ladder = (worker: string): string =>
+    // `clear` first, for the LOGIN SHELL's own banner — "Last login: …" and
+    // "You have mail." come from the shell cmux spawns, before any of this
+    // runs, so `--attach-clear` cannot reach them and this cannot reach what
+    // `up` prints. Two sources, two fixes; removing either leaves half the
+    // banner on screen.
+    `clear ; ${upFor(worker)} ; ` +
+    `${pifleetCommand(repoRoot, ["logs", "--worker", worker, "--follow", "--render"])} ; ` +
+    `${pifleetCommand(repoRoot, ["shell", "--worker", worker])} ; exec $SHELL -i`;
 
   /*
    * The SECOND agent pane. `workers[1]` when there is one — the console shows
    * two agents side by side across the top, and this is the left-hand one.
    *
-   * It does not run `up`. Exactly one pane may, because `up` creates a run, and
-   * two panes each creating one would give two runs and two sets of containers
-   * for a console the operator thinks is one thing. So this pane WAITS for the
-   * run the observer pane is standing up, then tails its worker.
-   *
-   * The wait is the whole reason this is not just `viewer`. `logs` against a
-   * run that does not exist yet returns immediately, the pane falls straight
-   * through its fallbacks to a host shell, and the operator gets a dead pane
-   * next to a live one — with no error, because nothing failed. `up` takes
-   * upwards of twenty seconds on a cold image.
+   * It runs its OWN `up`, because that is the only way it can be Pi's interface
+   * rather than a tail: `--attach-here` hands over the terminal of the process
+   * that runs it. The cost is a second run, which `status --all` reports and
+   * `--recreate` tears down.
    */
   const second = workers[1];
-  /*
-   * Reading `status --json` with `sed`/`grep`, not `jq`: `jq` is not something
-   * a host is guaranteed to have, and a pane whose first command is `command
-   * not found` is a dead pane that looks configured.
-   */
-  const statusJson = `${pifleetCommand(repoRoot, ["status", "--json"])} 2>/dev/null`;
-  const runIdOf = `${statusJson} | sed -n 's/.*"run_id":"\\([^"]*\\)".*/\\1/p'`;
-  const secondPane = second === undefined
-    ? null
-    : {
-        /*
-         * Wait for the second worker to be ALIVE, not merely mentioned.
-         *
-         * "Wait until a run mentions tick-1" is the obvious condition and it is
-         * wrong twice over. A run's directory outlives the run, so `status`
-         * keeps reporting a torn-down run's workers — with `"alive":false,
-         * "phase":"dead"` — and the condition passes instantly against a
-         * corpse. `logs` then tails that run's finished log file, which never
-         * grows, and the pane reads as a hung worker.
-         *
-         * MEASURED, twice, from a live console: the ticketing pane sat showing
-         * events stamped three and then six minutes older than the run the
-         * console had just created, while the observer beside it was healthy.
-         *
-         * Liveness is also why this is not "wait for the run id to CHANGE",
-         * which was the first fix and can hang outright: if `up` finishes
-         * before this pane starts, the id it captured is already the new one
-         * and it waits forever for a further change that never comes. A worker
-         * being alive is true immediately in that case.
-         */
-        wait:
-          `until ${statusJson} | grep -q ${shellQuote([`"id":"${second}","alive":true`])}` +
-          ` ; do sleep 2 ; done ; r="$(${runIdOf})"`,
-        /*
-         * `--run "$r"` pins it. Without it `logs` re-resolves the most recent
-         * run on every invocation, so the pane could still drift onto a later
-         * run started by something else entirely.
-         */
-        viewer:
-          pifleetCommand(repoRoot, ["logs", "--worker", second, "--follow", "--render"]) +
-          ` --run "$r"`,
-        shell: pifleetCommand(repoRoot, ["shell", "--worker", second]) + ` --run "$r"`,
-      };
 
   return [
     {
@@ -372,7 +362,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
        * that has a hole where its console was. Measured on the first live run,
        * where `up` did refuse and the shell was what made the refusal readable.
        */
-      command: `${envPreamble()} ${up} ; ${viewer} ; ${shell} ; exec $SHELL -i`,
+      command: `${envPreamble()} ${ladder(agent)}`,
       // The initial surface: the whole workspace until something splits it.
       //
       // The OBSERVER holds it, not the ticketing pane on its left, and that is
@@ -383,19 +373,17 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       // the one that starts.
       split: null,
     },
-    ...(secondPane === null
+    ...(second === undefined
       ? []
       : [
           {
             title: "ticketing",
             /*
-             * WAIT, then the same viewer/shell ladder pane 1 uses, minus `up`.
-             * See `secondPane` above for why this pane does not stand the run
-             * up itself and why the wait is load-bearing rather than polite.
+             * The same three-stage ladder the observer pane uses, for this
+             * pane's own worker and its own run. See `second` above for why it
+             * runs its own `up` rather than sharing one.
              */
-            command:
-              `${envPreamble()} ${secondPane.wait} ; ${secondPane.viewer} ; ` +
-              `${secondPane.shell} ; exec $SHELL -i`,
+            command: `${envPreamble()} ${ladder(second)}`,
             // LEFT of the observer, which puts ticketing on the left of the top
             // row and leaves the observer on the right.
             split: "left" as const,
@@ -423,8 +411,8 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       //
       // With one agent pane there is no right column, so it falls back to the
       // previous pane and the old two-up bottom row is what comes out.
-      split: secondPane === null ? "right" : "down",
-      ...(secondPane === null ? {} : { splitFrom: 0 }),
+      split: second === undefined ? "right" : "down",
+      ...(second === undefined ? {} : { splitFrom: 0 }),
     },
   ];
 }
@@ -478,13 +466,37 @@ export function envPreamble(): string {
  * first still holds a long-running process whose output nobody re-reads, and
  * the second is not installed by default on macOS.
  */
+/**
+ * A poll loop that redraws ONLY when the output changed.
+ *
+ * `while :; do clear; cmd; sleep n; done` repaints every tick whether or not
+ * anything moved, and on a standing console that is a visible flash several
+ * times a minute against panes whose content is usually identical — the fleet
+ * is idle and the branch has not moved. The flash is also the only motion in
+ * the window, so it reads as activity when there is none.
+ *
+ * Capturing into a variable and comparing costs one thing worth naming: a
+ * command writing to a pipe rather than a terminal turns its colour off. Any
+ * caller that wants colour has to ask for it explicitly — see the git loop.
+ *
+ * `|| true` so a command that exits non-zero leaves the loop running. Without
+ * it the pane dies on the first refresh after a `down`, which is exactly when
+ * an operator looks at it.
+ */
+function redrawOnChange(body: string, pollSeconds: number): string {
+  return (
+    `prev=''; while :; do out="$(${body} 2>&1)" || true; ` +
+    `if [ "$out" != "$prev" ]; then clear; printf '%s\\n' "$out"; prev="$out"; fi; ` +
+    `sleep ${pollSeconds}; done`
+  );
+}
+
 export function statusWatchCommand(repoRoot: string, pollSeconds: number): string {
-  const status = pifleetCommand(repoRoot, ["status"]);
-  // `|| true` so a `status` that exits non-zero — no run yet, a run directory
-  // half-written — leaves the loop running. Without it the pane dies on the
-  // first refresh after a `down`, which is exactly when an operator looks at
-  // it. The message still prints; only the exit code is swallowed.
-  return `while :; do clear; ${status} || true; sleep ${pollSeconds}; done`;
+  // `--all`, because the console stands up one run per attached pane: a status
+  // pane showing only the newest would report half the console and look, to
+  // the operator, like the other half had died.
+  const status = pifleetCommand(repoRoot, ["status", "--all"]);
+  return redrawOnChange(status, pollSeconds);
 }
 
 /**
@@ -503,9 +515,14 @@ export function gitWatchCommand(watchDir: string, pollSeconds: number): string {
   // failure a screenshot cannot distinguish from success. `git -c core.pager=`
   // and `GIT_PAGER=cat` both work too; this is the shortest, and it survives a
   // user's `[pager]` config, which an unset environment variable does not.
-  const g = `git --no-pager -C ${shellQuote([watchDir])}`;
-  return (
-    `while :; do clear; ${g} status --short --branch; echo; ` +
-    `${g} log --oneline -10; sleep ${pollSeconds}; done`
+  //
+  // `-c color.ui=always` is required BECAUSE of the redraw-on-change loop: the
+  // output is captured into a variable to compare it, and git turns colour off
+  // when its stdout is not a terminal. Without this the flicker fix would
+  // silently take the branch and commit colouring with it.
+  const g = `git --no-pager -c color.ui=always -C ${shellQuote([watchDir])}`;
+  return redrawOnChange(
+    `${g} status --short --branch; echo; ${g} log --oneline -10`,
+    pollSeconds,
   );
 }

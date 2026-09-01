@@ -432,4 +432,9 @@ workers:
   # One, not two. A second concurrent writer against the same ticket system is
   # a way to interleave two workers' edits on one object, and nothing in the
   # fleet serialises them.
-  - {id: tick-1, role: ticketing}
+  # pane_mode: tui so the operations console's pane runs Pi's own interface
+  # rather than a rendered tail. Each attended pane runs its OWN `up`,
+  # because --attach-here hands over the terminal of the process that runs
+  # it and one process has one terminal — so two attended panes are two
+  # runs, which `status --all` reports and `--recreate` tears down.
+  - {id: tick-1, role: ticketing, pane_mode: tui}

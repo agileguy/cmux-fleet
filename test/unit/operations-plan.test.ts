@@ -110,16 +110,18 @@ describe("the pane set", () => {
 });
 
 describe("the observer pane", () => {
-  test("one `up` stands BOTH console workers up, and only one pane runs it", () => {
-    // The observer leads because workers[0] is both the attach target and the
-    // worker this pane shows. tick-1 rides along so the ticketing pane beside
-    // it has something to tail.
+  test("each agent pane runs its OWN `up`, naming only its own worker", () => {
+    // Two attended panes are two runs. `--attach-here` hands over the terminal
+    // of the process that runs it, and one process has one terminal:
+    // attended/adopt.ts refuses with "can hand over ONE terminal and this run
+    // has N tui workers". A single `up` naming both cannot attach both.
     expect(DEFAULT_OPERATIONS_WORKERS).toEqual(["obs-1", "tick-1"]);
-    expect(paneNamed("observer").command).toContain("'up' '--workers' 'obs-1,tick-1'");
-    // Exactly one, and this is the assertion that matters: `up` creates a RUN,
-    // so a second pane running it would give two runs and two sets of
-    // containers for a console the operator thinks is one thing.
-    expect(plan().filter((pane) => pane.command.includes("'up'")).length).toBe(1);
+    expect(paneNamed("observer").command).toContain("'up' '--workers' 'obs-1'");
+    expect(paneNamed("ticketing").command).toContain("'up' '--workers' 'tick-1'");
+    // And NEITHER names both — a combined set is the shape that cannot attach.
+    for (const t of ["observer", "ticketing"]) {
+      expect(paneNamed(t).command).not.toContain("'obs-1,tick-1'");
+    }
   });
 
   /**
@@ -131,32 +133,33 @@ describe("the observer pane", () => {
    * satisfy an assertion that only looked at the tui case.
    */
   /**
-   * The ticketing pane waits for its worker to be ALIVE, and then pins the run.
+   * Attachment is per pane, resolved from each worker's own `pane_mode`.
    *
-   * Both halves are load-bearing and both come from a live failure. A run's
-   * directory outlives the run, so `status` keeps reporting a torn-down run's
-   * workers as `"alive":false,"phase":"dead"` — a wait that only checked the
-   * worker was MENTIONED passed instantly against a corpse, and `logs` then
-   * tailed a finished log file that never grew. Twice, the pane sat showing
-   * events minutes older than the run the console had just created while the
-   * observer beside it was healthy.
-   *
-   * `--run "$r"` is the second half: without it `logs` re-resolves the most
-   * recent run on every invocation and can drift onto a later one.
+   * This replaced a wait-then-tail arrangement in which only one pane ran `up`
+   * and the other waited for that run. Two defects lived there and are worth
+   * keeping named: a run directory outlives its run, so `status` reports a
+   * torn-down run's workers as `"alive":false,"phase":"dead"` and a wait that
+   * only checked the worker was MENTIONED passed instantly against a corpse;
+   * and `logs` then tailed a finished log file that never grew, so the pane
+   * read as a hung worker while the pane beside it was healthy. Giving each
+   * pane its own `up` removes the wait, and with it both failures.
    */
-  test("the ticketing pane waits for a LIVE worker and pins the run it found", () => {
-    const cmd = paneNamed("ticketing").command;
-    const second = DEFAULT_OPERATIONS_WORKERS[1]!;
-    expect(cmd).toContain(`'"id":"${second}","alive":true'`);
-    expect(cmd).toContain('--run "$r"');
-    // Mentioning the worker is NOT the condition — that is the bug this
-    // replaced, and a wait that greps the bare id passes against a dead run.
-    expect(cmd).not.toContain(`grep -q '${second}'`);
+  test("only the workers that resolve to tui get --attach-here", () => {
+    expect(paneNamed("observer", { tuiWorkers: ["obs-1"] }).command).toContain("'--attach-here'");
+    expect(paneNamed("ticketing", { tuiWorkers: ["obs-1"] }).command).not.toContain(
+      "'--attach-here'",
+    );
+    expect(paneNamed("ticketing", { tuiWorkers: ["obs-1", "tick-1"] }).command).toContain(
+      "'--attach-here'",
+    );
+    // The empty set is asserted too: a plan ignoring the option entirely would
+    // satisfy an assertion that only ever looked at the attached case.
+    expect(paneNamed("observer", { tuiWorkers: [] }).command).not.toContain("'--attach-here'");
   });
 
   test("attachHere puts Pi's own interface in pane 1, and its absence does not", () => {
-    expect(paneNamed("observer", { attachHere: true }).command).toContain("'--attach-here'");
-    expect(paneNamed("observer", { attachHere: false }).command).not.toContain("'--attach-here'");
+    expect(paneNamed("observer", { tuiWorkers: DEFAULT_OPERATIONS_WORKERS }).command).toContain("'--attach-here'");
+    expect(paneNamed("observer", { tuiWorkers: [] }).command).not.toContain("'--attach-here'");
   });
 
   /**
@@ -218,8 +221,13 @@ describe("the observer pane", () => {
   test("takes a collection of workers, not just one", () => {
     // `up --workers` is a SET (ISC-61); the console has no business being
     // narrower than the command it drives.
+    // The set spreads ACROSS panes now, one worker each, rather than into one
+    // `--workers` list — that is what makes each pane separately attachable.
     expect(paneNamed("observer", { workers: ["tick-1", "sre-1"] }).command).toContain(
-      "'--workers' 'tick-1,sre-1'",
+      "'--workers' 'tick-1'",
+    );
+    expect(paneNamed("ticketing", { workers: ["tick-1", "sre-1"] }).command).toContain(
+      "'--workers' 'sre-1'",
     );
   });
 
@@ -303,8 +311,8 @@ describe("the fleet-status pane", () => {
     // once and exits, which closes the pane — the same defect as pane 1's, in a
     // place with no shell after it. What changed is HOW it keeps running.
     const cmd = paneNamed("fleet-status").command;
-    expect(cmd).toMatch(/^while :; do/);
-    expect(cmd).toContain("'status'");
+    expect(cmd).toMatch(/^prev=''; while :; do/);
+    expect(cmd).toContain("'status' '--all'");
   });
 
   test("CLEARS before each refresh — a standing pane is read at a glance", () => {
@@ -358,7 +366,7 @@ describe("the git-watch pane", () => {
 
   test("is a shell loop, because macOS has no watch(1)", () => {
     const cmd = paneNamed("git-watch").command;
-    expect(cmd).toMatch(/^while :; do/);
+    expect(cmd).toMatch(/^prev=''; while :; do/);
     // procps' `watch` is the obvious way to write this and fails on tick one
     // here with `command not found`, leaving a dead pane that looks configured.
     expect(cmd).not.toMatch(/\bwatch\b/);
@@ -368,13 +376,26 @@ describe("the git-watch pane", () => {
     const cmd = paneNamed("git-watch").command;
     expect(cmd).toContain("status --short --branch");
     expect(cmd).toContain("log --oneline -10");
-    // Clearing after printing leaves the pane blank between ticks, which reads
-    // as a hung console.
-    expect(cmd.indexOf("clear")).toBeLessThan(cmd.indexOf("status --short"));
+    /*
+     * `clear` is immediately followed by the print, with nothing between them.
+     *
+     * The original rule was "clear BEFORE running the command", because a loop
+     * that cleared after printing left the pane blank for the length of the
+     * command and read as a hung console. The redraw-on-change loop inverts the
+     * order — the command has to run before its output can be compared — and
+     * satisfies the original requirement a stronger way: the output is already
+     * in hand when `clear` fires, so the blank window is not shortened, it does
+     * not exist. That is what this asserts, rather than a position that no
+     * longer means what it used to.
+     */
+    expect(cmd).toContain(`clear; printf '%s\\n' "$out"`);
+    // And the command runs into a capture, not straight at the terminal —
+    // which is what makes an unchanged tick draw nothing at all.
+    expect(cmd).toMatch(/out="\$\(git/);
   });
 
   test("takes a poll interval and refuses a nonsensical one", () => {
-    expect(plan({ gitPollSeconds: 30 })[2]!.command).toContain("sleep 30");
+    expect(paneNamed("git-watch", { gitPollSeconds: 30 }).command).toContain("sleep 30");
     // A zero or fractional interval is a busy loop on the operator's machine.
     expect(() => plan({ gitPollSeconds: 0 })).toThrow(/positive whole number/);
     expect(() => plan({ gitPollSeconds: 1.5 })).toThrow(/positive whole number/);
