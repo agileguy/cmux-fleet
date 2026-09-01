@@ -25,7 +25,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { stringify } from "yaml";
-import { parseConfig } from "../../src/config/load.ts";
+import { parseConfig, resolveWorker } from "../../src/config/load.ts";
+import { buildWorkerEnv } from "../../src/run/worker-env.ts";
 import { resolvedProviders } from "../../src/cli/commands/up.ts";
 import {
   egressBridgePlan,
@@ -366,6 +367,81 @@ describe("ISC-410: a declared provider no worker resolves to creates nothing", (
     const plan = egressBridgePlan(loaded.config, NET, resolved);
     expect(plan.map((b) => b.provider)).toEqual(["omlx", "ollama-cloud"]);
     expect(JSON.stringify(plan)).not.toContain("spare-vendor");
+  });
+
+  /**
+   * ISC-410's ALIAS clause, followed all the way into a worker's environment.
+   *
+   * The criterion says an unused provider creates "no network, no relay and no
+   * alias", and the plan tests above cover the first two and the alias set. But
+   * `NO_PROXY` is a SECOND place a listen alias is written down, derived
+   * separately in `worker-env.ts`, and §6.5.5 calls that out by name: leaving it
+   * fleet-wide would put another provider's hostname into the environment of a
+   * worker with no route to it. Harmless for routing, and still a disclosure
+   * with no purpose — and exactly the "second derivation of a fact that now
+   * varies" shape that produced ISC-264 and ISC-369.
+   *
+   * A worker with `egress_access` is the only one that gets `NO_PROXY` at all,
+   * which is why the role carries it here.
+   */
+  test("no worker's NO_PROXY names a provider it does not resolve to", async () => {
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "noproxy-fleet",
+        docker: { pi_version: "0.79.6", network: NET },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: {
+          model: "gpt-oss",
+          provider: "omlx",
+          providers: {
+            omlx: {
+              hosted: false,
+              base_url: "http://omlx.house.test:8000/v1",
+              api_key_env: "OMLX_API_KEY",
+              relay_upstream: "192.168.86.49:8000",
+            },
+            "ollama-cloud": {
+              hosted: true,
+              base_url: "https://ollama.com/v1",
+              api_key_env: "OLLAMA_CLOUD_API_KEY",
+              relay_upstream: "104.18.0.1:443",
+            },
+            "spare-vendor": {
+              hosted: true,
+              base_url: "https://api.spare-vendor.test:9443/v1",
+              api_key_env: "SPARE_VENDOR_API_KEY",
+              relay_upstream: "203.0.113.7:9443",
+            },
+          },
+        },
+        roles: { reacher: { egress_access: true } },
+        workers: [
+          { id: "w-local", role: "reacher" },
+          { id: "w-cloud", role: "reacher", model: "ollama-cloud/gpt-oss" },
+        ],
+        egress: { allow: [{ host: "104.18.0.1", port: 443 }] },
+      }),
+      "/tmp/fleet.yaml",
+    );
+
+    const noProxyFor = (id: string) =>
+      buildWorkerEnv(loaded, resolveWorker(loaded, id), {}).vars["NO_PROXY"] ?? "";
+
+    const local = noProxyFor("w-local");
+    const cloud = noProxyFor("w-cloud");
+
+    // Each worker bypasses the proxy for ITS OWN provider's endpoint…
+    expect(local).toContain("omlx.house.test");
+    expect(cloud).toContain("ollama.com");
+    // …and for no other provider's, used or unused. The cross assertion is the
+    // one that distinguishes a per-provider derivation from a fleet-wide list:
+    // under the old fleet-wide spelling BOTH of these would name all three.
+    expect(local).not.toContain("ollama.com");
+    expect(cloud).not.toContain("omlx.house.test");
+    // The declared-but-unused provider reaches NEITHER environment.
+    expect(local).not.toContain("api.spare-vendor.test");
+    expect(cloud).not.toContain("api.spare-vendor.test");
   });
 });
 
