@@ -30,14 +30,19 @@ import { renderWorker } from "../../src/config/render.ts";
 import { buildWorkerEnv } from "../../src/run/worker-env.ts";
 import { resolvedProviders } from "../../src/cli/commands/up.ts";
 import {
+  assertProviderKey,
   egressBridgePlan,
+  providerKeyBudget,
   providerNetworkName,
   relayContainerName,
   relayListenAliases,
   relayViewForProvider,
   uplinkNetworkName,
+  RELAY_NAME_PREFIX,
   type FleetRelayConfigView,
 } from "../../src/security/relay.ts";
+import { assertDockerName } from "../../src/security/docker-names.ts";
+import { EXIT } from "../../src/contracts.ts";
 
 const NET = "pifleet-egress";
 
@@ -700,5 +705,184 @@ describe("a worker attaches to ITS provider's bridge, not the fleet's", () => {
     flat["workers"] = [{ id: "w-local", role: "plain" }];
     const loaded = await parseConfig(stringify(flat), "/tmp/fleet.yaml");
     expect(await networkOf(loaded, "w-local")).toBe(NET);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISC-412 — an over-long provider key is refused at `up` NAMING THE FIELD
+// ---------------------------------------------------------------------------
+
+/**
+ * The bound already existed. The DIAGNOSTIC did not, and that was the gap.
+ *
+ * `assertDockerName` has always enforced 128 characters and the composed relay
+ * name has always passed through it, so an enormous provider key was always
+ * refused. What came back was
+ *
+ *     egress: invalid docker container name "pifleet-egress-relay-pifleet-egress-aaaa…"
+ *
+ * — a string the operator never typed, from a module named for egress, with no
+ * mention of `llm.providers` in it. Every other value this codebase composes
+ * into a Docker name is one it derived itself, so naming the derived string was
+ * always equivalent to naming the input; a provider key is the first one where
+ * it is not (§6.5.2). These tests pin the MESSAGE, not the refusal — the
+ * refusal was never the thing that was missing.
+ *
+ * ## Why the boundary is asserted on BOTH sides
+ *
+ * A test that only checks "a 500-character key throws" passes against the old
+ * code, against a `128 - net - 1` budget, and against a budget of three. It
+ * cannot fail in the direction that matters. So the pair below straddles the
+ * exact edge: 92 characters is ACCEPTED and composes into a relay name of
+ * exactly 128, and 93 is REFUSED as "1 too long". Only a budget that reserves
+ * the relay prefix exactly puts the edge there.
+ */
+describe("ISC-412: an over-long provider key is refused naming llm.providers", () => {
+  /**
+   * The budget's arithmetic, written as the test rather than as a comment.
+   * Pinned literally, because a budget that recomputed itself from whatever the
+   * code currently does would agree with any bug.
+   */
+  test("the budget reserves the relay prefix, not just the network name", () => {
+    expect(RELAY_NAME_PREFIX.length).toBe(21);
+    expect(NET.length).toBe(14);
+    expect(providerKeyBudget(NET)).toBe(128 - 21 - 14 - 1);
+    expect(providerKeyBudget(NET)).toBe(92);
+    // The naive budget — the one that checks only the network name — is 21
+    // characters more generous, and every key in that gap is one this
+    // criterion exists to catch.
+    expect(providerKeyBudget(NET)).toBeLessThan(128 - NET.length - 1);
+  });
+
+  /**
+   * THE CONTROL. A key at exactly the budget composes into a relay name of
+   * exactly 128 and is accepted end to end.
+   *
+   * Without this, every assertion below is satisfied by a budget of zero —
+   * refuse everything and all the anti-tests pass. This is the half that goes
+   * red if the bound is tightened for no reason.
+   */
+  test("a key at exactly the budget is accepted, and its relay name is exactly 128", () => {
+    const key = "a".repeat(providerKeyBudget(NET));
+    const network = providerNetworkName(NET, key);
+    const relay = relayContainerName(network);
+    expect(relay.length).toBe(128);
+    // Docker's own validator agrees, so the accepted edge is a real limit
+    // rather than a number this test and the budget both invented.
+    expect(() => assertDockerName("container", relay)).not.toThrow();
+    expect(() => uplinkNetworkName(network)).not.toThrow();
+  });
+
+  /** THE ANTI, one character past the control. Same fleet, same network. */
+  test("one character past the budget is refused, and the message names the field", () => {
+    const key = "a".repeat(providerKeyBudget(NET) + 1);
+    let message = "";
+    try {
+      providerNetworkName(NET, key);
+      throw new Error("providerNetworkName accepted a key that overflows the relay name");
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    // THE CRITERION: the field, by name. Not the derived string.
+    expect(message).toContain("llm.providers.");
+    expect(message).toContain(key);
+    // By how much, so the operator does not binary-search their own key.
+    expect(message).toContain("1 too long");
+    expect(message).toContain(`at most ${providerKeyBudget(NET)} characters`);
+    // And the OLD message is gone — this is what a regression would restore.
+    expect(message).not.toContain("invalid docker network name");
+    expect(message).not.toContain("invalid docker container name");
+  });
+
+  /**
+   * THE GAP ITSELF, and the sharpest test in this block.
+   *
+   * A 93-character key composes into a NETWORK name of 108, which Docker
+   * accepts without complaint. Only the relay name — 21 characters longer —
+   * breaks the limit. A budget derived from the network name alone therefore
+   * lets this key straight through `providerNetworkName`, and it fails later in
+   * `relayContainerName`, talking about containers. This is the test that goes
+   * red for that mutation, and it is why the budget is a function of
+   * `RELAY_NAME_PREFIX`.
+   */
+  test("a key the NETWORK name would accept is still refused for the RELAY name", () => {
+    const key = "a".repeat(93);
+    // The premise, measured rather than assumed: this key really does fit a
+    // network name. If it did not, the assertion below would prove nothing.
+    expect(`${NET}-${key}`.length).toBeLessThanOrEqual(128);
+    expect(() => assertDockerName("network", `${NET}-${key}`)).not.toThrow();
+    // …and really does not fit the relay name.
+    expect(`${RELAY_NAME_PREFIX}${NET}-${key}`.length).toBeGreaterThan(128);
+    expect(() => providerNetworkName(NET, key)).toThrow(/llm\.providers\./);
+  });
+
+  /**
+   * The remedy names BOTH inputs, because the budget is a function of both. An
+   * operator whose key cannot get any shorter needs to be told that the
+   * fleet's `docker.network` is what left no room.
+   */
+  test("the refusal names docker.network too, since it spends the same budget", () => {
+    const key = "a".repeat(providerKeyBudget(NET) + 1);
+    let message = "";
+    try {
+      providerNetworkName(NET, key);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("docker.network");
+    expect(message).toContain(JSON.stringify(NET));
+    // A longer network name really does buy the key less room, so the network
+    // is named because it matters rather than decoratively.
+    expect(providerKeyBudget(`${NET}-longer`)).toBe(providerKeyBudget(NET) - 7);
+  });
+
+  /**
+   * A key Docker's GRAMMAR refuses is operator-chosen too, and the
+   * flag-injection hazard `docker-names.ts` exists to close is reported best by
+   * pointing at the config key that carries it.
+   */
+  test("a key that is not a legal Docker name is refused naming the field as well", () => {
+    for (const bad of ["--driver=host", "-leading-dash", "has space", ""]) {
+      let message = "";
+      try {
+        providerNetworkName(NET, bad);
+        throw new Error(`providerNetworkName accepted ${JSON.stringify(bad)}`);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toContain("llm.providers.");
+      expect(message).not.toContain("invalid docker network name");
+    }
+    // The grammar predicate is SHARED with `assertDockerName` rather than
+    // copied, so a key this refuses is one Docker's own validator refuses too.
+    expect(() => assertProviderKey(NET, "fine-key")).not.toThrow();
+  });
+
+  /**
+   * THE CRITERION'S OWN WORDING — "refused at `up`".
+   *
+   * `up` builds the plan inside a `try` whose `catch` raises `CliError(…,
+   * EXIT.USAGE)`. What has to be true here is that the refusal reaches that
+   * `catch` at all: thrown by `egressBridgePlan`, from a real fleet-shaped
+   * config, and not by something further down that only runs after the first
+   * daemon call has already created a network.
+   */
+  test("the refusal is thrown by egressBridgePlan, so `up` refuses before any daemon call", () => {
+    const cfg = threeProviders();
+    const providers = cfg.llm.providers as Record<
+      string,
+      { base_url: string; relay_upstream: string | null }
+    >;
+    const longKey = "a".repeat(providerKeyBudget(NET) + 1);
+    providers[longKey] = { base_url: "https://api.toolong.test/v1", relay_upstream: "198.51.100.9:443" };
+    expect(() => egressBridgePlan(cfg, NET, [longKey])).toThrow(/llm\.providers\./);
+    // "Exits non-zero" is half the probe, so assert the code rather than
+    // trusting the constant's name.
+    expect(EXIT.USAGE).toBeGreaterThan(0);
+    // Anti-vacuity: the same plan call over the same providers map SUCCEEDS for
+    // a key that fits, so the throw above is about the key's length and not
+    // about the fixture being malformed.
+    providers["fits"] = { base_url: "https://api.fits.test/v1", relay_upstream: "198.51.100.8:443" };
+    expect(() => egressBridgePlan(cfg, NET, ["fits"])).not.toThrow();
   });
 });

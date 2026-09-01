@@ -13,7 +13,19 @@
 
 /** Docker object-name grammar; also refuses a leading `-` becoming a flag. */
 const DOCKER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
-const MAX_DOCKER_NAME = 128;
+
+/**
+ * The bound, EXPORTED because a caller now has to budget against it.
+ *
+ * `relay.ts` composes an operator-chosen provider key into a name whose length
+ * it must bound BEFORE this function sees it — a key that overflows has to be
+ * refused naming `llm.providers.<key>`, not the derived string the operator
+ * never typed (ISC-412). That arithmetic needs the number, and a second copy
+ * of `128` in `relay.ts` is a number that can drift away from the one actually
+ * enforced here, which would make the good message describe a limit that is
+ * not the limit.
+ */
+export const MAX_DOCKER_NAME = 128;
 
 /**
  * Throws on a name that could not have come from a validated config.
@@ -23,8 +35,23 @@ const MAX_DOCKER_NAME = 128;
  * single function rather than carrying a second copy of the regex that could
  * be relaxed independently.
  */
+/**
+ * The GRAMMAR half alone, split out for a caller that reports it differently.
+ *
+ * `relay.ts` refuses a bad provider key naming `llm.providers.<key>` rather
+ * than the composed string (ISC-412), so it needs the same predicate without
+ * this module's message — and the alternative was a second copy of the regex
+ * in `relay.ts`, which is precisely the drift this module's header exists to
+ * prevent. The length bound is deliberately NOT folded in: the caller budgets
+ * against `MAX_DOCKER_NAME` for a longer composed string, so it must be able
+ * to ask about the grammar and the length separately.
+ */
+export function dockerNameGrammarOk(name: string): boolean {
+  return name.length > 0 && DOCKER_NAME_RE.test(name);
+}
+
 export function assertDockerName(kind: "network" | "container", name: string): void {
-  if (name.length === 0 || name.length > MAX_DOCKER_NAME || !DOCKER_NAME_RE.test(name)) {
+  if (!dockerNameGrammarOk(name) || name.length > MAX_DOCKER_NAME) {
     throw new Error(`egress: invalid docker ${kind} name ${JSON.stringify(name)}`);
   }
 }

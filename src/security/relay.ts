@@ -135,6 +135,7 @@ import {
   type EgressPolicy,
   type EgressRule,
 } from "./egress.ts";
+import { dockerNameGrammarOk, MAX_DOCKER_NAME } from "./docker-names.ts";
 import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
 
 /**
@@ -651,9 +652,103 @@ export function uplinkNetworkName(egressNetwork: string): string {
  */
 export function relayContainerName(egressNetwork: string): string {
   assertDockerName("network", egressNetwork);
-  const name = `pifleet-egress-relay-${egressNetwork}`;
+  const name = `${RELAY_NAME_PREFIX}${egressNetwork}`;
+  // Re-checked after composition, and under D7 this is the check that actually
+  // binds: `RELAY_NAME_PREFIX` is 21 characters, so the relay's name is the
+  // LONGEST string an operator-chosen provider key feeds. `providerKeyBudget`
+  // reserves exactly this much room so the refusal arrives with the field
+  // named; this stays as the backstop that proves the bound is real.
   assertDockerName("container", name);
   return name;
+}
+
+/**
+ * The relay container name's fixed prefix — a constant because a budget is
+ * computed from its LENGTH (ISC-412).
+ *
+ * Spelling it inline in `relayContainerName` and again as a `21` inside
+ * `providerKeyBudget` is two facts that must agree and nothing making them:
+ * renaming the prefix would silently move the real limit while the budget kept
+ * reserving room for the old one, and the fleet would go back to failing with
+ * the derived-string message this criterion exists to replace.
+ */
+export const RELAY_NAME_PREFIX = "pifleet-egress-relay-";
+
+/**
+ * The longest provider key this fleet's `docker.network` leaves room for.
+ *
+ * Derived, never a literal: `MAX_DOCKER_NAME` comes from `docker-names.ts`
+ * where it is enforced, and the overhead comes from `RELAY_NAME_PREFIX` plus
+ * the single `-` that `providerNetworkName` joins with. The three names a key
+ * feeds are
+ *
+ *     network  <net>-<key>                            net + 1 + key
+ *     uplink   <net>-<key>-uplink                     net + 1 + key + 7
+ *     relay    pifleet-egress-relay-<net>-<key>       net + 1 + key + 21
+ *
+ * and the relay is the longest of the three, so bounding the key by the relay
+ * bounds all of them. That ordering is the whole reason a key can pass the
+ * NETWORK check and still blow the limit twenty characters later, which is the
+ * case ISC-412 names and the one a naive `128 - net - 1` budget would miss.
+ */
+export function providerKeyBudget(egressNetwork: string): number {
+  return MAX_DOCKER_NAME - RELAY_NAME_PREFIX.length - egressNetwork.length - 1;
+}
+
+/**
+ * Refuse an operator-chosen provider key NAMING THE FIELD (ISC-412).
+ *
+ * ## Why `assertDockerName` alone was not enough, when the bound already existed
+ *
+ * It did already refuse: the composed relay name goes through
+ * `assertDockerName("container", …)` and a 128-character bound is enforced
+ * there. What it produced was
+ *
+ *     egress: invalid docker network name "pifleet-egress-<something enormous>"
+ *
+ * — a string the operator never typed, from a module named for egress, with no
+ * mention of `llm.providers` anywhere in it. Every other value this codebase
+ * composes into a Docker name is one it derived itself, so naming the derived
+ * string has always been the same as naming the input. A PROVIDER KEY is the
+ * first one that is not: it is the operator's own word, and §6.5.2 calls this
+ * "the first composed name in this codebase that a long config value can push
+ * past Docker's limit". A refusal that does not say WHICH KEY, and by HOW MUCH,
+ * leaves the operator to reverse the composition by hand to find their own
+ * typo.
+ *
+ * ## Both halves name the field, not just the length one
+ *
+ * The grammar check moved in here too. A key of `--driver=host` is exactly as
+ * operator-chosen as a long one, and the flag-injection hazard
+ * `docker-names.ts` exists to close is reported best by pointing at the config
+ * key that carries it.
+ *
+ * The remedy names BOTH inputs because the budget is a function of both: the
+ * fleet's `docker.network` spends from the same 128 characters, so an operator
+ * whose key is already short learns that the network name is what left no room
+ * rather than being told to shorten something that cannot get shorter.
+ */
+export function assertProviderKey(egressNetwork: string, provider: string): void {
+  if (!dockerNameGrammarOk(provider)) {
+    throw new Error(
+      `relay: llm.providers.${JSON.stringify(provider)} is not a usable provider key. A key ` +
+        `becomes part of a Docker network and container name, so it must start with a letter ` +
+        `or digit and contain only letters, digits, '_', '.' and '-'. Rename the key in ` +
+        `llm.providers.`,
+    );
+  }
+  const budget = providerKeyBudget(egressNetwork);
+  if (provider.length > budget) {
+    const composed = `${RELAY_NAME_PREFIX}${egressNetwork}-${provider}`;
+    throw new Error(
+      `relay: llm.providers.${JSON.stringify(provider)} is ${provider.length} characters, ` +
+        `${provider.length - budget} too long. It composes into the relay container name ` +
+        `${JSON.stringify(composed)}, which is ${composed.length} characters and Docker's ` +
+        `limit is ${MAX_DOCKER_NAME}. Shorten the key in llm.providers to at most ${budget} ` +
+        `characters, or shorten docker.network ${JSON.stringify(egressNetwork)} ` +
+        `(${egressNetwork.length} characters), which spends from the same budget.`,
+    );
+  }
 }
 
 /**
@@ -675,16 +770,29 @@ export function relayContainerName(egressNetwork: string): string {
  * here the check finally earns its keep rather than merely being consistent: a
  * provider key is OPERATOR-CHOSEN, so `pifleet-egress-relay-<network>-<provider>`
  * is the first composed name in this codebase that a long config value can push
- * past Docker's limit (§6.5.2). It fails at `up` naming the composed string,
- * which is the right failure.
+ * past Docker's limit (§6.5.2). It fails at `up` NAMING THE FIELD — §6.5.2's
+ * wording, and ISC-412's — which is the right failure. An earlier revision of
+ * this docblock said "naming the composed string"; that was the behaviour, and
+ * it was the bug: see `assertProviderKey`.
  */
 export function providerNetworkName(egressNetwork: string, provider: string): string {
   assertDockerName("network", egressNetwork);
-  // The provider key alone, before composition. A key Docker would never
-  // accept produces a message about the key rather than about a string the
-  // operator never typed.
-  assertDockerName("network", provider);
+  /*
+   * The provider key alone, BUDGETED AGAINST THE RELAY NAME rather than merely
+   * checked as a network name (ISC-412).
+   *
+   * `assertDockerName("network", provider)` stood here and refused too late in
+   * two different ways. It bounded the key at 128 on its own, so a key that fit
+   * a network name and then overflowed the 21-character-longer relay name got
+   * past it and blew up further down the call; and when it did refuse, it named
+   * a derived string rather than `llm.providers.<key>`. One call closes both.
+   */
+  assertProviderKey(egressNetwork, provider);
   const name = `${egressNetwork}-${provider}`;
+  // Unreachable on LENGTH now — the budget above reserves the relay's prefix,
+  // which is strictly more room than this name needs — and kept anyway as the
+  // backstop for the composed grammar. A guard that only ever fires when the
+  // one above is wrong is exactly the guard worth keeping.
   assertDockerName("network", name);
   return name;
 }
