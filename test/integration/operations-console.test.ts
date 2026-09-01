@@ -18,6 +18,8 @@
  */
 import { describe, expect, test } from "bun:test";
 
+import { cliBudget } from "../support/budget.ts";
+
 const REPO = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
 
 async function dryRun(args: readonly string[]): Promise<string> {
@@ -45,7 +47,7 @@ describe("the operations console's pane 1", () => {
     const pane1 = out.split("pane 2")[0]!;
     expect(pane1).toContain("'up' '--workers' 'obs-1'");
     expect(pane1).toContain("'--attach-here'");
-  });
+  }, cliBudget(1));
 
   /**
    * The negative direction, and the one that would have caught the original
@@ -59,5 +61,5 @@ describe("the operations console's pane 1", () => {
     expect(pane1).toContain("'up' '--workers' 'tick-1'");
     expect(pane1).not.toContain("'--attach-here'");
     expect(pane1).toContain("'logs' '--worker' 'tick-1' '--follow' '--render'");
-  });
+  }, cliBudget(1));
 });
