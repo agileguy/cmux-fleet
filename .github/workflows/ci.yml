@@ -812,7 +812,33 @@ jobs:
           # it collects as a skip: 6 pass, 124 skip, 0 fail, 130 across 15 files.
           # Pass unmoved at 6 again, which is the check that the added case is
           # gated like its neighbours rather than accidentally ungated.
-          TOTAL_EXPECTED: "130"
+          # 2026-09-01, same method and same conditions: 140, and the
+          # arithmetic is written out because ONE of the two movements was a
+          # miss that this re-derivation caught rather than a change being
+          # made now.
+          #
+          #   131 = the SAME fifteen files, up one from the 130 recorded above
+          #         (6 pass, 125 skip). Pass unmoved at 6; the added case is
+          #         image.test.ts's ISC-407 real-container probe — the key is
+          #         in models.json and in no environment variable, asserted of
+          #         ONE container — which landed in phase 3 and did NOT move
+          #         this constant at the time. So this job was already failing
+          #         on this branch before the file below was added, and the
+          #         hand method is what surfaced it: incrementing 130 by 9
+          #         would have produced 139 and left the miss in place, which
+          #         is precisely why the method is written down.
+          #   + 9 = relay-provider-containment.test.ts (2 pass, 7 skip), new
+          #         with ISC-411 and ISC-413. Both criteria are live facts —
+          #         a worker on provider A's bridge resolving provider B's
+          #         alias, and two relays both binding :443 in separate
+          #         namespaces — so both need a daemon and neither can be
+          #         proved by a derivation test. The 2 that PASS ungated are
+          #         plan-level premises the fixture asserts before dialing
+          #         anything, deliberately left ungated so a broken fixture
+          #         fails loudly here instead of silently skipping.
+          #
+          # 131 + 9 = 140.
+          TOTAL_EXPECTED: "140"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell
@@ -992,7 +1018,8 @@ jobs:
               test/integration/acceptance-container.test.ts \
               test/integration/honeypot.test.ts \
               test/integration/hostile-pi.test.ts \
-              test/integration/mount-preflight-remote.test.ts
+              test/integration/mount-preflight-remote.test.ts \
+              test/integration/relay-provider-containment.test.ts
           # NOT LISTED, deliberately: test/integration/relay-script.test.ts.
           # It exercises the relay script against real sockets with no Docker
           # and no gate, so it already runs in the fast `test` job on every
