@@ -26,6 +26,7 @@
 import { describe, expect, test } from "bun:test";
 import { stringify } from "yaml";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
+import { renderWorker } from "../../src/config/render.ts";
 import { buildWorkerEnv } from "../../src/run/worker-env.ts";
 import { resolvedProviders } from "../../src/cli/commands/up.ts";
 import {
@@ -585,5 +586,119 @@ describe("relayViewForProvider", () => {
       egress: { google_hosts: [], allow: [] },
     };
     expect(relayViewForProvider(flat, "omlx")).toBe(flat);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The bridges are only worth building if workers are ON them
+// ---------------------------------------------------------------------------
+
+describe("a worker attaches to ITS provider's bridge, not the fleet's", () => {
+  /**
+   * THE OTHER HALF OF ISC-409 AND ISC-411, and it was missing while every
+   * derivation test above was already green.
+   *
+   * `egressBridgePlan` decides which networks EXIST; `config/render.ts` decides
+   * which one each worker JOINS. Those are separate code paths, and for a while
+   * the first shipped without the second: `up` stood up `pifleet-egress-omlx`
+   * and `pifleet-egress-ollama-cloud` correctly while every worker still got
+   * `--network pifleet-egress`, the base bridge.
+   *
+   * Docker does not report that. An ABSENT network name is an error, but the
+   * BASE network is a clean start onto a bridge whose relay serves a different
+   * provider's upstream — so a worker dials its own `base_url`, the alias
+   * resolves on a relay that publishes somebody else's, and the credential goes
+   * with it. `up` reports success throughout.
+   *
+   * Both sides now read `workerEgressNetwork`, so there is no second ternary to
+   * drift; these tests are what keeps that true.
+   */
+  const doc = () => ({
+    version: 2,
+    name: "attach-fleet",
+    docker: { pi_version: "0.79.6", network: NET },
+    run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+    llm: {
+      model: "gpt-oss",
+      provider: "omlx",
+      providers: {
+        omlx: {
+          hosted: false,
+          base_url: "http://omlx.house.test:8000/v1",
+          api_key_env: "OMLX_API_KEY",
+          relay_upstream: "192.168.86.49:8000",
+        },
+        "ollama-cloud": {
+          hosted: true,
+          base_url: "https://ollama.com/v1",
+          api_key_env: "OLLAMA_CLOUD_API_KEY",
+          relay_upstream: "104.18.0.1:443",
+        },
+      },
+    },
+    roles: { plain: {} },
+    workers: [
+      { id: "w-local", role: "plain" },
+      { id: "w-cloud", role: "plain", model: "ollama-cloud/gpt-oss" },
+    ],
+    egress: { allow: [{ host: "104.18.0.1", port: 443 }] },
+  });
+
+  const networkOf = async (loaded: Awaited<ReturnType<typeof parseConfig>>, id: string) => {
+    const r = await renderWorker(loaded, id, { runId: "attach-run" });
+    const i = r.docker.lastIndexOf("--network");
+    expect(i).toBeGreaterThan(-1);
+    return r.docker[i + 1]!;
+  };
+
+  test("two workers on two providers join two different bridges", async () => {
+    const loaded = await parseConfig(stringify(doc()), "/tmp/fleet.yaml");
+    const local = await networkOf(loaded, "w-local");
+    const cloud = await networkOf(loaded, "w-cloud");
+
+    // Against the DERIVED names, not against strings typed here: a literal
+    // would still pass if `providerNetworkName` changed its composition, and
+    // then `up` would create names these workers never join.
+    expect(local).toBe(providerNetworkName(NET, "omlx"));
+    expect(cloud).toBe(providerNetworkName(NET, "ollama-cloud"));
+    // The distinguishing assertion. A fleet-wide derivation returns one name
+    // twice and passes everything above it.
+    expect(local).not.toBe(cloud);
+    // And neither is the BASE network, which is the silent-failure value —
+    // the one Docker accepts without complaint.
+    expect([local, cloud]).not.toContain(NET);
+  });
+
+  test("every bridge a worker joins is one the plan actually builds", async () => {
+    const loaded = await parseConfig(stringify(doc()), "/tmp/fleet.yaml");
+    const plan = egressBridgePlan(
+      loaded.config as unknown as FleetRelayConfigView,
+      NET,
+      resolvedProviders(loaded, ["w-local", "w-cloud"]),
+    );
+    const built = new Set(plan.map((b) => b.network));
+    for (const id of ["w-local", "w-cloud"]) {
+      expect(built.has(await networkOf(loaded, id))).toBe(true);
+    }
+    // Anti-vacuity: an empty plan would satisfy nothing above by making the
+    // loop's body unreachable, and an over-broad plan would satisfy it by
+    // containing every name there is.
+    expect(built.size).toBe(2);
+  });
+
+  /**
+   * The flat fleet is UNCHANGED, byte for byte, and that is a deliberate
+   * reading of §6.1 rather than a transcription of §6.5.2's table. Composing
+   * `<net>-<provider>` for a flat config would rename the network every
+   * existing run already uses and orphan every adopted relay — a migration this
+   * feature has no reason to ask for.
+   */
+  test("a flat fleet still joins the base network", async () => {
+    const flat = doc() as Record<string, unknown>;
+    const llm = flat["llm"] as Record<string, unknown>;
+    delete llm["providers"];
+    flat["workers"] = [{ id: "w-local", role: "plain" }];
+    const loaded = await parseConfig(stringify(flat), "/tmp/fleet.yaml");
+    expect(await networkOf(loaded, "w-local")).toBe(NET);
   });
 });

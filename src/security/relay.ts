@@ -989,19 +989,62 @@ export function providerRelayTarget(view: RelayConfigView, provider: string): Re
  * per-provider bridges — and it is one rule with one boundary rather than a
  * per-field guess about which shape the operator meant.
  */
+/**
+ * The network a worker on `provider` attaches to — THE ONE PLACE THAT DECIDES.
+ *
+ * Read by `egressBridgePlan`, which CREATES the bridges, and by
+ * `config/render.ts`, which ATTACHES workers to them. Those two agreeing is not
+ * optional and must not be arranged by two copies of the same ternary: a worker
+ * attached to a network no relay is on reaches nothing, and Docker does not
+ * refuse it — `docker run --network` on an absent name is an error, but on the
+ * BASE network it is a clean start onto a bridge whose relay serves a different
+ * provider's upstream. That is a worker dialing its own `base_url` and getting
+ * somebody else's endpoint, which is the failure §6.5.4 exists to prevent.
+ *
+ * This repo has closed that shape twice already, both times by deleting a
+ * predicate rather than duplicating it: ISC-188's mount-source rule, and D8's
+ * `/secrets` gate, where `render.ts` and `materialize.ts` each spelled out
+ * `w.secrets.length > 0` and would have diverged. One function, two callers.
+ *
+ * A FLAT fleet keeps the base network unchanged, byte for byte. §6.1 calls the
+ * flat block a shorthand for a one-provider map, but composing `<net>-<name>`
+ * for it would rename the network every existing run already uses and orphan
+ * every adopted relay — a migration this feature has no reason to ask for.
+ */
+export function workerEgressNetwork(
+  cfg: FleetRelayConfigView,
+  egressNetwork: string,
+  provider: string,
+): string {
+  return isFlatFleet(cfg) ? egressNetwork : providerNetworkName(egressNetwork, provider);
+}
+
+/**
+ * Whether this fleet uses the flat `llm.*` shorthand rather than a providers map.
+ *
+ * ONE reading of `llm.providers === undefined`, for the same reason this module
+ * now has one reading of the network name. Two decisions genuinely turn on this
+ * fact — which network a worker attaches to, and which target-naming function
+ * keeps a running relay's `PIFLEET_RELAY_TARGETS` stable — and they are
+ * different decisions that must never disagree about which fleet they are in.
+ * Spelling the condition twice is how they would eventually.
+ */
+export function isFlatFleet(cfg: FleetRelayConfigView): boolean {
+  return cfg.llm.providers === undefined;
+}
+
 export function egressBridgePlan(
   cfg: FleetRelayConfigView,
   egressNetwork: string,
   resolved: readonly string[],
 ): ProviderBridge[] {
-  const flat = cfg.llm.providers === undefined;
   const seen = new Set<string>();
   const plan: ProviderBridge[] = [];
   for (const provider of resolved) {
     if (seen.has(provider)) continue;
     seen.add(provider);
     const view = relayViewForProvider(cfg, provider);
-    const network = flat ? egressNetwork : providerNetworkName(egressNetwork, provider);
+    const network = workerEgressNetwork(cfg, egressNetwork, provider);
     plan.push({
       provider,
       network,
@@ -1014,7 +1057,9 @@ export function egressBridgePlan(
       // `omlxRelayTarget` on the flat path keeps the name `"omlx"` that every
       // running relay already has stamped in `PIFLEET_RELAY_TARGETS`; see
       // `providerRelayTarget` for why that is not cosmetic.
-      targets: [flat ? omlxRelayTarget(view) : providerRelayTarget(view, provider)],
+      targets: [
+        isFlatFleet(cfg) ? omlxRelayTarget(view) : providerRelayTarget(view, provider),
+      ],
       view,
     });
   }

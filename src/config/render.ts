@@ -48,6 +48,7 @@ import {
   type WorkerPaths,
 } from "../run/paths.ts";
 import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
+import { workerEgressNetwork } from "../security/relay.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
 import { ConfigError, expandPath, resolveWorker, type LoadedConfig, type ResolvedWorker } from "./load.ts";
 import type { Toolchain } from "./schema.ts";
@@ -306,7 +307,21 @@ export function buildDockerArgv(
   argv.push("--pids-limit", String(docker.pids_limit));
   argv.push("--memory", docker.memory);
   argv.push("--cpus", String(docker.cpus));
-  argv.push("--network", docker.network);
+  /*
+   * THE WORKER'S PROVIDER'S BRIDGE, not the fleet's (D7, §6.5.4).
+   *
+   * `workerEgressNetwork` is imported rather than re-derived here, and that is
+   * the whole point of its existence: `up` CREATES the per-provider bridges
+   * through `egressBridgePlan`, this ATTACHES workers to them, and the two
+   * deciding separately is a defect Docker will not report. An absent network
+   * name is an error, but the BASE network is a clean start onto a bridge whose
+   * relay serves a different provider's upstream — a worker dialing its own
+   * `base_url` and reaching somebody else's endpoint, with its own credential.
+   *
+   * A flat fleet is unchanged: the function returns `docker.network` verbatim
+   * when there is no `providers:` map.
+   */
+  argv.push("--network", workerEgressNetwork(loaded.config, docker.network, w.provider));
   argv.push("--env-file", opts.worker.envFile);
 
   // Mount table (SRD §5.5). Nothing else is mounted — notably not the main
