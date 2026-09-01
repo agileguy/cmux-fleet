@@ -373,8 +373,31 @@ export interface RelayUpstream {
  * An explicit port is REQUIRED, with no default. A bare host would have to
  * inherit a port from somewhere, and every candidate source is the `base_url`
  * this field exists to stop deriving things from.
+ *
+ * ## `allowHostname`, and why it is a parameter rather than a second function
+ *
+ * `SRD-INFERENCE-PROVIDERS` D9 (§6.7) permits a HOSTNAME upstream in one place
+ * and one place only: a `hosted: true` block in `llm.providers`, where the
+ * address belongs to a vendor behind a global load balancer with no published
+ * range, so pinning a literal is a recurring manual chore against a target that
+ * moves. There, `up` resolves the name ON THE HOST and stamps the literal into
+ * the target, so the relay still dials an address and neither of the two
+ * failures above can occur.
+ *
+ * Everything else in this function applies to that case unchanged — the
+ * `host:port` shape, the explicit port, the hostname/IP well-formedness — which
+ * is why this is one flag on one function rather than a second, nearly
+ * identical validator that would drift from this one on the next edit.
+ *
+ * The flag is OFF by default, so every existing caller keeps the stronger rule
+ * without an edit, and D9's scoping — "a non-hosted provider's block still
+ * refuses a hostname at `config validate`" — is enforced by omission rather
+ * than by remembering to pass `false`.
  */
-export function relayUpstreamError(raw: string): string | null {
+export function relayUpstreamError(
+  raw: string,
+  { allowHostname = false }: { allowHostname?: boolean } = {},
+): string | null {
   const parsed = splitHostPort(raw);
   if (parsed === null) {
     return (
@@ -385,7 +408,7 @@ export function relayUpstreamError(raw: string): string | null {
   const host = normalizeHost(parsed.host);
   if (host === null) return `${JSON.stringify(parsed.host)} is not a valid hostname or IP literal`;
   if (!validPort(parsed.port)) return `invalid port ${JSON.stringify(String(parsed.port))} — expected 1..65535`;
-  if (host !== RELAY_DEFAULT_DIAL_HOST && isIP(host) === 0) {
+  if (!allowHostname && host !== RELAY_DEFAULT_DIAL_HOST && isIP(host) === 0) {
     return (
       `${JSON.stringify(host)} is a hostname; relay_upstream must be an IP literal or ` +
       `${JSON.stringify(RELAY_DEFAULT_DIAL_HOST)}. The relay resolves through Docker's embedded ` +

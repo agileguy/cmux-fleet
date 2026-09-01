@@ -656,8 +656,12 @@ export const ProviderSchema = z
      * right default for a provider that is reached the way oMLX always was, and
      * is simply wrong to guess at for a hosted one, whose operator must write
      * the upstream and the matching `egress.allow` entry either way.
+     *
+     * Validated in the block-level check below rather than here, because
+     * whether a HOSTNAME is permitted depends on this block's `hosted` (D9) and
+     * a field-level refinement cannot see its sibling.
      */
-    relay_upstream: relayUpstream.nullable().default(null),
+    relay_upstream: shortStr.nullable().default(null),
     /** Empty means "no allowlist", exactly as the flat key does. */
     models_allowlist: z.array(shortStr).max(64).default([]),
     /**
@@ -702,7 +706,42 @@ export const ProviderSchema = z
       })
       .optional(),
   })
-  .strict();
+  .strict()
+  /**
+   * `relay_upstream` may be a HOSTNAME on a hosted provider, and on nothing
+   * else. D9 (§6.7), and the scoping is the whole of the decision.
+   *
+   * The IP-literal rule is not stylistic. The relay resolves through Docker's
+   * embedded DNS, and — measured — it also PUBLISHES `base_url`'s host as an
+   * alias on the bridge it is itself attached to, so a hostname upstream that
+   * matches a published alias resolves to the relay itself and every forwarded
+   * connection loops back into its own listener: a hang, on the one path a
+   * fleet cannot run without, with nothing in `docker logs` explaining it.
+   *
+   * What D9 buys by relaxing it for hosted blocks is the removal of a recurring
+   * chore that only exists when the address is somebody else's: §3.1 measured a
+   * single A record behind a global load balancer, no published range, and no
+   * firewall guidance, so a pinned literal is a short-lived pin maintained by
+   * hand in two files. `up` resolves the name on the HOST, where the resolver
+   * is known to answer public names, and stamps the literal into the target, so
+   * the relay still dials an address and neither failure above can occur.
+   *
+   * What it costs, stated plainly because it is a real weakening: for a hosted
+   * block the gate's property becomes "the operator authorized this NAME, and
+   * the fleet recorded which address it resolved to at launch". What bounds it
+   * is that it cannot spread — the operator's own oMLX still refuses a hostname
+   * here, so the stronger property is enforced rather than merely default.
+   *
+   * **The resolution half of D9 is NOT built yet, and nothing resolves this map
+   * at all**, so a hostname written here today reaches no relay. When the
+   * resolver lands, `up` must stamp the literal; a hostname that reached the
+   * relay unresolved is precisely the hang described above.
+   */
+  .superRefine((block, ctx) => {
+    if (block.relay_upstream === null) return;
+    const err = relayUpstreamError(block.relay_upstream, { allowHostname: block.hosted });
+    if (err !== null) ctx.addIssue({ code: "custom", path: ["relay_upstream"], message: err });
+  });
 
 /**
  * The four flat keys that describe an ENDPOINT and therefore have a
