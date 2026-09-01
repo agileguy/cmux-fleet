@@ -129,11 +129,24 @@ describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
 
 describe("the --env-file contract with docker/entrypoint.sh", () => {
   /**
-   * The FOUR names the entrypoint reads. It was three until 2026-09-01, when
-   * `PIFLEET_LLM_API_KEY_ENV` was added to close Defect A — and this docblock
-   * still said "three" afterwards while the file it pins had grown a fourth
-   * branch. That is the staleness this whole describe block exists to prevent,
-   * so the count is asserted now rather than described.
+   * The `PIFLEET_LLM_*` names the entrypoint reads — DERIVED FROM THE SCRIPT,
+   * not listed here, and that change is this test catching itself.
+   *
+   * It was three names, then four on 2026-09-01 when `PIFLEET_LLM_API_KEY_ENV`
+   * was added to close Defect A, and the docblock still said "three" while the
+   * file it pins had grown a fourth branch. It said so in its own words: "that
+   * is the staleness this whole describe block exists to prevent, so the count
+   * is asserted now rather than described." Then D8 removed that variable
+   * again, the entrypoint stopped reading it, and this test went on asserting
+   * it was emitted — stale a second time, in the same direction, for the same
+   * reason. A hand-maintained list of what another file reads is a list that
+   * will be wrong again.
+   *
+   * So the expectation is now READ OFF `docker/entrypoint.sh`: every
+   * `PIFLEET_LLM_*` name it expands outside a comment must be emitted, and the
+   * plan must emit no `PIFLEET_LLM_*` name the script does not read. The second
+   * half is what makes it bidirectional — a variable nobody reads is exactly
+   * what `PIFLEET_LLM_API_KEY_ENV` became, and nothing would have failed.
    *
    * The guard is `[ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n
    * "${PIFLEET_LLM_MODELS:-}" ]` before writing models.json at all, so either
@@ -141,14 +154,35 @@ describe("the --env-file contract with docker/entrypoint.sh", () => {
    * that decomposes to an empty string, the only reachable way to empty
    * `PIFLEET_LLM_MODELS` from config.
    */
-  test("emits the four names the entrypoint reads", async () => {
+  test("emits exactly the PIFLEET_LLM_* names the entrypoint reads", async () => {
+    const script = await readFile(
+      join(import.meta.dir, "..", "..", "docker", "entrypoint.sh"),
+      "utf8",
+    );
+    const read = new Set(
+      script
+        .split("\n")
+        .filter((l) => !l.trimStart().startsWith("#"))
+        .flatMap((l) => [...l.matchAll(/\$\{?(PIFLEET_LLM_[A-Z_]+)/g)].map((m) => m[1]!)),
+    );
+    // Anti-vacuity: an empty set would make both directions below trivially
+    // true, and a regex that stopped matching is the likeliest way to get one.
+    expect(read.size).toBeGreaterThanOrEqual(4);
+
     const loaded = await load(baseDoc());
-    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {
+      OMLX_API_KEY: "KEY-SO-THE-POINTER-IS-EMITTED",
+    });
+    const emitted = new Set(Object.keys(plan.vars).filter((k) => k.startsWith("PIFLEET_LLM_")));
+
+    expect([...read].filter((n) => !emitted.has(n))).toEqual([]);
+    expect([...emitted].filter((n) => !read.has(n))).toEqual([]);
+
+    // The values still matter, so the two sets agreeing on nothing useful
+    // cannot pass: these are the three the entrypoint branches on.
     expect(plan.vars["PIFLEET_LLM_PROVIDER"]).toBe("omlx");
     expect(plan.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://omlx.pifleet.internal:8000/v1");
     expect(plan.vars["PIFLEET_LLM_MODELS"]).toBe("TestModel");
-    // The pointer, not the value — it names the variable the key arrives in.
-    expect(plan.vars["PIFLEET_LLM_API_KEY_ENV"]).toBe("OMLX_API_KEY");
   });
 
   /**

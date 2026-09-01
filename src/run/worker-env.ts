@@ -516,68 +516,26 @@ export function buildWorkerEnv(
     PIFLEET_LLM_PROVIDER: w.provider,
     PIFLEET_LLM_BASE_URL: llm.base_url,
     /*
-     * The NAME of the variable the key below travels under — never its value.
+     * `PIFLEET_LLM_API_KEY_ENV` STOOD HERE AND IS GONE (D8).
      *
-     * `docker/entrypoint.sh` renders models.json's `apiKey` field, and it read
-     * a hardcoded `${OMLX_API_KEY:-}` while this module has always written the
-     * key under `llm.api_key_env`, whatever the operator configured it to be.
-     * The two agreed only because both strings happened to be `OMLX_API_KEY`.
-     * A fleet that renamed the variable — which `api_key_env` exists precisely
-     * to permit — got `"apiKey": ""` in models.json, silently: the entrypoint's
-     * guard tests the base URL and the model list and not the key, so the
-     * container boots, `up` reports success, and the worker authenticates as
-     * nobody until something asks it to generate.
+     * It carried the NAME of the variable the credential arrived in, and it was
+     * added on 2026-09-01 to close Defect A — the entrypoint had hardcoded
+     * `OMLX_API_KEY` while this module wrote the key under whatever
+     * `llm.api_key_env` said, and the two agreed only because both strings
+     * happened to be `OMLX_API_KEY`.
      *
-     * ## Why a name and not a second copy of the value
+     * D8 replaced the indirection rather than repairing it: the credential is a
+     * FILE now, and `PIFLEET_LLM_API_KEY_FILE` carries a fleet-owned PATH, so
+     * the entrypoint no longer needs the operator's spelling at all. That left
+     * this variable in every worker's environment with NOTHING READING IT — a
+     * state worth removing rather than leaving, because a variable that still
+     * looks like a live channel is an invitation to read it again, and reading
+     * it again is Defect A.
      *
-     * The shorter fix is to ALSO write the key under a fixed fleet-owned alias,
-     * and ISC-31 forbids it: "`docker inspect` shows no cloud provider key in
-     * any container's environment (only `OMLX_API_KEY`)". An alias puts one
-     * credential in the container's environment twice, widening every `env`
-     * dump and crash serialisation that discloses it, to spare the entrypoint a
-     * single indirection. The credential keeps exactly one name; this says
-     * which name that is.
-     *
-     * Written UNCONDITIONALLY, including when the host had no key at all. The
-     * pointer is not the key and discloses nothing, and an env file that always
-     * carries it is a durable artifact `status` and `report` read back months
-     * later in which "the fleet configured this name" and "this pifleet
-     * predated the variable" are distinguishable — the same evidence argument
-     * `PIFLEET_PANE_MODE` and `PIFLEET_PI_THEME` below are written on.
-     *
-     * Not secret-shaped, and that is deliberate rather than lucky:
-     * `container-env.test.ts:isSecretShaped` matches names ending in `_KEY`,
-     * `_SECRET`, `_TOKEN` and friends, and a pointer named `..._API_KEY` would
-     * read to that guard — and to a person — as the thing it exists to avoid
-     * carrying. `_ENV` names it for what it holds and matches the schema field
-     * it is copied from, so a reader traces it in one hop.
-     *
-     * THE HAZARD THIS USED TO NAME IS NOW CLOSED IN THE SCHEMA, and the note it
-     * used to carry was WRONG in a way worth recording, because the wrongness is
-     * what kept the repair deferred.
-     *
-     * It said a colliding `api_key_env` "degrades safely — the entrypoint
-     * indirects on a credential, finds nothing, and renders `apiKey: \"\"`".
-     * That is true of the READ half only. The WRITE half — `vars[apiKeyEnvName]`
-     * below — lands on whatever name was given, and the entrypoint's guard tests
-     * only non-emptiness. Measured against the real script with
-     * `api_key_env: PIFLEET_LLM_MODELS`:
-     *
-     *   {"apiKey":"<the key>","models":[{"id":"<the key>","name":"<the key>"}]}
-     *
-     * The credential became a model id, written to a NAMED VOLUME that outlives
-     * the container's `--rm`, and nothing noticed: `missingApiKey` was false, the
-     * env file serialised cleanly, and ISC-31's test passed because it asserts
-     * how MANY variables hold the credential, not which. `HOME` yielded
-     * `"apiKey": "/home/pi"`; `PATH` was accepted too.
-     *
-     * `config/schema.ts` now refuses the whole class at parse time —
-     * `ENV_VAR_NAME_RE`, `RESERVED_ENV_PREFIXES`, `RESERVED_ENV_NAMES` — which is
-     * where the operator can be told which field is wrong. That is the same
-     * guard `secrets:` grants have always had (`SecretReservedNameError`); the
-     * defect was two doors into one namespace with only one of them watched.
+     * Removed rather than kept "for compatibility": nothing outside this repo
+     * consumes a pifleet env file, and the only other mention left in
+     * `docker/entrypoint.sh` is a comment recording the history.
      */
-    PIFLEET_LLM_API_KEY_ENV: apiKeyEnvName,
     /*
      * The worker's OWN model, not `llm.models_allowlist`.
      *
