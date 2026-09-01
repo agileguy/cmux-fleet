@@ -791,9 +791,23 @@ describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER
     expect(observerTuiWorkers(loaded.config)).toEqual([]);
   });
 
-  test("fleet.example.yaml's shipped observer entry raises no tui warning", async () => {
+  /**
+   * The shipped example deliberately DOES carry one tui observer, and this
+   * asserts exactly which. `obs-1` is the operations console's worker —
+   * `scripts/operations` resolves pane 1's mode from it, and only `tui` makes
+   * that pane Pi's own interface rather than a rendered log tail.
+   *
+   * Asserting the identity rather than a count is the point. `up` permits
+   * exactly one tui worker in a fleet, so this is a seat with room for one, and
+   * a bare count cannot tell "obs-1 holds it" apart from "someone moved the
+   * override onto obs-2, or up onto the role". The role-level case is the one
+   * that matters: on the role it would apply to every observer, and tui
+   * allocates no epoch, so a re-dispatched watch pass would run twice.
+   */
+  test("fleet.example.yaml ships exactly one tui observer, and it is the console's", async () => {
     const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
-    expect(observerTuiWorkers(loaded.config)).toEqual([]);
+    expect(observerTuiWorkers(loaded.config)).toEqual(["obs-1"]);
+    expect(resolveWorker(loaded, "obs-2").paneMode).toBe("rpc");
   });
 });
 
