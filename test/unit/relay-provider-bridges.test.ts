@@ -23,8 +23,9 @@
  * fleet asks for two containers on two networks rather than one container with
  * two listeners, which is the decision §6.3 records as rejected.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { stringify } from "yaml";
+import { realExec } from "../../src/container/run.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
 import { renderWorker } from "../../src/config/render.ts";
 import { buildWorkerEnv } from "../../src/run/worker-env.ts";
@@ -929,6 +930,36 @@ describe("ISC-412: an over-long provider key is refused naming llm.providers", (
  */
 describe("a relay is stamped with ITS provider's target name, not omlx", () => {
   /**
+   * AN ISOLATED NETWORK NAME, and this is not fussiness — it is a bug this
+   * block already caused.
+   *
+   * `ensureEgressRelay` calls `ensureUplinkNetwork`, which takes NO injected
+   * `exec` and therefore talks to the REAL daemon no matter how thoroughly the
+   * rest of the call is faked. Run against the shared `NET` above —
+   * `pifleet-egress`, the name an actual fleet uses — these tests created
+   * `pifleet-egress-ollama-cloud-uplink` and `pifleet-egress-spare-vendor-uplink`
+   * on the maintainer's machine, in the same namespace as a live fleet's
+   * networks. A unit test that leaves real infrastructure behind under
+   * production names is one `docker network prune` away from being an outage.
+   *
+   * So this block composes from a name no fleet uses, and `afterAll` removes
+   * what it made.
+   */
+  const STAMP_NET = "pifleet-d7stamp";
+
+  afterAll(async () => {
+    // Only the uplinks this block can have created, by exact derived name —
+    // never a prune, and never the shared `NET`'s uplink, which belongs to
+    // whatever fleet is running.
+    for (const provider of ["ollama-cloud", "spare-vendor", null]) {
+      const base = provider === null ? STAMP_NET : providerNetworkName(STAMP_NET, provider);
+      await realExec(["docker", "network", "rm", uplinkNetworkName(base)], {
+        timeoutMs: 30_000,
+      }).catch(() => {});
+    }
+  }, 60_000);
+
+  /**
    * A daemon that reports no existing relay, so every call takes the CREATE
    * path and the `docker run` argv is available to assert on.
    */
@@ -974,7 +1005,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
   }
 
   const planFor = (provider: string): ProviderBridge => {
-    const bridge = egressBridgePlan(threeProviders(), NET, [provider])[0];
+    const bridge = egressBridgePlan(threeProviders(), STAMP_NET, [provider])[0];
     if (bridge === undefined) throw new Error(`no bridge planned for ${provider}`);
     return bridge;
   };
@@ -1030,10 +1061,10 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
       llm: { base_url: "http://omlx.pifleet.internal:8000/v1", relay_upstream: null },
       egress: { google_hosts: [], allow: [] },
     };
-    const bridge = egressBridgePlan(flat, NET, ["omlx"])[0];
+    const bridge = egressBridgePlan(flat, STAMP_NET, ["omlx"])[0];
     if (bridge === undefined) throw new Error("no bridge planned for the flat fleet");
     // The flat fleet is not composed, so its relay is the one already running.
-    expect(bridge.network).toBe(NET);
+    expect(bridge.network).toBe(STAMP_NET);
     const { calls, exec } = daemon();
     await ensureBridgeRelay(bridge, exec);
     expect(stampedTargets(calls)[0]?.name).toBe("omlx");
