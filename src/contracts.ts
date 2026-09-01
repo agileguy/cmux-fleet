@@ -303,6 +303,51 @@ export const WorkerStateSchema = z.object({
    */
   session_path: shortStr.nullable().default(null),
   session_present: z.boolean().default(false),
+  /**
+   * Whether the session transcript is still being WRITTEN — the only liveness
+   * an attended worker has, and `null` for every worker that is not one.
+   *
+   * ## The defect
+   *
+   * `phase` and `task_id` describe an EPOCH, and a `tui` worker typed into by
+   * a person allocates none: `dispatch` refuses that route, so `em.live` stays
+   * null, `classifyTuiTurn` has nothing to classify against, and `phase` reads
+   * `idle` forever. Observed on the operations console 2026-09-01 — the status
+   * pane said `tick-1: idle task=- supervisor=up` while that pane was visibly
+   * mid-turn, writing files, its transcript 300 KB and growing. Both fields
+   * were telling the truth: the worker held no pifleet task. For the two panes
+   * the console exists to show, that is ALWAYS true, so the status pane could
+   * not report anything else about them and was answering a question nobody
+   * had asked.
+   *
+   * ## Why this is a separate field and not a wider `phase`
+   *
+   * `phase` is read by `wait`, `report` and the ledger to decide whether an
+   * epoch finished. Widening it so a typed-into pane reads `busy` would make
+   * every one of those consumers see a task that does not exist. This field
+   * answers the OTHER question — is the process doing anything — and nothing
+   * routes on it.
+   *
+   * `entries` is the transcript's line count at the last poll and
+   * `last_growth_at` is when it last went up, both recorded by the `tui`
+   * supervisor's transcript poll, which already reads exactly these two facts
+   * to settle epochs. `null` for `last_growth_at` means the poll has seen the
+   * file but never seen it grow — a supervisor that started against an
+   * existing transcript, which is not the same as a file that is standing
+   * still and must not be reported as though it were.
+   *
+   * `null` for the whole field means NOT MEASURED: an `rpc` worker, whose
+   * completion is reported over the socket and whose `phase` is therefore
+   * already the honest answer, or a `tui` worker before its first poll. A
+   * consumer must render that as silence rather than as zero.
+   */
+  transcript_activity: z
+    .object({
+      entries: z.number().int().nonnegative(),
+      last_growth_at: z.string().nullable(),
+    })
+    .nullable()
+    .default(null),
   last_event: shortStr.nullable().default(null),
   last_event_at: z.string().nullable().default(null),
   heartbeat_at: z.string().nullable().default(null),

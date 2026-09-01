@@ -1361,6 +1361,7 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
   "epoch": 1, "completed_epochs": [], "task_id": "T-004",
   "session_path": "/Users/dan/.pifleet/runs/<run-id>/sessions/2026-07-26T14-02-19-530Z_<run-id>--eng-1.jsonl",
   "session_present": true,
+  "transcript_activity": {"entries": 1462, "last_growth_at": "2026-07-26T14:09:05Z"},
   "last_event": "tool_execution_end", "last_event_at": "2026-07-26T14:09:03Z",
   "heartbeat_at": "2026-07-26T14:09:07Z",
   "turns": 12, "tool_calls": 41, "tool_errors": 2,
@@ -1405,6 +1406,25 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
 > persist its high-water mark must stop allocating epochs (`src/supervisor/index.ts:612-613`). §7.5's
 > "recorded in `state.json` before the `prompt` is written" is true and incomplete — it names the
 > advisory copy and omits the authoritative one.
+
+> **Added 2026-09-01 — `transcript_activity`, and it exists because every other field in this block
+> describes an EPOCH.**
+>
+> `phase`, `task_id`, `epoch` and `completed_epochs` all answer "where is this worker in a dispatched
+> task". A `tui` worker a person types into is never in one: §3.5's pane route allocates no epoch, so
+> `phase` reads `idle` for the whole life of the run and is correct every time it does. Observed on
+> the operations console 2026-09-01 as `tick-1: idle task=- supervisor=up` printed beside a pane that
+> was mid-turn with a 300 KB transcript still growing — three true fields, and no field that could
+> have said so.
+>
+> `{entries, last_growth_at}` is recorded by the `tui` transcript poll, which already reads both
+> facts to settle epochs, and is written only when the count moves so a 500 ms poll does not become a
+> state write twice a second. `null` means NOT MEASURED — an `rpc` worker, whose `phase` is already
+> the honest answer — and is rendered as silence rather than as zero; `last_growth_at: null` inside a
+> present object means the poll has watched and seen no write, which is a different claim and reads
+> differently. `status` renders it as a trailing `transcript 3s ago` and carries it in `--json`.
+> Nothing routes on it: `wait`, `report` and the ledger continue to read `phase`, which is why the
+> fix is a new field rather than a wider `phase`.
 
 ### 7.7 Ledger and registry
 

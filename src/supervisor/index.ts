@@ -45,6 +45,7 @@ import {
 } from "../contracts.ts";
 import { appendJsonl } from "../util/jsonl.ts";
 import { RpcClient, RpcTimeoutError, Stopwatch } from "../rpc/client.ts";
+import { isoNow } from "../util/clock.ts";
 import { CompletionTracker } from "../rpc/completion.ts";
 import { EpochManager } from "../rpc/epoch.ts";
 import { isInsideRunTree, runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
@@ -1977,6 +1978,46 @@ async function main(): Promise<void> {
             const count = tuiReader.entries.length;
             const grew = count > tuiLastCount;
             tuiLastCount = count;
+
+            /**
+             * ABOVE the `live === null` return, and that placement is the whole
+             * fix rather than an ordering preference.
+             *
+             * Everything below this point is EPOCH work, and an attended pane
+             * has no epoch — `dispatch` refuses the socket route for a `tui`
+             * worker, so `em.live` is null on every poll of a worker a person
+             * is typing into. Recording activity anywhere below the return
+             * would therefore record it for exactly the workers that already
+             * report their state some other way, and never for the ones that
+             * do not. `status` would keep printing `idle` beside a pane
+             * mid-turn, which is the defect (`WorkerStateSchema.transcript_activity`).
+             *
+             * `grew` and not `entries !== count`: a count that went DOWN is a
+             * different transcript, not a write, and dating it as growth would
+             * report a shrinking file as activity. `last_growth_at` therefore
+             * AGES between writes rather than being refreshed, which is what a
+             * reader wants from it — the value IS the age.
+             *
+             * THE FLUSH IS BELT AND BRACES, and that is stated rather than
+             * implied. The heartbeat flushes the whole state file every
+             * `HEARTBEAT_MS` (250 ms), which is FASTER than this poll's 500 ms,
+             * so the field reaches disk with or without the call below —
+             * measured, by deleting it and watching the integration probe stay
+             * green. It is kept because every other site that mutates `state`
+             * flushes at the point of change and treats the heartbeat as a
+             * backstop, and a field whose durability depended on a different
+             * interval's body would break silently if that body ever became
+             * conditional. The guard keeps it to one extra flush per CHANGE
+             * rather than one per poll.
+             */
+            const seen = state.transcript_activity;
+            if (seen === null || seen.entries !== count) {
+              state.transcript_activity = {
+                entries: count,
+                last_growth_at: grew ? isoNow() : (seen?.last_growth_at ?? null),
+              };
+              void flushState();
+            }
 
             const live = em.live;
             if (live === null) {
