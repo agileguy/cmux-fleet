@@ -340,3 +340,218 @@ describe("doctor's verdict agrees with up's gate on the same config (ISC-256 ↔
     });
   }
 });
+
+/**
+ * A colon tag is IDENTITY on the served side, and must not collapse into a
+ * different tag's model (ISC-424).
+ *
+ * ## The defect, and why nothing above catches it
+ *
+ * Every fixture in this file until now decorates a model whose distinguishing
+ * suffix is a QUANTISATION (`-4bit`, `-8bit`) or a repo-id namespace. Neither
+ * shape can collide with a thinking level, so the whole file passed while the
+ * one decoration that DOES collide — a vendor tag spelled with a colon — ate a
+ * model's identity in silence. Ollama's entire catalogue is spelled that way
+ * (`gpt-oss:120b`, `qwen3.5:397b`), and the six levels are ordinary words in a
+ * namespace the VENDOR owns, so `gpt-oss:high` and `gpt-oss:low` are two
+ * different models rather than one model asked to think harder.
+ *
+ * Measured 2026-09-01 against the code as it stood, and this is the whole
+ * criterion:
+ *
+ *     allowlistVerdicts(["ollama/gpt-oss:high"], ["gpt-oss:low"], "omlx")
+ *       -> [{ entry: "ollama/gpt-oss:high", model: "gpt-oss", served: true }]
+ *
+ * `:high` came off the entry, `:low` came off the served id, both sides became
+ * `gpt-oss`, and the check whose entire job is catching a model the server does
+ * not serve reported it GREEN. It was found by reading the code rather than by
+ * running it, which is the reason these rows exist as written.
+ *
+ * ## The reconciliation these rows pin
+ *
+ * The obvious fixes are both refused. Making the comparison provider-AWARE
+ * breaks the served side's `mlx-community/` prefix, which is a repo-id
+ * NAMESPACE and not a provider — precisely the case `doctor` was already
+ * exiting 3 over. Handing `decomposeModel` its `isTagStyleProvider` predicate
+ * does not help either: a served id has no configured provider, so the
+ * predicate would be asked about `mlx-community` and answer "not tag-style"
+ * for every unknown prefix, which is Defect C again from a different door.
+ *
+ * What is asserted instead touches providers nowhere: a `:level` suffix on the
+ * SERVED id may be relaxed away only for an entry that named no level of its
+ * own. An entry that spelled `:high` has made a statement about the
+ * decoration, and a server offering `:low` has contradicted it. An entry that
+ * spelled nothing keeps the tolerance it has today, which is what keeps
+ * `doctor` agreeing with `up` in the block above.
+ *
+ * Both directions are asserted, because a comparison that always answered
+ * `false` would satisfy the defect row on its own.
+ */
+describe("a colon tag is identity on the served side (ISC-424)", () => {
+  /** THE measured call from the criterion. This row IS the defect. */
+  test("an entry naming :high is NOT served by a server offering :low", () => {
+    const v = allowlistVerdicts(["ollama/gpt-oss:high"], ["gpt-oss:low"], "omlx");
+    expect(v).toEqual([{ entry: "ollama/gpt-oss:high", model: "gpt-oss", served: false }]);
+  });
+
+  /**
+   * ANTI-VACUITY. The row above is satisfiable by a function that always says
+   * no, so the same entry against the tag it actually named must come back
+   * true, and against a THIRD tag false again. One entry, four servers, so the
+   * comparison has to discriminate rather than merely refuse.
+   */
+  test("the same entry IS served when the server offers that same tag", () => {
+    expect(allowlistVerdicts(["ollama/gpt-oss:high"], ["gpt-oss:high"], "omlx")[0]!.served).toBe(
+      true,
+    );
+    expect(allowlistVerdicts(["ollama/gpt-oss:high"], ["gpt-oss:medium"], "omlx")[0]!.served).toBe(
+      false,
+    );
+    /*
+     * The server offering the model UNDECORATED also satisfies the entry. The
+     * `:high` on a config line is genuinely ambiguous until the provider map
+     * lands — level or tag — and both readings have to stay live, or this fix
+     * would trade a silent false positive for a loud false negative and send
+     * the operator to edit a correct file.
+     */
+    expect(allowlistVerdicts(["ollama/gpt-oss:high"], ["gpt-oss"], "omlx")[0]!.served).toBe(true);
+  });
+
+  /**
+   * The tag survives the namespace strip, so the two rules compose rather than
+   * cancel: the leading `some-org/` still comes off, and the `:low` behind it
+   * still does not.
+   */
+  test("a namespace prefix is still stripped, but not the tag behind it", () => {
+    expect(
+      allowlistVerdicts(["ollama/gpt-oss:high"], ["some-org/gpt-oss:low"], "omlx")[0]!.served,
+    ).toBe(false);
+    expect(
+      allowlistVerdicts(["ollama/gpt-oss:high"], ["some-org/gpt-oss:high"], "omlx")[0]!.served,
+    ).toBe(true);
+  });
+
+  /**
+   * THE REGRESSION GUARD, restated inside this block rather than left three
+   * hundred lines above it. The MLX repo-id form is the case `allowlistVerdicts`
+   * argues a provider-aware comparison would break, and it is the reason this
+   * defect is not a one-liner. If a later edit reaches for the provider to fix
+   * the rows above, this goes red in the same run they go green.
+   */
+  test("the MLX repo-id form is untouched by the tag fix", () => {
+    expect(
+      allowlistVerdicts(["Qwen3.5-35B-A3B-4bit"], ["mlx-community/Qwen3.5-35B-A3B-4bit"], "omlx")[0]!
+        .served,
+    ).toBe(true);
+    expect(
+      allowlistVerdicts(
+        ["omlx/Qwen3.5-35B-A3B-4bit:high"],
+        ["mlx-community/Qwen3.5-35B-A3B-4bit"],
+        "omlx",
+      )[0]!.served,
+    ).toBe(true);
+    // The config says `omlx`, the server says `mlx-community`, and the verdict
+    // must not depend on either — pinned here as well as above, because this
+    // block is where a provider-aware edit would be attempted.
+    for (const provider of ["omlx", "ollama", "mlx-community", "anything-at-all"]) {
+      expect(
+        allowlistVerdicts(
+          ["Qwen3.5-35B-A3B-4bit"],
+          ["mlx-community/Qwen3.5-35B-A3B-4bit"],
+          provider,
+        )[0]!.served,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * The relaxation an entry that named NO level still gets. Losing this would
+   * trade the docblock's measured constraint away to buy ISC-424, and the
+   * point of the fix is that neither has to be traded.
+   */
+  test("an entry naming no level still tolerates a level on the served id", () => {
+    expect(
+      allowlistVerdicts(["Qwen3.5-35B-A3B-4bit"], ["Qwen3.5-35B-A3B-4bit:high"], "omlx")[0]!.served,
+    ).toBe(true);
+    expect(
+      allowlistVerdicts(
+        ["Qwen3.5-35B-A3B-4bit"],
+        ["mlx-community/Qwen3.5-35B-A3B-4bit:low"],
+        "omlx",
+      )[0]!.served,
+    ).toBe(true);
+  });
+
+  /**
+   * A served suffix that is NOT one of the six levels was never relaxable and
+   * still is not, for either shape of entry — `:nonsense` and `:120b` are
+   * identity to everyone, so a near miss stays a miss.
+   */
+  test("a served suffix that is not a level is never relaxed away", () => {
+    expect(
+      allowlistVerdicts(["Qwen3.5-35B-A3B-4bit"], ["Qwen3.5-35B-A3B-4bit:nonsense"], "omlx")[0]!
+        .served,
+    ).toBe(false);
+    expect(allowlistVerdicts(["ollama/gpt-oss:high"], ["gpt-oss:120b"], "omlx")[0]!.served).toBe(
+      false,
+    );
+  });
+
+  /**
+   * THE GATE HALF, WHICH THIS FIX DOES NOT CLOSE — asserted as a TRIPWIRE
+   * rather than left to a sentence in a report.
+   *
+   * ISC-424 names two harms. `doctor`'s false `served: true` is the one every
+   * row above covers. The second is that `up` ADMITS a worker on
+   * `ollama/gpt-oss:low` against an allowlist naming only `ollama/gpt-oss:high`
+   * — and that list is the fleet's record of which models were probed for
+   * native tool calls (ISC-190), so an unprobed tag variant walks straight
+   * through.
+   *
+   * It cannot be closed from `doctor.ts`, and not because of a scope rule.
+   * Measured 2026-09-01:
+   *
+   *     resolveWorker("ollama/gpt-oss:low") -> model "gpt-oss", thinking "low"
+   *
+   * The tag is already gone by the time `assertModelAllowed` runs, so the gate
+   * has nothing left to discriminate on — the information was destroyed one
+   * function upstream. Preserving it requires `resolveWorker` to know the
+   * provider is tag-style, which requires the `llm.providers` map (ISC-405,
+   * Phase 2) that deliberately does not exist yet. So `doctor` is now STRICTER
+   * than `up` on exactly this shape. That asymmetry is the correct state
+   * rather than a new contradiction: the ISC-256 ↔ ISC-52 block above pins
+   * agreement on ids whose decoration is unambiguous, and this is the one
+   * shape where it is not — the stricter half is the half that is right.
+   *
+   * Per this repo's rule that a blocked criterion's probe is pinned to the
+   * BLOCKER's absence, this asserts the hole is still open. Closing the gate
+   * turns this test RED, which is what forces ISC-424 to be re-graded rather
+   * than left green by inertia.
+   */
+  test("TRIPWIRE: up's gate still admits the tag variant doctor now refuses", async () => {
+    const allowlist = ["ollama/gpt-oss:high"];
+    const loaded = await parseConfig(
+      stringify({
+        version: 2,
+        name: "isc-424-gate",
+        docker: { pi_version: "0.79.6" },
+        run: { repo: "./repo", budget: { tokens_ceiling: 1_000_000 } },
+        llm: { model: "DefaultModel", models_allowlist: allowlist },
+        roles: { eng: { model: "ollama/gpt-oss:low" } },
+        workers: [{ id: "w1", role: "eng" }],
+      }),
+      "/nonexistent/fleet.yaml",
+    );
+    const worker = resolveWorker(loaded, "w1");
+
+    // The information the gate would need is destroyed upstream, in `load.ts`.
+    expect(worker.model).toBe("gpt-oss");
+    expect(worker.thinking).toBe("low");
+
+    // So the gate admits it. When it stops, this line fails and ISC-424 is done.
+    expect(() => assertModelAllowed(loaded, worker)).not.toThrow();
+
+    // And `doctor`, which CAN still see the tag, refuses — the half fixed here.
+    expect(allowlistVerdicts(allowlist, ["gpt-oss:low"], "omlx")[0]!.served).toBe(false);
+  });
+});
