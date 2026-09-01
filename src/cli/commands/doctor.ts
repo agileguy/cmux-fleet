@@ -7,6 +7,7 @@ import { EXIT, type ExitCode } from "../../contracts.ts";
 import { loadBackend } from "../../backends/registry.ts";
 import { ConfigError, decomposeModel, loadConfig, type LoadedConfig } from "../../config/load.ts";
 import { resolveAllWorkers } from "../../config/load.ts";
+import { ThinkingLevelSchema } from "../../config/schema.ts";
 import type { FleetConfig, Toolchain } from "../../config/schema.ts";
 import { imageTag } from "../../container/image.ts";
 import { daemonScratchRoot, probeMountVisibility } from "../../container/mounts.ts";
@@ -626,15 +627,75 @@ export interface AllowlistVerdict {
  * correct file. `allowlistChecked` offers no cover: the list was fetched fine.
  *
  * `fallbackProvider` is the CONFIG's provider, and on a server-supplied id it
- * is inert by construction — `decomposeModel` derives `model` from `raw`
- * alone and the argument only ever reaches `spec.provider`, which this
- * comparison discards. It is passed for symmetry with the allowlist side and
- * because `doctor` probes exactly one endpoint, so the configured provider is
- * the only one an unprefixed served id could belong to. The inertness is
- * pinned by a test rather than left as a reading of `decomposeModel`: making
- * this comparison provider-AWARE later would break on precisely these
- * repo-id-form ids, where the config says `omlx` and the server says
- * `mlx-community` about the same model.
+ * is inert by construction — nothing below compares providers at all, and the
+ * argument reaches only the allowlist side's `decomposeModel`, whose
+ * `spec.provider` this comparison discards. It is passed for symmetry with
+ * that side and because `doctor` probes exactly one endpoint, so the
+ * configured provider is the only one an unprefixed served id could belong to.
+ * The inertness is pinned by a test rather than left as a reading of
+ * `decomposeModel`: making this comparison provider-AWARE would break on
+ * precisely these repo-id-form ids, where the config says `omlx` and the
+ * server says `mlx-community` about the same model.
+ *
+ * ## Why the served side is NOT decomposed, which for two commits it was
+ *
+ * "Both sides means both sides" is right about the `provider/` prefix and
+ * wrong about the `:thinking` suffix, and running one rule over both cost a
+ * silent false GREEN (ISC-424).
+ *
+ * Measured 2026-09-01, before this paragraph existed:
+ *
+ *     allowlistVerdicts(["ollama/gpt-oss:high"], ["gpt-oss:low"], "omlx")
+ *       -> [{ entry: "ollama/gpt-oss:high", model: "gpt-oss", served: true }]
+ *
+ * `:high` came off the entry and `:low` came off the served id, both sides
+ * became `gpt-oss`, and the check that exists to catch a model the server does
+ * not serve certified one it does not serve. It was found by reading this
+ * function rather than by running it, because every fixture the tests had
+ * decorated a model with a quantisation (`-4bit`) or a namespace, and neither
+ * shape can collide with a thinking level.
+ *
+ * The two decorations are not the same kind of thing, and the difference is
+ * WHO OWNS THE SPELLING:
+ *
+ *   - A `provider/` prefix is CONFIG grammar. On the served side the analogous
+ *     `mlx-community/` is a repo-id NAMESPACE — not a provider, and not
+ *     identity either, since the config and the server disagree about it while
+ *     meaning one model. It comes off both sides, and no provider is compared.
+ *   - A `:tag` on a served id is the SERVER's own spelling, and a server does
+ *     not serve thinking levels — thinking is a request parameter, so
+ *     `GET /v1/models` listing `gpt-oss:low` is the server naming a model.
+ *     Ollama's entire catalogue is spelled this way. It is identity.
+ *
+ * ## The one relaxation that survives, and why it has to
+ *
+ * Stripping nothing from the served side would be the simple rule, and it
+ * would break the constraint above it: an entry written `Qwen3.5-35B-A3B-4bit`
+ * against a server listing `Qwen3.5-35B-A3B-4bit:high` would go unserved, and
+ * `up` accepts that pair, so `doctor` would be back to exiting 3 over a config
+ * that starts. So a served `:level` IS relaxed away — but only for an entry
+ * that named no level of its own.
+ *
+ * That asymmetry is the whole fix, and it is a statement about the OPERATOR
+ * rather than about the provider. An entry spelled `gpt-oss:high` has made a
+ * claim about the decoration; a server offering `gpt-oss:low` has contradicted
+ * it, and no reading of `:high` makes those the same model. An entry spelled
+ * `Qwen3.5-35B-A3B-4bit` has made no such claim, so the server's decoration is
+ * still allowed to be a level. An entry that named a level also matches the
+ * server offering that exact spelling, because `:high` on a config line is
+ * genuinely ambiguous until §6.1's `llm.providers` map lands and both readings
+ * have to stay live — otherwise this trades a silent false positive for a loud
+ * false negative.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT FIX. An entry naming NO tag still matches a
+ * served id carrying one, so an allowlist entry `gpt-oss` is certified by a
+ * server offering only `gpt-oss:low`. That residue cannot be closed here:
+ * `up`'s gate accepts the same pair, and closing one without the other
+ * recreates the contradiction this whole docstring exists to prevent. It needs
+ * the provider map, which is a later phase. Neither can the GATE half of
+ * ISC-424 — measured, `resolveWorker("ollama/gpt-oss:low")` returns model
+ * `gpt-oss` with thinking `low`, so `assertModelAllowed` has no tag left to
+ * refuse on. Both are pinned by a tripwire in `doctor-allowlist.test.ts`.
  *
  * ## Why the comparison is one-directional
  *
@@ -648,11 +709,53 @@ export function allowlistVerdicts(
   served: readonly string[],
   fallbackProvider: string,
 ): AllowlistVerdict[] {
-  const servedIds = new Set(served.map((id) => decomposeModel(id, fallbackProvider, undefined).model));
+  /* What the server literally offers, minus the repo-id namespace only. */
+  const servedExact = new Set<string>();
+  /* The same, minus a trailing `:level` — offered ONLY to an entry that named none. */
+  const servedLevelRelaxed = new Set<string>();
+  for (const id of served) {
+    const identity = stripNamespace(id);
+    servedExact.add(identity);
+    const relaxed = stripThinkingLevel(identity);
+    if (relaxed !== null) servedLevelRelaxed.add(relaxed);
+  }
+
   return allowlist.map((entry) => {
     const { model } = decomposeModel(entry, fallbackProvider, undefined);
-    return { entry, model, served: servedIds.has(model) };
+    // `decomposeModel` splits the prefix the same way, so a difference here is
+    // exactly "the operator wrote a `:level`" — no second parse of the string.
+    const asWritten = stripNamespace(entry);
+    const namedALevel = asWritten !== model;
+    const served =
+      servedExact.has(model) ||
+      (namedALevel ? servedExact.has(asWritten) : servedLevelRelaxed.has(model));
+    return { entry, model, served };
   });
+}
+
+/**
+ * Drop a leading `namespace/`, which on a served id is a repo-id namespace and
+ * on an allowlist entry is a `provider/` prefix.
+ *
+ * Mirrors `decomposeModel`'s split exactly — `indexOf`, and `> 0` so a leading
+ * slash is not a namespace — because the two run on the same strings and a
+ * second spelling of one rule is the shape ISC-264 records the cost of.
+ */
+function stripNamespace(id: string): string {
+  const slash = id.indexOf("/");
+  return slash > 0 ? id.slice(slash + 1) : id;
+}
+
+/**
+ * The id with a trailing `:<thinking level>` removed, or `null` if it has
+ * none — the caller has to tell "there was no level" apart from "the level was
+ * removed", and a function returning the input unchanged cannot say that.
+ */
+function stripThinkingLevel(id: string): string | null {
+  const colon = id.lastIndexOf(":");
+  if (colon === -1) return null;
+  if (!ThinkingLevelSchema.safeParse(id.slice(colon + 1)).success) return null;
+  return id.slice(0, colon);
 }
 
 interface OmlxReport {
