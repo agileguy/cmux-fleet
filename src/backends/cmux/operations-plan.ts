@@ -70,8 +70,13 @@ export const OPERATIONS_WORKSPACE = "operations";
 /**
  * The workers pane 1 brings up when the caller names none.
  *
- * `obs-1` is `fleet.yaml`'s console observer. It is the default because pane 1
- * is the pane a human actually watches, and `observer` is the role whose work
+ * `obs-1` LEADS, and the order is load-bearing twice over: `workers[0]` is the
+ * worker whose `pane_mode` decides whether the top-right pane is Pi's own
+ * interface, and it is the worker that pane shows. `tick-1` follows so the same
+ * `up` stands the ticketing worker up for the top-LEFT pane.
+ *
+ * `obs-1` is `fleet.yaml`'s console observer. It leads because the top-right is
+ * the pane a human actually watches, and `observer` is the role whose work
  * is worth watching in real time — a deploy being followed through a pipeline,
  * or a service being interrogated. `tick-1`, the previous default, does its
  * work in one burst and then has nothing to show.
@@ -89,7 +94,22 @@ export const OPERATIONS_WORKSPACE = "operations";
  * the command it drives — naming two workers here is a config edit, not a code
  * change.
  */
-export const DEFAULT_OPERATIONS_WORKERS: readonly string[] = ["obs-1"];
+export const DEFAULT_OPERATIONS_WORKERS: readonly string[] = ["obs-1", "tick-1"];
+
+/**
+ * How much of the console's height the TOP row gets.
+ *
+ * The two top panes are the ones with something to read — an agent's own
+ * interface and a second agent's rendered output. The bottom two are a status
+ * table and a git log, both of which say what they have to say in a handful of
+ * lines and then repeat. An even split spends half the window on the half that
+ * needs least.
+ *
+ * Applied after the panes exist rather than as a split option, because
+ * `new-split` takes no size: it halves, and the layout is corrected afterwards
+ * against the container height cmux reports.
+ */
+export const OPERATIONS_TOP_FRACTION = 2 / 3;
 
 /** Seconds between refreshes of the git pane. */
 export const DEFAULT_GIT_POLL_SECONDS = 5;
@@ -120,6 +140,16 @@ export interface OperationsPane {
    * ```
    */
   readonly split: SplitDirection | null;
+  /**
+   * Which EARLIER pane this one is split off, as an index into this array.
+   * Omitted means the previous pane, which is the common case.
+   *
+   * A 2x2 cannot be built from "always the previous one". Splitting the four
+   * panes in reading order walks off the end of the shape: pane 4 has to land
+   * under pane 2, not beside pane 3. So the bottom-right pane names its anchor
+   * and every other pane keeps the default.
+   */
+  readonly splitFrom?: number;
 }
 
 export interface OperationsPlanOptions {
@@ -238,6 +268,30 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
   const viewer = pifleetCommand(repoRoot, ["logs", "--worker", agent, "--follow", "--render"]);
   const shell = pifleetCommand(repoRoot, ["shell", "--worker", agent]);
 
+  /*
+   * The SECOND agent pane. `workers[1]` when there is one — the console shows
+   * two agents side by side across the top, and this is the left-hand one.
+   *
+   * It does not run `up`. Exactly one pane may, because `up` creates a run, and
+   * two panes each creating one would give two runs and two sets of containers
+   * for a console the operator thinks is one thing. So this pane WAITS for the
+   * run the observer pane is standing up, then tails its worker.
+   *
+   * The wait is the whole reason this is not just `viewer`. `logs` against a
+   * run that does not exist yet returns immediately, the pane falls straight
+   * through its fallbacks to a host shell, and the operator gets a dead pane
+   * next to a live one — with no error, because nothing failed. `up` takes
+   * upwards of twenty seconds on a cold image.
+   */
+  const second = workers[1];
+  const secondPane = second === undefined
+    ? null
+    : {
+        wait: `until ${pifleetCommand(repoRoot, ["status"])} 2>/dev/null | grep -q ${shellQuote([second])}; do sleep 2; done`,
+        viewer: pifleetCommand(repoRoot, ["logs", "--worker", second, "--follow", "--render"]),
+        shell: pifleetCommand(repoRoot, ["shell", "--worker", second]),
+      };
+
   return [
     {
       title: "observer",
@@ -284,14 +338,39 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
        */
       command: `${envPreamble()} ${up} ; ${viewer} ; ${shell} ; exec $SHELL -i`,
       // The initial surface: the whole workspace until something splits it.
+      //
+      // The OBSERVER holds it, not the ticketing pane on its left, and that is
+      // forced rather than chosen. This is the pane that runs `up`, `up` is
+      // what `--attach-here` belongs to, and `--attach-here` hands the terminal
+      // to the run's single `pane_mode: tui` worker. Only the pane running `up`
+      // can be Pi's own interface, so the pane that must be Pi's interface is
+      // the one that starts.
       split: null,
     },
+    ...(secondPane === null
+      ? []
+      : [
+          {
+            title: "ticketing",
+            /*
+             * WAIT, then the same viewer/shell ladder pane 1 uses, minus `up`.
+             * See `secondPane` above for why this pane does not stand the run
+             * up itself and why the wait is load-bearing rather than polite.
+             */
+            command:
+              `${envPreamble()} ${secondPane.wait} ; ${secondPane.viewer} ; ` +
+              `${secondPane.shell} ; exec $SHELL -i`,
+            // LEFT of the observer, which puts ticketing on the left of the top
+            // row and leaves the observer on the right.
+            split: "left" as const,
+          },
+        ]),
     {
       title: "fleet-status",
       command: status,
-      // DOWN off pane 1, which is what makes ticketing the top HALF rather
-      // than a column: the first split decides the major axis, and everything
-      // after it lands inside the half this one created.
+      // DOWN off the pane before it — ticketing when there are two agent panes,
+      // the observer when there is only one. Either way it lands in the bottom
+      // of the LEFT column, because the pane it splits is the left one.
       split: "down",
     },
     {
@@ -301,10 +380,15 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       // that failed to apply cannot silently redirect the pane at something
       // else. `watchDir`, never `repoRoot` — see the field's docblock.
       command: gitWatchCommand(watchDir, poll),
-      // RIGHT off fleet-status, so the two lower panes tile side by side in the
-      // bottom half. Splitting right off pane 1 instead would put git-watch in
-      // the top row beside ticketing, which is the layout this replaced.
-      split: "right",
+      // DOWN off the OBSERVER — pane index 0 — and this is the one pane that
+      // cannot use the default anchor. Splitting off the previous pane
+      // (fleet-status) would stack a third row inside the left column; what is
+      // wanted is the bottom of the RIGHT column, under the observer.
+      //
+      // With one agent pane there is no right column, so it falls back to the
+      // previous pane and the old two-up bottom row is what comes out.
+      split: secondPane === null ? "right" : "down",
+      ...(secondPane === null ? {} : { splitFrom: 0 }),
     },
   ];
 }

@@ -45,8 +45,11 @@ describe("the operations console's pane 1", () => {
   test("resolves obs-1's pane_mode from the config and attaches Pi's interface", async () => {
     const out = await dryRun(["--config", "fleet.example.yaml"]);
     const pane1 = out.split("pane 2")[0]!;
-    expect(pane1).toContain("'up' '--workers' 'obs-1'");
+    // One `up` stands both console workers up; the observer leads because it
+    // is the attach target and the pane this command belongs to.
+    expect(pane1).toContain("'up' '--workers' 'obs-1,tick-1'");
     expect(pane1).toContain("'--attach-here'");
+    expect(pane1).toContain("'logs' '--worker' 'obs-1' '--follow' '--render'");
   }, cliBudget(1));
 
   /**

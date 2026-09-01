@@ -40,6 +40,7 @@ import {
   newSplitArgv,
   pingArgv,
   renameTabArgv,
+  resizePaneArgv,
   respawnPaneArgv,
   workspaceCloseArgv,
   workspaceCreateArgv,
@@ -49,11 +50,17 @@ import {
   findWorkspaceByTitle,
   parseListPanes,
   parseNewSplit,
+  parsePaneGeometry,
   parseWorkspaceCreate,
   parseWorkspaceList,
   type PaneListed,
 } from "./parse.ts";
-import { OPERATIONS_WORKSPACE, operationsPanes, type OperationsPlanOptions } from "./operations-plan.ts";
+import {
+  OPERATIONS_TOP_FRACTION,
+  OPERATIONS_WORKSPACE,
+  operationsPanes,
+  type OperationsPlanOptions,
+} from "./operations-plan.ts";
 
 /**
  * `select-workspace <id>` — built here rather than in `client.ts` because the
@@ -131,6 +138,12 @@ export async function createOperations(
 
   let anchor = created.surfaceId;
   let firstPaneId: string | null = null;
+  // Every pane's surface, by index, so a pane can name an EARLIER anchor than
+  // the one it happens to follow. A 2x2 needs exactly that: the bottom-right
+  // pane splits off the top-right, not off the bottom-left it was created
+  // after. Without this the fourth split stacks a third row in the left column
+  // and the layout silently comes out as 3+1 rather than 2+2.
+  const surfaces: string[] = [];
 
   for (const pane of panes) {
     let surfaceId: string;
@@ -138,9 +151,20 @@ export async function createOperations(
     if (pane.split === null) {
       surfaceId = created.surfaceId;
     } else {
-      const split = parseNewSplit(await client.runOk(newSplitArgv(wsId, anchor, pane.split)));
+      const from = pane.splitFrom === undefined ? anchor : surfaces[pane.splitFrom];
+      if (from === undefined) {
+        // A plan naming an anchor that does not exist yet is a programming
+        // error in the plan, not a cmux failure — say so here rather than
+        // letting `new-split` refuse an undefined surface id.
+        throw new Error(
+          `operations: pane '${pane.title}' names splitFrom ${String(pane.splitFrom)}, ` +
+            `which is not an earlier pane`,
+        );
+      }
+      const split = parseNewSplit(await client.runOk(newSplitArgv(wsId, from, pane.split)));
       surfaceId = split.surfaceId;
     }
+    surfaces.push(surfaceId);
 
     // Rename BEFORE respawning. `respawn-pane` restarts the surface's shell,
     // and a title set on a surface that is about to be replaced is a title
@@ -167,7 +191,46 @@ export async function createOperations(
     created.surfaceId,
   );
   if (firstPaneId !== null) await client.runOk(focusPaneArgv(firstPaneId));
+  await applyTopFraction(client, wsId);
   return { created: true, workspaceId: wsId };
+}
+
+
+/**
+ * Give the top row {@link OPERATIONS_TOP_FRACTION} of the height.
+ *
+ * `new-split` has no size argument — it halves — so the shape is corrected here
+ * against the geometry cmux reports rather than requested up front.
+ *
+ * EACH COLUMN IS RESIZED SEPARATELY, and that is a property of the layout
+ * rather than caution: a 2x2 built by splitting each column downward has two
+ * independent horizontal dividers, and moving one leaves the other where it
+ * was. Measured — resizing a single top pane moved only its own column and left
+ * the console visibly uneven.
+ *
+ * Best-effort on purpose. A console whose panes are all correct but evenly
+ * split is fully usable; refusing to return one because a cosmetic resize
+ * failed would trade the whole feature for a nicety.
+ */
+async function applyTopFraction(client: CmuxClient, wsId: string): Promise<void> {
+  try {
+    const geo: ReturnType<typeof parsePaneGeometry> = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+    if (geo.panes.length < 2) return;
+    const topY = Math.min(...geo.panes.map((p) => p.y));
+    const target = geo.containerHeight * OPERATIONS_TOP_FRACTION;
+    for (const pane of geo.panes) {
+      if (pane.y !== topY) continue;
+      const delta = target - pane.height;
+      // Sub-pixel deltas are what an already-correct layout produces; issuing
+      // them would be a no-op command per pane on every adoption.
+      if (Math.abs(delta) < 1) continue;
+      await client.runOk(
+        resizePaneArgv(pane.paneId, delta > 0 ? "D" : "U", Math.abs(delta)),
+      );
+    }
+  } catch {
+    // See the docblock: layout is cosmetic, the console is not.
+  }
 }
 
 /**
