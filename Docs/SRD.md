@@ -714,7 +714,7 @@ Workers inherit Dan's Google identity via **Application Default Credentials**, s
 
 **Never mounted:** the host `~/.config/gcloud` directory. It holds `credentials.db`, `legacy_credentials/`, and `access_tokens.db` — the full gcloud auth store for *every* account Dan has logged in, which is strictly more powerful than ADC itself. Only the single ADC artifact crosses the boundary, and `CLOUDSDK_CONFIG` gives the container its own writable config dir (§5.2).
 
-**Scoping.** `cloud.quota_project` sets `CLOUDSDK_CORE_PROJECT` and the ADC quota project (locally: `gen-lang-client-0675968762`). Where a scoped service account exists, `cloud.impersonate_service_account` is strongly preferred — the supervisor mints an impersonated token instead of a user token, and the worker inherits only that SA's roles rather than Dan's full authority.
+**Scoping.** `cloud.quota_project` sets `CLOUDSDK_CORE_PROJECT` and the ADC quota project (set per-deployment in the gitignored `fleet.yaml`). Where a scoped service account exists, `cloud.impersonate_service_account` is strongly preferred — the supervisor mints an impersonated token instead of a user token, and the worker inherits only that SA's roles rather than Dan's full authority.
 
 **This is a real privilege grant, stated plainly:** a worker with `bash` and `cloud_access: true` can do anything Dan's Google identity can do, for the lifetime of its token. It is off per role by default (`cloud_access: false`), and `pifleet up` prints the granted identity, project, and mode so the grant is never silent.
 
@@ -996,7 +996,7 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — §5
 cloud:
   adc: true                  # inherit the launching Claude instance's Google identity
   adc_mode: token            # the only mode: a ~1h access token (§5.8)
-  quota_project: gen-lang-client-0675968762
+  quota_project: example-project-000000
   impersonate_service_account: null    # strongly preferred where one exists
   kubeconfig: null           # path to a FILTERED kubeconfig; never the host default
   token_refresh: 45m

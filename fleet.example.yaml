@@ -133,7 +133,15 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
 cloud:
   adc: true                  # inherit the launching Claude instance's Google identity
   adc_mode: token            # token (1h, default) | file (refresh token — opt-in)
-  quota_project: gen-lang-client-0675968762
+  # An OBVIOUS EXAMPLE VALUE, on the same rule `egress.allow` states below:
+  # a copy of this file that is never edited must fail closed rather than
+  # bill or scope against someone else's project. Your real project id
+  # belongs in `fleet.yaml`, which is gitignored.
+  #
+  # It must also belong to the ADC identity the fleet inherits — the two move
+  # together, and a quota project from a different account is refused at the
+  # first API call rather than at launch.
+  quota_project: example-project-000000
   impersonate_service_account: null    # strongly preferred where one exists
   # A FILTERED kubeconfig; never the host default.
   #
