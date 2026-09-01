@@ -282,6 +282,36 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       // (`br-<first 12>`) from them. A memorable non-hex id here would be a
       // stand-in that could not stand in.
       "      inspect)",
+      // ---------------------------------------------------------------
+      // OPT-IN ABSENCE, so `network create` is an observable event (ISC-410).
+      //
+      // The default answer below is "this network already exists, internal" for
+      // EVERY name, which sends `ensureEgressNetwork` down its adopt branch and
+      // means no `docker network create` is ever issued. Every pre-existing
+      // test in this file was written against that and still gets it.
+      //
+      // ISC-410 is a claim about what `up` CREATES, and an adopt-only shim can
+      // only witness what `up` MENTIONS. So a rig may ask for the other,
+      // equally real, daemon state: the network is absent until this shim has
+      // seen a `network create` for that exact name, and present afterwards.
+      // That is Docker's own behaviour, not a test-only seam, and it is what
+      // turns "the unused provider's bridge was never created" into a fact
+      // about a create argv rather than an inference from silence.
+      //
+      // Opt-in rather than default for one reason: flipping it globally would
+      // move every other test in this file off the adopt path — including the
+      // ISC-189 positive control, which depends on an `-uplink`-named BASE
+      // network being refused by the exists-but-not-internal branch that
+      // absence would skip.
+      //
+      // Absence is spelled the way the daemon spells it, because
+      // `inspectEgressNetwork` matches on that text and treats every other
+      // non-zero exit as a hard failure — a shim inventing its own wording
+      // would be caught as "daemon unreachable" three layers away from here.
+      '        if [ -n "${PIFLEET_SHIM_NETWORK_ABSENT:-}" ] && [ ! -f "$(dirname "$0")/.net-$3" ]; then',
+      '          echo "Error response from daemon: network $3 not found" >&2',
+      "          exit 1",
+      "        fi",
       // The uplink MUST report non-internal or ensureUplinkNetwork refuses it.
       '        case "$3" in',
       "          *-uplink)",
@@ -292,7 +322,15 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       "            ;;",
       "        esac",
       "        ;;",
-      "      create|connect)",
+      // `network create <…flags…> <name>` — the name is LAST in both argvs
+      // production builds (`--internal <name>` for the bridge, bare `<name>`
+      // for the uplink), so the marker is keyed off the final word rather than
+      // off a position that differs between the two.
+      "      create)",
+      '        for a in "$@"; do last="$a"; done',
+      '        : > "$(dirname "$0")/.net-$last"',
+      "        ;;",
+      "      connect)",
       "        ;;",
       "      *)",
       '        echo "docker shim: unexpected network argv: $*" >&2',
@@ -784,7 +822,31 @@ interface FleetOptions {
    * the entry precedence over its role), so each worker's grant is stated at
    * the worker rather than inferred from whichever one declared the role first.
    */
-  extraWorkers?: { id: string; role: string; cloudAccess?: boolean }[];
+  extraWorkers?: { id: string; role: string; cloudAccess?: boolean; model?: string }[];
+  /**
+   * `llm.providers`, written as a map keyed by `name` (ISC-410).
+   *
+   * Omitted by default, which leaves the FLAT `llm.*` document every other test
+   * in this file loads — and that is load-bearing, not tidiness: a flat fleet
+   * gets exactly one bridge on `docker.network` verbatim, so writing this key
+   * unconditionally would rename the network every other assertion in this file
+   * names.
+   */
+  providers?: {
+    name: string;
+    hosted: boolean;
+    baseUrl: string;
+    apiKeyEnv: string;
+    relayUpstream: string;
+  }[];
+  /** `llm.provider`. Must be a key of `providers` when that map is written. */
+  llmProvider?: string;
+  /**
+   * `PIFLEET_SHIM_NETWORK_ABSENT`: make the shimmed daemon report a network
+   * absent until it has been created, so `network create` is observable.
+   * See the `inspect` branch of `writeDockerShim` for why it is opt-in.
+   */
+  shimNetworkAbsent?: boolean;
   /**
    * The ISC-53 native-tool-call gate, TRI-STATE on purpose.
    *
@@ -986,6 +1048,19 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
     ...(opts.modelsAllowlist === undefined
       ? []
       : [`  models_allowlist: [${opts.modelsAllowlist.join(", ")}]`]),
+    ...(opts.llmProvider === undefined ? [] : [`  provider: ${opts.llmProvider}`]),
+    ...(opts.providers === undefined
+      ? []
+      : [
+          "  providers:",
+          ...opts.providers.flatMap((p) => [
+            `    ${p.name}:`,
+            `      hosted: ${p.hosted}`,
+            `      base_url: ${p.baseUrl}`,
+            `      api_key_env: ${p.apiKeyEnv}`,
+            `      relay_upstream: ${p.relayUpstream}`,
+          ]),
+        ]),
     "roles:",
     `  engineer: {${roleFields.join(", ")}}`,
     ...extraRoles.map((r) => `  ${r}: {}`),
@@ -994,7 +1069,11 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
     ...extraWorkers.map(
       (w) =>
         `  - {id: ${w.id}, role: ${w.role}` +
-        `${w.cloudAccess === undefined ? "" : `, cloud_access: ${w.cloudAccess}`}}`,
+        `${w.cloudAccess === undefined ? "" : `, cloud_access: ${w.cloudAccess}`}` +
+        // `provider/model`, which is how a worker SELECTS a provider — the one
+        // input `resolvedProviders` reads and therefore the only way a fixture
+        // can leave a declared provider unselected.
+        `${w.model === undefined ? "" : `, model: ${w.model}`}}`,
     ),
     "",
   ].join("\n");
@@ -1108,6 +1187,20 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
        * discipline `GOOGLE_APPLICATION_CREDENTIALS` applies to the ADC lookup.
        */
       PIFLEET_SCRATCH_DIR: join(base, "scratch"),
+      ...(opts.shimNetworkAbsent === true ? { PIFLEET_SHIM_NETWORK_ABSENT: "1" } : {}),
+      /**
+       * A value for every declared provider's `api_key_env` (ISC-410).
+       *
+       * `providerApiKeyEnv` refuses to fall back to `llm.api_key_env`, so a
+       * provider whose variable is unset produces a worker `up` reports as
+       * key-less. Not a refusal — but it would make the run's shape depend on
+       * whatever the developer's shell happens to export, which is the same
+       * argument the ADC fixture and both shims already make. Marker strings,
+       * not credentials.
+       */
+      ...Object.fromEntries(
+        (opts.providers ?? []).map((p) => [p.apiKeyEnv, `fixture-${p.name}-not-a-real-key`]),
+      ),
     },
   };
   rigs.push(rig);
