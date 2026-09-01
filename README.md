@@ -80,7 +80,9 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-No ISA done-condition criterion is unattempted — there are zero `[ ]`. Eight are graded `[~]`
+Twenty-three criteria are unattempted `[ ]` — ISC-401..ISC-423, filed 2026-09-01 as the
+done-condition for per-worker inference providers (`Docs/SRD-INFERENCE-PROVIDERS.md`) and not yet
+built. Every criterion filed before that block has been attempted. Nine are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
@@ -103,6 +105,15 @@ stayed correct; and cmux's dispatch was refused by pifleet's *own* identifier gu
 has no `+`, at step 2 of a 29-step plan with two lines of the prompt already typed. Each backend
 now translates one fleet-wide key vocabulary or refuses — but the vocabulary itself is still a
 measurement nothing re-runs, which is why the criterion is `[~]`.
+**ISC-259 is the ninth, and it got there differently from the other eight.** It was closed `[x]` by
+owner decision on 2026-08-28 and re-graded on 2026-09-01 — not because anything contradicted it, but
+because a mechanism its closing evidence *cited* was deleted underneath it. That evidence names three
+mechanisms as the reason a hosted provider cannot appear by accident; ISC-369 removed the first, the
+pin on `llm.base_url`'s host, for an unrelated and good reason, and never mentioned ISC-259 because it
+had no reason to. Measured by driving this repo's own `parseConfig`, `omlxRelayTarget` and
+`assertTargetsAllowed`: a fleet can now be pointed at a third-party provider and it validates. The
+second half of the sentence — the two-place authorization — survives intact, which is why `[~]` and not
+`[ ]`; nothing re-checks the word *never*, which is why not `[x]`.
 ISC-372 was filed `[~]` the same day and closed hours later, when `up` gained the check against the
 *effective* backend that the entry had named as its own closing condition. The two that left this
 list on 2026-08-30 — ISC-306 and ISC-339 — were scope decisions rather than defects, and closed
@@ -113,7 +124,7 @@ criterion whose *premise* was superseded rather than left unproved. ISC-307 is a
 value reaching an env file, and secrets are delivered as read-only files now (ISC-337); ISC-360 is
 about an SRD erratum recording task-scoped cloud authorization as designed-but-not-built, and the
 owner withdrew the mechanism (ISC-366). Retired criteria are excluded from `progress:` on both
-sides — `369/377` counts the live set, and the frontmatter's `retired: 2` says where the rest
+sides — `382/414` counts the live set, and the frontmatter's `retired: 2` says where the rest
 went. Retiring is not closing, is not deleting (both entries keep their text and their live
 guards), and is refused for a criterion that is merely hard: `test/unit/isa-retired.test.ts`
 rejects any retirement that does not name a closed criterion that names it back.
