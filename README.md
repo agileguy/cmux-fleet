@@ -80,11 +80,19 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-Sixteen criteria are unattempted `[ ]` — ISC-407..ISC-419 and ISC-421..ISC-423, from the block
+Thirteen criteria are unattempted `[ ]` — ISC-409..ISC-419, ISC-421 and ISC-423, from the block
 ISC-401..ISC-423 filed 2026-09-01 as the done-condition for per-worker inference providers
-(`Docs/SRD-INFERENCE-PROVIDERS.md`). Seven of that block are answered: ISC-401 and ISC-406 closed with the two latent
-defects they name, and Phase 2 closed ISC-402, ISC-403, ISC-404, ISC-405 and ISC-420 when the
-`llm.providers` map landed and `resolveWorker` began reading it. ISC-424, filed during Phase 1's
+(`Docs/SRD-INFERENCE-PROVIDERS.md`). Eleven of that block are answered: ISC-401 and ISC-406 closed with the two latent
+defects they name, Phase 2 closed ISC-402, ISC-403, ISC-404, ISC-405 and ISC-420 when the
+`llm.providers` map landed and `resolveWorker` began reading it, and Phase 3 closed ISC-407,
+ISC-408 and ISC-422 by moving the provider credential out of the environment entirely — it is
+written to a `0444` file in the worker's secret store and reaches the container as a PATH under a
+fleet-owned variable, with the entrypoint's environment read removed rather than demoted to a
+fallback. **That last distinction is the phase's real content.** A file-then-environment fallback
+would have looked like robustness and quietly restored the defect ISC-406 had just closed: on the
+first day the pointer failed to arrive, a worker also holding `OMLX_API_KEY` through `secrets:`
+would have authenticated to its configured provider with the LOCAL credential — a wrong-credential
+401 strictly harder to diagnose than the empty key it replaced. ISC-424, filed during Phase 1's
 review, was graded `[~]` for half a day and closed the same way. Every criterion filed
 before the block has been attempted. Nine are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
@@ -134,10 +142,20 @@ criterion whose *premise* was superseded rather than left unproved. ISC-307 is a
 value reaching an env file, and secrets are delivered as read-only files now (ISC-337); ISC-360 is
 about an SRD erratum recording task-scoped cloud authorization as designed-but-not-built, and the
 owner withdrew the mechanism (ISC-366). Retired criteria are excluded from `progress:` on both
-sides — `390/415` counts the live set, and the frontmatter's `retired: 2` says where the rest
+sides — `393/415` counts the live set, and the frontmatter's `retired: 2` says where the rest
 went. Retiring is not closing, is not deleting (both entries keep their text and their live
 guards), and is refused for a criterion that is merely hard: `test/unit/isa-retired.test.ts`
 rejects any retirement that does not name a closed criterion that names it back.
+
+**ISC-340 was AMENDED rather than closed, re-graded or retired, and it is the only entry in that
+state.** Phase 3 made half its text false by design: `/secrets` used to mean "what the operator
+granted", so "a worker that asked for no secret gets no mount at all" was right, and the fleet now
+delivers the provider key into that same store while no worker requests it. The gate was deleted
+from BOTH sides rather than widened on one, and the guard that encoded the old meaning was
+**replaced with the positive assertion rather than removed** — the same rule the two closed
+tripwires above follow. The entry keeps `[x]` because its first clause, the one its mutation record
+actually pins, is untouched and still probed. Amending is not retiring: the criterion still has
+live guards and still counts.
 
 `test/unit/docs-currency.test.ts` pins both counts against `ISA.md`, so neither can drift the way
 the sentence it replaced did.
