@@ -614,3 +614,129 @@ describe("the shipped example's ticketing worker (ISC-330)", () => {
     expect(plan.vars["HTTP_PROXY"]).toBeUndefined();
   });
 });
+
+/**
+ * The observer role's own secrets, at the config-validation altitude §13
+ * asks for (SRD-OBSERVER-001 §6.5, §13's "Config." bullet): a `secrets:`
+ * naming something the fleet-wide ceiling omits refuses at `up`, by name.
+ *
+ * Reuses ISC-305's mechanism rather than re-deriving it — `buildWorkerEnv` is
+ * role-agnostic — and is worth its own block anyway because `observer` is the
+ * role §13 names explicitly, and because it doubles as the positive control
+ * for the `credential: false` trap (SRD §6.5): the base URLs must be
+ * DELIVERED and must NOT be swept, which the ticket-ops precedent already
+ * covers generically but this exercises against observer's own three pairs.
+ */
+describe("the observer role's secrets ceiling (SRD-OBSERVER-001 §6.5, §13)", () => {
+  // Mirrors what `env_allowlist` actually accepts. Typing this `string[]`
+  // compiles until the first entry uses the object form, which is the only
+  // form that can carry `credential: false` — so the narrower type rejects
+  // precisely the case these tests exist to cover.
+  type CeilingEntry = string | { name: string; credential: boolean };
+  const observerDoc = (allowlist: CeilingEntry[]) => ({
+    secrets: { env_allowlist: allowlist },
+    roles: {
+      observer: {
+        secrets: [
+          "CI_CD_TOKEN",
+          "CI_CD_BASE_URL",
+          "CI_BUILD_TOKEN",
+          "CI_BUILD_BASE_URL",
+          "GRAFANA_TOKEN",
+          "GRAFANA_BASE_URL",
+        ],
+      },
+    },
+    workers: [{ id: "obs-1", role: "observer" }],
+  });
+
+  const FULL_CEILING = [
+    "CI_CD_TOKEN",
+    { name: "CI_CD_BASE_URL", credential: false },
+    "CI_BUILD_TOKEN",
+    { name: "CI_BUILD_BASE_URL", credential: false },
+    "GRAFANA_TOKEN",
+    { name: "GRAFANA_BASE_URL", credential: false },
+  ];
+
+  test("a fleet ceiling missing one of observer's six names refuses at up, naming it", async () => {
+    // The ceiling omits GRAFANA_TOKEN — one name short of what the role asks for.
+    const short = FULL_CEILING.filter(
+      (e) => (typeof e === "string" ? e : e.name) !== "GRAFANA_TOKEN",
+    );
+    const loaded = await load(doc(observerDoc(short)));
+    const w = resolveWorker(loaded, "obs-1");
+    let caught: Error | null = null;
+    try {
+      buildWorkerEnv(loaded, w, {
+        CI_CD_TOKEN: CANARY,
+        CI_CD_BASE_URL: "http://ci-cd.example.com",
+        CI_BUILD_TOKEN: CANARY,
+        CI_BUILD_BASE_URL: "http://ci-build.example.com",
+        GRAFANA_TOKEN: CANARY,
+        GRAFANA_BASE_URL: "http://grafana.example.com",
+      });
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).toBeInstanceOf(SecretNotAllowlistedError);
+    // BY NAME — the one omitted variable, not a generic "some secret missing".
+    expect(caught!.message).toContain("GRAFANA_TOKEN");
+    expect(caught!.message).toContain("secrets.env_allowlist");
+    expect(caught!.message).toContain("obs-1");
+  });
+
+  test("with the full ceiling present, all six names are delivered as files, none as values", async () => {
+    const loaded = await load(doc(observerDoc(FULL_CEILING)));
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "obs-1"), {
+      CI_CD_TOKEN: CANARY,
+      CI_CD_BASE_URL: "http://ci-cd.example.com",
+      CI_BUILD_TOKEN: CANARY,
+      CI_BUILD_BASE_URL: "http://ci-build.example.com",
+      GRAFANA_TOKEN: CANARY,
+      GRAFANA_BASE_URL: "http://grafana.example.com",
+    });
+    expect(plan.secretNames.sort()).toEqual(
+      [
+        "CI_CD_TOKEN",
+        "CI_CD_BASE_URL",
+        "CI_BUILD_TOKEN",
+        "CI_BUILD_BASE_URL",
+        "GRAFANA_TOKEN",
+        "GRAFANA_BASE_URL",
+      ].sort(),
+    );
+    for (const name of plan.secretNames) {
+      expect(plan.vars[name]).toBeUndefined();
+      expect(plan.vars[secretPointerName(name)]).toBe(secretContainerPath(name));
+    }
+  });
+
+  /**
+   * The `credential: false` trap, asserted as a POSITIVE (SRD §6.5): the
+   * three base URLs are exactly the subset the fleet declared non-credential,
+   * and the three tokens are exactly the subset that is NOT. Regressing
+   * either direction — a token marked `credential: false` by accident, or a
+   * base URL left swept — fails here rather than surfacing later as every
+   * observer-ops.json being refused for carrying "a credential" that was
+   * actually the endpoint it was pointed at (the TICKET_BASE_URL failure this
+   * role inherits at three times the surface).
+   */
+  test("exactly the three base URLs are marked credential: false, never the tokens", async () => {
+    const loaded = await load(doc(observerDoc(FULL_CEILING)));
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "obs-1"), {
+      CI_CD_TOKEN: CANARY,
+      CI_CD_BASE_URL: "http://ci-cd.example.com",
+      CI_BUILD_TOKEN: CANARY,
+      CI_BUILD_BASE_URL: "http://ci-build.example.com",
+      GRAFANA_TOKEN: CANARY,
+      GRAFANA_BASE_URL: "http://grafana.example.com",
+    });
+    expect(plan.nonCredentialSecretNames.sort()).toEqual(
+      ["CI_CD_BASE_URL", "CI_BUILD_BASE_URL", "GRAFANA_BASE_URL"].sort(),
+    );
+    for (const token of ["CI_CD_TOKEN", "CI_BUILD_TOKEN", "GRAFANA_TOKEN"]) {
+      expect(plan.nonCredentialSecretNames).not.toContain(token);
+    }
+  });
+});

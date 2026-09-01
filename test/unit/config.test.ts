@@ -26,7 +26,14 @@ import { resolveHarnessPatterns } from "../../src/harvest/patterns.ts";
 import { runPaths, type RunPaths } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS } from "../../src/harvest/acceptance.ts";
 import { assertModelsAllowed } from "../../src/cli/commands/up.ts";
-import { BackendSchema, parseDuration } from "../../src/config/schema.ts";
+import {
+  BackendSchema,
+  kubeconfigScopeWarning,
+  observerTuiEpochWarning,
+  observerTuiWorkers,
+  parseDuration,
+  workersMissingKubeconfig,
+} from "../../src/config/schema.ts";
 import { omlxRelayTarget } from "../../src/security/relay.ts";
 import { EXIT } from "../../src/contracts.ts";
 
@@ -686,6 +693,107 @@ describe("pane_mode: tui is refused where there is no pane (SRD §3.5)", () => {
     const loaded = await writeAndLoad(doc);
     expect(loaded.config.backend.kind).toBeUndefined();
     expect(resolveWorker(loaded, "w1").paneMode).toBe("tui");
+  });
+});
+
+/**
+ * The two non-fatal config warnings SRD-OBSERVER-001 section 6.2/6.6 call for
+ * (section 13's "Config." bullet) — ISC-392, ISC-393. Neither fails
+ * `.safeParse`, so these call the pure functions directly rather than going
+ * through `expectIssue`, on the same reasoning `tui-guards.test.ts` uses for
+ * `unattendedTuiWarning`: a document that trips one of these must still load.
+ */
+describe("cloud_access without cloud.kubeconfig warns, never refuses (SRD-OBSERVER-001 §6.6)", () => {
+  test("a role resolving cloud_access: true with no cloud.kubeconfig is named", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: { cloud_access: true } };
+    const loaded = await writeAndLoad(doc);
+    expect(loaded.config.cloud.kubeconfig).toBeNull();
+    const missing = workersMissingKubeconfig(loaded.config);
+    expect(missing).toEqual(["w1"]);
+    const warning = kubeconfigScopeWarning(missing);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("w1");
+    expect(warning).toContain("cloud.kubeconfig");
+  });
+
+  test("the same document still loads — this is a warning, not a schema refusal", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: { cloud_access: true } };
+    // Must not throw.
+    await writeAndLoad(doc);
+  });
+
+  test("cloud.kubeconfig set clears the warning even with cloud_access: true", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: { cloud_access: true } };
+    doc["cloud"] = { kubeconfig: "/run/pifleet/kubeconfig" };
+    const loaded = await writeAndLoad(doc);
+    expect(workersMissingKubeconfig(loaded.config)).toEqual([]);
+    expect(kubeconfigScopeWarning(workersMissingKubeconfig(loaded.config))).toBeNull();
+  });
+
+  test("cloud_access: false raises nothing, kubeconfig unset or not", async () => {
+    const doc = baseDoc();
+    const loaded = await writeAndLoad(doc);
+    expect(workersMissingKubeconfig(loaded.config)).toEqual([]);
+  });
+
+  test("a worker-level override completes the grant a role left unset", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { eng: {} };
+    doc["workers"] = [{ id: "w1", role: "eng", cloud_access: true }];
+    const loaded = await writeAndLoad(doc);
+    expect(workersMissingKubeconfig(loaded.config)).toEqual(["w1"]);
+  });
+});
+
+describe("pane_mode: tui on the observer role warns, never refuses (SRD-OBSERVER-001 §6.2, §7.5)", () => {
+  test("an observer role resolving pane_mode: tui is named, and the mechanism is stated", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { observer: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    const loaded = await writeAndLoad(doc);
+    const tuiWorkers = observerTuiWorkers(loaded.config);
+    expect(tuiWorkers).toEqual(["obs-1"]);
+    const warning = observerTuiEpochWarning(tuiWorkers);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("obs-1");
+    // The mechanism, not just the fact — this is what a reader has to act on.
+    expect(warning).toMatch(/no epoch/);
+    expect(warning).toMatch(/already_completed/);
+    expect(warning).toMatch(/twice/);
+  });
+
+  test("the same document still loads — this is a warning, not a schema refusal", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { observer: { pane_mode: "tui" } };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    // Must not throw, unlike the tui+oneshot / tui+headless refusals above.
+    await writeAndLoad(doc);
+  });
+
+  test("pane_mode: tui on a DIFFERENT role's name raises nothing", async () => {
+    // Keyed to the literal role name "observer" — the hazard is a property of
+    // what the observer-ops skill does, not a generic fact this schema can
+    // derive from any read-only role.
+    const doc = baseDoc();
+    doc["roles"] = { eng: { pane_mode: "tui" } };
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual([]);
+  });
+
+  test("observer at pane_mode: rpc (the shipped default) raises nothing", async () => {
+    const doc = baseDoc();
+    doc["roles"] = { observer: {} };
+    doc["workers"] = [{ id: "obs-1", role: "observer" }];
+    const loaded = await writeAndLoad(doc);
+    expect(observerTuiWorkers(loaded.config)).toEqual([]);
+  });
+
+  test("fleet.example.yaml's shipped observer entry raises no tui warning", async () => {
+    const loaded = await loadConfig(join(REPO_ROOT, "fleet.example.yaml"));
+    expect(observerTuiWorkers(loaded.config)).toEqual([]);
   });
 });
 
