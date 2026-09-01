@@ -233,7 +233,16 @@ async function resolveFrom(network: string, alias: string): Promise<string | nul
     );
   }
   const out = r.stdout.trim();
-  if (out.startsWith("RESOLVED ")) return out.slice("RESOLVED ".length).trim();
+  if (out.startsWith("RESOLVED ")) {
+    // `getent hosts` answers `<address>\t<name>`; the address is the first
+    // field. Returning the whole line would make the address assertions below
+    // match on the NAME as well, which is the thing under test.
+    const addr = out.slice("RESOLVED ".length).trim().split(/\s+/)[0];
+    if (addr === undefined || addr === "") {
+      throw new Error(`getent answered without an address: ${JSON.stringify(out)}`);
+    }
+    return addr;
+  }
   if (out === "NXDOMAIN") return null;
   throw new Error(`unreadable probe output from ${network}: ${JSON.stringify(out)}`);
 }
