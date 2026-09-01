@@ -39,6 +39,7 @@ import {
   relayListenAliases,
   relayViewForProvider,
   uplinkNetworkName,
+  ProviderKeyError,
   RELAY_NAME_PREFIX,
   type FleetRelayConfigView,
 } from "../../src/security/relay.ts";
@@ -49,7 +50,7 @@ import {
   type ProviderBridge,
 } from "../../src/security/relay.ts";
 import { assertDockerName } from "../../src/security/docker-names.ts";
-import { EXIT } from "../../src/contracts.ts";
+import { EXIT, isExitCoded } from "../../src/contracts.ts";
 import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
 
 const NET = "pifleet-egress";
@@ -867,15 +868,54 @@ describe("ISC-412: an over-long provider key is refused naming llm.providers", (
   });
 
   /**
-   * THE CRITERION'S OWN WORDING — "refused at `up`".
+   * THE EXIT CODE, carried by the error itself rather than by a call site.
    *
-   * `up` builds the plan inside a `try` whose `catch` raises `CliError(…,
-   * EXIT.USAGE)`. What has to be true here is that the refusal reaches that
-   * `catch` at all: thrown by `egressBridgePlan`, from a real fleet-shaped
-   * config, and not by something further down that only runs after the first
-   * daemon call has already created a network.
+   * An earlier revision of this block asserted that the refusal "is thrown by
+   * `egressBridgePlan`, so `up` refuses before any daemon call", and that
+   * sentence was false in the way that matters: `providerNetworkName` is
+   * reached from TWO paths, and the one that fires first is not the plan.
+   * `renderAllWorkers` runs at `up.ts:1016` and `egressBridgePlan` at
+   * `up.ts:1186`, so the RENDER path always throws first — and it is not inside
+   * the plan's `try`. The test was green against a call site that never runs
+   * first, which is the same shape as the `omlx` defect below: a fact asserted
+   * against itself while the shipped path did something else.
+   *
+   * So the claim is now about the ERROR, not about which caller catches it.
+   * `exitCodeForError` dispatches structurally through `isExitCoded`, so a
+   * typed throw is correct from both paths at once. Measured through the real
+   * binary: with `ProviderKeyError` `up` exits 2 and prints the diagnostic;
+   * with a plain `Error` it exits 8 as `pifleet: internal error: …`, telling an
+   * operator who mistyped their own config to go file a bug.
    */
-  test("the refusal is thrown by egressBridgePlan, so `up` refuses before any daemon call", () => {
+  test("the refusal carries EXIT.USAGE itself, so both call sites report a config error", () => {
+    const key = "a".repeat(providerKeyBudget(NET) + 1);
+    let caught: unknown;
+    try {
+      providerNetworkName(NET, key);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ProviderKeyError);
+    // Structurally exit-coded, which is what `exitCodeForError` actually reads
+    // — being an `Error` subclass is not enough on its own.
+    expect(isExitCoded(caught)).toBe(true);
+    expect((caught as ProviderKeyError).exitCode).toBe(EXIT.USAGE);
+    // USAGE, not INTERNAL: a too-long provider key is a config typo, and
+    // `index.ts` is explicit that an internal error means "file a bug, do not
+    // fix the command line".
+    expect((caught as ProviderKeyError).exitCode).not.toBe(EXIT.INTERNAL);
+    // The grammar branch is typed too, or half the refusals still exit 8.
+    let grammar: unknown;
+    try {
+      providerNetworkName(NET, "--driver=host");
+    } catch (err) {
+      grammar = err;
+    }
+    expect(isExitCoded(grammar)).toBe(true);
+    expect((grammar as ProviderKeyError).exitCode).toBe(EXIT.USAGE);
+  });
+
+  test("egressBridgePlan refuses too, since it is the second path to the same key", () => {
     const cfg = threeProviders();
     const providers = cfg.llm.providers as Record<
       string,

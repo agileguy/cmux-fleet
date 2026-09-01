@@ -135,6 +135,7 @@ import {
   type EgressPolicy,
   type EgressRule,
 } from "./egress.ts";
+import { EXIT } from "../contracts.ts";
 import { dockerNameGrammarOk, MAX_DOCKER_NAME } from "./docker-names.ts";
 import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
 
@@ -728,9 +729,38 @@ export function providerKeyBudget(egressNetwork: string): number {
  * whose key is already short learns that the network name is what left no room
  * rather than being told to shorten something that cannot get shorter.
  */
+export class ProviderKeyError extends Error {
+  /**
+   * USAGE, and the integer is the half of ISC-412 that a plain `Error` lost.
+   *
+   * `providerNetworkName` is reached from TWO call sites and the one that fires
+   * first is not the obvious one: `renderAllWorkers` runs at `up.ts:1016`,
+   * `egressBridgePlan` at `up.ts:1186`, so the render path always throws first
+   * and it is NOT inside the plan's `try`. A bare `Error` therefore escaped
+   * undiagnosed and `up` announced a config typo as
+   *
+   *     pifleet: internal error: egress: invalid docker network name "aaaa…"
+   *     EXIT=8
+   *
+   * `index.ts` is explicit that an internal error means *"file a bug, do not fix
+   * the command line"*, which is precisely the wrong instruction for an
+   * operator who mistyped their own `llm.providers` key.
+   *
+   * Typed rather than wrapped at the call site: `exitCodeForError` dispatches
+   * structurally through `isExitCoded`, so one typed throw is correct from BOTH
+   * paths at once. Wrapping `up.ts:1016` would fix only the path that happens
+   * to run first today, and would go quietly wrong the moment the order moved.
+   */
+  readonly exitCode = EXIT.USAGE;
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderKeyError";
+  }
+}
+
 export function assertProviderKey(egressNetwork: string, provider: string): void {
   if (!dockerNameGrammarOk(provider)) {
-    throw new Error(
+    throw new ProviderKeyError(
       `relay: llm.providers.${JSON.stringify(provider)} is not a usable provider key. A key ` +
         `becomes part of a Docker network and container name, so it must start with a letter ` +
         `or digit and contain only letters, digits, '_', '.' and '-'. Rename the key in ` +
@@ -740,7 +770,7 @@ export function assertProviderKey(egressNetwork: string, provider: string): void
   const budget = providerKeyBudget(egressNetwork);
   if (provider.length > budget) {
     const composed = `${RELAY_NAME_PREFIX}${egressNetwork}-${provider}`;
-    throw new Error(
+    throw new ProviderKeyError(
       `relay: llm.providers.${JSON.stringify(provider)} is ${provider.length} characters, ` +
         `${provider.length - budget} too long. It composes into the relay container name ` +
         `${JSON.stringify(composed)}, which is ${composed.length} characters and Docker's ` +
