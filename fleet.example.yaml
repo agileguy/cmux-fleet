@@ -135,7 +135,41 @@ cloud:
   adc_mode: token            # token (1h, default) | file (refresh token — opt-in)
   quota_project: gen-lang-client-0675968762
   impersonate_service_account: null    # strongly preferred where one exists
-  kubeconfig: null           # path to a FILTERED kubeconfig; never the host default
+  # A FILTERED kubeconfig; never the host default.
+  #
+  # THREE THINGS HAVE TO BE TRUE FOR kubectl TO WORK FROM A WORKER, and the
+  # first two are not obvious enough to leave undocumented — each fails in a way
+  # that reads as one of the others.
+  #
+  # 1. THE EXEC PLUGIN CANNOT BE THE VENDOR'S DEFAULT. A managed-Kubernetes
+  #    kubeconfig authenticates through an exec plugin that shells out to the
+  #    cloud CLI to mint a token — and that call is a CREDENTIAL-PRINTING verb,
+  #    which `docker/verbgate` classifies as MUTATING on purpose. So the plugin
+  #    exits non-zero and kubectl reports a plugin failure, which looks like a
+  #    broken image and is actually the gate working. Point the kubeconfig's
+  #    `user.exec` at the token the supervisor ALREADY injects instead:
+  #
+  #      command: /bin/sh
+  #      args: ["-c", "printf '{\"apiVersion\":\"client.authentication.k8s.io/v1\",
+  #             \"kind\":\"ExecCredential\",\"status\":{\"token\":\"%s\"}}'
+  #             \"$(cat \"$CLOUDSDK_AUTH_ACCESS_TOKEN_FILE\")\""]
+  #
+  #    No new verb, no second credential path, and nothing to widen: that token
+  #    is in the container already because `cloud_access: true` put it there.
+  #    Note the copy is taken at `up` time, so editing this file needs a relaunch.
+  #
+  # 2. THE CONTROL PLANE MUST BE IN `egress.allow`. The bridge is deny-all and
+  #    kubectl dials the master through the CONNECT proxy, so an unlisted master
+  #    comes back `Forbidden` — the PROXY's 403, not the cluster's, and
+  #    indistinguishable from an RBAC denial unless you know to look. List the
+  #    ADDRESS, because the address is what the CONNECT names.
+  #
+  # 3. THE ADC IDENTITY MUST BE ONE THE CLUSTER KNOWS. The fleet inherits the
+  #    HOST's application-default credential — which is not necessarily the
+  #    account `gcloud auth list` shows as active. When it is the wrong one the
+  #    error finally names it, and that error is the good outcome: it means the
+  #    other two are already right.
+  kubeconfig: null
   token_refresh: 45m
 
 secrets:
