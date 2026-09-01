@@ -308,6 +308,46 @@ describe.skipIf(!DOCKER)("verbgate", () => {
     }, cliBudget(1));
   });
 
+  /**
+   * SRD-DEPLOY-OPS §5.3/§10.1a/§12 D5. `gcloud logging read` is the only log
+   * channel that survives a `Forbidden` `kubectl logs` or a down VPN tunnel,
+   * and it exited 77 because neither `logging` nor `read` matched either
+   * classification set. `read` now joins the read set.
+   *
+   * The three refusals ride in the SAME test as the new allowance, on
+   * purpose: a widening that admits `logging read` but ALSO reopens
+   * `print-access-token` (mints a bearer token), `get-credentials` (writes a
+   * kubeconfig), or lets a POSITIONAL outvote a preceding verb would pass a
+   * test that checked the new allowance alone. The last of the three replays
+   * this file's own header defect — `gcloud compute instances delete
+   * real-vm list` once classified as a read because a positional was named
+   * `list` — with `read` in the positional's place, since `read` is now a
+   * recognized token too and is the one this change could plausibly widen.
+   */
+  test("D5 — gcloud logging read is admitted without loosening credential-minting or positional-verb refusals", async () => {
+    const sb = await makeSandbox();
+    const out = await inImage(
+      `${PRELUDE}
+       gcloud logging read "resource.type=k8s_container" --limit=1 >/dev/null 2>&1; echo "logging=$?"
+       gcloud auth print-access-token >/dev/null 2>&1;                              echo "token=$?"
+       gcloud container clusters get-credentials demo-cluster >/dev/null 2>&1;      echo "creds=$?"
+       gcloud compute instances delete real-vm read >/dev/null 2>&1;                echo "positional=$?"`,
+      sb.mounts,
+    );
+    expect(out).not.toContain("logging=77");
+    expect(out).toContain("token=77");
+    expect(out).toContain("creds=77");
+    expect(out).toContain("positional=77");
+
+    const rows = (await sb.ledger())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as { tool: string; verb: string; decision: string });
+    const loggingRow = rows.find((r) => r.tool === "gcloud" && r.verb.startsWith("logging read"));
+    expect(loggingRow?.decision).toBe("allow_read");
+  }, cliBudget(1));
+
   describe("bypasses", () => {
     /**
      * The gcloud arm scanned EVERY leading token for a read keyword, so a

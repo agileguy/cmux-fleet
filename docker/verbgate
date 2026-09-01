@@ -220,7 +220,14 @@ case "${tool}" in
           is_read=0
           break
           ;;
-        list|describe|version|info|help|get-*|print-*|search|check|wait|tail)
+        # `read` was missing from this set until it took out the only log
+        # channel that survives a Forbidden `kubectl logs` or a down VPN
+        # tunnel: `gcloud logging read` matched neither this set nor the
+        # mutating one below, fell through to the mutating path with an empty
+        # policy mounted, and refused with exit 77 on every call
+        # (SRD-DEPLOY-OPS §5.3, decision D5). No mutating gcloud command uses
+        # `read` as its verb, so admitting it here widens nothing else.
+        list|describe|version|info|help|get-*|print-*|search|check|wait|tail|read)
           is_read=1
           break
           ;;
