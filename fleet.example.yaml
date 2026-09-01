@@ -182,6 +182,30 @@ secrets:
     # string above means `true`.
     - name: TICKET_BASE_URL
       credential: false
+    #
+    # `observer`'s own three pairs, added for the same delivery reason and
+    # carrying the SAME trap one order of magnitude wider — three base URLs
+    # instead of one. THE FAILURE THIS RECORDS: before the `credential: false`
+    # erratum above existed, every `TICKET_BASE_URL` was granted as a bare
+    # string, so it swept as a credential — and a ticket worker's artifacts
+    # legitimately NAME the endpoint they queried. Every `ticket-ops.json`
+    # that did its job honestly was refused as leaking a credential, every
+    # refusal was recorded as a discrepancy nothing caused, and every verdict
+    # clamped on evidence that was never a leak. `observer`'s reports are
+    # WORSE hit if this is not learned here: a build URL or a dashboard link
+    # is close to the single most useful line in a deploy report, and this
+    # role carries three base URLs rather than one. So the tokens are bare
+    # strings (swept, as a credential must be) and the base URLs say up front
+    # that they are not needles.
+    - CI_CD_TOKEN
+    - CI_BUILD_TOKEN
+    - GRAFANA_TOKEN
+    - name: CI_CD_BASE_URL
+      credential: false
+    - name: CI_BUILD_BASE_URL
+      credential: false
+    - name: GRAFANA_BASE_URL
+      credential: false
 
 # Extra holes in the deny-all bridge. Empty by default, and every entry here is
 # a decision rather than a detail.
@@ -213,6 +237,18 @@ egress:
     # That refusal is correct and deliberate: a rule the matcher can never
     # match silently denies the destination it was written for.
     - {host: tickets.example.com, port: 443}
+    #
+    # `observer`'s destination classes (§6.4) — one exact host, one port,
+    # exactly like the rule above; a host with any port is a tunnel, not an
+    # allowance. FOUR new rules, not five: the fifth class in §6.4's table is
+    # Google's own API endpoints (container/logging/monitoring/auth), and
+    # `egress.google_hosts` already grants `*.googleapis.com` plus the two
+    # auth hosts by default (below) — a fifth entry here would be the same
+    # destination twice, not a narrower one.
+    - {host: ci-cd.example.com, port: 443}        # the CD pipeline API — §5.1
+    - {host: ci-build.example.com, port: 443}     # image-build server, D4 — build-failure logs
+    - {host: k8s-control.example.com, port: 443}  # a control-plane endpoint — kubectl, helm
+    - {host: grafana.example.com, port: 443}      # dashboard + datasource checks
 
 # Which changed files count as the EXAM rather than the answer (§6.5, §8.2a). A
 # diff touching one caps the verdict at `unknown`: a worker that can rewrite the
@@ -274,15 +310,29 @@ roles:
     cloud_access: true                    # ADC grant — §5.8; verbs gated by §5.10
     isolation: worktree                   # manifest/IaC edits land on a branch
     append_system_prompt_file: ./roles/sre.md
-  investigator:                           # read-only diagnosis; never mutates
+  observer:                               # read-only diagnostic role — replaces
+                                           # `investigator` in this same change (D2);
+                                           # deploy watches AND ad-hoc service inquiries,
+                                           # one skill bundle, `mode` picks the shape
     model: Qwen3.5-35B-A3B-8bit
-    thinking: high
-    toolchain: base
-    tools: [read, bash, grep, find, ls]   # bash for kubectl/gcloud READ verbs
-    skills: [pifleet-worker]
-    cloud_access: true
-    isolation: none
-    append_system_prompt_file: ./roles/investigator.md
+    thinking: high                        # reconciling four disagreeing channels is the job
+    toolchain: base                       # gcloud, kubectl, helm, curl, jq already in the image
+    tools: [read, write, bash, grep, find, ls]   # write is for the outbox artifact only
+    skills: [pifleet-worker, observer-ops]
+    cloud_access: true                    # ADC, read verbs only — §5.10 refuses every mutation
+    egress_access: true                   # a ROUTE to the proxy; destinations are egress.allow
+    secrets:                              # two CI dialects, one dashboard — §6.4/§6.5
+      - CI_CD_TOKEN
+      - CI_CD_BASE_URL
+      - CI_BUILD_TOKEN
+      - CI_BUILD_BASE_URL
+      - GRAFANA_TOKEN
+      - GRAFANA_BASE_URL
+    isolation: none                       # no repository; the outbox artifact is the whole output
+    pane_mode: rpc                        # tui allocates no epoch — a re-dispatched watch
+                                           # pass would run twice; see the schema-level warning
+                                           # this config would otherwise trip (SRD §6.2, §7.5)
+    append_system_prompt_file: ./roles/observer.md
   verifier:                               # confirms a remediation actually worked
     model: Qwen3-Coder-30B-A3B-Instruct-4bit
     toolchain: base
@@ -356,11 +406,14 @@ roles:
     egress_access: true
 
 workers:
-  # 6 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
+  # 8 panes, 2 generating at a time (§9.3) — panes stay warm and visible,
   # admission control does the queuing against the single oMLX server.
   - {id: sre-1,  role: sre}
   - {id: sre-2,  role: sre}
-  - {id: inv-1,  role: investigator}
+  - {id: obs-1,  role: observer}
+  - {id: obs-2,  role: observer}
+  # Two, not one: observer is read-only, so a watch on one target can proceed
+  # while an inquiry about another is answered (§6.2).
   - {id: ver-1,  role: verifier}
   - {id: eng-1,  role: engineer}
   - {id: rev-1,  role: reviewer}
