@@ -910,7 +910,7 @@ describe("theme resolves three-level and warns on a name the image lacks", () =>
     const obs = resolveWorker(loaded, "obs-1").theme;
     const tick = resolveWorker(loaded, "tick-1").theme;
     expect(obs).toBe("catppuccin-mocha");
-    expect(tick).toBe("dracula");
+    expect(tick).toBe("catppuccin-latte");
     expect(obs).not.toBe(tick);
     expect(unknownThemeWorkers(loaded.config)).toEqual([]);
   });

@@ -430,6 +430,11 @@ workers:
   # terminal. Both names below come from the bundle baked into the image
   # (src/config/themes.ts); `catppuccin` alone is NOT a name, the bundle
   # distinguishes -mocha from -latte.
+  #
+  # -latte is one of the bundle's four LIGHT themes and is an operator's
+  # deliberate choice here, not an oversight: it tunes its ink for a light
+  # background, and a Pi theme sets no background of its own, so it only reads
+  # well in a pane whose terminal is light. Chosen anyway.
   - {id: obs-1,  role: observer, pane_mode: tui, theme: catppuccin-mocha}
   - {id: obs-2,  role: observer}
   # Two, not one: observer is read-only, so a watch on one target can proceed
@@ -445,4 +450,4 @@ workers:
   # because --attach-here hands over the terminal of the process that runs
   # it and one process has one terminal — so two attended panes are two
   # runs, which `status --all` reports and `--recreate` tears down.
-  - {id: tick-1, role: ticketing, pane_mode: tui, theme: dracula}
+  - {id: tick-1, role: ticketing, pane_mode: tui, theme: catppuccin-latte}
