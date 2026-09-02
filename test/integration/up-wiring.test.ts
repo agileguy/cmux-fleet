@@ -1171,6 +1171,16 @@ interface FleetOptions {
    */
   network?: string;
   /**
+   * Write NO `docker.network` key at all, so the schema default supplies it
+   * (ISC-430).
+   *
+   * The gate this proves something about spends money, and the fixture is the
+   * only place the default can be exercised: every other config in this file
+   * writes the key, so a reader could not tell a real dependency on it from a
+   * defaulted one.
+   */
+  omitDockerNetwork?: boolean;
+  /**
    * `backend.kind`, written into a `backend:` block (ISC-271).
    *
    * Omitted by default, which is what every other fixture in this file gets
@@ -1219,7 +1229,13 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
     ...(opts.backendKind === undefined ? [] : ["backend:", `  kind: ${opts.backendKind}`]),
     "docker:",
     '  pi_version: "0.79.6"',
-    `  network: ${opts.network ?? NETWORK}`,
+    /*
+     * OMITTED when a test asks (ISC-430). `docker.network` carries a schema
+     * default, so a config that never mentions it still yields one — which is
+     * the whole content of ISC-430 and cannot be shown by a fixture that always
+     * writes the key.
+     */
+    ...(opts.omitDockerNetwork === true ? [] : [`  network: ${opts.network ?? NETWORK}`]),
     "run:",
     `  repo: ${repo}`,
     ...(opts.maxConcurrent === undefined ? [] : [`  max_concurrent: ${opts.maxConcurrent}`]),
@@ -5800,5 +5816,146 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
      * than tight, which is the direction budget.ts asks for.
      */
     cliBudget(3),
+  );
+});
+
+/**
+ * §5.9's spend gate is reachable on the strength of a CONFIG, not of Docker
+ * (ISC-430).
+ *
+ * ## The defect this pins, which was never a behaviour
+ *
+ * `up` ran the mandatory tool-call probe under
+ * `if (loadedConfig !== null && egressNetwork !== null)`. `egressNetwork` is
+ * assigned unconditionally from `loadedConfig.config.docker.network`, and
+ * `schema.ts` DEFAULTS that key — so on every path where a config parses
+ * cleanly the second conjunct was implied by the first. The condition READ as
+ * though provider spend were gated on Docker being configured, and it was not.
+ * Behaviour was correct; the legibility was not, and a reader who trusted it
+ * would be wrong about where the money goes.
+ *
+ * ## Why a source-shaped test would not have been enough
+ *
+ * The fix could be undone by "simplifying" the derived network back into a
+ * nullable and re-adding the conjunct, and nothing about the SHAPE of the code
+ * would catch that — the suite would stay green while the gate silently
+ * acquired a Docker dependency that could, one schema edit later, actually be
+ * false. So the rule is pinned BEHAVIOURALLY: a config that never mentions
+ * `docker.network`, on the backend that draws no panes, still spends.
+ *
+ * ## The detector, and the control
+ *
+ * "Reached the gate" is `stub.requests.length` — the same load-bearing count
+ * the ISC-53 block uses, and for the same reason: an exit code cannot tell a
+ * run that probed from a run that skipped the probe and succeeded anyway.
+ *
+ * The control is a run that does NOT reach it, differing in ONE thing. Both
+ * cases below carry the same stub, the same `--backend headless`, the same
+ * `require_native_tool_calls: true` and the same models; the control names a
+ * `-uplink` network, which `ensureEgressNetwork` refuses several steps BEFORE
+ * the gate. Its request count is 0. So the probe can distinguish reaching from
+ * not-reaching, and "1" in the positive case is a measurement rather than a
+ * value it could not have failed to produce.
+ *
+ * It also says something true that the criterion is easy to over-read: Docker
+ * still gates the probe POSITIONALLY — a broken network stops the run earlier
+ * — but not CONDITIONALLY, which is the distinction the old `&&` erased.
+ */
+describe("the §5.9 spend gate is reachable on a config alone (ISC-430)", () => {
+  test(
+    "a headless up whose config never mentions docker.network still probes",
+    async () => {
+      const rig = await makeRig();
+      const stub = stubOmlx(STUB_TOOL_CALL);
+      try {
+        const cfg = join(rig.base, "no-docker-network.yaml");
+        await writeFile(
+          cfg,
+          fleetYaml(rig.repo, {
+            requireNativeToolCalls: true,
+            llmBaseUrl: stub.baseUrl,
+            omitDockerNetwork: true,
+          }),
+        );
+        // Asserted, not assumed: the fixture's whole job is that the key is
+        // absent, and a `fleetYaml` change that reintroduced it would leave
+        // this test passing for a reason unrelated to ISC-430.
+        expect(await Bun.file(cfg).text()).not.toContain("network:");
+
+        const up = await runCli(rig, [
+          "up",
+          "--config",
+          cfg,
+          "--workers",
+          "eng-1",
+          "--backend",
+          "headless",
+          "--json",
+        ]);
+        expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+          code: EXIT.SUCCESS,
+        });
+        rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+        // THE CLAIM. A config that says nothing about Docker's network, on the
+        // backend that draws nothing, still dialled the provider.
+        expect(stub.requests.length).toBe(1);
+        expect(stub.requests[0]!.path).toBe("/v1/chat/completions");
+        expect(Array.isArray(stub.requests[0]!.body["tools"])).toBe(true);
+
+        // …and the fleet then stood up, so this is the gate PASSING rather
+        // than the run stopping at it.
+        const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+        expect(records.map((r) => r.event)).toContain("supervisor_launched");
+      } finally {
+        await stub.stop();
+      }
+    },
+    // ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`. The
+    // stub is an in-process server, not a spawn.
+    cliBudget(1),
+  );
+
+  test(
+    "CONTROL: a run stopped before the gate never dials the provider",
+    async () => {
+      const rig = await makeRig();
+      const stub = stubOmlx(STUB_TOOL_CALL);
+      try {
+        /*
+         * IDENTICAL to the fixture above but for `network:`, which is named
+         * rather than omitted and ends `-uplink` — the shim answers that
+         * NON-internal and `ensureEgressNetwork` refuses to adopt it, several
+         * steps before the gate. One difference, one outcome.
+         */
+        const cfg = join(rig.base, "uplink-network.yaml");
+        await writeFile(
+          cfg,
+          fleetYaml(rig.repo, {
+            requireNativeToolCalls: true,
+            llmBaseUrl: stub.baseUrl,
+            network: `${NETWORK}-uplink`,
+          }),
+        );
+        const up = await runCli(rig, [
+          "up",
+          "--config",
+          cfg,
+          "--workers",
+          "eng-1",
+          "--backend",
+          "headless",
+        ]);
+        expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+
+        // The detector can tell the two apart. Without this line, "1" above
+        // would be a number nothing showed could be anything else.
+        expect(stub.requests).toEqual([]);
+      } finally {
+        await stub.stop();
+      }
+    },
+    // ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`.
+    cliBudget(1),
   );
 });
