@@ -1496,6 +1496,28 @@ export async function egressBridgePlan(
     const target = isFlatFleet(cfg)
       ? omlxRelayTarget(view)
       : providerRelayTarget(view, provider, { allowHostname: hosted });
+    /*
+     * `hosted` HERE IS REDUNDANT, AND THAT IS MEASURED RATHER THAN ASSUMED.
+     *
+     * Deleting it from this line was mutation-tested and NOTHING went red —
+     * across the whole suite, not one file. The reason is the `allowHostname`
+     * on the line above: a non-hosted block naming a hostname is REFUSED by
+     * `providerRelayTarget` before this expression is evaluated, so no input
+     * exists that can distinguish this clause's presence from its absence.
+     * `omlxRelayTarget` refuses the same way on the flat path.
+     *
+     * It stays, and the reason is not superstition. Without it the line reads
+     * *"resolve any hostname"*, and its correctness then lives entirely in a
+     * guard fifteen lines up — one relaxation of the parse away from silently
+     * resolving names on blocks D9 explicitly refuses to weaken. With it, the
+     * two halves of the decision are spelled at the point each is used.
+     *
+     * What must NOT be read into it: this clause is not the enforcement. The
+     * enforcement is `allowHostname: hosted` above and `ProviderSchema`'s
+     * `superRefine` below that (ISC-427). A future reader hunting for what
+     * stops a non-hosted hostname should look there, and a future editor who
+     * deletes this line has broken nothing today.
+     */
     const resolvable =
       hosted && isIP(target.host) === 0 && target.host !== RELAY_DEFAULT_DIAL_HOST;
     /*
