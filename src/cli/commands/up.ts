@@ -15,7 +15,12 @@ import {
   writePresentation,
 } from "../../run/state.ts";
 import { attachArgv, enterTui, DETACH_KEYS } from "../../attended/mode.ts";
-import { adoptRefusal, adoptRefusalMessage, adoptedAttachArgv } from "../../attended/adopt.ts";
+import {
+  adoptRefusal,
+  adoptRefusalMessage,
+  adoptedAttachArgv,
+  adoptedSurface,
+} from "../../attended/adopt.ts";
 // The driver that changes no pane. Imported from the `tui` command rather than
 // re-declared, because it is an ASSERTION about a tui worker's pane — that
 // entering attended mode must not respawn a pane which is already a person's
@@ -2118,13 +2123,35 @@ export function register(program: Command): void {
         // `backend` is the ACTIVE backend, not the requested one: it was
         // hardcoded to "headless" here, so a cmux run recorded itself as
         // headless and `attach` would have had nothing to focus.
+        /*
+         * The surface the OPERATOR handed over, when there is one.
+         *
+         * Only meaningful for the adopted worker: `adoptedSurface` reads the
+         * environment of THIS process, which is the terminal `up` was typed
+         * in, and that terminal is exactly one worker's pane. Applying it to
+         * any other worker in the run would name a surface that is not theirs.
+         *
+         * `null` for every other case, and that stays a first-class answer:
+         * an adopted Terminal.app, ssh session or tmux pane announces no cmux
+         * surface, and the staged route degrades to printing the trigger
+         * rather than sending it. See `adoptedSurface`.
+         */
+        const adopted = attachHere && tuiWorkers.includes(workerId);
+        const handedOver = adopted ? adoptedSurface(process.env) : null;
         await writePresentation(wp, {
           schema: "pifleet.presentation/v1",
           worker: workerId,
           backend: backend.kind,
-          workspace_ref: workspace.id,
-          surface_ref: pane.id,
+          workspace_ref: handedOver?.workspace ?? workspace.id,
+          surface_ref: handedOver?.surface ?? pane.id,
           window_ref: null,
+          /*
+           * WHO owns `surface_ref`, which `backend` above cannot say for an
+           * adopted terminal: the run's backend is `headless` and the surface
+           * is cmux's. `dispatch` reads this rather than re-deriving it, so
+           * the two questions stay separable. See `surface_backend`.
+           */
+          surface_backend: handedOver?.backend ?? (pane.id === null ? null : backend.kind === "headless" ? null : backend.kind),
           /*
            * No attach child yet, and this is the honest value rather than a
            * placeholder: this write happens BEFORE the spawn, so the pid does
@@ -2142,12 +2169,16 @@ export function register(program: Command): void {
            * says what it is — a headless run with no pane — because that is
            * still true of it.
            *
-           * `surface_ref` stays null and is not an oversight: there is no id
-           * a later process could send bytes to. `dispatch` reads exactly that
-           * and refuses, which is correct for this mode — the person holding
-           * the terminal is the dispatcher.
+           * `surface_ref` USED TO STAY NULL here, on the reasoning that there
+           * was no id a later process could send bytes to. There is: a cmux
+           * pane announces itself in the environment, and this process is
+           * running in it. That was recorded as SRD-TUI-DISPATCH D2 and
+           * recommended against; the owner reversed it on 2026-09-02, and the
+           * shape that came back is narrower than the one D2 argued against —
+           * the brief travels through the read-only file plane and only a
+           * short, shell-inert trigger is typed.
            */
-          adopted_terminal: attachHere && tuiWorkers.includes(workerId),
+          adopted_terminal: adopted,
         });
         const { pid, pgid, started } = await processLauncher.launchDetached({
           runId,

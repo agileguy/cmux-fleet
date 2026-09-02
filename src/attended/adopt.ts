@@ -231,3 +231,60 @@ export function terminalRefusalMessage(worker: string, r: TerminalRefusal): stri
       );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Which surface did the operator hand over? (D2, reversed by owner 2026-09-02)
+// ---------------------------------------------------------------------------
+
+/**
+ * The environment variable a cmux pane sets to name itself. Read here rather
+ * than in `src/backends/cmux/` because ISC-137 forbids importing a cmux symbol
+ * outside that directory, and this is a variable NAME, not a cmux import — the
+ * same reasoning `doctor.ts` already relies on when it reads the pair to decide
+ * whether it is running inside a pane.
+ */
+export const CMUX_SURFACE_ENV = "CMUX_SURFACE_ID";
+export const CMUX_WORKSPACE_ENV = "CMUX_WORKSPACE_ID";
+
+/**
+ * What surface, if any, the terminal running `up --attach-here` belongs to.
+ *
+ * ## Why this exists at all — the decision that produced it
+ *
+ * `Docs/SRD-TUI-DISPATCH.md` D2 recommended NOT recording this, on the grounds
+ * that `docker attach --detach-keys=ctrl-]` makes detach one keypress pifleet
+ * cannot see, after which anything typed at the surface lands in a host shell.
+ * **The owner reversed it on 2026-09-02**, and the design that came back is
+ * better than either arm the document offered: the BRIEF still travels through
+ * the read-only file plane and never touches the terminal, and only a short
+ * TRIGGER is typed. So the exposure §4.3 argued about shrinks from a whole
+ * markdown document executed line-by-line to one line — and that line is
+ * shaped to be inert in a shell (`src/cli/commands/dispatch.ts`).
+ *
+ * ## PURE, and the environment is the caller's
+ *
+ * Passed in rather than read from `process.env` here so every arm below is
+ * testable without a cmux, without a pane, and without mutating the test
+ * process's own environment — which is a global that other suites read.
+ *
+ * ## `null` is a first-class answer, not a failure
+ *
+ * An adopted terminal in Terminal.app, over ssh, or inside tmux announces no
+ * cmux surface. That is the majority case for this mode outside the operations
+ * console, and it must degrade to "stage it and tell the operator to trigger
+ * it" rather than to an error — which is why this returns an id or nothing and
+ * never throws. D2's second argument survives its own reversal: a design that
+ * only works under cmux must not become a design that only RUNS under cmux.
+ */
+export function adoptedSurface(
+  env: Record<string, string | undefined>,
+): { backend: "cmux"; surface: string; workspace: string | null } | null {
+  const surface = env[CMUX_SURFACE_ENV];
+  if (surface === undefined || surface.trim() === "") return null;
+  const workspace = env[CMUX_WORKSPACE_ENV];
+  return {
+    backend: "cmux",
+    surface: surface.trim(),
+    workspace: workspace === undefined || workspace.trim() === "" ? null : workspace.trim(),
+  };
+}

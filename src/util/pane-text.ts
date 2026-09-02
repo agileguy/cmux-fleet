@@ -127,3 +127,43 @@ export function assertPaneKey(what: string, v: string): void {
     );
   }
 }
+
+/**
+ * The line pifleet types to start a staged task — and the reason it begins with
+ * `#`.
+ *
+ * ## What is being defended against
+ *
+ * `SRD-TUI-DISPATCH` §4.3 argued that an adopted terminal must never be typed
+ * into, because `docker attach --detach-keys=ctrl-]` makes detach one keypress
+ * pifleet cannot observe. Detach, and the pane's `up --attach-here` exits, and
+ * what is left on that surface is the operator's own SHELL. Anything sent after
+ * that moment is a shell command.
+ *
+ * The owner reversed that decision on 2026-09-02, and the design that came back
+ * shrinks the exposure rather than accepting it: the BRIEF goes through
+ * `/policy/dispatch`, read-only and unwritable by the worker, and never touches
+ * the terminal at all. Only this line does.
+ *
+ * ## `#` first, and what it actually buys
+ *
+ * In `bash`, `sh` and any POSIX shell, a line beginning `#` is a comment: the
+ * payload is not executed. In interactive `zsh`, `INTERACTIVE_COMMENTS` is off
+ * by default, so the same line is a parse error — `zsh: bad pattern` or
+ * `command not found: #` — which is a NOISY FAILURE and not an execution.
+ * Either way the words after the `#` cannot run.
+ *
+ * **It is a mitigation, not a guarantee, and the difference is worth stating.**
+ * It does not survive a shell configured with `interactive_comments` and a
+ * history-expansion quirk, it does nothing about a pane respawned onto some
+ * third program that treats `#` as input, and it cannot make a misdirected
+ * keystroke correct. What it does is convert the worst outcome §4.3 named —
+ * arbitrary text from a run's brief executed as host commands — into a comment
+ * or an error. The brief is not here to be executed; that is the larger half of
+ * the answer, and this is the smaller half that covers the line that is.
+ *
+ * Pi reads it as ordinary text, because it is: a leading `#` is a markdown
+ * heading and carries no special meaning in a composer.
+ */
+export const STAGED_TRIGGER_LINE =
+  "# pifleet: a task was staged for you — read /policy/dispatch and do what it says";

@@ -29,7 +29,7 @@
  * the failure that matters.
  */
 
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import {
   adoptRefusal,
   adoptRefusalMessage,
@@ -254,9 +254,20 @@ describe("the presentation record", () => {
       adopted_terminal: true,
     });
     expect(adopted.adopted_terminal).toBe(true);
-    // `surface_ref` stays null BY DESIGN: there is no id anything could send
-    // bytes to, which is what keeps `dispatch` refusing this worker.
+    /*
+     * `surface_ref` stays null WHEN THE HOST ANNOUNCED NOTHING, which is what
+     * a Terminal.app window, an ssh session or a bare tmux pane does — and
+     * what this fixture models, since it names no surface.
+     *
+     * IT IS NO LONGER NULL BY DESIGN. It was, on the reasoning that there is
+     * no id anything could send bytes to; a cmux pane announces one in its own
+     * environment and `up` runs inside it. Recorded as SRD-TUI-DISPATCH D2,
+     * recommended against, and reversed by the owner on 2026-09-02 — under a
+     * design that keeps the BRIEF off the terminal entirely and types only a
+     * short, shell-inert trigger.
+     */
     expect(adopted.surface_ref).toBeNull();
+    expect(adopted.surface_backend).toBeNull();
 
     const old = PresentationSchema.parse({
       schema: "pifleet.presentation/v1",
@@ -269,31 +280,62 @@ describe("the presentation record", () => {
 });
 
 /**
- * The refusal an operator actually reads when they try to dispatch.
+ * What `dispatch` does with an adopted pane, now that it does not refuse it.
  *
- * `dispatch` must still refuse an adopted worker — there is no surface id, so
- * there is genuinely nothing to type into — but "nowhere to go" is the wrong
- * DIAGNOSIS here: a pane exists and a person is looking at it. Same refusal,
- * same exit code, different sentence.
+ * ## What changed and why the old test had to go rather than be adjusted
  *
- * Asserted on the rendered strings rather than by driving the CLI, because the
- * branch is a ternary on one recorded boolean and the integration path is
- * already covered by `tui-dispatch-pane.test.ts`. Both arms, because a message
- * that said "adopted" unconditionally would be worse than the one it replaced.
+ * This block used to assert the REFUSAL — that an adopted worker got "there is
+ * no surface id to type into" and a sentence naming the operator as the
+ * dispatcher. That refusal was correct under D2 and is gone with it. Adjusting
+ * the assertions would have left a test whose name and docblock argued for a
+ * behaviour the tree no longer has, which is worse than a test that is missing.
+ *
+ * ## The two properties worth pinning now
+ *
+ * The fork is on the RECORD and it is taken FIRST, and the original refusal
+ * survives for the case it was actually written for. Both matter: a headless
+ * run with no pane and an adopted terminal share `backend: "headless"`, so a
+ * fork on the backend name would send the wrong one down the staged route, and
+ * an adopted terminal satisfies `surface_ref === null || backend === "headless"`
+ * by the letter of a condition that no longer means what it says.
  */
-describe("dispatch tells an adopted pane apart from no pane", () => {
-  test("the two refusals are different sentences and neither is empty", async () => {
+describe("dispatch forks an adopted pane into the staged route", () => {
+  test("the fork is on the record, and it precedes the no-surface refusal", async () => {
     const src = await Bun.file(
       new URL("../../src/cli/commands/dispatch.ts", import.meta.url).pathname,
     ).text();
-    // The adopted arm names the flag that created the situation and says who
-    // the dispatcher is.
-    expect(src).toContain("ADOPTED terminal");
-    expect(src).toContain("up --attach-here");
-    // And the original arm survives for the case it was written for.
-    expect(src).toContain("a tui worker's prompt has nowhere to go");
-    // The branch is on the RECORD, not on the backend name — a headless run
-    // with no pane and an adopted one share `backend: "headless"`.
-    expect(src).toContain("presentation.adopted_terminal");
+    const fork = src.indexOf("if (presentation.adopted_terminal) {");
+    const refusal = src.indexOf('presentation.backend === "headless" || presentation.surface_ref === null');
+    expect(fork, "the staged fork is gone").toBeGreaterThan(-1);
+    expect(refusal, "the no-surface refusal is gone").toBeGreaterThan(-1);
+    // ORDER, not merely presence. Below the refusal, the fork is unreachable
+    // for every adopted worker — which is the state this replaced.
+    expect(fork).toBeLessThan(refusal);
+    expect(src).toContain("stageForAdoptedTerminal");
   });
+
+  test("the original refusal survives for the case it was written for", () => {
+    // A headless run with no pane at all. D1 does not touch it, and ISC-454
+    // is the anti-criterion that says so.
+    expect(REFUSAL_SOURCE).toContain("a tui worker's prompt has nowhere to go");
+  });
+
+  /**
+   * The old sentence is GONE, not merely unreachable. A refusal left in the
+   * tree telling an operator that pifleet "has no surface id to type into"
+   * would be read as current by the next person to grep for it — and it is now
+   * false twice over: there is an id, and pifleet uses it.
+   */
+  test("and the D2-era refusal is not left lying in the source", () => {
+    expect(REFUSAL_SOURCE).not.toContain("has no surface id to type into");
+    expect(REFUSAL_SOURCE).not.toContain("could not have been deduplicated anyway");
+  });
+});
+
+/** The dispatch source, read once — three assertions above search it. */
+let REFUSAL_SOURCE = "";
+beforeAll(async () => {
+  REFUSAL_SOURCE = await Bun.file(
+    new URL("../../src/cli/commands/dispatch.ts", import.meta.url).pathname,
+  ).text();
 });

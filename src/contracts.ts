@@ -818,6 +818,29 @@ export const PresentationSchema = z.object({
    */
   adopted_terminal: z.boolean().default(false),
   /**
+   * WHO OWNS THE SURFACE `surface_ref` NAMES — which is not the same question
+   * as `backend` above, and conflating the two is what made this field
+   * necessary.
+   *
+   * `backend` means "the run's active presentation backend": the thing pifleet
+   * uses to make panes. For every run except an adopted one it also answers
+   * "who owns this surface", because pifleet made the surface. An adopted
+   * terminal breaks that: the run's backend is `headless` — correctly, the
+   * fleet must not open windows of its own — while the surface the operator
+   * handed over was made by cmux and is addressable through cmux.
+   *
+   * `dispatch` read `backend === "headless"` as "there is no surface", which
+   * was true until `--attach-here` existed. Splitting the field is the repair,
+   * and it is a SECOND field rather than a widening of the first for the
+   * reason `assertTuiBackendPossible` needed a second guard: a single value
+   * answering two questions cannot be corrected one question at a time.
+   *
+   * `null` means nothing owns a surface for this worker — no pane, or a pane
+   * whose host announced no id. Every record written before this field existed
+   * parses as `null`, which is what they all were.
+   */
+  surface_backend: z.enum(["cmux", "tmux"]).nullable().default(null),
+  /**
    * The `docker attach` child `up --attach-here` spawned, in the SAME
    * `(pid, started)` shape the launcher, the lease and the registry use.
    *
