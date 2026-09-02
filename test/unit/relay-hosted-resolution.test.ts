@@ -95,18 +95,25 @@ function fleet(): FleetRelayConfigView {
     egress: {
       google_hosts: [],
       /*
-       * BOTH the name and the address are authorized here, on purpose.
+       * THE NAME ONLY, and the address is deliberately NOT authorized here.
        *
-       * `ensureEgressRelay` runs its target through `assertTargetsAllowed`, and
-       * teaching that gate to accept a name for an address is ISC-428 — a
-       * different criterion, being built in parallel. Allowing both keeps this
-       * file measuring ITS OWN claim (what the target carries) instead of
-       * failing or passing on the state of somebody else's change.
+       * An earlier draft of this fixture allowed both, reasoning that ISC-428
+       * was landing in parallel and this file should not depend on it. That was
+       * exactly wrong, and it took ISC-428 landing to see why: with the address
+       * also allowed, a target that FAILED to carry `policyHost` would be
+       * judged on its dialled literal, find it in this list, and pass. The
+       * belt-and-braces entry masked the one failure the integration can have.
+       *
+       * With the name alone, `assertTargetsAllowed` admits this relay only if
+       * `policyHost` really carries the pre-resolution name — so
+       * `ensureBridgeRelay` below is a live tripwire on the ISC-428 seam rather
+       * than a test that would pass with the seam cut. §6.7's whole sentence is
+       * that the operator authorizes a NAME while the relay dials an ADDRESS;
+       * a fixture authorizing both is not testing that sentence.
        */
       allow: [
         { host: "192.168.86.49", port: 8000 },
         { host: "ollama.com", port: 443 },
-        { host: OLLAMA_ADDR, port: 443 },
       ],
     },
   };
