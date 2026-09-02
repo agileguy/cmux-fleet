@@ -80,7 +80,14 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-There are zero `[ ]` criteria. The block ISC-401..ISC-430, filed 2026-09-01 as the
+**Twenty-eight criteria are unattempted `[ ]`**: ISC-431..ISC-458, filed 2026-09-02 as the
+done-condition for dispatch to an adopted-terminal `tui` worker
+(`Docs/SRD-TUI-DISPATCH.md`) and being built now. Twenty-five are that document's
+own §10 list verbatim; the last three are the ones it reserved and could not phrase
+until its four open decisions were taken and its three blocking questions answered.
+ISC-459 and ISC-460 stay reserved.
+
+Before that block, there were zero. The block ISC-401..ISC-430, filed 2026-09-01 as the
 done-condition for per-worker inference providers
 (`Docs/SRD-INFERENCE-PROVIDERS.md`), is closed in full — all thirty, including the two
 filed out of its own phases' work: ISC-401 and ISC-406 closed with the two latent

@@ -817,6 +817,57 @@ export const PresentationSchema = z.object({
    * parses as the pane pifleet itself created — which is what they all were.
    */
   adopted_terminal: z.boolean().default(false),
+  /**
+   * The `docker attach` child `up --attach-here` spawned, in the SAME
+   * `(pid, started)` shape the launcher, the lease and the registry use.
+   *
+   * ## What it is for
+   *
+   * "Is this terminal still the worker's?" was not a checkable fact. `up.ts`
+   * held the pid at the moment it spawned the attach and threw it away, so a
+   * dispatch staged for an adopted-terminal worker had no way to know whether
+   * anybody was still there to trigger it — and a staged task nobody can
+   * trigger is the `<none>` shape again: a mechanism running over an input
+   * nobody is reading, reporting success.
+   *
+   * ## Why the PAIR and not the pid
+   *
+   * `up.ts` already says it: *"the number outlives the process and the kernel
+   * hands it out again."* A bare pid re-check would be satisfied by a stranger
+   * the moment the operator's terminal died on a busy machine, which is
+   * exactly when the guard is supposed to fire. `started` is the
+   * `IDENTITY_FORMAT` rendering `registry.ts` produces, so the comparison is
+   * the same one ISC-144 installed for the run-dir lease.
+   *
+   * ## Written at LAUNCH, from the child handle
+   *
+   * `supervisor/launch.ts` states the rule this obeys and the failure it
+   * avoids: a start time read off a live pid names whoever holds the number,
+   * and every downstream guard compares the record against the OS, so none of
+   * them can catch a record that was WRITTEN from the OS. The capture site
+   * holds `Bun.spawn`'s handle and checks `exitCode === null &&
+   * signalCode === null` AFTER the read — POSIX retains a child's pid until its
+   * parent reaps it, so a child that is still unreaped cannot have had its
+   * number reissued, which is what turns the read into a record.
+   *
+   * ## `null` means no terminal, and is the safe direction
+   *
+   * Null before the attach, null again once it exits, and null for every
+   * record written before this field existed. Staging REFUSES on null rather
+   * than proceeding, so a capture that failed costs a refusal the operator can
+   * act on rather than a task queued at nobody.
+   *
+   * **A PARTIAL GUARD, and it must not be described as more.** It catches a
+   * clean detach and a crashed terminal. It does not catch a re-attach from
+   * elsewhere, a pane respawned onto a different program, or a second
+   * concurrent attach — the host has no way this project has found to
+   * enumerate a container's attached clients.
+   */
+  attach_process: z
+    .object({ pid: z.number().int().positive(), started: z.string().min(1) })
+    .strict()
+    .nullable()
+    .default(null),
 });
 export type Presentation = z.infer<typeof PresentationSchema>;
 
