@@ -41,7 +41,12 @@ import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { TASK_POLICY_MOUNT } from "../../src/run/task-policy.ts";
 import { SECRETS_MOUNT } from "../../src/run/worker-env.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
-import { BudgetStateSchema, EXIT, type LedgerRecord } from "../../src/contracts.ts";
+import {
+  BudgetStateSchema,
+  EXIT,
+  type LedgerRecord,
+  WorkerLaunchSchema,
+} from "../../src/contracts.ts";
 import { runPaths, workerBranch, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { readRunBudgetPolicy, readRunWorktrees } from "../../src/run/state.ts";
@@ -4403,5 +4408,466 @@ describe("a declared-but-unused provider creates nothing (ISC-410)", () => {
     // ceiling in this file keeps 90_000: the derived value is the FLOOR the
     // audit checks against, not the value shipped.
     90_000,
+  );
+});
+
+/**
+ * The disclosure banner and the launch record name the same workers
+ * (ISC-416, ISC-417).
+ *
+ * ## What "the same set" means, stated before it is asserted
+ *
+ * The two surfaces are produced at different moments and one of them is not
+ * always produced at all, so "the same set" is not self-evident and a
+ * comparison picked because it went green would be worth nothing. Three sets,
+ * over one run:
+ *
+ *   W — the workers this run SELECTS (`--workers`).
+ *   B — the worker ids the printed banner names.
+ *   L — the workers with a `launch.json` on disk.
+ *   D — the members of L whose record carries a non-null `disclosure`.
+ *
+ * **ISC-416 is `B` against the world:** the banner names every worker whose
+ * context leaves the machine, compared against a set typed into this file as a
+ * LITERAL, over W. It cannot be compared against anything `disclosureFor`
+ * produces, because that is the function under test — if it wrongly returned
+ * `null` for a worker that should be disclosed, the banner would omit it, the
+ * record would omit it, and any comparison between the two would agree
+ * perfectly while both were wrong. That is the "asserted against itself" shape,
+ * and only a literal from a config this file wrote can see through it.
+ *
+ * **ISC-417 is the two surfaces against each other: `D = B ∩ L`.**
+ *
+ * Scoped to `L` because the anti-criterion's subject is a worker STOOD UP
+ * silently, and a worker `up` never stood up cannot have been. That is not a
+ * convenience: `WorkerLaunchSchema`'s own docblock defines a missing record as
+ * meaning the run went through the `PIFLEET_PI_COMMAND` double, "which starts
+ * no container". The double run below is that case, held as its own test so
+ * the boundary is visible rather than inferred.
+ *
+ * **On the container-path run below `L = W`, so `B ∩ L` collapses to `B` and
+ * the assertion is full equality.** The intersection exists to keep the
+ * criterion WELL-DEFINED on a partial run — one refused after some records
+ * were written — not to soften it here.
+ *
+ * A mismatch fails in EITHER direction and both have a witness on disk:
+ *
+ *   - a record marked hosted whose worker the banner never named is a SILENT
+ *     STAND-UP — the operator was told nothing about a worker already talking
+ *     to a vendor, which is the whole of what §7.3's banner is the control for;
+ *   - a banner row whose own launch record carries no disclosure means the
+ *     recorded answer contradicts what the operator was told, and §7.3 wants
+ *     the record precisely so "was this run's ticket credential exposed to a
+ *     vendor" has an answer rather than a reconstruction.
+ *
+ * Neither direction is `⊆` in disguise: `D ⊆ B` alone would let a banner
+ * promise go unrecorded, and `B ⊆ D` alone would let a record name a worker
+ * nobody was told about.
+ *
+ * ## Anti-vacuity, which is where a set comparison goes to die
+ *
+ * `∅ = ∅ ∩ ∅` is true. Every guard below exists because some way of reaching
+ * that is reachable by a real mutation:
+ *
+ *   - `L = W` is asserted, so deleting every launch record does not empty the
+ *     domain into agreement;
+ *   - the banner PARSE is asserted to have found exactly `|D|` rows, so a regex
+ *     that silently matched nothing cannot supply `B = ∅`;
+ *   - the fixture has both a hosted and a non-hosted launched worker, so
+ *     neither "everything is disclosed" nor "nothing is" satisfies it;
+ *   - `provider` and `cloud_access` vary across the disclosed rows, so a row
+ *     that hard-coded either value fails;
+ *   - each row is asserted to appear on exactly ONE stream, so a banner written
+ *     to both cannot be quietly deduped into looking correct.
+ *
+ * ## Why this rig refuses, and why that is the right probe
+ *
+ * `containerPath: true` is what makes `up` write launch records at all — the
+ * double writes none. Against the docker PATH shim such a run reaches
+ * `assertBindMountsVisible` and exits 3, and it does so in about 1.7s rather
+ * than waiting out the 60s idle gate on containers this shim cannot start.
+ * Every worker's record is on disk by then, because materialization precedes
+ * that guard. The refusal is therefore AFTER the state these criteria are about
+ * and is not part of them — and `L = W` is asserted rather than assumed, so a
+ * refusal that ever moved EARLIER would fail this file instead of quietly
+ * shrinking the domain it compares over.
+ */
+describe("the disclosure banner and the launch record name the same workers (ISC-416, ISC-417)", () => {
+  /** Must match `fleetYaml`'s `docker.pi_version`, as in the ISC-32 block. */
+  const PINNED_PI_VERSION = "0.79.6";
+
+  /**
+   * One local provider and two hosted ones.
+   *
+   * TWO hosted providers rather than one so `provider` VARIES across the
+   * disclosed rows: with a single vendor a row that printed a constant would
+   * pass. The names are chosen so none is a substring of another.
+   */
+  const PROVIDERS = [
+    {
+      name: "alpha",
+      hosted: false,
+      baseUrl: "http://alpha.house.test:8000/v1",
+      apiKeyEnv: "ALPHA_API_KEY",
+      relayUpstream: "192.168.86.49:8000",
+    },
+    {
+      name: "bravo",
+      hosted: true,
+      baseUrl: "https://bravo.example.test/v1",
+      apiKeyEnv: "BRAVO_API_KEY",
+      relayUpstream: "104.18.0.1:443",
+    },
+    {
+      name: "charlie",
+      hosted: true,
+      baseUrl: "https://charlie.example.test/v1",
+      apiKeyEnv: "CHARLIE_API_KEY",
+      relayUpstream: "104.18.0.2:443",
+    },
+  ];
+
+  /** W. `eng-1` inherits `llm.provider: alpha`; the other two select by prefix. */
+  const SELECTED = ["eng-1", "rev-1", "qa-1"];
+
+  /**
+   * THE LITERAL — ISC-416's expectation, and the one set in this file that does
+   * not come from the code under test.
+   *
+   * It is derived by hand from `PROVIDERS` and the worker list below: `rev-1`
+   * resolves to `bravo` and `qa-1` to `charlie`, both `hosted: true`; `eng-1`
+   * resolves to `alpha`, which is not. If someone edits the fixture without
+   * editing this, the test fails — which is the correct cost of an expectation
+   * that refuses to be derived from the thing it is checking.
+   */
+  const HOSTED_BY_FIXTURE = ["qa-1", "rev-1"];
+
+  /**
+   * `cloud_access` per disclosed worker, also a literal.
+   *
+   * `rev-1` holds a Google identity and `qa-1` does not, which is what makes
+   * this field discriminating — and it is the D10 case §7.4 names as the one to
+   * watch, so the banner claiming it correctly is not a detail.
+   */
+  const CLOUD_ACCESS_BY_FIXTURE: Record<string, string> = { "rev-1": "true", "qa-1": "false" };
+
+  /**
+   * A banner row, parsed on STRUCTURE rather than on prose.
+   *
+   * The row lines are `key=value` and the header and footer are sentences, so
+   * this pins exactly the fields ISC-416 is about and stays green if the header
+   * is later reworded — while a change to the ROW format reddens it, which is
+   * correct, because the row IS the surface the criterion is about.
+   *
+   * A substring search for a worker id was rejected outright: `up` also prints
+   * `eng-1: 1 hazard(s) in its checkout` and `rev-1: /…/worktrees/rev-1 on
+   * fleet/…`, so `text.includes(id)` is satisfied by output with nothing to do
+   * with disclosure, and `B` would be right for the wrong reason on a run whose
+   * banner printed nothing at all.
+   */
+  const ROW = /^(?:!!| {2}) (\S+) {2}role=(\S+) {2}provider=(\S+) {2}isolation=(\S+) {2}repo=(.*)$/;
+
+  interface BannerRow {
+    workerId: string;
+    role: string;
+    provider: string;
+    isolation: string;
+    repo: string;
+  }
+
+  function bannerRows(text: string): BannerRow[] {
+    const out: BannerRow[] = [];
+    for (const line of text.split("\n")) {
+      const m = ROW.exec(line);
+      if (m === null) continue;
+      out.push({
+        workerId: m[1]!,
+        role: m[2]!,
+        provider: m[3]!,
+        isolation: m[4]!,
+        repo: m[5]!,
+      });
+    }
+    return out;
+  }
+
+  /** The `cloud_access=` continuation line for one worker, five spaces in. */
+  function cloudAccessFor(text: string, workerId: string): string | null {
+    const lines = text.split("\n");
+    for (const [i, line] of lines.entries()) {
+      const m = ROW.exec(line);
+      if (m === null || m[1] !== workerId) continue;
+      const next = lines[i + 1] ?? "";
+      const c = /^ {5}cloud_access=(\S+) {2}secrets=(.*)$/.exec(next);
+      return c === null ? null : c[1]!;
+    }
+    return null;
+  }
+
+  /**
+   * L and its records, read through `WorkerLaunchSchema` rather than as raw
+   * JSON: a record that stopped satisfying the contract must fail HERE, where
+   * the file is named, rather than as a missing property three assertions away.
+   */
+  async function launchRecords(
+    rig: Rig,
+    ids: readonly string[],
+  ): Promise<Map<string, ReturnType<typeof WorkerLaunchSchema.parse>>> {
+    const runIds = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
+    expect(runIds).toHaveLength(1);
+    rig.runId = runIds[0]!;
+    const run = runPaths(rig.runId, rig.root);
+    const out = new Map<string, ReturnType<typeof WorkerLaunchSchema.parse>>();
+    for (const id of ids) {
+      const p = workerPaths(run, id).launchJson;
+      if (!(await Bun.file(p).exists())) continue;
+      out.set(id, WorkerLaunchSchema.parse(await Bun.file(p).json()));
+    }
+    return out;
+  }
+
+  /** The three-provider fleet, on the path that actually writes launch records. */
+  async function hostedRig(opts: { containerPath: boolean }): Promise<Rig> {
+    return makeRig({
+      containerPath: opts.containerPath,
+      imagePresent: opts.containerPath,
+      ...(opts.containerPath ? { shimPiVersion: PINNED_PI_VERSION } : {}),
+      providers: PROVIDERS,
+      llmProvider: "alpha",
+      // Every provider's upstream, including the two hosted ones:
+      // `ensureBridgeRelay` refuses to forward a destination the policy denies,
+      // and a refusal there would stop the run before any record was written.
+      egressAllow: PROVIDERS.map((p) => ({
+        host: p.relayUpstream.split(":")[0]!,
+        port: Number(p.relayUpstream.split(":")[1]),
+      })),
+      extraWorkers: [
+        { id: "rev-1", role: "reviewer", model: "bravo/wiring-test-model", cloudAccess: true },
+        { id: "qa-1", role: "qa", model: "charlie/wiring-test-model" },
+      ],
+    });
+  }
+
+  test(
+    "the banner names every hosted worker and no other, and the SAME set is in the launch records (ISC-416)",
+    async () => {
+      const rig = await hostedRig({ containerPath: true });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        SELECTED.join(","),
+        "--backend",
+        "headless",
+      ]);
+
+      // The rig's refusal, stated so a DIFFERENT failure is not mistaken for
+      // the expected one. Exit 3 at the mount preflight is this shim's floor
+      // (see the block header); anything else means the run stopped somewhere
+      // this test has not reasoned about, and the sets below would be measured
+      // over a state nobody chose.
+      expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+        code: EXIT.BACKEND_UNAVAILABLE,
+      });
+      expect(up.stderr).toContain("bind-mount source(s) are not visible");
+
+      // ---------------------------------------------------------------
+      // B, and the two-stream rule. Exactly one stream carries each row;
+      // a banner written to both would double-count, and a parser that
+      // deduped would hide it.
+      // ---------------------------------------------------------------
+      const onOut = bannerRows(up.stdout);
+      const onErr = bannerRows(up.stderr);
+      expect(onErr).toEqual([]);
+      const rows = onOut;
+
+      // THE PARSE ITSELF, asserted before anything is concluded from it. A
+      // regex that matched nothing would supply `B = ∅`, and `∅ = ∅ ∩ L` is
+      // true — the criterion would pass on a banner that printed nothing.
+      expect(rows).toHaveLength(HOSTED_BY_FIXTURE.length);
+
+      // ISC-416, against the LITERAL rather than against the derivation.
+      const B = rows.map((r) => r.workerId).sort();
+      expect(B).toEqual([...HOSTED_BY_FIXTURE].sort());
+
+      // And the row CONTENT, from the same literal — `provider` varies across
+      // the two rows, so a banner printing a constant fails here.
+      const byId = new Map(rows.map((r) => [r.workerId, r]));
+      expect(byId.get("rev-1")).toMatchObject({
+        role: "reviewer",
+        provider: "bravo",
+        isolation: "worktree",
+        repo: rig.repo,
+      });
+      expect(byId.get("qa-1")).toMatchObject({
+        role: "qa",
+        provider: "charlie",
+        isolation: "worktree",
+        repo: rig.repo,
+      });
+      for (const [id, expected] of Object.entries(CLOUD_ACCESS_BY_FIXTURE)) {
+        expect(cloudAccessFor(up.stdout, id)).toBe(expected);
+      }
+
+      // ---------------------------------------------------------------
+      // The RECORD half of ISC-416 — "the SAME list appears in the launch
+      // record", and its probe: "a hosted worker missing from it fails".
+      // ---------------------------------------------------------------
+      const records = await launchRecords(rig, SELECTED);
+      // L = W. Without this the record comparison could be over a shrunken
+      // domain and nobody would see it.
+      expect([...records.keys()].sort()).toEqual([...SELECTED].sort());
+
+      const D = [...records.entries()]
+        .filter(([, r]) => r.disclosure !== null)
+        .map(([id]) => id)
+        .sort();
+      expect(D).toEqual([...HOSTED_BY_FIXTURE].sort());
+
+      // The non-hosted worker's record says `null` — a DECISION, not an
+      // omission. Without this the field could be "always present" and the
+      // set comparison above would still hold.
+      expect(records.get("eng-1")!.disclosure).toBeNull();
+
+      // The recorded row, field by field, against the same literal the banner
+      // was checked against. `worker_id` is compared to the DIRECTORY the file
+      // was read from, which is what makes a row written into the wrong
+      // worker's record a failure rather than a relabelling.
+      expect(records.get("rev-1")!.disclosure).toMatchObject({
+        worker_id: "rev-1",
+        role: "reviewer",
+        provider: "bravo",
+        isolation: "worktree",
+        repo: rig.repo,
+        cloud_access: true,
+      });
+      expect(records.get("qa-1")!.disclosure).toMatchObject({
+        worker_id: "qa-1",
+        role: "qa",
+        provider: "charlie",
+        isolation: "worktree",
+        repo: rig.repo,
+        cloud_access: false,
+      });
+
+      /*
+       * The two routes to the granted names, compared on disk.
+       *
+       * `secret_names` at the top level copies `WorkerEnvPlan.secretNames` (the
+       * DELIVERED grant); `disclosure.secret_names` copies the row's
+       * `secretNames` (the deduped REQUEST). They are equal only because every
+       * exclusion in `buildWorkerEnv`'s grant loop throws rather than skipping.
+       *
+       * STATED PLAINLY: on this fixture both are EMPTY, because
+       * `up-wiring.test.ts`'s rig has no knob for granting a worker `secrets:`.
+       * So this is a shape check, not a drift detector — it would not catch a
+       * throw turned into a `continue`. `test/unit/disclosure.test.ts` carries
+       * that equality properly; this is here so the two fields are compared at
+       * all on the real write path, and the residual is written down rather
+       * than left to be discovered by whoever trusts this line.
+       */
+      for (const id of HOSTED_BY_FIXTURE) {
+        const r = records.get(id)!;
+        expect(r.disclosure!.secret_names).toEqual(r.secret_names);
+      }
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "a mismatch between the banner and the record fails in EITHER direction (ISC-417)",
+    async () => {
+      const rig = await hostedRig({ containerPath: true });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        SELECTED.join(","),
+        "--backend",
+        "headless",
+      ]);
+      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+
+      const rows = bannerRows(up.stdout);
+      // The parse, again asserted non-empty before it is used — this test can
+      // be run alone and must not be able to pass on an empty banner.
+      expect(rows.length).toBeGreaterThan(0);
+      const B = new Set(rows.map((r) => r.workerId));
+
+      const records = await launchRecords(rig, SELECTED);
+      const L = new Set(records.keys());
+      // The domain, pinned. `L = W` here, so `B ∩ L` below is `B` — the
+      // intersection is what keeps this well-defined on a PARTIAL run, and
+      // this assertion is what stops it becoming an escape hatch on this one.
+      expect([...L].sort()).toEqual([...SELECTED].sort());
+
+      const D = new Set(
+        [...records.entries()].filter(([, r]) => r.disclosure !== null).map(([id]) => id),
+      );
+
+      // Both sides non-degenerate: at least one launched worker IS disclosed
+      // and at least one is NOT. Without this, "all" and "none" both satisfy
+      // an equality that then means nothing.
+      expect(D.size).toBeGreaterThan(0);
+      expect(L.size - D.size).toBeGreaterThan(0);
+
+      // THE CRITERION: D = B ∩ L.
+      const expected = [...B].filter((id) => L.has(id)).sort();
+      expect([...D].sort()).toEqual(expected);
+
+      // Stated once more as the two directions the criterion names, so a
+      // failure message says WHICH way it broke rather than printing two sets
+      // and leaving the reader to diff them.
+      expect([...D].filter((id) => !B.has(id))).toEqual([]); // stood up, never announced
+      expect(expected.filter((id) => !D.has(id))).toEqual([]); // announced, not recorded
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "on the Pi double the banner still prints and there is no record to compare it to (ISC-417 boundary)",
+    async () => {
+      /**
+       * The case that makes the scope of ISC-417 explicit rather than implied.
+       *
+       * `PIFLEET_PI_COMMAND` starts no container, so `up` writes no launch
+       * record — `WorkerLaunchSchema`'s docblock calls that absence meaningful
+       * and not a gap. `L` is therefore empty and `D = B ∩ L` is vacuously
+       * true, which is CORRECT: nothing was stood up, so nothing was stood up
+       * silently.
+       *
+       * It is a test rather than a comment because the tempting "fix" for a
+       * vacuous case is to widen the comparison to W — and that would make
+       * ISC-417 fail on every double run in this repository, for a fleet that
+       * disclosed perfectly and created nothing. The banner still prints, which
+       * is the half that must NOT be conditional on the launch path: the double
+       * sends real context to a real vendor.
+       */
+      const rig = await hostedRig({ containerPath: false });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        SELECTED.join(","),
+        "--backend",
+        "headless",
+      ]);
+      expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+        code: EXIT.SUCCESS,
+      });
+
+      // B is unchanged by the launch path.
+      const rows = bannerRows(up.stdout);
+      expect(rows).toHaveLength(HOSTED_BY_FIXTURE.length);
+      expect(rows.map((r) => r.workerId).sort()).toEqual([...HOSTED_BY_FIXTURE].sort());
+
+      // And L is empty — for every selected worker, not just the disclosed ones.
+      const records = await launchRecords(rig, SELECTED);
+      expect([...records.keys()]).toEqual([]);
+    },
+    cliBudget(1),
   );
 });
