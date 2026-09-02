@@ -102,6 +102,11 @@ async function main(argv: string[]): Promise<number> {
     import("./commands/worktrees.ts"),
     import("./commands/dispatch.ts"),
     import("./commands/steer.ts"),
+    // Beside `abort` because the two are the pair an operator confuses, and
+    // `--help` listing them adjacently is where the distinction is cheapest to
+    // read: `unstage` releases a staged epoch and leaves the worker running,
+    // `abort` on a tui worker sends SIGINT and stops it. See `unstage.ts`.
+    import("./commands/unstage.ts"),
     import("./commands/abort.ts"),
     import("./commands/wait.ts"),
     import("./commands/artifacts.ts"),

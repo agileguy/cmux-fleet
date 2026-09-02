@@ -37,6 +37,16 @@
  *   answer.** Timeout → retry → the first dispatch actually landed: returning
  *   `already_completed` would leave the caller unable to distinguish "someone
  *   else did it" from "I did it and lost the ack".
+ *
+ * There is ONE release that is not a settle, and it is named here because a
+ * reader who took `settle` for the only exit would be reading the invariant
+ * above too strongly. `cancel` releases an epoch that was allocated and never
+ * STARTED — the staged-dispatch case, where allocation and the turn are
+ * separated by however long a person takes to press a key — and it appends
+ * nothing to `completed`, because a task that never ran must not answer
+ * `already_completed` to the next attempt against it. It does not weaken
+ * quiescence: an unstarted epoch has produced no output to be attributed, so
+ * there is nothing to quiesce. See `cancel` for the full argument.
  */
 
 import { EXIT, type Verdict } from "../contracts.ts";
@@ -96,6 +106,27 @@ export type DispatchDecision =
   | { ok: false; reason: "already_completed"; epoch: number; verdict: Verdict }
   | { ok: false; reason: "busy"; epoch: number }
   | { ok: false; reason: "stale_epoch"; requested: number; next: number };
+
+/**
+ * The answer to `cancel` (SRD-TUI-DISPATCH §9 Q8).
+ *
+ * Every refusal arm carries the fact that produced it rather than a bare
+ * `false`, because the caller's next move differs for each: `no_live_epoch`
+ * means the release already happened (or never needed to), `not_the_live_attempt`
+ * means the caller is holding a stale view and should re-read the fence before
+ * deciding anything, and `already_started` means the task is RUNNING and the
+ * operator wants `abort`. A single boolean would send all three to the same
+ * unhelpful sentence.
+ */
+export type CancelDecision =
+  | { ok: true; epoch: number }
+  | { ok: false; reason: "no_live_epoch" }
+  | {
+      ok: false;
+      reason: "not_the_live_attempt";
+      live: { task_id: string; attempt_id: string; epoch: number };
+    }
+  | { ok: false; reason: "already_started"; epoch: number };
 
 /** Durable form of the fence — what `fence.json` holds (run/state.ts persists it). */
 export interface FenceSnapshot {
@@ -292,6 +323,77 @@ export class EpochManager {
       epoch: record.epoch,
       verdict,
     };
+  }
+
+  /**
+   * Release a STAGED epoch that has not started (SRD-TUI-DISPATCH §9 Q8).
+   *
+   * ## Why this exists at all
+   *
+   * A staged dispatch allocates a real epoch before anything runs, and
+   * `allocate` refuses `busy` while one is live — deliberately, because "at
+   * most one unsettled epoch" is what makes seq attribution unambiguous. On the
+   * RPC route that window is milliseconds wide. On a staged route it is however
+   * long the operator takes to press a key, which may be never, so the mistake
+   * of staging the wrong task takes the worker out of service indefinitely. The
+   * two verbs that look like the release are not: `abort` on a `tui` worker
+   * records intent and returns `ok: false`, and `pifleet abort` on that mode
+   * issues `docker kill --signal=INT`, which stops the WORKER rather than
+   * returning it to idle (`attended/voided.ts:97-99`).
+   *
+   * ## Why it is not `settle("cancelled")`, and this is the whole design
+   *
+   * `settle` appends to `completed`, and `completed` is what `allocate` reads
+   * to answer `already_completed` for a different attempt against the same
+   * `task_id`. **A cancelled task never ran.** A row in `completed` would
+   * therefore tell the next, corrected attempt against that same task id that
+   * the work was already done — and tell it WITH A VERDICT, which the caller
+   * has no means to doubt. That is the shape the 2026-08-30 live regression
+   * recorded from the other direction: a value that is delivered but wrong is
+   * worse than one that is missing, because there is nothing to disbelieve.
+   * So `completed` gains nothing here, and the epoch simply stops existing.
+   *
+   * ## What each guard is holding
+   *
+   * - **The NAMED `(task_id, attempt_id)` must be the live one.** Cancelling
+   *   "whatever is live" would let a cancel issued against a stale view race a
+   *   real dispatch and release a turn that is running — the caller believes it
+   *   is releasing the thing it staged, and releases whatever arrived since.
+   * - **`started === false`.** A started epoch has an open window
+   *   (`bindStart`), and clearing `live` under it would let the NEXT epoch's
+   *   window open over output this one still owns. That is the §7.5
+   *   interleaving, manufactured on purpose. A running turn is `abort`'s
+   *   problem, and answering `already_started` sends the operator there.
+   *
+   * ## What is deliberately NOT undone
+   *
+   * `last_accepted_epoch` stays ADVANCED. Epochs are never reused: the number
+   * was durably persisted before anything could act under it, and a supervisor
+   * that handed the same number out twice is the exact failure the high-water
+   * mark exists to prevent. `attempts[key]` IS deleted, so the same
+   * `(task_id, attempt_id)` can be staged again — a corrected re-stage must
+   * ALLOCATE rather than replay the number it just released, which is what
+   * makes the deterministic `attempt_id` of a re-run usable after a cancel.
+   */
+  cancel(taskId: string, attemptId: string): CancelDecision {
+    const live = this.#s.live;
+    if (live === null) return { ok: false, reason: "no_live_epoch" };
+    if (live.task_id !== taskId || live.attempt_id !== attemptId) {
+      return {
+        ok: false,
+        reason: "not_the_live_attempt",
+        live: { task_id: live.task_id, attempt_id: live.attempt_id, epoch: live.epoch },
+      };
+    }
+    if (live.started) return { ok: false, reason: "already_started", epoch: live.epoch };
+
+    const epoch = live.epoch;
+    this.#s.live = null;
+    // Cleared for the reason `settle` clears it: a fence post left behind would
+    // attribute the NEXT epoch's early records by THIS epoch's ack seq.
+    this.#s.ack_seq = null;
+    delete this.#s.attempts[attemptKey(taskId, attemptId)];
+    return { ok: true, epoch };
   }
 }
 

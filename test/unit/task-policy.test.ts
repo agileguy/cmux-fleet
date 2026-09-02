@@ -160,10 +160,40 @@ describe("the gate reads the file, not the environment", () => {
 describe("the supervisor stamps provenance at the right two moments", () => {
   const supervisor = stripComments(readFileSync(`${ROOT}src/supervisor/index.ts`, "utf8"));
 
+  /**
+   * SCOPED TO THE RPC `dispatch` HANDLER, and the scoping is a repair of a
+   * probe that had rotted in a way its own assertions could not report.
+   *
+   * The three anchors were originally bare `indexOf` calls over the whole file,
+   * which was correct only while each string appeared once on a path that
+   * mattered. Neither `persistFence` nor `state.phase = "busy"` does any more:
+   * `persistFence` has always had a `settle` call site at the top of the file,
+   * so the `write > fence` comparison was passing against an occurrence 1700
+   * lines from the code it claims to constrain — true, and vacuous. And the
+   * staged-dispatch trigger now promotes a staged worker with a second
+   * `state.phase = "busy"` several hundred lines ABOVE this handler, which
+   * broke `write < busy` outright while the ordering it describes was never
+   * touched.
+   *
+   * A bare `lastIndexOf` would have made it green again and left the same
+   * fragility one edit away. Slicing the handler first is what makes all three
+   * anchors mean the occurrence in the code under test, so the probe fails when
+   * the ORDER changes and not when an unrelated site gains a line.
+   */
   test("the dispatch write happens after the fence and before the worker is marked busy", () => {
-    const fence = supervisor.indexOf("await persistFence();");
-    const write = supervisor.indexOf("await writeTaskPolicy(wp.taskPolicy, envelope.task_id");
-    const busy = supervisor.indexOf('state.phase = "busy";');
+    const handler = supervisor.indexOf('case "dispatch": {');
+    expect(handler, "the RPC dispatch handler was not found — the probe has rotted").toBeGreaterThan(
+      -1,
+    );
+    const handlerEnd = supervisor.indexOf('case "stage": {', handler);
+    expect(handlerEnd, "no `stage` case after `dispatch` — the probe has rotted").toBeGreaterThan(
+      handler,
+    );
+    const region = supervisor.slice(handler, handlerEnd);
+
+    const fence = region.indexOf("await persistFence();");
+    const write = region.indexOf("await writeTaskPolicy(wp.taskPolicy, envelope.task_id");
+    const busy = region.indexOf('state.phase = "busy";');
 
     expect(fence, "persistFence call not found — the probe has rotted").toBeGreaterThan(-1);
     expect(write, "no dispatch-time writeTaskPolicy call").toBeGreaterThan(-1);
@@ -182,11 +212,34 @@ describe("the supervisor stamps provenance at the right two moments", () => {
   });
 
   test("provenance is written in exactly the two places, so neither can cover for the other", () => {
-    // Exactly two CALL sites. The import names the symbol without a paren, so
-    // it does not count — a third match means a third place stamping
-    // provenance, which is how one call site starts covering for a deleted
-    // other and the pair of ordering probes above stops being able to fail.
+    /**
+     * THREE call sites since the staged-dispatch verbs, and the count alone is
+     * no longer the whole guard — it was never quite enough and the third site
+     * is what exposed that.
+     *
+     * The original claim was "exactly two", on the argument that a third match
+     * means a third place stamping provenance, which is how one call site
+     * starts covering for a deleted other and the pair of ordering probes above
+     * stops being able to fail. That argument is still right; a bare count is
+     * just a weak way to make it, because it passes a diff that DELETES one
+     * known site and ADDS an unknown one.
+     *
+     * So the sites are pinned by IDENTITY as well as by number. The third is
+     * the injection seam `stageDeps` binds for `handleStage`/`handleUnstage`
+     * (SRD-TUI-DISPATCH D6/Q8) — it stamps nothing itself, it binds
+     * `wp.taskPolicy` to the `writeProvenance` dependency, and the ORDER of
+     * the two calls that use it is pinned behaviourally in
+     * `stage-verb.test.ts` rather than structurally here, because those two
+     * functions are at module scope and can be run against a real
+     * `EpochManager`.
+     */
     const calls = supervisor.split("writeTaskPolicy(").length - 1;
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
+    // 1. the RPC dispatch stamp, 2. the settle clear, 3. the staged-verb seam.
+    expect(supervisor).toContain(
+      "writeTaskPolicy(wp.taskPolicy, envelope.task_id, decision.epoch)",
+    );
+    expect(supervisor).toContain("writeTaskPolicy(wp.taskPolicy, null, 0)");
+    expect(supervisor).toContain("writeTaskPolicy(wp.taskPolicy, taskId, epoch)");
   });
 });

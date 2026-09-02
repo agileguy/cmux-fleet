@@ -407,3 +407,52 @@ describe("voidedFor picks the table by the worker's launch mode", () => {
     expect(() => got.push({ isc: "ISC-1", because: "x".repeat(70) })).toThrow();
   });
 });
+
+/**
+ * ISC-85's row named the wrong key, and the correction is owed independently of
+ * anything built on top of it.
+ *
+ * The row said dedup keys on `(worker, task_id, epoch)` and that the answer is
+ * `already_completed`. Neither is what the allocator does. `attemptKey` is
+ * `(task_id, attempt_id)` — no worker, no epoch — and a repeated attempt gets a
+ * REPLAY of the stored epoch, which `rpc/epoch.ts` argues for explicitly:
+ * returning `already_completed` would leave a caller unable to distinguish
+ * "someone else did it" from "I did it and lost the ack". `already_completed`
+ * is a different answer for a different case, a second attempt against a task
+ * that has already settled.
+ *
+ * The row's CONCLUSION was right and stays: on this route the task runs twice.
+ * What was wrong was the mechanism it blamed, and a table read by an operator
+ * deciding whether to re-dispatch has to name the real one — otherwise the fix
+ * they reach for is an epoch, when what is missing is an allocator.
+ */
+describe("the tui table describes the dedup mechanism the allocator actually has", () => {
+  const row = (isc: string): string => {
+    const r = PANE_MODE_TUI_VOIDED.find((v) => v.isc === isc);
+    expect(r, `${isc} is not in the tui table`).toBeDefined();
+    return r!.because;
+  };
+
+  test("ISC-85 names (task_id, attempt_id), not (worker, task_id, epoch)", () => {
+    expect(row("ISC-85")).toContain("(task_id, attempt_id)");
+    expect(row("ISC-85")).not.toContain("(worker, task_id, epoch)");
+  });
+
+  test("…and says the answer is a replay, with already_completed as the other case", () => {
+    expect(row("ISC-85")).toMatch(/REPLAY of the stored epoch/);
+    // Not merely absent: the row must say what `already_completed` IS, or the
+    // next reader restores the old sentence from the criterion's own title.
+    expect(row("ISC-85")).toMatch(/a second attempt against a task that has settled/);
+  });
+
+  /**
+   * The conclusion is unchanged, and this is the arm that proves the
+   * correction was a correction rather than a softening. The operator-facing
+   * consequence — it runs twice, check the transcript — is what the row is
+   * for, and rewriting the mechanism must not have quietly dropped it.
+   */
+  test("the operator-facing consequence survives the correction", () => {
+    expect(row("ISC-85")).toContain("RUNS THE TASK TWICE");
+    expect(row("ISC-85")).toContain("Check the transcript before re-dispatching");
+  });
+});

@@ -39,7 +39,7 @@ export function register(program: Command): void {
       for (const w of harness.warnings) process.stderr.write(`warning: ${w}\n`);
 
       const collected = await collectRunReport(run, { harnessPatterns: harness.patterns });
-      const { report, attended, attendedUnverified } = collected;
+      const { report, attended, attendedUnverified, stagedWorkers } = collected;
 
       /**
        * The harness notes ride in `collection_notes` as well as on stderr.
@@ -67,10 +67,12 @@ export function register(program: Command): void {
         // rides the same way: a run a person drove must say so in every
         // output format, not only the human one (SRD §3.5, Phase 6).
         process.stdout.write(
-          `${JSON.stringify({ ...report, attended, attended_unverified: attendedUnverified, collection_notes: notes })}\n`,
+          `${JSON.stringify({ ...report, attended, attended_unverified: attendedUnverified, staged_workers: stagedWorkers, collection_notes: notes })}\n`,
         );
         return;
       }
-      process.stdout.write(renderRunReport(report, notes, attended, attendedUnverified));
+      process.stdout.write(
+        renderRunReport(report, notes, attended, attendedUnverified, stagedWorkers),
+      );
     });
 }

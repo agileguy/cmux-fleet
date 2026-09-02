@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { CliError } from "../index.ts";
@@ -8,6 +8,7 @@ import {
   VerdictSchema,
   TaskEnvelopeSchema,
   type BudgetState,
+  type Presentation,
   type ScheduledTask,
   type TaskEnvelope,
   type TaskSpec,
@@ -23,6 +24,7 @@ import {
   workerBranch,
   workerPaths,
   type RunPaths,
+  type WorkerPaths,
 } from "../../run/paths.ts";
 import { abortWedged, eventSilenceMs } from "../../run/stall-io.ts";
 import { BudgetCeilingError, BudgetManager, resumeBudget } from "../../safety/budget.ts";
@@ -37,7 +39,17 @@ import { controlCall } from "../../supervisor/launch.ts";
 import { renderPrompt } from "../../supervisor/index.ts";
 import { launchPaneMode } from "../../container/interrupt.ts";
 import { loadBackend } from "../../backends/registry.ts";
-import { assertPaneKey, assertPaneTypeableLine } from "../../util/pane-text.ts";
+import {
+  assertPaneKey,
+  assertPaneTypeableLine,
+  STAGED_TRIGGER_LINE,
+} from "../../util/pane-text.ts";
+import { writeTaskPolicy } from "../../run/task-policy.ts";
+import {
+  DISPATCH_POLICY_MOUNT,
+  writeDispatchPolicy,
+} from "../../run/dispatch-policy.ts";
+import { terminalRefusal, terminalRefusalMessage } from "../../attended/adopt.ts";
 import { nextAttendedRecord, readAttended } from "./steer.ts";
 import {
   readBudgetState,
@@ -75,6 +87,59 @@ import { runSchedule, type DispatchAnswer, type SchedulerIO } from "../../orches
  *
  * @throws {MalformedEpochError} on a negative or fractional `epoch`.
  */
+/**
+ * The attempt id a STAGED dispatch carries (SRD-TUI-DISPATCH §9 Q9).
+ *
+ * ## What an attempt id is for, which decides how this must be derived
+ *
+ * `EpochManager` dedups on `(task_id, attempt_id)`: a second allocate under a
+ * known pair returns the ORIGINAL epoch and runs nothing. On the staged route
+ * that replay IS the fence — §6.3 makes it the mechanism by which a staged
+ * dispatch is deduplicated at all, and ISC-440 requires that staging the same
+ * task file twice replays rather than allocating.
+ *
+ * A random id can never match a stored one, so a staged dispatch that minted
+ * one would get no replay: the second stage of an unchanged file would find the
+ * first epoch still live and be refused `busy`. Item 4 of §1.3 would stay open
+ * while looking closed.
+ *
+ * ## Scoped to the STAGED route, and the scoping was corrected rather than
+ * ## chosen
+ *
+ * This was briefly the fallback for `pifleet dispatch <file>` on every route,
+ * on the argument that an id depending on which control plane a worker had
+ * would make the same file dedup differently two ways. That argument was built
+ * on a false premise — that the rpc route's `randomUUID()` let a re-dispatch
+ * RUN THE TASK TWICE. It does not: a settled task is refused
+ * `already_completed` off `completed`, and a live one is refused `busy`, both
+ * keyed on `task_id` alone. What a random id actually costs there is narrower:
+ * a caller who loses an ack mid-flight re-sends and gets `busy` instead of its
+ * original answer.
+ *
+ * **The cost of widening it was concrete and was caught by an existing
+ * criterion.** With a content id, re-dispatching a completed task becomes the
+ * SAME attempt, so `allocate` replays it — and `test/e2e/lifecycle.test.ts`
+ * pins ISC-85's Phase-1 exit shape as `accepted: false`, `already_completed`.
+ * Both behaviours are the no-op ISC-85 asks for; only the wire shape differs.
+ * Redefining a graded Phase-1 criterion is not this document's to do, and §9 Q9
+ * asks about a staged dispatch and nothing else.
+ *
+ * ## The content, and what "content" means here
+ *
+ * The task file as PARSED and re-serialized, not its raw bytes: reformatting a
+ * file is not a new task, and `JSON.stringify` over the object `JSON.parse`
+ * produced preserves the operator's key order while dropping whitespace. An
+ * edited brief is a different task and gets a different id, which is the
+ * property ISC-458 asserts in both directions.
+ *
+ * 16 hex characters of SHA-256, prefixed so it is never mistaken for `auto:`
+ * or for an id an operator wrote by hand — and an explicit `attempt_id` in the
+ * file still wins over this, on every route.
+ */
+export function attemptIdFor(taskContent: string): string {
+  return `file:${createHash("sha256").update(taskContent).digest("hex").slice(0, 16)}`;
+}
+
 export function requestedEpochFrom(raw: unknown): number | null {
   if (typeof raw !== "number") return null;
   assertEpochWellFormed(raw);
@@ -148,8 +213,15 @@ export interface SendOutcome {
    * and Pi acked the prompt; `pane` means `cmux` exited 0 having typed bytes
    * into a pty. Reporting the second as the first would let an operator believe
    * a fence exists that could stop a double run. See `sendViaPane`.
+   *
+   * `staged` is a THIRD claim and is not a weaker `pane`. It means the identity
+   * — task id, epoch, outbox and the whole brief — was written into the
+   * worker's read-only policy plane, and that a short trigger was typed at the
+   * surface (or, when there is no addressable surface, printed for the operator
+   * to type). What reached the terminal on this route is one line; what reached
+   * the worker is a file it cannot write. See `stageForAdoptedTerminal`.
    */
-  via: "rpc" | "pane";
+  via: "rpc" | "pane" | "staged";
 }
 
 /** The control socket did not answer — a fact about the worker, not the task. */
@@ -430,6 +502,18 @@ async function sendViaPane(args: {
   run: RunPaths;
   worker: string;
   envelope: TaskEnvelope;
+  /**
+   * Carried through unused by the pane route and REQUIRED by the staged one.
+   *
+   * The two routes fork below, and only one of them has an allocator to dedup
+   * against — the backend-managed pane route has no epoch at all, which is
+   * ISC-84's row. Threading it to the fork rather than into `sendViaPane`'s own
+   * body is what stops the staged route re-deriving it; see `attemptId` on
+   * `stageForAdoptedTerminal`.
+   */
+  attemptId: string;
+  /** The staged route's dedup key; see `sendTaskEnvelope`. */
+  stagedAttemptId: string;
   ledger: LedgerWriter;
 }): Promise<SendOutcome> {
   const { run, worker, envelope } = args;
@@ -443,6 +527,20 @@ async function sendViaPane(args: {
       EXIT.USAGE,
     );
   }
+  /**
+   * THE STAGED ROUTE — the fork SRD-TUI-DISPATCH D1 adds, taken before the
+   * headless/no-surface refusal below because an adopted terminal satisfies
+   * that condition's letter and not its meaning.
+   *
+   * `adopted_terminal` and not `backend === "headless"`: the run's presentation
+   * backend is headless for this worker, correctly (the fleet opens no windows
+   * of its own), and that used to be read as "there is no pane". There is one —
+   * a person is looking at it.
+   */
+  if (presentation.adopted_terminal) {
+    return stageForAdoptedTerminal({ ...args, attemptId: args.stagedAttemptId, wp, presentation });
+  }
+
   if (presentation.backend === "headless" || presentation.surface_ref === null) {
     // The mode's own contradiction, named. `config/validate.ts` refuses
     // `pane_mode: tui` on a headless backend at config time, so reaching here
@@ -456,14 +554,16 @@ async function sendViaPane(args: {
      * to be told is that they are the dispatcher, not that something is
      * missing. Same refusal, same exit code; only the diagnosis changes.
      */
+    /*
+     * The ADOPTED case no longer reaches here — it forks above into the staged
+     * route — so this is once again the single sentence it was written as: a
+     * headless run with no pane at all, where a tui worker's prompt genuinely
+     * has nowhere to go. That case is untouched by D1 and keeps its original
+     * wording, which is `ISC-454`.
+     */
     throw new CliError(
-      presentation.adopted_terminal
-        ? `worker ${worker} is pane_mode: tui with an ADOPTED terminal — its pane is the ` +
-          `terminal that ran up --attach-here, and pifleet has no surface id to type into. ` +
-          `Type the prompt at that terminal; there is no epoch and nothing to fence, so a ` +
-          `dispatch here could not have been deduplicated anyway.`
-        : `worker ${worker} is pane_mode: tui but its backend is ${presentation.backend} with no ` +
-          `surface — a tui worker's prompt has nowhere to go`,
+      `worker ${worker} is pane_mode: tui but its backend is ${presentation.backend} with no ` +
+        `surface — a tui worker's prompt has nowhere to go`,
       EXIT.BACKEND_UNAVAILABLE,
     );
   }
@@ -494,6 +594,46 @@ async function sendViaPane(args: {
    */
   const prompt = renderPrompt({ ...envelope, epoch: envelope.epoch });
   const plan = paneKeystrokes(worker, prompt);
+
+  /**
+   * Provenance BEFORE the first byte — the same write, in the same order, that
+   * `supervisor/index.ts` performs on the rpc route, and it was missing here.
+   *
+   * ## What its absence did
+   *
+   * `writeTaskPolicy` had three call sites and two of them reset the file to
+   * `(<none>, 0)`: `materialize.ts` when the worker directory is built, and the
+   * supervisor when a task settles. The only real write was inside the RPC
+   * `dispatch` handler — a handler this route deliberately never reaches. So a
+   * worker dispatched through its pane ran its WHOLE LIFE with `/policy/task`
+   * reading `<none>` and `0`, and every gated cloud verb it executed was
+   * ledgered against no task at all. That is ISC-360's original finding
+   * recurring on a route built after it: the audit trail records THAT a
+   * destructive verb was attempted and loses WHICH task attempted it.
+   *
+   * Confirmed live 2026-09-02 by reading the file out of a running
+   * adopted-terminal container: `-r--r--r-- 1 pi pi 9 /policy/task`, contents
+   * `<none>\n0\n`, while the worker was mid-task. The mount was correct, the
+   * mode was correct, and nothing had ever written a value into it.
+   *
+   * ## Why here and not earlier
+   *
+   * AFTER `paneKeystrokes`, which is the last thing that can refuse: an
+   * untypeable prompt throws there, and a dispatch that never types must not
+   * leave this worker's provenance pointing at a task no pane ever received.
+   * BEFORE the send loop, because the instant the first line lands the worker
+   * can start a turn and run a gated verb, and a verb classified before this
+   * write is attributed to the PREVIOUS task — which is worse than `<none>`,
+   * being wrong rather than merely absent.
+   *
+   * `envelope.epoch` verbatim, which on this route is the placeholder 0. The
+   * same 0 the prompt carries and the same 0 the inbox record carries, for the
+   * reason the docblock above gives at length: consistency across the three is
+   * what keeps the harvest correlating rather than clamping. When this route
+   * acquires a real allocator the value follows the envelope without this line
+   * being touched.
+   */
+  await writeTaskPolicy(wp.taskPolicy, envelope.task_id, envelope.epoch);
 
   for (const [i, step] of plan.entries()) {
     try {
@@ -696,7 +836,29 @@ export async function sendTaskEnvelope(args: {
     );
   }
   if (route.kind === "pane") {
-    return sendViaPane({ run, worker, envelope, ledger: args.ledger });
+    /**
+     * THE STAGED ROUTE'S OWN ATTEMPT ID, derived here rather than inherited.
+     *
+     * The caller's `attemptId` is `randomUUID()` for a single-task dispatch,
+     * which the rpc route wants (ISC-85's Phase-1 shape rests on a fresh
+     * attempt reaching `already_completed`). The staged route needs the
+     * opposite: a re-stage of an unchanged file must REPLAY, which only
+     * happens if the pair is recognised. See `attemptIdFor`.
+     *
+     * An explicit `attempt_id` in the task file still wins, on both routes.
+     */
+    const stagedAttemptId =
+      typeof args.partial["attempt_id"] === "string"
+        ? args.partial["attempt_id"]
+        : attemptIdFor(JSON.stringify(args.partial));
+    return sendViaPane({
+      run,
+      worker,
+      envelope,
+      attemptId,
+      stagedAttemptId,
+      ledger: args.ledger,
+    });
   }
 
   let reply: Record<string, unknown>;
@@ -1478,4 +1640,267 @@ export function renderScheduleTable(schedule: readonly ScheduledTask[]): string 
   return `${rows
     .map((r) => r.map((cell, col) => cell.padEnd(widths[col]!)).join("  ").trimEnd())
     .join("\n")}\n`;
+}
+
+/**
+ * Stage a task for a worker whose pane is a terminal a person handed over, then
+ * type the one line that starts it.
+ *
+ * ## The split this route is built on
+ *
+ * A dispatch is two things: an IDENTITY — task id, epoch, outbox path, the
+ * brief — and a TRIGGER, the byte that starts a turn. Only the trigger needs a
+ * terminal. So the identity goes through the read-only policy plane, where the
+ * worker can read it and cannot write it, and the terminal receives one short
+ * line. `SRD-TUI-DISPATCH` §0.1.
+ *
+ * That split is what makes typing at this surface tolerable at all.
+ * `docker attach --detach-keys=ctrl-]` means detach is one keypress pifleet
+ * cannot observe, and after it the surface hosts the operator's own SHELL. D2
+ * recommended never typing here for that reason; the owner reversed it on
+ * 2026-09-02, and this shape is why the reversal is defensible: what could
+ * land in a shell is `STAGED_TRIGGER_LINE`, which begins `#` and cannot
+ * execute, rather than a markdown brief delivered line by line.
+ *
+ * ## The order of the writes is the correctness argument
+ *
+ * Borrowed verbatim from the RPC route (`supervisor/index.ts`), and the reasons
+ * transfer with one change of scale: there, the gap between writing the fence
+ * and acting under it is milliseconds. Here it is however long the worker takes
+ * to read its drop — which makes the ordering easier to get right and much more
+ * expensive to get wrong.
+ *
+ *  1. Refuse if the terminal is gone (D9). Before anything is allocated, so a
+ *     refusal burns no epoch.
+ *  2. Allocate, through the supervisor's `stage` verb. A second stage while one
+ *     is pending is refused `busy` BY THE ALLOCATOR — this route adds no check
+ *     of its own, because a second spelling of a fact the allocator owns is two
+ *     rules.
+ *  3. The fence, the provenance and `state` are persisted by `stage` itself,
+ *     inside the supervisor, in that order.
+ *  4. Write the drop. AFTER the epoch exists, because the drop carries it and a
+ *     drop whose epoch disagrees with the inbox record's makes the harvest
+ *     refuse a correct result.
+ *  5. Write the inbox record, with the REAL epoch, so `dispatchedTaskIds` sees
+ *     the id and the harvest correlates. This is the whole of what makes a
+ *     staged task harvestable, and it needs no harvest change at all.
+ *  6. Append `dispatched` with `via: "staged"`.
+ *  7. Trigger.
+ *
+ * ## Why the trigger is last, and why its failure is not fatal
+ *
+ * Everything above is durable. If the send fails, the task is STAGED — recorded,
+ * reportable, and triggerable by hand — which is a strictly better state than
+ * the refusal this route replaced. So a failed send degrades to the printed
+ * instruction rather than throwing away six durable writes, and says so.
+ */
+async function stageForAdoptedTerminal(args: {
+  run: RunPaths;
+  worker: string;
+  envelope: TaskEnvelope;
+  /**
+   * The CALLER's attempt id, threaded rather than re-derived (ISC-458).
+   *
+   * This route used to send `String(envelope.attempt)`, which is `1` for every
+   * fresh dispatch because `attempt` DEFAULTS to 1 a few hundred lines up. Two
+   * different task files sharing a `task_id` therefore shared an attempt key,
+   * and the second one REPLAYED the first: same epoch, no rewrite of the drop,
+   * `replayed: true` reported as success. The operator edits the brief, stages
+   * it, is told it worked, and the worker is still holding the old one.
+   *
+   * That is the exact hazard §9 Q9 was answered to prevent, and it was
+   * reintroduced one line below the answer by re-deriving a value that was
+   * already in scope. Re-derivation is the defect; the parameter is the fix.
+   */
+  attemptId: string;
+  ledger: LedgerWriter;
+  wp: WorkerPaths;
+  presentation: Presentation;
+}): Promise<SendOutcome> {
+  const { run, worker, envelope, attemptId, wp, presentation } = args;
+
+  /*
+   * STEP 1. The terminal, before the epoch.
+   *
+   * `processStartTime` is the caller's read and `terminalRefusal` is pure, so
+   * the decision is testable without a process to kill. A staged task whose
+   * terminal has gone is a task nobody can trigger, reported as accepted —
+   * which is the `<none>` shape this repository keeps closing.
+   */
+  const attach = presentation.attach_process;
+  const observed = attach === null ? null : await processStartTime(attach.pid).catch(() => null);
+  const gone = terminalRefusal(attach, observed);
+  if (gone !== null) {
+    throw new CliError(terminalRefusalMessage(worker, gone), EXIT.BACKEND_UNAVAILABLE);
+  }
+
+  // STEP 2. The supervisor allocates; it does not send, and cannot.
+  const staged = (await controlCall(run, worker, {
+    cmd: "stage",
+    envelope,
+    attempt_id: attemptId,
+    requested_epoch: null,
+  })) as { accepted: boolean; epoch?: number; replayed?: boolean; reason?: string; error?: string };
+
+  if (!staged.accepted) {
+    throw new CliError(
+      staged.error ??
+        `worker ${worker} refused to stage ${envelope.task_id}: ${staged.reason ?? "unknown"}`,
+      EXIT.USAGE,
+    );
+  }
+  const epoch = staged.epoch ?? 0;
+
+  /*
+   * A REPLAY is a no-op, and stopping here is the point of ISC-440.
+   *
+   * The same task file staged twice must not rewrite the drop, re-record the
+   * inbox entry or re-trigger a turn — it must return the original answer. The
+   * allocator has already decided this; all this branch does is decline to
+   * repeat the side effects it decided against.
+   */
+  if (staged.replayed === true) {
+    return {
+      accepted: true,
+      epoch,
+      replayed: true,
+      reason: null,
+      verdict: null,
+      error: null,
+      via: "staged",
+    };
+  }
+
+  // STEP 4. The drop, carrying the epoch the supervisor just allocated — NOT
+  // `envelope.epoch`, which is the caller's schema default of 0. The 2026-08-30
+  // regression `supervisor/index.ts` records is exactly this line getting it
+  // wrong on the other route.
+  const prompt = renderPrompt({ ...envelope, epoch });
+  await writeDispatchPolicy(
+    wp.dispatchPolicy,
+    {
+      task_id: envelope.task_id,
+      run_id: run.runId,
+      worker,
+      epoch,
+      attempt: envelope.attempt,
+      outbox: envelope.outbox,
+      dispatched_at: envelope.dispatched_at,
+    },
+    prompt,
+  );
+
+  // STEP 5. The durable dispatch record, with the real epoch on BOTH sides of
+  // `harvest/outbox.ts`'s correlation — which on the pane route agrees only by
+  // both being 0.
+  await writeJsonAtomic(inboxTaskPath(run, envelope.task_id), { ...envelope, epoch });
+
+  // STEP 6.
+  await args.ledger.append("dispatched", {
+    worker,
+    task_id: envelope.task_id,
+    epoch,
+    detail: {
+      via: "staged",
+      surface_backend: presentation.surface_backend,
+      surface: presentation.surface_ref,
+      drop: DISPATCH_POLICY_MOUNT,
+    },
+  });
+
+  // STEP 7. The trigger, and nothing else, reaches the terminal.
+  const trigger = await sendStagedTrigger(worker, presentation);
+  if (!trigger.sent) {
+    await args.ledger.append("stage_trigger_deferred", {
+      worker,
+      task_id: envelope.task_id,
+      epoch,
+      detail: { reason: trigger.reason },
+    });
+  }
+
+  const record = nextAttendedRecord(
+    await readAttended(wp.attendedJson),
+    worker,
+    new Date().toISOString(),
+  );
+  if (record !== null) await writeJsonAtomic(wp.attendedJson, record);
+
+  return {
+    accepted: true,
+    epoch,
+    replayed: false,
+    reason: null,
+    verdict: null,
+    error: trigger.sent ? null : trigger.reason,
+    via: "staged",
+  };
+}
+
+/**
+ * Type `STAGED_TRIGGER_LINE` at the surface the operator handed over.
+ *
+ * ## One line, and the whole reason it is only one line
+ *
+ * `paneKeystrokes` exists to turn a rendered prompt into a plan of N text sends
+ * and N key presses, and it is the right machine for the backend-managed route.
+ * It is the WRONG machine here, and deliberately not used: a plan that types a
+ * brief into a surface that may have become a shell is what D2 refused, and the
+ * staged design's entire claim is that the brief never goes near a terminal.
+ * One send and one `enter`. `assertPaneTypeableLine` still gates the line, so
+ * the trigger is held to the same standard as any other text this fleet types.
+ *
+ * ## `surface_backend`, never `backend`
+ *
+ * `presentation.backend` is the RUN's presentation backend, which for an
+ * adopted terminal is `headless` — the fleet opens no windows of its own — and
+ * loading a backend by that name would give something with no `sendText` at
+ * all. `surface_backend` is the field that answers "who owns this surface", and
+ * it exists precisely because those two questions had one field between them.
+ *
+ * ## Not sending is a REPORTED outcome, not a failure
+ *
+ * There is no cmux surface when the operator adopted a Terminal.app window, an
+ * ssh session or a tmux pane, and that is the ordinary case for this mode
+ * outside the operations console. The task is already staged and durable at
+ * this point, so the honest answer is to hand the operator the line and say why
+ * — never to throw away six writes because one convenience was unavailable.
+ */
+async function sendStagedTrigger(
+  worker: string,
+  presentation: Presentation,
+): Promise<{ sent: true; reason: null } | { sent: false; reason: string }> {
+  const kind = presentation.surface_backend;
+  const surface = presentation.surface_ref;
+  if (kind === null || surface === null) {
+    return {
+      sent: false,
+      reason:
+        `no addressable surface for ${worker} — the adopted terminal announced no pane id, ` +
+        `which is what a Terminal.app window, an ssh session or a bare tmux pane does. The ` +
+        `task is staged and durable; type this at that terminal to start it:\n` +
+        `  ${STAGED_TRIGGER_LINE}`,
+    };
+  }
+  try {
+    assertPaneTypeableLine("staged trigger", STAGED_TRIGGER_LINE);
+    const backend = await loadBackend(kind);
+    if (backend.sendText === undefined || backend.sendKey === undefined) {
+      return {
+        sent: false,
+        reason: `backend ${kind} cannot type into a pane; type this at ${worker}'s terminal:\n  ${STAGED_TRIGGER_LINE}`,
+      };
+    }
+    const pane = { backend: kind, id: surface };
+    await backend.sendText(pane, STAGED_TRIGGER_LINE);
+    await backend.sendKey(pane, SUBMIT_KEY);
+    return { sent: true, reason: null };
+  } catch (err) {
+    return {
+      sent: false,
+      reason:
+        `could not type the trigger at ${worker}'s surface (${String(err)}). The task is ` +
+        `staged and durable; type this at that terminal to start it:\n  ${STAGED_TRIGGER_LINE}`,
+    };
+  }
 }

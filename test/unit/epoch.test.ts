@@ -295,3 +295,174 @@ describe("EpochManager — durability across restart", () => {
     expect(emptyFence().live).toBeNull();
   });
 });
+
+/**
+ * Cancelling a staged epoch (SRD-TUI-DISPATCH §9 Q8).
+ *
+ * Q8 is the question that SRD names as blocking its own design. A staged
+ * dispatch allocates a real epoch, `allocate` refuses `busy` while one is live,
+ * and nothing in §6 releases it — so an operator who stages the wrong task
+ * takes the worker out of service until something settles it. On a `tui` worker
+ * nothing will: `abort` records intent and returns `ok: false`
+ * (`supervisor/index.ts`, SITE 5), and `pifleet abort` on this mode issues
+ * `docker kill --signal=INT`, which STOPS the worker rather than returning it
+ * to idle (`attended/voided.ts:97-99`).
+ *
+ * `cancel` is the release. Each probe below pins one of the four ways the
+ * obvious implementation gets it wrong, and each has a control arm that the
+ * wrong implementation passes:
+ *
+ *   1. `settle("cancelled")` — appends to `completed`, so a LATER, DIFFERENT
+ *      attempt against the same `task_id` is refused `already_completed` for a
+ *      task that never ran. That is the whole reason this is not a settle.
+ *   2. Forgetting `delete attempts[key]` — the re-stage REPLAYS the cancelled
+ *      epoch instead of allocating, so the operator's correction silently
+ *      re-uses the number they just released.
+ *   3. Rewinding `last_accepted_epoch` — epochs get reused, which is the one
+ *      thing the fence exists to prevent (`epoch.ts`, the durability
+ *      invariant).
+ *   4. Cancelling "whatever is live" rather than a NAMED attempt — a cancel
+ *      issued against a stale view races a real dispatch and releases a turn
+ *      that is running.
+ */
+describe("EpochManager — cancel releases a staged epoch (SRD §9 Q8)", () => {
+  test("a matching, unstarted live epoch is released", () => {
+    const em = new EpochManager();
+    expect(em.allocate("T-001", "a1", null)).toEqual({ ok: true, epoch: 1, replayed: false });
+
+    const c = em.cancel("T-001", "a1");
+    expect(c).toEqual({ ok: true, epoch: 1 });
+    expect(em.live).toBeNull();
+    // The worker is free: a different task allocates immediately rather than
+    // being told `busy`. This is the property the whole verb exists for.
+    expect(em.allocate("T-002", "b1", null)).toEqual({ ok: true, epoch: 2, replayed: false });
+  });
+
+  /**
+   * The load-bearing probe — defects 2 and 3 at once — and it needs BOTH
+   * halves of the claim.
+   *
+   * `toBeGreaterThan(1)` alone passes an implementation that never cleared
+   * `attempts`, if the counter happened to move for some other reason;
+   * asserting only "not a replay" passes one that rewound the counter and
+   * handed out 1 a second time. The claim is that the same attempt re-stages
+   * FRESH — a new allocation — and that the new number is ABOVE the released
+   * one.
+   */
+  test("the same attempt re-stages to a fresh, HIGHER epoch after a cancel", () => {
+    const em = new EpochManager();
+    expect(em.allocate("T-001", "a1", null)).toEqual({ ok: true, epoch: 1, replayed: false });
+    expect(em.cancel("T-001", "a1")).toEqual({ ok: true, epoch: 1 });
+
+    const again = em.allocate("T-001", "a1", null);
+    // `replayed: false` is asserted by the shape: an implementation that left
+    // `attempts` populated returns `{ ok: true, epoch: 1, replayed: true }`,
+    // which fails on both fields at once.
+    expect(again).toEqual({ ok: true, epoch: 2, replayed: false });
+    // And the released number is spent forever — the fence never rewinds.
+    expect(em.snapshot().last_accepted_epoch).toBe(2);
+  });
+
+  /**
+   * Defect 1, stated as the consequence rather than as an implementation
+   * detail, because the consequence is what an operator meets.
+   *
+   * A cancelled task never ran. `already_completed` claims it did, and claims
+   * it WITH A VERDICT, which the caller has no way to doubt — the same shape
+   * as the delivered-but-wrong epoch the 2026-08-30 regression recorded. So
+   * `completed` must gain nothing.
+   */
+  test("a DIFFERENT attempt against a cancelled task_id is not already_completed", () => {
+    const em = new EpochManager();
+    em.allocate("T-001", "a1", null);
+    em.cancel("T-001", "a1");
+
+    const other = em.allocate("T-001", "a-different", null);
+    expect(other).toEqual({ ok: true, epoch: 2, replayed: false });
+  });
+
+  test("cancel appends nothing to completed and clears the ack fence", () => {
+    const em = new EpochManager();
+    em.allocate("T-001", "a1", null);
+    em.noteAck(10);
+    expect(em.snapshot().ack_seq).toBe(10);
+
+    em.cancel("T-001", "a1");
+    const snap = em.snapshot();
+    expect(snap.completed).toEqual([]);
+    // A stale fence post would attribute the NEXT epoch's early events against
+    // the cancelled epoch's ack seq, which is the §7.5 misattribution with the
+    // epochs swapped.
+    expect(snap.ack_seq).toBeNull();
+    expect(snap.attempts).toEqual({});
+  });
+
+  /**
+   * Defect 4. The control arm is that the epoch is STILL LIVE afterwards — a
+   * refusal that nonetheless cleared `live` would pass a probe that read only
+   * the return value, and would be exactly the race this guard exists for.
+   */
+  test("a cancel naming a different task_id is refused and changes nothing", () => {
+    const em = new EpochManager();
+    em.allocate("T-001", "a1", null);
+
+    expect(em.cancel("T-999", "a1")).toEqual({
+      ok: false,
+      reason: "not_the_live_attempt",
+      live: { task_id: "T-001", attempt_id: "a1", epoch: 1 },
+    });
+    expect(em.live).not.toBeNull();
+    expect(em.snapshot().attempts).toEqual({ "T-001\0a1": 1 });
+  });
+
+  test("a cancel naming a different attempt_id is refused and changes nothing", () => {
+    const em = new EpochManager();
+    em.allocate("T-001", "a1", null);
+
+    const c = em.cancel("T-001", "a-other");
+    expect(c.ok).toBe(false);
+    if (!c.ok) expect(c.reason).toBe("not_the_live_attempt");
+    expect(em.live).not.toBeNull();
+    expect(em.snapshot().attempts).toEqual({ "T-001\0a1": 1 });
+  });
+
+  /**
+   * A started epoch is a RUNNING TURN. Releasing it would leave `attempts`
+   * cleared and `live` null while the agent kept working, so the NEXT
+   * allocation's window would open over output this epoch still owns — the
+   * §7.5 interleaving, manufactured deliberately. `abort` is that job.
+   */
+  test("a started epoch is refused — abort is that job, not this one", () => {
+    const em = new EpochManager();
+    em.allocate("T-001", "a1", null);
+    em.noteAck(10);
+    expect(em.bindStart(11)).toBe(true);
+    expect(em.windowOpen).toBe(true);
+
+    expect(em.cancel("T-001", "a1")).toEqual({ ok: false, reason: "already_started", epoch: 1 });
+    expect(em.live).not.toBeNull();
+    expect(em.windowOpen).toBe(true);
+  });
+
+  test("a cancel with no live epoch is refused rather than silently accepted", () => {
+    const em = new EpochManager();
+    expect(em.cancel("T-001", "a1")).toEqual({ ok: false, reason: "no_live_epoch" });
+  });
+
+  test("the release survives a restart — the cleared attempt is in the snapshot", () => {
+    // `cancel` mutates the same durable structure `allocate` does, so a
+    // supervisor that crashed between the cancel and the next stage must come
+    // back released rather than busy.
+    const em = new EpochManager();
+    em.allocate("T-001", "a1", null);
+    em.cancel("T-001", "a1");
+
+    const restored = new EpochManager(em.snapshot());
+    expect(restored.live).toBeNull();
+    expect(restored.allocate("T-001", "a1", null)).toEqual({
+      ok: true,
+      epoch: 2,
+      replayed: false,
+    });
+  });
+});

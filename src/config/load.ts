@@ -481,6 +481,23 @@ export interface ResolvedWorker {
   isolation: Isolation;
   paneMode: "rpc" | "tui";
   /**
+   * Whether a staged brief starts its own turn, with no keystroke (§9 Q4).
+   *
+   * `tui` ONLY — an rpc worker has no staged route to auto-trigger, and the
+   * flag is ignored rather than refused there so a `defaults:` block can carry
+   * it for a fleet of mixed modes.
+   *
+   * **Defaults TRUE**, which is the one setting here that is a judgement rather
+   * than a convention, so it is written down. The staged route exists because a
+   * brief could not be typed safely; the keystroke was never the feature, it
+   * was the price. Q4 established the price is avoidable, and leaving the
+   * default at `false` would ship the mechanism and keep charging the price
+   * until an operator found the flag. The escape hatch runs the other way:
+   * `auto_trigger: false` restores the keypress for a seat that wants a human
+   * in the loop, and `unstage` still exists for the seat that changes its mind.
+   */
+  autoTrigger: boolean;
+  /**
    * Pi TUI colour theme, or `undefined` for Pi's own default.
    *
    * Left OPTIONAL rather than defaulted to `"dark"` here, and the distinction
@@ -648,6 +665,7 @@ export function resolveWorker(loaded: LoadedConfig, id: string): ResolvedWorker 
     secrets: [...(pick("secrets", entry, role, d) ?? [])],
     isolation: pick("isolation", entry, role, d) ?? config.run.isolation,
     paneMode: pick("pane_mode", entry, role, d) ?? "rpc",
+    autoTrigger: pick("auto_trigger", entry, role, d) ?? true,
     // No `?? "dark"`: see the field's docstring — absent means "leave Pi's own
     // selection alone", which is not the same as choosing Pi's default.
     ...(pick("theme", entry, role, d) === undefined ? {} : { theme: pick("theme", entry, role, d)! }),

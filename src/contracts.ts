@@ -297,6 +297,43 @@ export const WorkerStateSchema = z.object({
   completed_epochs: z.array(z.number().int().nonnegative()).max(MAX_ITEMS).default([]),
   task_id: shortStr.nullable().default(null),
   /**
+   * The task that is STAGED and has not been TRIGGERED — a dispatch whose
+   * identity is durable and whose turn has not begun (SRD-TUI-DISPATCH §6.5).
+   *
+   * ## Why this is a new field and not a new `phase`
+   *
+   * §6.5 asks for `phase` to stay `idle` with the staged id beside it, and the
+   * argument is `transcript_activity`'s own, three fields below: `phase` and
+   * `task_id` describe an EPOCH, and the console defect that field was added
+   * for was a status pane reporting `idle` about a worker that was visibly
+   * mid-turn. The staged route creates the mirror-image hazard. A staged
+   * worker is not running anything — nobody has pressed the key — so writing
+   * `busy` would put a liveness claim on disk that no observation supports,
+   * and `status` would report a turn in progress for however long the operator
+   * takes to come back from lunch. `phase: "idle"` is the truth about the
+   * agent; this field is the truth about the allocator.
+   *
+   * **The two facts genuinely differ, which is what makes one field
+   * insufficient.** The worker cannot take another task — `EpochManager`
+   * refuses `busy` while an epoch is live — and it is also not doing anything.
+   * A single enum has to pick one of those to state and one to imply, and
+   * whichever it picks, a reader acting on the other is wrong. So `phase`
+   * keeps its meaning and this carries the rest.
+   *
+   * Cleared at three sites, and each is a different way a stage can end: the
+   * trigger (transcript growth promotes `phase` to `busy` — approximate, §9
+   * Q1), `unstage` (the epoch is released and nothing ran), and `settle` (the
+   * turn finished). A stale id here is a worker reported as awaiting a key
+   * nobody needs to press, which is a smaller lie than the reverse and is
+   * still a lie, so all three clear it explicitly rather than relying on the
+   * next dispatch to overwrite it.
+   *
+   * `null` on every worker that has never been staged, which is every worker
+   * that is not a `tui` worker at an adopted terminal — the default makes
+   * every state file already on disk parse unchanged.
+   */
+  staged_task_id: shortStr.nullable().default(null),
+  /**
    * Recorded verbatim from `get_state`. Never computed and never globbed: the
    * timestamp prefix is unknowable in advance and the file is created lazily on
    * the first assistant message (SRD §4.2).
@@ -817,6 +854,80 @@ export const PresentationSchema = z.object({
    * parses as the pane pifleet itself created — which is what they all were.
    */
   adopted_terminal: z.boolean().default(false),
+  /**
+   * WHO OWNS THE SURFACE `surface_ref` NAMES — which is not the same question
+   * as `backend` above, and conflating the two is what made this field
+   * necessary.
+   *
+   * `backend` means "the run's active presentation backend": the thing pifleet
+   * uses to make panes. For every run except an adopted one it also answers
+   * "who owns this surface", because pifleet made the surface. An adopted
+   * terminal breaks that: the run's backend is `headless` — correctly, the
+   * fleet must not open windows of its own — while the surface the operator
+   * handed over was made by cmux and is addressable through cmux.
+   *
+   * `dispatch` read `backend === "headless"` as "there is no surface", which
+   * was true until `--attach-here` existed. Splitting the field is the repair,
+   * and it is a SECOND field rather than a widening of the first for the
+   * reason `assertTuiBackendPossible` needed a second guard: a single value
+   * answering two questions cannot be corrected one question at a time.
+   *
+   * `null` means nothing owns a surface for this worker — no pane, or a pane
+   * whose host announced no id. Every record written before this field existed
+   * parses as `null`, which is what they all were.
+   */
+  surface_backend: z.enum(["cmux", "tmux"]).nullable().default(null),
+  /**
+   * The `docker attach` child `up --attach-here` spawned, in the SAME
+   * `(pid, started)` shape the launcher, the lease and the registry use.
+   *
+   * ## What it is for
+   *
+   * "Is this terminal still the worker's?" was not a checkable fact. `up.ts`
+   * held the pid at the moment it spawned the attach and threw it away, so a
+   * dispatch staged for an adopted-terminal worker had no way to know whether
+   * anybody was still there to trigger it — and a staged task nobody can
+   * trigger is the `<none>` shape again: a mechanism running over an input
+   * nobody is reading, reporting success.
+   *
+   * ## Why the PAIR and not the pid
+   *
+   * `up.ts` already says it: *"the number outlives the process and the kernel
+   * hands it out again."* A bare pid re-check would be satisfied by a stranger
+   * the moment the operator's terminal died on a busy machine, which is
+   * exactly when the guard is supposed to fire. `started` is the
+   * `IDENTITY_FORMAT` rendering `registry.ts` produces, so the comparison is
+   * the same one ISC-144 installed for the run-dir lease.
+   *
+   * ## Written at LAUNCH, from the child handle
+   *
+   * `supervisor/launch.ts` states the rule this obeys and the failure it
+   * avoids: a start time read off a live pid names whoever holds the number,
+   * and every downstream guard compares the record against the OS, so none of
+   * them can catch a record that was WRITTEN from the OS. The capture site
+   * holds `Bun.spawn`'s handle and checks `exitCode === null &&
+   * signalCode === null` AFTER the read — POSIX retains a child's pid until its
+   * parent reaps it, so a child that is still unreaped cannot have had its
+   * number reissued, which is what turns the read into a record.
+   *
+   * ## `null` means no terminal, and is the safe direction
+   *
+   * Null before the attach, null again once it exits, and null for every
+   * record written before this field existed. Staging REFUSES on null rather
+   * than proceeding, so a capture that failed costs a refusal the operator can
+   * act on rather than a task queued at nobody.
+   *
+   * **A PARTIAL GUARD, and it must not be described as more.** It catches a
+   * clean detach and a crashed terminal. It does not catch a re-attach from
+   * elsewhere, a pane respawned onto a different program, or a second
+   * concurrent attach — the host has no way this project has found to
+   * enumerate a container's attached clients.
+   */
+  attach_process: z
+    .object({ pid: z.number().int().positive(), started: z.string().min(1) })
+    .strict()
+    .nullable()
+    .default(null),
 });
 export type Presentation = z.infer<typeof PresentationSchema>;
 
@@ -1016,6 +1127,44 @@ export const EXIT = {
    * now fails if any `EXIT` value goes missing from that line.
    */
   INTERNAL: 8,
+  /**
+   * A task was DISPATCHED and never TRIGGERED — the staged-dispatch route's
+   * one genuinely new terminal state (SRD-TUI-DISPATCH §6.5, ISC-445).
+   *
+   * A staged dispatch is durable the moment `stage` returns: the epoch is
+   * allocated, `/policy/task` is stamped, the brief is on disk at
+   * `/policy/dispatch`, and the inbox record exists. What has NOT happened is
+   * the turn, because starting it takes a keystroke at a terminal pifleet does
+   * not own. So the task is neither running nor finished, and every code above
+   * describes it wrongly:
+   *
+   *   - `TIMEOUT` claims a clock ran out. None started — the deadline arms on
+   *     the trigger, not on the stage (§9 Q1), which is the whole reason a
+   *     20-minute task staged before lunch is not `timed_out` after lunch.
+   *   - `PARTIAL` claims the task ran and did not succeed. It did not run.
+   *   - `WORKER_DIED` claims a diagnosis. The worker is fine and idle.
+   *
+   * **It is worth a NUMBER rather than only a reason string, and that is the
+   * expensive half of this decision.** `wait --json` has carried `reason` all
+   * along, so a caller that parses JSON could always have seen this. A caller
+   * that reads `$?` — which is every shell script, every CI step, and the
+   * operations console's own polling — could not, and would have read the
+   * staged task as `7 partial`: "some tasks did not succeed", answered by
+   * investigating a failure that never happened while the actual remedy is one
+   * keypress at a terminal somebody is sitting at. That is ISC-216's shape
+   * exactly, and ISC-216 is in this file because collapsing a distinguishable
+   * state into a neighbouring code cost this project a retry loop.
+   *
+   * Ranked BELOW `TIMEOUT` and above `PARTIAL` in `EXIT_SEVERITY`, and the
+   * position is argued rather than convenient. Everything above `TIMEOUT`
+   * describes something that HAPPENED to the run; this describes something
+   * that has not begun, so it must not outrank a real outcome. It outranks
+   * `PARTIAL` because a `wait` over a mixed set whose remainder is merely
+   * un-started is a different fact from one whose remainder failed, and
+   * ranking it lower would hide it behind the very code it exists to be
+   * distinguishable from.
+   */
+  STAGED: 9,
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
@@ -1055,6 +1204,11 @@ const EXIT_SEVERITY: readonly ExitCode[] = [
   EXIT.BUDGET,
   EXIT.WORKER_DIED,
   EXIT.TIMEOUT,
+  // Below TIMEOUT because a staged task has not started, so it must not
+  // outrank something that ran and did not finish; above PARTIAL because
+  // "nobody pressed the key" and "it failed" want different next actions and
+  // the integer is the only channel a shell caller has. See `EXIT.STAGED`.
+  EXIT.STAGED,
   EXIT.PARTIAL,
   EXIT.SUCCESS,
 ];
@@ -1534,6 +1688,27 @@ export const TaskSchedStateSchema = z.enum([
   "waiting", // a dependency has not finished
   "ready", // dependencies met, no idle worker yet
   "dispatched",
+  /**
+   * Dispatched to an adopted-terminal `tui` worker and NOT YET TRIGGERED
+   * (SRD-TUI-DISPATCH §6.5, ISC-451).
+   *
+   * A member of this enum rather than a boolean beside it, and the asymmetry
+   * with `WorkerStateSchema.staged_task_id` — which deliberately is NOT a
+   * `phase` member — is worth stating because it looks like an inconsistency.
+   *
+   * `phase` answers two questions at once for a staged worker: what the agent
+   * is doing (nothing) and whether the worker can take more work (no). Those
+   * genuinely differ, so one enum has to imply whichever it does not state, and
+   * a reader acting on the implied half is wrong.
+   *
+   * `state` answers ONE question — where is this task in the schedule — and
+   * `staged` is a real answer to it. Collapsing it into `dispatched` is what
+   * makes a task nobody has started render as `- T-1: dispatched worker=tui-1`,
+   * which is character-for-character what a running task renders as. That is
+   * the precise misreading ISC-451 exists to prevent, and a top-of-report note
+   * mitigates it without removing the row that causes it.
+   */
+  "staged",
   "done",
   "blocked", // a dependency failed; this task will never be dispatched
 ]);

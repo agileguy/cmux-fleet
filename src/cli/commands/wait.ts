@@ -149,6 +149,57 @@ export function register(program: Command): void {
               });
               continue;
             }
+            /**
+             * STAGED AND NEVER TRIGGERED — settled here rather than waited on
+             * (ISC-445, SRD-TUI-DISPATCH §6.5).
+             *
+             * Reading the same `state` the death check already read, because
+             * the two questions are asked about the same file at the same
+             * moment and a second read could see a different one.
+             *
+             * ## Why this is a terminal answer and not another `pending++`
+             *
+             * A task with no record is normally a task still running, and
+             * waiting is exactly right for it. A STAGED task has no record for
+             * a different reason: nothing has started, and nothing will until
+             * a person presses a key at a terminal this process cannot see or
+             * reach. So the poll below has no event to wait for. It would spin
+             * for the full `--timeout` and then report `wait_timeout` — a
+             * diagnosis that says a clock ran out, sending the reader to
+             * investigate a slow task when the remedy is a keystroke.
+             *
+             * **The timeout is the cost, and it is why this is a criterion.**
+             * §6.5 puts it plainly: a `wait` that blocks on a key nobody
+             * pressed is the hang this whole design exists to avoid. The
+             * default is 10 minutes and orchestrators pass much more, so the
+             * difference between answering here and answering at the deadline
+             * is the difference between a console that reports a staged task
+             * and one that appears wedged. ISC-445's probe therefore asserts
+             * the CLOCK as well as the code.
+             *
+             * `verdict: "unknown"` and not a verdict of its own: `unknown` is
+             * the lattice's identity element — "no evidence either way" — and
+             * that is precisely the state of a task that has not run. The
+             * reason string carries the distinction, and `exitFor` maps it to
+             * `EXIT.STAGED` so a caller reading only `$?` gets it too.
+             *
+             * The check is `=== taskId` rather than `!== null`: one worker's
+             * staged task must not settle a DIFFERENT task that happens to be
+             * waiting on the same worker. That case is real — a second stage is
+             * refused `busy`, so the second task's dispatch failed and it has
+             * no record for an unrelated reason — and reporting it as staged
+             * would name the wrong remedy.
+             */
+            if (state !== null && state.staged_task_id === taskId) {
+              results.set(taskId, {
+                task_id: taskId,
+                worker,
+                epoch: state.epoch,
+                verdict: "unknown",
+                reason: "staged_untriggered",
+              });
+              continue;
+            }
           }
           pending++;
         }
@@ -232,6 +283,23 @@ function exitFor(t: WaitedTask): ExitCode {
   // the unknown verdict first would misreport every slow task as a death.
   if (t.reason === "wait_timeout") return EXIT.TIMEOUT;
   if (t.reason === "worker_died") return EXIT.WORKER_DIED;
+  /**
+   * The constraint the two lines above establish, stated once for all three:
+   * every reason check must precede the `verdict` switch, because all three of
+   * these tasks carry `verdict: "unknown"` and the switch maps that to
+   * `EXIT.PARTIAL`. A staged task reported as 7 is ISC-216's shape — "some
+   * tasks did not succeed", answered by investigating a failure that never
+   * happened — and `EXIT.STAGED` exists precisely to be distinguishable from
+   * that 7.
+   *
+   * Placed LAST among the reason checks rather than first, mirroring
+   * `EXIT_SEVERITY`, where `STAGED` sits below both `TIMEOUT` and
+   * `WORKER_DIED`. The order is presentational here and not load-bearing —
+   * `reason` holds one value, so no task can match two of these arms — and it
+   * is written this way so the function reads in the ladder's order rather
+   * than requiring a reader to check that the arms are disjoint.
+   */
+  if (t.reason === "staged_untriggered") return EXIT.STAGED;
   switch (t.verdict) {
     case "success":
       return EXIT.SUCCESS;

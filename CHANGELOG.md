@@ -6,6 +6,130 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **A staged task now starts its own turn — no keystroke at all (ISC-460..ISC-466,
+  `Docs/SRD-TUI-DISPATCH.md` §9 Q4).** The staged route below hands the operator one line to type.
+  This removes it.
+
+  §9 Q4 asked whether a **container-side** trigger could start a Pi turn without writing to the
+  surface, and predicted *"no — a TTY has one owner"*. It was probed on 2026-09-02 against the
+  shipped image rather than assumed, and **the answer is yes**. Pi enumerates its own input sources
+  as `"interactive" | "rpc" | "extension"`, and its extension API carries `sendUserMessage()`,
+  documented verbatim *"Send a user message to the agent. **Always triggers a turn.**"*
+
+  **The prediction was wrong for a reason worth keeping:** `Docs/SRD.md` §162 governs who may
+  *write to the terminal*, and this path never touches the terminal. §4.3's hazard — a brief landing
+  in a composer beside a half-typed line, submitted by a `shift+enter` — is therefore not mitigated
+  here, it is **absent**. Different channel, different failure mode.
+
+  The image now bakes one extension at `/opt/pifleet/dispatch-trigger.ts`, root-owned `0444`, loaded
+  by an explicit `--extension` path. **`--no-extensions` stays on the argv beside it**: measured
+  against `pi --help` in the image, that flag disables *discovery* only — "explicit -e paths still
+  work" — so §12.2's denial of repo-supplied `.pi/extensions/*.ts` is untouched and exactly one
+  pifleet-owned extension loads. Baked rather than bind-mounted because Pi executes it in-process:
+  a mount carries that guarantee in a `:ro` flag one character from being dropped, an image layer
+  does not. `auto_trigger: false` at any config level restores the keypress.
+
+  Two properties were found by measurement and would each have shipped a silently-dead feature:
+
+  - **It polls; it must not use `fs.watch`.** A host-side write to a bind-mounted file produced
+    **zero** inotify events inside the container, while `fs.watchFile` and a `readFileSync` poll
+    both saw it. An event-driven build passes every test that writes the drop from *inside* the
+    container — the natural way to write one — and never fires in production.
+  - **It requires two identical consecutive reads.** `/policy/dispatch` must be rewritten in place
+    (a bind mount pins the inode), which is not atomic; the probe observed the file half-written.
+    The first version of the guard claimed the JSON parse was sufficient and its own test refuted it
+    on the first run: a prefix ending at the separator is a *complete valid header with an empty
+    prompt*. It parses, it fires, and the worker is sent to read a brief still being written.
+
+  **This also closes §9 Q1 for this route.** Q1 asked whether any signal separates the staged task's
+  turn from an operator's own prompt in the same pane, and expected none. The auto-trigger creates
+  one — the message that starts the turn was written by pifleet and nobody typed it — so
+  `tui_stage_triggered` now carries `attributed_to_stage` and says APPROXIMATE only when it is.
+
+- **`dispatch` to an adopted-terminal `tui` worker stages instead of refusing (ISC-431..ISC-459,
+  `Docs/SRD-TUI-DISPATCH.md`).** The refusal it replaces — *"pifleet has no surface id to type
+  into"* — was correct about the mechanism and drew the wrong conclusion from it. A dispatch is two
+  things: an **identity** (task id, epoch, outbox, brief) and a **trigger** (the byte that starts a
+  turn). Only the trigger needs a terminal.
+
+  So the identity travels the read-only policy plane, which every worker including this one already
+  has. `dispatch` allocates a real epoch through a new supervisor `stage` verb, persists the fence,
+  rewrites `/policy/task`, drops the rendered brief at **`/policy/dispatch`** — a sibling `:ro`
+  mount the verbgate holds to the same integrity bar, refusing every verb with exit 78 if it is
+  writable — writes the inbox record with the real epoch, ledgers `via: "staged"`, and then types
+  exactly one line:
+
+  ```
+  # pifleet: a task was staged for you — read /policy/dispatch and do what it says
+  ```
+
+  **The brief never goes near a terminal.** The leading `#` is a comment in `bash`/`sh` and a parse
+  error in interactive `zsh` (`INTERACTIVE_COMMENTS` is off by default) — an execution in neither —
+  and the line carries no `;`, `&`, `|`, backtick, `$(`, `>`, `<` or newline, none of which is
+  needed to say "read this file". That is a mitigation and is documented as one, not a proof.
+
+  A terminal that announces no surface id — Terminal.app, ssh, a bare tmux pane — is a **reported
+  outcome, not an error**: the task is already staged and durable by then, so the route hands the
+  operator the line and says why it could not type it. A design that only works under cmux must not
+  become one that only runs under cmux.
+
+- **`pifleet unstage --task <id>`** releases a staged epoch that was never triggered, returning the
+  worker to idle. Deliberately not `abort`, which on a `pane_mode: tui` worker issues
+  `docker kill --signal=INT` and **stops** it. Cancellation clears the live epoch and deletes the
+  attempt while appending nothing to `completed`, so a later different attempt against the same
+  task id is not refused `already_completed` — which is the exact cancel-fix-restage motion an
+  operator makes after a typo.
+
+- **`wait` answers a staged task immediately, with the new exit code `9` (`EXIT.STAGED`)** and
+  reason `staged_untriggered`, instead of consuming its timeout. A staged task has no record
+  because nothing has *started*, not because something is slow, so the poll has no event to wait
+  for. `report` gains a `## STAGED` section above the totals naming the task and the remedy;
+  `status` names the staged task beside the phase; the schedule row says `staged` rather than
+  `dispatched`.
+
+- **The `tui` voided-requirements table is now derived per ROUTE, not per mode.** A staged dispatch
+  allocates a real epoch (ISC-84 no longer holds for it) and dedups on `(task_id, attempt_id)`
+  (ISC-85 closes for a re-stage of the same attempt, and stays open — unclosably — for a person
+  typing the same brief twice). The staged table is a *delta* over the mode table, so every
+  unchanged row is byte-identical across routes by construction. `attended.json` still records the
+  mode table, which was the true one when the person took the pane; `report` re-derives.
+
+### Fixed
+
+- **The pane route never wrote `/policy/task`, so every gated verb a pane-dispatched worker ran was
+  ledgered against `<none>`** (ISC-431). `writeTaskPolicy`'s only real call site was the RPC handler
+  that route never reaches. The probe asserts the ORDER rather than the end state: it drives a send
+  that fails at its first keystroke, then reads the file — which can only hold the task id if the
+  write happened first.
+
+- **A staged dispatch derives its attempt id from the task file's content (ISC-458).** It was
+  sending `String(envelope.attempt)`, and `attempt` **defaults to 1** — so two different briefs under
+  one task id collided and the second *replayed* the first: same epoch, drop file not rewritten,
+  `replayed: true` reported as success. Edit the brief, stage it, be told it worked, and the worker
+  still holds the old one. A missing dedup runs work twice and the transcript shows it; a too-coarse
+  dedup substitutes one brief for another and every surface reports success.
+
+  **The rpc route is unchanged** and still mints a fresh id per dispatch. An earlier draft of this
+  change widened the derivation to both routes, on the belief that a random id let a re-dispatch
+  re-run a completed task. It does not — a settled task is refused `already_completed` and a live one
+  `busy`, both keyed on the task id alone — and widening it turned that refusal into a replay, which
+  is the same no-op in a different wire shape and is ISC-85's pinned Phase-1 exit criterion. An
+  explicit `attempt_id` in the task file still wins on either route.
+
+- **The worker skill told workers to hard-code `epoch: 1`.** Its field rules said the value *"is not
+  currently delivered to you"*; `renderPrompt` has been emitting an `epoch:` line in the fenced
+  `## This task` block on every route, and `harvest/outbox.ts` **refuses** an envelope whose epoch
+  differs from the inbox record's. So a hard-coded `1` meant a task that did all its work correctly
+  harvested as though the container had produced nothing. It survived because it was true by
+  coincidence twice: the old pane route compared `0` against `0`, and a worker's *first* task
+  allocates 1. Now pinned at both ends — the instruction must point at the delivered value, and the
+  renderer must still deliver it.
+
+- **`up --attach-here` records the attach child's `(pid, started)`**, and clears it when the attach
+  exits. Staging refuses a dead or pid-reused terminal by name, with the remedy in every arm. A
+  stale record would otherwise satisfy the very check that exists to catch a detached terminal —
+  a guard reporting success.
+
 - **§13's failure table says NOT BUILT where the mitigation does not exist (ISC-365).** The audit
   found six mitigations written in the present tense that do not exist and recorded them in one
   erratum below the table. Right finding, wrong placement: a failure taxonomy is consulted during an

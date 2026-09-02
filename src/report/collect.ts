@@ -85,6 +85,28 @@ export interface CollectedReport {
    */
   attended: AttendedRecord[];
   /**
+   * Workers that took at least one STAGED dispatch in this run (ISC-452, D7).
+   *
+   * ## The evidence source, chosen from three and the other two cannot answer
+   *
+   * The merged ledger's `dispatched` records where `detail.via === "staged"`.
+   * `collectRunReport` already holds `ledger.records` as its first act, so this
+   * is not a second read and not a second source of truth for one fact — the
+   * rule this module states for `attendedInLedger`.
+   *
+   * **The inbox cannot answer it.** The staged route writes a `TaskEnvelope`
+   * and `TaskEnvelopeSchema` has no route field, so the fact is simply not on
+   * disk there. **`stage_accepted` cannot answer it either**, or rather it
+   * answers a slightly different question: on a replay the CLI returns early
+   * without the supervisor allocating again, so keying on the supervisor's row
+   * would lose the second stage of an unchanged file.
+   *
+   * `via: "staged"` is appended BEFORE the trigger is typed, which is the
+   * property that matters most: it survives a trigger that failed to send, and
+   * that is precisely the run where knowing the route is worth something.
+   */
+  stagedWorkers: string[];
+  /**
    * Workers the ledger says a person touched whose record cannot be produced
    * — missing, unreadable, or schema-invalid.
    *
@@ -104,6 +126,21 @@ interface DispatchedTask {
   envelope: TaskEnvelope | null;
   verdict: Verdict;
   settled: boolean;
+  /**
+   * Dispatched to an adopted terminal and NOT YET TRIGGERED (ISC-451).
+   *
+   * Distinct from `!settled`, and the distinction is the finding: an unsettled
+   * task is one that has not finished, which includes every task currently
+   * running. This is the narrower fact that nobody has STARTED it — the epoch
+   * is allocated, the brief is on disk, and the turn begins when a person
+   * presses a key at a terminal pifleet does not own.
+   *
+   * Read from the owning worker's `staged_task_id`, which the supervisor
+   * clears on the trigger, on `unstage` and on settle. So a stale `true` here
+   * means the state file is stale, not that the task is stuck; the report says
+   * "not triggered", never "will never run".
+   */
+  staged: boolean;
 }
 
 /** Build the full RunReport for a run directory. Degrades; does not throw. */
@@ -128,7 +165,16 @@ export async function collectRunReport(
   for (const rec of ledger.records) {
     if (rec.event === "dispatched" && rec.task_id !== undefined && !inboxIds.has(rec.task_id)) {
       notes.push(`ledger records dispatch of ${rec.task_id} but inbox has no envelope for it`);
-      dispatched.push({ taskId: rec.task_id, envelope: null, verdict: "unknown", settled: false });
+      // `staged: false` because there is no envelope to name a worker, so there
+      // is no state file to read the claim from. An unreadable dispatch is the
+      // wrong place to guess that a person still has to press a key.
+      dispatched.push({
+        taskId: rec.task_id,
+        envelope: null,
+        verdict: "unknown",
+        settled: false,
+        staged: false,
+      });
       inboxIds.add(rec.task_id);
     }
   }
@@ -220,7 +266,27 @@ export async function collectRunReport(
       failed: schedule.filter((s) => s.verdict === "failed").length,
     },
   });
-  return { report, notes, attended, attendedUnverified };
+  /**
+   * `detail.via` is worker-adjacent data read out of a ledger row, so it is
+   * matched exactly rather than coerced: any other shape leaves the worker off
+   * the staged list and it gets the mode table, which is the SAFE direction —
+   * the mode table states the stronger warnings, and a worker wrongly told its
+   * epoch is void loses nothing it had.
+   */
+  const stagedWorkers = [
+    ...new Set(
+      ledger.records
+        .filter(
+          (r) =>
+            r.event === "dispatched" &&
+            typeof r.worker === "string" &&
+            (r.detail as { via?: unknown } | undefined)?.via === "staged",
+        )
+        .map((r) => r.worker as string),
+    ),
+  ].sort();
+
+  return { report, notes, attended, attendedUnverified, stagedWorkers };
 }
 
 /**
@@ -457,17 +523,39 @@ async function collectDispatched(
     // Settle is the supervisor's word, not the worker's: the terminal task
     // record is written at settle and carries the epoch it settled.
     let settled = false;
+    /**
+     * Staged and untriggered, from the owning worker's own state file.
+     *
+     * Deliberately NOT derived from "no task record exists": that is true of
+     * every task currently running, and a report that called those staged
+     * would tell an operator to go press a key for work already in progress.
+     * The supervisor writes `staged_task_id` at stage and clears it at the
+     * trigger, so the positive assertion is the one to read.
+     *
+     * A worker whose state cannot be read yields `false` — an absent signal is
+     * not evidence of staging, and inventing one here would put a "nobody has
+     * started this" line at the top of a report about a run whose state files
+     * are simply gone.
+     */
+    let staged = false;
     if (envelope !== null) {
+      const wp = workerPaths(run, envelope.worker);
       try {
-        const rec = await readTaskRecord(
-          taskRecordPath(workerPaths(run, envelope.worker), taskId),
-        );
+        const rec = await readTaskRecord(taskRecordPath(wp, taskId));
         settled = rec !== null && rec.epoch === envelope.epoch;
       } catch (err) {
         notes.push(`task record for ${taskId} is unreadable: ${firstLine(err)}`);
       }
+      if (!settled) {
+        try {
+          const state = await readWorkerState(wp);
+          staged = state !== null && state.staged_task_id === taskId;
+        } catch (err) {
+          notes.push(`worker state for ${envelope.worker} is unreadable: ${firstLine(err)}`);
+        }
+      }
     }
-    out.push({ taskId, envelope, verdict, settled });
+    out.push({ taskId, envelope, verdict, settled, staged });
   }
   return out;
 }
@@ -483,6 +571,24 @@ async function collectDispatched(
  * file must not let it bypass adjudication. Dispatched rows take the harvest
  * verdict; undispatched rows have none to take.
  */
+/**
+ * One dispatched task's schedule state, in the order the states EXCLUDE each
+ * other.
+ *
+ * `settled` first: a task that finished is `done` whatever any other file
+ * still says about it. A worker whose `staged_task_id` was never cleared —
+ * a supervisor killed between the trigger and its flush — must not turn a
+ * finished task back into one waiting for a keypress, and putting `staged`
+ * first would do exactly that. `collectDispatched` already declines to read
+ * the state at all once `settled` is true; this ordering is the second half
+ * of the same argument, kept here so the precedence is visible where the
+ * states are chosen rather than only where they are gathered.
+ */
+function schedStateFor(d: DispatchedTask): "done" | "staged" | "dispatched" {
+  if (d.settled) return "done";
+  return d.staged ? "staged" : "dispatched";
+}
+
 async function buildSchedule(
   run: RunPaths,
   dispatched: DispatchedTask[],
@@ -500,7 +606,7 @@ async function buildSchedule(
       covered.add(d.taskId);
       rows.push({
         ...entry,
-        state: d.settled ? "done" : "dispatched",
+        state: schedStateFor(d),
         verdict: d.verdict,
       });
     } else {
@@ -535,7 +641,7 @@ async function buildSchedule(
     rows.push(
       ScheduledTaskSchema.parse({
         id: d.taskId,
-        state: d.settled ? "done" : "dispatched",
+        state: schedStateFor(d),
         worker: d.envelope?.worker ?? null,
         task_id: d.taskId,
         depends_on: d.envelope?.depends_on ?? [],

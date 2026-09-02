@@ -608,6 +608,7 @@ always present will look for a `/secrets` that a worker granted nothing never re
 | `<run-dir>/skills/<role>` | `/skills` | **ro** | always | role skill bundle |
 | `<run-dir>/workers/<worker>/cloud-allow` | `/policy/cloud-allow` | **ro** | always | the verbgate's policy (§5.10). **Read-only and separate from `/outbox` on purpose** — it used to be read out of `/outbox`, which the worker owns, so the subject of the policy could rewrite the policy and the task-scoped cloud grant was a suggestion rather than a control |
 | `<run-dir>/workers/<worker>/task-policy` | `/policy/task` | **ro** | always | the task id and epoch the verbgate stamps on every ledger row (§5.10). Rewritten IN PLACE by the supervisor at each dispatch and cleared at settle — never tmp+rename, because a bind mount pins the inode. Not environment: a container outlives any one epoch, and a worker can rewrite its own environment — ISC-362 |
+| `<run-dir>/workers/<worker>/dispatch-policy` | `/policy/dispatch` | **ro** | always | the TASK DROP: the staged brief plus a one-line JSON identity header, for a worker whose terminal belongs to a person and which therefore has no wire to be prompted over. A sibling of `/policy/task` and not a third line in it, because that file's two-line shape is load-bearing for a POSIX `sh` parser. Rewritten IN PLACE at each stage and cleared at settle, never tmp+rename, for the inode reason above; capped at 256 KiB at WRITE time, because the reader is `cat` in a container and a reader that discovers the size has already paid for it — `SRD-TUI-DISPATCH` §6.2, D4, Q6 |
 | `<run-dir>/workers/<worker>/secrets` | `/secrets` | **ro** | only when the worker was granted ≥1 `secrets:` name | granted credentials, one file per name at 0444, reached through `<NAME>_FILE` — §12.4 |
 | *(named volume)* `pifleet-piagent-<worker>` | `/home/pi/.pi/agent` | rw | always | container-local Pi state — **never the host `~/.pi/agent`**, which holds the operator's auth and sessions |
 | `<run-dir>/workers/<worker>/system-append.md` | `/briefing/system-append.md` | **ro** | only when a briefing fragment exists | the single concatenated `--append-system-prompt` file — §6.3 |
@@ -1358,7 +1359,7 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
   "proc_started": "Sat Jul 26 14:02:11 2026",
   "container": {"name": "pifleet-…-eng-1", "id": "3f9a…", "image": "pifleet/pi-worker:0.79.6-node-a1b2"},
   "phase": "busy",
-  "epoch": 1, "completed_epochs": [], "task_id": "T-004",
+  "epoch": 1, "completed_epochs": [], "task_id": "T-004", "staged_task_id": null,
   "session_path": "/Users/dan/.pifleet/runs/<run-id>/sessions/2026-07-26T14-02-19-530Z_<run-id>--eng-1.jsonl",
   "session_present": true,
   "transcript_activity": {"entries": 1462, "last_growth_at": "2026-07-26T14:09:05Z"},
@@ -1374,7 +1375,7 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
 }
 ```
 
-`session_path` is **recorded from `get_state`**, never computed. `pgid` is recorded so the kill ladder can signal the process group. `exit` distinguishes SIGKILL from a clean exit — necessary because Pi exits 0 in every case. Presentation identifiers (`surface_id`, `workspace_id`) live in a sibling `presentation.json` so a lost cmux cannot invalidate control state.
+`session_path` is **recorded from `get_state`**, never computed. `pgid` is recorded so the kill ladder can signal the process group. `exit` distinguishes SIGKILL from a clean exit — necessary because Pi exits 0 in every case. Presentation identifiers (`surface_id`, `workspace_id`) live in a sibling `presentation.json` so a lost cmux cannot invalidate control state. `staged_task_id` is the STAGED-dispatch route's field (SRD-TUI-DISPATCH §6.5) and is deliberately not a `phase` member: a staged task is durable but has not begun, so `phase` stays `idle` — the truth about the agent — while this names the task the allocator is holding the worker for.
 
 > **Added and corrected (2026-08-30, documentation audit) — the block above is a true SUBSET of
 > `WorkerStateSchema`, and the two omissions are both load-bearing. The sibling file's field names
@@ -1641,6 +1642,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet dispatch --worker <id> --task <file\|->` / `--auto --tasks <f>` | send task envelopes |
 | `pifleet steer --worker <id> "msg"` | mid-turn correction |
 | `pifleet abort --worker <id>` | cancel current epoch |
+| `pifleet unstage --task <id> [--worker w]` | release a STAGED epoch that was never triggered, returning the worker to idle. Deliberately not `abort`: on a `pane_mode: tui` worker `abort` issues `docker kill --signal=INT`, which STOPS the worker (`src/attended/voided.ts`, ISC-81 row), whereas nothing has run here and nothing is settled (SRD-TUI-DISPATCH §9 Q8) |
 | `pifleet wait [--run r] [--task T\|--all] [--timeout d]` | block until settle/deadline |
 | `pifleet artifacts [--task T\|--all] [--include diff]` | §8.4 |
 | `pifleet transcript --worker <id> [--html f]` | A4/A5 |
@@ -1655,7 +1657,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 
 **Exit codes** — a strict severity ladder, highest wins, because one `wait --all` can legitimately have a timeout *and* a budget trip *and* a failed task:
 
-`8` internal error > `2` usage/config > `3` backend unavailable > `5` budget ceiling > `6` worker died > `4` timeout > `7` partial (some `failed`/`blocked`/`aborted`) > `0` success.
+`8` internal error > `2` usage/config > `3` backend unavailable > `5` budget ceiling > `6` worker died > `4` timeout > `9` staged, never triggered > `7` partial (some `failed`/`blocked`/`aborted`) > `0` success.
 
 > **Erratum (2026-08-30, documentation audit) — `8` was missing from this ladder, and it sits at the
 > TOP of it.**

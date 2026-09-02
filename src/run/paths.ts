@@ -270,6 +270,24 @@ export interface WorkerPaths {
   cloudAllow: string;
   /** Per-dispatch task provenance for the verbgate ledger (ISC-362). */
   taskPolicy: string;
+  /**
+   * The TASK DROP: the staged brief for a worker with no wire to deliver one on
+   * (SRD-TUI-DISPATCH §6.2, D4).
+   *
+   * A SIBLING of `taskPolicy`, named here for the reason the four above it are
+   * (ISC-188): `config/render.ts` emits the `-v`, `run/materialize.ts` creates
+   * the inode the mount pins, and `run/dispatch-policy.ts` rewrites it at each
+   * stage. Three writers on one path is precisely the shape that had `render`
+   * describing four mounts at paths no run would ever contain, and a bind mount
+   * whose two sides disagree does not fail — Docker creates the missing source
+   * as a DIRECTORY and the worker comes up with a drop that can never have
+   * content.
+   *
+   * `dispatch-policy` and not `dispatch`: the name is a file in the same
+   * directory as `task-policy`, and the two are read together by anyone
+   * debugging what a worker was told.
+   */
+  dispatchPolicy: string;
   kubeconfig: string;
   /**
    * The per-worker secret store: one file per granted `secrets:` name, holding
@@ -366,6 +384,7 @@ export function workerPaths(run: RunPaths, workerId: string): WorkerPaths {
     systemAppendMd: join(dir, "system-append.md"),
     cloudAllow: join(dir, "cloud-allow"),
     taskPolicy: join(dir, "task-policy"),
+    dispatchPolicy: join(dir, "dispatch-policy"),
     kubeconfig: join(dir, "kubeconfig"),
     secretsDir: join(dir, "secrets"),
     launchJson: join(dir, "launch.json"),

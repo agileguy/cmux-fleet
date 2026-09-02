@@ -23,3 +23,10 @@ gha-creds-*.json
 
 # Agent worktrees — transient, created by background agents
 .claude/worktrees/
+
+# Local console fleets. `fleet.yaml` is already ignored for this reason; these
+# are the same thing under a name `--config` can point at, and they name the
+# operator's own hosts, endpoints and egress allowances. `fleet.example.yaml`
+# is the tracked, annotated one.
+fleet-development.yaml
+fleet-operations-local.yaml

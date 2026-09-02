@@ -453,12 +453,29 @@ describe("the supervisor branches on pane_mode", () => {
    * burns no epoch. Asserted by source ORDER: the guard's return has to precede
    * the allocation, and `toContain` on both would pass with them the wrong way
    * round.
+   *
+   * **SCOPED TO THE `dispatch` CASE, and it has to be since D6 added a second
+   * allocator.** `handleStage` allocates too — deliberately, that is the whole
+   * of D6 — so a file-wide `indexOf` no longer asks the question this test
+   * means. It would answer "is the FIRST allocation anywhere in the file after
+   * the guard", which happens to be true today only because `handleStage` sits
+   * below `main()`, and would flip red on a reordering that changed nothing
+   * about dispatch. Cutting the case out first makes the claim be about the
+   * route it names.
    */
   test("dispatch refuses a tui worker before any epoch is allocated", () => {
-    const guard = SUPERVISOR.indexOf('reason = "pane_mode_tui_has_no_rpc_dispatch"');
-    const allocate = SUPERVISOR.indexOf("em.allocate(envelope.task_id");
-    expect(guard).toBeGreaterThan(-1);
-    expect(allocate).toBeGreaterThan(-1);
+    const from = SUPERVISOR.indexOf('case "dispatch": {');
+    expect(from, "the dispatch case could not be located").toBeGreaterThan(-1);
+    // Up to the next case label, so nothing after the arm can satisfy either
+    // half of the ordering claim.
+    const to = SUPERVISOR.indexOf('case "stage": {', from);
+    expect(to, "the case following dispatch could not be located").toBeGreaterThan(from);
+    const dispatchCase = SUPERVISOR.slice(from, to);
+
+    const guard = dispatchCase.indexOf('reason = "pane_mode_tui_has_no_rpc_dispatch"');
+    const allocate = dispatchCase.indexOf("em.allocate(envelope.task_id");
+    expect(guard, "the tui refusal is not in the dispatch case").toBeGreaterThan(-1);
+    expect(allocate, "the dispatch case allocates nowhere").toBeGreaterThan(-1);
     expect(guard).toBeLessThan(allocate);
   });
 

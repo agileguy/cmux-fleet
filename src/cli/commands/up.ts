@@ -11,10 +11,16 @@ import {
   readWorkerLaunch,
   readWorkerState,
   runBudgetRecord,
+  readPresentation,
   writePresentation,
 } from "../../run/state.ts";
 import { attachArgv, enterTui, DETACH_KEYS } from "../../attended/mode.ts";
-import { adoptRefusal, adoptRefusalMessage, adoptedAttachArgv } from "../../attended/adopt.ts";
+import {
+  adoptRefusal,
+  adoptRefusalMessage,
+  adoptedAttachArgv,
+  adoptedSurface,
+} from "../../attended/adopt.ts";
 // The driver that changes no pane. Imported from the `tui` command rather than
 // re-declared, because it is an ASSERTION about a tui worker's pane — that
 // entering attended mode must not respawn a pane which is already a person's
@@ -2117,13 +2123,42 @@ export function register(program: Command): void {
         // `backend` is the ACTIVE backend, not the requested one: it was
         // hardcoded to "headless" here, so a cmux run recorded itself as
         // headless and `attach` would have had nothing to focus.
+        /*
+         * The surface the OPERATOR handed over, when there is one.
+         *
+         * Only meaningful for the adopted worker: `adoptedSurface` reads the
+         * environment of THIS process, which is the terminal `up` was typed
+         * in, and that terminal is exactly one worker's pane. Applying it to
+         * any other worker in the run would name a surface that is not theirs.
+         *
+         * `null` for every other case, and that stays a first-class answer:
+         * an adopted Terminal.app, ssh session or tmux pane announces no cmux
+         * surface, and the staged route degrades to printing the trigger
+         * rather than sending it. See `adoptedSurface`.
+         */
+        const adopted = attachHere && tuiWorkers.includes(workerId);
+        const handedOver = adopted ? adoptedSurface(process.env) : null;
         await writePresentation(wp, {
           schema: "pifleet.presentation/v1",
           worker: workerId,
           backend: backend.kind,
-          workspace_ref: workspace.id,
-          surface_ref: pane.id,
+          workspace_ref: handedOver?.workspace ?? workspace.id,
+          surface_ref: handedOver?.surface ?? pane.id,
           window_ref: null,
+          /*
+           * WHO owns `surface_ref`, which `backend` above cannot say for an
+           * adopted terminal: the run's backend is `headless` and the surface
+           * is cmux's. `dispatch` reads this rather than re-deriving it, so
+           * the two questions stay separable. See `surface_backend`.
+           */
+          surface_backend: handedOver?.backend ?? (pane.id === null ? null : backend.kind === "headless" ? null : backend.kind),
+          /*
+           * No attach child yet, and this is the honest value rather than a
+           * placeholder: this write happens BEFORE the spawn, so the pid does
+           * not exist. The attach site fills it in and clears it again on
+           * detach; see `PresentationSchema.attach_process`.
+           */
+          attach_process: null,
           /*
            * The terminal that ran `up` is this worker's pane.
            *
@@ -2134,12 +2169,16 @@ export function register(program: Command): void {
            * says what it is — a headless run with no pane — because that is
            * still true of it.
            *
-           * `surface_ref` stays null and is not an oversight: there is no id
-           * a later process could send bytes to. `dispatch` reads exactly that
-           * and refuses, which is correct for this mode — the person holding
-           * the terminal is the dispatcher.
+           * `surface_ref` USED TO STAY NULL here, on the reasoning that there
+           * was no id a later process could send bytes to. There is: a cmux
+           * pane announces itself in the environment, and this process is
+           * running in it. That was recorded as SRD-TUI-DISPATCH D2 and
+           * recommended against; the owner reversed it on 2026-09-02, and the
+           * shape that came back is narrower than the one D2 argued against —
+           * the brief travels through the read-only file plane and only a
+           * short, shell-inert trigger is typed.
            */
-          adopted_terminal: attachHere && tuiWorkers.includes(workerId),
+          adopted_terminal: adopted,
         });
         const { pid, pgid, started } = await processLauncher.launchDetached({
           runId,
@@ -2574,7 +2613,93 @@ export function register(program: Command): void {
          */
         if (opts.attachClear === true) process.stdout.write("\u001b[2J\u001b[3J\u001b[H");
         const child = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+        /**
+         * RECORD THE ATTACH CHILD'S IDENTITY, which this site used to discard.
+         *
+         * ## What the absence cost
+         *
+         * "Is this terminal still the worker's?" had no answer. The pid was in
+         * scope right here and thrown away, so nothing downstream could tell an
+         * operator sitting at the pane from one who detached an hour ago — and
+         * a task staged for a worker whose reader has gone is a task nobody can
+         * trigger, reported as accepted. That is the `<none>` shape: a
+         * mechanism running over an input nobody is reading.
+         *
+         * ## Why this is a RECORD and not a read off a live pid
+         *
+         * `supervisor/launch.ts` states the rule and the failure at length, and
+         * it applies here unchanged: a start time read off a bare pid names
+         * whoever holds the number, every downstream guard compares the record
+         * against the OS, and none of them can catch a record that was WRITTEN
+         * from the OS in the first place. What makes this different is the
+         * HANDLE. POSIX retains a child's pid until its parent reaps it, so
+         * while `exitCode` and `signalCode` are both still null the kernel
+         * cannot have reissued `child.pid`, and the read therefore describes
+         * the process this line spawned.
+         *
+         * The check runs AFTER the read, and the order is load-bearing for the
+         * reason that file gives: "not reaped now" implies "not reaped at any
+         * earlier instant", so a check that passes afterwards vouches for a
+         * read taken before it. The reverse order vouches for nothing.
+         *
+         * ## Non-fatal, in the direction that costs a refusal rather than a lie
+         *
+         * A failed capture leaves `attach_process: null`, and staging refuses
+         * on null. The operator loses the ability to stage — recoverable, and
+         * they are told — where the alternative is a guard that passes against
+         * a record nothing measured.
+         *
+         * ## A SECOND write, because the pid cannot exist before the spawn
+         *
+         * The presentation record is written before the attach so it can never
+         * UNDERclaim attendance. The pid is knowable only after. Merging the
+         * two would mean spawning before recording, which reverses that
+         * property for the sake of one file write.
+         */
+        try {
+          const started = await processStartTime(child.pid).catch(() => null);
+          const stillOurs = child.exitCode === null && child.signalCode === null;
+          const current = await readPresentation(wp);
+          if (current !== null && started !== null && stillOurs) {
+            await writePresentation(wp, {
+              ...current,
+              attach_process: { pid: child.pid, started },
+            });
+          }
+        } catch (err) {
+          process.stderr.write(
+            `pifleet: could not record the attach process for ${workerId} ` +
+              `(${err instanceof Error ? err.message : String(err)}); ` +
+              `dispatch will refuse to stage work for it\n`,
+          );
+        }
         const code = await child.exited;
+        /**
+         * AND CLEAR IT, because the terminal has stopped being the worker's.
+         *
+         * Without this the record outlives the reader and the guard inverts:
+         * an operator who detaches and walks away leaves a presentation file
+         * claiming a live terminal, and the first thing that claim does is
+         * satisfy the check that exists to catch exactly this. A stale `true`
+         * is worse than no guard, because it is a guard reporting success.
+         *
+         * Same non-fatal posture, and the failure lands on the safe side by
+         * accident of which direction is safe here: an uncleared record
+         * over-claims, which is why the write is attempted rather than skipped,
+         * and why the operator is told when it could not be made.
+         */
+        try {
+          const current = await readPresentation(wp);
+          if (current !== null && current.attach_process !== null) {
+            await writePresentation(wp, { ...current, attach_process: null });
+          }
+        } catch (err) {
+          process.stderr.write(
+            `pifleet: could not clear the attach process record for ${workerId} ` +
+              `(${err instanceof Error ? err.message : String(err)}); ` +
+              `it still names a terminal that has detached\n`,
+          );
+        }
         /*
          * Detaching is a SUCCESS, and docker's exit code cannot tell it from a
          * failure — `--detach-keys` returns 0, and so does a container that

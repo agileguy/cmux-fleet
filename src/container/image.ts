@@ -115,6 +115,15 @@ export const BUILD_CONTEXT_ASSETS = [
   // second of those returns rows rather than an error. A hash that did not
   // cover this file would let that ship under an unchanged tag.
   "ticket-cli",
+  // The auto-trigger extension (§9 Q4). It is the only asset here that Pi
+  // EXECUTES IN-PROCESS, and a stale copy is the worst kind of staleness this
+  // hash exists to prevent: an extension that no longer matches the drop format
+  // it parses stops firing SILENTLY — the worker sits idle, `status` reports a
+  // staged task, and nothing anywhere reports an error. The verbgate and the
+  // honeypot at least fail loudly. This one fails by doing nothing at all,
+  // which is the same failure `fs.watch` would have caused and the reason its
+  // own header spends a paragraph on it.
+  "pi-extensions/dispatch-trigger.ts",
 ] as const;
 export type BuildContextAsset = (typeof BUILD_CONTEXT_ASSETS)[number];
 

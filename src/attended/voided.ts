@@ -140,7 +140,7 @@ export const PANE_MODE_TUI_VOIDED: readonly VoidedRequirement[] = [
   {
     isc: "ISC-85",
     because:
-      "With no epoch there is no `(worker, task_id, epoch)` to recognise, so `already_completed` can never be returned: re-dispatching the same task file types the prompt into the pane a second time and RUNS THE TASK TWICE, and the harvest accepts whichever result.json lands last. Check the transcript before re-dispatching, because nothing else will.",
+      "Re-dispatching the same task file types the prompt into the pane a second time and RUNS THE TASK TWICE, and the harvest accepts whichever result.json lands last. Check the transcript before re-dispatching, because nothing else will. The reason is that nothing ALLOCATES on this route: dedup keys on (task_id, attempt_id) and answers with a REPLAY of the stored epoch, and with no allocator there is no stored epoch to replay. `already_completed` is a different answer for a different case — a second attempt against a task that has settled — and it is equally unreachable here.",
   },
   {
     isc: "ISC-86",
@@ -171,6 +171,70 @@ export const PANE_MODE_TUI_VOIDED: readonly VoidedRequirement[] = [
     isc: "ISC-141",
     because:
       "There is no RPC stream, so there are no offsets and no fence post: the input the attribution rule reads does not exist for this worker. That subsumes the weaker attended-mode reason above — it is not that a person's writes sit outside the fence, it is that there is no fence.",
+  },
+].map((v) => VoidedRequirementSchema.parse(v));
+
+/**
+ * How a task REACHED this worker — the third key, added by SRD-TUI-DISPATCH D7.
+ *
+ * `typed` is a person at the keyboard, or the backend-managed pane route
+ * typing a rendered prompt with no epoch behind it. `staged` is a dispatch that
+ * allocated a real epoch, wrote the inbox record and the drop file, and typed
+ * only a trigger.
+ */
+export type TuiDispatchRoute = "typed" | "staged";
+
+/**
+ * What a STAGED dispatch gives back, expressed as a DELTA over
+ * `PANE_MODE_TUI_VOIDED` rather than as a second full table (SRD §7.2, D7).
+ *
+ * ## The cost this file now carries, quoted from the document that chose it
+ *
+ * §7.2: *"the table must be re-derived per route rather than per mode, which is
+ * itself a cost: today one list describes every `tui` worker, and after this
+ * there are two shapes of `tui` worker with different guarantees."* And its
+ * summary of the whole trade: **"this design converts a mode that voids ten
+ * guarantees into a route that voids seven and a half, and adds a second table
+ * to keep straight."**
+ *
+ * That is a real regression in the legibility this file mostly exists for, and
+ * it is taken rather than avoided because the alternative is worse: one table
+ * for both routes would have to state ISC-84 as either "no epoch is allocated"
+ * (false for a staged dispatch) or "an epoch is allocated" (false for the
+ * hand-typed turn, which is most of what happens at this seat). A row that is
+ * false half the time is not a weaker warning, it is a warning an operator
+ * learns to disbelieve.
+ *
+ * ## A DELTA, and the choice is load-bearing
+ *
+ * Only the rows §7.2 names appear here. Every other row — ISC-74, ISC-81,
+ * ISC-95, ISC-111, ISC-115, ISC-141 — is inherited verbatim from the mode
+ * table, so it is byte-identical across routes BY CONSTRUCTION rather than by
+ * anybody remembering to copy it. Two full tables would let an edit to one
+ * silently change a claim on one route only, and that drift is exactly the
+ * failure the "every isc must name a real criterion" cross-check below was
+ * written for, one level up.
+ */
+export const STAGED_ROUTE_TUI_VOIDED: readonly VoidedRequirement[] = [
+  {
+    isc: "ISC-84",
+    because:
+      "NOT VOID on this route, and the row is kept rather than dropped so the difference is visible: a staged dispatch allocates a REAL epoch >= 1 through the supervisor's stage verb, and the same number appears in the inbox record, the drop file and the ledger row. What remains void is everything this worker does OUTSIDE a staged task — a person typing their own prompt at this terminal still runs under whatever /policy/task last said, and §7.5's interleaving is still undecidable for those turns. The epoch tells you which staged task a diff belongs to; it does not tell you the diff came from that task.",
+  },
+  {
+    isc: "ISC-85",
+    because:
+      "CLOSED for a re-stage of the same attempt: dedup keys on (task_id, attempt_id), the attempt id is derived from the task file's content, and a second stage of an unchanged file REPLAYS the stored epoch and rewrites nothing. Editing the brief changes the id and allocates fresh, so the two cases cannot be confused. STILL OPEN, and nothing can close it, for a person who types the same brief into this terminal twice — that is not a dispatch and no allocator sees it. Check the transcript before re-typing; the file route now checks itself.",
+  },
+  {
+    isc: "ISC-86",
+    because:
+      "Unchanged in force and WEAKER in what it can prove: `accepted: true` on this route means a FILE WAS WRITTEN, not that bytes reached a pty. It does not prove Pi read the drop, that the trigger was typed, or that a turn started — the trigger's own send is reported separately and can fail while the task stays staged and durable. A staged task that nobody triggered looks identical to one that was, from the accept alone; `wait` and `report` are where that difference is visible, not here.",
+  },
+  {
+    isc: "ISC-87",
+    because:
+      "Unchanged in kind and REACHABLE FOR THE FIRST TIME. Completion is still read out of the transcript — a terminal-looking assistant entry followed by a quiet window, coarser by construction than the rpc path's agent_end. The change worth stating is that until the stage verb existed this settle path had never once EXECUTED: the only caller of the epoch allocator sat below a refusal this route never passed, so em.live was always null and there was nothing to classify against. Treat a settle here as a strong hint, and treat it as a NEW hint: this row described a mechanism that had never run.",
   },
 ].map((v) => VoidedRequirementSchema.parse(v));
 
@@ -214,6 +278,50 @@ export function voidedFor(mode: LaunchPaneMode): readonly VoidedRequirement[] {
   for (const v of TUI_VOIDED) byIsc.set(v.isc, v);
   // Second, so the mode's sentence replaces the attended one on a collision.
   for (const v of PANE_MODE_TUI_VOIDED) byIsc.set(v.isc, v);
+  return Object.freeze(
+    [...byIsc.values()].sort(
+      (a, b) => Number(a.isc.slice("ISC-".length)) - Number(b.isc.slice("ISC-".length)),
+    ),
+  );
+}
+
+/**
+ * The table `report` prints for one worker, given how its tasks actually
+ * arrived (SRD §7.2, ISC-452).
+ *
+ * ## Why this is not what gets STAMPED, and `voidedFor` still is
+ *
+ * `attended.json` is written when a person enters the worker — before any
+ * dispatch. At that moment nothing has been staged and the mode table is the
+ * true one, so `voidedFor(mode)` remains what is recorded and this function
+ * changes nothing about it. What this adds is a RE-DERIVATION at report time,
+ * for the one run where the stamp is knowably stale: a run in which something
+ * was staged after the stamp was taken.
+ *
+ * The alternative — rewriting `attended.json` on every stage — was rejected.
+ * The stamp is a record of what was told to the operator when they took the
+ * pane, and a record that mutates under later events is not a record.
+ *
+ * `typed` returns `voidedFor(mode)` VERBATIM, which is what makes a run with no
+ * staged dispatch byte-identical to what it printed before this existed. A
+ * change that alters an unstaged run's output is a regression, and the test for
+ * this asserts equality against the mode table rather than against a copy of
+ * its text.
+ */
+export function voidedForDispatchRoute(
+  mode: LaunchPaneMode,
+  route: TuiDispatchRoute,
+): readonly VoidedRequirement[] {
+  const base = voidedFor(mode);
+  // The delta describes the tui mode's own rows. An rpc worker has no staged
+  // route to be on — `dispatch` sends it down the control socket — so there is
+  // nothing here to apply, and applying it anyway would attach the mode's
+  // sentences to a worker that is not in the mode.
+  if (route === "typed" || mode === "rpc") return base;
+
+  const byIsc = new Map<string, VoidedRequirement>();
+  for (const v of base) byIsc.set(v.isc, v);
+  for (const v of STAGED_ROUTE_TUI_VOIDED) byIsc.set(v.isc, v);
   return Object.freeze(
     [...byIsc.values()].sort(
       (a, b) => Number(a.isc.slice("ISC-".length)) - Number(b.isc.slice("ISC-".length)),

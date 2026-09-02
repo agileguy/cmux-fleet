@@ -61,7 +61,15 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
     expect(sources.length).toBeGreaterThanOrEqual(6);
 
     const names = new Set(sources.map((s) => assetNameOf(s.source)));
-    expect(names).toEqual(new Set(["verbgate", "entrypoint.sh", "honeypot.cjs", "ticket-cli"]));
+    expect(names).toEqual(
+      new Set([
+        "verbgate",
+        "entrypoint.sh",
+        "honeypot.cjs",
+        "ticket-cli",
+        "pi-extensions/dispatch-trigger.ts",
+      ]),
+    );
   });
 
   test("the enrolled names are the measured ones, so a silent shrink of the array is visible", () => {
@@ -77,6 +85,10 @@ describe("the real docker/Dockerfile against the real BUILD_CONTEXT_ASSETS", () 
       // environment, so an image carrying a stale copy queries the wrong scope
       // — which returns rows rather than an error.
       "ticket-cli",
+      // The auto-trigger extension (§9 Q4). Pi EXECUTES it in-process, and a
+      // stale copy stops firing silently, so it is the one asset here whose
+      // absence from the hash would produce no error anywhere.
+      "pi-extensions/dispatch-trigger.ts",
     ]);
   });
 
