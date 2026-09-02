@@ -593,15 +593,42 @@ const PROVIDER_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
  * One entry in `llm.providers` — everything that describes ONE endpoint
  * (`Docs/SRD-INFERENCE-PROVIDERS.md` §6.2).
  *
- * ## Why these six and not the other four
+ * ## Why these seven and not the other four
  *
  * §6.2's table splits the old flat `llm:` block on a single question: does the
  * field describe an ENDPOINT, or does it describe what the FLEET will tolerate?
- * `base_url`, `relay_upstream`, `api_key_env`, `models_allowlist`, `hosted` and
- * `tag_style` are all statements about one endpoint and move here.
- * `provider`, `model` and `thinking` stay fleet-wide because they are defaults
- * a worker overrides, and `require_native_tool_calls` stays fleet-wide for a
- * reason that is not symmetry — see its entry below.
+ * `base_url`, `relay_upstream`, `api_key_env`, `models_allowlist`, `hosted`,
+ * `tag_style` and `probe_timeout_ms` are all statements about one endpoint and
+ * move here. `provider`, `model` and `thinking` stay fleet-wide because they
+ * are defaults a worker overrides, and `require_native_tool_calls` stays
+ * fleet-wide for a reason that is not symmetry — see its entry below.
+ *
+ * ## `probe_timeout_ms` was SIX until D16, and it joins by the rule above
+ *
+ * It reads at first like a fleet tolerance — a deadline sounds like patience,
+ * and patience sounds like something the fleet decides. It is not, and §6.2's
+ * own test is what settles it: the question is how long THIS ENDPOINT takes to
+ * answer, which is a measured property of the server and the models it serves,
+ * not a statement about what the operator will put up with. D16 measured the
+ * difference: the same 60 s is generous for oMLX on the operator's own
+ * hardware — it was sized against a cold 35B load there — and marginal for a
+ * hosted catalogue whose two largest models answered at 42.1 s and 56.9 s
+ * host-side and unqueued. One number cannot be right for both, and that it was
+ * ever one number is the whole of the defect.
+ *
+ * Contrast `require_native_tool_calls`, which stays fleet-wide: WHETHER to
+ * refuse a model that cannot emit a tool call is a statement about what the
+ * fleet will tolerate, and it is the same answer whichever endpoint serves the
+ * model. HOW LONG to wait before concluding anything is a property of the wire.
+ * The pair is the clearest illustration of §6.2's split in this schema, which
+ * is why they are described together rather than in separate paragraphs.
+ *
+ * Like `hosted` and `tag_style` — and unlike the other four — it has **no flat
+ * spelling at all**, so it is absent from `PER_PROVIDER_FLAT_KEYS` and the
+ * §6.1 both-spellings refusal is untouched. D16's own reasoning is the
+ * justification: 60 s is CORRECT for the flat case, because the flat case is
+ * oMLX on the operator's machine. The problem belongs to a hosted provider, and
+ * a hosted provider by definition has a providers map.
  *
  * `models_allowlist` moving here closes §2.6's second gap by construction: the
  * allowlist is checked against the RESOLVED provider's list, so a model
@@ -678,6 +705,88 @@ export const ProviderSchema = z
      * field the merge rules give the lowest precedence to anyway.
      */
     tag_style: z.boolean().default(false),
+    /**
+     * How long THIS endpoint gets to answer the mandatory §5.9 tool-call probe,
+     * in milliseconds (D16, ISC-419). Absent means the
+     * `probeNativeToolCalls` default — 60 s — applies.
+     *
+     * ## Why it is a per-provider field and not a raised constant
+     *
+     * `PROBE_TIMEOUT_MS = 60_000` was sized against oMLX **cold loads on the
+     * operator's own hardware**, and for that endpoint it is CORRECT. Under a
+     * providers map the same number silently became the budget for a third
+     * party's largest models over the public internet, and D16 measured that as
+     * live rather than theoretical: seventeen of nineteen catalogue models
+     * answered in ≤ 4,374 ms, then `mistral-large-3:675b` at 42,114 ms and
+     * `nemotron-3-ultra` at 56,947 ms — inside the ceiling by three seconds,
+     * host-side and unqueued, so both figures are floors. Through the relay,
+     * inside a container, behind D14's one-concurrent-request tier, they only
+     * go up, and `up` then exits non-zero with a `timeout` verdict: a refused
+     * fleet. Raising the constant fleet-wide was rejected because it relaxes the
+     * gate for the operator's own server too, and one number serving two very
+     * different failure modes is how it came to be wrong here.
+     *
+     * ## Why the bound, and why THESE two numbers
+     *
+     * `z.number().int().positive()` alone admits both ends of the range that
+     * make `up` useless, in opposite directions, and an operator reaches either
+     * one by acting reasonably.
+     *
+     * **The floor, 1 s.** 17 of 19 models answered at or under 4,374 ms, most
+     * under 1,500 ms — and every one of those is a floor, measured with no relay
+     * and no queue in the path. A sub-second budget is therefore under the FAST
+     * group's own median before the real path is considered, so it refuses every
+     * model on the provider with a `timeout` verdict. `probe_timeout_ms: 1` is
+     * not a tight budget; it is an off switch that exits non-zero, which is the
+     * one shape §5.9 will not have — the same argument that makes
+     * `require_native_tool_calls` a boolean rather than a number.
+     *
+     * **The ceiling, 5 min.** The gate is sequential and mandatory, so what an
+     * operator waits is `distinct (provider, model) pairs × budget`; the wrong
+     * number here is MULTIPLIED, not merely tolerated. 300_000 is 5.3× the
+     * slowest probe ever measured against this catalogue — ample headroom for
+     * that model queued behind others of its class — and it caps a single
+     * pathological probe at a wait that reads as "slow" rather than "hung",
+     * which is the whole harm D16 names. Past that point the honest instrument
+     * is not a larger number: D16 gives `models_allowlist` a second, concrete
+     * job of "excluding models measured near the ceiling" and calls it the
+     * cheaper of the two controls because it needs no code at all. A model that
+     * cannot emit a ZERO-ARGUMENT tool call inside five minutes is not one the
+     * fleet should then be dispatching real work to; a bigger budget buys a
+     * fleet that comes up and behaves the same way on every turn.
+     *
+     * ## No default here, deliberately
+     *
+     * `.optional()` rather than `.default(60_000)`, so 60 s keeps exactly ONE
+     * home — `probeNativeToolCalls`'s default parameter, where its docblock
+     * explains the cold load it was sized against. A default restated here would
+     * be a second constant that reads correctly today and drifts the first time
+     * either is tuned, which is the shape ISC-264 cost a rename to find. The
+     * resolver (`providerProbeTimeoutMs`) therefore returns `number |
+     * undefined` and hands `undefined` straight through.
+     */
+    probe_timeout_ms: z
+      .number()
+      .int({ error: "probe_timeout_ms is whole milliseconds; a fractional millisecond is not a budget" })
+      .min(1_000, {
+        error:
+          "probe_timeout_ms must be at least 1000ms. 17 of 19 measured models answered in under " +
+          "4.4s and most under 1.5s, host-side with no relay and no queue in the path — so a " +
+          "sub-second budget refuses every model on this provider with a `timeout` verdict. That " +
+          "is an off switch that exits non-zero, not a tight budget; to turn the probe off, set " +
+          "llm.require_native_tool_calls: false.",
+      })
+      .max(300_000, {
+        error:
+          "probe_timeout_ms must be at most 300000ms (5 minutes). The tool-call gate is " +
+          "sequential and mandatory, so an operator waits `distinct (provider, model) pairs x " +
+          "this budget` before `up` says anything — a larger number does not make the fleet more " +
+          "patient, it makes `up` indistinguishable from hung. 300000 is over 5x the slowest " +
+          "probe ever measured (56,947ms). For a model that genuinely needs longer, exclude it " +
+          "with this provider's models_allowlist (SRD D16) rather than widening the budget for " +
+          "every model on the endpoint.",
+      })
+      .optional(),
     /**
      * REFUSED, and declared here rather than left to `.strict()` so the refusal
      * can say why (ISC-420).

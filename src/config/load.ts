@@ -395,6 +395,59 @@ export function providerApiKeyEnv(config: FleetConfig, provider: string): string
   return block.api_key_env;
 }
 
+/**
+ * How long ONE provider's endpoint gets to answer the §5.9 tool-call probe
+ * (D16, ISC-419). `undefined` means UNSET — the caller's own default applies.
+ *
+ * ## Why this returns `undefined` instead of resolving the default itself
+ *
+ * The 60 s default lives in exactly one place: `probeNativeToolCalls`'s default
+ * parameter in `security/model-probe.ts`, where its docblock records the oMLX
+ * cold load it was sized against. Reading it here would require importing that
+ * module, and **this module must not import it** — the dependency runs the
+ * other way (`model-probe.ts` imports `resolveWorker` and `providerApiKeyEnv`
+ * from here), and `model-probe.ts`'s own header states why: `config/load.ts` is
+ * deliberately synchronous file-IO only, and a config loader that reaches the
+ * network is one that cannot be unit-tested without one.
+ *
+ * Restating `60_000` here to dodge the import would be worse than the import.
+ * It is the same defect ISC-264 cost a rename to find: two constants that
+ * describe one thing, agree on the day they are written, and drift the first
+ * time either is tuned. `undefined` passed to a parameter with a default IS the
+ * default, so handing the value straight through costs nothing and leaves the
+ * number with one home.
+ *
+ * ## Why absence is `undefined` rather than a throw, unlike `providerApiKeyEnv`
+ *
+ * Worth stating, because a reader arriving from the function directly above
+ * will have just read a `ConfigError` thrown for exactly this case and will
+ * reasonably ask why this one shrugs.
+ *
+ * The two are answering different questions. A missing `api_key_env` cannot be
+ * defaulted at all — §6.2 forbids inheriting the flat key, because that is how
+ * a second provider silently acquires oMLX's credential and carries it to
+ * someone else's endpoint — so there is no correct value to return and refusing
+ * is the only honest move. A missing BUDGET has a correct value: the default,
+ * which is what every pre-D7 fleet has always run on.
+ *
+ * And an undeclared provider is already refused, earlier and by name:
+ * `resolveWorker` (ISC-402) rejects a worker whose provider is not in the map
+ * before any probe is reached, so a `throw` here would be a second refusal for
+ * a state the caller cannot be in. `providerAllowlist` returns `[]` on this
+ * path for the same reason and this follows its shape rather than the one
+ * above it.
+ *
+ * The no-`providers`-map fleet also lands here as `undefined`, and that is
+ * D16's own argument rather than a fall-through: 60 s was sized against oMLX on
+ * the operator's own hardware, so it is CORRECT for a flat fleet. The problem
+ * D16 describes belongs to a hosted provider, and a hosted provider by
+ * definition has a providers map — which is why there is no flat
+ * `llm.probe_timeout_ms` spelling for this to read.
+ */
+export function providerProbeTimeoutMs(config: FleetConfig, provider: string): number | undefined {
+  return config.llm.providers?.[provider]?.probe_timeout_ms;
+}
+
 // ---------------------------------------------------------------------------
 // The merge
 // ---------------------------------------------------------------------------

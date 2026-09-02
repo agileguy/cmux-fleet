@@ -25,6 +25,7 @@ import { EXIT } from "../contracts.ts";
 import {
   ConfigError,
   providerApiKeyEnv,
+  providerProbeTimeoutMs,
   resolveWorker,
   type LoadedConfig,
 } from "../config/load.ts";
@@ -852,7 +853,28 @@ export async function assertModelsSupportToolCalls(
      */
     const baseUrl = relayViewForProvider(loaded.config, provider).llm.base_url;
     const apiKey = process.env[providerApiKeyEnv(loaded.config, provider)] ?? "";
-    const result = await probeNativeToolCalls(baseUrl, apiKey, model, fetchFor(provider));
+    /*
+     * THIS PROVIDER'S deadline, and the third member of the set above rather
+     * than a fourth thing (D16, ISC-419).
+     *
+     * It is read through a shared resolver for the same reason the endpoint and
+     * the credential are: it is a property of ONE endpoint, and the gate must
+     * judge that endpoint on the terms the operator declared for it. The number
+     * this replaces was sized against oMLX COLD LOADS on the operator's own
+     * hardware; measured against a hosted catalogue it left the two
+     * largest-parameter models at 42.1s and 56.9s — the second inside the
+     * 60s ceiling by three seconds, host-side and unqueued, so both are floors.
+     * Through the relay, in a container, behind D14's one-concurrent-request
+     * tier, they cross it, and `up` exits non-zero with a `timeout` verdict.
+     *
+     * `undefined` — the ordinary case, and every fleet with no `providers` map —
+     * IS the default: it is passed straight into a parameter that has one. That
+     * is deliberate and is why the resolver does not resolve the default
+     * itself. `PROBE_TIMEOUT_MS` keeps exactly one home, a few hundred lines up,
+     * next to the docblock explaining the load it was measured against.
+     */
+    const timeoutMs = providerProbeTimeoutMs(loaded.config, provider);
+    const result = await probeNativeToolCalls(baseUrl, apiKey, model, fetchFor(provider), timeoutMs);
     if (result.ok) continue;
     /**
      * The exit-code split, and the ONLY place it is decided.
