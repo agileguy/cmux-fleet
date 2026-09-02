@@ -4527,8 +4527,20 @@ describe("the disclosure banner and the launch record name the same workers (ISC
     },
   ];
 
-  /** W. `eng-1` inherits `llm.provider: alpha`; the other two select by prefix. */
-  const SELECTED = ["eng-1", "rev-1", "qa-1"];
+  /**
+   * W. `eng-1` and `eng-2` inherit `llm.provider: alpha`; the other two select
+   * a hosted provider through their model prefix.
+   *
+   * TWO undisclosed workers rather than one, and the reason is a mutation
+   * rather than symmetry. With a single undisclosed worker, ANY defect that
+   * records a row for a worker the banner never named necessarily records one
+   * for every worker — `L \ D` empties, and the non-degeneracy guard fires
+   * before the set comparison is ever reached. The comparison would then never
+   * be shown to catch that direction, only the guard. A second undisclosed
+   * worker leaves `L \ D` non-empty under a one-worker mutation, so the
+   * EQUALITY is what reddens and the direction it names is the real one.
+   */
+  const SELECTED = ["eng-1", "eng-2", "rev-1", "qa-1"];
 
   /**
    * THE LITERAL — ISC-416's expectation, and the one set in this file that does
@@ -4642,6 +4654,8 @@ describe("the disclosure banner and the launch record name the same workers (ISC
         port: Number(p.relayUpstream.split(":")[1]),
       })),
       extraWorkers: [
+        // Second undisclosed worker — see `SELECTED` for why there are two.
+        { id: "eng-2", role: "engineer" },
         { id: "rev-1", role: "reviewer", model: "bravo/wiring-test-model", cloudAccess: true },
         { id: "qa-1", role: "qa", model: "charlie/wiring-test-model" },
       ],
