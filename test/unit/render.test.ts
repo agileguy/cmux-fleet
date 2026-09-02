@@ -1424,12 +1424,14 @@ describe("the run directory is computed once (ISC-188)", () => {
       [after, moved],
     ] as const) {
       const hostPaths = runStateHostPaths(rendered.docker);
-      // Or the loop below is vacuous: eight mounts plus the env file. The
-      // seventh is /policy/task, added with ISC-362. The eighth is /secrets,
-      // which D8 made unconditional — `eng-1` requests no `secrets:` and still
-      // gets the store, because the Class 1 provider key is delivered as a file
-      // in it and no worker requests that.
-      expect(hostPaths.length).toBe(9);
+      // Or the loop below is vacuous: nine mounts plus the env file. The
+      // seventh is /policy/task, added with ISC-362. The eighth is
+      // /policy/dispatch, the task drop (SRD-TUI-DISPATCH D4), unconditional
+      // for the same reason its sibling is. The ninth is /secrets, which D8
+      // made unconditional — `eng-1` requests no `secrets:` and still gets the
+      // store, because the Class 1 provider key is delivered as a file in it
+      // and no worker requests that.
+      expect(hostPaths.length).toBe(10);
       for (const p of hostPaths) expect(p.startsWith(join(root, "dry"))).toBe(true);
     }
 
@@ -1497,12 +1499,13 @@ describe("the run directory is computed once (ISC-188)", () => {
         const r = await renderWorker(loaded, "eng-1");
         expect(isAbsolute(r.runDir)).toBe(true);
         const hostPaths = runStateHostPaths(r.docker);
-        // Eight mounts plus the env file (the seventh is /policy/task, ISC-362;
-        // the eighth is /secrets, which D8 made unconditional).
+        // Nine mounts plus the env file (the seventh is /policy/task, ISC-362;
+        // the eighth is /policy/dispatch, the task drop, SRD-TUI-DISPATCH D4;
+        // the ninth is /secrets, which D8 made unconditional).
         // Unresolved, they are not absolute and `runStateHostPaths` drops them
         // as named volumes — so this count is the assertion, and it read 0
         // before the root was canonicalized.
-        expect(hostPaths.length).toBe(9);
+        expect(hostPaths.length).toBe(10);
         for (const p of hostPaths) expect(isAbsolute(p)).toBe(true);
       } finally {
         if (saved === undefined) delete process.env["PIFLEET_RUNS_DIR"];
@@ -1868,6 +1871,13 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       `${worker.cloudAllow}:/policy/cloud-allow:ro`,
       "-v",
       `${worker.taskPolicy}:/policy/task:ro`,
+      // The task drop, pinned IMMEDIATELY after its sibling and before the
+      // secret store. Its position is asserted for the same reason the image
+      // tag's is: the two policy files are read together by anyone debugging
+      // what a worker was told, and a drop that drifted away from `/policy/task`
+      // in the argv is the first sign the two stopped being one surface.
+      "-v",
+      `${worker.dispatchPolicy}:/policy/dispatch:ro`,
       // D8 made this UNCONDITIONAL. `eng-1` requests no `secrets:` and still
       // carries the store, because the Class 1 provider key is delivered as a
       // 0444 file in it and no worker requests that. Its POSITION is pinned

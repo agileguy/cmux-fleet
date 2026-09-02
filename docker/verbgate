@@ -47,6 +47,18 @@ real="/usr/local/libexec/${tool}.real"
 allow_file="/policy/cloud-allow"
 ledger="/outbox/ledger/verbgate.jsonl"
 task_file="/policy/task"
+# The task DROP: the staged brief, for a worker whose terminal belongs to a
+# person and which therefore has no wire to be prompted over. Declared beside
+# the two files above and deliberately never READ here — the gate has no use for
+# a brief, and parsing one would be a second place that has to agree with the
+# host about its format.
+#
+# It is named so the integrity loop below can hold it to the same read-only bar
+# as the other two, which is the whole cost D4 records: a worker that can
+# rewrite its own brief can rewrite the task it is graded against and then
+# report success on the one it wrote, and this loop's exit 78 is the only thing
+# enforcing that.
+drop_file="/policy/dispatch"
 # Line 1 task id, line 2 epoch. Every read is defensive: an unreadable or
 # truncated file must degrade to <none>/0, never to a broken ledger row. The
 # gate does not trust this file even though the host writes it — a gate that
@@ -121,7 +133,15 @@ log_ledger() {
 # that is this gate's actual product. The directory test already covered it (it
 # is the same directory); it is named explicitly so that stays true if either
 # file moves.
-for policy_path in "${allow_file}" "${task_file}"; do
+#
+# The task drop is the third, for the same reason one step further back: the
+# provenance file says which task a verb belongs to, and the drop says what that
+# task IS. A worker that can rewrite its own brief does not need to forge the
+# ledger — it can make the ledger's honest answer describe work nobody asked
+# for. Adding the path here is the one cost D4 records for the sibling mount,
+# and it is deliberately spelled as a THIRD element of a list rather than as a
+# second condition, so a fourth policy file is one word.
+for policy_path in "${allow_file}" "${task_file}" "${drop_file}"; do
   if [ -w "${policy_path}" ] || [ -w "$(dirname "${policy_path}")" ]; then
     log_ledger policy_writable "(policy-integrity)" "$@"
     printf "verbgate: policy file %s is writable by uid %s — refusing every verb\n" \

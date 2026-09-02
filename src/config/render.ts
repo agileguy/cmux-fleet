@@ -47,6 +47,7 @@ import {
   type RunPaths,
   type WorkerPaths,
 } from "../run/paths.ts";
+import { DISPATCH_POLICY_MOUNT } from "../run/dispatch-policy.ts";
 import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
 import { workerEgressNetwork } from "../security/relay.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
@@ -372,6 +373,28 @@ export function buildDockerArgv(
   // dispatch. It is NOT environment, because a worker container outlives any
   // one epoch and a worker can rewrite its own environment (ISC-362).
   argv.push("-v", `${opts.worker.taskPolicy}:${TASK_POLICY_MOUNT}:ro`);
+  /*
+   * The task drop — a SIBLING of the provenance file above, on the same policy
+   * surface, under the same integrity rule (SRD-TUI-DISPATCH §6.2, D4).
+   *
+   * It carries the staged brief for a worker whose terminal belongs to a
+   * person, so pifleet has no wire to deliver one on and writes it as a file
+   * instead. `:ro` is doing the same work here that it does for `/secrets` and
+   * `/policy/cloud-allow`, and it is doing it against a stronger adversary: the
+   * macOS Docker VM squashes bind-mount ownership to the container user, so the
+   * host's 0444 reads as OWNED by uid 10001 inside the container and the mount
+   * flag is the only thing left. `docker/verbgate`'s integrity loop refuses
+   * every verb when this file is writable, which means a dropped `:ro` costs
+   * the whole worker rather than one forged brief.
+   *
+   * UNCONDITIONAL, like `/policy/task` and unlike anything gated on a role
+   * field. Only a `tui` worker on an adopted terminal can be staged, but the
+   * mount is not what decides that — the staging route is — and a `-v` behind a
+   * predicate that `materialize.ts` would have to spell a second time is the
+   * ISC-188 shape this file keeps closing. A worker that never stages reads a
+   * drop saying nothing is staged.
+   */
+  argv.push("-v", `${opts.worker.dispatchPolicy}:${DISPATCH_POLICY_MOUNT}:ro`);
   /*
    * The secret store, `:ro` like every other input the worker only reads.
    *

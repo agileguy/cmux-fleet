@@ -99,6 +99,7 @@ import {
   type RunPaths,
   workerContainerName,
 } from "./paths.ts";
+import { clearDispatchPolicy } from "./dispatch-policy.ts";
 import { writeTaskPolicy } from "./task-policy.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import {
@@ -199,6 +200,13 @@ export interface MaterializedWorker {
    * task, so the mount exists before the first epoch does.
    */
   taskPolicy: string;
+  /**
+   * The task drop. Rewritten by the staged dispatch route, not here — the same
+   * split as `taskPolicy` above and for the same reason: materialize
+   * establishes the inode the bind mount pins, and whoever stages a task owns
+   * the content.
+   */
+  dispatchPolicy: string;
   /** null when the worker has no briefing content (render's own predicate). */
   systemAppendMd: string | null;
   /** null when `cloud.kubeconfig` is null or the worker has no cloud access. */
@@ -880,6 +888,25 @@ export async function materializeWorkerInputs(
     });
 
     /**
+     * The TASK DROP, established the same way and for the same reason
+     * (SRD-TUI-DISPATCH §6.2): the staged brief a worker on an adopted terminal
+     * reads instead of being typed at, written here with nothing staged so the
+     * bind mount has an inode from launch.
+     *
+     * It is established for EVERY worker and not only for the `tui` ones that
+     * can use it. The `-v` in `config/render.ts` is unconditional, and a mount
+     * whose source this module skipped would have Docker create a directory at
+     * the path instead — the divergence ISC-188 keeps closing, and the one the
+     * `/secrets` gate was removed to stop reintroducing. A worker that never
+     * stages reads a drop that says nothing is staged, which is a true
+     * statement and costs one inode.
+     */
+    await establishing(`the task drop for ${workerId}`, async () => {
+      await refuseSymlinkDestination(paths.dispatchPolicy);
+      await clearDispatchPolicy(paths.dispatchPolicy);
+    });
+
+    /**
      * Briefing content, path, and existence all come from `render` — the same
      * call that decides whether a `-v` is emitted at all. A worker with no
      * fragments gets no file, matching the absent mount exactly.
@@ -1264,6 +1291,7 @@ export async function materializeWorkerInputs(
       skillsDir,
       cloudAllow: paths.cloudAllow,
       taskPolicy: paths.taskPolicy,
+      dispatchPolicy: paths.dispatchPolicy,
       systemAppendMd,
       kubeconfig,
       kubeconfigSource,

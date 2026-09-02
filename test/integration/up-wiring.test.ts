@@ -38,6 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
+import { DISPATCH_POLICY_MOUNT } from "../../src/run/dispatch-policy.ts";
 import { TASK_POLICY_MOUNT } from "../../src/run/task-policy.ts";
 import { SECRETS_MOUNT } from "../../src/run/worker-env.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
@@ -3049,6 +3050,11 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // gate holds its provenance file to the allow file's integrity bar, so a
     // writable one refuses every verb rather than yielding a forgeable ledger.
     [TASK_POLICY_MOUNT]: { directory: false, mode: 0o444 },
+    // The task drop, established by `materialize.ts` with nothing staged so the
+    // bind mount has an inode to pin — a source that does not exist has Docker
+    // create a DIRECTORY at the host path, which is why `directory: false` is
+    // the interesting half of this row rather than the mode.
+    [DISPATCH_POLICY_MOUNT]: { directory: false, mode: 0o444 },
     /*
      * The secret store, present for EVERY worker since D8 — this rig's workers
      * request no `secrets:` and still carry it, because the Class 1 provider
