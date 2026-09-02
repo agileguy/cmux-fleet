@@ -50,6 +50,11 @@ import {
 import { describeCredentialPlan, planCredential, resolveIdentity } from "../../security/adc.ts";
 import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
+import {
+  disclosureFor,
+  formatDisclosureBanner,
+  type DisclosureRow,
+} from "../../security/disclosure.ts";
 import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
 import { containerFetch } from "../../security/probe-transport.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
@@ -1033,6 +1038,69 @@ export function register(program: Command): void {
          * to happen while nothing is on disk yet.
          */
         assertSecretsResolvable(loadedConfig, workers, process.env);
+
+        /**
+         * §7.3's DISCLOSURE — the list of workers whose context will leave the
+         * machine, printed BEFORE anything is created (ISC-414, ISC-415).
+         *
+         * ## Why this is a print and not a refusal
+         *
+         * D10 ruled against the draft. A worker resolving to a `hosted: true`
+         * provider while holding `cloud_access: true` or a non-empty `secrets:`
+         * **stands up** — not gated, not warned-and-continued, permitted. §7.2
+         * is explicit that *"the fleet does not decide which of the operator's
+         * data is theirs to send. It makes sure they cannot send it without
+         * knowing."* So the thing that makes the reversal safe is that this
+         * line prints, and §7.4 records it in terms: *"the banner is the entire
+         * control."*
+         *
+         * ## Why HERE
+         *
+         * §7.3 says *"before creating anything"*, and the distance between that
+         * and the alternative is the difference between a disclosure and a
+         * receipt: a banner printed after the clones, the networks and the
+         * relay tells an operator what has already happened. This sits with the
+         * config-vs-config gates above — after them deliberately, since a run
+         * that is about to be refused sends nothing and a banner for it would
+         * be a false alarm — and before the image gate, before
+         * `ensureEgressNetwork`, before the first clone, before the daemon and
+         * before any supervisor.
+         *
+         * ## STDOUT, except under `--json`, and it is never suppressed
+         *
+         * ISC-414's probe asserts the banner on stdout, and that is where it
+         * goes for a person. `--json` is the one deviation and it is forced:
+         * every machine consumer of this command does `JSON.parse(stdout)` —
+         * the `--json` payload is a single object written at the end — so a
+         * banner on stdout would not disclose anything to a script, it would
+         * crash it. Redirected to stderr, which no consumer parses and every
+         * terminal and log shows. **Redirected, never dropped**: a `--json`
+         * bring-up that printed nothing would be the silent standup ISC-417
+         * forbids, reached through the flag a machine consumer is most likely
+         * to use, and both halves of that are asserted.
+         *
+         * The rows come from `disclosureFor` and from nowhere else. The launch
+         * record's copy calls the same function on the same worker — ISC-417
+         * compares the two sets and fails on a difference in either direction,
+         * which is a coin flip the moment two places decide who is on the list.
+         */
+        {
+          const disclosures: DisclosureRow[] = [];
+          const definedWorkers = new Set(loadedConfig.config.workers.map((w) => w.id));
+          for (const workerId of workers) {
+            // The `PIFLEET_PI_COMMAND` double names ids the config never
+            // defined, exactly as `assertModelsAllowed` and `resolvedProviders`
+            // skip them: a worker with no config has no provider to be hosted.
+            if (!definedWorkers.has(workerId)) continue;
+            const row = disclosureFor(loadedConfig, resolveWorker(loadedConfig, workerId));
+            if (row !== null) disclosures.push(row);
+          }
+          const banner = formatDisclosureBanner(disclosures);
+          if (banner !== null) {
+            if (opts.json === true) process.stderr.write(banner);
+            else process.stdout.write(banner);
+          }
+        }
 
         /**
          * EVERY ROLE'S IMAGE MUST EXIST AND MUST VERIFY (ISC-32, ISC-189).
