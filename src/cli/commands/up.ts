@@ -1489,7 +1489,31 @@ export function register(program: Command): void {
        * nothing was learned about the model). Both codes come off the thrown
        * error's own `exitCode` via the `ExitCoded` protocol.
        */
-      if (loadedConfig !== null && egressNetwork !== null) {
+      /**
+       * ## The gate is A CONFIG THAT LOADED, and nothing else (ISC-430)
+       *
+       * This read `if (loadedConfig !== null && egressNetwork !== null)`, and
+       * the second conjunct could not be false while the first was true:
+       * `egressNetwork` is assigned unconditionally from
+       * `loadedConfig.config.docker.network`, and `schema.ts` DEFAULTS that key
+       * to `pifleet-egress`. So the condition STATED a dependency on Docker
+       * being configured that the probe does not have, and a reader who
+       * believed it would be wrong about where the money goes — the same class
+       * of harm as ISC-264's two quietly-disagreeing constants.
+       *
+       * Behaviour is unchanged, deliberately: ISC-423 establishes that a
+       * headless fleet SHOULD probe, because its workers dial the provider
+       * whether or not a pane is drawn, and a per-backend opt-out from a
+       * mandatory gate is the shape ISC-420 already refused. What changed is
+       * that the condition now says the true precondition — a config parsed, so
+       * there are providers and models to probe — and the network is DERIVED
+       * from that same config at the point of use rather than carried here in a
+       * nullable that has to be re-checked. One check, one source; the two can
+       * no longer be made to disagree, which is what "delete the conjunct"
+       * would not have achieved (the body needs a `string`, and deleting it
+       * would not have typechecked).
+       */
+      if (loadedConfig !== null) {
         /*
          * ONE TRANSPORT PER PROVIDER, on that provider's own bridge (ISC-418).
          *
@@ -1506,7 +1530,14 @@ export function register(program: Command): void {
          * network would certify a path no worker takes.
          */
         const probeConfig = loadedConfig;
-        const probeNetwork = egressNetwork;
+        /*
+         * The base network, taken from the config rather than from the
+         * nullable above — `schema.ts` defaults this key, so it is a `string`
+         * here by the schema's own type and needs no second null check. That
+         * is the whole of ISC-430's fix: the dependency the gate has is on the
+         * CONFIG, and the network is something the config supplies.
+         */
+        const probeNetwork = probeConfig.config.docker.network;
         await assertModelsSupportToolCalls(loadedConfig, workers, (provider) =>
           containerFetch({
             network: workerEgressNetwork(probeConfig.config, probeNetwork, provider),

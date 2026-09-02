@@ -33,7 +33,7 @@
 
 import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
@@ -66,6 +66,10 @@ import {
 import { checkMlxTrainingGuard } from "../../src/safety/mlx-training-guard.ts";
 import { git, gitOk, seedGitRepo } from "../fixtures/synthetic-repo.ts";
 import { cliBudget } from "../support/budget.ts";
+// ISC-429 drives the REAL preflight against this file's shim, so the guard's
+// answer is production's rather than a restatement of it here.
+import { MountNotVisibleError, assertBindMountsVisible } from "../../src/container/mount-preflight.ts";
+import type { Exec } from "../../src/container/run.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -394,11 +398,44 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       //
       // The rewrite requires the trailing quote or slash so `/probe/1` cannot
       // match inside `/probe/10`.
+      //
+      // ONE `sed` COMMAND PER LINE, and that is not style (ISC-429).
+      //
+      // BSD `sed` — macOS's — reads a script in PIECES and treats a piece
+      // boundary as a LINE BREAK, whether the script arrived as an argument or
+      // through `-f`. A `;`-joined program is ONE line, so a boundary landing
+      // inside a substitute cuts it in half and `sed` dies with `unterminated
+      // substitute pattern`, having written nothing.
+      //
+      // THE THRESHOLD IS SHAPE-DEPENDENT, NOT A NUMBER, because it depends on
+      // where a boundary falls relative to a command. Measured against
+      // `/usr/bin/sed`, darwin 25.6.0 arm64, sweeping command count at a fixed
+      // command length: 20-byte commands first fail at 2,060 bytes, 34-byte at
+      // 2,074, 68-byte at 2,108 — all just past 2,048 — while a program of
+      // IDENTICAL 134-byte commands survived to 51,322. The program actually
+      // captured from an instrumented `up` first fails at 16 commands / 2,176
+      // bytes. So "under 2 kB" is the only safe reading of the old form.
+      //
+      // Newlines are read first, so a program whose every LINE is short has no
+      // ceiling this fleet can reach: 42 kB measured here, and 87 kB over 400
+      // mounts measured independently. No remaining limit was reachable.
+      //
+      // The relay's 3-mount probe builds a 694-byte program and never noticed.
+      // `up`'s worker probe builds two commands per mount over absolute
+      // `$TMPDIR` paths — 6,608 bytes for a four-worker fleet, measured — and
+      // every one of them died. The refusal that reached the operator said
+      // "the probe container reported nothing about this path", three layers
+      // from the cause, because the failure below was silent: see the exit
+      // status check.
       '    case " $* " in',
       '      *":/probe/0:ro "*)',
       "        script=''",
       "        sedexpr=''",
       "        prev=''",
+      // A literal newline, spelled the one way POSIX sh has: an open quote and
+      // a close quote on the next line.
+      "        NL='",
+      "'",
       '        for a in "$@"; do',
       '          if [ "$prev" = "-c" ]; then script="$a"; fi',
       '          if [ "$prev" = "-v" ]; then',
@@ -407,7 +444,7 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       '                src="${a%%:/probe/*}"',
       '                rest="${a#*:/probe/}"',
       '                idx="${rest%%:ro}"',
-      `                sedexpr="$sedexpr s#/probe/$idx'#$src'#g; s#/probe/$idx/#$src/#g;"`,
+      `                sedexpr="$sedexpr\${NL}s#/probe/$idx'#$src'#g\${NL}s#/probe/$idx/#$src/#g"`,
       "                ;;",
       "            esac",
       "          fi",
@@ -417,7 +454,21 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       '          echo "docker shim: mount probe carried no -c script: $*" >&2',
       "          exit 1",
       "        fi",
-      `        printf '%s\\n' "$script" | sed "$sedexpr" | sh`,
+      // THE REWRITE'S OWN FAILURE IS AN ERROR, not an empty answer.
+      //
+      // This used to be `printf … | sed … | sh`, whose exit status is `sh`'s.
+      // A `sed` that aborted fed `sh` an empty script, `sh` exited 0, and the
+      // shim reported SUCCESS WITH NO OUTPUT — which `probeBindMountSources`
+      // reads as "reported nothing about this path" for every mount, a
+      // diagnosis about the container that was true of the shim's own `sed`.
+      // Splitting the two makes a broken rewrite exit 1 with sed's own words,
+      // which the preflight quotes back as "the probe container exited 1: …".
+      `        rewritten="$(printf '%s\\n' "$script" | sed "$sedexpr" 2>&1)"`,
+      '        if [ $? -ne 0 ]; then',
+      '          echo "docker shim: mount probe rewrite failed: $rewritten" >&2',
+      "          exit 1",
+      "        fi",
+      `        printf '%s\\n' "$rewritten" | sh`,
       "        exit $?",
       "        ;;",
       "    esac",
@@ -568,6 +619,90 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       '            cat "$src/from-host" || exit 1',
       '            echo "container-wrote-this" > "$src/from-container"',
       "            exit 0",
+      "            ;;",
+      // ---------------------------------------------------------------
+      // THE WORKER CONTAINER ITSELF, stood in for — OPT-IN (ISC-429).
+      //
+      // Everything above answers a PREFLIGHT. This answers the launch: the
+      // `docker run -i … <image> pi --mode rpc …` a supervisor spawns and then
+      // speaks JSONL to over stdin/stdout. Without it the run reaches
+      // `up`'s idle gate and every worker dies there, so no test in this file
+      // could reach a COMPLETED container-path run — which is the whole of the
+      // coverage hole ISC-429 records.
+      //
+      // It stands in the way the two branches above do: by running the real
+      // thing on the host. `PIFLEET_SHIM_WORKER_PI` carries the SAME fake-Pi
+      // double `PIFLEET_PI_COMMAND` names on the non-container path, so the
+      // conversation the supervisor has is the one every other test in this
+      // file already trusts — and the argv it is handed is production's own,
+      // lifted from after the image rather than reconstructed.
+      //
+      // ONE path is translated: `--session-dir /sessions` becomes the host
+      // directory that `-v …:/sessions` was about to mount there. That is the
+      // same liberty the mount-probe branch takes, for the same reason — on a
+      // shared path the container's `/sessions` IS that host directory, so
+      // writing the transcript there is faithful rather than convenient. Every
+      // other flag is passed through untouched.
+      //
+      // OPT-IN, for the reason `PIFLEET_SHIM_NETWORK_ABSENT` is: unset, the
+      // argv falls to the refusal below, so every test written before this
+      // branch existed keeps the loud "unexpected worker-image run argv" it
+      // was written against. A shim that answered a worker launch by default
+      // would let a run that should have stopped somewhere walk past it.
+      //
+      // WHAT IT DOES NOT PROVE, said plainly: no container is started and no
+      // image is entered, so this is not evidence that the real entrypoint
+      // execs `pi`, that the mounts land where the argv says, or that the
+      // egress network is what the process can reach. Those need the
+      // Docker-gated `container` job. What it makes reachable is `up`'s own
+      // sequencing AFTER the mount preflight — the idle gate, the summary, the
+      // exit code — which is what was unreachable.
+      `          *" --session-dir /sessions "*)`,
+      '            if [ -z "${PIFLEET_SHIM_WORKER_PI:-}" ]; then',
+      '              echo "docker shim: unexpected worker-image run argv: $*" >&2',
+      "              exit 1",
+      "            fi",
+      // The host side of `/sessions`, read off the argv rather than guessed.
+      '            sessions=""',
+      '            prev=""',
+      '            for a in "$@"; do',
+      '              if [ "$prev" = "-v" ]; then',
+      '                case "$a" in',
+      '                  *":/sessions") sessions="${a%:/sessions}" ;;',
+      "                esac",
+      "              fi",
+      '              prev="$a"',
+      "            done",
+      '            if [ -z "$sessions" ]; then',
+      '              echo "docker shim: worker run carried no -v <host>:/sessions: $*" >&2',
+      "              exit 1",
+      "            fi",
+      // Drop everything up to and including the image; what remains is the
+      // command production put after it.
+      "            while [ $# -gt 0 ]; do",
+      '              case "$1" in',
+      "                pifleet/pi-worker:*) shift; break ;;",
+      "              esac",
+      "              shift",
+      "            done",
+      // Rotate the list once, substituting the one path that cannot survive
+      // outside a container.
+      "            n=$#",
+      "            i=0",
+      '            prev=""',
+      '            while [ "$i" -lt "$n" ]; do',
+      '              a="$1"',
+      "              shift",
+      '              if [ "$prev" = "--session-dir" ] && [ "$a" = "/sessions" ]; then',
+      '                a="$sessions"',
+      "              fi",
+      '              prev="$a"',
+      '              set -- "$@" "$a"',
+      "              i=$((i + 1))",
+      "            done",
+      // Unquoted on purpose: the variable carries a command AND its arguments,
+      // exactly as `PIFLEET_PI_COMMAND` does.
+      '            exec $PIFLEET_SHIM_WORKER_PI "$@"',
       "            ;;",
       "          *)",
       '            echo "docker shim: unexpected worker-image run argv: $*" >&2',
@@ -993,6 +1128,16 @@ interface FleetOptions {
    * there is no image for a gate to be about.
    */
   containerPath?: boolean;
+  /**
+   * `PIFLEET_SHIM_WORKER_PI`: let the shim ANSWER a worker container launch
+   * with the fake-Pi double, instead of refusing the argv (ISC-429).
+   *
+   * Meaningful only with `containerPath`, and opt-in for the reason the shim
+   * branch records: every test written before it keeps the loud refusal. Set
+   * it and a container-path run can get past `up`'s idle gate, which is the
+   * only way anything in this file reaches a COMPLETED container-path run.
+   */
+  workerContainerDouble?: boolean;
   /** `PIFLEET_SHIM_IMAGE`: whether the shimmed image store holds the tag. */
   imagePresent?: boolean;
   /**
@@ -1025,6 +1170,16 @@ interface FleetOptions {
    * this shim cannot actually run.
    */
   network?: string;
+  /**
+   * Write NO `docker.network` key at all, so the schema default supplies it
+   * (ISC-430).
+   *
+   * The gate this proves something about spends money, and the fixture is the
+   * only place the default can be exercised: every other config in this file
+   * writes the key, so a reader could not tell a real dependency on it from a
+   * defaulted one.
+   */
+  omitDockerNetwork?: boolean;
   /**
    * `backend.kind`, written into a `backend:` block (ISC-271).
    *
@@ -1074,7 +1229,13 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
     ...(opts.backendKind === undefined ? [] : ["backend:", `  kind: ${opts.backendKind}`]),
     "docker:",
     '  pi_version: "0.79.6"',
-    `  network: ${opts.network ?? NETWORK}`,
+    /*
+     * OMITTED when a test asks (ISC-430). `docker.network` carries a schema
+     * default, so a config that never mentions it still yields one — which is
+     * the whole content of ISC-430 and cannot be shown by a fixture that always
+     * writes the key.
+     */
+    ...(opts.omitDockerNetwork === true ? [] : [`  network: ${opts.network ?? NETWORK}`]),
     "run:",
     `  repo: ${repo}`,
     ...(opts.maxConcurrent === undefined ? [] : [`  max_concurrent: ${opts.maxConcurrent}`]),
@@ -1269,6 +1430,21 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
       ...(opts.shimConfigHash === undefined
         ? {}
         : { PIFLEET_SHIM_CONFIG_HASH: opts.shimConfigHash }),
+      /**
+       * The SAME double the non-container path runs, spelled once above as
+       * `PIFLEET_PI_COMMAND` (ISC-429). Two spellings of one command would be
+       * two things to keep in step, so the value is built the same way — and
+       * a container-path rig that opts in therefore has the conversation
+       * every other test in this file already trusts.
+       */
+      ...(opts.workerContainerDouble === true
+        ? {
+            PIFLEET_SHIM_WORKER_PI: `${process.execPath} ${FAKE_PI} --scenario ${join(
+              SCENARIOS,
+              "happy.json",
+            )}`,
+          }
+        : {}),
       /**
        * `verifyImage`'s `/workspace` write-through probe creates a scratch
        * directory under `daemonScratchRoot()`, which defaults to the
@@ -4548,17 +4724,24 @@ describe("a declared-but-unused provider creates nothing (ISC-410)", () => {
  *   - each row is asserted to appear on exactly ONE stream, so a banner written
  *     to both cannot be quietly deduped into looking correct.
  *
- * ## Why this rig refuses, and why that is the right probe
+ * ## Why this rig is a COMPLETED run now, and what that changed
  *
  * `containerPath: true` is what makes `up` write launch records at all — the
- * double writes none. Against the docker PATH shim such a run reaches
- * `assertBindMountsVisible` and exits 3, and it does so in about 1.7s rather
- * than waiting out the 60s idle gate on containers this shim cannot start.
- * Every worker's record is on disk by then, because materialization precedes
- * that guard. The refusal is therefore AFTER the state these criteria are about
- * and is not part of them — and `L = W` is asserted rather than assumed, so a
- * refusal that ever moved EARLIER would fail this file instead of quietly
- * shrinking the domain it compares over.
+ * double writes none. These two tests used to measure their sets over a run
+ * that REFUSED: against the docker PATH shim such a run reached
+ * `assertBindMountsVisible` and exited 3, which was harmless here because every
+ * launch record is on disk before that guard and `L = W` was asserted rather
+ * than assumed. ISC-429 found that refusal to be a defect in the shim's own
+ * `sed`, not a property of the product, and fixed it; `workerContainerDouble`
+ * then carries the run past `up`'s idle gate as well. So `B` and `L` are now
+ * compared over a run that SUCCEEDED, which is strictly more of the domain
+ * these criteria are about — the disclosure banner and the launch records of a
+ * fleet that actually stood up.
+ *
+ * The `L = W` guard is unchanged and still load-bearing for the same reason: a
+ * refusal that ever moved EARLIER, or a run that stopped short of launching
+ * every selected worker, fails this file instead of quietly shrinking the
+ * domain it compares over.
  */
 describe("the disclosure banner and the launch record name the same workers (ISC-416, ISC-417)", () => {
   /** Must match `fleetYaml`'s `docker.pi_version`, as in the ISC-32 block. */
@@ -4711,6 +4894,9 @@ describe("the disclosure banner and the launch record name the same workers (ISC
     return makeRig({
       containerPath: opts.containerPath,
       imagePresent: opts.containerPath,
+      // Carries the container path all the way to a successful run rather than
+      // stopping at `up`'s idle gate — see the block header (ISC-429).
+      workerContainerDouble: opts.containerPath,
       ...(opts.containerPath ? { shimPiVersion: PINNED_PI_VERSION } : {}),
       providers: PROVIDERS,
       llmProvider: "alpha",
@@ -4744,15 +4930,18 @@ describe("the disclosure banner and the launch record name the same workers (ISC
         "headless",
       ]);
 
-      // The rig's refusal, stated so a DIFFERENT failure is not mistaken for
-      // the expected one. Exit 3 at the mount preflight is this shim's floor
-      // (see the block header); anything else means the run stopped somewhere
-      // this test has not reasoned about, and the sets below would be measured
-      // over a state nobody chose.
+      // The rig's OUTCOME, stated so a different one is not mistaken for it.
+      // This run SUCCEEDS now (ISC-429); anything else means it stopped
+      // somewhere this test has not reasoned about, and the sets below would be
+      // measured over a state nobody chose.
       expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
-        code: EXIT.BACKEND_UNAVAILABLE,
+        code: EXIT.SUCCESS,
       });
-      expect(up.stderr).toContain("bind-mount source(s) are not visible");
+      // The refusal this rig used to stop at, asserted ABSENT rather than
+      // merely no longer expected: it is the one failure whose exit code these
+      // sets are known to survive, so a silent return to it would look like a
+      // passing test measuring a smaller domain.
+      expect(up.stderr).not.toContain("bind-mount source(s) are not visible");
 
       // ---------------------------------------------------------------
       // B, and the two-stream rule. Exactly one stream carries each row;
@@ -4870,7 +5059,10 @@ describe("the disclosure banner and the launch record name the same workers (ISC
         "--backend",
         "headless",
       ]);
-      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+      // Succeeds now, for the reason the ISC-416 test above states (ISC-429).
+      expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+        code: EXIT.SUCCESS,
+      });
 
       const rows = bannerRows(up.stdout);
       // The parse, again asserted non-empty before it is used — this test can
@@ -5195,6 +5387,575 @@ describe("up discloses what leaves the machine (ISC-414, ISC-415)", () => {
       expect(byId.get("sec-1")?.secrets).toEqual(["TICKET_API_TOKEN"]);
       expect(up.stderr).not.toContain(TICKET_VALUE);
     },
+    cliBudget(1),
+  );
+});
+
+/**
+ * A container-path `up` can reach a SUCCESSFUL run against this file's shim
+ * (ISC-429).
+ *
+ * ## The defect, named
+ *
+ * The mount-probe branch of `writeDockerShim` rewrites production's own probe
+ * script by building one `sed` program out of two `s###g` commands per `-v`
+ * flag. Those commands used to be joined with `; `, which put the whole program
+ * on ONE LINE.
+ *
+ * macOS's BSD `sed` reads a script in PIECES and treats a piece boundary as a
+ * line break — whether the script arrives as an argument or through `-f`. A
+ * `;`-joined program is ONE line, so a boundary landing inside a substitute
+ * cuts it in half and `sed` dies with `unterminated substitute pattern`.
+ *
+ * THERE IS NO SINGLE THRESHOLD, and the number matters enough to say so.
+ * Whether a boundary kills a command depends on where it falls relative to one,
+ * so the ceiling is a function of the program's SHAPE. Measured against
+ * `/usr/bin/sed`, darwin 25.6.0 arm64, sweeping command count at a fixed
+ * command length: 20-byte commands first fail at 2,060 bytes, 34-byte at 2,074,
+ * 68-byte at 2,108 — all just past 2,048 — while a program of IDENTICAL
+ * 134-byte commands survived to 51,322 bytes. The program captured verbatim
+ * from an instrumented `up` first fails at 16 commands / 2,176 bytes. "Under
+ * 2 kB" is the only safe reading of the old form, which is why the tests below
+ * do not assert a constant: they RUN the old form on their own fixture and
+ * require it to fail.
+ *
+ * Newlines are read first, and no ceiling on that form was reachable: 42 kB
+ * measured here, 87 kB over 400 mounts measured independently.
+ *
+ * `ensureEgressRelay`'s probe carries 3 mounts and builds a 694-byte program,
+ * which is why the relay half always worked. `up`'s worker probe carries
+ * several mounts per worker over absolute `$TMPDIR` paths — 6,608 bytes for a
+ * four-worker fleet, measured from the shim's own call log — and died on every
+ * single invocation.
+ *
+ * ## Why it presented as silence rather than as an error
+ *
+ * The branch ended `printf … | sed "$sedexpr" | sh`, and a pipeline's exit
+ * status is its LAST command's. `sed` aborted, wrote nothing, and `sh` read an
+ * empty script and exited 0 — so the shim reported SUCCESS WITH NO OUTPUT.
+ * `probeBindMountSources` reads `code === 0` and an unparseable (empty) stdout
+ * as "the probe container reported nothing about this path", once per mount,
+ * and `assertBindMountsVisible` refuses the launch with exit 3. The diagnosis
+ * an operator saw was about the container; the fault was in the shim's `sed`.
+ *
+ * Both halves are fixed: one command per line removes the ceiling, and the
+ * rewrite's exit status is now checked separately from `sh`'s, so a future
+ * failure there is loud.
+ *
+ * ## What this block is for
+ *
+ * ISC-429 records the consequence as a COVERAGE HOLE. Every container-path run
+ * in this file stopped at that guard, so nothing here could assert what a
+ * COMPLETED container-path run does. Getting past the guard is necessary and
+ * not sufficient: the run then reaches `up`'s idle gate, where a supervisor
+ * waits on a container this shim cannot start. `PIFLEET_SHIM_WORKER_PI` — the
+ * opt-in worker stand-in — closes that half, and the first test below is the
+ * criterion's own probe: a container-path `up` that exits 0.
+ *
+ * ## The vacuity this block has to answer, said before the tests
+ *
+ * A shim can be made to satisfy "one `up` exits 0" by answering everything
+ * affirmatively, which turns a test double into a rubber stamp and silently
+ * guts every other assertion in this file. The fix must therefore keep the
+ * property the branch's own comment claims: **a source that genuinely does not
+ * exist still reports `x`, and the guard still refuses.**
+ *
+ * Test 2 is that control, and it is driven at TWO altitudes because production
+ * cannot express the first one on its own. `probeBindMountSources` SKIPS a
+ * source that is missing from the host — deliberately, and it says why: `docker
+ * run -v <missing>:<dst>` CREATES the source, so probing one would make the
+ * diagnostic the thing that materialized the directory it asked about. So
+ * "delete a mount source and watch the run refuse" is not a probe this product
+ * has; a deleted source is ISC-188's criterion, not ISC-292's. What is left is:
+ *
+ *   - the SHIM's own answer for a path that is not there, asked directly with
+ *     an argv in `probeArgv`'s shape, over a mount set large enough that the
+ *     old `; `-joined program would not have compiled; and
+ *   - the GUARD's behaviour when the container's answer and the host's
+ *     measurement disagree, driven through the real `assertBindMountsVisible`.
+ *
+ * Neither passes against a shim that answers affirmatively, and the first could
+ * not even have been asked of the one this file had yesterday.
+ */
+describe("a container-path up can reach a successful run (ISC-429)", () => {
+  /** Must match `fleetYaml`'s `docker.pi_version`, as in the ISC-32 block. */
+  const PINNED_PI_VERSION = "0.79.6";
+
+  /**
+   * Would the OLD, `; `-joined program have failed on this fixture?
+   *
+   * A CONSTANT WOULD HAVE BEEN A LIE HERE. The ceiling is shape-dependent (see
+   * the header: 2,060 bytes for one program shape, 51,322 for another), so
+   * "assert the fixture is bigger than N" would be asserting a number that does
+   * not describe the thing. This runs the old form instead, on this fixture's
+   * own paths and this machine's own `sed`, and reports whether it dies.
+   *
+   * Used as an anti-vacuity guard: a fixture that stopped being large enough —
+   * or a `sed` that lifted the limit — makes the tests below say so rather than
+   * pass while proving nothing about ISC-429.
+   */
+  async function oldStyleProgramFails(sources: readonly string[]): Promise<boolean> {
+    const program = sources
+      .map((src, i) => ` s#/probe/${i}'#${src}'#g; s#/probe/${i}/#${src}/#g;`)
+      .join("");
+    const proc = Bun.spawn(["sed", program], {
+      stdin: new Blob(["probe 0 '/probe/0/witness.txt'\n"]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return (await proc.exited) !== 0;
+  }
+
+  /**
+   * The shim, addressed as a program rather than through PATH.
+   *
+   * `assertBindMountsVisible` builds an argv beginning with the literal
+   * `docker`; this maps that first word onto the shim this file writes and
+   * passes the rest through untouched, so what the guard measures is the same
+   * text a real `docker` would have received.
+   */
+  function shimExec(binDir: string): Exec {
+    return async (argv) => {
+      const proc = Bun.spawn([join(binDir, "docker"), ...argv.slice(1)], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, PATH: `${binDir}:${process.env["PATH"] ?? ""}` },
+      });
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      return { code: await proc.exited, stdout, stderr, timedOut: false };
+    };
+  }
+
+  /**
+   * `n` mount sources, each a directory holding one witness file.
+   *
+   * The count is a floor checked below rather than a matter of taste: the point
+   * of the fixture is that the program the shim builds from it is LONGER than
+   * the line BSD sed will compile.
+   */
+  async function seedMountSources(
+    base: string,
+    n: number,
+  ): Promise<Array<{ src: string; witness: string; size: number }>> {
+    const out: Array<{ src: string; witness: string; size: number }> = [];
+    for (let i = 0; i < n; i += 1) {
+      /*
+       * LONG, AND OF VARYING LENGTH — both measured requirements, not taste.
+       *
+       * Long because the program's size is a function of the PATHS: a fixture
+       * of three-character names sits under any ceiling however many there are.
+       * Varying because a program of IDENTICAL commands is the shape that
+       * survived to 51 kB in the sweep (see the block header) — the first
+       * version of this fixture used a fixed-width name, built a 7,840-byte
+       * old-form program, and `oldStyleProgramFails` correctly reported that it
+       * did not reproduce ISC-429 at all. A real mount set is ragged
+       * (`sessions`, `workers/eng-1/cloud-allow`, `skills/engineer`), so this
+       * one is too.
+       */
+      const src = join(
+        base,
+        `mount-source-${"segment-".repeat(1 + (i % 5))}${String(i).padStart(3, "0")}`,
+      );
+      await mkdir(src, { recursive: true });
+      const body = `witness-${i}\n`;
+      await writeFile(join(src, "witness.txt"), body);
+      out.push({ src, witness: "witness.txt", size: Buffer.byteLength(body) });
+    }
+    return out;
+  }
+
+  /**
+   * How many bytes of `sed` program the shim's probe branch builds for a mount
+   * set.
+   *
+   * A DERIVATION, not a second copy of the rewrite: it is used only to check
+   * that a fixture is big enough to be about the ceiling at all. If the
+   * rewrite's shape changes this stops describing it, which is a cost the two
+   * `toBeGreaterThan` assertions below make visible rather than silent.
+   */
+  function rewriteProgramBytes(sources: readonly string[]): number {
+    return sources.reduce(
+      (n, src, i) => n + `\ns#/probe/${i}'#${src}'#g\ns#/probe/${i}/#${src}/#g`.length,
+      0,
+    );
+  }
+
+  /** `probeArgv`'s shape: read-only, network-less, every mount `:ro`. */
+  function probeLikeArgv(mounts: readonly { src: string; ask: string }[], tag: string): string[] {
+    const argv = ["docker", "run", "--rm", "--read-only", "--network", "none"];
+    for (const [i, m] of mounts.entries()) argv.push("-v", `${m.src}:/probe/${i}:ro`);
+    const lines = [
+      `probe() { if [ -h "$2" ]; then echo "$1 l 0"; ` +
+        `elif [ -f "$2" ]; then echo "$1 f $(wc -c < "$2" | tr -d ' ')"; ` +
+        `elif [ -d "$2" ]; then echo "$1 d 0"; else echo "$1 x 0"; fi; }`,
+      ...mounts.map((m, i) => `probe ${i} '/probe/${i}${m.ask}'`),
+    ];
+    argv.push("--entrypoint", "/bin/sh", tag, "-c", lines.join("\n"));
+    return argv;
+  }
+
+  test(
+    "a container-path up exits 0, and the mount preflight it passed really ran",
+    async () => {
+      const rig = await makeRig({
+        containerPath: true,
+        workerContainerDouble: true,
+        imagePresent: true,
+        shimPiVersion: PINNED_PI_VERSION,
+        /*
+         * FOUR workers, which is what makes this the criterion's own probe
+         * rather than a smaller case that would have squeaked under the
+         * ceiling. The assertion below measures the fixture instead of
+         * trusting this comment.
+         */
+        extraWorkers: [
+          { id: "eng-2", role: "engineer" },
+          { id: "rev-1", role: "reviewer" },
+          { id: "qa-1", role: "qa" },
+        ],
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,eng-2,rev-1,qa-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+
+      // THE CRITERION. `stderr` is carried into the failure message rather
+      // than asserted, because the whole value of this probe when it breaks is
+      // reading WHERE the run stopped.
+      expect({ code: up.code, stderr: up.stderr.slice(-600) }).toMatchObject({
+        code: EXIT.SUCCESS,
+      });
+
+      /**
+       * A COMPLETED run, not merely a zero. `up` prints this payload after the
+       * idle gate, so a worker in it is one whose supervisor was OBSERVED idle
+       * — and `launch.json` exists only on the container path, so its presence
+       * is what says this run was not quietly the `PIFLEET_PI_COMMAND` double.
+       */
+      const parsed = JSON.parse(up.stdout.trim()) as {
+        run_id: string;
+        workers: Array<{ id: string }>;
+      };
+      rig.runId = parsed.run_id;
+      expect(parsed.workers.map((w) => w.id).sort()).toEqual(["eng-1", "eng-2", "qa-1", "rev-1"]);
+      const run = runPaths(rig.runId, rig.root);
+      for (const id of ["eng-1", "eng-2", "rev-1", "qa-1"]) {
+        const launch = WorkerLaunchSchema.parse(
+          await Bun.file(workerPaths(run, id).launchJson).json(),
+        );
+        expect(launch.image).toContain("pifleet/pi-worker:");
+      }
+
+      /**
+       * ANTI-VACUITY FOR THIS TEST. `exit 0` is also what a run that never
+       * reached the preflight would produce, and `assertBindMountsVisible` is
+       * called only when some worker has a launch argv. So the shim's own call
+       * log is read for the probe argv, and the mount set it carries is
+       * measured against the ceiling the fix exists for: a fixture that shrank
+       * under it would keep passing while proving nothing about ISC-429.
+       */
+      const calls = (await Bun.file(rig.dockerCalls).text()).split("\n");
+      const probes = calls
+        .filter((c) => c.includes(":/probe/0:ro "))
+        .map((c) => [...c.matchAll(/(\S+):\/probe\/\d+:ro/g)].map((m) => m[1]!));
+      expect(probes.length).toBeGreaterThan(0);
+      const widest = probes.sort((a, b) => b.length - a.length)[0]!;
+      expect({
+        mounts: widest.length,
+        bytes: rewriteProgramBytes(widest),
+        oldFormDies: await oldStyleProgramFails(widest),
+      }).toMatchObject({ oldFormDies: true });
+    },
+    /*
+     * ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`. It is
+     * NOT one process — this `up` starts four supervisors and four fake-Pi
+     * doubles behind them — but every one of those is detached and the
+     * command's own wait is the idle gate, whose cost `budget.ts` already
+     * charges through PER_SPAWN_IDLE_MS. `cliBudget(1)` is 11_400 ms; a
+     * one-worker version of this run measured 2.2 s.
+     */
+    cliBudget(1),
+  );
+
+  test(
+    "the same shim still reports a path that is not there, and the guard still refuses",
+    async () => {
+      const base = await mkdtemp(join(tmpdir(), "pifleet-mount-shim-"));
+      const bin = join(base, "bin");
+      await mkdir(bin, { recursive: true });
+      await writeDockerShim(bin, join(base, "docker-calls.log"));
+      const exec = shimExec(bin);
+      const sources = await seedMountSources(base, 30);
+
+      /**
+       * HALF ONE — the shim's own discrimination, asked directly.
+       *
+       * Directly, because production never asks about a path it did not just
+       * measure: `probeBindMountSources` skips a missing source outright (see
+       * the block header). The argv is `probeArgv`'s shape, and the mount set
+       * is asserted to be over the ceiling — so this is a question the shim
+       * could not have answered AT ALL before the fix, and what is asserted is
+       * that its answers DIFFER from each other rather than that they exist.
+       */
+      expect({
+        bytes: rewriteProgramBytes(sources.map((s) => s.src)),
+        oldFormDies: await oldStyleProgramFails(sources.map((s) => s.src)),
+      }).toMatchObject({ oldFormDies: true });
+      const mounts = sources.map((s, i) => ({
+        src: s.src,
+        // One mount in thirty asks about a file nobody wrote. Every other asks
+        // about the witness that is really there.
+        ask: i === 7 ? "/no-such-witness.txt" : `/${s.witness}`,
+      }));
+      const answered = await exec(probeLikeArgv(mounts, "pifleet/pi-worker:probe"));
+      expect({ code: answered.code, stderr: answered.stderr }).toMatchObject({ code: 0 });
+      const lines = answered.stdout.trim().split("\n");
+      // Thirty answers, not "some output": a rewrite that silently dropped
+      // mounts would still produce a stdout.
+      expect(lines).toHaveLength(30);
+      expect(lines[7]).toBe("7 x 0");
+      expect(lines.filter((l) => l.endsWith(" x 0"))).toHaveLength(1);
+      for (const [i, s] of sources.entries()) {
+        if (i === 7) continue;
+        expect(lines[i]).toBe(`${i} f ${s.size}`);
+      }
+
+      /**
+       * HALF TWO — the REAL guard, over the REAL shim, still refuses.
+       *
+       * The disagreement is one production can actually reach and one the
+       * probe script is explicitly built to catch: `pathKind` stats the source
+       * and FOLLOWS symlinks, so the host measures a regular file of a known
+       * size, while the in-container script tests `-h` FIRST and answers `l`.
+       * The two answers differ, and a shim that had been softened into
+       * agreeing with whatever it was asked would not produce that.
+       */
+      const realFile = join(base, "kubeconfig-target");
+      await writeFile(realFile, "apiVersion: v1\n");
+      const link = join(base, "kubeconfig-symlink");
+      await symlink(realFile, link);
+
+      const argvs = [
+        ...sources.map((s) => ["docker", "run", "-v", `${s.src}:/workspace`, "img"]),
+        ["docker", "run", "-v", `${link}:/home/pi/.kube/config:ro`, "img"],
+      ];
+      let caught: unknown;
+      try {
+        await assertBindMountsVisible(argvs, "pifleet/pi-worker:probe", exec);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(MountNotVisibleError);
+      const err = caught as MountNotVisibleError;
+      expect(err.exitCode).toBe(3);
+      expect(err.message).toContain(link);
+      // ONLY that one. A shim reporting nothing about everything would name
+      // all thirty-one paths and still satisfy the two assertions above.
+      for (const s of sources) expect(err.message).not.toContain(s.src);
+
+      /*
+       * THE CONTROL FOR THE CONTROL: drop the symlink and the same guard, over
+       * the same shim and the same thirty sources, RESOLVES. Without it,
+       * "it refused" is indistinguishable from "it refuses everything" — which
+       * is precisely the state this fix was undoing.
+       */
+      await assertBindMountsVisible(argvs.slice(0, -1), "pifleet/pi-worker:probe", exec);
+
+      /**
+       * HALF THREE — DELETE A REAL BIND-MOUNT SOURCE, and record what actually
+       * happens, because it is not what one would guess.
+       *
+       * The SHIM still reports it missing: asked about the deleted path it
+       * answers `x`, which is the property the branch's comment claims and the
+       * one a rubber stamp could not have. That is asserted first.
+       *
+       * The GUARD, given the same deleted source, RESOLVES — it does not refuse
+       * with exit 3. That is production's deliberate choice and it says why:
+       * `docker run -v <missing>:<dst>` CREATES the source, so probing one would
+       * make the diagnostic the thing that materialized the directory it asked
+       * about. A missing source is ISC-188's criterion, not ISC-292's. Asserted
+       * rather than described, so a future change of that policy fails here
+       * instead of being discovered by someone reading this comment.
+       *
+       * Both halves matter to ISC-429: "the shim still reports missing" is the
+       * anti-rubber-stamp property, and "the guard skips it anyway" is why
+       * deletion alone cannot be the anti-vacuity probe for this criterion. The
+       * symlink above is, because it is the one disagreement a host-answering
+       * shim can actually produce.
+       */
+      const deleted = sources[3]!;
+      await rm(deleted.src, { recursive: true, force: true });
+      const afterDelete = await exec(
+        probeLikeArgv([{ src: deleted.src, ask: `/${deleted.witness}` }], "pifleet/pi-worker:probe"),
+      );
+      expect(afterDelete.stdout.trim()).toBe("0 x 0");
+      await assertBindMountsVisible(
+        [["docker", "run", "-v", `${deleted.src}:/workspace`, "img"]],
+        "pifleet/pi-worker:probe",
+        exec,
+      );
+
+      await rm(base, { recursive: true, force: true });
+    },
+    /*
+     * ISC-274 audit: no `up` spawn, but three shim invocations — one direct
+     * and two through `assertBindMountsVisible`, which charges one probe
+     * container per call. `cliBudget(3)` is the model's own answer for three
+     * spawn-reaching calls; the shim is a `/bin/sh` script and far cheaper than
+     * the CLI startup that figure is calibrated to, so this is generous rather
+     * than tight, which is the direction budget.ts asks for.
+     */
+    cliBudget(3),
+  );
+});
+
+/**
+ * §5.9's spend gate is reachable on the strength of a CONFIG, not of Docker
+ * (ISC-430).
+ *
+ * ## The defect this pins, which was never a behaviour
+ *
+ * `up` ran the mandatory tool-call probe under
+ * `if (loadedConfig !== null && egressNetwork !== null)`. `egressNetwork` is
+ * assigned unconditionally from `loadedConfig.config.docker.network`, and
+ * `schema.ts` DEFAULTS that key — so on every path where a config parses
+ * cleanly the second conjunct was implied by the first. The condition READ as
+ * though provider spend were gated on Docker being configured, and it was not.
+ * Behaviour was correct; the legibility was not, and a reader who trusted it
+ * would be wrong about where the money goes.
+ *
+ * ## Why a source-shaped test would not have been enough
+ *
+ * The fix could be undone by "simplifying" the derived network back into a
+ * nullable and re-adding the conjunct, and nothing about the SHAPE of the code
+ * would catch that — the suite would stay green while the gate silently
+ * acquired a Docker dependency that could, one schema edit later, actually be
+ * false. So the rule is pinned BEHAVIOURALLY: a config that never mentions
+ * `docker.network`, on the backend that draws no panes, still spends.
+ *
+ * ## The detector, and the control
+ *
+ * "Reached the gate" is `stub.requests.length` — the same load-bearing count
+ * the ISC-53 block uses, and for the same reason: an exit code cannot tell a
+ * run that probed from a run that skipped the probe and succeeded anyway.
+ *
+ * The control is a run that does NOT reach it, differing in ONE thing. Both
+ * cases below carry the same stub, the same `--backend headless`, the same
+ * `require_native_tool_calls: true` and the same models; the control names a
+ * `-uplink` network, which `ensureEgressNetwork` refuses several steps BEFORE
+ * the gate. Its request count is 0. So the probe can distinguish reaching from
+ * not-reaching, and "1" in the positive case is a measurement rather than a
+ * value it could not have failed to produce.
+ *
+ * It also says something true that the criterion is easy to over-read: Docker
+ * still gates the probe POSITIONALLY — a broken network stops the run earlier
+ * — but not CONDITIONALLY, which is the distinction the old `&&` erased.
+ */
+describe("the §5.9 spend gate is reachable on a config alone (ISC-430)", () => {
+  test(
+    "a headless up whose config never mentions docker.network still probes",
+    async () => {
+      const rig = await makeRig();
+      const stub = stubOmlx(STUB_TOOL_CALL);
+      try {
+        const cfg = join(rig.base, "no-docker-network.yaml");
+        await writeFile(
+          cfg,
+          fleetYaml(rig.repo, {
+            requireNativeToolCalls: true,
+            llmBaseUrl: stub.baseUrl,
+            omitDockerNetwork: true,
+          }),
+        );
+        // Asserted, not assumed: the fixture's whole job is that the key is
+        // absent, and a `fleetYaml` change that reintroduced it would leave
+        // this test passing for a reason unrelated to ISC-430.
+        expect(await Bun.file(cfg).text()).not.toContain("network:");
+
+        const up = await runCli(rig, [
+          "up",
+          "--config",
+          cfg,
+          "--workers",
+          "eng-1",
+          "--backend",
+          "headless",
+          "--json",
+        ]);
+        expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+          code: EXIT.SUCCESS,
+        });
+        rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+        // THE CLAIM. A config that says nothing about Docker's network, on the
+        // backend that draws nothing, still dialled the provider.
+        expect(stub.requests.length).toBe(1);
+        expect(stub.requests[0]!.path).toBe("/v1/chat/completions");
+        expect(Array.isArray(stub.requests[0]!.body["tools"])).toBe(true);
+
+        // …and the fleet then stood up, so this is the gate PASSING rather
+        // than the run stopping at it.
+        const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+        expect(records.map((r) => r.event)).toContain("supervisor_launched");
+      } finally {
+        await stub.stop();
+      }
+    },
+    // ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`. The
+    // stub is an in-process server, not a spawn.
+    cliBudget(1),
+  );
+
+  test(
+    "CONTROL: a run stopped before the gate never dials the provider",
+    async () => {
+      const rig = await makeRig();
+      const stub = stubOmlx(STUB_TOOL_CALL);
+      try {
+        /*
+         * IDENTICAL to the fixture above but for `network:`, which is named
+         * rather than omitted and ends `-uplink` — the shim answers that
+         * NON-internal and `ensureEgressNetwork` refuses to adopt it, several
+         * steps before the gate. One difference, one outcome.
+         */
+        const cfg = join(rig.base, "uplink-network.yaml");
+        await writeFile(
+          cfg,
+          fleetYaml(rig.repo, {
+            requireNativeToolCalls: true,
+            llmBaseUrl: stub.baseUrl,
+            network: `${NETWORK}-uplink`,
+          }),
+        );
+        const up = await runCli(rig, [
+          "up",
+          "--config",
+          cfg,
+          "--workers",
+          "eng-1",
+          "--backend",
+          "headless",
+        ]);
+        expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+
+        // The detector can tell the two apart. Without this line, "1" above
+        // would be a number nothing showed could be anything else.
+        expect(stub.requests).toEqual([]);
+      } finally {
+        await stub.stop();
+      }
+    },
+    // ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`.
     cliBudget(1),
   );
 });
