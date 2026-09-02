@@ -1688,6 +1688,27 @@ export const TaskSchedStateSchema = z.enum([
   "waiting", // a dependency has not finished
   "ready", // dependencies met, no idle worker yet
   "dispatched",
+  /**
+   * Dispatched to an adopted-terminal `tui` worker and NOT YET TRIGGERED
+   * (SRD-TUI-DISPATCH §6.5, ISC-451).
+   *
+   * A member of this enum rather than a boolean beside it, and the asymmetry
+   * with `WorkerStateSchema.staged_task_id` — which deliberately is NOT a
+   * `phase` member — is worth stating because it looks like an inconsistency.
+   *
+   * `phase` answers two questions at once for a staged worker: what the agent
+   * is doing (nothing) and whether the worker can take more work (no). Those
+   * genuinely differ, so one enum has to imply whichever it does not state, and
+   * a reader acting on the implied half is wrong.
+   *
+   * `state` answers ONE question — where is this task in the schedule — and
+   * `staged` is a real answer to it. Collapsing it into `dispatched` is what
+   * makes a task nobody has started render as `- T-1: dispatched worker=tui-1`,
+   * which is character-for-character what a running task renders as. That is
+   * the precise misreading ISC-451 exists to prevent, and a top-of-report note
+   * mitigates it without removing the row that causes it.
+   */
+  "staged",
   "done",
   "blocked", // a dependency failed; this task will never be dispatched
 ]);

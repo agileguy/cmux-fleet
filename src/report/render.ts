@@ -21,6 +21,7 @@ import type {
   RunReport,
   ScheduledTask,
 } from "../contracts.ts";
+import { voidedForDispatchRoute } from "../attended/voided.ts";
 
 /** Render the whole report as markdown-flavoured text. */
 export function renderRunReport(
@@ -28,6 +29,15 @@ export function renderRunReport(
   notes: readonly string[] = [],
   attended: readonly AttendedRecord[] = [],
   attendedUnverified: readonly { worker: string; reason: string }[] = [],
+  /**
+   * Workers that took a STAGED dispatch, from `collect`'s ledger scan.
+   *
+   * Defaulted to empty so every existing caller — and every existing test —
+   * renders exactly what it rendered before. A run with no staged dispatch must
+   * be byte-identical to its old output; if it is not, this change has altered
+   * a report that had nothing to do with it.
+   */
+  stagedWorkers: readonly string[] = [],
 ): string {
   const lines: string[] = [];
   lines.push(`# pifleet run ${report.run_id}`);
@@ -41,7 +51,7 @@ export function renderRunReport(
    * verdict they might believe. A footnote here would be the exact
    * scrolled-past shape this module's header forbids.
    */
-  for (const a of attended) lines.push(...renderAttended(a));
+  for (const a of attended) lines.push(...renderAttended(a, stagedWorkers.includes(a.worker)));
   /**
    * An unverifiable record gets the SAME prominence as a verified one, and
    * for a stronger reason: a record that is missing or unreadable is the
@@ -55,6 +65,39 @@ export function renderRunReport(
     lines.push("    Treat this run as attended: the voided guarantees are unknown.");
   }
   if (attended.length > 0 || attendedUnverified.length > 0) lines.push("");
+
+  /**
+   * STAGED BUT NOT TRIGGERED (ISC-451) — up here with ATTENDED, for the same
+   * reason and one stronger.
+   *
+   * This module's header forbids a footnote: a degraded row an operator has
+   * scrolled past by the time it matters has not been reported. A staged task
+   * is the sharpest case of that in the whole report, because everything below
+   * this line reads as though the work is under way. `## schedule` will carry
+   * the row as `staged`, but a reader who skims the totals sees a task counted
+   * and no verdict, and concludes it is running.
+   *
+   * The line names the REMEDY, not just the state, because unlike every other
+   * finding in this report the operator can clear this one in five seconds —
+   * and unlike a failure, it will otherwise wait forever.
+   */
+  const staged = report.schedule.filter((r) => r.state === "staged");
+  if (staged.length > 0) {
+    lines.push(`## STAGED — ${staged.length} task(s) dispatched and never triggered`);
+    for (const row of staged) {
+      lines.push(
+        `- ${row.id}: staged on worker ${row.worker ?? "unknown"} — the epoch is allocated and ` +
+          `the brief is on disk at /policy/dispatch, but no turn has begun`,
+      );
+    }
+    lines.push(
+      "  Nothing is wrong and nothing is running: a staged task starts when a person types the",
+    );
+    lines.push(
+      "  trigger at that worker's terminal. To release one instead, `pifleet unstage --task <id>`.",
+    );
+    lines.push("");
+  }
 
   /**
    * The security surface comes before the totals for the same reason ATTENDED
@@ -99,7 +142,7 @@ export function renderRunReport(
  * A still-open session ("not handed back") is stated outright — a verdict
  * over a pane a person still owns is a diff still in motion.
  */
-function renderAttended(a: AttendedRecord): string[] {
+function renderAttended(a: AttendedRecord, staged: boolean): string[] {
   const out: string[] = [];
   const span =
     a.left_at !== null
@@ -107,9 +150,33 @@ function renderAttended(a: AttendedRecord): string[] {
       : `since ${a.entered_at} — not handed back; a person may still be driving`;
   out.push(`## ATTENDED — a person drove worker ${a.worker}`);
   out.push(`- ${a.worker}: ${a.mode === "tui" ? "pane is attended" : "pane returned to viewer"}, ${span}`);
-  if (a.voided.length > 0) {
-    out.push(`- ${a.voided.length} guarantee(s) do not hold for this run:`);
-    for (const v of a.voided) out.push(`    ${v.isc}: ${v.because}`);
+
+  /**
+   * THE STAMP IS RE-DERIVED HERE, and only for a run that staged something.
+   *
+   * `a.voided` was written into `attended.json` when the person took the pane —
+   * before any dispatch, when the mode table was the true one. A staged
+   * dispatch later in the run makes three of its rows wrong in the direction
+   * that matters: it tells the operator no epoch exists when one does, and that
+   * a re-dispatch runs the task twice when the file route now dedups. So the
+   * printed table is recomputed and the record is left alone; a record that
+   * mutates under later events is not a record.
+   *
+   * A run with nothing staged takes `a.voided` verbatim and is byte-identical
+   * to what this printed before the staged route existed.
+   */
+  const voided = staged
+    ? voidedForDispatchRoute(a.mode === "tui" ? "tui" : "rpc", "staged")
+    : a.voided;
+  if (staged) {
+    out.push(
+      `- worker ${a.worker} took at least one STAGED dispatch; the rows below are the ` +
+        `staged route's, which void less than the mode's — see the epoch rows`,
+    );
+  }
+  if (voided.length > 0) {
+    out.push(`- ${voided.length} guarantee(s) do not hold for this run:`);
+    for (const v of voided) out.push(`    ${v.isc}: ${v.because}`);
   }
   return out;
 }

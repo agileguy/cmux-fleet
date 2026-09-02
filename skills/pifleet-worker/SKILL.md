@@ -133,13 +133,19 @@ worth more than silence, and silence is precisely what an absent envelope is.
 Field rules, each of which is checked:
 
 - `task_id` must match the task you were given — see the section above on where to read it.
-- `epoch` must match too, and **the value is not currently delivered to you**: your prompt
-  carries the title, the brief and the acceptance criteria, and nothing else. Until it is, write
-  `1` — the first dispatch to a worker is epoch 1, and a re-dispatch of the same task under a
-  new epoch is rare enough that guessing right is the common case. This is a known gap on the
-  orchestrator's side, not a puzzle to solve: an envelope whose epoch does not match is
-  **refused**, which records a discrepancy rather than downgrading a live attempt with a stale
-  one.
+- `epoch` must match too, and **it is delivered to you — read it, never guess it.** It is the
+  `epoch:` line of the same fenced `## This task` block you read `task_id` from, and for a
+  **staged** task it is also on its own line in `/policy/dispatch`. Copy the number.
+
+  **This bullet used to tell you to write `1`**, on the reasoning that the value was not
+  delivered and that the first dispatch to a worker is epoch 1 anyway. Both halves have stopped
+  being true, and the second one is the dangerous half: it was a guess that happens to be right
+  on a worker's first task and wrong on every one after it. A second task on the same worker, a
+  re-stage after a cancel, or any replay allocates something other than 1, and an envelope whose
+  epoch does not match is **refused** — so a task where you did all the work correctly harvests
+  as though the container produced nothing, with a stale-epoch discrepancy instead of your
+  result. That is the same shape as the `task_id` failure at the top of this file: the value was
+  in your prompt the whole time.
 - `files_changed[].path` is **repo-relative** (`src/status.ts`), never absolute. It is compared
   against `git diff --name-status`, and a file you claim but did not change is flagged.
 - `commits[]` are **full 40-character SHAs**. Short SHAs are rejected.

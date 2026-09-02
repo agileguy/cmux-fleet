@@ -150,3 +150,59 @@ describe("the worker documents only name container paths a worker actually has",
     ).toEqual([]);
   });
 });
+
+/**
+ * The `epoch` the worker is told to write is one it is told to READ (ISC-433's
+ * finding, at a second field).
+ *
+ * ## The defect, and why it looked harmless for so long
+ *
+ * The field rules used to say the epoch was "not currently delivered to you"
+ * and instruct the worker to write `1`, on the reasoning that the first
+ * dispatch to a worker is epoch 1 and guessing right is the common case. Both
+ * halves were false by the time they were read: `renderPrompt` emits an
+ * `epoch:` line in the fenced `## This task` block on every route, and a worker
+ * takes more than one task.
+ *
+ * `harvest/outbox.ts` REFUSES an envelope whose epoch differs from the inbox
+ * record's. So a hard-coded `1` is not a small inaccuracy — it is a task that
+ * did all of its work correctly and harvests as though the container produced
+ * nothing, carrying a stale-epoch discrepancy instead of a result.
+ *
+ * **It survived because it was true by coincidence twice.** On the old pane
+ * route both sides of the comparison were the placeholder 0, so the gate passed
+ * without comparing anything. On the staged route a worker's FIRST task
+ * allocates 1, and the hard-coded 1 matches. The failure only appears on a
+ * second task, a re-stage after a cancel, or any replay — which is also why a
+ * test that only ever allocates epoch 1 cannot see it, and why the probes
+ * elsewhere in this block allocate something else on purpose.
+ *
+ * Pinned at BOTH ends, because either alone is satisfiable while the pair is
+ * broken: the instruction must point at the delivered value, and the renderer
+ * must still deliver it.
+ */
+describe("the worker is told to read the epoch, not to guess it", () => {
+  test("the stale 'not delivered' instruction is gone", () => {
+    expect(SKILL).not.toContain("the value is not currently delivered to you");
+    // The specific bad advice, which is what actually reached the outbox.
+    expect(SKILL).not.toContain("Until it is, write");
+  });
+
+  test("the instruction points at the block that carries it", () => {
+    const rules = SKILL.slice(SKILL.indexOf("Field rules"));
+    const bullet = rules.slice(rules.indexOf("- `epoch`"));
+    expect(bullet).toContain("## This task");
+    expect(bullet).toContain("/policy/dispatch");
+    expect(bullet).toContain("never guess it");
+  });
+
+  /**
+   * THE OTHER END. An instruction to read a value the renderer stopped emitting
+   * is the same defect facing the other way, and the skill file alone cannot
+   * detect it.
+   */
+  test("renderPrompt still emits the epoch line the instruction names", () => {
+    const supervisor = readFileSync(`${ROOT}src/supervisor/index.ts`, "utf8");
+    expect(supervisor).toContain("`epoch:   ${envelope.epoch}\\n`");
+  });
+});
