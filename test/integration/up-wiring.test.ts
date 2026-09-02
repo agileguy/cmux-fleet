@@ -5507,6 +5507,67 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
   }
 
   /**
+   * Does THIS platform's `sed` truncate a long one-line program AT ALL?
+   *
+   * ## Why the guard above needs this, measured on CI rather than reasoned
+   *
+   * `oldStyleProgramFails` is the anti-vacuity guard for the two tests below,
+   * and its own docblock anticipated "a `sed` that lifted the limit" — but
+   * treated that as a failure. It is not. It is a different PLATFORM.
+   *
+   * BSD `sed` (macOS) reads a script in pieces and treats a piece boundary as a
+   * line break, which is the whole of ISC-429's first mechanism. GNU `sed`
+   * (Linux, and therefore CI) has no such behaviour: measured on the CI runner,
+   * the fixture's 5,260-byte old-form program compiled cleanly and
+   * `oldFormDies` came back `false`, failing both tests on a machine where the
+   * DEFECT CANNOT OCCUR. Locally on darwin the same fixture dies, which is why
+   * this was green here and red there.
+   *
+   * So the regime is established explicitly instead of assumed, with a probe
+   * sized from a measured sweep of BOTH implementations rather than chosen to
+   * look extreme:
+   *
+   *   commands x 40-char paths   GNU sed 4.9 (debian)   BSD sed (darwin 26.6)
+   *      50  /   6,460 bytes            ok                     DIES
+   *     200  /  26,360 bytes            ok                     DIES
+   *     800  / 106,760 bytes            ok                     DIES
+   *
+   * 200 commands / ~26 kB sits far above every BSD ceiling measured for this
+   * shape and far below the first thing that breaks GNU.
+   *
+   * ## DO NOT MAKE THIS PROBE BIGGER. It was 2,000 commands and that was WRONG.
+   *
+   * At 471 kB the probe reported "truncating" on Linux too — not because GNU
+   * `sed` truncates, but because Linux caps a SINGLE argv argument at
+   * `MAX_ARG_STRLEN` (128 kB) and `exec` returned `E2BIG` before `sed` ever
+   * parsed anything. A bigger probe therefore stops measuring `sed` at all and
+   * silently reports every platform as truncating, which would have put CI
+   * straight back into the failure this branch exists to fix. Anything over
+   * ~128 kB measures the kernel.
+   *
+   * BOTH BRANCHES ASSERT. Where `sed` truncates, the fixture must be in the
+   * failing regime, exactly as before. Where it does not, `oldFormDies` must be
+   * FALSE — pinning the platform rather than skipping, so a `sed` that later
+   * GAINS the limit cannot quietly take the inapplicable path, and a fixture
+   * that dies for some unrelated reason is still a failure. What neither branch
+   * does is require a defect to reproduce on a platform that does not have it.
+   *
+   * The FIX is platform-independent and is what the rest of these tests
+   * measure: one command per line compiles everywhere, and `up` reaching exit 0
+   * over a real mount set is asserted on both.
+   */
+  let sedRegime: Promise<boolean> | null = null;
+  function sedTruncatesLongPrograms(): Promise<boolean> {
+    if (sedRegime === null) {
+      const pad = "z".repeat(40);
+      sedRegime = oldStyleProgramFails(
+        Array.from({ length: 200 }, (_, i) => `/tmp/${pad}${i}`),
+      );
+    }
+    return sedRegime;
+  }
+
+  /**
    * The shim, addressed as a program rather than through PATH.
    *
    * `assertBindMountsVisible` builds an argv beginning with the literal
@@ -5670,11 +5731,18 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
         .map((c) => [...c.matchAll(/(\S+):\/probe\/\d+:ro/g)].map((m) => m[1]!));
       expect(probes.length).toBeGreaterThan(0);
       const widest = probes.sort((a, b) => b.length - a.length)[0]!;
-      expect({
-        mounts: widest.length,
-        bytes: rewriteProgramBytes(widest),
-        oldFormDies: await oldStyleProgramFails(widest),
-      }).toMatchObject({ oldFormDies: true });
+      const truncating = await sedTruncatesLongPrograms();
+      expect(
+        {
+          mounts: widest.length,
+          bytes: rewriteProgramBytes(widest),
+          oldFormDies: await oldStyleProgramFails(widest),
+        },
+        truncating
+          ? "this sed truncates long one-line programs, so the fixture must be in the failing regime"
+          : "this sed compiles a 26 kB one-line program that BSD sed cannot, so no fixture size can fail here — " +
+            "the size guard is inapplicable and ISC-429's other assertions carry the test",
+      ).toMatchObject({ oldFormDies: truncating });
     },
     /*
      * ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`. It is
@@ -5707,10 +5775,17 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
        * could not have answered AT ALL before the fix, and what is asserted is
        * that its answers DIFFER from each other rather than that they exist.
        */
-      expect({
-        bytes: rewriteProgramBytes(sources.map((s) => s.src)),
-        oldFormDies: await oldStyleProgramFails(sources.map((s) => s.src)),
-      }).toMatchObject({ oldFormDies: true });
+      const truncating = await sedTruncatesLongPrograms();
+      expect(
+        {
+          bytes: rewriteProgramBytes(sources.map((s) => s.src)),
+          oldFormDies: await oldStyleProgramFails(sources.map((s) => s.src)),
+        },
+        truncating
+          ? "this sed truncates long one-line programs, so the fixture must be in the failing regime"
+          : "this sed compiles a 26 kB one-line program that BSD sed cannot, so no fixture size can fail here — " +
+            "the size guard is inapplicable and this test's discrimination assertions carry it",
+      ).toMatchObject({ oldFormDies: truncating });
       const mounts = sources.map((s, i) => ({
         src: s.src,
         // One mount in thirty asks about a file nobody wrote. Every other asks
