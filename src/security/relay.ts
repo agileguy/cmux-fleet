@@ -623,9 +623,27 @@ function splitHostPort(raw: string): { host: string; port: number } | null {
  * Parse a validated `relay_upstream`. Throws on anything `relayUpstreamError`
  * refuses — the schema should have caught it first, so reaching this throw
  * means config validation was bypassed, not that the operator mistyped.
+ *
+ * ## `allowHostname` has to be here too, and its absence was a live defect
+ *
+ * Phase 2 landed D9's schema half — `ProviderSchema` passes
+ * `{ allowHostname: block.hosted }`, so a hosted block PARSES with a hostname
+ * — and stopped there. This function kept `relayUpstreamError`'s default, so a
+ * `fleet.yaml` that `config validate` accepted still threw from inside `up`
+ * the moment `providerRelayTarget` read it: *"is a hostname; relay_upstream
+ * must be an IP literal"*, about a field the validator had just approved. Found
+ * by ISC-426's tests, not by the type checker — the flag is a default, and a
+ * default cannot be forgotten loudly.
+ *
+ * The default stays `false` for the same reason it does on `relayUpstreamError`:
+ * every existing caller keeps the stronger rule with no edit, and D9's scoping
+ * is enforced by omission rather than by remembering to pass `false`.
  */
-export function parseRelayUpstream(raw: string): RelayUpstream {
-  const err = relayUpstreamError(raw);
+export function parseRelayUpstream(
+  raw: string,
+  { allowHostname = false }: { allowHostname?: boolean } = {},
+): RelayUpstream {
+  const err = relayUpstreamError(raw, { allowHostname });
   if (err !== null) throw new Error(`relay: llm.relay_upstream ${err}`);
   const parsed = splitHostPort(raw)!;
   // Through the SAME normalizer the policy matcher uses, so a trailing root dot
@@ -642,12 +660,16 @@ export function parseRelayUpstream(raw: string): RelayUpstream {
  * `host.docker.internal:<port from base_url>` — byte-for-byte the behaviour
  * `omlxRelayTarget` had before ISC-259.
  */
-export function relayUpstreamFor(cfg: RelayConfigView, listenPort: number): RelayUpstream {
+export function relayUpstreamFor(
+  cfg: RelayConfigView,
+  listenPort: number,
+  { allowHostname = false }: { allowHostname?: boolean } = {},
+): RelayUpstream {
   const raw = cfg.llm.relay_upstream;
   if (raw === null || raw === undefined || raw === "") {
     return { host: RELAY_DEFAULT_DIAL_HOST, port: listenPort };
   }
-  return parseRelayUpstream(raw);
+  return parseRelayUpstream(raw, { allowHostname });
 }
 
 /**
@@ -1186,9 +1208,13 @@ export function relayViewForProvider(cfg: FleetRelayConfigView, provider: string
  * by `relayTargetsDrifted`, so renaming it on the flat path would report every
  * existing relay as drifted and cycle it on the next `up` for no reason at all.
  */
-export function providerRelayTarget(view: RelayConfigView, provider: string): RelayTarget {
+export function providerRelayTarget(
+  view: RelayConfigView,
+  provider: string,
+  { allowHostname = false }: { allowHostname?: boolean } = {},
+): RelayTarget {
   const listenPort = relayListenPort(view);
-  const upstream = relayUpstreamFor(view, listenPort);
+  const upstream = relayUpstreamFor(view, listenPort, { allowHostname });
   return { listenPort, host: upstream.host, port: upstream.port, name: provider };
 }
 
@@ -1445,24 +1471,31 @@ export async function egressBridgePlan(
     seen.add(provider);
     const view = relayViewForProvider(cfg, provider);
     const network = workerEgressNetwork(cfg, egressNetwork, provider);
+    /*
+     * ONE READING OF `hosted`, feeding BOTH halves of D9 — and that is the
+     * invariant, not a convenience.
+     *
+     * The same flag that PERMITS a hostname here is the flag that REQUIRES it
+     * to be resolved before the relay sees it. Read twice, they could disagree,
+     * and the disagreement has a direction that matters: permitted-but-unresolved
+     * is a hostname reaching Docker's embedded DNS, which is §6.7's alias loop —
+     * a hang with nothing in `docker logs`. Read once, that state is not
+     * expressible.
+     *
+     * `hosted !== true` — which includes EVERY flat fleet, since the flat
+     * shorthand has no `hosted` field to set — means `allowHostname` stays
+     * `false` AND no resolution runs, so a pre-D7 fleet's plan is unchanged
+     * byte for byte and no non-hosted provider acquires a resolution step it
+     * did not have. `ProviderSchema` refuses a hostname on those blocks at
+     * `config validate` (ISC-427), so both layers say the same thing.
+     */
+    const hosted = cfg.llm.providers?.[provider]?.hosted === true;
     // `omlxRelayTarget` on the flat path keeps the name `"omlx"` that every
     // running relay already has stamped in `PIFLEET_RELAY_TARGETS`; see
     // `providerRelayTarget` for why that is not cosmetic.
     const target = isFlatFleet(cfg)
       ? omlxRelayTarget(view)
-      : providerRelayTarget(view, provider);
-    /*
-     * D9's resolution, and the gate on it is the whole of the decision.
-     *
-     * `hosted !== true` — which includes EVERY flat fleet, since the flat
-     * shorthand has no `hosted` field to set — leaves `target` exactly as the
-     * pure functions above returned it, so a pre-D7 fleet's plan is unchanged
-     * byte for byte and no non-hosted provider acquires a resolution step it
-     * did not have. The schema half already refuses a hostname on those blocks
-     * (ISC-427), so the two halves agree: the weaker property cannot be reached
-     * either by editing a field or by falling through a branch here.
-     */
-    const hosted = cfg.llm.providers?.[provider]?.hosted === true;
+      : providerRelayTarget(view, provider, { allowHostname: hosted });
     const resolvable =
       hosted && isIP(target.host) === 0 && target.host !== RELAY_DEFAULT_DIAL_HOST;
     const address = resolvable
