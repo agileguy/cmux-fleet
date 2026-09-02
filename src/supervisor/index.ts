@@ -80,6 +80,7 @@ import { cancelledResponse, classifyUiRequest } from "./ui-requests.ts";
 import {
   TUI_POLL_MS,
   TUI_QUIET_MS,
+  attributedToStage,
   classifyTuiTurn,
   detachedDockerArgv,
   discoverSessionPath,
@@ -2185,15 +2186,37 @@ async function main(): Promise<void> {
               // it. The await also puts a rejection inside this poll's own
               // catch instead of leaving it unhandled.
               await flushState();
+              /*
+               * §9 Q1, answered for one of the two routes (§9 Q4).
+               *
+               * The detail string below has always said APPROXIMATE, and on the
+               * typed route it still must: nothing separates the staged task's
+               * turn from an unrelated prompt the operator typed into the same
+               * pane. The AUTO-TRIGGER route does separate them, because the
+               * message that starts the turn was written by pifleet and carries
+               * a string a person would have to type deliberately.
+               *
+               * Two different sentences rather than one hedged sentence: an
+               * operator reading `APPROXIMATE` on a run where the attribution
+               * was in fact positive would go and re-derive it by hand, and one
+               * reading a confident sentence on a run where it was not would
+               * trust a `timed_out` verdict that is only an upper bound. The
+               * event is the only place either fact is recorded.
+               */
+              const attributed = attributedToStage(tuiReader.entries.slice(tuiBaselineCount));
               logEvent({
                 type: "tui_stage_triggered",
                 epoch: live.epoch,
                 task_id: live.task_id,
                 deadline_ms: deadlineMs,
-                detail:
-                  "deadline armed on first transcript growth after the stage; APPROXIMATE — " +
-                  "growth cannot be attributed to the staged task rather than to the " +
-                  "operator's own prompt (SRD-TUI-DISPATCH §9 Q1)",
+                attributed_to_stage: attributed,
+                detail: attributed
+                  ? "deadline armed on the auto-trigger's own message, which pifleet wrote and " +
+                    "no one typed; the growth IS this stage's turn (SRD-TUI-DISPATCH §9 Q4 " +
+                    "closes §9 Q1 for this route)"
+                  : "deadline armed on first transcript growth after the stage; APPROXIMATE — " +
+                    "growth cannot be attributed to the staged task rather than to the " +
+                    "operator's own prompt (SRD-TUI-DISPATCH §9 Q1)",
               });
             }
 

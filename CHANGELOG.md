@@ -6,6 +6,46 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **A staged task now starts its own turn — no keystroke at all (ISC-460..ISC-466,
+  `Docs/SRD-TUI-DISPATCH.md` §9 Q4).** The staged route below hands the operator one line to type.
+  This removes it.
+
+  §9 Q4 asked whether a **container-side** trigger could start a Pi turn without writing to the
+  surface, and predicted *"no — a TTY has one owner"*. It was probed on 2026-09-02 against the
+  shipped image rather than assumed, and **the answer is yes**. Pi enumerates its own input sources
+  as `"interactive" | "rpc" | "extension"`, and its extension API carries `sendUserMessage()`,
+  documented verbatim *"Send a user message to the agent. **Always triggers a turn.**"*
+
+  **The prediction was wrong for a reason worth keeping:** `Docs/SRD.md` §162 governs who may
+  *write to the terminal*, and this path never touches the terminal. §4.3's hazard — a brief landing
+  in a composer beside a half-typed line, submitted by a `shift+enter` — is therefore not mitigated
+  here, it is **absent**. Different channel, different failure mode.
+
+  The image now bakes one extension at `/opt/pifleet/dispatch-trigger.ts`, root-owned `0444`, loaded
+  by an explicit `--extension` path. **`--no-extensions` stays on the argv beside it**: measured
+  against `pi --help` in the image, that flag disables *discovery* only — "explicit -e paths still
+  work" — so §12.2's denial of repo-supplied `.pi/extensions/*.ts` is untouched and exactly one
+  pifleet-owned extension loads. Baked rather than bind-mounted because Pi executes it in-process:
+  a mount carries that guarantee in a `:ro` flag one character from being dropped, an image layer
+  does not. `auto_trigger: false` at any config level restores the keypress.
+
+  Two properties were found by measurement and would each have shipped a silently-dead feature:
+
+  - **It polls; it must not use `fs.watch`.** A host-side write to a bind-mounted file produced
+    **zero** inotify events inside the container, while `fs.watchFile` and a `readFileSync` poll
+    both saw it. An event-driven build passes every test that writes the drop from *inside* the
+    container — the natural way to write one — and never fires in production.
+  - **It requires two identical consecutive reads.** `/policy/dispatch` must be rewritten in place
+    (a bind mount pins the inode), which is not atomic; the probe observed the file half-written.
+    The first version of the guard claimed the JSON parse was sufficient and its own test refuted it
+    on the first run: a prefix ending at the separator is a *complete valid header with an empty
+    prompt*. It parses, it fires, and the worker is sent to read a brief still being written.
+
+  **This also closes §9 Q1 for this route.** Q1 asked whether any signal separates the staged task's
+  turn from an operator's own prompt in the same pane, and expected none. The auto-trigger creates
+  one — the message that starts the turn was written by pifleet and nobody typed it — so
+  `tui_stage_triggered` now carries `attributed_to_stage` and says APPROXIMATE only when it is.
+
 - **`dispatch` to an adopted-terminal `tui` worker stages instead of refusing (ISC-431..ISC-459,
   `Docs/SRD-TUI-DISPATCH.md`).** The refusal it replaces — *"pifleet has no surface id to type
   into"* — was correct about the mechanism and drew the wrong conclusion from it. A dispatch is two

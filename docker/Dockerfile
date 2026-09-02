@@ -302,6 +302,25 @@ COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/pifleet-entrypoint
 # context leaves the tag unchanged and a stale image is silently reused.
 COPY --chmod=0755 docker/honeypot.cjs /usr/local/bin/pifleet-honeypot
 
+# The auto-trigger extension (SRD-TUI-DISPATCH §9 Q4) — what removes the
+# keystroke from a staged dispatch.
+#
+# 0444 and root-owned by default, which is the whole reason it is baked in
+# rather than bind-mounted. Pi loads it with `--extension` and runs it IN
+# PROCESS with the full extension API, so a worker able to write it would be a
+# worker able to make itself dispatch anything. A mount would carry that
+# guarantee in a `:ro` flag that is one character from being dropped; a root-owned
+# image layer carries it in the filesystem.
+#
+# `--no-extensions` stays on the pi argv alongside `--extension`: that flag
+# disables DISCOVERY only, so repo-supplied `.pi/extensions/*.ts` remains denied
+# (SRD §12.2) while this one path still loads.
+#
+# ADDING THIS COPY MEANT ADDING "pi-extensions/dispatch-trigger.ts" TO
+# `BUILD_CONTEXT_ASSETS` in src/container/image.ts — a stale copy of this file
+# stops triggering silently, which is worse than any loud failure.
+COPY --chmod=0444 docker/pi-extensions/dispatch-trigger.ts /opt/pifleet/dispatch-trigger.ts
+
 USER 10001:10001
 WORKDIR /workspace
 ENV PI_OFFLINE=0 \

@@ -33,6 +33,7 @@ import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Verdict } from "../contracts.ts";
 import { isAssistantEntry, type TreeEntry } from "../harvest/transcript.ts";
+import { AUTO_TRIGGER_TEXT } from "../util/pane-text.ts";
 
 // ---------------------------------------------------------------------------
 // 1. The launch shape
@@ -327,4 +328,51 @@ export function verdictForStopReason(stopReason: string | null): { verdict: Verd
     default:
       return { verdict: "success", reason: "transcript_quiesced" };
   }
+}
+
+/**
+ * Did this growth come from the STAGED task, or from the operator? (§9 Q1)
+ *
+ * ## The question this answers, and why it was unanswerable until now
+ *
+ * `tui_stage_triggered` has always carried the word APPROXIMATE, and §9 Q1
+ * states why: the only observable a supervisor has for "a turn started" is the
+ * transcript growing, and growth after a stage may equally be the operator
+ * typing something else into the same pane. Q1's own probe — *"stage a task, do
+ * not trigger it, type something else, and see whether any available signal
+ * separates the two"* — expected the answer to be no, and for the TYPED route
+ * it still is: an operator who pastes the brief produces a user message that
+ * looks like any other user message.
+ *
+ * **The auto-trigger route creates the signal Q1 went looking for.** The
+ * message that starts the turn is not typed by anyone; it is sent by pifleet's
+ * own extension, with text pifleet chose. So its presence in the new entries is
+ * evidence the growth is this stage's turn and not a person's.
+ *
+ * ## What a `true` and a `false` each mean, which are not symmetric
+ *
+ * `true` is a positive identification and is worth the same as one. `false` is
+ * the ABSENCE of evidence, not evidence of absence: it is what a typed-route
+ * stage returns, what an auto-trigger worker returns if the operator got a
+ * prompt in first, and what any worker returns whose extension did not load.
+ * The caller must therefore treat `false` exactly as it treated every growth
+ * before this function existed — as the upper bound §9 Q1 describes — and must
+ * not turn it into a claim that the operator interrupted.
+ *
+ * The scan is over ALL new entries rather than just the first, because
+ * `deliverAs: "followUp"` queues the message behind whatever the agent was
+ * already doing: the trigger can legitimately arrive second.
+ */
+export function attributedToStage(sinceBaseline: readonly TreeEntry[]): boolean {
+  for (const entry of sinceBaseline) {
+    if (entry.type !== "message") continue;
+    const message = (entry as { message?: { role?: unknown; content?: unknown } }).message;
+    if (message === undefined || message.role !== "user") continue;
+    // The content shape is Pi's, not ours, and it is a string in some versions
+    // and a content-block array in others. Stringifying covers both without
+    // asserting which — a narrower reader that guessed wrong would return
+    // `false` forever and silently reinstate the approximation this closes.
+    if (JSON.stringify(message.content ?? "").includes(AUTO_TRIGGER_TEXT)) return true;
+  }
+  return false;
 }

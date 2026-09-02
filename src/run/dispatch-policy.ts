@@ -76,6 +76,41 @@ import { TASK_POLICY_NONE } from "./task-policy.ts";
 export const DISPATCH_POLICY_MOUNT = "/policy/dispatch";
 
 /**
+ * Where the auto-trigger extension lives (§9 Q4). **Baked into the image, not
+ * mounted**, and the choice is the security argument rather than a packaging
+ * convenience.
+ *
+ * This file is EXECUTED IN-PROCESS by Pi with the full extension API — it can
+ * start turns, read the session, register tools. Every other input on this
+ * surface is data the worker reads; this one is code the worker runs. Two
+ * consequences follow, and they point the same way:
+ *
+ * 1. **A bind mount would put its host path in `docker run` argv**, which means
+ *    pifleet would have to locate its own source at run time. pifleet is
+ *    installed as a compiled binary as often as not, and a resolver that
+ *    guesses wrong mounts *nothing* — Docker then creates an empty directory at
+ *    the target and Pi refuses to start. Measured, not supposed: a scratch path
+ *    outside Docker Desktop's shared set produced exactly that on 2026-09-02.
+ * 2. **In the image it is root-owned and 0444**, unwritable by uid 10001 with
+ *    no mount flag to drop. `/policy/dispatch:ro` needs the verbgate's
+ *    integrity loop precisely because a missing `:ro` is one character; an
+ *    image layer has no such character.
+ *
+ * It is therefore NOT under `/policy/`, and the verbgate's loop is deliberately
+ * left at three files. That loop exists for host-mounted policy, where writability
+ * is a live risk; adding an image path to it would assert a guarantee the loop
+ * does not actually provide and dilute the three checks that matter.
+ *
+ * The `.ts` suffix is required rather than cosmetic: Pi resolves an
+ * `--extension` path by loading it as a module and its loader keys on the suffix.
+ *
+ * `THEMES_DIR` is the precedent for the whole shape, including its one real
+ * cost: the extension's version is the IMAGE's version, so changing this file
+ * changes nothing until the image is rebuilt.
+ */
+export const DISPATCH_TRIGGER_PATH = "/opt/pifleet/dispatch-trigger.ts";
+
+/**
  * The line that fences the machine-readable half off from the prompt.
  *
  * A CONSTANT and exported, because two readers have to agree on it and neither

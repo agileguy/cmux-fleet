@@ -80,14 +80,15 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-**There are zero `[ ]` criteria.** The block ISC-431..ISC-459, filed 2026-09-02 as the
+**There are zero `[ ]` criteria.** The block ISC-431..ISC-466, filed 2026-09-02 as the
 done-condition for dispatch to an adopted-terminal `tui` worker
-(`Docs/SRD-TUI-DISPATCH.md`), is graded: twenty-seven `[x]` and two `[~]`. Twenty-five were
+(`Docs/SRD-TUI-DISPATCH.md`), is graded: thirty-four `[x]` and two `[~]`. Twenty-five were
 that document's own §10 list verbatim; ISC-456..ISC-458 are the three it reserved and could
 not phrase until its four open decisions were taken and its three blocking questions
 answered; ISC-459 was filed out of the reserve at grading time, because the block had a
-criterion for `wait` and one for `report` and none for `status`. ISC-460 is the last
-unallocated reserve id.
+criterion for `wait` and one for `report` and none for `status`; **ISC-460..ISC-466 are the
+auto-trigger**, filed after §9 Q4 was probed and came back the opposite of what the SRD
+predicted. The reserve is now empty.
 
 **The two `[~]` are named rather than rounded up.** ISC-432 — a gated verb run by a
 backend-managed `tui` worker is ledgered under its dispatched task — has every link pinned
@@ -109,6 +110,31 @@ already staged and durable, so the route hands the operator the line and says wh
 not type it. `pifleet unstage --task <id>` releases a staged epoch without settling it —
 deliberately not `abort`, which on this mode issues `docker kill --signal=INT` and stops the
 worker.
+
+**Then the keystroke went too.** §9 Q4 asked whether a container-side trigger could start a
+Pi turn without writing to the surface, expected "no — a TTY has one owner", and was probed
+on 2026-09-02 rather than assumed. **The answer is yes.** Pi enumerates its own input
+sources as `"interactive" | "rpc" | "extension"`, and its extension API carries
+`sendUserMessage()`, documented "Always triggers a turn". pifleet now bakes one extension
+into the worker image at `/opt/pifleet/dispatch-trigger.ts`, root-owned 0444, loaded with an
+explicit `--extension` path — `--no-extensions` stays on the argv beside it, because that
+flag disables *discovery* only, so repo-supplied `.pi/extensions/*.ts` is still denied. The
+extension polls `/policy/dispatch` and calls `sendUserMessage` when a new `(task_id, epoch)`
+appears. **The prediction was wrong for an instructive reason: §162 governs who may write to
+the terminal, and this path never touches the terminal** — so §4.3's hazard is not mitigated,
+it is absent. The brief does not enter the composer, is not concatenated onto a half-typed
+line, and is not submitted by a key. `auto_trigger: false` restores the keypress for a seat
+that wants a human in the loop.
+
+Two things about it are worth the reader's attention because both were found by measurement
+rather than review. It **polls rather than using `fs.watch`**: Docker Desktop does not
+propagate host-side inotify into a container, so an event-driven build would pass every test
+written inside the container and never fire in production — a worker that waits forever,
+silently. And it requires **two identical consecutive reads** before firing: the in-place
+truncate that `/policy/dispatch` must use (a bind mount pins the inode) is not atomic, and a
+prefix ending at the separator is a complete valid header with an empty prompt. The first
+version of that guard claimed the JSON parse was enough; its own test refuted it on the
+first run.
 
 Before that block, there were also zero. The block ISC-401..ISC-430, filed 2026-09-01 as the
 done-condition for per-worker inference providers

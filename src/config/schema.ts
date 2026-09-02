@@ -163,6 +163,17 @@ export const RoleFieldsSchema = z
     no_context_files: z.boolean().optional(),
     /** Declares intent; enforced against `tools` in `superRefine` (ISC-59). */
     read_only: z.boolean().optional(),
+    /**
+     * Whether a staged brief starts its own turn with no keystroke (§9 Q4).
+     *
+     * `pane_mode: tui` only, and IGNORED rather than refused elsewhere. An rpc
+     * worker has no staged route — `dispatch` reaches it down the control
+     * socket — so the flag has nothing to switch, and refusing it would make a
+     * `defaults:` block unusable across a fleet of mixed modes, which is the
+     * common shape. `resolveWorker` defaults it TRUE; see `ResolvedWorker.autoTrigger`
+     * for why that default is a judgement and not a convention.
+     */
+    auto_trigger: z.boolean().optional(),
     /** Briefing fragment on disk, relative to the config file's directory. */
     append_system_prompt_file: shortStr.optional(),
     /** Inline briefing fragment. Fragments concatenate; the flag does not repeat. */

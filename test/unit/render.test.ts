@@ -1979,6 +1979,14 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       "--no-context-files",
       "--theme",
       "/opt/pifleet/themes",
+      // The auto-trigger extension (§9 Q4) — the SECOND thing that differs
+      // between the modes, and it sits beside `--no-extensions` on purpose.
+      // That flag disables DISCOVERY only ("explicit -e paths still work",
+      // measured against this image's `pi --help`), so §12.2's denial of
+      // repo-supplied `.pi/extensions/*.ts` is intact and exactly one
+      // extension — pifleet's, root-owned 0444 in the image — loads.
+      "--extension",
+      "/opt/pifleet/dispatch-trigger.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2019,7 +2027,7 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
    * id-derived by construction: `--name`, the worktree, the outbox, the
    * env-file, the pi-agent volume, and the briefing file.
    */
-  test("a tui worker's docker argv is the rpc one plus -t, minus --mode rpc, and nothing else", async () => {
+  test("a tui worker's docker argv is the rpc one plus -t and the extension, minus --mode rpc, and nothing else", async () => {
     const { rpc, tui } = await bothModes();
 
     const swapped = rpc.docker.map((a) => a.replaceAll("eng-1", "eng-2"));
@@ -2027,8 +2035,29 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       (a, i) => a !== "--mode" && swapped[i - 1] !== "--mode",
     );
     const expected = [...withoutMode.slice(0, 3), "-t", ...withoutMode.slice(3)];
+    /*
+     * The second difference, SPLICED IN rather than pinned as a literal.
+     *
+     * This test's force has always been that `expected` is DERIVED from the rpc
+     * argv, so anything that sneaks into the tui path shows up as a diff. §9 Q4
+     * adds a legitimate second difference, and the way to keep the force is to
+     * name it as a two-element insertion — not to relax the equality. A THIRD
+     * difference still fails, which is the whole point.
+     */
+    const at = expected.indexOf("--provider");
+    expect(at).toBeGreaterThan(-1);
+    expected.splice(at, 0, "--extension", "/opt/pifleet/dispatch-trigger.ts");
     expect(expected.slice(0, 5)).toEqual(["docker", "run", "-i", "-t", "--rm"]);
     expect(tui.docker).toEqual(expected);
+    /*
+     * …and there is no `-v` for it, which the equality above would ALSO satisfy
+     * if both argvs had grown one. The extension is baked into the image at
+     * 0444 root-owned, because Pi executes it in-process and a bind mount would
+     * carry that guarantee in a `:ro` flag one character from being dropped.
+     */
+    expect(tui.docker.filter((a) => a.includes("dispatch-trigger"))).toEqual([
+      "/opt/pifleet/dispatch-trigger.ts",
+    ]);
   });
 
   /**

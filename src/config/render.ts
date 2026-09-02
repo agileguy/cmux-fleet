@@ -47,7 +47,7 @@ import {
   type RunPaths,
   type WorkerPaths,
 } from "../run/paths.ts";
-import { DISPATCH_POLICY_MOUNT } from "../run/dispatch-policy.ts";
+import { DISPATCH_POLICY_MOUNT, DISPATCH_TRIGGER_PATH } from "../run/dispatch-policy.ts";
 import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
 import { workerEgressNetwork } from "../security/relay.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
@@ -185,6 +185,23 @@ export function buildPiArgv(w: ResolvedWorker, hasBriefing: boolean): string[] {
    * would otherwise cause is every worker in the fleet declining to start.
    */
   argv.push("--theme", THEMES_DIR);
+  /*
+   * The auto-trigger extension (§9 Q4) — the flag that removes the keystroke.
+   *
+   * `--no-extensions` is already on this argv and STAYS: measured against
+   * `pi --help` in this image, it disables *discovery* only — "explicit -e
+   * paths still work". So §12.2's denial of repo-supplied `.pi/extensions/*.ts`
+   * is untouched, and the only extension that loads is the one pifleet mounts
+   * read-only at a path the worker cannot write. The two flags are not in
+   * tension; they are the two halves of "run our extension and nobody else's".
+   *
+   * `tui` only, and the same `w.autoTrigger` predicate `buildDockerArgv` uses
+   * for the mount. An rpc worker is dispatched down the control socket and has
+   * no staged brief to trigger.
+   */
+  if (w.paneMode === "tui" && w.autoTrigger) {
+    argv.push("--extension", DISPATCH_TRIGGER_PATH);
+  }
   argv.push("--provider", w.provider);
   argv.push("--model", w.model);
   if (w.thinking !== undefined) argv.push("--thinking", w.thinking);

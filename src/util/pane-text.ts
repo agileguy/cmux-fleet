@@ -167,3 +167,34 @@ export function assertPaneKey(what: string, v: string): void {
  */
 export const STAGED_TRIGGER_LINE =
   "# pifleet: a task was staged for you — read /policy/dispatch and do what it says";
+
+/**
+ * What the auto-trigger extension sends when a staged brief appears (§9 Q4).
+ *
+ * ## Two copies, on purpose, with a test holding them equal
+ *
+ * The string also appears in `docker/pi-extensions/dispatch-trigger.ts`, which
+ * cannot import it: that file is copied into the image and executed by Pi
+ * inside a container where `src/` does not exist. So the agreement is the
+ * `THEMES_DIR` shape one level down —
+ *
+ *     AUTO_TRIGGER_TEXT (here)  ←test→  the extension's own literal  ←build→  the image
+ *
+ * — and `test/unit/auto-trigger.test.ts` asserts the first arrow by reading the
+ * extension off disk. **The drift this prevents is silent in the direction that
+ * matters.** If the extension's text changed and this did not, the extension
+ * would still fire, the turn would still start, and only `attributedToStage`
+ * below would quietly stop recognising it — so every staged turn would fall
+ * back to §9 Q1's approximation while every surface kept reporting success.
+ *
+ * ## Why it is not `STAGED_TRIGGER_LINE`
+ *
+ * That constant is shaped by a constraint that does not exist here — it must be
+ * inert if it lands in a SHELL, hence the leading `#` — and this text never
+ * touches a terminal, so the `#` would be a mitigation whose reason had
+ * evaporated. The two routes also have to stay TELLABLE APART in the
+ * transcript, which is precisely what `attributedToStage` is for; one shared
+ * string would collapse the distinction it exists to make.
+ */
+export const AUTO_TRIGGER_TEXT =
+  "pifleet auto-trigger: a task was staged for you. Read /policy/dispatch and do what it says.";
