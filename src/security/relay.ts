@@ -1498,8 +1498,22 @@ export async function egressBridgePlan(
       : providerRelayTarget(view, provider, { allowHostname: hosted });
     const resolvable =
       hosted && isIP(target.host) === 0 && target.host !== RELAY_DEFAULT_DIAL_HOST;
-    const address = resolvable
-      ? await stampUpstreamAddress(provider, target.host, lookup)
+    /*
+     * ONE RESOLUTION, and everything D9 needs is read off it.
+     *
+     * Three facts fall out of this single step and they must not be able to
+     * disagree: the address the relay DIALS (`target.host`), the name the
+     * egress policy JUDGES (`target.policyHost`, ISC-428), and the pair the
+     * ledger RECORDS (`upstreamResolution`). Held as one object rather than as
+     * three assignments, so there is no edit that sets one and forgets another
+     * — and the failure of forgetting is not cosmetic in any of the three
+     * directions. A `host` left as the name is §6.7's alias loop. A missing
+     * `policyHost` is every hosted relay refused at `default-deny`, which is
+     * what ISC-428 measured before this field existed. A missing record is a
+     * relay nobody can afterwards say what it dialled.
+     */
+    const resolution: RelayUpstreamResolution | null = resolvable
+      ? { name: target.host, address: await stampUpstreamAddress(provider, target.host, lookup) }
       : null;
     plan.push({
       provider,
@@ -1513,8 +1527,17 @@ export async function egressBridgePlan(
       // The LITERAL, never the name. `relayRunArgv` serializes this into
       // `PIFLEET_RELAY_TARGETS` verbatim, so a name surviving to here is a name
       // the relay would hand to Docker's embedded DNS (§6.7).
-      targets: [address === null ? target : { ...target, host: address }],
-      upstreamResolution: address === null ? null : { name: target.host, address },
+      // The LITERAL is dialled, the NAME is judged. `relayRunArgv` serializes
+      // this straight into `PIFLEET_RELAY_TARGETS`, so a name left in `host`
+      // is a name the relay hands to Docker's embedded DNS (§6.7); a name
+      // missing from `policyHost` is a relay `assertTargetsAllowed` refuses at
+      // `default-deny` (ISC-428). Both are set from `resolution` or neither is.
+      targets: [
+        resolution === null
+          ? target
+          : { ...target, host: resolution.address, policyHost: resolution.name },
+      ],
+      upstreamResolution: resolution,
       view,
     });
   }

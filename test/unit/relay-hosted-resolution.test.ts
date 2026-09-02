@@ -164,9 +164,24 @@ describe("ISC-426: the relay's target carries the resolved literal, never the na
     // The literal, stated as a PROPERTY and not only as a string match: a
     // future fixture change that swapped the address keeps this honest.
     expect(target.host).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
-    // …and the name is gone from it. See the header for why this is not vacuous.
+    // …and the name is gone from THE FIELD THAT IS DIALLED. See the header for
+    // why this is not vacuous.
     expect(target.host).not.toBe("ollama.com");
-    expect(JSON.stringify(target)).not.toContain("ollama.com");
+
+    /*
+     * The name is not gone from the TARGET, and this assertion used to say it
+     * was — wrongly, and it took ISC-428 landing to show it.
+     *
+     * `assertTargetsAllowed` judges `policyHost ?? host`, so the operator
+     * authorizes `{host: ollama.com, port: 443}` in `egress.allow` while the
+     * relay dials the address. A target that dropped the name would be refused
+     * at `default-deny` on every hosted fleet. So the criterion is not "the
+     * name appears nowhere" — that is the blunt version, and it is false — it
+     * is "the name is never the string the relay dials, and is exactly the
+     * string the policy judges".
+     */
+    expect(target.policyHost).toBe("ollama.com");
+    expect(target.policyHost).not.toBe(target.host);
 
     // THE ANTI-VACUITY CONTROL, in the same run: the very name that must not
     // appear in the target IS published as an alias on this bridge, which is
@@ -468,13 +483,22 @@ describe("ISC-426: the literal is what reaches the container's env", () => {
       name: string;
       host: string;
       port: number;
+      policyHost?: string;
     }>;
     expect(stamped).toHaveLength(1);
     expect(stamped[0]!.host).toBe(OLLAMA_ADDR);
     expect(stamped[0]!.name).toBe("ollama-cloud");
-    // The name must not survive into the container's env under ANY key — this
-    // is the string that would loop the relay into its own listener.
-    expect(row).not.toContain("ollama.com");
+    /*
+     * `host` is what the relay script dials, and the name must never be there:
+     * that is the string that resolves to the relay itself through Docker's
+     * embedded DNS and loops every connection into its own listener.
+     *
+     * `policyHost` beside it is the authorized name and is inert to the relay
+     * — the script reads `host` and `port` — so both travelling in one env var
+     * is the container documenting what it dials AND on whose authority.
+     */
+    expect(stamped[0]!.policyHost).toBe("ollama.com");
+    expect(stamped[0]!.host).not.toBe(stamped[0]!.policyHost);
 
     // ANTI-VACUITY: the name IS in this same argv, as a published alias, so
     // "absent from the targets row" is a statement about that row and not
