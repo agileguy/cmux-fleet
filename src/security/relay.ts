@@ -301,6 +301,49 @@ export interface RelayTarget {
   readonly host: string;
   readonly port: number;
   readonly name: string;
+  /**
+   * What the EGRESS POLICY judges this target by, when that is not the string
+   * it dials (D9, §6.7, ISC-428). Absent on every non-hosted target, where the
+   * two are one string and always were.
+   *
+   * ## Why the target needs two hosts at all
+   *
+   * For a `hosted: true` provider, D9 splits a field that used to be one thing
+   * into two. `host` is the ADDRESS, resolved on the Docker host at `up` and
+   * stamped here, because the relay must dial an address: it resolves through
+   * Docker's embedded DNS, and a name matching an alias the relay itself
+   * publishes resolves TO THE RELAY, looping every forwarded connection into
+   * its own listener. `policyHost` is the NAME the operator wrote in
+   * `egress.allow`, because a vendor behind a global load balancer has no
+   * published range and authorizing today's A record is a pin that expires.
+   *
+   * §6.7 anticipated this as *"a change of input, not of mechanism"*, and that
+   * is right about `egress.ts` — `normalizeHost` and `decide` already match on
+   * names and neither changed. It was incomplete about the target: the changed
+   * input had to become REPRESENTABLE first, and a shape with one host cannot
+   * say "dial this, judge that".
+   *
+   * ## Optional, and never a fallback
+   *
+   * Absent means the pre-D9 rule, unchanged: `host` is judged. That keeps the
+   * stronger property on the default path without an edit at any existing call
+   * site — the same reason `relayUpstreamError`'s `allowHostname` defaults off.
+   *
+   * PRESENT means the policy reads THIS AND ONLY THIS. It must never widen to
+   * "match either form": an `egress.allow` naming the resolved literal has to
+   * be refused even though that literal is exactly what gets dialled, because
+   * D9's accepted cost is bounded by the operator authorizing a NAME. Matching
+   * either would turn that into "the name, or whatever it currently points at",
+   * which is a different and unstated bargain. `test/unit/
+   * d9-egress-name-authorization.test.ts` pins the refusal.
+   *
+   * Deliberately NOT part of `formatRelayTarget`, and so not part of the drift
+   * key: drift asks "would adopting this running relay serve the current
+   * config", and that is a question about what it FORWARDS. Two relays dialling
+   * the same address are the same relay. The authorization is re-checked from
+   * config on every `up` regardless, so it cannot go stale by being omitted.
+   */
+  readonly policyHost?: string;
 }
 
 /**
@@ -1329,16 +1372,65 @@ export function relayGatePolicy(cfg: RelayConfigView): EgressPolicy {
  * the Docker host at the listen port — `relayGatePolicy`'s rule 1. See that
  * function for why that is bounded by measurement (SRD §12.8) rather than by
  * assumption.
+ *
+ * ## What D9 changes here, and what it costs (§6.7, ISC-428)
+ *
+ * For a `hosted: true` provider the thing DIALLED and the thing AUTHORIZED stop
+ * being the same string: `up` resolves the name on the Docker host and stamps
+ * the literal into `target.host`, while the operator writes the NAME in
+ * `egress.allow`. So this loop reads `policyHost` where one is present.
+ *
+ * §6.7 called that *"a change of input, not of mechanism"*. Correct about the
+ * mechanism — `normalizeHost` and `decide` were already name-matchers and did
+ * not change — and incomplete about the input, which had to become
+ * representable before it could be changed: with one host per target, this
+ * function compared the resolved literal against a name-carrying allowlist and
+ * refused the relay at `default-deny`. D9 did not work at all until the target
+ * could carry both.
+ *
+ * **The property this gate holds for a hosted target is therefore weaker, in a
+ * way worth stating rather than burying.** It is no longer *"the operator
+ * authorized this exact address"* but *"the operator authorized this name, and
+ * the fleet recorded which address it resolved to at launch"*. Between the
+ * check and the dial there is one resolution, performed once and reused, so the
+ * window is small — but a hostile or compromised resolver moves that relay's
+ * dial target without `egress.allow` changing.
+ *
+ * **Two things bound it.** It cannot spread: ISC-427 keeps a non-hosted block
+ * refusing a hostname at `config validate`, so an operator cannot opt their own
+ * oMLX into this by editing a field. And it cannot widen: an `egress.allow`
+ * naming the resolved LITERAL does not admit a target whose `policyHost` is
+ * set, even though that literal is precisely what gets dialled — the
+ * authorization means the name, or it means nothing in particular.
  */
 export function assertTargetsAllowed(
   targets: readonly RelayTarget[],
   policy: EgressPolicy,
 ): void {
   for (const t of targets) {
-    const verdict = decide(t.host, t.port, policy);
+    // D9 (§6.7): the operator authorizes a NAME and the relay dials an ADDRESS,
+    // so the policy reads `policyHost` where one exists. `??` and not `||`: the
+    // fallback must trigger on ABSENCE, never on emptiness. `makeRule` refuses
+    // an unmatchable host, so `""` cannot come from config — but a future
+    // producer that stamped one would, under `||`, silently revert this target
+    // to being judged on the address it dials, which is the exact weakening the
+    // third clause of ISC-428 exists to refuse.
+    const judged = t.policyHost ?? t.host;
+    const verdict = decide(judged, t.port, policy);
     if (!verdict.allowed) {
+      // Name what was JUDGED, not only what is dialled. When D9 has split the
+      // two, a message showing only the address sends the operator to add that
+      // address to `egress.allow` — an entry that can never match, because the
+      // comparison above reads the name. They would then get this identical
+      // message a second time, on the one path a fleet cannot start without.
+      const dialled = `${t.host}:${t.port}`;
+      const via =
+        t.policyHost === undefined
+          ? dialled
+          : `${dialled} (authorized as ${JSON.stringify(t.policyHost)}, which is what the ` +
+            `policy compares — an egress.allow entry naming the address will NOT match)`;
       throw new Error(
-        `relay: refusing to forward ${t.name} -> ${t.host}:${t.port} — the egress policy denies ` +
+        `relay: refusing to forward ${t.name} -> ${via} — the egress policy denies ` +
           `it (rule: ${verdict.rule}). The relay may only carry destinations decide() allows; ` +
           `add an explicit egress.allow entry for it, or correct llm.base_url.`,
       );
