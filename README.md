@@ -80,9 +80,9 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-Four criteria are unattempted `[ ]` — ISC-419, ISC-421, ISC-423 and ISC-429, from the
-block ISC-401..ISC-429 filed 2026-09-01 as the done-condition for per-worker inference
-providers (`Docs/SRD-INFERENCE-PROVIDERS.md`). Twenty-five of that block are answered: ISC-401 and ISC-406 closed with the two latent
+Three criteria are unattempted `[ ]` — ISC-421, ISC-429 and ISC-430, from the
+block ISC-401..ISC-430 filed 2026-09-01 as the done-condition for per-worker inference
+providers (`Docs/SRD-INFERENCE-PROVIDERS.md`). Twenty-seven of that block are answered: ISC-401 and ISC-406 closed with the two latent
 defects they name, Phase 2 closed ISC-402, ISC-403, ISC-404, ISC-405 and ISC-420 when the
 `llm.providers` map landed and `resolveWorker` began reading it, Phase 3 closed ISC-407,
 ISC-408 and ISC-422 by moving the provider credential out of the environment entirely — it is
@@ -95,8 +95,14 @@ would have looked like robustness and quietly restored the defect ISC-406 had ju
 first day the pointer failed to arrive, a worker also holding `OMLX_API_KEY` through `secrets:`
 would have authenticated to its configured provider with the LOCAL credential — a wrong-credential
 401 strictly harder to diagnose than the empty key it replaced. ISC-424, filed during Phase 1's
-review, was graded `[~]` for half a day and closed the same way. Every criterion filed
-before the block has been attempted. Nine are graded `[~]`
+review, was graded `[~]` for half a day and closed the same way. Phase 5 closed ISC-426..ISC-428 by
+resolving a hosted provider's `relay_upstream` hostname once, at `up`, so the relay dials an address
+while the egress policy still judges the NAME; Phase 6 closed ISC-414..ISC-417 by making a worker
+whose context leaves the machine loud rather than refused — `up` prints a disclosure banner and the
+launch record carries the same set, with a mismatch in EITHER direction failing; and Phase 7 closed
+ISC-419 and ISC-423, giving the tool-call probe a per-provider deadline and proving the headless
+acceptance suite still passes with every credential-shaped variable stripped from its environment.
+Every criterion filed before the block has been attempted. Nine are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped

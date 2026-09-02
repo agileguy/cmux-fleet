@@ -584,6 +584,7 @@ declares it, and every refusal in §7 keys on the declaration.
 | `models_allowlist` | **per provider** | §2.6 — the pair must be the unit of validation |
 | `hosted` | **per provider** | new |
 | `tag_style` | **per provider** | D12 |
+| `probe_timeout_ms` | **per provider** | D16 — how long to wait is a measured property of the wire, not a fleet policy. Contrast `require_native_tool_calls`: *whether* to refuse a prose-only model is the same answer whichever endpoint serves it |
 | `provider` | fleet | the default; overridable per worker by prefix, unchanged |
 | `model`, `thinking` | fleet default | already overridable at role and worker level |
 | `require_native_tool_calls` | **fleet** | it is a statement about what the fleet will tolerate, not about an endpoint. Per-provider would let a hosted provider quietly opt out of the gate §5.9 calls mandatory |
