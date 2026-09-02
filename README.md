@@ -80,9 +80,10 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-Three criteria are unattempted `[ ]` — ISC-421, ISC-429 and ISC-430, from the
-block ISC-401..ISC-430 filed 2026-09-01 as the done-condition for per-worker inference
-providers (`Docs/SRD-INFERENCE-PROVIDERS.md`). Twenty-seven of that block are answered: ISC-401 and ISC-406 closed with the two latent
+There are zero `[ ]` criteria. The block ISC-401..ISC-430, filed 2026-09-01 as the
+done-condition for per-worker inference providers
+(`Docs/SRD-INFERENCE-PROVIDERS.md`), is closed in full — all thirty, including the two
+filed out of its own phases' work: ISC-401 and ISC-406 closed with the two latent
 defects they name, Phase 2 closed ISC-402, ISC-403, ISC-404, ISC-405 and ISC-420 when the
 `llm.providers` map landed and `resolveWorker` began reading it, Phase 3 closed ISC-407,
 ISC-408 and ISC-422 by moving the provider credential out of the environment entirely — it is
@@ -101,7 +102,11 @@ while the egress policy still judges the NAME; Phase 6 closed ISC-414..ISC-417 b
 whose context leaves the machine loud rather than refused — `up` prints a disclosure banner and the
 launch record carries the same set, with a mismatch in EITHER direction failing; and Phase 7 closed
 ISC-419 and ISC-423, giving the tool-call probe a per-provider deadline and proving the headless
-acceptance suite still passes with every credential-shaped variable stripped from its environment.
+acceptance suite still passes with every credential-shaped variable stripped from its environment;
+and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 key now joins the
+harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
+shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
+states the dependency it actually has instead of one it merely appeared to.
 Every criterion filed before the block has been attempted. Nine are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
