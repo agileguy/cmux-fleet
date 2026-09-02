@@ -1359,7 +1359,7 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
   "proc_started": "Sat Jul 26 14:02:11 2026",
   "container": {"name": "pifleet-…-eng-1", "id": "3f9a…", "image": "pifleet/pi-worker:0.79.6-node-a1b2"},
   "phase": "busy",
-  "epoch": 1, "completed_epochs": [], "task_id": "T-004",
+  "epoch": 1, "completed_epochs": [], "task_id": "T-004", "staged_task_id": null,
   "session_path": "/Users/dan/.pifleet/runs/<run-id>/sessions/2026-07-26T14-02-19-530Z_<run-id>--eng-1.jsonl",
   "session_present": true,
   "transcript_activity": {"entries": 1462, "last_growth_at": "2026-07-26T14:09:05Z"},
@@ -1375,7 +1375,7 @@ A second hazard: `prompt` **acks immediately and is not awaited**, and a failure
 }
 ```
 
-`session_path` is **recorded from `get_state`**, never computed. `pgid` is recorded so the kill ladder can signal the process group. `exit` distinguishes SIGKILL from a clean exit — necessary because Pi exits 0 in every case. Presentation identifiers (`surface_id`, `workspace_id`) live in a sibling `presentation.json` so a lost cmux cannot invalidate control state.
+`session_path` is **recorded from `get_state`**, never computed. `pgid` is recorded so the kill ladder can signal the process group. `exit` distinguishes SIGKILL from a clean exit — necessary because Pi exits 0 in every case. Presentation identifiers (`surface_id`, `workspace_id`) live in a sibling `presentation.json` so a lost cmux cannot invalidate control state. `staged_task_id` is the STAGED-dispatch route's field (SRD-TUI-DISPATCH §6.5) and is deliberately not a `phase` member: a staged task is durable but has not begun, so `phase` stays `idle` — the truth about the agent — while this names the task the allocator is holding the worker for.
 
 > **Added and corrected (2026-08-30, documentation audit) — the block above is a true SUBSET of
 > `WorkerStateSchema`, and the two omissions are both load-bearing. The sibling file's field names
@@ -1656,7 +1656,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 
 **Exit codes** — a strict severity ladder, highest wins, because one `wait --all` can legitimately have a timeout *and* a budget trip *and* a failed task:
 
-`8` internal error > `2` usage/config > `3` backend unavailable > `5` budget ceiling > `6` worker died > `4` timeout > `7` partial (some `failed`/`blocked`/`aborted`) > `0` success.
+`8` internal error > `2` usage/config > `3` backend unavailable > `5` budget ceiling > `6` worker died > `4` timeout > `9` staged, never triggered > `7` partial (some `failed`/`blocked`/`aborted`) > `0` success.
 
 > **Erratum (2026-08-30, documentation audit) — `8` was missing from this ladder, and it sits at the
 > TOP of it.**

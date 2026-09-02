@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { CliError } from "../index.ts";
@@ -87,6 +87,66 @@ import { runSchedule, type DispatchAnswer, type SchedulerIO } from "../../orches
  *
  * @throws {MalformedEpochError} on a negative or fractional `epoch`.
  */
+/**
+ * The attempt id for a task file that does not name one (SRD-TUI-DISPATCH §9 Q9).
+ *
+ * ## What an attempt id is FOR, which decides how it must be derived
+ *
+ * `EpochManager` dedups on `(task_id, attempt_id)`: a second allocate under a
+ * known pair returns the ORIGINAL epoch and runs nothing. That makes the
+ * attempt id the difference between "the caller lost my ack, send it again"
+ * and "this is new work" — and a value that is fresh every time answers the
+ * second for a caller that meant the first.
+ *
+ * This used to be `randomUUID()`. A random id can never replay, so the dedup
+ * machinery was fully built, fully tested, and unreachable from the ordinary
+ * `pifleet dispatch <file>` path: re-dispatching the same file allocated a new
+ * epoch and RAN THE TASK AGAIN. `--auto` already knew better and used
+ * `auto:${spec.id}`, and its comment states the property as desirable — "a
+ * re-run of the same list against the same run replays completed answers
+ * instead of re-executing work (ISC-85)" — so the single-task path was the
+ * odd one out rather than this being a new idea.
+ *
+ * ## The CONTENT, and specifically the raw bytes
+ *
+ * An edited file is different work and must allocate fresh; an unedited file
+ * is the same work and must replay. Hashing the file's raw text says exactly
+ * that. Hashing a NORMALIZED form (parsed and re-serialized) was considered
+ * and rejected: it would make two files that differ only in key order or
+ * whitespace share an id, which is right, and it would also require deciding
+ * what normalization means for every future envelope field — a decision that,
+ * got wrong once, makes two genuinely different briefs collide and hands a
+ * worker the wrong one under a replayed epoch.
+ *
+ * **The error directions are not symmetric, and that is the whole argument.**
+ * Hashing raw bytes can only over-allocate: a cosmetic edit yields a new id,
+ * and a new id against a held worker is REFUSED `busy` and reported. Hashing
+ * too loosely can under-allocate: a changed brief replays the old epoch, the
+ * drop file is deliberately not rewritten on replay, and the operator is told
+ * it worked. One failure is a visible refusal; the other is a silent lie about
+ * which brief the worker holds.
+ *
+ * ## This changes the rpc route too, deliberately
+ *
+ * Both routes take their attempt id from here, and they must: an id that
+ * depended on which control plane a worker happened to have would mean the
+ * same file dispatched two ways dedups differently, which is a fact about
+ * pifleet's plumbing leaking into a claim about the operator's work. The
+ * behaviour change for the rpc route is that re-dispatching an unmodified task
+ * file now REPLAYS instead of re-running. An operator who wants a genuine
+ * re-run edits `attempt` in the file — which is what that field is named for,
+ * and which changes the content and therefore this id — or names an
+ * `attempt_id` outright, which still wins over this derivation.
+ *
+ * 16 hex characters of SHA-256. Long enough that a collision is not a thing
+ * that happens to a directory of task files, short enough to read in a ledger
+ * row, and prefixed so it is never mistaken for `auto:` or for an id an
+ * operator wrote by hand.
+ */
+export function attemptIdFor(rawTaskFile: string): string {
+  return `file:${createHash("sha256").update(rawTaskFile).digest("hex").slice(0, 16)}`;
+}
+
 export function requestedEpochFrom(raw: unknown): number | null {
   if (typeof raw !== "number") return null;
   assertEpochWellFormed(raw);
@@ -449,6 +509,16 @@ async function sendViaPane(args: {
   run: RunPaths;
   worker: string;
   envelope: TaskEnvelope;
+  /**
+   * Carried through unused by the pane route and REQUIRED by the staged one.
+   *
+   * The two routes fork below, and only one of them has an allocator to dedup
+   * against — the backend-managed pane route has no epoch at all, which is
+   * ISC-84's row. Threading it to the fork rather than into `sendViaPane`'s own
+   * body is what stops the staged route re-deriving it; see `attemptId` on
+   * `stageForAdoptedTerminal`.
+   */
+  attemptId: string;
   ledger: LedgerWriter;
 }): Promise<SendOutcome> {
   const { run, worker, envelope } = args;
@@ -771,7 +841,7 @@ export async function sendTaskEnvelope(args: {
     );
   }
   if (route.kind === "pane") {
-    return sendViaPane({ run, worker, envelope, ledger: args.ledger });
+    return sendViaPane({ run, worker, envelope, attemptId, ledger: args.ledger });
   }
 
   let reply: Record<string, unknown>;
@@ -872,7 +942,7 @@ export function register(program: Command): void {
         const taskId = typeof partial["task_id"] === "string" ? partial["task_id"] : "";
         if (taskId === "") throw new CliError("task file needs a task_id", EXIT.USAGE);
         const attemptId =
-          typeof partial["attempt_id"] === "string" ? partial["attempt_id"] : randomUUID();
+          typeof partial["attempt_id"] === "string" ? partial["attempt_id"] : attemptIdFor(raw);
 
         const ledger = new LedgerWriter(run, `cli-dispatch-${process.pid}`);
         const outcome = await sendTaskEnvelope({
@@ -1611,11 +1681,26 @@ async function stageForAdoptedTerminal(args: {
   run: RunPaths;
   worker: string;
   envelope: TaskEnvelope;
+  /**
+   * The CALLER's attempt id, threaded rather than re-derived (ISC-458).
+   *
+   * This route used to send `String(envelope.attempt)`, which is `1` for every
+   * fresh dispatch because `attempt` DEFAULTS to 1 a few hundred lines up. Two
+   * different task files sharing a `task_id` therefore shared an attempt key,
+   * and the second one REPLAYED the first: same epoch, no rewrite of the drop,
+   * `replayed: true` reported as success. The operator edits the brief, stages
+   * it, is told it worked, and the worker is still holding the old one.
+   *
+   * That is the exact hazard §9 Q9 was answered to prevent, and it was
+   * reintroduced one line below the answer by re-deriving a value that was
+   * already in scope. Re-derivation is the defect; the parameter is the fix.
+   */
+  attemptId: string;
   ledger: LedgerWriter;
   wp: WorkerPaths;
   presentation: Presentation;
 }): Promise<SendOutcome> {
-  const { run, worker, envelope, wp, presentation } = args;
+  const { run, worker, envelope, attemptId, wp, presentation } = args;
 
   /*
    * STEP 1. The terminal, before the epoch.
@@ -1636,7 +1721,7 @@ async function stageForAdoptedTerminal(args: {
   const staged = (await controlCall(run, worker, {
     cmd: "stage",
     envelope,
-    attempt_id: String(envelope.attempt),
+    attempt_id: attemptId,
     requested_epoch: null,
   })) as { accepted: boolean; epoch?: number; replayed?: boolean; reason?: string; error?: string };
 

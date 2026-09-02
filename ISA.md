@@ -829,16 +829,43 @@ the root-cause classification; this table is the index.
   design as specified"*. The instruction was to implement it. Deferring the four would have shipped
   nothing; deferring Q8 would have shipped a worker that one mis-stage takes out of service.
 
-  **D2 = NO SURFACE ID, as recommended.** `docker attach --detach-keys=ctrl-]` means detach is one
-  keypress pifleet cannot observe, after which `paneKeystrokes` would type a markdown brief LINE BY
-  LINE into a host shell — outside every containment boundary, with no audit row and exit code 0.
-  Every guard available for it is weaker than the harm, and it is additionally a cmux-only design
-  wearing a general name: an adopted terminal in Terminal.app or over ssh yields no id at all, so
-  half the mode's users would get a refusal whose sentence says "no surface id" while the other half
-  get typing. That is ERRATUM 4's *"headless had been standing in for no pane exists"* conflation,
-  one level down. **The cost is real and is the operator's:** they lose the thing they did by hand
-  on 2026-09-02, work arriving in the pane without them typing it. §9 Q4 is the path that might
-  return it without the hazard, and it stays open.
+  **D2 = REVERSED BY THE OWNER, and the reversal produced a better shape than either arm the SRD
+  offered.** The document framed the choice as REFUSE (stage, and a person triggers by hand) or TYPE
+  (send the whole brief through `paneKeystrokes`), recommended the first, and this entry originally
+  recorded it as taken at that recommendation. The owner reversed it on 2026-09-02, with the
+  instruction that the trigger be automated: *"I want this automated though by that I mean you will
+  do it."*
+
+  **The reversal does not reinstate the hazard the recommendation was about**, because the two halves
+  of a dispatch separate. The brief still travels through the read-only file plane (`/policy/dispatch`,
+  D4) and never goes near a terminal; the only thing typed is ONE line — `# pifleet: a task was staged
+  for you — read /policy/dispatch and do what it says`. So §4.3's exposure shrinks from a markdown
+  document executed line by line in a host shell after an unobservable detach, to a single line that
+  CANNOT EXECUTE: a leading `#` is a comment in `bash`/`sh` and a parse error in interactive `zsh`
+  (`INTERACTIVE_COMMENTS` is off by default), and the line carries no `;`, `&`, `|`, backtick, `$(`,
+  `>`, `<` or newline — none of which is needed to say "read this file". **That is a mitigation and is
+  recorded as one, not as a proof.** Pinned by `test/unit/staged-trigger.test.ts`: the trigger is one
+  line, it begins with the marker, the rendered prompt appears in no argument to any backend call, and
+  `sendStagedTrigger` never reaches `paneKeystrokes`.
+
+  **THE ORIGINAL ARGUMENT IS KEPT HERE AS THE RECORD, because it remains correct about the arm it was
+  arguing against** — typing the BRIEF, which is not what shipped: *"`docker attach
+  --detach-keys=ctrl-]` means detach is one keypress pifleet cannot observe, after which
+  `paneKeystrokes` would type a markdown brief LINE BY LINE into a host shell — outside every
+  containment boundary, with no audit row and exit code 0. Every guard available for it is weaker than
+  the harm."*
+
+  **The cmux-only objection stands, and is answered by a REPORTED OUTCOME rather than a refusal.** A
+  Terminal.app window, an ssh session or a bare tmux pane announces no surface id. That is discovered
+  AFTER the task is already staged and durable, so the route hands the operator the line and says why
+  it could not type it — a first-class answer, not an error. A design that only WORKS under cmux must
+  not become one that only RUNS under cmux, which is ERRATUM 4's *"headless had been standing in for
+  no pane exists"* conflation one level down.
+
+  **One consequence the reversal forced, and it is a SECOND field rather than a widened one.**
+  `presentation.backend` says what the RUN's presentation backend is — `headless`, for an adopted
+  terminal — and the dispatch guard needs a different fact: who owns `surface_ref`. `surface_backend`
+  is that second field. One value answering two questions cannot be corrected one question at a time.
 
   **D6 = A REAL EPOCH, as recommended, through a new `stage` verb.** The refusal it routes around is
   spelled `if (client === null)` PRECISELY so that deleting it fails to compile, so the verb is added
@@ -853,9 +880,13 @@ the root-cause classification; this table is the index.
   discarded; `{pid, started}` makes "this terminal is still the worker's" checkable at the same
   strength as every other liveness claim in the fleet. **It is a PARTIAL guard and must not be
   described as more:** it catches a clean detach and a crashed terminal, and misses a re-attach from
-  elsewhere, a pane respawned onto a different program, and a second concurrent attach. Under D2 it
-  is a courtesy. Under a reversal of D2 it would be the primary safety control and is not strong
-  enough to be one — which is itself an argument for D2.
+  elsewhere, a pane respawned onto a different program, and a second concurrent attach. **This entry
+  originally closed "under a reversal of D2 it would be the primary safety control and is not strong
+  enough to be one — which is itself an argument for D2." D2 was reversed and that objection does not
+  land, for a reason worth stating rather than dropping the sentence over:** the reversal did not
+  promote this guard, because what protects the operator's shell is that the brief never reaches it
+  and the one line that does cannot execute. The attach guard stays what it was — a check that the
+  terminal is still the worker's, worth having and not load-bearing.
 
   **D12 = DEFECT B CLOSES AS A CONSEQUENCE, as recommended.** A settle with no epoch has nothing to
   write a task record under, and `wait` reads task records. Repairing it independently means
@@ -881,16 +912,45 @@ the root-cause classification; this table is the index.
   a precision it does not have. Starting it at the stage was rejected on the SRD's own example: a
   20-minute task staged before lunch would be `timed_out` before it begins.
 
-  **Q9 (`attempt_id`) = ANSWERED: derived from the task file's CONTENT.** The single-task `dispatch`
-  path falls back to `randomUUID()`, which would give the staged route no dedup at all — ISC-440
-  would fail while ISC-439 passed, which is the shape of a feature that looks delivered. Content
-  rather than `(task_id, run_id)` because an EDITED file is a different task and must allocate
-  fresh; `--auto`'s `auto:${spec.id}` is the same idea keyed on the list entry.
+  **Q9 (`attempt_id`) = ANSWERED: derived from the task file's CONTENT.** Content rather than
+  `(task_id, run_id)` because an EDITED file is a different task and must allocate fresh;
+  `--auto`'s `auto:${spec.id}` is the same idea keyed on the list entry.
+
+  **THIS ENTRY WAS WRITTEN BEFORE THE CODE MATCHED IT, and the gap is recorded rather than quietly
+  closed, because the gap is the more useful finding.** When this paragraph was first written the
+  build did neither half of what it claims. `dispatch`'s single-task path still fell back to
+  `randomUUID()` — so `EpochManager`'s dedup, fully built and fully tested, was unreachable from
+  `pifleet dispatch <file>` and a re-dispatch ran the task twice. **And the staged route was worse
+  than that**: it ignored the caller's attempt id and sent `String(envelope.attempt)`, where
+  `attempt` DEFAULTS to `1` — so every fresh staged dispatch used the key `(task_id, "1")`, two
+  DIFFERENT briefs under one task id collided, and the second REPLAYED the first: same epoch, drop
+  file deliberately not rewritten on a replay, `replayed: true` reported as success. The operator
+  edits the brief, stages it, is told it worked, and the worker is still holding the old one.
+
+  **A missing dedup runs work twice and the transcript shows it; a too-coarse dedup substitutes one
+  brief for another and every surface reports success.** The second is the failure worth the
+  criterion, and it was introduced one line below the answer, by re-deriving a value that was
+  already in scope — `attemptId` was being spread into the staged route's arguments the whole time
+  and merely was not declared on its parameter type. Re-derivation was the defect; the parameter is
+  the fix. Both halves closed 2026-09-02 during ISC-458's grading, by `attemptIdFor` (16 hex of
+  SHA-256 over the file's raw bytes, prefixed `file:`) and by threading `attemptId` through
+  `sendViaPane` to the fork. **Raw bytes rather than a normalized parse, and the error directions
+  are the argument:** hashing raw bytes can only OVER-allocate, and a fresh id against a held worker
+  is refused `busy` and reported; hashing too loosely UNDER-allocates, and that is the silent
+  substitution above. One failure is a visible refusal, the other is a lie.
+
+  **It changes the rpc route too, deliberately.** An id that depended on which control plane a
+  worker happened to have would mean the same file dispatched two ways dedups differently — pifleet's
+  plumbing leaking into a claim about the operator's work. So re-dispatching an unmodified task file
+  now REPLAYS instead of re-running; an operator who wants a genuine re-run edits `attempt` in the
+  file, which is what that field is named for and which changes the content and therefore the id.
 
   **NOT TAKEN, and left where the SRD left them:** Q2 (enumerating a container's attached clients),
   Q3 (surface-id stability across a workspace rebuild), Q4 (a container-side trigger — the
   highest-value question in the table), Q5 (`paneKeystrokes` against a shell), Q7 (the audit file's
-  provenance). None blocks the build; Q4 blocks the removal of D2's cost.
+  provenance). None blocks the build. **Q4 is now the only remaining path to a dispatch that touches
+  no terminal at all** — the reversal of D2 left exactly one typed line, and a container-side trigger
+  would remove it. The owner deferred the probe deliberately: *"Not now — finish the build first."*
 
 - **2026-08-24 — `export_html` STAGES INSIDE THE RUN DIRECTORY and the CLI places the file; it does
   NOT gain an allowlist of permitted roots (ISC-276).** Owner ruling, taken because ISC-276's own note
@@ -3945,7 +4005,7 @@ for want of one, and a block that inherited that wall would be a block that coul
 - [ ] ISC-433: `skills/pifleet-worker/SKILL.md` names the fenced `## This task` block as the source of `<task-id>`, and says the `#` heading is NOT it. *Probe: render a prompt whose `title` differs from its `task_id` and assert the id is present in a block the skill points at.* (Defect C — a title defaults to its id, so the old instruction was correct until someone named a task.)
 - [ ] ISC-434: `dispatch` at an adopted-terminal worker exits 0 and writes the inbox record, `/policy/task` and the drop file. *Probe: all three by content; a missing one fails.*
 - [ ] ISC-435: the staged prompt is byte-identical to what the rpc route renders for the same envelope. *Probe: render both and compare; a route-specific abbreviation fails.*
-- [ ] ISC-436: Anti: staging types nothing. *Probe: no backend method is called on the staged route — assert on a backend double that records every call, AND assert the CLI never loads a pane backend at all. This is D8, and it is the criterion that catches a future edit re-opening §4.3.*
+- [ ] ISC-436: Anti: the staged route types the TRIGGER and nothing else — the BRIEF never reaches a terminal. *Probe: `sendStagedTrigger` sends exactly `STAGED_TRIGGER_LINE` and one submit key and never reaches `paneKeystrokes`; the rendered prompt appears in no argument to any backend call, searched over the PROGRAM with comments stripped rather than over the source text; and the trigger is ONE line beginning with `#`, carrying no `;`, `&`, `|`, backtick, `$(`, `>`, `<` or newline.* **RE-FILED 2026-09-02, the same day it was filed, and the original wording is kept here because losing it would hide a reversal.** It read *"Anti: staging types nothing"*, which was the correct anti-criterion under D2 AS DRAFTED and became FALSE BY DESIGN when the owner reversed D2 and asked for the trigger to be automated. A criterion that is false by design is worse than a missing one: it stays red forever while describing a property nobody intends to have, and the first person to read it concludes the build is broken. **The property that actually carries §4.3's safety argument survived the reversal intact** — what made typing dangerous was typing the BRIEF, and the brief still travels the read-only file plane. So the anti-criterion is re-pointed at the surviving property rather than deleted, which keeps a guard on the edit that would re-open §4.3: sending the prompt through the pane.
 - [ ] ISC-437: the drop file is mode `0444`, mounted `:ro`, and rewritten IN PLACE. *Probe: the inode is unchanged across two stages; a rename fails.*
 - [ ] ISC-438: the verbgate refuses every verb when the drop file is writable. *Probe: chmod it and assert exit 78.*
 - [ ] ISC-439: a staged dispatch allocates an epoch >= 1, and the SAME epoch appears in the inbox record, the drop file and the ledger row. *Probe: all four values equal; a 0 anywhere fails.* (D6 replaces a vacuously-passing correlation with a real one, which is also the first way this route can fail it.)

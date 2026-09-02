@@ -297,6 +297,43 @@ export const WorkerStateSchema = z.object({
   completed_epochs: z.array(z.number().int().nonnegative()).max(MAX_ITEMS).default([]),
   task_id: shortStr.nullable().default(null),
   /**
+   * The task that is STAGED and has not been TRIGGERED — a dispatch whose
+   * identity is durable and whose turn has not begun (SRD-TUI-DISPATCH §6.5).
+   *
+   * ## Why this is a new field and not a new `phase`
+   *
+   * §6.5 asks for `phase` to stay `idle` with the staged id beside it, and the
+   * argument is `transcript_activity`'s own, three fields below: `phase` and
+   * `task_id` describe an EPOCH, and the console defect that field was added
+   * for was a status pane reporting `idle` about a worker that was visibly
+   * mid-turn. The staged route creates the mirror-image hazard. A staged
+   * worker is not running anything — nobody has pressed the key — so writing
+   * `busy` would put a liveness claim on disk that no observation supports,
+   * and `status` would report a turn in progress for however long the operator
+   * takes to come back from lunch. `phase: "idle"` is the truth about the
+   * agent; this field is the truth about the allocator.
+   *
+   * **The two facts genuinely differ, which is what makes one field
+   * insufficient.** The worker cannot take another task — `EpochManager`
+   * refuses `busy` while an epoch is live — and it is also not doing anything.
+   * A single enum has to pick one of those to state and one to imply, and
+   * whichever it picks, a reader acting on the other is wrong. So `phase`
+   * keeps its meaning and this carries the rest.
+   *
+   * Cleared at three sites, and each is a different way a stage can end: the
+   * trigger (transcript growth promotes `phase` to `busy` — approximate, §9
+   * Q1), `unstage` (the epoch is released and nothing ran), and `settle` (the
+   * turn finished). A stale id here is a worker reported as awaiting a key
+   * nobody needs to press, which is a smaller lie than the reverse and is
+   * still a lie, so all three clear it explicitly rather than relying on the
+   * next dispatch to overwrite it.
+   *
+   * `null` on every worker that has never been staged, which is every worker
+   * that is not a `tui` worker at an adopted terminal — the default makes
+   * every state file already on disk parse unchanged.
+   */
+  staged_task_id: shortStr.nullable().default(null),
+  /**
    * Recorded verbatim from `get_state`. Never computed and never globbed: the
    * timestamp prefix is unknowable in advance and the file is created lazily on
    * the first assistant message (SRD §4.2).
@@ -1090,6 +1127,44 @@ export const EXIT = {
    * now fails if any `EXIT` value goes missing from that line.
    */
   INTERNAL: 8,
+  /**
+   * A task was DISPATCHED and never TRIGGERED — the staged-dispatch route's
+   * one genuinely new terminal state (SRD-TUI-DISPATCH §6.5, ISC-445).
+   *
+   * A staged dispatch is durable the moment `stage` returns: the epoch is
+   * allocated, `/policy/task` is stamped, the brief is on disk at
+   * `/policy/dispatch`, and the inbox record exists. What has NOT happened is
+   * the turn, because starting it takes a keystroke at a terminal pifleet does
+   * not own. So the task is neither running nor finished, and every code above
+   * describes it wrongly:
+   *
+   *   - `TIMEOUT` claims a clock ran out. None started — the deadline arms on
+   *     the trigger, not on the stage (§9 Q1), which is the whole reason a
+   *     20-minute task staged before lunch is not `timed_out` after lunch.
+   *   - `PARTIAL` claims the task ran and did not succeed. It did not run.
+   *   - `WORKER_DIED` claims a diagnosis. The worker is fine and idle.
+   *
+   * **It is worth a NUMBER rather than only a reason string, and that is the
+   * expensive half of this decision.** `wait --json` has carried `reason` all
+   * along, so a caller that parses JSON could always have seen this. A caller
+   * that reads `$?` — which is every shell script, every CI step, and the
+   * operations console's own polling — could not, and would have read the
+   * staged task as `7 partial`: "some tasks did not succeed", answered by
+   * investigating a failure that never happened while the actual remedy is one
+   * keypress at a terminal somebody is sitting at. That is ISC-216's shape
+   * exactly, and ISC-216 is in this file because collapsing a distinguishable
+   * state into a neighbouring code cost this project a retry loop.
+   *
+   * Ranked BELOW `TIMEOUT` and above `PARTIAL` in `EXIT_SEVERITY`, and the
+   * position is argued rather than convenient. Everything above `TIMEOUT`
+   * describes something that HAPPENED to the run; this describes something
+   * that has not begun, so it must not outrank a real outcome. It outranks
+   * `PARTIAL` because a `wait` over a mixed set whose remainder is merely
+   * un-started is a different fact from one whose remainder failed, and
+   * ranking it lower would hide it behind the very code it exists to be
+   * distinguishable from.
+   */
+  STAGED: 9,
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
@@ -1129,6 +1204,11 @@ const EXIT_SEVERITY: readonly ExitCode[] = [
   EXIT.BUDGET,
   EXIT.WORKER_DIED,
   EXIT.TIMEOUT,
+  // Below TIMEOUT because a staged task has not started, so it must not
+  // outrank something that ran and did not finish; above PARTIAL because
+  // "nobody pressed the key" and "it failed" want different next actions and
+  // the integer is the only channel a shell caller has. See `EXIT.STAGED`.
+  EXIT.STAGED,
   EXIT.PARTIAL,
   EXIT.SUCCESS,
 ];
