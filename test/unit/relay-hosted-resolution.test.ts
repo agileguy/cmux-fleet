@@ -248,6 +248,54 @@ describe("ISC-426 anti: a non-hosted provider and a flat fleet are untouched", (
     expect(plan[0]!.network).toBe(NET);
   });
 
+  /**
+   * THE PAIR, pinned — and it was NOT pinned until a mutation said so.
+   *
+   * `egressBridgePlan` reads `hosted` once and feeds it to two places: the
+   * `allowHostname` that lets `providerRelayTarget` PARSE a hostname, and the
+   * `resolvable` gate that decides whether to RESOLVE one. Mutating either one
+   * to `true` on its own was measured GREEN against every other test in this
+   * file, because no fixture anywhere put a hostname on a non-hosted block —
+   * the one input that can tell the two apart.
+   *
+   * Without this test the interesting failure is invisible: `allowHostname`
+   * forced true would let a non-hosted block's hostname through the parser, and
+   * `resolvable`'s `hosted &&` would then decline to resolve it, so the relay
+   * would dial THE NAME — §6.7's alias loop, on the provider D9 explicitly
+   * refuses to weaken. This is the assertion that turns that red.
+   *
+   * It is deliberately the PLAN's refusal and not the schema's. ISC-427 owns
+   * `config validate`; this owns the layer under it, which the whole test suite
+   * — and `relayViewForProvider`'s exported structural view — reaches directly
+   * without ever passing through Zod.
+   */
+  test("a hosted:false block naming a HOSTNAME is refused, not resolved", async () => {
+    const cfg = fleet();
+    cfg.llm.providers!["omlx"]!.relay_upstream = "macbook.local:8000";
+    const { calls, lookup } = fakeResolver({ "macbook.local": ["192.168.86.49"] });
+
+    await expect(egressBridgePlan(cfg, NET, ["omlx"], lookup)).rejects.toThrow(
+      /is a hostname; relay_upstream must be an IP literal/,
+    );
+    // …and it was refused BEFORE any resolution, not after one. A plan that
+    // resolved first and refused second would still have made the network call
+    // D9 confines to hosted blocks.
+    expect(calls).toEqual([]);
+
+    // ANTI-VACUITY, in the same run: flipping `hosted` — and changing NOTHING
+    // else, the same host, the same port, the same fixture — is what makes it
+    // legal. Without this the refusal above could be about the name being
+    // malformed rather than about the block being non-hosted.
+    cfg.llm.providers!["omlx"]!.hosted = true;
+    const plan = await egressBridgePlan(cfg, NET, ["omlx"], lookup);
+    expect(plan[0]!.targets[0]!.host).toBe("192.168.86.49");
+    expect(plan[0]!.upstreamResolution).toEqual({
+      name: "macbook.local",
+      address: "192.168.86.49",
+    });
+    expect(calls).toEqual(["macbook.local"]);
+  });
+
   test("the Docker-host alias is NOT resolved, so --add-host still fires", async () => {
     /*
      * `relayRunArgv` detects the literal string `host.docker.internal` in the
