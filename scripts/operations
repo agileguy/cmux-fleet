@@ -31,10 +31,12 @@ import {
   operationsPanes,
 } from "../src/backends/cmux/operations-plan.ts";
 import { cmuxReachable, ensureOperations } from "../src/backends/cmux/operations.ts";
+import { runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/operations [options]
 
-  --workers <ids>   comma-separated pifleet workers for pane 1 (default: obs-1)
+  --workers <ids>   comma-separated pifleet workers for the agent panes
+                    (default: obs-1,tick-1 — also the set --recreate scopes to)
   --backend <kind>  pifleet backend for pane 1 (default: headless)
   --config <path>   fleet.yaml for pane 1 (default: <repo>/fleet.yaml)
   --poll <seconds>  git pane refresh interval (default: 5)
@@ -146,13 +148,37 @@ async function main(argv: string[]): Promise<number> {
    * point of the default path is that a second `operations` changes nothing.
    */
   if (argv.includes("--recreate")) {
-    // EVERY live run, not the newest. The console stands up one run per
-    // attended pane, so stopping only the most recent leaves the other pane's
-    // containers behind — the leak this exists to close, halved.
-    const ids = [
-      ...(await runOutput(repoRoot, ["status", "--all", "--json"])).matchAll(/"run_id":"([^"]+)"/g),
-    ].map((m) => m[1]!);
-    for (const runId of ids) {
+    /*
+     * EVERY run of THIS console's workers — not the newest, and not every run
+     * on the machine.
+     *
+     * Both halves of that sentence were learned the hard way, in that order.
+     * Stopping only the most recent left the other attended pane's containers
+     * behind and closed half the leak; the fix for that was a bare sweep of
+     * `status --all`, and the sweep had no idea whose runs it was reading.
+     *
+     * MEASURED 2026-09-02, twice in one session: rebuilding this console
+     * printed six `stopping run …` lines — its own two, and the FOUR seats of
+     * the `development` console, which had nothing to do with it. Those four
+     * panes were left attached to runs that no longer existed. `scripts/
+     * development` already had the answer and says so in its own comment —
+     * *"the operations console's runs are somebody else's and must survive a
+     * development rebuild"* — so the scoping landed in one launcher and not
+     * the other, and the launcher that missed it is the one that sweeps
+     * widest.
+     *
+     * `runsHoldingAny` rather than a second copy of the predicate, for the
+     * reason this repo keeps rediscovering: two spellings of one rule are two
+     * rules. It also PARSES the status document instead of scraping
+     * `/"run_id":"([^"]+)"/g` out of it, which is what stood here — a regex
+     * that matches the key wherever it appears, including nested inside a
+     * record that is not a run, and which cannot see the `workers` array it
+     * would now have to consult anyway. An unreadable status stops nothing,
+     * which is the correct blast radius for a launcher.
+     */
+    const mine = new Set(opts.workers ?? DEFAULT_OPERATIONS_WORKERS);
+    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
+    for (const runId of runsHoldingAny(json, mine)) {
       process.stderr.write(`operations: stopping run ${runId} before rebuilding\n`);
       // Best effort. A run that cannot be stopped is worth a line, not a
       // refusal to open the console the operator asked for.
