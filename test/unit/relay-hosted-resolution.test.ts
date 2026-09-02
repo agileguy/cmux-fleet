@@ -48,6 +48,7 @@ import {
   type FleetRelayConfigView,
   type HostAddressLookup,
 } from "../../src/security/relay.ts";
+import { egressRelayReadyDetail } from "../../src/cli/commands/up.ts";
 import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
 
 /**
@@ -575,5 +576,79 @@ describe("ISC-426: the production resolver is getaddrinfo on this host", () => {
     const found = await lookupHostAddresses("localhost");
     expect(found.length).toBeGreaterThan(0);
     expect(found).toContain("127.0.0.1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The ledger row — the second half of ISC-426's probe
+// ---------------------------------------------------------------------------
+
+/**
+ * ISC-426 asks the `egress_relay_ready` event to record BOTH the name and the
+ * address it resolved to. That half was implemented and COMPLETELY UNCOVERED:
+ * deleting the two fields from `up.ts` outright was measured green across the
+ * whole suite — 3349 tests, 211 files — because the only thing that emits this
+ * row is a real `up` against a real daemon, and the one test that reads it
+ * belongs to another criterion's file.
+ *
+ * `egressRelayReadyDetail` is production's derivation, exported so this can
+ * reach it. Rebuilding the shape here instead would produce a test that agrees
+ * with itself and with nothing that ships.
+ */
+describe("ISC-426: the ledger records the name AND the address", () => {
+  const status = {
+    name: "pifleet-egress-relay-x",
+    created: true,
+    replaced: null,
+    scriptSha256: "abc",
+  } as const;
+
+  test("a hosted relay's row carries both halves of the resolution", async () => {
+    const { lookup } = fakeResolver(answersOllama);
+    const plan = await egressBridgePlan(fleet(), NET, ["ollama-cloud"], lookup);
+    const bridge = plan[0]!;
+    const detail = egressRelayReadyDetail(bridge, { ...status, targets: bridge.targets });
+
+    const pair = detail["relay_upstream_resolved"] as { name: string; address: string };
+    expect(pair).toBeDefined();
+    // BOTH, asserted separately so a failure says which half went missing.
+    expect(pair.name).toBe("ollama.com");
+    expect(pair.address).toBe(OLLAMA_ADDR);
+
+    // The row must also still carry what it always carried, or this became a
+    // record of the resolution instead of a record of the relay.
+    expect(detail["provider"]).toBe("ollama-cloud");
+    expect(detail["script_sha256"]).toBe("abc");
+    /*
+     * `targets` renders the DIALLED address, and the authorized name is NOT in
+     * it — `formatRelayTarget` deliberately omits `policyHost` because it is
+     * the drift key (see `RelayTarget.policyHost`). So this row is the only
+     * place the two are written down together, which is precisely why ISC-426
+     * asks for the pair here rather than inferring it from `targets`.
+     *
+     * Written out by hand rather than through `formatRelayTarget`: comparing
+     * production against itself would stay green through any change to it.
+     */
+    expect(detail["targets"]).toEqual([`ollama-cloud:443->${OLLAMA_ADDR}:443`]);
+    expect(JSON.stringify(detail["targets"])).not.toContain("ollama.com");
+  });
+
+  test("a relay that resolved nothing writes the row it always wrote", async () => {
+    const plan = await egressBridgePlan(flatFleet(), NET, ["omlx"], forbiddenResolver);
+    const bridge = plan[0]!;
+    const detail = egressRelayReadyDetail(bridge, { ...status, targets: bridge.targets });
+
+    // ABSENT, not null. A `null` would read as "we resolved and got nothing",
+    // which is a false claim about a fleet that has no hostname to resolve.
+    expect("relay_upstream_resolved" in detail).toBe(false);
+    // Byte for byte the pre-D9 key set, in the pre-D9 order.
+    expect(Object.keys(detail)).toEqual([
+      "name",
+      "provider",
+      "network",
+      "created",
+      "script_sha256",
+      "targets",
+    ]);
   });
 });

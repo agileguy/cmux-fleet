@@ -242,6 +242,67 @@ export function tuiWorkerIds(loaded: LoadedConfig, workerIds: readonly string[])
  * the `PIFLEET_PI_COMMAND` double has no role, no provider and no container to
  * attach to a network.
  */
+/**
+ * The `egress_relay_ready` ledger row's `detail`, as a function (ISC-426).
+ *
+ * ## Why this is not an object literal at the append site any more
+ *
+ * It was, and the whole of D9's audit half was invisible because of it.
+ * Mutation-tested by deleting the resolution fields outright: the FULL suite —
+ * 3349 tests across 211 files — stayed green, because the only thing that
+ * produces this row is a real `up` against a real daemon, and the one test that
+ * reads it belongs to another criterion. A record nothing can reach is a record
+ * nothing can check, and §6.7 asks this row to keep *"what did this relay
+ * actually dial"* answerable months later.
+ *
+ * Exported for the same reason `resolvedProviders` above is: the assertion has
+ * to be able to reach production's derivation rather than a copy of it. A test
+ * that rebuilt this shape would agree with itself and with nothing else.
+ *
+ * ## The resolution fields are SPREAD, so a relay that resolved nothing is
+ * byte-identical to what it always wrote
+ *
+ * A flat pre-D7 fleet and a non-hosted provider get no key at all rather than a
+ * `null` one. `null` would read as *"we resolved and got nothing"*, which is a
+ * different and false claim about a provider whose schema refuses a hostname in
+ * the first place.
+ */
+export function egressRelayReadyDetail(
+  bridge: ProviderBridge,
+  status: RelayStatus,
+): Record<string, unknown> {
+  return {
+    name: status.name,
+    // Which provider this relay is FOR, and which network it is on. The name
+    // already encodes both, but only for a reader who knows the composition
+    // rule — and `report` reads these rows months later, when several relays
+    // differ by one suffix.
+    provider: bridge.provider,
+    network: bridge.network,
+    created: status.created,
+    script_sha256: status.scriptSha256,
+    targets: status.targets.map(formatRelayTarget),
+    /*
+     * BOTH halves of D9's resolution, or neither (ISC-426).
+     *
+     * `targets` above already carries the ADDRESS — it must, or the relay would
+     * be dialing a name through Docker's embedded DNS (§6.7) — and an address
+     * alone does not answer *"what did this relay dial, and on whose
+     * authority"*: `egress.allow` authorizes the NAME (ISC-428), so a reader
+     * holding only the literal cannot line the two up after the fact. The pair
+     * is the record; either half alone is not.
+     */
+    ...(bridge.upstreamResolution === null
+      ? {}
+      : {
+          relay_upstream_resolved: {
+            name: bridge.upstreamResolution.name,
+            address: bridge.upstreamResolution.address,
+          },
+        }),
+  };
+}
+
 export function resolvedProviders(loaded: LoadedConfig, workerIds: readonly string[]): string[] {
   const defined = new Set(loaded.config.workers.map((w) => w.id));
   const out: string[] = [];
@@ -1506,46 +1567,22 @@ export function register(program: Command): void {
          * becomes visible at all. Recording it only on creation would miss
          * exactly the adopted case, which is the one nothing else can see.
          */
+        /*
+         * THE DETAIL COMES FROM ONE FUNCTION, not from a literal here.
+         *
+         * `script_sha256` and `targets` are recorded on EVERY run, adopted or
+         * created, and that is the point rather than an accident. The relay
+         * executes a bind-mounted file from the operator's working tree —
+         * mutable on the host side, and re-exec'd by `--restart unless-stopped`
+         * after a reboot — and `ensureEgressRelay` adopts a running relay
+         * without comparing what it forwards. The ledger is therefore the only
+         * place where "this run would have run different code, or forwarded
+         * somewhere else, than the last one" becomes visible at all. Recording
+         * it only on creation would miss exactly the adopted case, which is the
+         * one nothing else can see.
+         */
         await ledger.append("egress_relay_ready", {
-          detail: {
-            name: egressRelay.name,
-            // Which provider this relay is FOR, and which network it is on.
-            // The name already encodes both, but only for a reader who knows
-            // the composition rule — and `report` reads these rows months
-            // later, when several relays differ by one suffix.
-            provider: bridge.provider,
-            network: bridge.network,
-            created: egressRelay.created,
-            script_sha256: egressRelay.scriptSha256,
-            targets: egressRelay.targets.map(formatRelayTarget),
-            /*
-             * BOTH halves of D9's resolution, or the key is absent entirely
-             * (ISC-426).
-             *
-             * `targets` above already carries the ADDRESS — it must, or the
-             * relay would be dialing a name through Docker's embedded DNS
-             * (§6.7) — and an address alone does not answer *"what did this
-             * relay actually dial, and on whose authority"*: `egress.allow`
-             * authorizes the NAME (ISC-428), so a reader holding only the
-             * literal cannot line the two up months later. The pair is the
-             * record; either half alone is not.
-             *
-             * SPREAD, so a relay that resolved nothing writes the row it has
-             * always written, byte for byte. A flat pre-D7 fleet and a
-             * non-hosted provider get no key here rather than a `null` one —
-             * `null` would read as "we resolved and got nothing", which is a
-             * different and false claim about a provider whose schema refuses a
-             * hostname in the first place.
-             */
-            ...(bridge.upstreamResolution === null
-              ? {}
-              : {
-                  relay_upstream_resolved: {
-                    name: bridge.upstreamResolution.name,
-                    address: bridge.upstreamResolution.address,
-                  },
-                }),
-          },
+          detail: egressRelayReadyDetail(bridge, egressRelay),
         });
         /**
          * A SEPARATE row, not a field on the one above, and deliberately so
