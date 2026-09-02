@@ -401,18 +401,29 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       //
       // ONE `sed` COMMAND PER LINE, and that is not style (ISC-429).
       //
-      // BSD `sed` — macOS's — reads a script in 4096-byte pieces and treats a
-      // piece boundary as a LINE BREAK, whether the script arrived as an
-      // argument or through `-f`. A `;`-joined program longer than that gets a
-      // substitute command cut in half at byte 4096 and dies with
-      // `unterminated substitute pattern`, having written nothing. Newlines
-      // are read first, so a program whose every LINE is short is unbounded:
-      // measured here at 42 kB against `/usr/bin/sed` on darwin 25.6.
+      // BSD `sed` — macOS's — reads a script in PIECES and treats a piece
+      // boundary as a LINE BREAK, whether the script arrived as an argument or
+      // through `-f`. A `;`-joined program is ONE line, so a boundary landing
+      // inside a substitute cuts it in half and `sed` dies with `unterminated
+      // substitute pattern`, having written nothing.
+      //
+      // THE THRESHOLD IS SHAPE-DEPENDENT, NOT A NUMBER, because it depends on
+      // where a boundary falls relative to a command. Measured against
+      // `/usr/bin/sed`, darwin 25.6.0 arm64, sweeping command count at a fixed
+      // command length: 20-byte commands first fail at 2,060 bytes, 34-byte at
+      // 2,074, 68-byte at 2,108 — all just past 2,048 — while a program of
+      // IDENTICAL 134-byte commands survived to 51,322. The program actually
+      // captured from an instrumented `up` first fails at 16 commands / 2,176
+      // bytes. So "under 2 kB" is the only safe reading of the old form.
+      //
+      // Newlines are read first, so a program whose every LINE is short has no
+      // ceiling this fleet can reach: 42 kB measured here, and 87 kB over 400
+      // mounts measured independently. No remaining limit was reachable.
       //
       // The relay's 3-mount probe builds a 694-byte program and never noticed.
       // `up`'s worker probe builds two commands per mount over absolute
-      // `$TMPDIR` paths — 6.6 kB for a four-worker fleet — and every one of
-      // them died at the boundary. The refusal that reached the operator said
+      // `$TMPDIR` paths — 6,608 bytes for a four-worker fleet, measured — and
+      // every one of them died. The refusal that reached the operator said
       // "the probe container reported nothing about this path", three layers
       // from the cause, because the failure below was silent: see the exit
       // status check.
@@ -4697,17 +4708,24 @@ describe("a declared-but-unused provider creates nothing (ISC-410)", () => {
  *   - each row is asserted to appear on exactly ONE stream, so a banner written
  *     to both cannot be quietly deduped into looking correct.
  *
- * ## Why this rig refuses, and why that is the right probe
+ * ## Why this rig is a COMPLETED run now, and what that changed
  *
  * `containerPath: true` is what makes `up` write launch records at all — the
- * double writes none. Against the docker PATH shim such a run reaches
- * `assertBindMountsVisible` and exits 3, and it does so in about 1.7s rather
- * than waiting out the 60s idle gate on containers this shim cannot start.
- * Every worker's record is on disk by then, because materialization precedes
- * that guard. The refusal is therefore AFTER the state these criteria are about
- * and is not part of them — and `L = W` is asserted rather than assumed, so a
- * refusal that ever moved EARLIER would fail this file instead of quietly
- * shrinking the domain it compares over.
+ * double writes none. These two tests used to measure their sets over a run
+ * that REFUSED: against the docker PATH shim such a run reached
+ * `assertBindMountsVisible` and exited 3, which was harmless here because every
+ * launch record is on disk before that guard and `L = W` was asserted rather
+ * than assumed. ISC-429 found that refusal to be a defect in the shim's own
+ * `sed`, not a property of the product, and fixed it; `workerContainerDouble`
+ * then carries the run past `up`'s idle gate as well. So `B` and `L` are now
+ * compared over a run that SUCCEEDED, which is strictly more of the domain
+ * these criteria are about — the disclosure banner and the launch records of a
+ * fleet that actually stood up.
+ *
+ * The `L = W` guard is unchanged and still load-bearing for the same reason: a
+ * refusal that ever moved EARLIER, or a run that stopped short of launching
+ * every selected worker, fails this file instead of quietly shrinking the
+ * domain it compares over.
  */
 describe("the disclosure banner and the launch record name the same workers (ISC-416, ISC-417)", () => {
   /** Must match `fleetYaml`'s `docker.pi_version`, as in the ISC-32 block. */
@@ -4860,6 +4878,9 @@ describe("the disclosure banner and the launch record name the same workers (ISC
     return makeRig({
       containerPath: opts.containerPath,
       imagePresent: opts.containerPath,
+      // Carries the container path all the way to a successful run rather than
+      // stopping at `up`'s idle gate — see the block header (ISC-429).
+      workerContainerDouble: opts.containerPath,
       ...(opts.containerPath ? { shimPiVersion: PINNED_PI_VERSION } : {}),
       providers: PROVIDERS,
       llmProvider: "alpha",
@@ -4893,15 +4914,18 @@ describe("the disclosure banner and the launch record name the same workers (ISC
         "headless",
       ]);
 
-      // The rig's refusal, stated so a DIFFERENT failure is not mistaken for
-      // the expected one. Exit 3 at the mount preflight is this shim's floor
-      // (see the block header); anything else means the run stopped somewhere
-      // this test has not reasoned about, and the sets below would be measured
-      // over a state nobody chose.
+      // The rig's OUTCOME, stated so a different one is not mistaken for it.
+      // This run SUCCEEDS now (ISC-429); anything else means it stopped
+      // somewhere this test has not reasoned about, and the sets below would be
+      // measured over a state nobody chose.
       expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
-        code: EXIT.BACKEND_UNAVAILABLE,
+        code: EXIT.SUCCESS,
       });
-      expect(up.stderr).toContain("bind-mount source(s) are not visible");
+      // The refusal this rig used to stop at, asserted ABSENT rather than
+      // merely no longer expected: it is the one failure whose exit code these
+      // sets are known to survive, so a silent return to it would look like a
+      // passing test measuring a smaller domain.
+      expect(up.stderr).not.toContain("bind-mount source(s) are not visible");
 
       // ---------------------------------------------------------------
       // B, and the two-stream rule. Exactly one stream carries each row;
@@ -5019,7 +5043,10 @@ describe("the disclosure banner and the launch record name the same workers (ISC
         "--backend",
         "headless",
       ]);
-      expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+      // Succeeds now, for the reason the ISC-416 test above states (ISC-429).
+      expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+        code: EXIT.SUCCESS,
+      });
 
       const rows = bannerRows(up.stdout);
       // The parse, again asserted non-empty before it is used — this test can
@@ -5359,17 +5386,31 @@ describe("up discloses what leaves the machine (ISC-414, ISC-415)", () => {
  * flag. Those commands used to be joined with `; `, which put the whole program
  * on ONE LINE.
  *
- * macOS's BSD `sed` reads a script in 4096-byte pieces and treats a piece
- * boundary as a line break — whether the script arrives as an argument or
- * through `-f`. Measured here on darwin 25.6: a single-line program of 4095
- * bytes compiles, one of 4102 dies with `unterminated substitute pattern`
- * reported against "line 2". Newlines are read first, so a program whose every
- * LINE is short has no ceiling at all: 42 kB compiles fine.
+ * macOS's BSD `sed` reads a script in PIECES and treats a piece boundary as a
+ * line break — whether the script arrives as an argument or through `-f`. A
+ * `;`-joined program is ONE line, so a boundary landing inside a substitute
+ * cuts it in half and `sed` dies with `unterminated substitute pattern`.
+ *
+ * THERE IS NO SINGLE THRESHOLD, and the number matters enough to say so.
+ * Whether a boundary kills a command depends on where it falls relative to one,
+ * so the ceiling is a function of the program's SHAPE. Measured against
+ * `/usr/bin/sed`, darwin 25.6.0 arm64, sweeping command count at a fixed
+ * command length: 20-byte commands first fail at 2,060 bytes, 34-byte at 2,074,
+ * 68-byte at 2,108 — all just past 2,048 — while a program of IDENTICAL
+ * 134-byte commands survived to 51,322 bytes. The program captured verbatim
+ * from an instrumented `up` first fails at 16 commands / 2,176 bytes. "Under
+ * 2 kB" is the only safe reading of the old form, which is why the tests below
+ * do not assert a constant: they RUN the old form on their own fixture and
+ * require it to fail.
+ *
+ * Newlines are read first, and no ceiling on that form was reachable: 42 kB
+ * measured here, 87 kB over 400 mounts measured independently.
  *
  * `ensureEgressRelay`'s probe carries 3 mounts and builds a 694-byte program,
  * which is why the relay half always worked. `up`'s worker probe carries
  * several mounts per worker over absolute `$TMPDIR` paths — 6,608 bytes for a
- * four-worker fleet — and crossed the boundary every single time.
+ * four-worker fleet, measured from the shim's own call log — and died on every
+ * single invocation.
  *
  * ## Why it presented as silence rather than as an error
  *
@@ -5425,10 +5466,29 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
   const PINNED_PI_VERSION = "0.79.6";
 
   /**
-   * The line length BSD sed will compile, and the whole reason this block
-   * exists. Measured, not looked up — see the header.
+   * Would the OLD, `; `-joined program have failed on this fixture?
+   *
+   * A CONSTANT WOULD HAVE BEEN A LIE HERE. The ceiling is shape-dependent (see
+   * the header: 2,060 bytes for one program shape, 51,322 for another), so
+   * "assert the fixture is bigger than N" would be asserting a number that does
+   * not describe the thing. This runs the old form instead, on this fixture's
+   * own paths and this machine's own `sed`, and reports whether it dies.
+   *
+   * Used as an anti-vacuity guard: a fixture that stopped being large enough —
+   * or a `sed` that lifted the limit — makes the tests below say so rather than
+   * pass while proving nothing about ISC-429.
    */
-  const SED_LINE_CEILING = 4096;
+  async function oldStyleProgramFails(sources: readonly string[]): Promise<boolean> {
+    const program = sources
+      .map((src, i) => ` s#/probe/${i}'#${src}'#g; s#/probe/${i}/#${src}/#g;`)
+      .join("");
+    const proc = Bun.spawn(["sed", program], {
+      stdin: new Blob(["probe 0 '/probe/0/witness.txt'\n"]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return (await proc.exited) !== 0;
+  }
 
   /**
    * The shim, addressed as a program rather than through PATH.
@@ -5467,10 +5527,23 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
   ): Promise<Array<{ src: string; witness: string; size: number }>> {
     const out: Array<{ src: string; witness: string; size: number }> = [];
     for (let i = 0; i < n; i += 1) {
-      // A long-ish name, because the program's length is a function of the
-      // PATHS: a fixture with three-character directory names would sit under
-      // the ceiling however many of them there were.
-      const src = join(base, `mount-source-for-the-bind-preflight-${String(i).padStart(3, "0")}`);
+      /*
+       * LONG, AND OF VARYING LENGTH — both measured requirements, not taste.
+       *
+       * Long because the program's size is a function of the PATHS: a fixture
+       * of three-character names sits under any ceiling however many there are.
+       * Varying because a program of IDENTICAL commands is the shape that
+       * survived to 51 kB in the sweep (see the block header) — the first
+       * version of this fixture used a fixed-width name, built a 7,840-byte
+       * old-form program, and `oldStyleProgramFails` correctly reported that it
+       * did not reproduce ISC-429 at all. A real mount set is ragged
+       * (`sessions`, `workers/eng-1/cloud-allow`, `skills/engineer`), so this
+       * one is too.
+       */
+      const src = join(
+        base,
+        `mount-source-${"segment-".repeat(1 + (i % 5))}${String(i).padStart(3, "0")}`,
+      );
       await mkdir(src, { recursive: true });
       const body = `witness-${i}\n`;
       await writeFile(join(src, "witness.txt"), body);
@@ -5581,7 +5654,11 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
         .map((c) => [...c.matchAll(/(\S+):\/probe\/\d+:ro/g)].map((m) => m[1]!));
       expect(probes.length).toBeGreaterThan(0);
       const widest = probes.sort((a, b) => b.length - a.length)[0]!;
-      expect(rewriteProgramBytes(widest)).toBeGreaterThan(SED_LINE_CEILING);
+      expect({
+        mounts: widest.length,
+        bytes: rewriteProgramBytes(widest),
+        oldFormDies: await oldStyleProgramFails(widest),
+      }).toMatchObject({ oldFormDies: true });
     },
     /*
      * ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`. It is
@@ -5614,7 +5691,10 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
        * could not have answered AT ALL before the fix, and what is asserted is
        * that its answers DIFFER from each other rather than that they exist.
        */
-      expect(rewriteProgramBytes(sources.map((s) => s.src))).toBeGreaterThan(SED_LINE_CEILING);
+      expect({
+        bytes: rewriteProgramBytes(sources.map((s) => s.src)),
+        oldFormDies: await oldStyleProgramFails(sources.map((s) => s.src)),
+      }).toMatchObject({ oldFormDies: true });
       const mounts = sources.map((s, i) => ({
         src: s.src,
         // One mount in thirty asks about a file nobody wrote. Every other asks
@@ -5674,6 +5754,40 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
        * is precisely the state this fix was undoing.
        */
       await assertBindMountsVisible(argvs.slice(0, -1), "pifleet/pi-worker:probe", exec);
+
+      /**
+       * HALF THREE — DELETE A REAL BIND-MOUNT SOURCE, and record what actually
+       * happens, because it is not what one would guess.
+       *
+       * The SHIM still reports it missing: asked about the deleted path it
+       * answers `x`, which is the property the branch's comment claims and the
+       * one a rubber stamp could not have. That is asserted first.
+       *
+       * The GUARD, given the same deleted source, RESOLVES — it does not refuse
+       * with exit 3. That is production's deliberate choice and it says why:
+       * `docker run -v <missing>:<dst>` CREATES the source, so probing one would
+       * make the diagnostic the thing that materialized the directory it asked
+       * about. A missing source is ISC-188's criterion, not ISC-292's. Asserted
+       * rather than described, so a future change of that policy fails here
+       * instead of being discovered by someone reading this comment.
+       *
+       * Both halves matter to ISC-429: "the shim still reports missing" is the
+       * anti-rubber-stamp property, and "the guard skips it anyway" is why
+       * deletion alone cannot be the anti-vacuity probe for this criterion. The
+       * symlink above is, because it is the one disagreement a host-answering
+       * shim can actually produce.
+       */
+      const deleted = sources[3]!;
+      await rm(deleted.src, { recursive: true, force: true });
+      const afterDelete = await exec(
+        probeLikeArgv([{ src: deleted.src, ask: `/${deleted.witness}` }], "pifleet/pi-worker:probe"),
+      );
+      expect(afterDelete.stdout.trim()).toBe("0 x 0");
+      await assertBindMountsVisible(
+        [["docker", "run", "-v", `${deleted.src}:/workspace`, "img"]],
+        "pifleet/pi-worker:probe",
+        exec,
+      );
 
       await rm(base, { recursive: true, force: true });
     },
