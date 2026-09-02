@@ -177,13 +177,47 @@ export async function ensureEgressNetwork(name: string): Promise<EgressNetworkSt
     return before;
   }
   const created = await docker(networkCreateArgv(name));
-  if (created.code !== 0) {
+  /*
+   * THE CREATE'S EXIT STATUS IS NOT THE QUESTION — the daemon's answer is.
+   *
+   * `inspect`-then-`create` is a TOCTOU window, and the operations console
+   * walks straight into it: each attended pane runs its OWN `up` (one terminal
+   * per process), so two `up`s start within milliseconds of each other on the
+   * SAME bridge. Both inspect and see nothing; both create; the loser gets
+   * `Error response from daemon: network with name <n> already exists` and
+   * `up` died on it. Measured 2026-09-02 on the first bring-up of a new
+   * per-provider bridge, where obs-1 won and tick-1's whole console pane
+   * failed with the fleet otherwise healthy.
+   *
+   * Why it stayed hidden until now: these networks are long-lived, so the
+   * window only opens on the FIRST `up` of a name nothing has created yet. A
+   * fleet that has run once is immune, which is exactly the shape that gets
+   * shipped.
+   *
+   * RE-INSPECTING RATHER THAN MATCHING THE MESSAGE, and that is the whole
+   * design of the fix. "already exists" is daemon dialect — this module's own
+   * `inspectEgressNetwork` header already warns that an unexpected dialect
+   * must not be conflated with a decidable fact — and a fleet whose deny-all
+   * posture depends on a substring match is one Docker release away from
+   * adopting whatever it finds. So the create's failure is treated as a
+   * QUESTION, not an answer, and the daemon settles it: if a correctly-shaped
+   * network is there afterwards, it does not matter which process made it.
+   *
+   * Nothing is weakened. The two guards below are the same ones the success
+   * path has always run, and they run on what the daemon reports, so a
+   * concurrent create that produced a NON-internal network is refused here
+   * exactly as `before.internal` refuses an adopted one above. The only
+   * behaviour that changed is that losing a race is no longer fatal.
+   */
+  const after = await inspectEgressNetwork(name);
+  if (!after.exists) {
     throw new Error(`egress: 'docker network create ${name}' failed: ${created.stderr.trim()}`);
   }
-  const after = await inspectEgressNetwork(name);
-  if (!after.exists || !after.internal) {
+  if (!after.internal) {
     throw new Error(
-      `egress: created network ${JSON.stringify(name)} but the daemon does not report it internal`,
+      `egress: network ${JSON.stringify(name)} was created but the daemon does not report it ` +
+        `internal — workers on it would have unrestricted egress while the fleet reports ` +
+        `deny-all. Remove it (docker network rm ${name}) and re-run.`,
     );
   }
   await containGateway(after);
@@ -247,13 +281,19 @@ export async function ensureUplinkNetwork(name: string): Promise<EgressNetworkSt
   }
   assertNetworkName(name);
   const created = await docker(["network", "create", name]);
-  if (created.code !== 0) {
+  // Same race, same resolution — see `ensureEgressNetwork`. This is the one
+  // that actually fired: the uplink is created immediately after the worker
+  // bridge, so it is the second of the two windows a concurrent `up` hits and
+  // the first whose loser has nothing else to blame.
+  const after = await inspectEgressNetwork(name);
+  if (!after.exists) {
     throw new Error(`egress: 'docker network create ${name}' failed: ${created.stderr.trim()}`);
   }
-  const after = await inspectEgressNetwork(name);
-  if (!after.exists || after.internal) {
+  if (after.internal) {
     throw new Error(
-      `egress: created uplink network ${JSON.stringify(name)} but the daemon reports it internal`,
+      `egress: uplink network ${JSON.stringify(name)} was created but the daemon reports it ` +
+        `internal — the egress relay attaches here to reach host.docker.internal and cannot do ` +
+        `so on an internal bridge. Remove it (docker network rm ${name}) and re-run.`,
     );
   }
   return after;
