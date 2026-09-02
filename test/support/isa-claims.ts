@@ -1488,6 +1488,25 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     expect: 1,
   },
   {
+    isc: "ISC-438",
+    grade: "[x]",
+    claim:
+      "The task drop is a THIRD policy path the verbgate's integrity check covers, declared the " +
+      "same way its two siblings are. Filed as a sibling of ISC-362's claim above rather than " +
+      "folded into it, because the two pin different things: that one says provenance comes from " +
+      "a FILE, this one says the drop is one of the files the gate refuses to run without. " +
+      "**The reason this is pinned on the DECLARATION and not on the loop is a finding.** The " +
+      "existing probe in `task-policy.test.ts` matched the writability loop by PREFIX — " +
+      "`for policy_path in \"${allow_file}\" \"${task_file}\"` — and stayed green both when a " +
+      "third path was added to that loop AND when it was removed again, because a prefix of a " +
+      "longer list is still a prefix. It could not see that class of change at all. The gate's " +
+      "own `*_file=\"/policy/…\"` declarations are the enumeration a set comparison can be " +
+      "derived from, which is what `task-policy.test.ts` now does; this claim is the cheap " +
+      "half of the same guard and goes red if the drop stops being a policy path.",
+    argv: ["grep", "-nF", 'drop_file="/policy/dispatch"', "docker/verbgate"],
+    expect: 1,
+  },
+  {
     isc: "ISC-366",
     grade: "[x]",
     claim:

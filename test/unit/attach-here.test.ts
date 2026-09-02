@@ -339,3 +339,79 @@ beforeAll(async () => {
     new URL("../../src/cli/commands/dispatch.ts", import.meta.url).pathname,
   ).text();
 });
+
+/**
+ * `up --attach-here` records the attach child's `(pid, started)` from the
+ * LAUNCHER'S OWN record (ISC-446, D9).
+ *
+ * ## ISC-191's lesson, applied at a fourth capture site
+ *
+ * The repo already holds three places where a process identity is captured, and
+ * the rule they share is that a pair read off a NAME — a `ps` lookup, a
+ * container inspect, a pid file — is not a record. The number outlives the
+ * process and the kernel reissues it, so a lookup can only ever describe
+ * whatever holds the pid at the moment of the lookup.
+ *
+ * What makes this site a record rather than a read is the CHILD HANDLE. The
+ * process was spawned here, so `child.exitCode === null && child.signalCode ===
+ * null` is a statement about the process this code started, not about whatever
+ * currently answers to that number.
+ *
+ * ## The ORDER is the whole argument, and it is asserted rather than described
+ *
+ * "Not reaped now" implies "not reaped at any earlier instant", so a liveness
+ * check that passes AFTER the read vouches for the read. The reverse order
+ * vouches for nothing: the process could exit and the pid be reissued between a
+ * passing check and a subsequent read, which is precisely the window the pair
+ * exists to close. A reviewer swapping these two lines for readability would
+ * silently reduce the record to a lookup, and nothing about the resulting code
+ * would look wrong.
+ */
+describe("the attach child is recorded, not looked up (ISC-446)", () => {
+  const src = () =>
+    Bun.file(new URL("../../src/cli/commands/up.ts", import.meta.url).pathname).text();
+
+  test("the pair comes off the child handle, not a name lookup", async () => {
+    const text = await src();
+    const at = text.indexOf("const stillOurs = child.exitCode === null");
+    expect(at, "the attach capture site is gone or renamed").toBeGreaterThan(-1);
+    const block = text.slice(at - 400, at + 500);
+    expect(block).toContain("processStartTime(child.pid)");
+    expect(block).toContain("attach_process: { pid: child.pid, started }");
+  });
+
+  test("the liveness check runs AFTER the read, which is what makes it a record", async () => {
+    const text = await src();
+    const read = text.indexOf("const started = await processStartTime(child.pid)");
+    const check = text.indexOf("const stillOurs = child.exitCode === null");
+    expect(read).toBeGreaterThan(-1);
+    expect(check).toBeGreaterThan(-1);
+    expect(read).toBeLessThan(check);
+  });
+
+  /**
+   * No `ps` at this site. `processStartTime` is the repo's single shared reader
+   * and owns whatever it shells out to; a second spelling here would be a
+   * fourth copy of a rule three other sites already share.
+   */
+  test("nothing shells out to ps here", async () => {
+    const text = await src();
+    expect(text).not.toContain('"ps"');
+    expect(text).not.toContain("'ps'");
+  });
+
+  /**
+   * AND IT IS CLEARED when the attach ends. Without this the record outlives
+   * the reader and the guard INVERTS: a stale pair satisfies the very check
+   * that exists to catch a detached terminal, which is a guard reporting
+   * success. Asserted as an ordering against `child.exited`, because a clear
+   * that ran before the wait would clear a live record.
+   */
+  test("the record is cleared after the attach exits, not before", async () => {
+    const text = await src();
+    const exited = text.indexOf("const code = await child.exited;");
+    const clear = text.indexOf("attach_process: null }", exited);
+    expect(exited).toBeGreaterThan(-1);
+    expect(clear, "nothing clears the attach record").toBeGreaterThan(exited);
+  });
+});

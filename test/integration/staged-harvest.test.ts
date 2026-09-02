@@ -57,6 +57,9 @@ import { harvestTask } from "../../src/harvest/index.ts";
 import { splitDispatchPolicy } from "../../src/run/dispatch-policy.ts";
 import { attemptIdFor } from "../../src/cli/commands/dispatch.ts";
 import { cliBudget } from "../support/budget.ts";
+import { renderPrompt } from "../../src/supervisor/index.ts";
+import { mergeLedger } from "../../src/run/ledger.ts";
+import { stat } from "node:fs/promises";
 
 /**
  * `workerPaths().controlSock` hashes `(run_id, worker_id)` into the SHARED
@@ -136,6 +139,7 @@ beforeAll(async () => {
     }),
   );
 
+  const staged = new Set<string>();
   await ensureControlAuth(run);
   const secret = await loadControlSecret(run);
   const server = await serveJsonlSocket(
@@ -143,7 +147,23 @@ beforeAll(async () => {
     async (msg) => {
       stageCalls.push(msg);
       if (msg["cmd"] === "stage") {
-        return { ok: true, accepted: true, epoch: ALLOCATED, replayed: false };
+        /**
+         * The double MODELS THE DEDUP rather than always answering fresh.
+         *
+         * Written flat (`replayed: false` always) first, and the ISC-440 probe
+         * below caught it: a re-stage then looked like a new allocation, the
+         * route correctly rewrote the drop, and the test failed for the double's
+         * reason rather than the code's. A double that cannot produce the answer
+         * the real allocator produces cannot test what the caller does with it.
+         *
+         * The key is `(task_id, attempt_id)`, which is `EpochManager`'s own.
+         */
+        const key = `${String(msg["attempt_id"])}\u0000${String(
+          (msg["envelope"] as { task_id?: unknown } | undefined)?.task_id,
+        )}`;
+        const replayed = staged.has(key);
+        staged.add(key);
+        return { ok: true, accepted: true, epoch: ALLOCATED, replayed };
       }
       return { ok: false, error: `unexpected verb ${String(msg["cmd"])}` };
     },
@@ -248,6 +268,70 @@ describe("a staged dispatch is durable, and the harvest can see it (ISC-449)", (
     expect(identity.staged, "the drop was not written as a staged identity").toBe(true);
     if (identity.staged) expect(identity.epoch).toBe(ALLOCATED);
   });
+
+  /**
+   * ISC-435. The staged prompt must be what the RPC route would render for the
+   * same envelope — byte for byte, not "equivalent".
+   *
+   * A route-specific abbreviation is the failure being excluded, and it is a
+   * tempting one: this route writes to a file rather than typing, so a shorter
+   * or restructured brief costs nothing to produce and would be invisible until
+   * a worker behaved differently on one route than the other. `renderPrompt` is
+   * called with the envelope read back off disk, so this compares the delivered
+   * artefact against the shared renderer rather than against a copy of it.
+   */
+  test("the drop's prompt is byte-identical to what the rpc route renders", async () => {
+    const wp = workerPaths(run, WORKER);
+    const envelope = JSON.parse(await readFile(inboxTaskPath(run, TASK), "utf8")) as Parameters<
+      typeof renderPrompt
+    >[0];
+    const { prompt } = splitDispatchPolicy(await readFile(wp.dispatchPolicy, "utf8"));
+    expect(prompt).toBe(renderPrompt(envelope));
+  });
+
+  /**
+   * ISC-439's fourth value. The inbox record, the drop and the CLI's answer are
+   * asserted above; the ledger is the one an operator reads afterwards, and a
+   * row that disagreed with the other three would make the audit trail the only
+   * wrong copy — the worst place for the disagreement to be.
+   */
+  test("the ledger's dispatched row carries the same epoch", async () => {
+    const { records } = await mergeLedger(run);
+    const row = records.find((r) => r.event === "dispatched" && r.task_id === TASK);
+    expect(row, "no dispatched row for the staged task").toBeDefined();
+    expect(row!.epoch).toBe(ALLOCATED);
+    expect((row!.detail as { via?: unknown } | undefined)?.via).toBe("staged");
+  });
+
+  /**
+   * ISC-440. A re-stage of an UNCHANGED file replays, and the drop is NOT
+   * rewritten.
+   *
+   * The second half is the one worth asserting. A replay that re-rendered the
+   * drop would be a write performed on behalf of a stage that already happened,
+   * and it is the write that could land while the epoch is mid-turn — replacing
+   * the brief under a worker that is reading it. The inode is checked as well
+   * as the mtime because the mount pins the inode: a rewrite that replaced the
+   * file rather than truncating it would break the mount silently.
+   *
+   * The fake supervisor is what decides `replayed` here, so this proves the
+   * CLI HONOURS a replay, not that the allocator produces one — that half is
+   * `stage-verb.test.ts`'s, against a real `EpochManager`.
+   */
+  test("re-staging the same file replays and does not rewrite the drop", async () => {
+    const wp = workerPaths(run, WORKER);
+    const before = await stat(wp.dispatchPolicy);
+    stageCalls = [];
+    const again = await stage(TASK);
+    expect(again.epoch).toBe(ALLOCATED);
+    // The same attempt id reached the supervisor — the dedup key, not a new one.
+    expect(stageCalls.find((m) => m["cmd"] === "stage")!["attempt_id"]).toBe(
+      attemptIdFor(taskFile(TASK)),
+    );
+    const after = await stat(wp.dispatchPolicy);
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+  }, cliBudget(1));
 
   test("dispatchedTaskIds sees the task — the set is no longer empty", async () => {
     expect(await dispatchedTaskIds(run)).toContain(TASK);

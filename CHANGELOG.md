@@ -6,6 +6,90 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **`dispatch` to an adopted-terminal `tui` worker stages instead of refusing (ISC-431..ISC-459,
+  `Docs/SRD-TUI-DISPATCH.md`).** The refusal it replaces — *"pifleet has no surface id to type
+  into"* — was correct about the mechanism and drew the wrong conclusion from it. A dispatch is two
+  things: an **identity** (task id, epoch, outbox, brief) and a **trigger** (the byte that starts a
+  turn). Only the trigger needs a terminal.
+
+  So the identity travels the read-only policy plane, which every worker including this one already
+  has. `dispatch` allocates a real epoch through a new supervisor `stage` verb, persists the fence,
+  rewrites `/policy/task`, drops the rendered brief at **`/policy/dispatch`** — a sibling `:ro`
+  mount the verbgate holds to the same integrity bar, refusing every verb with exit 78 if it is
+  writable — writes the inbox record with the real epoch, ledgers `via: "staged"`, and then types
+  exactly one line:
+
+  ```
+  # pifleet: a task was staged for you — read /policy/dispatch and do what it says
+  ```
+
+  **The brief never goes near a terminal.** The leading `#` is a comment in `bash`/`sh` and a parse
+  error in interactive `zsh` (`INTERACTIVE_COMMENTS` is off by default) — an execution in neither —
+  and the line carries no `;`, `&`, `|`, backtick, `$(`, `>`, `<` or newline, none of which is
+  needed to say "read this file". That is a mitigation and is documented as one, not a proof.
+
+  A terminal that announces no surface id — Terminal.app, ssh, a bare tmux pane — is a **reported
+  outcome, not an error**: the task is already staged and durable by then, so the route hands the
+  operator the line and says why it could not type it. A design that only works under cmux must not
+  become one that only runs under cmux.
+
+- **`pifleet unstage --task <id>`** releases a staged epoch that was never triggered, returning the
+  worker to idle. Deliberately not `abort`, which on a `pane_mode: tui` worker issues
+  `docker kill --signal=INT` and **stops** it. Cancellation clears the live epoch and deletes the
+  attempt while appending nothing to `completed`, so a later different attempt against the same
+  task id is not refused `already_completed` — which is the exact cancel-fix-restage motion an
+  operator makes after a typo.
+
+- **`wait` answers a staged task immediately, with the new exit code `9` (`EXIT.STAGED`)** and
+  reason `staged_untriggered`, instead of consuming its timeout. A staged task has no record
+  because nothing has *started*, not because something is slow, so the poll has no event to wait
+  for. `report` gains a `## STAGED` section above the totals naming the task and the remedy;
+  `status` names the staged task beside the phase; the schedule row says `staged` rather than
+  `dispatched`.
+
+- **The `tui` voided-requirements table is now derived per ROUTE, not per mode.** A staged dispatch
+  allocates a real epoch (ISC-84 no longer holds for it) and dedups on `(task_id, attempt_id)`
+  (ISC-85 closes for a re-stage of the same attempt, and stays open — unclosably — for a person
+  typing the same brief twice). The staged table is a *delta* over the mode table, so every
+  unchanged row is byte-identical across routes by construction. `attended.json` still records the
+  mode table, which was the true one when the person took the pane; `report` re-derives.
+
+### Fixed
+
+- **The pane route never wrote `/policy/task`, so every gated verb a pane-dispatched worker ran was
+  ledgered against `<none>`** (ISC-431). `writeTaskPolicy`'s only real call site was the RPC handler
+  that route never reaches. The probe asserts the ORDER rather than the end state: it drives a send
+  that fails at its first keystroke, then reads the file — which can only hold the task id if the
+  write happened first.
+
+- **Attempt ids are derived from the task file's content, not minted (ISC-458).** Two defects, and
+  the second was the dangerous one. `dispatch`'s single-task path fell back to `randomUUID()`, so
+  `EpochManager`'s dedup was unreachable from `pifleet dispatch <file>` and a re-dispatch ran the
+  task twice. And the staged route sent `String(envelope.attempt)`, where `attempt` **defaults to
+  1** — so two different briefs under one task id collided and the second *replayed* the first: same
+  epoch, drop file not rewritten, `replayed: true` reported as success. Edit the brief, stage it, be
+  told it worked, and the worker still holds the old one. A missing dedup runs work twice and the
+  transcript shows it; a too-coarse dedup substitutes one brief for another and every surface
+  reports success.
+
+  Re-dispatching an **unmodified** task file now replays instead of re-running, on the rpc route as
+  well — an id that depended on which control plane a worker had would mean the same file dispatched
+  two ways dedups differently. To force a re-run, edit `attempt` in the file.
+
+- **The worker skill told workers to hard-code `epoch: 1`.** Its field rules said the value *"is not
+  currently delivered to you"*; `renderPrompt` has been emitting an `epoch:` line in the fenced
+  `## This task` block on every route, and `harvest/outbox.ts` **refuses** an envelope whose epoch
+  differs from the inbox record's. So a hard-coded `1` meant a task that did all its work correctly
+  harvested as though the container had produced nothing. It survived because it was true by
+  coincidence twice: the old pane route compared `0` against `0`, and a worker's *first* task
+  allocates 1. Now pinned at both ends — the instruction must point at the delivered value, and the
+  renderer must still deliver it.
+
+- **`up --attach-here` records the attach child's `(pid, started)`**, and clears it when the attach
+  exits. Staging refuses a dead or pid-reused terminal by name, with the remedy in every arm. A
+  stale record would otherwise satisfy the very check that exists to catch a detached terminal —
+  a guard reporting success.
+
 - **§13's failure table says NOT BUILT where the mitigation does not exist (ISC-365).** The audit
   found six mitigations written in the present tense that do not exist and recorded them in one
   erratum below the table. Right finding, wrong placement: a failure taxonomy is consulted during an
