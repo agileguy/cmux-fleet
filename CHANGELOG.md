@@ -62,19 +62,19 @@ All notable changes to this project are documented here.
   that fails at its first keystroke, then reads the file — which can only hold the task id if the
   write happened first.
 
-- **Attempt ids are derived from the task file's content, not minted (ISC-458).** Two defects, and
-  the second was the dangerous one. `dispatch`'s single-task path fell back to `randomUUID()`, so
-  `EpochManager`'s dedup was unreachable from `pifleet dispatch <file>` and a re-dispatch ran the
-  task twice. And the staged route sent `String(envelope.attempt)`, where `attempt` **defaults to
-  1** — so two different briefs under one task id collided and the second *replayed* the first: same
-  epoch, drop file not rewritten, `replayed: true` reported as success. Edit the brief, stage it, be
-  told it worked, and the worker still holds the old one. A missing dedup runs work twice and the
-  transcript shows it; a too-coarse dedup substitutes one brief for another and every surface
-  reports success.
+- **A staged dispatch derives its attempt id from the task file's content (ISC-458).** It was
+  sending `String(envelope.attempt)`, and `attempt` **defaults to 1** — so two different briefs under
+  one task id collided and the second *replayed* the first: same epoch, drop file not rewritten,
+  `replayed: true` reported as success. Edit the brief, stage it, be told it worked, and the worker
+  still holds the old one. A missing dedup runs work twice and the transcript shows it; a too-coarse
+  dedup substitutes one brief for another and every surface reports success.
 
-  Re-dispatching an **unmodified** task file now replays instead of re-running, on the rpc route as
-  well — an id that depended on which control plane a worker had would mean the same file dispatched
-  two ways dedups differently. To force a re-run, edit `attempt` in the file.
+  **The rpc route is unchanged** and still mints a fresh id per dispatch. An earlier draft of this
+  change widened the derivation to both routes, on the belief that a random id let a re-dispatch
+  re-run a completed task. It does not — a settled task is refused `already_completed` and a live one
+  `busy`, both keyed on the task id alone — and widening it turned that refusal into a replay, which
+  is the same no-op in a different wire shape and is ISC-85's pinned Phase-1 exit criterion. An
+  explicit `attempt_id` in the task file still wins on either route.
 
 - **The worker skill told workers to hard-code `epoch: 1`.** Its field rules said the value *"is not
   currently delivered to you"*; `renderPrompt` has been emitting an `epoch:` line in the fenced

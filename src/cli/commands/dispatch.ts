@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { CliError } from "../index.ts";
@@ -88,63 +88,56 @@ import { runSchedule, type DispatchAnswer, type SchedulerIO } from "../../orches
  * @throws {MalformedEpochError} on a negative or fractional `epoch`.
  */
 /**
- * The attempt id for a task file that does not name one (SRD-TUI-DISPATCH §9 Q9).
+ * The attempt id a STAGED dispatch carries (SRD-TUI-DISPATCH §9 Q9).
  *
- * ## What an attempt id is FOR, which decides how it must be derived
+ * ## What an attempt id is for, which decides how this must be derived
  *
  * `EpochManager` dedups on `(task_id, attempt_id)`: a second allocate under a
- * known pair returns the ORIGINAL epoch and runs nothing. That makes the
- * attempt id the difference between "the caller lost my ack, send it again"
- * and "this is new work" — and a value that is fresh every time answers the
- * second for a caller that meant the first.
+ * known pair returns the ORIGINAL epoch and runs nothing. On the staged route
+ * that replay IS the fence — §6.3 makes it the mechanism by which a staged
+ * dispatch is deduplicated at all, and ISC-440 requires that staging the same
+ * task file twice replays rather than allocating.
  *
- * This used to be `randomUUID()`. A random id can never replay, so the dedup
- * machinery was fully built, fully tested, and unreachable from the ordinary
- * `pifleet dispatch <file>` path: re-dispatching the same file allocated a new
- * epoch and RAN THE TASK AGAIN. `--auto` already knew better and used
- * `auto:${spec.id}`, and its comment states the property as desirable — "a
- * re-run of the same list against the same run replays completed answers
- * instead of re-executing work (ISC-85)" — so the single-task path was the
- * odd one out rather than this being a new idea.
+ * A random id can never match a stored one, so a staged dispatch that minted
+ * one would get no replay: the second stage of an unchanged file would find the
+ * first epoch still live and be refused `busy`. Item 4 of §1.3 would stay open
+ * while looking closed.
  *
- * ## The CONTENT, and specifically the raw bytes
+ * ## Scoped to the STAGED route, and the scoping was corrected rather than
+ * ## chosen
  *
- * An edited file is different work and must allocate fresh; an unedited file
- * is the same work and must replay. Hashing the file's raw text says exactly
- * that. Hashing a NORMALIZED form (parsed and re-serialized) was considered
- * and rejected: it would make two files that differ only in key order or
- * whitespace share an id, which is right, and it would also require deciding
- * what normalization means for every future envelope field — a decision that,
- * got wrong once, makes two genuinely different briefs collide and hands a
- * worker the wrong one under a replayed epoch.
+ * This was briefly the fallback for `pifleet dispatch <file>` on every route,
+ * on the argument that an id depending on which control plane a worker had
+ * would make the same file dedup differently two ways. That argument was built
+ * on a false premise — that the rpc route's `randomUUID()` let a re-dispatch
+ * RUN THE TASK TWICE. It does not: a settled task is refused
+ * `already_completed` off `completed`, and a live one is refused `busy`, both
+ * keyed on `task_id` alone. What a random id actually costs there is narrower:
+ * a caller who loses an ack mid-flight re-sends and gets `busy` instead of its
+ * original answer.
  *
- * **The error directions are not symmetric, and that is the whole argument.**
- * Hashing raw bytes can only over-allocate: a cosmetic edit yields a new id,
- * and a new id against a held worker is REFUSED `busy` and reported. Hashing
- * too loosely can under-allocate: a changed brief replays the old epoch, the
- * drop file is deliberately not rewritten on replay, and the operator is told
- * it worked. One failure is a visible refusal; the other is a silent lie about
- * which brief the worker holds.
+ * **The cost of widening it was concrete and was caught by an existing
+ * criterion.** With a content id, re-dispatching a completed task becomes the
+ * SAME attempt, so `allocate` replays it — and `test/e2e/lifecycle.test.ts`
+ * pins ISC-85's Phase-1 exit shape as `accepted: false`, `already_completed`.
+ * Both behaviours are the no-op ISC-85 asks for; only the wire shape differs.
+ * Redefining a graded Phase-1 criterion is not this document's to do, and §9 Q9
+ * asks about a staged dispatch and nothing else.
  *
- * ## This changes the rpc route too, deliberately
+ * ## The content, and what "content" means here
  *
- * Both routes take their attempt id from here, and they must: an id that
- * depended on which control plane a worker happened to have would mean the
- * same file dispatched two ways dedups differently, which is a fact about
- * pifleet's plumbing leaking into a claim about the operator's work. The
- * behaviour change for the rpc route is that re-dispatching an unmodified task
- * file now REPLAYS instead of re-running. An operator who wants a genuine
- * re-run edits `attempt` in the file — which is what that field is named for,
- * and which changes the content and therefore this id — or names an
- * `attempt_id` outright, which still wins over this derivation.
+ * The task file as PARSED and re-serialized, not its raw bytes: reformatting a
+ * file is not a new task, and `JSON.stringify` over the object `JSON.parse`
+ * produced preserves the operator's key order while dropping whitespace. An
+ * edited brief is a different task and gets a different id, which is the
+ * property ISC-458 asserts in both directions.
  *
- * 16 hex characters of SHA-256. Long enough that a collision is not a thing
- * that happens to a directory of task files, short enough to read in a ledger
- * row, and prefixed so it is never mistaken for `auto:` or for an id an
- * operator wrote by hand.
+ * 16 hex characters of SHA-256, prefixed so it is never mistaken for `auto:`
+ * or for an id an operator wrote by hand — and an explicit `attempt_id` in the
+ * file still wins over this, on every route.
  */
-export function attemptIdFor(rawTaskFile: string): string {
-  return `file:${createHash("sha256").update(rawTaskFile).digest("hex").slice(0, 16)}`;
+export function attemptIdFor(taskContent: string): string {
+  return `file:${createHash("sha256").update(taskContent).digest("hex").slice(0, 16)}`;
 }
 
 export function requestedEpochFrom(raw: unknown): number | null {
@@ -519,6 +512,8 @@ async function sendViaPane(args: {
    * `stageForAdoptedTerminal`.
    */
   attemptId: string;
+  /** The staged route's dedup key; see `sendTaskEnvelope`. */
+  stagedAttemptId: string;
   ledger: LedgerWriter;
 }): Promise<SendOutcome> {
   const { run, worker, envelope } = args;
@@ -543,7 +538,7 @@ async function sendViaPane(args: {
    * a person is looking at it.
    */
   if (presentation.adopted_terminal) {
-    return stageForAdoptedTerminal({ ...args, wp, presentation });
+    return stageForAdoptedTerminal({ ...args, attemptId: args.stagedAttemptId, wp, presentation });
   }
 
   if (presentation.backend === "headless" || presentation.surface_ref === null) {
@@ -841,7 +836,29 @@ export async function sendTaskEnvelope(args: {
     );
   }
   if (route.kind === "pane") {
-    return sendViaPane({ run, worker, envelope, attemptId, ledger: args.ledger });
+    /**
+     * THE STAGED ROUTE'S OWN ATTEMPT ID, derived here rather than inherited.
+     *
+     * The caller's `attemptId` is `randomUUID()` for a single-task dispatch,
+     * which the rpc route wants (ISC-85's Phase-1 shape rests on a fresh
+     * attempt reaching `already_completed`). The staged route needs the
+     * opposite: a re-stage of an unchanged file must REPLAY, which only
+     * happens if the pair is recognised. See `attemptIdFor`.
+     *
+     * An explicit `attempt_id` in the task file still wins, on both routes.
+     */
+    const stagedAttemptId =
+      typeof args.partial["attempt_id"] === "string"
+        ? args.partial["attempt_id"]
+        : attemptIdFor(JSON.stringify(args.partial));
+    return sendViaPane({
+      run,
+      worker,
+      envelope,
+      attemptId,
+      stagedAttemptId,
+      ledger: args.ledger,
+    });
   }
 
   let reply: Record<string, unknown>;
@@ -942,7 +959,7 @@ export function register(program: Command): void {
         const taskId = typeof partial["task_id"] === "string" ? partial["task_id"] : "";
         if (taskId === "") throw new CliError("task file needs a task_id", EXIT.USAGE);
         const attemptId =
-          typeof partial["attempt_id"] === "string" ? partial["attempt_id"] : attemptIdFor(raw);
+          typeof partial["attempt_id"] === "string" ? partial["attempt_id"] : randomUUID();
 
         const ledger = new LedgerWriter(run, `cli-dispatch-${process.pid}`);
         const outcome = await sendTaskEnvelope({

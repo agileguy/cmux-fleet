@@ -9,27 +9,35 @@
  * staged route no dedup at all … which is the shape of a feature that looks
  * delivered."
  *
- * Two things in the tree disagreed with that sentence:
+ * The staged route disagreed with that sentence. It ignored the caller's
+ * attempt id and sent `String(envelope.attempt)` — and `attempt` DEFAULTS to
+ * `1`, so every fresh staged dispatch used the key `(task_id, "1")`. **That is
+ * worse than no dedup**: two DIFFERENT briefs sharing a `task_id` collided, and
+ * the second one replayed the first — same epoch, drop file deliberately not
+ * rewritten on a replay, `replayed: true` reported as success. The operator
+ * edits the brief, stages it, is told it worked, and the worker still holds the
+ * old one.
  *
- *  1. `dispatch`'s single-task path fell back to `randomUUID()`. A random id
- *     can never match a stored one, so `EpochManager`'s dedup — fully built and
- *     fully tested — was unreachable from `pifleet dispatch <file>`. ISC-85's
- *     "re-dispatch runs the task twice" was true on the RPC route too, for this
- *     reason rather than for the missing-allocator reason the voided table
- *     gives.
+ * A missing dedup runs work twice and the transcript shows it; a too-coarse
+ * dedup silently substitutes one brief for another and every surface reports
+ * success.
  *
- *  2. The staged route ignored the caller's attempt id and sent
- *     `String(envelope.attempt)`. `attempt` DEFAULTS to `1`, so every fresh
- *     staged dispatch used the key `(task_id, "1")`. **That is worse than no
- *     dedup**: two DIFFERENT briefs sharing a `task_id` collided, and the
- *     second one replayed the first — same epoch, drop file deliberately not
- *     rewritten on a replay, `replayed: true` reported as success. The operator
- *     edits the brief, stages it, is told it worked, and the worker still holds
- *     the old one.
+ * ## The RPC route keeps `randomUUID()`, and the first fix here was too wide
  *
- * The second is the one worth the criterion. A missing dedup runs work twice
- * and the transcript shows it; a too-coarse dedup silently substitutes one
- * brief for another and every surface reports success.
+ * This derivation was briefly the fallback on every route, argued from the
+ * claim that a random id let a re-dispatch RUN THE TASK TWICE. **That claim was
+ * false.** `allocate` refuses a settled task `already_completed` and a live one
+ * `busy`, both keyed on `task_id` alone, so a random attempt id never caused a
+ * second run. What it actually costs there is narrower: a caller that loses an
+ * ack mid-flight re-sends and gets `busy` instead of its original answer.
+ *
+ * The widening had a concrete cost and an existing criterion caught it. With a
+ * content id, re-dispatching a completed task becomes the SAME attempt, so
+ * `allocate` replays it — and `test/e2e/lifecycle.test.ts` pins ISC-85's
+ * Phase-1 exit shape as `accepted: false` / `already_completed`. Both are the
+ * no-op ISC-85 asks for; only the wire shape differs. Redefining a graded
+ * Phase-1 criterion is not this block's to do, and §9 Q9 asks about a staged
+ * dispatch and nothing else.
  *
  * ## What these probes are, and the one that is not decorative
  *
@@ -51,7 +59,9 @@ const code = (text: string): string =>
   text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
 const taskFile = (brief: string): string =>
-  JSON.stringify({ task_id: "t-1", title: "a task", brief }, null, 2);
+  // As the route derives it: the PARSED file re-serialized, so a reformat is
+  // not a new task while an edited brief is.
+  JSON.stringify({ task_id: "t-1", title: "a task", brief });
 
 describe("an unnamed attempt id is derived from the file, not minted", () => {
   test("the same bytes give the same id, twice", () => {
@@ -81,8 +91,8 @@ describe("an unnamed attempt id is derived from the file, not minted", () => {
    * would miss. A brief whose only change is a negation is a different task and
    * must not replay the old epoch.
    */
-  test("one character is enough", () => {
-    expect(attemptIdFor("{}")).not.toBe(attemptIdFor("{ }"));
+  test("one character of CONTENT is enough", () => {
+    expect(attemptIdFor(taskFile("do it"))).not.toBe(attemptIdFor(taskFile("do It")));
   });
 
   test("it is legible in a ledger row and cannot be confused with --auto's", () => {
@@ -95,13 +105,26 @@ describe("an unnamed attempt id is derived from the file, not minted", () => {
 
 describe("the routes take the caller's attempt id rather than re-deriving one", () => {
   /**
-   * `randomUUID` is gone from this module entirely. Not a style point: while it
-   * was the fallback, every dedup test in the repo was exercising a code path
-   * no ordinary dispatch reached.
+   * The rpc route KEEPS `randomUUID()`, and that is the corrected scope rather
+   * than an oversight. A fresh attempt is what reaches `already_completed` on a
+   * settled task, which is ISC-85's pinned Phase-1 shape in
+   * `test/e2e/lifecycle.test.ts`. Widening the derivation to that route turned
+   * a refusal into a replay — the same no-op, a different wire shape, and not
+   * this document's criterion to redefine.
    */
-  test("nothing in dispatch mints a uuid for an attempt", async () => {
+  test("the rpc route still mints a fresh attempt id", async () => {
     const text = code(await Bun.file(SOURCE).text());
-    expect(text).not.toContain("randomUUID");
+    expect(text).toContain("randomUUID()");
+  });
+
+  /**
+   * …and the STAGED route does not reach it. The fork must take the derived id,
+   * or a re-stage of an unchanged file is refused `busy` instead of replaying.
+   */
+  test("the staged fork is handed the derived id, not the minted one", async () => {
+    const text = code(await Bun.file(SOURCE).text());
+    expect(text).toContain("attemptId: args.stagedAttemptId");
+    expect(text).toContain("attemptIdFor(JSON.stringify(args.partial))");
   });
 
   /**

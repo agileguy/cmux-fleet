@@ -939,11 +939,27 @@ the root-cause classification; this table is the index.
   is refused `busy` and reported; hashing too loosely UNDER-allocates, and that is the silent
   substitution above. One failure is a visible refusal, the other is a lie.
 
-  **It changes the rpc route too, deliberately.** An id that depended on which control plane a
-  worker happened to have would mean the same file dispatched two ways dedups differently — pifleet's
-  plumbing leaking into a claim about the operator's work. So re-dispatching an unmodified task file
-  now REPLAYS instead of re-running; an operator who wants a genuine re-run edits `attempt` in the
-  file, which is what that field is named for and which changes the content and therefore the id.
+  **SCOPED TO THE STAGED ROUTE, and the scoping was CORRECTED rather than chosen — the first fix was
+  too wide and an existing criterion caught it.** The derivation was briefly the fallback on every
+  route, argued from the claim that the rpc route's `randomUUID()` let a re-dispatch RUN THE TASK
+  TWICE. **That claim was false**, and it is recorded here because it was written into this entry and
+  into a CHANGELOG before it was checked: `allocate` refuses a settled task `already_completed` and a
+  live one `busy`, both keyed on `task_id` alone, so a random attempt id never caused a second run.
+  What it actually costs there is narrower — a caller that loses an ack mid-flight re-sends and gets
+  `busy` instead of its original answer.
+
+  The cost of widening was concrete. With a content id, re-dispatching a completed task becomes the
+  SAME attempt, so `allocate` replays it — and `test/e2e/lifecycle.test.ts` pins **ISC-85's Phase-1
+  exit shape** as `accepted: false` / `already_completed`. Both behaviours are the no-op ISC-85 asks
+  for and only the wire shape differs, but redefining a graded Phase-1 criterion is not this
+  document's to do, and §9 Q9 asks about a staged dispatch and nothing else. The rpc route keeps
+  `randomUUID()`; the staged fork derives its own key from the parsed task file, and an explicit
+  `attempt_id` still wins on both. **The two routes therefore dedup differently, which is honest
+  rather than tidy: only one of them has an allocator that can replay a stage.**
+
+  Content means the file as PARSED and re-serialized, not its raw bytes — reformatting is not a new
+  task, and `JSON.stringify` over what `JSON.parse` produced preserves the operator's key order while
+  dropping whitespace.
 
   **NOT TAKEN, and left where the SRD left them:** Q2 (enumerating a container's attached clients),
   Q3 (surface-id stability across a workspace rebuild), Q4 (a container-side trigger — the
