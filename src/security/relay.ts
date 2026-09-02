@@ -122,6 +122,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join } from "node:path";
@@ -370,14 +371,31 @@ export type RelayConfigView = EgressConfigView & {
  * of a provider block this module has any business reading.
  *
  * Structural like everything else here, and deliberately NARROWER than
- * `ProviderSchema`: `api_key_env`, `hosted`, `models_allowlist` and `tag_style`
- * are statements about credentials and about what the fleet will tolerate, and
- * none of them changes a network name, a listen alias or a dial target. Naming
- * them here would invite this file to grow an opinion about them.
+ * `ProviderSchema`: `api_key_env`, `models_allowlist` and `tag_style` are
+ * statements about credentials and about what the fleet will tolerate, and none
+ * of them changes a network name, a listen alias or a dial target. Naming them
+ * here would invite this file to grow an opinion about them.
+ *
+ * ## `hosted` is in, and the membership rule is why rather than an exception
+ *
+ * It used to be on the excluded list above, beside `api_key_env`, and the
+ * stated reason was that it *"changes no network name, listen alias or dial
+ * target"*. D9 (§6.7) makes that sentence false: a `hosted: true` block may
+ * name a HOSTNAME upstream, which `up` resolves on the host and stamps into the
+ * target as a literal, so `hosted` is now the flag that decides whether this
+ * module dials the string the operator wrote or an address derived from it.
+ * That is exactly the membership test the paragraph above states, so `hosted`
+ * joins by satisfying the rule rather than by an exemption from it.
+ *
+ * Optional at the TYPE level — `ProviderSchema` makes it REQUIRED and refuses
+ * to infer it (see its `hosted` docblock) — so that a structural fixture or a
+ * caller holding an older view still type-checks. Absent reads as `false`,
+ * which is the safe direction: the unresolved, IP-literal-only path.
  */
 export type ProviderRelayView = {
   base_url: string;
   relay_upstream?: string | null;
+  hosted?: boolean;
 };
 
 /**
@@ -424,8 +442,49 @@ export interface ProviderBridge {
   readonly aliases: readonly string[];
   /** Exactly one — see above. */
   readonly targets: readonly RelayTarget[];
+  /**
+   * What a `hosted: true` block's HOSTNAME upstream resolved to on the host,
+   * or `null` when nothing was resolved (D9, §6.7, ISC-426).
+   *
+   * `null` covers three cases and they are all the same case: a flat fleet, a
+   * non-hosted provider (whose schema still refuses a hostname outright), and a
+   * hosted provider that wrote a literal anyway. In every one of them
+   * `targets[0].host` IS the string the operator wrote, so there is no name to
+   * record beside it.
+   *
+   * ## Why it is a field here rather than recomputed at the ledger
+   *
+   * `targets[0].host` is the address after resolution; the NAME is gone from it
+   * by construction, and that is the point — §6.7's alias loop is only
+   * impossible if the name never reaches the relay. So the name has to be
+   * carried, and this is the record `up` writes into `egress_relay_ready`.
+   * Re-resolving it at the ledger to recover the name would be a SECOND
+   * resolution, which could answer differently from the one the relay is
+   * actually dialing and turn the audit record into a plausible lie.
+   *
+   * **Production reads this field** — `up.ts`'s `egress_relay_ready` row. That
+   * sentence is here because the last field added to this interface,
+   * `targets`, was computed correctly and read by nothing but the tests while
+   * `ensureEgressRelay` re-derived its own; see that function for the shape.
+   */
+  readonly upstreamResolution: RelayUpstreamResolution | null;
   /** The projected view `ensureEgressRelay` is called with (§6.5.4). */
   readonly view: RelayConfigView;
+}
+
+/**
+ * One hostname and the one address it resolved to, on the host, at `up`.
+ *
+ * Both halves are kept because ISC-426 asks for both: the relay dials
+ * `address`, `egress.allow` authorizes `name` (ISC-428), and *"what did this
+ * relay actually dial"* is only answerable months later if the ledger holds the
+ * pair rather than either half.
+ */
+export interface RelayUpstreamResolution {
+  /** The hostname exactly as `relay_upstream` spelled it, normalized. */
+  readonly name: string;
+  /** The IP literal stamped into the relay's target. */
+  readonly address: string;
 }
 
 /** A fully-resolved dial target: an explicit host and an explicit port. */
@@ -1214,11 +1273,171 @@ export function isFlatFleet(cfg: FleetRelayConfigView): boolean {
   return cfg.llm.providers === undefined;
 }
 
-export function egressBridgePlan(
+/**
+ * Resolve a hostname to its addresses, ON THE HOST. Injected so no test dials
+ * DNS and no fixture depends on a vendor's live A record.
+ */
+export type HostAddressLookup = (hostname: string) => Promise<readonly string[]>;
+
+/**
+ * The production `HostAddressLookup`: `getaddrinfo`, in this process, on the
+ * host — which is the whole of D9's mechanism (§6.7).
+ *
+ * `dns.promises.lookup` and NOT `dns.resolve4`. The distinction is the reason
+ * the resolution is specified as happening "on the host" rather than merely
+ * "before the container": `lookup` goes through the platform resolver, so it
+ * honours `/etc/hosts`, the search domains, and whatever the operator's VPN or
+ * corporate resolver has configured — the same answer any other program on that
+ * machine would get. `resolve4` talks to a nameserver directly and would
+ * silently disagree with the machine it is running on, which is a worse failure
+ * than not resolving at all: the fleet would dial an address the operator
+ * cannot reproduce with `getent`.
+ *
+ * `verbatim: true` so the platform's own ordering arrives here untouched;
+ * `chooseUpstreamAddress` then imposes its own order, and it must be choosing
+ * from what the resolver said rather than from what Node re-sorted.
+ */
+export async function lookupHostAddresses(hostname: string): Promise<readonly string[]> {
+  const found = await dnsLookup(hostname, { all: true, verbatim: true });
+  return found.map((a) => a.address);
+}
+
+/**
+ * A resolution that did not produce a usable address — a config or network
+ * fault, never a bug in pifleet.
+ *
+ * Its own class because `up` must map it to a DIFFERENT exit code from the rest
+ * of `egressBridgePlan`'s throws. Everything else that function raises is a
+ * config error (an undeclared provider, a composed name Docker will not take)
+ * and exits `USAGE`, telling the operator to edit `fleet.yaml`. A resolver that
+ * did not answer is `BACKEND_UNAVAILABLE`: the config may be perfect and the
+ * VPN merely down, and sending that operator to edit a correct file is the
+ * wrong instruction. Distinguished by type rather than by matching the message,
+ * because a message is not an interface.
+ */
+export class RelayUpstreamResolutionError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly hostname: string,
+    detail: string,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `relay: could not resolve llm.providers.${provider}.relay_upstream host ` +
+        `${JSON.stringify(hostname)} on this host: ${detail}. A hosted provider may name a ` +
+        `hostname (D9, SRD §6.7), but 'up' must stamp the ADDRESS into the relay's target — the ` +
+        `relay resolves through Docker's embedded DNS, where this name would either fail every ` +
+        `connection or, if it matches an alias this relay publishes, resolve to the relay ` +
+        `itself and hang. Check the name and this machine's resolver, then re-run.`,
+      options,
+    );
+    this.name = "RelayUpstreamResolutionError";
+  }
+}
+
+/**
+ * Sort key that puts IPv4 first and orders each family deterministically.
+ *
+ * The `"4:"`/`"6:"` prefix does the family preference and the padding does the
+ * ordering, so one key expresses both and they cannot drift apart.
+ */
+function addressSortKey(address: string): string {
+  if (isIP(address) === 4) {
+    return `4:${address.split(".").map((o) => o.padStart(3, "0")).join(".")}`;
+  }
+  return `6:${address.toLowerCase()}`;
+}
+
+/**
+ * Pick ONE address out of an RRset, deterministically.
+ *
+ * ## Why not simply the resolver's first answer
+ *
+ * Because a global load balancer's RRset ROTATES. `relayTargetsDrifted` keys on
+ * `formatRelayTarget`, which contains the host, and a relay whose targets have
+ * "drifted" is torn down and rebuilt — a relay this module documents as SHARED,
+ * which other fleets on that bridge are forwarding through. Taking the
+ * resolver's first answer would therefore cycle a live relay on every `up`
+ * against any name with more than one A record, for no configuration change at
+ * all. Sorting costs nothing and makes the target a function of the RRset's
+ * CONTENTS rather than of its order.
+ *
+ * ## Why IPv4 wins when both families are offered
+ *
+ * The relay dials from a Docker bridge, and Docker's daemon does not enable
+ * IPv6 on user-defined bridges unless the operator turns it on. Choosing a AAAA
+ * on a v4-only bridge produces a relay that starts cleanly, reports ready and
+ * fails every connection — §6.7's exact failure shape, reintroduced by the
+ * mechanism meant to remove it. Stated from Docker's documented default rather
+ * than from a measurement taken here; the deterministic ordering below is what
+ * this file actually proves.
+ *
+ * Returns `null` for an empty or entirely unparseable list rather than
+ * throwing, so the caller owns the one error message.
+ */
+export function chooseUpstreamAddress(addresses: readonly string[]): string | null {
+  const usable = addresses.filter((a) => isIP(a) !== 0);
+  if (usable.length === 0) return null;
+  return usable.slice().sort((a, b) => (addressSortKey(a) < addressSortKey(b) ? -1 : 1))[0]!;
+}
+
+/**
+ * THE ONE PLACE A HOSTNAME UPSTREAM BECOMES AN ADDRESS (D9, §6.7, ISC-426).
+ *
+ * Called from `egressBridgePlan` and nowhere else, which is the containment
+ * this criterion is really about: `egressBridgePlan` is the single derivation
+ * of what a relay dials, so stamping the literal HERE means every consumer
+ * downstream — `ensureBridgeRelay`, `relayRunArgv`, `PIFLEET_RELAY_TARGETS`,
+ * the ledger row — carries the address without any of them knowing a
+ * resolution happened. A second call site would be a second answer to "what
+ * does this relay dial", which is the defect D7 shipped and §6.5.4 now guards.
+ *
+ * ## The two hosts that are NOT resolved, and both matter
+ *
+ * An IP LITERAL is returned untouched: there is nothing to resolve, and running
+ * `getaddrinfo` on it would make a hosted block with a pinned address depend on
+ * a resolver it currently does not need.
+ *
+ * `RELAY_DEFAULT_DIAL_HOST` is returned untouched and the reason is mechanical:
+ * `relayRunArgv` detects that exact string in the target list and adds
+ * `--add-host host-gateway`, which is how the container reaches the Docker
+ * host. Resolving it here would substitute an address, the string would no
+ * longer match, the flag would not be added, and the relay would dial whatever
+ * this MACHINE thinks `host.docker.internal` means — usually nothing. It is
+ * also not a name the resolution exists for: D9's chore is a vendor's address
+ * behind a load balancer, not Docker's own alias.
+ */
+async function stampUpstreamAddress(
+  provider: string,
+  host: string,
+  lookup: HostAddressLookup,
+): Promise<string> {
+  let addresses: readonly string[];
+  try {
+    addresses = await lookup(host);
+  } catch (err) {
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    throw new RelayUpstreamResolutionError(provider, host, detail, { cause: err });
+  }
+  const address = chooseUpstreamAddress(addresses);
+  if (address === null) {
+    throw new RelayUpstreamResolutionError(
+      provider,
+      host,
+      addresses.length === 0
+        ? "the resolver returned no addresses"
+        : `the resolver returned no usable IP address (got ${JSON.stringify(addresses)})`,
+    );
+  }
+  return address;
+}
+
+export async function egressBridgePlan(
   cfg: FleetRelayConfigView,
   egressNetwork: string,
   resolved: readonly string[],
-): ProviderBridge[] {
+  lookup: HostAddressLookup = lookupHostAddresses,
+): Promise<ProviderBridge[]> {
   const seen = new Set<string>();
   const plan: ProviderBridge[] = [];
   for (const provider of resolved) {
@@ -1226,6 +1445,29 @@ export function egressBridgePlan(
     seen.add(provider);
     const view = relayViewForProvider(cfg, provider);
     const network = workerEgressNetwork(cfg, egressNetwork, provider);
+    // `omlxRelayTarget` on the flat path keeps the name `"omlx"` that every
+    // running relay already has stamped in `PIFLEET_RELAY_TARGETS`; see
+    // `providerRelayTarget` for why that is not cosmetic.
+    const target = isFlatFleet(cfg)
+      ? omlxRelayTarget(view)
+      : providerRelayTarget(view, provider);
+    /*
+     * D9's resolution, and the gate on it is the whole of the decision.
+     *
+     * `hosted !== true` — which includes EVERY flat fleet, since the flat
+     * shorthand has no `hosted` field to set — leaves `target` exactly as the
+     * pure functions above returned it, so a pre-D7 fleet's plan is unchanged
+     * byte for byte and no non-hosted provider acquires a resolution step it
+     * did not have. The schema half already refuses a hostname on those blocks
+     * (ISC-427), so the two halves agree: the weaker property cannot be reached
+     * either by editing a field or by falling through a branch here.
+     */
+    const hosted = cfg.llm.providers?.[provider]?.hosted === true;
+    const resolvable =
+      hosted && isIP(target.host) === 0 && target.host !== RELAY_DEFAULT_DIAL_HOST;
+    const address = resolvable
+      ? await stampUpstreamAddress(provider, target.host, lookup)
+      : null;
     plan.push({
       provider,
       network,
@@ -1235,12 +1477,11 @@ export function egressBridgePlan(
       // published on its own bridge and on no other — and so `NO_PROXY` can be
       // built per network rather than per fleet (§6.5.5).
       aliases: relayListenAliases(view),
-      // `omlxRelayTarget` on the flat path keeps the name `"omlx"` that every
-      // running relay already has stamped in `PIFLEET_RELAY_TARGETS`; see
-      // `providerRelayTarget` for why that is not cosmetic.
-      targets: [
-        isFlatFleet(cfg) ? omlxRelayTarget(view) : providerRelayTarget(view, provider),
-      ],
+      // The LITERAL, never the name. `relayRunArgv` serializes this into
+      // `PIFLEET_RELAY_TARGETS` verbatim, so a name surviving to here is a name
+      // the relay would hand to Docker's embedded DNS (§6.7).
+      targets: [address === null ? target : { ...target, host: address }],
+      upstreamResolution: address === null ? null : { name: target.host, address },
       view,
     });
   }

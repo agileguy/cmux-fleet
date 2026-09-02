@@ -109,7 +109,7 @@ function twoProviders(): FleetRelayConfigView {
  * Both providers are listed as resolved, which is what makes them bridges at
  * all: a declared provider nothing selects creates nothing (ISC-410).
  */
-const PLAN = egressBridgePlan(twoProviders(), NET, ["vendor-a", "vendor-b"]);
+const PLAN = await egressBridgePlan(twoProviders(), NET, ["vendor-a", "vendor-b"]);
 
 /** One provider's bridge, with the alias that belongs to it and no other. */
 interface Side {

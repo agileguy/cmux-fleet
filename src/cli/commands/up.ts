@@ -57,6 +57,7 @@ import {
   egressBridgePlan,
   ensureBridgeRelay,
   formatRelayTarget,
+  RelayUpstreamResolutionError,
   workerEgressNetwork,
   type ProviderBridge,
   type RelayStatus,
@@ -1184,17 +1185,37 @@ export function register(program: Command): void {
       let egressBridges: readonly ProviderBridge[] = [];
       if (egressNetwork !== null && loadedConfig !== null) {
         try {
-          egressBridges = egressBridgePlan(
+          /*
+           * `await`, because building the plan now performs ONE host-side
+           * effect: a `hosted: true` provider's hostname `relay_upstream` is
+           * resolved here and the LITERAL is stamped into the target (D9,
+           * §6.7, ISC-426). It is deliberately inside `egressBridgePlan` rather
+           * than a step this line has to remember afterwards — the plan's
+           * target is the single derivation of what a relay dials, and a
+           * "resolve the plan" call a caller could omit is the same shape as
+           * the optional argument `ensureBridgeRelay` exists to remove.
+           */
+          egressBridges = await egressBridgePlan(
             loadedConfig.config,
             egressNetwork,
             resolvedProviders(loadedConfig, workers),
           );
         } catch (err) {
-          // A composed name Docker will not take, or a worker resolving to an
-          // undeclared provider. Both are config errors and neither has created
-          // anything yet, which is why the plan is built before the first
-          // daemon call rather than lazily inside the loop.
-          throw new CliError(err instanceof Error ? err.message : String(err), EXIT.USAGE);
+          /*
+           * TWO exit codes, because there are now two kinds of failure here.
+           *
+           * A composed name Docker will not take, or a worker resolving to an
+           * undeclared provider, is a config error: `USAGE`, edit `fleet.yaml`.
+           * A resolver that did not answer is not — the config may be exactly
+           * right and the machine's DNS merely down — so it reports
+           * `BACKEND_UNAVAILABLE` and does not send the operator to edit a
+           * correct file. Neither has created anything yet, which is why the
+           * plan is built before the first daemon call rather than lazily
+           * inside the loop.
+           */
+          const code =
+            err instanceof RelayUpstreamResolutionError ? EXIT.BACKEND_UNAVAILABLE : EXIT.USAGE;
+          throw new CliError(err instanceof Error ? err.message : String(err), code);
         }
       }
 
@@ -1497,6 +1518,33 @@ export function register(program: Command): void {
             created: egressRelay.created,
             script_sha256: egressRelay.scriptSha256,
             targets: egressRelay.targets.map(formatRelayTarget),
+            /*
+             * BOTH halves of D9's resolution, or the key is absent entirely
+             * (ISC-426).
+             *
+             * `targets` above already carries the ADDRESS — it must, or the
+             * relay would be dialing a name through Docker's embedded DNS
+             * (§6.7) — and an address alone does not answer *"what did this
+             * relay actually dial, and on whose authority"*: `egress.allow`
+             * authorizes the NAME (ISC-428), so a reader holding only the
+             * literal cannot line the two up months later. The pair is the
+             * record; either half alone is not.
+             *
+             * SPREAD, so a relay that resolved nothing writes the row it has
+             * always written, byte for byte. A flat pre-D7 fleet and a
+             * non-hosted provider get no key here rather than a `null` one —
+             * `null` would read as "we resolved and got nothing", which is a
+             * different and false claim about a provider whose schema refuses a
+             * hostname in the first place.
+             */
+            ...(bridge.upstreamResolution === null
+              ? {}
+              : {
+                  relay_upstream_resolved: {
+                    name: bridge.upstreamResolution.name,
+                    address: bridge.upstreamResolution.address,
+                  },
+                }),
           },
         });
         /**

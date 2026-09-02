@@ -155,8 +155,8 @@ describe("ISC-413: two providers on the same port stand up, in separate namespac
    * the collision is established as a fact about the fixture before separation
    * is claimed as a fact about the design.
    */
-  test("the collision is real: both providers listen on 443", () => {
-    const plan = egressBridgePlan(twoOn443(), NET, ["vendor-a", "vendor-b"]);
+  test("the collision is real: both providers listen on 443", async () => {
+    const plan = await egressBridgePlan(twoOn443(), NET, ["vendor-a", "vendor-b"]);
     expect(plan).toHaveLength(2);
     expect(plan.map((b) => b.targets[0]!.listenPort)).toEqual([443, 443]);
   });
@@ -167,9 +167,9 @@ describe("ISC-413: two providers on the same port stand up, in separate namespac
    * `listen(2)` on 443 would fail — the good failure, but a failure. Here the
    * plan stands up and the two listeners are in two network namespaces.
    */
-  test("they stand up cleanly: two networks, two uplinks, two relay containers", () => {
+  test("they stand up cleanly: two networks, two uplinks, two relay containers", async () => {
     const cfg = twoOn443();
-    const plan = egressBridgePlan(cfg, NET, ["vendor-a", "vendor-b"]);
+    const plan = await egressBridgePlan(cfg, NET, ["vendor-a", "vendor-b"]);
 
     // The separation, asserted as DISTINCTNESS rather than as two literals: a
     // derivation that ignored its provider argument would return one string
@@ -186,8 +186,8 @@ describe("ISC-413: two providers on the same port stand up, in separate namespac
     }
   });
 
-  test("the upstreams stay distinct, so the two relays are not the same relay twice", () => {
-    const plan = egressBridgePlan(twoOn443(), NET, ["vendor-a", "vendor-b"]);
+  test("the upstreams stay distinct, so the two relays are not the same relay twice", async () => {
+    const plan = await egressBridgePlan(twoOn443(), NET, ["vendor-a", "vendor-b"]);
     // Different dial targets on the same listen port is exactly the pair a
     // single spliced listener cannot serve: the relay resolves which upstream
     // to dial from which port the connection arrived on, and here that signal
@@ -196,9 +196,9 @@ describe("ISC-413: two providers on the same port stand up, in separate namespac
     expect(plan.map((b) => b.targets[0]!.port)).toEqual([443, 443]);
   });
 
-  test("each relay publishes only ITS OWN vendor hostname as a listen alias", () => {
+  test("each relay publishes only ITS OWN vendor hostname as a listen alias", async () => {
     const cfg = twoOn443();
-    const plan = egressBridgePlan(cfg, NET, ["vendor-a", "vendor-b"]);
+    const plan = await egressBridgePlan(cfg, NET, ["vendor-a", "vendor-b"]);
     const [a, b] = plan;
 
     expect(a!.aliases).toContain("api.vendor-a.test");
@@ -243,10 +243,10 @@ describe("ISC-410: a declared provider no worker resolves to creates nothing", (
    * test and the next one ever both pass for the wrong reason, they have to
    * pass for opposite wrong reasons.
    */
-  test("CONTROL: those exact derived names DO appear once a worker uses it", () => {
+  test("CONTROL: those exact derived names DO appear once a worker uses it", async () => {
     const cfg = threeProviders();
     const ghost = ghostNames(cfg);
-    const plan = egressBridgePlan(cfg, NET, ["omlx", "spare-vendor"]);
+    const plan = await egressBridgePlan(cfg, NET, ["omlx", "spare-vendor"]);
     const serialized = JSON.stringify(plan);
 
     // The derivations are non-empty and distinct from the other providers', so
@@ -261,12 +261,12 @@ describe("ISC-410: a declared provider no worker resolves to creates nothing", (
     expect(serialized).toContain("api.spare-vendor.test");
   });
 
-  test("declared and unused: no network, no uplink, no relay, no alias", () => {
+  test("declared and unused: no network, no uplink, no relay, no alias", async () => {
     const cfg = threeProviders();
     const ghost = ghostNames(cfg);
     // Declared three; two workers, resolving to two of them.
     expect(Object.keys(cfg.llm.providers!)).toHaveLength(3);
-    const plan = egressBridgePlan(cfg, NET, ["omlx", "ollama-cloud"]);
+    const plan = await egressBridgePlan(cfg, NET, ["omlx", "ollama-cloud"]);
     expect(plan).toHaveLength(2);
 
     expect(plan.map((b) => b.network)).not.toContain(ghost.network);
@@ -309,9 +309,9 @@ describe("ISC-410: a declared provider no worker resolves to creates nothing", (
    * what it does not. Written down here as a test, because an assertion quietly
    * dropped from the sweep is indistinguishable from one nobody thought of.
    */
-  test("BOUND: the fleet-wide allowlist is NOT partitioned, and that is D7's stated limit", () => {
+  test("BOUND: the fleet-wide allowlist is NOT partitioned, and that is D7's stated limit", async () => {
     const cfg = threeProviders();
-    const plan = egressBridgePlan(cfg, NET, ["omlx", "ollama-cloud"]);
+    const plan = await egressBridgePlan(cfg, NET, ["omlx", "ollama-cloud"]);
     for (const bridge of plan) {
       expect(bridge.view.egress.allow).toEqual(cfg.egress.allow);
     }
@@ -379,7 +379,7 @@ describe("ISC-410: a declared provider no worker resolves to creates nothing", (
     expect(resolved).toEqual(["omlx", "ollama-cloud"]);
     expect(resolved).not.toContain("spare-vendor");
 
-    const plan = egressBridgePlan(loaded.config, NET, resolved);
+    const plan = await egressBridgePlan(loaded.config, NET, resolved);
     expect(plan.map((b) => b.provider)).toEqual(["omlx", "ollama-cloud"]);
     expect(JSON.stringify(plan)).not.toContain("spare-vendor");
   });
@@ -465,8 +465,8 @@ describe("ISC-410: a declared provider no worker resolves to creates nothing", (
 // ---------------------------------------------------------------------------
 
 describe("ISC-409: two providers in use produce two bridges of exactly one target", () => {
-  test("two networks and two relays, derived per provider", () => {
-    const plan = egressBridgePlan(threeProviders(), NET, ["omlx", "ollama-cloud"]);
+  test("two networks and two relays, derived per provider", async () => {
+    const plan = await egressBridgePlan(threeProviders(), NET, ["omlx", "ollama-cloud"]);
     expect(plan).toHaveLength(2);
 
     // Whole-value equality rather than `toContain`, for the reason this file's
@@ -497,8 +497,8 @@ describe("ISC-409: two providers in use produce two bridges of exactly one targe
    * re-opens exactly one destination"*. The rejected §6.3 design would put both
    * of these on one relay, and this assertion is what refuses it.
    */
-  test("each relay carries exactly ONE target, and the two differ", () => {
-    const plan = egressBridgePlan(threeProviders(), NET, ["omlx", "ollama-cloud"]);
+  test("each relay carries exactly ONE target, and the two differ", async () => {
+    const plan = await egressBridgePlan(threeProviders(), NET, ["omlx", "ollama-cloud"]);
 
     for (const bridge of plan) expect(bridge.targets).toHaveLength(1);
 
@@ -518,19 +518,19 @@ describe("ISC-409: two providers in use produce two bridges of exactly one targe
     });
   });
 
-  test("each relay's alias set names its own endpoint and not the other's", () => {
-    const plan = egressBridgePlan(threeProviders(), NET, ["omlx", "ollama-cloud"]);
+  test("each relay's alias set names its own endpoint and not the other's", async () => {
+    const plan = await egressBridgePlan(threeProviders(), NET, ["omlx", "ollama-cloud"]);
     expect(plan[0]!.aliases).toContain("omlx.house.test");
     expect(plan[0]!.aliases).not.toContain("ollama.com");
     expect(plan[1]!.aliases).toContain("ollama.com");
     expect(plan[1]!.aliases).not.toContain("omlx.house.test");
   });
 
-  test("duplicate workers on one provider still produce ONE bridge for it", () => {
+  test("duplicate workers on one provider still produce ONE bridge for it", async () => {
     // Five workers, two providers. The bridge count is a function of DISTINCT
     // providers, not of fleet size — otherwise `up` would try to create the
     // same network four times and the ledger would claim four bridges.
-    const plan = egressBridgePlan(threeProviders(), NET, [
+    const plan = await egressBridgePlan(threeProviders(), NET, [
       "omlx",
       "omlx",
       "ollama-cloud",
@@ -540,7 +540,7 @@ describe("ISC-409: two providers in use produce two bridges of exactly one targe
     expect(plan.map((b) => b.provider)).toEqual(["omlx", "ollama-cloud"]);
   });
 
-  test("a flat fleet with no providers map is ONE bridge on docker.network verbatim", () => {
+  test("a flat fleet with no providers map is ONE bridge on docker.network verbatim", async () => {
     // The §6.1 shorthand, pinned so the no-regression claim is a test rather
     // than a paragraph: a pre-D7 `fleet.yaml` must get the network and the
     // relay name it already has, or every running relay is stranded.
@@ -548,7 +548,7 @@ describe("ISC-409: two providers in use produce two bridges of exactly one targe
       llm: { base_url: "http://omlx.pifleet.internal:8000/v1", relay_upstream: null },
       egress: { google_hosts: ["oauth2.googleapis.com"], allow: [] },
     };
-    const plan = egressBridgePlan(flat, NET, ["omlx"]);
+    const plan = await egressBridgePlan(flat, NET, ["omlx"]);
     expect(plan).toHaveLength(1);
     expect(plan[0]!.network).toBe(NET);
     expect(plan[0]!.relay).toBe(`pifleet-egress-relay-${NET}`);
@@ -685,7 +685,7 @@ describe("a worker attaches to ITS provider's bridge, not the fleet's", () => {
 
   test("every bridge a worker joins is one the plan actually builds", async () => {
     const loaded = await parseConfig(stringify(doc()), "/tmp/fleet.yaml");
-    const plan = egressBridgePlan(
+    const plan = await egressBridgePlan(
       loaded.config as unknown as FleetRelayConfigView,
       NET,
       resolvedProviders(loaded, ["w-local", "w-cloud"]),
@@ -915,7 +915,7 @@ describe("ISC-412: an over-long provider key is refused naming llm.providers", (
     expect((grammar as ProviderKeyError).exitCode).toBe(EXIT.USAGE);
   });
 
-  test("egressBridgePlan refuses too, since it is the second path to the same key", () => {
+  test("egressBridgePlan refuses too, since it is the second path to the same key", async () => {
     const cfg = threeProviders();
     const providers = cfg.llm.providers as Record<
       string,
@@ -923,7 +923,11 @@ describe("ISC-412: an over-long provider key is refused naming llm.providers", (
     >;
     const longKey = "a".repeat(providerKeyBudget(NET) + 1);
     providers[longKey] = { base_url: "https://api.toolong.test/v1", relay_upstream: "198.51.100.9:443" };
-    expect(() => egressBridgePlan(cfg, NET, [longKey])).toThrow(/llm\.providers\./);
+    // `rejects`, not a sync throw: `egressBridgePlan` became async when D9's
+    // host-side resolution moved inside it (ISC-426). The refusal is the same
+    // refusal — `providerNetworkName` still throws before any await — it now
+    // arrives as a rejected promise.
+    await expect(egressBridgePlan(cfg, NET, [longKey])).rejects.toThrow(/llm\.providers\./);
     // "Exits non-zero" is half the probe, so assert the code rather than
     // trusting the constant's name.
     expect(EXIT.USAGE).toBeGreaterThan(0);
@@ -931,7 +935,7 @@ describe("ISC-412: an over-long provider key is refused naming llm.providers", (
     // a key that fits, so the throw above is about the key's length and not
     // about the fixture being malformed.
     providers["fits"] = { base_url: "https://api.fits.test/v1", relay_upstream: "198.51.100.8:443" };
-    expect(() => egressBridgePlan(cfg, NET, ["fits"])).not.toThrow();
+    await expect(egressBridgePlan(cfg, NET, ["fits"])).resolves.toBeArrayOfSize(1);
   });
 });
 
@@ -1044,8 +1048,8 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
     return JSON.parse(row.slice(prefix.length));
   }
 
-  const planFor = (provider: string): ProviderBridge => {
-    const bridge = egressBridgePlan(threeProviders(), STAMP_NET, [provider])[0];
+  const planFor = async (provider: string): Promise<ProviderBridge> => {
+    const bridge = (await egressBridgePlan(threeProviders(), STAMP_NET, [provider]))[0];
     if (bridge === undefined) throw new Error(`no bridge planned for ${provider}`);
     return bridge;
   };
@@ -1060,7 +1064,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
   test("each provider's relay is stamped with its own name", async () => {
     for (const provider of ["ollama-cloud", "spare-vendor"]) {
       const { calls, exec } = daemon();
-      const status = await ensureBridgeRelay(planFor(provider), exec);
+      const status = await ensureBridgeRelay(await planFor(provider), exec);
       const stamped = stampedTargets(calls);
       expect(stamped).toHaveLength(1);
       expect(stamped[0]?.name).toBe(provider);
@@ -1078,7 +1082,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    */
   test("the stamped target still carries this provider's own upstream", async () => {
     const { calls, exec } = daemon();
-    await ensureBridgeRelay(planFor("ollama-cloud"), exec);
+    await ensureBridgeRelay(await planFor("ollama-cloud"), exec);
     const stamped = stampedTargets(calls);
     expect(stamped[0]?.host).toBe("104.18.0.1");
     expect(stamped[0]?.port).toBe(443);
@@ -1101,7 +1105,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
       llm: { base_url: "http://omlx.pifleet.internal:8000/v1", relay_upstream: null },
       egress: { google_hosts: [], allow: [] },
     };
-    const bridge = egressBridgePlan(flat, STAMP_NET, ["omlx"])[0];
+    const bridge = (await egressBridgePlan(flat, STAMP_NET, ["omlx"]))[0];
     if (bridge === undefined) throw new Error("no bridge planned for the flat fleet");
     // The flat fleet is not composed, so its relay is the one already running.
     expect(bridge.network).toBe(STAMP_NET);
@@ -1121,7 +1125,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * someone unwinds it back to a two-argument call.
    */
   test("calling the relay WITHOUT the plan's target is what reintroduces omlx", async () => {
-    const bridge = planFor("ollama-cloud");
+    const bridge = await planFor("ollama-cloud");
     const viaSeam = daemon();
     await ensureBridgeRelay(bridge, viaSeam.exec);
     expect(stampedTargets(viaSeam.calls)[0]?.name).toBe("ollama-cloud");

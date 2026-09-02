@@ -732,10 +732,13 @@ export const ProviderSchema = z
    * is that it cannot spread — the operator's own oMLX still refuses a hostname
    * here, so the stronger property is enforced rather than merely default.
    *
-   * **The resolution half of D9 is NOT built yet, and nothing resolves this map
-   * at all**, so a hostname written here today reaches no relay. When the
-   * resolver lands, `up` must stamp the literal; a hostname that reached the
-   * relay unresolved is precisely the hang described above.
+   * **The resolution half of D9 is built (ISC-426).** `egressBridgePlan` — the
+   * single derivation of what a relay dials — resolves a hosted block's
+   * hostname through `getaddrinfo` on the host and stamps the literal into the
+   * target, and `up` records the name and the address it resolved to in the
+   * `egress_relay_ready` ledger row. So a hostname written here reaches the
+   * plan, and only its ADDRESS reaches the relay; the hang described above is
+   * unreachable rather than merely undocumented.
    */
   .superRefine((block, ctx) => {
     if (block.relay_upstream === null) return;
