@@ -38,6 +38,7 @@ import { renderPrompt } from "../../supervisor/index.ts";
 import { launchPaneMode } from "../../container/interrupt.ts";
 import { loadBackend } from "../../backends/registry.ts";
 import { assertPaneKey, assertPaneTypeableLine } from "../../util/pane-text.ts";
+import { writeTaskPolicy } from "../../run/task-policy.ts";
 import { nextAttendedRecord, readAttended } from "./steer.ts";
 import {
   readBudgetState,
@@ -494,6 +495,46 @@ async function sendViaPane(args: {
    */
   const prompt = renderPrompt({ ...envelope, epoch: envelope.epoch });
   const plan = paneKeystrokes(worker, prompt);
+
+  /**
+   * Provenance BEFORE the first byte — the same write, in the same order, that
+   * `supervisor/index.ts` performs on the rpc route, and it was missing here.
+   *
+   * ## What its absence did
+   *
+   * `writeTaskPolicy` had three call sites and two of them reset the file to
+   * `(<none>, 0)`: `materialize.ts` when the worker directory is built, and the
+   * supervisor when a task settles. The only real write was inside the RPC
+   * `dispatch` handler — a handler this route deliberately never reaches. So a
+   * worker dispatched through its pane ran its WHOLE LIFE with `/policy/task`
+   * reading `<none>` and `0`, and every gated cloud verb it executed was
+   * ledgered against no task at all. That is ISC-360's original finding
+   * recurring on a route built after it: the audit trail records THAT a
+   * destructive verb was attempted and loses WHICH task attempted it.
+   *
+   * Confirmed live 2026-09-02 by reading the file out of a running
+   * adopted-terminal container: `-r--r--r-- 1 pi pi 9 /policy/task`, contents
+   * `<none>\n0\n`, while the worker was mid-task. The mount was correct, the
+   * mode was correct, and nothing had ever written a value into it.
+   *
+   * ## Why here and not earlier
+   *
+   * AFTER `paneKeystrokes`, which is the last thing that can refuse: an
+   * untypeable prompt throws there, and a dispatch that never types must not
+   * leave this worker's provenance pointing at a task no pane ever received.
+   * BEFORE the send loop, because the instant the first line lands the worker
+   * can start a turn and run a gated verb, and a verb classified before this
+   * write is attributed to the PREVIOUS task — which is worse than `<none>`,
+   * being wrong rather than merely absent.
+   *
+   * `envelope.epoch` verbatim, which on this route is the placeholder 0. The
+   * same 0 the prompt carries and the same 0 the inbox record carries, for the
+   * reason the docblock above gives at length: consistency across the three is
+   * what keeps the harvest correlating rather than clamping. When this route
+   * acquires a real allocator the value follows the envelope without this line
+   * being touched.
+   */
+  await writeTaskPolicy(wp.taskPolicy, envelope.task_id, envelope.epoch);
 
   for (const [i, step] of plan.entries()) {
     try {

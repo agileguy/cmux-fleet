@@ -241,3 +241,100 @@ describe("sendTaskEnvelope routes by pane mode", () => {
     expect(String(err)).toMatch(/no presentation record/);
   });
 });
+
+/**
+ * Defect A — the pane route ran its whole life with no provenance.
+ *
+ * `writeTaskPolicy` had three call sites when this was found. Two of them
+ * write `(<none>, 0)`: `materialize.ts` when the worker directory is built, and
+ * the supervisor when a task settles. The one real write is inside the RPC
+ * `dispatch` handler, which this route deliberately never reaches — so every
+ * gated cloud verb a pane-dispatched worker ran was ledgered against no task.
+ * Confirmed 2026-09-02 by reading `/policy/task` out of a live adopted-terminal
+ * container mid-task: `<none>\n0\n`.
+ *
+ * ## Why the probe drives a FAILING send
+ *
+ * The criterion is an ORDERING — the write lands before the first byte — and an
+ * ordering cannot be proved by a test that only looks at the end state. Making
+ * the send fail at step 1 splits the two: the file is read AFTER `sendViaPane`
+ * has thrown, so it can only hold the task id if the write happened first. Move
+ * the `writeTaskPolicy` call below the send loop and this goes red, which is
+ * the mutation the criterion is actually about.
+ *
+ * `tmux` with a pane id no server has is what makes the send fail, and it fails
+ * whether or not tmux is installed: absent, the spawn fails; present, the pane
+ * does not exist. NO PTY, no Docker, no live backend — the property ISC-377,
+ * ISC-378, ISC-379 and ISC-387 all lack and are `[~]` for.
+ */
+describe("the pane route writes task provenance before it types", () => {
+  async function paneDispatchAgainstADeadSurface(): Promise<{
+    wp: ReturnType<typeof workerPaths>;
+    err: unknown;
+  }> {
+    const { run } = await makeRun();
+    const worker = "w-1";
+    const wp = workerPaths(run, worker);
+    await mkdir(wp.dir, { recursive: true });
+    await writeJsonAtomic(wp.launchJson, launch("tui"));
+    await writeJsonAtomic(wp.presentationJson, {
+      schema: "pifleet.presentation/v1",
+      worker,
+      backend: "tmux",
+      workspace_ref: null,
+      // Well-formed for `assertTmuxValue` and belonging to no server.
+      surface_ref: "%999999",
+      window_ref: null,
+      adopted_terminal: false,
+    });
+    const ledger = new LedgerWriter(run, "test");
+    const err = await sendTaskEnvelope({
+      run,
+      worker,
+      taskId: "t-provenance",
+      partial: { title: "t", brief: "b", acceptance: [] as string[] },
+      attemptId: "a-1",
+      requestedEpoch: null,
+      ledger,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    return { wp, err };
+  }
+
+  test("the task id is on disk even though not one byte was typed", async () => {
+    const { wp, err } = await paneDispatchAgainstADeadSurface();
+    // The send really did fail — without this the assertion below could pass
+    // on a route that typed the whole prompt successfully, which is a
+    // different (and untested) claim.
+    expect(err).not.toBeNull();
+    expect(String(err)).toMatch(/pane dispatch failed at step 1/);
+
+    const written = await Bun.file(wp.taskPolicy).text();
+    expect(written).toBe("t-provenance\n0\n");
+  });
+
+  /**
+   * The control. `<none>` is `verbgate`'s own spelling of "no task is live",
+   * and it is what this file held on this route for the whole of ISC-380's
+   * life — so a test asserting only "the file exists" would have passed then
+   * too.
+   */
+  test("and it is not the <none> the file used to keep", async () => {
+    const { wp } = await paneDispatchAgainstADeadSurface();
+    expect(await Bun.file(wp.taskPolicy).text()).not.toContain("<none>");
+  });
+
+  /**
+   * 0 verbatim, and asserted rather than incidental: the prompt, the inbox
+   * record and this file must carry the SAME epoch or `harvest/outbox.ts`
+   * refuses a correct result as stale. This route allocates nothing, so all
+   * three are the schema placeholder — and the day one of them stops being 0,
+   * this is where the disagreement shows up first.
+   */
+  test("the epoch line matches the placeholder the envelope carries", async () => {
+    const { wp } = await paneDispatchAgainstADeadSurface();
+    expect((await Bun.file(wp.taskPolicy).text()).split("\n")[1]).toBe("0");
+  });
+});

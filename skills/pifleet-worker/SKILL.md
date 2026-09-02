@@ -15,6 +15,7 @@ you and the orchestrator that dispatched your task. It is the same for every rol
 | `/workspace` | your checkout of the repo, on a branch created for you. **Whether it exists and whether it is writable depend on your role.** A `worktree` role gets its own writable checkout and may commit; a `shared-ro` role (the reviewer) gets the operator's checkout mounted **read-only**; a `none` role (observer, verifier, ticketing) gets **no `/workspace` at all** and works against live systems. An absent or read-only `/workspace` is your role, not a fault |
 | `/outbox/<task-id>` | where you write your result; the orchestrator reads it — `<task-id>` is a literal string you were given, never a name you choose (next section) |
 | `/skills` | read-only skill bundle |
+| `/policy/dispatch` | read-only. Present and non-empty only when your task was **staged** — see the next section. Holds the same identity block your prompt carries, plus the brief |
 
 Nothing outside `/workspace` and `/outbox` is yours. Paths in your task are **container**
 paths; you never see or need a host path, and any absolute host path in a brief is a bug you
@@ -41,12 +42,32 @@ Measured: a worker completed a ticketing task, wrote a full write-up to
 run harvested as though the container had produced nothing at all. The dispatched id was
 `my-iteration-2`, and it was sitting in that worker's own prompt the whole time.
 
-**Where to read it.** The `#` heading on the first line of your prompt: a task's title
-defaults to its id, so unless an operator wrote a separate human title, that heading *is* the
-string. Where there is a distinct title, the id is named in the brief. Fix the value **before
-you start work**, not when you come to write your result — by then the job you just finished is
-the salient name for it and the dispatched id is not, which is exactly how the wrong one gets
-chosen.
+**Where to read it.** The fenced block under the `## This task` heading at the END of your
+prompt. It looks like this and it is delivered on every route:
+
+```
+task_id: my-iteration-2
+outbox:  /outbox/my-iteration-2
+worker:  tick-1
+epoch:   3
+```
+
+`task_id` is the string. `outbox` is the directory, given as a literal path so you never have
+to assemble one.
+
+**Not the `#` heading on the first line.** A task's *title* defaults to its id, so the heading
+is usually the same string — and that coincidence is exactly why it is the wrong place to
+read. The moment an operator writes a human title, the heading becomes prose and the id is
+still in the block below it. A rule that works until someone names a task properly is not a
+rule.
+
+**A second copy is mounted at `/policy/dispatch`,** for the same values, when your task was
+staged rather than typed. Read it if the block above is missing; it is read-only and the host
+wrote it.
+
+Fix the value **before you start work**, not when you come to write your result — by then the
+job you just finished is the salient name for it and the dispatched id is not, which is exactly
+how the wrong one gets chosen.
 
 **Do not derive one.** Not from the work you did, not from your role, not from the date, and
 not from a sibling directory a previous task left behind.

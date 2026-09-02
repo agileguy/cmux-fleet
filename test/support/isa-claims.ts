@@ -357,18 +357,39 @@ export const ISA_CLAIMS: readonly IsaClaim[] = [
     isc: "ISC-349",
     grade: "[~]",
     claim:
-      "The mounted worker skill names the ONE place a task id is readable — the prompt's `#` " +
-      "heading, which `dispatch.ts` defaults to the task id. Empty here means the binding was " +
-      "dropped and `<task-id>` is an unbindable placeholder again, which is the state that " +
-      "produced `/outbox/list-tickets-2026-08-29/` for a task dispatched as `my-iteration-2`. " +
-      "`[~]` and not `[x]`: this proves the sentence is SHIPPED. Nothing here observes a " +
-      "worker resolving its id, and nothing can, because the value is still not sent to it.",
+      "The mounted worker skill names the ONE place a task id is readable — the fenced " +
+      "`## This task` block `renderPrompt` appends to every prompt on every route. Empty here " +
+      "means the binding was dropped and `<task-id>` is an unbindable placeholder again, which " +
+      "is the state that produced `/outbox/list-tickets-2026-08-29/` for a task dispatched as " +
+      "`my-iteration-2`.\n\n" +
+      "PINNED STRING CHANGED 2026-09-02, and the change is ISC-349's own finding recurring one " +
+      "level up. The skill used to point at the prompt's `#` HEADING, on the reasoning that a " +
+      "task's title defaults to its id. That is true and it is not a rule: `renderPrompt` takes " +
+      "`title` and `task_id` as separate fields, so the instant an operator writes a human " +
+      "title the heading becomes prose and the id is somewhere else. The instruction was " +
+      "correct for every task nobody had named — which is to say, correct until used. It now " +
+      "names the block that carries the VALUE, and says in as many words that the heading is " +
+      "the wrong place, so the coincidence cannot be re-derived by the next reader.\n\n" +
+      "`[~]` and not `[x]`: this proves the sentence is SHIPPED and that it points somewhere " +
+      "the value actually is. Nothing here observes a worker resolving its id.",
     argv: [
       "grep",
       "-nF",
-      "defaults to its id, so unless an operator wrote a separate human title",
+      "The fenced block under the `## This task` heading",
       "skills/pifleet-worker/SKILL.md",
     ],
+    expect: 1,
+  },
+  {
+    isc: "ISC-349",
+    grade: "[~]",
+    claim:
+      "…and the skill says the `#` heading is NOT the place, rather than merely omitting it. " +
+      "Empty here means the correction degraded to a silent removal, which leaves a reader who " +
+      "remembers the old rule — or a model that learned it — with nothing contradicting them. " +
+      "The heading and the id are the same string for every unnamed task, so the wrong rule " +
+      "passes its own spot check.",
+    argv: ["grep", "-nF", "Not the `#` heading on the first line.", "skills/pifleet-worker/SKILL.md"],
     expect: 1,
   },
   {
