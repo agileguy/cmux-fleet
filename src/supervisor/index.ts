@@ -40,6 +40,7 @@ import {
   type RpcEvent,
   type RpcResponse,
   type RpcSessionState,
+  type TaskEnvelope,
   type Verdict,
   type WorkerState,
 } from "../contracts.ts";
@@ -47,7 +48,7 @@ import { appendJsonl } from "../util/jsonl.ts";
 import { RpcClient, RpcTimeoutError, Stopwatch } from "../rpc/client.ts";
 import { isoNow } from "../util/clock.ts";
 import { CompletionTracker } from "../rpc/completion.ts";
-import { EpochManager } from "../rpc/epoch.ts";
+import { EpochManager, type CancelDecision, type DispatchDecision } from "../rpc/epoch.ts";
 import { isInsideRunTree, runPaths, taskRecordPath, workerPaths } from "../run/paths.ts";
 import { writeTaskPolicy } from "../run/task-policy.ts";
 import {
@@ -613,6 +614,27 @@ async function main(): Promise<void> {
   const prose = new ProseTurnDetector(proseTurnsBeforeFail);
   const deadline = new Stopwatch();
   let deadlineMs: number | null = null;
+  /**
+   * A STAGED epoch's deadline, held UNSTARTED until the turn begins (§9 Q1).
+   *
+   * `deadlineMs` is the armed clock: the heartbeat compares `deadline.elapsedMs()`
+   * against it, so writing it is what starts the countdown. The RPC route sets
+   * both in the same breath as the prompt send, which is right there because
+   * the turn begins in the same millisecond.
+   *
+   * A staged epoch's turn begins when a person presses a key — immediately, in
+   * ten minutes, or never. Setting `deadlineMs` at stage time would make a
+   * 20-minute task staged before lunch `timed_out` before it began, and D6
+   * names that as one of its two non-cosmetic costs. So the value is parked
+   * here, where nothing reads it, and moved to `deadlineMs` at the trigger.
+   *
+   * While it is parked the epoch has NO deadline at all. That is deliberate and
+   * it is the lesser of the two errors: an untriggered stage is released by
+   * `unstage`, which is a verb an operator can reach, whereas a task killed by
+   * a clock that started before it did is a failure with no remedy and a
+   * misleading verdict attached.
+   */
+  let stagedDeadlineMs: number | null = null;
   /** Pending kill ladder armed when a deadline `abort` goes unanswered. */
   let abortEscalation: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -860,6 +882,11 @@ async function main(): Promise<void> {
     probing = false;
     livePromptId = null;
     deadlineMs = null;
+    // Both clocks, and the parked one for the same reason as the armed one: a
+    // staged epoch that settled before its trigger (a `failed` on restart, say)
+    // would otherwise leave its deadline parked, and the NEXT stage's first
+    // transcript growth would arm the PREVIOUS task's number.
+    stagedDeadlineMs = null;
     const settledWorkdir = liveWorkdir;
     const settledBaseline = liveWorkdirBaseline;
     const settledToolErrors = state.tool_errors - liveToolErrorsAtStart;
@@ -2019,6 +2046,37 @@ async function main(): Promise<void> {
               void flushState();
             }
 
+            /**
+             * THE EPOCH GATE — reachable since D6, and STILL DEAD for one of
+             * the two `tui` routes. Labelled rather than left to be read as
+             * live, in the style `dispatch.ts` uses for its declared-unreachable
+             * key loop.
+             *
+             * Defect B was that everything below this line could never run: the
+             * only caller of `em.allocate` was the RPC `dispatch` handler, which
+             * refuses a `tui` worker 29 lines before reaching it, and
+             * `sendViaPane` never reaches the supervisor at all. So `em.live`
+             * was null on every poll of every `tui` worker, `classifyTuiTurn`
+             * never ran, no task record was ever written, and `pifleet wait`
+             * could only time out. The settle path was not missing; it was
+             * waiting for an allocator.
+             *
+             * The `stage` verb is that allocator, and D12 is the decision to let
+             * Defect B close as a CONSEQUENCE of D6 rather than as a separate
+             * repair — the alternative, a settle that works without an epoch,
+             * would have to invent a second identity for a turn in order to
+             * write the task record `wait` reads.
+             *
+             * **WHICH ROUTE IS NOW LIVE, AND WHICH IS NOT.** `stage` is reached
+             * by the ADOPTED-terminal route only. A backend-managed `tui`
+             * worker is still dispatched by `sendViaPane` typing into its pane,
+             * which allocates nothing, so for that worker `em.live` is still
+             * null on every poll and everything below is still dead. That is a
+             * known-dead mechanism left in the tree deliberately: it is the same
+             * code, correct for both, and backporting the verb to the pane route
+             * is what makes it run (§5.3). Nobody should read this gate as
+             * covering both routes because it covers one.
+             */
             const live = em.live;
             if (live === null) {
               // Nothing to settle. The reader is still polled above so that the
@@ -2039,6 +2097,53 @@ async function main(): Promise<void> {
                 entries_before: count,
               });
               return;
+            }
+
+            /**
+             * THE TRIGGER, AND IT IS APPROXIMATE — the word is §9 Q1's and it
+             * is used here deliberately rather than softened.
+             *
+             * A staged epoch's deadline must start when the turn starts, and
+             * the supervisor has exactly one observable for that: the
+             * transcript growing. So the first growth AFTER the stage's
+             * baseline arms the clock.
+             *
+             * **What Q1 states cannot be separated, and this code does not
+             * separate it:** growth after a stage may be the staged task, or it
+             * may be the operator's own unrelated prompt typed into the same
+             * pane. Nothing in the transcript distinguishes them — the staged
+             * brief is a file the operator pastes or references, not a marker
+             * Pi records — so an operator who stages a task and then asks the
+             * agent something else has started this task's deadline against
+             * that other turn. The measurement is therefore an UPPER BOUND on
+             * how long the staged task has been running, never an equality, and
+             * a `timed_out` verdict produced by it says "the worker has been
+             * busy this long since the stage", not "this task ran this long".
+             *
+             * That inaccuracy was accepted because both alternatives are worse:
+             * starting at stage time is wrong by however long the operator
+             * takes to press the key, which is unbounded and always in the
+             * fatal direction, and never starting a deadline at all hands the
+             * fleet a task that can hang forever with no verdict.
+             *
+             * `grew` and not `count !== tuiBaselineCount`: a transcript that
+             * SHRANK is a different file, not a turn, and arming on it would
+             * start the clock on a reader reset.
+             */
+            if (stagedDeadlineMs !== null && grew) {
+              deadline.restart();
+              deadlineMs = stagedDeadlineMs;
+              stagedDeadlineMs = null;
+              logEvent({
+                type: "tui_stage_triggered",
+                epoch: live.epoch,
+                task_id: live.task_id,
+                deadline_ms: deadlineMs,
+                detail:
+                  "deadline armed on first transcript growth after the stage; APPROXIMATE — " +
+                  "growth cannot be attributed to the staged task rather than to the " +
+                  "operator's own prompt (SRD-TUI-DISPATCH §9 Q1)",
+              });
             }
 
             const reading = classifyTuiTurn(tuiReader.entries.slice(tuiBaselineCount));
@@ -2109,6 +2214,39 @@ async function main(): Promise<void> {
           }
         })();
       }, TUI_POLL_MS);
+
+  /**
+   * The closure `stage` and `unstage` are allowed to reach, assembled per call.
+   *
+   * A FUNCTION DECLARATION and not a `const`, for the same reason
+   * `startControlServer` is one: the server is started at the top of `main`,
+   * long before this line is reached, so a message arriving in between would
+   * find a `const` in its temporal dead zone and take the socket down with a
+   * `ReferenceError` instead of answering. Hoisting removes the window rather
+   * than making it small.
+   *
+   * Assembled per call rather than captured once because `state` is mutated in
+   * place and `shuttingDown` is read at the moment the verb runs; a snapshot
+   * taken at startup would answer with the flags the supervisor had before it
+   * ever did anything.
+   *
+   * **`client` is not in it, and that is the point** — see `StageDeps`.
+   */
+  function stageDeps(): StageDeps {
+    return {
+      em,
+      state,
+      worker: argv.workerId,
+      persistFence,
+      flushState,
+      writeProvenance: (taskId, epoch) => writeTaskPolicy(wp.taskPolicy, taskId, epoch),
+      ledgerAppend: (event, fields) => ledger.append(event, fields),
+      logEvent,
+      armDeadlineOnTrigger: (ms) => {
+        stagedDeadlineMs = ms;
+      },
+    };
+  }
 
   // -------------------------------------------------------------------------
   // Control socket handler (started earlier, before idle was writable).
@@ -2336,6 +2474,64 @@ async function main(): Promise<void> {
           epoch: decision.epoch,
         });
         return { accepted: true, epoch: decision.epoch, replayed: false };
+      }
+
+      /**
+       * `stage` — allocate an epoch for a dispatch this supervisor will not
+       * deliver (SRD-TUI-DISPATCH D6).
+       *
+       * ## Why a new verb rather than relaxing `dispatch`'s refusal
+       *
+       * `dispatch` refuses `client === null` BEFORE `em.allocate`, and the
+       * comment on that guard says the spelling is what narrows `client` for
+       * the `send` below — delete the guard and the prompt send fails to
+       * compile. That is a good guard and it keeps working, untouched, exactly
+       * as it is. What it was conflating is DELIVERY with ALLOCATION: the
+       * supervisor holds `em`, persists `fence.json` and polls the transcript
+       * for a `tui` worker, and none of that needs an RPC channel. The refusal
+       * is about delivery, and it currently reads as being about allocation
+       * only because on that route the two were the same act.
+       *
+       * So the concerns are separated at the TYPE level rather than by comment:
+       * `handleStage` is a module-scope function whose dependency object has no
+       * `client` field and whose scope has no `client` binding, so the mutation
+       * this design has to survive — a `stage` that grows a `send` — does not
+       * compile for want of a NAME rather than for want of a null check.
+       *
+       * ## The wire shape is `dispatch`'s, and that is not an accident
+       *
+       * Same `envelope` / `attempt_id` / `requested_epoch` in, the allocator's
+       * own `reason` out. A staged dispatch is dedup'd on `(task_id,
+       * attempt_id)` by the same allocator against the same durable `attempts`
+       * map, so a re-stage REPLAYS — which is the whole of what §6.3 claims the
+       * epoch fences on this route, and is worth nothing if the caller has to
+       * speak a second dialect to get it.
+       */
+      case "stage": {
+        const envelope = TaskEnvelopeSchema.parse(msg["envelope"]);
+        const attemptId = typeof msg["attempt_id"] === "string" ? msg["attempt_id"] : "a-unknown";
+        const requested = typeof msg["requested_epoch"] === "number" ? msg["requested_epoch"] : null;
+        return await handleStage(stageDeps(), envelope, attemptId, requested);
+      }
+
+      /**
+       * `unstage` — release a staged epoch nobody triggered (§9 Q8).
+       *
+       * The verb the SRD calls "the first thing an implementer will need": a
+       * live epoch takes the worker out of service until something settles it,
+       * and on this mode nothing will. The names are REQUIRED and not optional
+       * — `EpochManager.cancel` refuses unless they match the live epoch,
+       * because a cancel that released "whatever is live" would race a real
+       * dispatch and hand back a running turn.
+       */
+      case "unstage": {
+        const taskId = typeof msg["task_id"] === "string" ? msg["task_id"] : "";
+        const attemptId = typeof msg["attempt_id"] === "string" ? msg["attempt_id"] : "";
+        return await handleUnstage(
+          { ...stageDeps(), shuttingDown, disarmStagedDeadline: () => (stagedDeadlineMs = null) },
+          taskId,
+          attemptId,
+        );
       }
 
       case "steer": {
@@ -2705,6 +2901,286 @@ async function main(): Promise<void> {
 
   process.on("SIGTERM", () => void beginShutdown());
   process.on("SIGINT", () => void beginShutdown());
+}
+
+// ---------------------------------------------------------------------------
+// `stage` / `unstage` — the staged-dispatch verbs (SRD-TUI-DISPATCH D6, Q8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything `handleStage` and `handleUnstage` are allowed to touch — and,
+ * far more importantly, everything they are NOT.
+ *
+ * ## THERE IS NO `client` HERE, AND THAT ABSENCE IS THE DESIGN
+ *
+ * D6 asks for a verb that allocates an epoch without delivering a prompt, and
+ * asks for it to be a NEW verb rather than a relaxation of `dispatch`'s
+ * `client === null` refusal, precisely because that refusal is spelled the way
+ * it is so deleting it fails to compile. The `stage` verb needs the mirror-image
+ * property: it must be impossible for it to grow a `send`.
+ *
+ * A `case "stage"` written inline inside `startControlServer` would only have
+ * `client` typed `RpcClient | null` — so `client.send(...)` would be a
+ * strict-null error, which is real but is one narrowing guard away from
+ * compiling. These functions live at MODULE scope instead, where `client` is
+ * not a name at all and is not a field of this interface, so the mutation the
+ * SRD names — "make `stage` fall through to `send`" — is not a guard away from
+ * compiling, it is `Cannot find name 'client'`. Threading the RPC channel in
+ * here would mean editing this type, which is a change no reviewer can miss.
+ *
+ * The secondary benefit is why this shape was worth the parameter object:
+ * `src/supervisor/index.ts` is one 2000-line `main()` that spawns a process and
+ * opens a socket, and `supervisor-tui.test.ts` says in as many words that the
+ * risk in it can only be graded structurally. These two functions are the first
+ * pieces of the control plane that can be graded BEHAVIOURALLY, at unit speed,
+ * against a real `EpochManager`.
+ */
+export interface StageDeps {
+  em: EpochManager;
+  state: WorkerState;
+  worker: string;
+  /** Fail-stop durable fence write. See `persistFence` in `main`. */
+  persistFence: () => Promise<void>;
+  flushState: () => Promise<void>;
+  /**
+   * `/policy/task` — the two-line provenance file the verbgate stamps its
+   * ledger from. `(null, 0)` is the "no task" spelling `settle` uses.
+   *
+   * Injected rather than called directly so the ORDER of the writes is
+   * observable to a probe. The order is the correctness argument on this route
+   * (§6.1) and the write itself is trivial, so the order is the thing worth
+   * being able to assert.
+   */
+  writeProvenance: (taskId: string | null, epoch: number) => Promise<void>;
+  ledgerAppend: (
+    event: string,
+    fields: {
+      worker?: string;
+      task_id?: string;
+      epoch?: number;
+      detail?: Record<string, unknown>;
+    },
+  ) => Promise<void>;
+  logEvent: (record: Record<string, unknown>) => void;
+  /**
+   * Record the staged task's deadline WITHOUT starting it (SRD §9 Q1).
+   *
+   * The RPC route runs `deadline.restart(); deadlineMs = envelope.deadline_s *
+   * 1000` at dispatch, which is correct there because the turn begins in the
+   * same millisecond. A staged epoch's turn begins when a person presses a key,
+   * so starting the clock here would make a 20-minute task staged before lunch
+   * `timed_out` before it began. The supervisor arms it on the trigger instead;
+   * see the arming site in the transcript poll for what "the trigger" can
+   * actually be observed as, and why that is APPROXIMATE.
+   */
+  armDeadlineOnTrigger: (deadlineMs: number) => void;
+}
+
+/**
+ * The `stage` answer, and the refusal arms are the ALLOCATOR's own.
+ *
+ * `Extract<DispatchDecision, { ok: false }>` rather than a hand-written union:
+ * a caller must be able to read `busy` / `already_completed` / `stale_epoch`
+ * from a staged dispatch and from an RPC dispatch with the same code, and a
+ * second spelling of the allocator's vocabulary would drift the first time one
+ * of them gained an arm. `busy` carries `epoch`, which is how a refused stage
+ * NAMES the epoch that is holding the worker — the operator's next move is
+ * `unstage` against it.
+ */
+export type StageAnswer =
+  | { accepted: true; epoch: number; replayed: boolean }
+  | ({ accepted: false } & Extract<DispatchDecision, { ok: false }>);
+
+/** The `unstage` answer: the cancel decision, plus a sentence for a human. */
+export type UnstageAnswer =
+  | { ok: true; epoch: number }
+  | (Extract<CancelDecision, { ok: false }> & { error: string });
+
+/**
+ * `stage` — allocate an epoch for a dispatch nothing is going to send (D6).
+ *
+ * The steps below are §6.1's steps 2, 3 and 4 in §6.1's order, and the order is
+ * borrowed verbatim from the RPC route's own argument (the `dispatch` case,
+ * "Provenance BEFORE the prompt"):
+ *
+ *   1. **Allocate.** A second stage while one is pending is refused `busy` by
+ *      the allocator itself, so there is no second check here. §6.1 step 2 says
+ *      so explicitly, and adding one would be a second spelling of a fact the
+ *      allocator already owns.
+ *   2. **Persist the fence, durably, BEFORE anything can act under the epoch.**
+ *      Allocate-then-crash-then-restart must not re-issue a number.
+ *   3. **Write the provenance, BEFORE the worker can run a gated verb under
+ *      it.** A verb classified before this write is ledgered against the
+ *      PREVIOUS task.
+ *
+ * **On this route the gap between step 3 and the act is a human's reaction time
+ * rather than a few milliseconds** — which makes the ordering easier to get
+ * right and very much more expensive to get wrong, because the window in which
+ * a wrong `/policy/task` is on disk is now minutes wide and an operator typing
+ * in that pane is stamping every gated verb with it.
+ *
+ * ## What this deliberately does NOT do
+ *
+ * - **It does not send.** There is nothing to send it on. See `StageDeps`.
+ * - **It does not start the deadline.** §9 Q1; see `armDeadlineOnTrigger`.
+ * - **It does not write the task drop (`/policy/dispatch`, §6.2).** That file
+ *   and its mount are the next phase's, and staging without it means the worker
+ *   has the correct provenance and no rendered brief to read — a staged epoch
+ *   that is allocated, fenced and ledgered but not yet READABLE. It is called
+ *   out here rather than left to be discovered, because the failure it produces
+ *   is a triggered turn that runs against the operator's own typing under a
+ *   real task id, which the ledger will attribute perfectly and wrongly.
+ * - **It does not set `phase` to a staged state, and §6.5 asks for one.** That
+ *   section wants `phase` to stay `idle` with the staged task id in a NEW field
+ *   beside it, on the argument that a staged task has not started. `PhaseSchema`
+ *   has no `staged` member and `WorkerStateSchema` has no such field, and both
+ *   live in `src/contracts.ts`. So this writes `busy`, which is true of the
+ *   allocator (the worker cannot take another task) and premature about the
+ *   agent (it is not running one). The divergence is recorded rather than
+ *   silently taken.
+ */
+export async function handleStage(
+  deps: StageDeps,
+  envelope: TaskEnvelope,
+  attemptId: string,
+  requestedEpoch: number | null,
+): Promise<StageAnswer> {
+  const decision = deps.em.allocate(envelope.task_id, attemptId, requestedEpoch);
+  if (!decision.ok) {
+    await deps.ledgerAppend("stage_rejected", {
+      worker: deps.worker,
+      task_id: envelope.task_id,
+      detail: { reason: decision.reason },
+    });
+    return { accepted: false, ...decision };
+  }
+  if (decision.replayed) {
+    /**
+     * Idempotent re-stage: the original answer, verbatim, and NOTHING is
+     * rewritten.
+     *
+     * Identical to the RPC route's replay arm and identical for the same
+     * reason — the caller lost the ack, not the stage — but it matters more
+     * here, because §6.3 makes replay the mechanism by which a staged
+     * dispatch is fenced at all. Re-persisting or re-stamping the provenance
+     * would be writes performed on behalf of a stage that already happened,
+     * and the second write is the one that could land while the epoch is
+     * mid-turn.
+     */
+    return { accepted: true, epoch: decision.epoch, replayed: true };
+  }
+
+  await deps.persistFence();
+  await deps.writeProvenance(envelope.task_id, decision.epoch);
+  deps.state.epoch = decision.epoch;
+  deps.state.task_id = envelope.task_id;
+  deps.state.phase = "busy";
+  await deps.flushState();
+  deps.armDeadlineOnTrigger(envelope.deadline_s * 1000);
+
+  deps.logEvent({
+    type: "stage_accepted",
+    task_id: envelope.task_id,
+    epoch: decision.epoch,
+    deadline_s: envelope.deadline_s,
+    detail: "epoch allocated for a staged dispatch; no prompt was sent",
+  });
+  await deps.ledgerAppend("stage_accepted", {
+    worker: deps.worker,
+    task_id: envelope.task_id,
+    epoch: decision.epoch,
+  });
+  return { accepted: true, epoch: decision.epoch, replayed: false };
+}
+
+/**
+ * `unstage` — release a staged epoch that was never triggered (§9 Q8).
+ *
+ * `EpochManager.cancel` holds every refusal; this function's own job is the
+ * three durable consequences of a successful one, and each is here for a
+ * failure it prevents:
+ *
+ *   1. **Persist the fence.** The release is a fence mutation like any other.
+ *      A supervisor that crashed between the cancel and the next stage would
+ *      otherwise come back holding a live epoch nobody can trigger — the exact
+ *      state this verb exists to leave.
+ *   2. **Clear `/policy/task` back to `(null, 0)`.** `settle` does this and
+ *      says why: a worker process outlives its epoch, and anything it runs
+ *      between the release and the next dispatch belongs to NO task. Leaving
+ *      the cancelled task's id on disk is worse here than after a settle,
+ *      because the operator is sitting at that terminal and will keep typing —
+ *      every gated verb they run would be stamped with a task that never ran.
+ *   3. **Reset `state`.** `phase`/`task_id`/`epoch` are what `status` prints;
+ *      a released worker that still reports `busy` under the cancelled task is
+ *      a fleet that looks occupied and is not.
+ *
+ * `phase` goes to `idle` unless the supervisor is shutting down, matching
+ * `settle`: a shutdown has already decided what the phase means and a release
+ * must not overwrite that decision with a liveness claim.
+ */
+export async function handleUnstage(
+  deps: StageDeps & { shuttingDown: boolean; disarmStagedDeadline: () => void },
+  taskId: string,
+  attemptId: string,
+): Promise<UnstageAnswer> {
+  const decision = deps.em.cancel(taskId, attemptId);
+  if (!decision.ok) {
+    return { ...decision, error: unstageRefusalMessage(deps.worker, taskId, attemptId, decision) };
+  }
+
+  await deps.persistFence();
+  await deps.writeProvenance(null, 0);
+  deps.disarmStagedDeadline();
+  deps.state.epoch = 0;
+  deps.state.task_id = null;
+  deps.state.phase = deps.shuttingDown ? deps.state.phase : "idle";
+  await deps.flushState();
+
+  deps.logEvent({
+    type: "stage_cancelled",
+    task_id: taskId,
+    epoch: decision.epoch,
+    detail: "staged epoch released; it never ran, so nothing was settled",
+  });
+  await deps.ledgerAppend("stage_cancelled", {
+    worker: deps.worker,
+    task_id: taskId,
+    epoch: decision.epoch,
+  });
+  return { ok: true, epoch: decision.epoch };
+}
+
+/**
+ * One sentence per refusal, naming the fact AND the remedy.
+ *
+ * Each arm sends the operator somewhere different, and a shared "cancel
+ * refused" would send all three to the same place: `no_live_epoch` means there
+ * is nothing to release, `not_the_live_attempt` means they are holding a stale
+ * view of the fence, and `already_started` means the turn is RUNNING and the
+ * verb they want is `abort` — which on this mode has its own honest refusal to
+ * deliver.
+ */
+function unstageRefusalMessage(
+  worker: string,
+  taskId: string,
+  attemptId: string,
+  decision: Extract<CancelDecision, { ok: false }>,
+): string {
+  switch (decision.reason) {
+    case "no_live_epoch":
+      return `worker ${worker} has no live epoch; there is nothing staged to release`;
+    case "not_the_live_attempt":
+      return (
+        `worker ${worker} holds epoch ${decision.live.epoch} for ` +
+        `(${decision.live.task_id}, ${decision.live.attempt_id}), not ` +
+        `(${taskId}, ${attemptId}); re-read the fence before cancelling`
+      );
+    case "already_started":
+      return (
+        `epoch ${decision.epoch} on worker ${worker} has already started; a running turn is ` +
+        `aborted, not unstaged`
+      );
+  }
 }
 
 /**

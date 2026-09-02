@@ -182,11 +182,34 @@ describe("the supervisor stamps provenance at the right two moments", () => {
   });
 
   test("provenance is written in exactly the two places, so neither can cover for the other", () => {
-    // Exactly two CALL sites. The import names the symbol without a paren, so
-    // it does not count — a third match means a third place stamping
-    // provenance, which is how one call site starts covering for a deleted
-    // other and the pair of ordering probes above stops being able to fail.
+    /**
+     * THREE call sites since the staged-dispatch verbs, and the count alone is
+     * no longer the whole guard — it was never quite enough and the third site
+     * is what exposed that.
+     *
+     * The original claim was "exactly two", on the argument that a third match
+     * means a third place stamping provenance, which is how one call site
+     * starts covering for a deleted other and the pair of ordering probes above
+     * stops being able to fail. That argument is still right; a bare count is
+     * just a weak way to make it, because it passes a diff that DELETES one
+     * known site and ADDS an unknown one.
+     *
+     * So the sites are pinned by IDENTITY as well as by number. The third is
+     * the injection seam `stageDeps` binds for `handleStage`/`handleUnstage`
+     * (SRD-TUI-DISPATCH D6/Q8) — it stamps nothing itself, it binds
+     * `wp.taskPolicy` to the `writeProvenance` dependency, and the ORDER of
+     * the two calls that use it is pinned behaviourally in
+     * `stage-verb.test.ts` rather than structurally here, because those two
+     * functions are at module scope and can be run against a real
+     * `EpochManager`.
+     */
     const calls = supervisor.split("writeTaskPolicy(").length - 1;
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
+    // 1. the RPC dispatch stamp, 2. the settle clear, 3. the staged-verb seam.
+    expect(supervisor).toContain(
+      "writeTaskPolicy(wp.taskPolicy, envelope.task_id, decision.epoch)",
+    );
+    expect(supervisor).toContain("writeTaskPolicy(wp.taskPolicy, null, 0)");
+    expect(supervisor).toContain("writeTaskPolicy(wp.taskPolicy, taskId, epoch)");
   });
 });
