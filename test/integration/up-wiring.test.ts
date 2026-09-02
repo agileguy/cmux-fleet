@@ -835,7 +835,43 @@ interface FleetOptions {
    * the entry precedence over its role), so each worker's grant is stated at
    * the worker rather than inferred from whichever one declared the role first.
    */
-  extraWorkers?: { id: string; role: string; cloudAccess?: boolean; model?: string }[];
+  extraWorkers?: {
+    id: string;
+    role: string;
+    cloudAccess?: boolean;
+    model?: string;
+    /**
+     * The worker's `secrets:` REQUEST (ISC-415). Every name here must also be
+     * on `secretsAllowlist` and must have a value in `hostSecrets`, because
+     * `buildWorkerEnv` refuses an unallowlisted name and refuses one the host
+     * does not carry — a fixture that forgets either gets a refusal rather
+     * than the grant it meant to write.
+     */
+    secrets?: string[];
+    /** The worker's `isolation:`; omitted leaves the schema default. */
+    isolation?: string;
+  }[];
+  /**
+   * `secrets.env_allowlist` — the fleet-wide CEILING a worker's `secrets:`
+   * request is intersected against (§5.6, §12.4).
+   *
+   * Omitted by default, like `cloud:` and `providers:` above and for the same
+   * reason: an absent block and an empty one mean the same thing to the
+   * schema, so writing the key unconditionally would change the document every
+   * other test in this file loads for no gain.
+   */
+  secretsAllowlist?: string[];
+  /**
+   * Values for the granted secrets, put in the rig's environment.
+   *
+   * Separate from `secretsAllowlist` on purpose: the allowlist is what the
+   * fleet PERMITS and lives in the config, the value is what the host CARRIES
+   * and lives in the environment, and `up` reads them from those two different
+   * places. Marker strings, never credentials — and the disclosure tests rely
+   * on these being distinctive enough that finding one in a banner is proof of
+   * a leak rather than a coincidence.
+   */
+  hostSecrets?: Record<string, string>;
   /**
    * `llm.providers`, written as a map keyed by `name` (ISC-410).
    *
@@ -1082,6 +1118,12 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
             `      relay_upstream: ${p.relayUpstream}`,
           ]),
         ]),
+    // Before `roles:` and well before `workers:`, because a top-level key
+    // emitted between two list entries would silently truncate the sequence —
+    // the same hazard the `egress:` block at the bottom is placed around.
+    ...(opts.secretsAllowlist === undefined
+      ? []
+      : ["secrets:", "  env_allowlist:", ...opts.secretsAllowlist.map((n) => `    - ${n}`)]),
     "roles:",
     `  engineer: {${roleFields.join(", ")}}`,
     ...extraRoles.map((r) => `  ${r}: {}`),
@@ -1094,7 +1136,9 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
         // `provider/model`, which is how a worker SELECTS a provider — the one
         // input `resolvedProviders` reads and therefore the only way a fixture
         // can leave a declared provider unselected.
-        `${w.model === undefined ? "" : `, model: ${w.model}`}}`,
+        `${w.model === undefined ? "" : `, model: ${w.model}`}` +
+        `${w.isolation === undefined ? "" : `, isolation: ${w.isolation}`}` +
+        `${w.secrets === undefined ? "" : `, secrets: [${w.secrets.join(", ")}]`}}`,
     ),
     // LAST, after the whole `workers:` sequence — a top-level key emitted
     // between two list entries would silently truncate it.
@@ -1231,6 +1275,14 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
       ...Object.fromEntries(
         (opts.providers ?? []).map((p) => [p.apiKeyEnv, `fixture-${p.name}-not-a-real-key`]),
       ),
+      /**
+       * Values for granted `secrets:` (ISC-415). `buildWorkerEnv` raises
+       * `SecretMissingFromHostError` for a requested name the host does not
+       * carry, so without these a fixture that MEANT to test a grant would be
+       * testing a refusal instead — and the disclosure banner it is asserting
+       * would never print at all.
+       */
+      ...(opts.hostSecrets ?? {}),
     },
   };
   rigs.push(rig);
