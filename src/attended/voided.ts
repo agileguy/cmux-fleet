@@ -140,7 +140,7 @@ export const PANE_MODE_TUI_VOIDED: readonly VoidedRequirement[] = [
   {
     isc: "ISC-85",
     because:
-      "With no epoch there is no `(worker, task_id, epoch)` to recognise, so `already_completed` can never be returned: re-dispatching the same task file types the prompt into the pane a second time and RUNS THE TASK TWICE, and the harvest accepts whichever result.json lands last. Check the transcript before re-dispatching, because nothing else will.",
+      "Re-dispatching the same task file types the prompt into the pane a second time and RUNS THE TASK TWICE, and the harvest accepts whichever result.json lands last. Check the transcript before re-dispatching, because nothing else will. The reason is that nothing ALLOCATES on this route: dedup keys on (task_id, attempt_id) and answers with a REPLAY of the stored epoch, and with no allocator there is no stored epoch to replay. `already_completed` is a different answer for a different case — a second attempt against a task that has settled — and it is equally unreachable here.",
   },
   {
     isc: "ISC-86",
