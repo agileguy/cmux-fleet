@@ -358,3 +358,39 @@ describe("the image cannot go stale without the tag moving", () => {
     expect(dockerfile).toContain("--chmod=0444 docker/pi-extensions/dispatch-trigger.ts");
   });
 });
+
+describe("the worker is told what the message is (SKILL.md currency)", () => {
+  const SKILL = readFileSync(`${ROOT}skills/pifleet-worker/SKILL.md`, "utf8");
+
+  /**
+   * A worker that receives an unattributed instruction has EVERY reason to
+   * treat it as injected — that suspicion is correct and the skill deliberately
+   * does not tell it to switch it off. Without this section the most
+   * security-conscious workers are the ones most likely to refuse a legitimate
+   * dispatch, which is a failure mode that gets worse as models get better.
+   */
+  test("SKILL.md names the auto-trigger message by its prefix", () => {
+    expect(SKILL).toContain("pifleet auto-trigger:");
+  });
+
+  /** …and the prefix it documents is the one that will actually arrive. */
+  test("the documented prefix is a prefix of the real text", () => {
+    expect(SHARED_TEXT.startsWith("pifleet auto-trigger:")).toBe(true);
+  });
+
+  /**
+   * The reason given must be the STRUCTURAL one — the message carries no
+   * payload, only a path to a read-only host-written file — rather than an
+   * assurance that it is trustworthy. An assurance is exactly what an injected
+   * instruction would also offer.
+   */
+  test("it gives the no-payload reason rather than an assurance", () => {
+    expect(SKILL).toContain("no payload");
+    expect(SKILL).toContain("doorbell");
+  });
+
+  /** And it must say the absence of the message means nothing. */
+  test("it says absence is not meaningful, for the auto_trigger: false seat", () => {
+    expect(SKILL).toContain("auto_trigger: false");
+  });
+});

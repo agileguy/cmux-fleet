@@ -80,13 +80,13 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-**There are zero `[ ]` criteria.** The block ISC-431..ISC-466, filed 2026-09-02 as the
+**There are zero `[ ]` criteria.** The block ISC-431..ISC-467, filed 2026-09-02 as the
 done-condition for dispatch to an adopted-terminal `tui` worker
-(`Docs/SRD-TUI-DISPATCH.md`), is graded: thirty-four `[x]` and two `[~]`. Twenty-five were
+(`Docs/SRD-TUI-DISPATCH.md`), is graded: thirty-five `[x]` and two `[~]`. Twenty-five were
 that document's own §10 list verbatim; ISC-456..ISC-458 are the three it reserved and could
 not phrase until its four open decisions were taken and its three blocking questions
 answered; ISC-459 was filed out of the reserve at grading time, because the block had a
-criterion for `wait` and one for `report` and none for `status`; **ISC-460..ISC-466 are the
+criterion for `wait` and one for `report` and none for `status`; **ISC-460..ISC-467 are the
 auto-trigger**, filed after §9 Q4 was probed and came back the opposite of what the SRD
 predicted. The reserve is now empty.
 
