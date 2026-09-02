@@ -160,10 +160,40 @@ describe("the gate reads the file, not the environment", () => {
 describe("the supervisor stamps provenance at the right two moments", () => {
   const supervisor = stripComments(readFileSync(`${ROOT}src/supervisor/index.ts`, "utf8"));
 
+  /**
+   * SCOPED TO THE RPC `dispatch` HANDLER, and the scoping is a repair of a
+   * probe that had rotted in a way its own assertions could not report.
+   *
+   * The three anchors were originally bare `indexOf` calls over the whole file,
+   * which was correct only while each string appeared once on a path that
+   * mattered. Neither `persistFence` nor `state.phase = "busy"` does any more:
+   * `persistFence` has always had a `settle` call site at the top of the file,
+   * so the `write > fence` comparison was passing against an occurrence 1700
+   * lines from the code it claims to constrain — true, and vacuous. And the
+   * staged-dispatch trigger now promotes a staged worker with a second
+   * `state.phase = "busy"` several hundred lines ABOVE this handler, which
+   * broke `write < busy` outright while the ordering it describes was never
+   * touched.
+   *
+   * A bare `lastIndexOf` would have made it green again and left the same
+   * fragility one edit away. Slicing the handler first is what makes all three
+   * anchors mean the occurrence in the code under test, so the probe fails when
+   * the ORDER changes and not when an unrelated site gains a line.
+   */
   test("the dispatch write happens after the fence and before the worker is marked busy", () => {
-    const fence = supervisor.indexOf("await persistFence();");
-    const write = supervisor.indexOf("await writeTaskPolicy(wp.taskPolicy, envelope.task_id");
-    const busy = supervisor.indexOf('state.phase = "busy";');
+    const handler = supervisor.indexOf('case "dispatch": {');
+    expect(handler, "the RPC dispatch handler was not found — the probe has rotted").toBeGreaterThan(
+      -1,
+    );
+    const handlerEnd = supervisor.indexOf('case "stage": {', handler);
+    expect(handlerEnd, "no `stage` case after `dispatch` — the probe has rotted").toBeGreaterThan(
+      handler,
+    );
+    const region = supervisor.slice(handler, handlerEnd);
+
+    const fence = region.indexOf("await persistFence();");
+    const write = region.indexOf("await writeTaskPolicy(wp.taskPolicy, envelope.task_id");
+    const busy = region.indexOf('state.phase = "busy";');
 
     expect(fence, "persistFence call not found — the probe has rotted").toBeGreaterThan(-1);
     expect(write, "no dispatch-time writeTaskPolicy call").toBeGreaterThan(-1);

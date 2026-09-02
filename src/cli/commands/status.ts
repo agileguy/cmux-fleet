@@ -152,6 +152,14 @@ export function register(program: Command): void {
                 alive: w.alive,
                 phase: w.state?.phase ?? null,
                 task_id: w.state?.task_id ?? null,
+                // Carried into `--json` for the same reason
+                // `transcript_activity` is, twelve lines down: the console
+                // pane is one consumer, and a script asking "is anything
+                // waiting on me" needs the same field the pane reads. Without
+                // it a caller polling this JSON sees `phase: "idle"` and an
+                // unfamiliar `task_id`, which is the console defect again in a
+                // machine reader instead of a human one.
+                staged_task_id: w.state?.staged_task_id ?? null,
                 epoch: w.state?.epoch ?? null,
                 completed_epochs: w.state?.completed_epochs ?? [],
                 pid: w.state?.pid ?? null,
@@ -178,7 +186,35 @@ export function register(program: Command): void {
             const live = w.alive ? "up" : "gone";
             const note = transcriptNote(w.state?.transcript_activity ?? null, nowMs);
             const suffix = note === null ? "" : ` ${note}`;
-            process.stdout.write(`  ${w.id}: ${phase} task=${task} supervisor=${live}${suffix}\n`);
+            /**
+             * The staged task, named on the line rather than left to `phase`.
+             *
+             * A staged worker prints `idle`, and that is correct — nothing has
+             * started, because starting it takes a keypress at a terminal
+             * (SRD-TUI-DISPATCH §6.5). But `idle` alone is the console defect
+             * `transcript_activity` was added for, read from the other end: a
+             * pane that said `idle` about a worker that was busy sent an
+             * operator looking for a fleet that had stopped. A pane that says
+             * `idle` about a worker holding a staged task sends them looking
+             * for a worker that is free, and it is not — the epoch is live and
+             * the next dispatch will be refused `busy` by an allocator whose
+             * refusal names an epoch the status line never mentioned.
+             *
+             * So the id is printed with the WORD `staged`, not as a second
+             * bare `task=`. Two task ids on one line, distinguished only by
+             * position, is a line the reader has to know the format of; this
+             * one says which of the two facts each id is.
+             *
+             * Omitted entirely when there is nothing staged, like
+             * `transcriptNote`'s `null`: every non-`tui` worker in the fleet
+             * would otherwise carry a permanently empty column about a
+             * mechanism it does not use.
+             */
+            const stagedId = w.state?.staged_task_id ?? null;
+            const staged = stagedId === null ? "" : ` staged=${stagedId}`;
+            process.stdout.write(
+              `  ${w.id}: ${phase} task=${task}${staged} supervisor=${live}${suffix}\n`,
+            );
           }
         }
         return snapshot;

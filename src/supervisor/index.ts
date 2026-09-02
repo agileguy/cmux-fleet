@@ -1072,6 +1072,21 @@ async function main(): Promise<void> {
      */
     await writeTaskPolicy(wp.taskPolicy, null, 0);
     state.task_id = null;
+    /**
+     * The third and last of `staged_task_id`'s clear sites, and the one that
+     * catches the paths the other two do not.
+     *
+     * The trigger clears it when a turn starts and `unstage` clears it when the
+     * epoch is released, which between them cover the two ways a stage is meant
+     * to end. This covers every way it is not: a staged epoch settled `failed`
+     * on restart, killed by the deadline the trigger armed, or aborted — all of
+     * which reach `settle` without passing through either. `stagedDeadlineMs` is
+     * cleared eleven lines above for exactly this reason and says so; the id is
+     * the same fact in the state file, and clearing one without the other would
+     * leave `status` naming a staged task whose parked deadline had already been
+     * discarded.
+     */
+    state.staged_task_id = null;
     state.completed_epochs = [...state.completed_epochs, settled.epoch];
     await flushState();
     await ledger.append("settled", {
@@ -2129,11 +2144,47 @@ async function main(): Promise<void> {
              * `grew` and not `count !== tuiBaselineCount`: a transcript that
              * SHRANK is a different file, not a turn, and arming on it would
              * start the clock on a reader reset.
+             *
+             * ## This is also where the STAGE is PROMOTED, and for the same
+             * reason and with the same caveat
+             *
+             * `handleStage` leaves `phase: "idle"` with the id in
+             * `state.staged_task_id`, because at stage time nothing had started
+             * and writing `busy` would have been a liveness claim no
+             * observation supported (see that function). This tick is the first
+             * moment any observation supports one — the transcript grew, so
+             * SOMETHING is being written — so `phase` becomes `busy` and
+             * `staged_task_id` is cleared, and the two happen together because
+             * a worker that is both `busy` and holding a staged id reads as
+             * two tasks.
+             *
+             * The promotion inherits the approximation verbatim: the growth may
+             * be the staged task or the operator's own unrelated prompt, so
+             * `busy` here means "this worker is mid-turn", which is true either
+             * way, and NOT "the staged task is running", which is the stronger
+             * claim nothing on this route can make. Clearing `staged_task_id`
+             * on an operator's unrelated turn is the cost, and it is the right
+             * direction of error: the staged brief is still on disk at
+             * `/policy/dispatch` and the epoch is still live and still
+             * settleable, so what is lost is the console's "awaiting a
+             * keypress" annotation, not the task. Keeping the id instead would
+             * leave `status` telling an operator to press a key on a worker
+             * that is already typing.
              */
             if (stagedDeadlineMs !== null && grew) {
               deadline.restart();
               deadlineMs = stagedDeadlineMs;
               stagedDeadlineMs = null;
+              state.phase = "busy";
+              state.staged_task_id = null;
+              // AWAITED, unlike the `void flushState()` on the session-path
+              // discovery above: that one re-runs on the next tick if it is
+              // lost, and this one does not — `stagedDeadlineMs` has already
+              // been consumed, so a dropped write leaves `state.json` claiming
+              // a staged task forever and there is no second trigger to correct
+              // it. The await also puts a rejection inside this poll's own
+              // catch instead of leaving it unhandled.
+              await flushState();
               logEvent({
                 type: "tui_stage_triggered",
                 epoch: live.epoch,
@@ -3030,14 +3081,33 @@ export type UnstageAnswer =
  *   out here rather than left to be discovered, because the failure it produces
  *   is a triggered turn that runs against the operator's own typing under a
  *   real task id, which the ledger will attribute perfectly and wrongly.
- * - **It does not set `phase` to a staged state, and §6.5 asks for one.** That
- *   section wants `phase` to stay `idle` with the staged task id in a NEW field
- *   beside it, on the argument that a staged task has not started. `PhaseSchema`
- *   has no `staged` member and `WorkerStateSchema` has no such field, and both
- *   live in `src/contracts.ts`. So this writes `busy`, which is true of the
- *   allocator (the worker cannot take another task) and premature about the
- *   agent (it is not running one). The divergence is recorded rather than
- *   silently taken.
+ * - **It does not claim the agent is running. `phase` goes to `idle` and the
+ *   staged id goes in `state.staged_task_id` beside it — §6.5's shape.** The
+ *   two facts genuinely differ: the worker cannot take another task (the
+ *   allocator refuses while an epoch is live) and it is also not doing
+ *   anything, because nobody has pressed the key. `phase` states the second and
+ *   `staged_task_id` states the first, so neither has to be inferred from the
+ *   other.
+ *
+ *   Writing `busy` here — which an earlier revision did, back when
+ *   `WorkerStateSchema` had no such field — would put a liveness claim on disk
+ *   that no observation supports, and `status` would report a turn in progress
+ *   for however long the operator takes to come back from lunch. That is the
+ *   mirror image of the console defect `transcript_activity` exists for: a pane
+ *   reporting `idle` about a worker that was visibly mid-turn. Both readings
+ *   are wrong in the same way, and only one field can be wrong at a time, so
+ *   the promotion to `busy` waits for the trigger — the transcript poll, where
+ *   there is at least an APPROXIMATE observation to hang it on (§9 Q1).
+ *
+ *   `idle` is WRITTEN rather than left as it was found, and the shutdown
+ *   carve-out `settle` and `handleUnstage` both make (`shuttingDown ? phase :
+ *   "idle"`) is deliberately not copied. Those two run on the way OUT of an
+ *   epoch and are reached BY `beginShutdown`, so preserving a `dead` the
+ *   shutdown just wrote is the whole point. Nothing routes a shutdown into
+ *   `stage`; it is reached only from the control socket, and a worker that has
+ *   just been handed a live epoch is idle by construction. Inheriting
+ *   `starting` — which is what `initialWorkerState` writes — would leave a
+ *   staged worker reported as still coming up.
  */
 export async function handleStage(
   deps: StageDeps,
@@ -3074,7 +3144,8 @@ export async function handleStage(
   await deps.writeProvenance(envelope.task_id, decision.epoch);
   deps.state.epoch = decision.epoch;
   deps.state.task_id = envelope.task_id;
-  deps.state.phase = "busy";
+  deps.state.staged_task_id = envelope.task_id;
+  deps.state.phase = "idle";
   await deps.flushState();
   deps.armDeadlineOnTrigger(envelope.deadline_s * 1000);
 
@@ -3133,6 +3204,11 @@ export async function handleUnstage(
   deps.disarmStagedDeadline();
   deps.state.epoch = 0;
   deps.state.task_id = null;
+  // The staged id dies with the epoch it named. Left behind it would be the
+  // worst of the three stale readings: `status` would report a worker awaiting
+  // a keypress for a task whose epoch has been released, so the operator's
+  // remedy — press the key — is one nothing can act on any more.
+  deps.state.staged_task_id = null;
   deps.state.phase = deps.shuttingDown ? deps.state.phase : "idle";
   await deps.flushState();
 

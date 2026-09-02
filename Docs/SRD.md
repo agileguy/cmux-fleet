@@ -1642,6 +1642,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet dispatch --worker <id> --task <file\|->` / `--auto --tasks <f>` | send task envelopes |
 | `pifleet steer --worker <id> "msg"` | mid-turn correction |
 | `pifleet abort --worker <id>` | cancel current epoch |
+| `pifleet unstage --task <id> [--worker w]` | release a STAGED epoch that was never triggered, returning the worker to idle. Deliberately not `abort`: on a `pane_mode: tui` worker `abort` issues `docker kill --signal=INT`, which STOPS the worker (`src/attended/voided.ts`, ISC-81 row), whereas nothing has run here and nothing is settled (SRD-TUI-DISPATCH §9 Q8) |
 | `pifleet wait [--run r] [--task T\|--all] [--timeout d]` | block until settle/deadline |
 | `pifleet artifacts [--task T\|--all] [--include diff]` | §8.4 |
 | `pifleet transcript --worker <id> [--html f]` | A4/A5 |
