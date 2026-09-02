@@ -115,11 +115,41 @@ export interface NeedleSupply {
    */
   needles: string[];
   /**
-   * The granted names that produced them — safe to print, by construction.
+   * The names that produced them — safe to print, by construction.
    *
    * Separated from the values for the reason `WorkerEnvPlan` separates them: a
    * diagnostic that wants to say what was swept can reach this field and
    * cannot reach the other one.
+   *
+   * ## THIS IS A SWEEP MANIFEST, NOT A GRANT LIST, and under D15 the two
+   * ## stopped coinciding
+   *
+   * It used to say "the granted names", and that was accurate only while every
+   * needle came from `launch.secret_names`. ISC-421 adds a second source — the
+   * Class 1 provider key of a `hosted: true` worker — and the field's JOB is
+   * "what was swept", so the key's name is ON this list. That was a real
+   * judgement call and the reasoning is recorded rather than assumed.
+   *
+   * **Why it belongs here.** The failure this repo keeps paying for is a
+   * component that reports itself doing something it is not doing:
+   * `SECRET_NAMES_VAR`'s docstring predicted a redactor that "reports itself as
+   * armed while scrubbing nothing", and it came true. Omitting the key inverts
+   * the same defect — the sweep would scrub a value and report it had not — and
+   * a manifest that does not describe the run is the same lie with the sign
+   * flipped. It is not academic: `findCredentialLeaks`' finding names PATHS
+   * only, deliberately, so a value is never quoted into a report. This list is
+   * therefore the only surface that can tell an operator WHICH credential hit,
+   * and the one credential every worker carries would be the one it could not
+   * name.
+   *
+   * **What it risks, and why that risk is bounded structurally.** The grant
+   * distinction this whole design preserves is that `launch.secret_names` must
+   * never claim the key (ISC-422). Nothing here weakens it: that field is a
+   * different surface, on a different record, written by a different process,
+   * and it is untouched. This one is harvest-local, is never written back to
+   * the run, and has exactly one kind of consumer — a diagnostic printing what
+   * was swept. The dataflow is one-way and dies with the report, so a reader
+   * who confuses the two has to ignore both names and both docblocks to do it.
    */
   names: string[];
   /**
@@ -161,7 +191,43 @@ export async function resolveWorkerNeedles(wp: WorkerPaths): Promise<NeedleSuppl
   // carrying. Not a degradation — see `WorkerLaunchSchema.secret_names`.
   if (launch === null) return EMPTY;
   const granted = launch.secret_names;
-  if (granted.length === 0) return EMPTY;
+  /**
+   * The Class 1 provider key's NAME, for a `hosted: true` worker (ISC-421).
+   *
+   * ## The gap, and why the guard below reads TWO fields now
+   *
+   * Everything above this function is about the values the fleet delivered as
+   * GRANTS, and the Class 1 key is deliberately not one — `worker-env.ts`
+   * refuses to widen `secretNames` to cover it, and ISC-422 stands guard on
+   * that refusal. The consequence, measured rather than suspected, is that the
+   * key's value was never a needle: the log redactor was armed for it and this
+   * sweep was blind to it, for every fleet, on every run.
+   *
+   * **The guard this replaced would have made the whole change vacuous.** It
+   * read `if (granted.length === 0) return EMPTY`, and a worker whose only
+   * credential is the provider key has `secret_names: []` — that is precisely
+   * what ISC-422 asserts, and it is the COMMON case, since a fleet with no
+   * `secrets:` block anywhere still hands every worker a key. So the record
+   * could carry a perfectly correct `provider_key_name` and the sweep would
+   * still return `EMPTY` for exactly the fleet the criterion is about. The
+   * fixture that hides this is the natural one: give the worker a grant AS WELL
+   * and `granted.length` is non-zero, the early return is skipped, and
+   * everything appears to work.
+   *
+   * ## The cheap-EMPTY promise is KEPT, and it is load-bearing
+   *
+   * This file's own argument for holding plaintext at all is that "the scope is
+   * one worker's grant, read only when that worker HAS one — a fleet with no
+   * `secrets:` anywhere never opens an env file at all". The guard is widened
+   * by exactly one disjunct, not removed: a worker with no grant AND no hosted
+   * provider key — every local-provider fleet, every keyless run, every record
+   * written before D7 — still returns without opening anything. What changes is
+   * that a HOSTED worker now resolves one value it did not before, which is the
+   * blast radius D15 chose knowingly and priced as "one more chance of a false
+   * positive".
+   */
+  const providerKeyName = launch.provider_key_name;
+  if (granted.length === 0 && providerKeyName === null) return EMPTY;
 
   /**
    * The grants the fleet said are NOT credentials — delivered, not swept.
@@ -220,24 +286,100 @@ export async function resolveWorkerNeedles(wp: WorkerPaths): Promise<NeedleSuppl
     names.push(name);
   }
 
+  /**
+   * THE CLASS 1 KEY, swept through the SAME resolver and on its own arm.
+   *
+   * ## Why a second call rather than one widened list
+   *
+   * Appending the name to `granted` and resolving once would be shorter and is
+   * refused for two reasons, both about honesty rather than style.
+   *
+   * The first is the note. `resolveGrantedSecretValues` returns `unresolved`,
+   * and the note below says "the run records secrets GRANTED to this worker
+   * that neither store nor env file carries". The key was not granted — that is
+   * the entire distinction this feature preserves — so a merged list would make
+   * the harvester's own diagnostic claim the grant that `secret_names` was kept
+   * clean to avoid claiming. It gets its own sentence, which also happens to be
+   * the more useful one: a missing provider key file means something different
+   * from a missing grant file.
+   *
+   * The second is blast radius. The grant path above is byte-for-byte what it
+   * was, so ISC-333, ISC-343 and the `credential: false` narrowing cannot
+   * regress through this change — they run over the same list, in the same
+   * order, from the same call. The new behaviour is purely additive and can be
+   * deleted by deleting this block.
+   *
+   * It is the same FUNCTION either way, which is what ISC-345 actually asks
+   * for: one place that knows where a value lives. Two calls to one resolver
+   * is not the duplication that cost a live credential; two parsers was.
+   *
+   * ## `non_credential_secrets` is not consulted, and that is not an omission
+   *
+   * That list is the subset of the GRANT the fleet declared `credential: false`
+   * — `worker-env.ts` computes it as `secretNames.filter(...)`, and the key can
+   * never be in `secrets.env_allowlist` because `buildWorkerEnv` puts
+   * `apiKeyEnvName` in its `reserved` set and throws on a worker that requests
+   * it. So the filter could only ever be a no-op here, and running it anyway
+   * would advertise an exception mechanism that cannot be reached. If a hosted
+   * key ever does collide with honest artifact prose, D15 says the exception is
+   * declared where the others are, not invented here.
+   */
+  const notes: string[] = [];
+  if (providerKeyName !== null && !granted.includes(providerKeyName)) {
+    const key = await resolveGrantedSecretValues(wp.secretsDir, wp.envFile, [providerKeyName]);
+    const value = key.values.get(providerKeyName);
+    if (value === undefined) {
+      /*
+       * A DEGRADATION worth its own sentence. `provider_key_name` is only
+       * written by the statement that writes the key's file, so an unresolvable
+       * name means the store was moved, pruned or hand-edited after the run —
+       * and the sweep is running narrower than the run intended, which is the
+       * silence this whole module exists to end.
+       */
+      notes.push(
+        `the run records a hosted provider's API key for ${safeForReport(wp.workerId)} ` +
+          `(${safeForReport(providerKeyName)}) that neither its secret store nor its env file ` +
+          `carries; its value was not swept for`,
+      );
+    } else if (value.trim() !== "" && value.length >= MIN_NEEDLE_BYTES) {
+      // The same floor the grants get, applied for the same reason and not
+      // reported for the same reason: a value below it is delivered, simply not
+      // usable as a literal needle. A provider key short enough to trip this is
+      // not a credential any vendor issues.
+      needles.push(value);
+      names.push(providerKeyName);
+    }
+  }
+  if (resolved.unresolved.length > 0) {
+    notes.push(
+      /*
+       * ESCAPED, though this is control-plane text rather than worker text.
+       * `launch.json` sits in the run directory, which no mount in
+       * `container/mounts.ts` names, so a worker cannot author these names —
+       * but this string is published into the harvest report, and a run
+       * directory that has been hand-edited or moved between machines is the
+       * case where a name carrying a newline would forge a line in the report
+       * that is judging it (SRD 12.6). The same treatment `reconcile.ts` gives
+       * every other name it prints. The provider-key note above is escaped for
+       * the identical reason.
+       */
+      `the run records secrets granted to ${safeForReport(wp.workerId)} that neither its ` +
+        `secret store nor its env file carries ` +
+        `(${safeForReport(resolved.unresolved.join(", "), 256)}); those were not swept for`,
+    );
+  }
+
   return {
     needles,
     names,
-    note:
-      resolved.unresolved.length === 0
-        ? null
-        : /*
-           * ESCAPED, though this is control-plane text rather than worker
-           * text. `launch.json` sits in the run directory, which no mount in
-           * `container/mounts.ts` names, so a worker cannot author these
-           * names — but this string is published into the harvest report, and
-           * a run directory that has been hand-edited or moved between
-           * machines is the case where a name carrying a newline would forge
-           * a line in the report that is judging it (SRD 12.6). The same
-           * treatment `reconcile.ts` gives every other name it prints.
-           */
-          `the run records secrets granted to ${safeForReport(wp.workerId)} that neither its ` +
-          `secret store nor its env file carries ` +
-          `(${safeForReport(resolved.unresolved.join(", "), 256)}); those were not swept for`,
+    /*
+     * JOINED rather than first-wins. Both degradations are "the sweep ran
+     * narrower than the run intended", and reporting one while swallowing the
+     * other is the shape of silence this module was filed over. `null` stays
+     * the encoding for "nothing degraded", because `harvest/index.ts` pushes
+     * this straight onto `reasons` and an empty string there would be a blank
+     * line in the report.
+     */
+    note: notes.length === 0 ? null : notes.join("; also, "),
   };
 }

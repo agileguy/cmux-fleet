@@ -1166,6 +1166,28 @@ export async function materializeWorkerInputs(
        */
       non_credential_secrets: envPlan.nonCredentialSecretNames,
       /*
+       * The Class 1 key's NAME, so the harvest sweep can reach a credential the
+       * grant list deliberately does not claim (SRD D15, ISC-421).
+       *
+       * A PLAIN READ, and this is the fifth field on this record placed here by
+       * the same argument — `credential` records `planCredential`'s output,
+       * `secret_names` records `WorkerEnvPlan.secretNames`, `pane_mode` records
+       * `resolveWorker`'s, `disclosure` records `disclosureFor`'s. `up` resolves
+       * config in a cwd and environment the harvester does not share, and the
+       * decision this carries folds the provider's `hosted` flag with whether
+       * the key was actually in the host environment. Re-deriving either half at
+       * harvest time would mean resolving `fleet.yaml` from the harvester's cwd,
+       * which `harvest/patterns.ts` forbids for the reason that applies here
+       * unchanged: a run outlives the config that produced it.
+       *
+       * `envPlan.providerKeyName` and not `envPlan.apiKeyEnvName`. The latter is
+       * always populated — it is the diagnostic name for the `missingApiKey`
+       * message — so copying it would record a key for every keyless and every
+       * self-hosted run, and the harvester would report an unresolvable
+       * credential on all of them.
+       */
+      provider_key_name: envPlan.providerKeyName,
+      /*
        * The pane mode travels with the argv for the third time on this record,
        * and for the third instance of one reason: `up` resolved it in a cwd and
        * environment the detached supervisor does not share.

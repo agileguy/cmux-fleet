@@ -102,7 +102,7 @@ import { writeFile, chmod, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
 import { nonCredentialSecretNames, secretGrantNames } from "../config/schema.ts";
-import { ConfigError, providerApiKeyEnv } from "../config/load.ts";
+import { ConfigError, providerApiKeyEnv, providerIsHosted } from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
 import {
   LEGACY_RELAY_LISTEN_ALIAS,
@@ -269,6 +269,32 @@ export interface WorkerEnvPlan {
    * that had since changed or moved.
    */
   nonCredentialSecretNames: string[];
+  /**
+   * `apiKeyEnvName` when this worker's provider is `hosted: true` AND the key
+   * was actually delivered; `null` otherwise (SRD D15, ISC-421).
+   *
+   * ## What it is for
+   *
+   * The harvest sweep needs the Class 1 key's VALUE in its needle set, and it
+   * cannot get there through `secretNames` — that list is what the OPERATOR
+   * granted, the key is not on it, and widening it is the lie ISC-422 stands
+   * guard over. So the name travels on its own field, `materialize.ts` copies
+   * it into `launch.json`, and `harvest/needles.ts` resolves the value from
+   * the same 0444 store `secretFiles` already wrote it to.
+   *
+   * A NAME, like `secretNames` and for the identical type-level reason: no
+   * reporting surface that reaches this field can reach a credential. The one
+   * place a value may sit is `secretFiles`, and this does not duplicate it.
+   *
+   * ## Why the `hosted` gate is here rather than at the harvester
+   *
+   * The harvester is handed a RUN DIRECTORY, not a workspace, and a run
+   * outlives the `fleet.yaml` that produced it — `harvest/needles.ts` states
+   * the rule and `secret_names` was placed on the launch record by it. A
+   * `hosted` flag read from config at harvest time would grade a two-week-old
+   * run against today's document, or against no document at all.
+   */
+  providerKeyName: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +531,11 @@ export function buildWorkerEnv(
    * decision does not have to be split across the function to reach it.
    */
   const secretFiles: SecretFile[] = [];
+  /*
+   * Declared beside `secretFiles` and for the same reason: it is written by
+   * the same statement, in the D8 block below. See `WorkerEnvPlan.providerKeyName`.
+   */
+  let providerKeyName: string | null = null;
 
   const vars: Record<string, string> = {
     /*
@@ -722,10 +753,30 @@ export function buildWorkerEnv(
    * NOT pushed onto `secretNames`. That list is what the OPERATOR granted, and
    * the key is fleet-assigned material no worker requested (ISC-422); the
    * `redactable` block below states the same split at length.
+   *
+   * ## THE HARVEST SWEEP JOINED THIS `if` UNDER D15, and it had to join HERE
+   *
+   * `providerKeyName` is the third effect of the one delivery decision, and it
+   * is assigned inside this block rather than computed next to `deliversApiKey`
+   * for exactly the reason the paragraph above gives about the pointer and the
+   * file. The field is a promise to the harvester that a file exists in the
+   * store under this name; a condition that merely AGREES with the push today
+   * is a promise that can come apart from it tomorrow, and the failure would be
+   * silent in the usual direction — a launch record naming a credential the run
+   * never wrote, which `harvest/needles.ts` can only report as a degradation on
+   * every single run.
+   *
+   * The `hosted` test is the only thing this line adds to the push, and D15
+   * gates on it deliberately: §12.4 accepted the self-hosted residual on the
+   * basis that the key carries no billing authority, and that basis still
+   * holds for a local provider. A hosted provider's key is a subscription
+   * credential, and every extra swept value is another chance of the false
+   * positive that clamped every verdict once already.
    */
   if (deliversApiKey) {
     vars[LLM_API_KEY_FILE_VAR] = secretContainerPath(apiKeyEnvName);
     secretFiles.push({ name: apiKeyEnvName, value: apiKey });
+    if (providerIsHosted(loaded.config, w.provider)) providerKeyName = apiKeyEnvName;
   }
 
   /*
@@ -997,6 +1048,10 @@ export function buildWorkerEnv(
     // Intersected with what this worker was actually granted, not copied from
     // the fleet-wide declaration — see the field's docblock.
     nonCredentialSecretNames: secretNames.filter((n) => notCredentials.has(n)),
+    // Assigned by the D8 block above, inside the same `if` that writes the
+    // file it names. A plain read here; an expression on this right-hand side
+    // would be the second derivation that field exists to prevent.
+    providerKeyName,
   };
 }
 

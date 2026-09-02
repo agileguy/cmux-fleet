@@ -557,6 +557,72 @@ export const WorkerLaunchSchema = z
      */
     non_credential_secrets: z.array(shortStr).max(MAX_ITEMS).default([]),
     /**
+     * The NAME of the Class 1 provider key this worker was handed, when its
+     * provider is `hosted: true` and the key was actually delivered — or
+     * `null` (SRD D15, ISC-421).
+     *
+     * ## The gap this closes, and it was measured rather than suspected
+     *
+     * `worker-env.ts` builds `redactable = [apiKeyEnvName, ...secretNames]`,
+     * which arms the LOG redactor. The harvest sweep reads a DIFFERENT list —
+     * `harvest/needles.ts` takes `secret_names` above, which deliberately
+     * excludes the key — so the Class 1 credential's VALUE was never swept
+     * from a harvested artifact, for every fleet, on every run. The redactor
+     * scrubs it out of `events.jsonl`; nothing ever looked for it in the
+     * worker's own output.
+     *
+     * §12.4 accepted that residual twice, on the explicit basis that the key
+     * "carries no billing authority". A `hosted: true` provider's key is a
+     * SUBSCRIPTION credential, so that basis is gone — and D8 puts the value
+     * in a file the worker can `cat`, which is a plausible route into a
+     * transcript. Hence a field, and hence the `hosted` gate: the self-hosted
+     * residual stays accepted, because every extra swept value is another
+     * chance of the false positive that §12.4's `credential: false` erratum
+     * exists because of.
+     *
+     * ## WHY A FIELD OF ITS OWN, and NOT a wider `secret_names`
+     *
+     * Widening the field above is the obvious fix and it is refused. That list
+     * is what the OPERATOR granted under `secrets:`; the key is fleet-assigned
+     * material no worker requested and every worker carries. Putting it there
+     * would make the record claim a grant that never happened — which
+     * `worker-env.ts`'s own docblock refuses in those terms and ISC-422 is the
+     * standing guard on. The two lists answer different questions, so the
+     * sweep learns the second answer from a second field rather than by having
+     * the first one lie to it.
+     *
+     * ## A NAME. Never, under any circumstance, a value
+     *
+     * Every word of `secret_names`' argument above applies here and is not
+     * repeated: this record is read by the supervisor, by `down`, and by
+     * anything that renders a launch, so it must be structurally incapable of
+     * putting a credential in front of any of them. `shortStr`, holding the
+     * spelling of the operator's variable.
+     *
+     * The VALUE is not recorded anywhere new, and there is no second store.
+     * `worker-env.ts` already pushes the key onto `secretFiles`, so `up`
+     * already writes it to the per-worker 0444 secret store beside the grants.
+     * This field is the NAME that lets the harvester look it up there, through
+     * the same `resolveGrantedSecretValues` the grants go through — one
+     * resolver, which is ISC-345's whole point.
+     *
+     * ## Non-null means DELIVERED, not merely CONFIGURED
+     *
+     * `worker-env.ts` writes the key's file inside a conditional, and a name
+     * recorded for a key that was never written is a claim the harvester
+     * cannot resolve — it would report a degradation on every keyless run.
+     * So this is populated by the same statement that pushes the file, not by
+     * a second test that agrees with it today.
+     *
+     * `null` is therefore three answers at once, all of them "nothing extra to
+     * sweep": a local provider, a fleet with no key in the host environment,
+     * and a flat pre-D7 fleet whose §6.1 shorthand has no `hosted` field to be
+     * true. Defaulted, so every record written before this field existed parses
+     * as `null` — which is true of all of them, because no fleet could declare
+     * a hosted provider until D7.
+     */
+    provider_key_name: shortStr.nullable().default(null),
+    /**
      * The worker's `pane_mode` (SRD §3.5), recorded rather than re-derived.
      *
      * The supervisor needs this before it spawns anything: a `tui` worker is
