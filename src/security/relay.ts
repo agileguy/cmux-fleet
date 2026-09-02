@@ -136,6 +136,7 @@ import {
   type EgressPolicy,
   type EgressRule,
 } from "./egress.ts";
+import { providerIsHosted } from "../config/load.ts";
 import { EXIT } from "../contracts.ts";
 import { dockerNameGrammarOk, MAX_DOCKER_NAME } from "./docker-names.ts";
 import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
@@ -1489,7 +1490,12 @@ export async function egressBridgePlan(
      * did not have. `ProviderSchema` refuses a hostname on those blocks at
      * `config validate` (ISC-427), so both layers say the same thing.
      */
-    const hosted = cfg.llm.providers?.[provider]?.hosted === true;
+    // Through `providerIsHosted` rather than inline, because §7.3's disclosure
+    // banner now keys on the same flag: a second reading of it here is how the
+    // relay and the banner come to disagree about which endpoints are a
+    // vendor's, and a worker the banner omits is the silent bring-up ISC-417
+    // forbids. The expression is unchanged — see that function's docblock.
+    const hosted = providerIsHosted(cfg, provider);
     // `omlxRelayTarget` on the flat path keeps the name `"omlx"` that every
     // running relay already has stamped in `PIFLEET_RELAY_TARGETS`; see
     // `providerRelayTarget` for why that is not cosmetic.

@@ -313,6 +313,38 @@ export function providerAllowlist(config: FleetConfig, provider: string): readon
 }
 
 /**
+ * Does this provider run on someone else's hardware (D3)?
+ *
+ * ONE READING OF `hosted`, and the sharing is the whole point rather than a
+ * tidy-up. Two things now key on this flag and they key on it in opposite
+ * directions: D9 lets a hosted block's `relay_upstream` be a HOSTNAME (and
+ * then requires it resolved before the relay sees it), while §7.3's disclosure
+ * banner names every worker whose context reaches a hosted endpoint. Read from
+ * two places those can disagree, and the disagreement is silent in the
+ * direction that matters — a provider the relay treats as hosted but the
+ * banner does not is a worker sending its repository and its credentials to a
+ * vendor with nothing printed, which is precisely the state D10 accepted a
+ * reversal on the understanding that it could not happen.
+ *
+ * The parameter is structural rather than `FleetConfig` so that `relay.ts` can
+ * call it with its own narrower `FleetRelayConfigView`. Both carry the same
+ * field and this reads the same byte from either.
+ *
+ * `undefined` — no `providers` map at all — is FALSE, and that is the correct
+ * answer rather than a default. §6.1 keeps the flat `llm.*` keys as the
+ * default provider's shorthand and that shorthand has no `hosted` field to
+ * set, because `hosted` is required in a provider block and is never inferred
+ * (D3). A flat fleet is oMLX on the operator's own machine, so nothing about
+ * it leaves and no pre-D7 config acquires a banner it never asked for.
+ */
+export function providerIsHosted(
+  cfg: { llm: { providers?: Readonly<Record<string, { readonly hosted?: boolean }>> | undefined } },
+  provider: string,
+): boolean {
+  return cfg.llm.providers?.[provider]?.hosted === true;
+}
+
+/**
  * The host variable holding ONE provider's Class 1 key (ISC-425).
  *
  * ## The defect this exists to make unrepeatable
