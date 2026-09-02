@@ -473,10 +473,413 @@ const httpUrl = z.string().url().superRefine((raw, ctx) => {
   }
 });
 
-export const LlmSchema = z
+/**
+ * A name Docker will accept as an environment variable identifier.
+ *
+ * Exported because `run/worker-env.ts` needs the same rule when it serialises
+ * the env file, and two spellings of one constant is the failure ISC-264 was
+ * filed for.
+ */
+export const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Namespaces the fleet owns outright. Prefixes rather than a name list because
+ * the list is the part that drifts: `PIFLEET_HONEYPOT` arrived after the other
+ * three `PIFLEET_*` vars and would have had to be remembered here.
+ *
+ * `CLOUDSDK_`/`GOOGLE_` are wider than `CREDENTIAL_ENV_VARS` on purpose — that
+ * set names four variables and gcloud reads dozens, so pinning only the four
+ * would leave `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` refused and its neighbours
+ * open.
+ */
+export const RESERVED_ENV_PREFIXES = ["PIFLEET_", "GIT_CONFIG_", "CLOUDSDK_", "GOOGLE_"] as const;
+
+/**
+ * Names with no shared prefix that the container's own environment depends on.
+ * Deliberately short: this list only has to cover what a plausible `api_key_env`
+ * typo could hit, and everything the FLEET assigns is caught by the prefixes
+ * above instead.
+ */
+export const RESERVED_ENV_NAMES: readonly string[] = [
+  "PATH", "HOME", "SHELL", "USER", "LANG", "TERM",
+];
+
+/**
+ * The three `api_key_env` rules, in ONE place, because there are now two doors
+ * into the same namespace.
+ *
+ * Until 2026-09-01 there was one field to guard and the guard was written
+ * inline. `llm.providers` adds a second `api_key_env` per declared provider,
+ * and an inline copy of these checks on the flat field only would have left the
+ * per-provider one bare — the field most likely to name a credential worth
+ * stealing, since a hosted provider is the reason the map exists at all.
+ *
+ * The hole was MEASURED, not imagined, and the measurement is written out at
+ * the flat field below: `api_key_env: PIFLEET_LLM_MODELS` parsed, and the
+ * credential was then written into `models.json` AS A MODEL ID, on a named
+ * volume that outlives the container's `--rm`, with nothing anywhere noticing.
+ * Reopening that on the per-provider side one commit after closing it on the
+ * flat side is the single most plausible way this change goes wrong, so the
+ * rules are a function two schemas call rather than a paragraph two schemas
+ * each try to remember.
+ *
+ * Returns the message, or `null` when the name is acceptable. `field` is only
+ * the label the message carries; the issue's PATH names the exact location, so
+ * the per-provider caller passes the bare key and lets the path say which
+ * provider block it came from.
+ */
+export function envVarNameIssue(name: string, field: string): string | null {
+  if (!ENV_VAR_NAME_RE.test(name)) {
+    return (
+      `${field} must be an environment variable NAME — got "${name}", which is not a ` +
+      `valid identifier. The value is read from the host environment under this name; it is ` +
+      `never written in config.`
+    );
+  }
+  const prefix = RESERVED_ENV_PREFIXES.find((p) => name.startsWith(p));
+  if (prefix !== undefined) {
+    return (
+      `${field} must not start with "${prefix}" — got "${name}". That namespace is ` +
+      `assigned by the fleet itself, and a collision overwrites the variable the worker ` +
+      `needs with the credential.`
+    );
+  }
+  if (RESERVED_ENV_NAMES.includes(name)) {
+    return (
+      `${field} must not be "${name}" — the container's own environment depends on ` +
+      `it, and overwriting it with the credential breaks the worker before it starts.`
+    );
+  }
+  return null;
+}
+
+/** `api_key_env`, guarded, under whichever label the caller's messages carry. */
+const apiKeyEnvName = (field: string) =>
+  shortStr.superRefine((name, ctx) => {
+    const message = envVarNameIssue(name, field);
+    if (message !== null) ctx.addIssue({ code: "custom", message });
+  });
+
+/**
+ * The fleet's default provider when `llm.provider` is not written.
+ *
+ * A named constant because it is read twice — once as this field's default, and
+ * once by the flat-key collision check, which runs against the RAW document and
+ * therefore has to reproduce the defaulting itself. Two literal `"omlx"`s, one
+ * of them inside a refusal, is the shape ISC-264 was filed for.
+ */
+const DEFAULT_PROVIDER = "omlx";
+
+/**
+ * What a provider KEY may look like.
+ *
+ * Two independent reasons, and the first is the one that bites silently. The
+ * key is what a worker names in a `provider/model` prefix, and `decomposeModel`
+ * splits that on the FIRST `/` — so a key containing a slash describes a
+ * provider no worker can ever name, and a prefix that looks like it names it
+ * resolves to something else. The second is D7: the key is composed into
+ * `pifleet-egress-relay-<network>-<provider>` and into a Docker network name,
+ * and Docker accepts only `[a-zA-Z0-9][a-zA-Z0-9_.-]*` there.
+ *
+ * The LENGTH half of the Docker-name constraint is deliberately NOT checked
+ * here. It depends on the fleet name and the network name this key is composed
+ * WITH, which this schema cannot see, so it belongs at `up` where the composed
+ * string exists — that is ISC-412, and duplicating half of it here would be a
+ * second derivation that drifts from the real one.
+ */
+const PROVIDER_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+/**
+ * One entry in `llm.providers` — everything that describes ONE endpoint
+ * (`Docs/SRD-INFERENCE-PROVIDERS.md` §6.2).
+ *
+ * ## Why these seven and not the other four
+ *
+ * §6.2's table splits the old flat `llm:` block on a single question: does the
+ * field describe an ENDPOINT, or does it describe what the FLEET will tolerate?
+ * `base_url`, `relay_upstream`, `api_key_env`, `models_allowlist`, `hosted`,
+ * `tag_style` and `probe_timeout_ms` are all statements about one endpoint and
+ * move here. `provider`, `model` and `thinking` stay fleet-wide because they
+ * are defaults a worker overrides, and `require_native_tool_calls` stays
+ * fleet-wide for a reason that is not symmetry — see its entry below.
+ *
+ * ## `probe_timeout_ms` was SIX until D16, and it joins by the rule above
+ *
+ * It reads at first like a fleet tolerance — a deadline sounds like patience,
+ * and patience sounds like something the fleet decides. It is not, and §6.2's
+ * own test is what settles it: the question is how long THIS ENDPOINT takes to
+ * answer, which is a measured property of the server and the models it serves,
+ * not a statement about what the operator will put up with. D16 measured the
+ * difference: the same 60 s is generous for oMLX on the operator's own
+ * hardware — it was sized against a cold 35B load there — and marginal for a
+ * hosted catalogue whose two largest models answered at 42.1 s and 56.9 s
+ * host-side and unqueued. One number cannot be right for both, and that it was
+ * ever one number is the whole of the defect.
+ *
+ * Contrast `require_native_tool_calls`, which stays fleet-wide: WHETHER to
+ * refuse a model that cannot emit a tool call is a statement about what the
+ * fleet will tolerate, and it is the same answer whichever endpoint serves the
+ * model. HOW LONG to wait before concluding anything is a property of the wire.
+ * The pair is the clearest illustration of §6.2's split in this schema, which
+ * is why they are described together rather than in separate paragraphs.
+ *
+ * Like `hosted` and `tag_style` — and unlike the other four — it has **no flat
+ * spelling at all**, so it is absent from `PER_PROVIDER_FLAT_KEYS` and the
+ * §6.1 both-spellings refusal is untouched. D16's own reasoning is the
+ * justification: 60 s is CORRECT for the flat case, because the flat case is
+ * oMLX on the operator's machine. The problem belongs to a hosted provider, and
+ * a hosted provider by definition has a providers map.
+ *
+ * `models_allowlist` moving here closes §2.6's second gap by construction: the
+ * allowlist is checked against the RESOLVED provider's list, so a model
+ * belonging to one provider can no longer satisfy an allowlist written for the
+ * other. That check itself is ISC-404 and lives in the resolver, not here.
+ *
+ * ## What is REQUIRED, and why the defaults were not simply copied down
+ *
+ * `hosted`, `base_url` and `api_key_env` have no defaults in a provider block,
+ * and the flat keys' defaults were deliberately not repeated here. Every one of
+ * those defaults describes oMLX on the operator's own machine. Inheriting them
+ * into a block that exists precisely because it is NOT that endpoint is how a
+ * second provider silently acquires oMLX's URL and, worse, oMLX's credential —
+ * which is the exact failure §6.2 names when it says two endpoints cannot share
+ * a credential. A missing field is a `config validate` error naming the field;
+ * an inherited one is a fleet that comes up and sends the wrong key somewhere.
+ */
+export const ProviderSchema = z
   .object({
-    /** oMLX — on the Docker host, or on a trusted LAN peer (§5.9). */
-    provider: shortStr.default("omlx"),
+    /**
+     * REQUIRED and explicit. Never inferred — D3, and the reason is measured
+     * rather than stylistic.
+     *
+     * §5.9's third permitted private shape is a tunnel to the operator's own
+     * machine. The operator's actual tunnel has a public address, a publicly
+     * resolvable hostname and TLS, so EVERY inference available — the URL
+     * scheme, the address range, whether `relay_upstream` is RFC1918 — reads it
+     * as hosted, which is wrong in exactly the case §5.9 spent an amendment
+     * establishing. An inference that is wrong about the one shape a whole
+     * amendment was written for is not an inference worth having.
+     *
+     * The declared cost (D3): an operator can lie to this field. They can; and
+     * so can they set `cloud_access: false` on a role that needs it. It is a
+     * declaration of intent the fleet then holds them to, and every refusal and
+     * banner in §7 keys on the declaration rather than on a guess.
+     */
+    hosted: z.boolean({
+      error:
+        "hosted must be declared explicitly on every provider — it is never inferred. A tunnel " +
+        "to the operator's own machine is https:, publicly resolvable and on a public address, " +
+        "so inferring from the URL, the address range or the presence of TLS misclassifies the " +
+        "one shape SRD §5.9 permits. Write `hosted: true` for a provider running on someone " +
+        "else's hardware, `hosted: false` for one running on yours.",
+    }),
+    /** What a worker dials for THIS provider; same semantics as `llm.base_url`. */
+    base_url: httpUrl,
+    /** Names the env var for THIS provider's key; the value never appears in config. */
+    api_key_env: apiKeyEnvName("api_key_env"),
+    /**
+     * Where THIS provider's relay dials. `null` keeps the flat key's meaning —
+     * the Docker host on the port from this block's `base_url` — which is the
+     * right default for a provider that is reached the way oMLX always was, and
+     * is simply wrong to guess at for a hosted one, whose operator must write
+     * the upstream and the matching `egress.allow` entry either way.
+     *
+     * Validated in the block-level check below rather than here, because
+     * whether a HOSTNAME is permitted depends on this block's `hosted` (D9) and
+     * a field-level refinement cannot see its sibling.
+     */
+    relay_upstream: shortStr.nullable().default(null),
+    /** Empty means "no allowlist", exactly as the flat key does. */
+    models_allowlist: z.array(shortStr).max(64).default([]),
+    /**
+     * Turns off `decomposeModel`'s `:thinking` suffix stripping for models on
+     * this provider (D12, ISC-405). Off by default, so oMLX is unaffected and
+     * no existing config changes meaning.
+     *
+     * The collision is real and one-directional: a vendor that spells model
+     * sizes as tags — `gpt-oss:120b`, and one day a tag that happens to be
+     * spelled `high` — would have that tag silently eaten and produce a
+     * `model-not-found` against a name the operator can see is correct. D12's
+     * declared cost is that the `:thinking` SUFFIX is then unavailable on this
+     * provider and the operator must use the `thinking:` key, which is the
+     * field the merge rules give the lowest precedence to anyway.
+     */
+    tag_style: z.boolean().default(false),
+    /**
+     * How long THIS endpoint gets to answer the mandatory §5.9 tool-call probe,
+     * in milliseconds (D16, ISC-419). Absent means the
+     * `probeNativeToolCalls` default — 60 s — applies.
+     *
+     * ## Why it is a per-provider field and not a raised constant
+     *
+     * `PROBE_TIMEOUT_MS = 60_000` was sized against oMLX **cold loads on the
+     * operator's own hardware**, and for that endpoint it is CORRECT. Under a
+     * providers map the same number silently became the budget for a third
+     * party's largest models over the public internet, and D16 measured that as
+     * live rather than theoretical: seventeen of nineteen catalogue models
+     * answered in ≤ 4,374 ms, then `mistral-large-3:675b` at 42,114 ms and
+     * `nemotron-3-ultra` at 56,947 ms — inside the ceiling by three seconds,
+     * host-side and unqueued, so both figures are floors. Through the relay,
+     * inside a container, behind D14's one-concurrent-request tier, they only
+     * go up, and `up` then exits non-zero with a `timeout` verdict: a refused
+     * fleet. Raising the constant fleet-wide was rejected because it relaxes the
+     * gate for the operator's own server too, and one number serving two very
+     * different failure modes is how it came to be wrong here.
+     *
+     * ## Why the bound, and why THESE two numbers
+     *
+     * `z.number().int().positive()` alone admits both ends of the range that
+     * make `up` useless, in opposite directions, and an operator reaches either
+     * one by acting reasonably.
+     *
+     * **The floor, 1 s.** 17 of 19 models answered at or under 4,374 ms, most
+     * under 1,500 ms — and every one of those is a floor, measured with no relay
+     * and no queue in the path. A sub-second budget is therefore under the FAST
+     * group's own median before the real path is considered, so it refuses every
+     * model on the provider with a `timeout` verdict. `probe_timeout_ms: 1` is
+     * not a tight budget; it is an off switch that exits non-zero, which is the
+     * one shape §5.9 will not have — the same argument that makes
+     * `require_native_tool_calls` a boolean rather than a number.
+     *
+     * **The ceiling, 5 min.** The gate is sequential and mandatory, so what an
+     * operator waits is `distinct (provider, model) pairs × budget`; the wrong
+     * number here is MULTIPLIED, not merely tolerated. 300_000 is 5.3× the
+     * slowest probe ever measured against this catalogue — ample headroom for
+     * that model queued behind others of its class — and it caps a single
+     * pathological probe at a wait that reads as "slow" rather than "hung",
+     * which is the whole harm D16 names. Past that point the honest instrument
+     * is not a larger number: D16 gives `models_allowlist` a second, concrete
+     * job of "excluding models measured near the ceiling" and calls it the
+     * cheaper of the two controls because it needs no code at all. A model that
+     * cannot emit a ZERO-ARGUMENT tool call inside five minutes is not one the
+     * fleet should then be dispatching real work to; a bigger budget buys a
+     * fleet that comes up and behaves the same way on every turn.
+     *
+     * ## No default here, deliberately
+     *
+     * `.optional()` rather than `.default(60_000)`, so 60 s keeps exactly ONE
+     * home — `probeNativeToolCalls`'s default parameter, where its docblock
+     * explains the cold load it was sized against. A default restated here would
+     * be a second constant that reads correctly today and drifts the first time
+     * either is tuned, which is the shape ISC-264 cost a rename to find. The
+     * resolver (`providerProbeTimeoutMs`) therefore returns `number |
+     * undefined` and hands `undefined` straight through.
+     */
+    probe_timeout_ms: z
+      .number()
+      .int({ error: "probe_timeout_ms is whole milliseconds; a fractional millisecond is not a budget" })
+      .min(1_000, {
+        error:
+          "probe_timeout_ms must be at least 1000ms. 17 of 19 measured models answered in under " +
+          "4.4s and most under 1.5s, host-side with no relay and no queue in the path — so a " +
+          "sub-second budget refuses every model on this provider with a `timeout` verdict. That " +
+          "is an off switch that exits non-zero, not a tight budget; to turn the probe off, set " +
+          "llm.require_native_tool_calls: false.",
+      })
+      .max(300_000, {
+        error:
+          "probe_timeout_ms must be at most 300000ms (5 minutes). The tool-call gate is " +
+          "sequential and mandatory, so an operator waits `distinct (provider, model) pairs x " +
+          "this budget` before `up` says anything — a larger number does not make the fleet more " +
+          "patient, it makes `up` indistinguishable from hung. 300000 is over 5x the slowest " +
+          "probe ever measured (56,947ms). For a model that genuinely needs longer, exclude it " +
+          "with this provider's models_allowlist (SRD D16) rather than widening the budget for " +
+          "every model on the endpoint.",
+      })
+      .optional(),
+    /**
+     * REFUSED, and declared here rather than left to `.strict()` so the refusal
+     * can say why (ISC-420).
+     *
+     * `.strict()` would already reject the key, with "unrecognized key" — the
+     * same message an operator gets for a typo, which teaches nothing about a
+     * field that exists, is spelled correctly, and is deliberately not
+     * available at this level. This file already made that trade once, in
+     * `CloudSchema.adc_mode`, and for the same reason.
+     *
+     * The scope is not symmetry. §6.2: this field is a statement about what the
+     * FLEET will tolerate, not about an endpoint, and §6.8 names what a
+     * per-provider override would buy — a hosted provider quietly leaving a
+     * gate the SRD calls mandatory, which is the shape of relaxation that whole
+     * document exists to avoid. The gate has been measured against the real
+     * hosted endpoint and all 19 catalogue models clear it, so fixing the scope
+     * costs nothing today, which is the best moment to fix it.
+     */
+    require_native_tool_calls: z
+      .never({
+        error:
+          "require_native_tool_calls is fleet-wide and has no per-provider override (SRD " +
+          "§6.2, §6.8). It states what the FLEET will tolerate, not what an endpoint offers, " +
+          "and a per-provider opt-out is exactly how a hosted provider would quietly leave a " +
+          "gate the SRD calls mandatory. Set it once, on `llm`.",
+      })
+      .optional(),
+  })
+  .strict()
+  /**
+   * `relay_upstream` may be a HOSTNAME on a hosted provider, and on nothing
+   * else. D9 (§6.7), and the scoping is the whole of the decision.
+   *
+   * The IP-literal rule is not stylistic. The relay resolves through Docker's
+   * embedded DNS, and — measured — it also PUBLISHES `base_url`'s host as an
+   * alias on the bridge it is itself attached to, so a hostname upstream that
+   * matches a published alias resolves to the relay itself and every forwarded
+   * connection loops back into its own listener: a hang, on the one path a
+   * fleet cannot run without, with nothing in `docker logs` explaining it.
+   *
+   * What D9 buys by relaxing it for hosted blocks is the removal of a recurring
+   * chore that only exists when the address is somebody else's: §3.1 measured a
+   * single A record behind a global load balancer, no published range, and no
+   * firewall guidance, so a pinned literal is a short-lived pin maintained by
+   * hand in two files. `up` resolves the name on the HOST, where the resolver
+   * is known to answer public names, and stamps the literal into the target, so
+   * the relay still dials an address and neither failure above can occur.
+   *
+   * What it costs, stated plainly because it is a real weakening: for a hosted
+   * block the gate's property becomes "the operator authorized this NAME, and
+   * the fleet recorded which address it resolved to at launch". What bounds it
+   * is that it cannot spread — the operator's own oMLX still refuses a hostname
+   * here, so the stronger property is enforced rather than merely default.
+   *
+   * **The resolution half of D9 is built (ISC-426).** `egressBridgePlan` — the
+   * single derivation of what a relay dials — resolves a hosted block's
+   * hostname through `getaddrinfo` on the host and stamps the literal into the
+   * target, and `up` records the name and the address it resolved to in the
+   * `egress_relay_ready` ledger row. So a hostname written here reaches the
+   * plan, and only its ADDRESS reaches the relay; the hang described above is
+   * unreachable rather than merely undocumented.
+   */
+  .superRefine((block, ctx) => {
+    if (block.relay_upstream === null) return;
+    const err = relayUpstreamError(block.relay_upstream, { allowHostname: block.hosted });
+    if (err !== null) ctx.addIssue({ code: "custom", path: ["relay_upstream"], message: err });
+  });
+
+/**
+ * The four flat keys that describe an ENDPOINT and therefore have a
+ * per-provider spelling. Written out rather than derived from
+ * `ProviderSchema.shape` on purpose: `hosted` and `tag_style` are in that shape
+ * and have no flat spelling at all, so a derived list would name two keys that
+ * cannot collide and quietly stop naming any that later can.
+ */
+const PER_PROVIDER_FLAT_KEYS = [
+  "base_url",
+  "relay_upstream",
+  "api_key_env",
+  "models_allowlist",
+] as const;
+
+const LlmObject = z
+  .object({
+    /**
+     * oMLX — on the Docker host, or on a trusted LAN peer (§5.9).
+     *
+     * Also the fleet DEFAULT provider: the one a worker gets when its `model:`
+     * carries no `provider/` prefix. When `providers` is written, this must
+     * name a key of it — a fleet default that names nothing is a fleet where
+     * every unprefixed model resolves to an endpoint that was never declared.
+     */
+    provider: shortStr.default(DEFAULT_PROVIDER),
     /**
      * What a WORKER dials, from inside the egress bridge — NOT necessarily
      * where the model server is. The host component must be
@@ -515,14 +918,156 @@ export const LlmSchema = z
      * deliberately not derivable from this one.
      */
     relay_upstream: relayUpstream.nullable().default(null),
-    /** Names the env var; the value never appears in config (SRD §12.4). */
-    api_key_env: shortStr.default("OMLX_API_KEY"),
+    /**
+     * Names the env var; the value never appears in config (SRD §12.4).
+     *
+     * ## Why this is validated here and not left to `shortStr`
+     *
+     * This string becomes an environment variable NAME inside the worker, and
+     * until 2026-09-01 nothing checked it — while the same repo already refused
+     * exactly these names when they arrived through `secrets:`
+     * (`worker-env.ts`'s `SecretReservedNameError`). Two doors into the same
+     * namespace, one guarded.
+     *
+     * The gap was measured, not imagined. `api_key_env: PIFLEET_LLM_MODELS`
+     * parsed, and `worker-env` then overwrote the model list with the
+     * credential; the entrypoint's guard tests only non-emptiness, so it
+     * rendered:
+     *
+     *   {"apiKey":"<the key>","models":[{"id":"<the key>","name":"<the key>"}]}
+     *
+     * The credential became a model id, on a NAMED VOLUME that outlives the
+     * container's `--rm`. Nothing noticed: `missingApiKey` was false, the env
+     * file serialised cleanly, and the ISC-31 test still passed because it
+     * asserts how MANY variables hold the credential, not which. The runtime
+     * symptom was `model-not-found`, which reads as a fleet.yaml typo.
+     * `PIFLEET_LLM_BASE_URL` does the same to the endpoint, and `PATH` and
+     * `HOME` were accepted too.
+     *
+     * A malformed name was the other half: the entrypoint's identifier guard
+     * discards it and renders an empty key, silently. Refusing at parse time is
+     * the only place the operator learns which field is wrong.
+     *
+     * The three rules moved into `envVarNameIssue` when `llm.providers` gave
+     * this field a second spelling. They are unchanged; there is now one copy
+     * of them instead of the two a per-provider block would otherwise need.
+     */
+    api_key_env: apiKeyEnvName("llm.api_key_env").default("OMLX_API_KEY"),
     model: z.string().min(1).max(256),
     thinking: ThinkingLevelSchema.optional(),
     models_allowlist: z.array(shortStr).max(64).default([]),
     require_native_tool_calls: z.boolean().default(true),
+    /**
+     * The provider map (§6.1). Absent — not empty — when the operator has not
+     * written one, and the distinction is load-bearing twice over: it is what
+     * makes the flat keys legal, and `providers: {}` is a document that
+     * declares no provider while `llm.provider` still names one, which is a
+     * refusal rather than a shorthand for "none".
+     *
+     * Nothing RESOLVES against this map yet. This schema establishes that a
+     * multi-provider fleet can be SPELLED and that the two ways of spelling one
+     * cannot disagree; wiring the resolver, the relay and the probe to it is
+     * sequenced after, and until that lands a declared provider changes no
+     * behaviour beyond being validated.
+     */
+    providers: z.record(z.string(), ProviderSchema).optional(),
   })
-  .strict();
+  .strict()
+  /**
+   * The fleet default must name a declared provider, and every key must be a
+   * name a worker and Docker can both use.
+   *
+   * This runs on the PARSED object because it needs `provider`'s default
+   * applied — an operator who writes `providers:` and never writes `provider:`
+   * is relying on `omlx`, and if that is not a declared key then every
+   * unprefixed model in the fleet resolves to an endpoint the document does not
+   * describe. The worker-facing half of the same rule — a `provider/` prefix
+   * naming something absent from the map — is ISC-402 and belongs to the
+   * resolver, which is the only place a worker's merged model exists.
+   */
+  .superRefine((llm, ctx) => {
+    if (llm.providers === undefined) return;
+    const declared = Object.keys(llm.providers);
+    for (const name of declared) {
+      if (PROVIDER_KEY_RE.test(name)) continue;
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", name],
+        message:
+          `"${name}" is not usable as a provider key. It has to survive two places: a worker ` +
+          `names it as the "provider/" prefix on a model, which is split on the first "/", and ` +
+          `it is composed into a Docker network and relay name. Use letters, digits, "_", "." ` +
+          `or "-", starting with a letter or a digit.`,
+      });
+    }
+    if (Object.prototype.hasOwnProperty.call(llm.providers, llm.provider)) return;
+    ctx.addIssue({
+      code: "custom",
+      path: ["provider"],
+      message:
+        `llm.provider is "${llm.provider}", which llm.providers does not declare ` +
+        (declared.length === 0
+          ? `— llm.providers is empty. `
+          : `(declared: ${declared.join(", ")}). `) +
+        `It is the provider every worker gets whose model carries no "provider/" prefix, so a ` +
+        `fleet default naming nothing sends the whole fleet to an endpoint this document does ` +
+        `not describe.`,
+    });
+  });
+
+/**
+ * The flat keys and the map cannot both spell the same provider.
+ *
+ * ## Why this is a preprocess and not another refinement
+ *
+ * The check needs to know whether the operator WROTE a flat key, and every one
+ * of them carries a default — `base_url` resolves to the oMLX literal,
+ * `api_key_env` to `OMLX_API_KEY`, `relay_upstream` to `null` — so by the time
+ * the object has parsed, "the operator wrote it" and "the schema supplied it"
+ * are the same value and are indistinguishable. Only the raw document knows,
+ * and `z.preprocess` is where the raw document still exists. The alternative,
+ * dropping the defaults and re-applying them in a transform, would move four
+ * default values away from the four field docblocks that explain them.
+ *
+ * ## Why a refusal rather than a merge
+ *
+ * §6.1 names the reason and it is not tidiness: the flat keys mean "the block
+ * for `llm.provider`", so a document that writes both has said one thing twice.
+ * Whichever way a merge resolved it, the losing spelling would sit in the file
+ * looking authoritative — and two constants that quietly disagree is exactly
+ * what ISC-264 cost a whole rename to find. The operator moves the value into
+ * the block, or deletes the block; the schema does not choose for them.
+ *
+ * Keyed on the ENTRY, not on the individual key, because that is what §6.1 and
+ * ISC-403 both say: a `providers` entry for `llm.provider` is a complete
+ * description of that endpoint, so any flat endpoint key beside it is a second
+ * description of the same thing whether or not the values happen to match
+ * today.
+ */
+export const LlmSchema = z.preprocess((raw, ctx) => {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const doc = raw as Record<string, unknown>;
+  const providers = doc.providers;
+  if (typeof providers !== "object" || providers === null || Array.isArray(providers)) return raw;
+  // `provider`'s own default has not been applied yet — this is the raw
+  // document — so reproduce it from the same constant the field uses.
+  const provider = typeof doc.provider === "string" ? doc.provider : DEFAULT_PROVIDER;
+  if (!Object.prototype.hasOwnProperty.call(providers, provider)) return raw;
+  for (const key of PER_PROVIDER_FLAT_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(doc, key)) continue;
+    ctx.addIssue({
+      code: "custom",
+      path: [key],
+      message:
+        `llm.${key} and llm.providers.${provider}.${key} are two spellings of one value. The ` +
+        `flat keys mean "the block for llm.provider" (§6.1), so writing both is not a merge — ` +
+        `one would have to win silently, and two constants that quietly disagree is what ` +
+        `ISC-264 cost a rename to find. Move the value into llm.providers.${provider} and ` +
+        `delete llm.${key}.`,
+    });
+  }
+  return raw;
+}, LlmObject);
 
 export const CloudSchema = z
   .object({

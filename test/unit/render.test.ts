@@ -1424,9 +1424,12 @@ describe("the run directory is computed once (ISC-188)", () => {
       [after, moved],
     ] as const) {
       const hostPaths = runStateHostPaths(rendered.docker);
-      // Or the loop below is vacuous: seven mounts plus the env file. The
-      // seventh is /policy/task, added with ISC-362.
-      expect(hostPaths.length).toBe(8);
+      // Or the loop below is vacuous: eight mounts plus the env file. The
+      // seventh is /policy/task, added with ISC-362. The eighth is /secrets,
+      // which D8 made unconditional — `eng-1` requests no `secrets:` and still
+      // gets the store, because the Class 1 provider key is delivered as a file
+      // in it and no worker requests that.
+      expect(hostPaths.length).toBe(9);
       for (const p of hostPaths) expect(p.startsWith(join(root, "dry"))).toBe(true);
     }
 
@@ -1494,11 +1497,12 @@ describe("the run directory is computed once (ISC-188)", () => {
         const r = await renderWorker(loaded, "eng-1");
         expect(isAbsolute(r.runDir)).toBe(true);
         const hostPaths = runStateHostPaths(r.docker);
-        // Seven mounts plus the env file (the seventh is /policy/task, ISC-362).
+        // Eight mounts plus the env file (the seventh is /policy/task, ISC-362;
+        // the eighth is /secrets, which D8 made unconditional).
         // Unresolved, they are not absolute and `runStateHostPaths` drops them
         // as named volumes — so this count is the assertion, and it read 0
         // before the root was canonicalized.
-        expect(hostPaths.length).toBe(8);
+        expect(hostPaths.length).toBe(9);
         for (const p of hostPaths) expect(isAbsolute(p)).toBe(true);
       } finally {
         if (saved === undefined) delete process.env["PIFLEET_RUNS_DIR"];
@@ -1864,6 +1868,12 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       `${worker.cloudAllow}:/policy/cloud-allow:ro`,
       "-v",
       `${worker.taskPolicy}:/policy/task:ro`,
+      // D8 made this UNCONDITIONAL. `eng-1` requests no `secrets:` and still
+      // carries the store, because the Class 1 provider key is delivered as a
+      // 0444 file in it and no worker requests that. Its POSITION is pinned
+      // here for the same reason the image tag's is, one block down.
+      "-v",
+      `${worker.secretsDir}:/secrets:ro`,
       "-v",
       "pifleet-piagent-eng-1:/home/pi/.pi/agent",
       "-v",

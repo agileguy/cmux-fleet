@@ -80,7 +80,34 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-No ISA done-condition criterion is unattempted — there are zero `[ ]`. Eight are graded `[~]`
+There are zero `[ ]` criteria. The block ISC-401..ISC-430, filed 2026-09-01 as the
+done-condition for per-worker inference providers
+(`Docs/SRD-INFERENCE-PROVIDERS.md`), is closed in full — all thirty, including the two
+filed out of its own phases' work: ISC-401 and ISC-406 closed with the two latent
+defects they name, Phase 2 closed ISC-402, ISC-403, ISC-404, ISC-405 and ISC-420 when the
+`llm.providers` map landed and `resolveWorker` began reading it, Phase 3 closed ISC-407,
+ISC-408 and ISC-422 by moving the provider credential out of the environment entirely — it is
+written to a `0444` file in the worker's secret store and reaches the container as a PATH under a
+fleet-owned variable, with the entrypoint's environment read removed rather than demoted to a
+fallback, and Phase 4 closed ISC-409..ISC-413 plus ISC-418 and ISC-425 by giving each provider IN USE
+its own egress bridge, its own relay carrying exactly one target, and its own credential in both
+the worker and the tool-call gate. **That last distinction is the phase's real content.** A file-then-environment fallback
+would have looked like robustness and quietly restored the defect ISC-406 had just closed: on the
+first day the pointer failed to arrive, a worker also holding `OMLX_API_KEY` through `secrets:`
+would have authenticated to its configured provider with the LOCAL credential — a wrong-credential
+401 strictly harder to diagnose than the empty key it replaced. ISC-424, filed during Phase 1's
+review, was graded `[~]` for half a day and closed the same way. Phase 5 closed ISC-426..ISC-428 by
+resolving a hosted provider's `relay_upstream` hostname once, at `up`, so the relay dials an address
+while the egress policy still judges the NAME; Phase 6 closed ISC-414..ISC-417 by making a worker
+whose context leaves the machine loud rather than refused — `up` prints a disclosure banner and the
+launch record carries the same set, with a mismatch in EITHER direction failing; and Phase 7 closed
+ISC-419 and ISC-423, giving the tool-call probe a per-provider deadline and proving the headless
+acceptance suite still passes with every credential-shaped variable stripped from its environment;
+and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 key now joins the
+harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
+shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
+states the dependency it actually has instead of one it merely appeared to.
+Every criterion filed before the block has been attempted. Nine are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
@@ -103,20 +130,45 @@ stayed correct; and cmux's dispatch was refused by pifleet's *own* identifier gu
 has no `+`, at step 2 of a 29-step plan with two lines of the prompt already typed. Each backend
 now translates one fleet-wide key vocabulary or refuses — but the vocabulary itself is still a
 measurement nothing re-runs, which is why the criterion is `[~]`.
+**ISC-259 is the ninth, and it got there differently from the other eight.** It was closed `[x]` by
+owner decision on 2026-08-28 and re-graded on 2026-09-01 — not because anything contradicted it, but
+because a mechanism its closing evidence *cited* was deleted underneath it. That evidence names three
+mechanisms as the reason a hosted provider cannot appear by accident; ISC-369 removed the first, the
+pin on `llm.base_url`'s host, for an unrelated and good reason, and never mentioned ISC-259 because it
+had no reason to. Measured by driving this repo's own `parseConfig`, `omlxRelayTarget` and
+`assertTargetsAllowed`: a fleet can now be pointed at a third-party provider and it validates. The
+second half of the sentence — the two-place authorization — survives intact, which is why `[~]` and not
+`[ ]`; nothing re-checks the word *never*, which is why not `[x]`.
 ISC-372 was filed `[~]` the same day and closed hours later, when `up` gained the check against the
-*effective* backend that the entry had named as its own closing condition. The two that left this
-list on 2026-08-30 — ISC-306 and ISC-339 — were scope decisions rather than defects, and closed
-when the owner made the decision each entry named as its closing condition.
+*effective* backend that the entry had named as its own closing condition.
+
+**Two criteria left this list on 2026-09-01 by being closed rather than re-graded, and both are
+worth a sentence because of HOW.** ISC-405 and ISC-424 were each `[~]` with their probe pinned to a
+BLOCKER's absence — the rule this repo uses so that removing a blocker turns the guard red instead of
+letting a criterion drift green. Both guards fired, on the commit that unblocked them, and both were
+replaced with the positive assertion rather than deleted. ISC-405's fired twice: once when
+`llm.providers` appeared in the schema, and again when `resolveWorker` started passing the tag-style
+predicate. That is the pattern paying for itself — nobody had to remember either criterion.
 
 Two are retired `[-]` — ISC-307 and ISC-360 — a marker introduced by ISC-368 on 2026-08-30 for a
 criterion whose *premise* was superseded rather than left unproved. ISC-307 is about a secret's
 value reaching an env file, and secrets are delivered as read-only files now (ISC-337); ISC-360 is
 about an SRD erratum recording task-scoped cloud authorization as designed-but-not-built, and the
 owner withdrew the mechanism (ISC-366). Retired criteria are excluded from `progress:` on both
-sides — `369/377` counts the live set, and the frontmatter's `retired: 2` says where the rest
+sides — `407/420` counts the live set, and the frontmatter's `retired: 2` says where the rest
 went. Retiring is not closing, is not deleting (both entries keep their text and their live
 guards), and is refused for a criterion that is merely hard: `test/unit/isa-retired.test.ts`
 rejects any retirement that does not name a closed criterion that names it back.
+
+**ISC-340 was AMENDED rather than closed, re-graded or retired, and it is the only entry in that
+state.** Phase 3 made half its text false by design: `/secrets` used to mean "what the operator
+granted", so "a worker that asked for no secret gets no mount at all" was right, and the fleet now
+delivers the provider key into that same store while no worker requests it. The gate was deleted
+from BOTH sides rather than widened on one, and the guard that encoded the old meaning was
+**replaced with the positive assertion rather than removed** — the same rule the two closed
+tripwires above follow. The entry keeps `[x]` because its first clause, the one its mutation record
+actually pins, is untouched and still probed. Amending is not retiring: the criterion still has
+live guards and still counts.
 
 `test/unit/docs-currency.test.ts` pins both counts against `ISA.md`, so neither can drift the way
 the sentence it replaced did.

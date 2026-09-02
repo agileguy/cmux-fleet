@@ -16,6 +16,8 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import { parseConfig, resolveWorker, ConfigError } from "../../src/config/load.ts";
 import {
+  LLM_API_KEY_FILE_VAR,
+  SECRETS_MOUNT,
   buildWorkerEnv,
   serializeEnvFile,
   writeWorkerEnvFile,
@@ -127,13 +129,57 @@ describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
 
 describe("the --env-file contract with docker/entrypoint.sh", () => {
   /**
-   * The three names the entrypoint actually branches on. It guards with
-   * `[ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]`
-   * before writing models.json at all, so either one missing is silent.
+   * The `PIFLEET_LLM_*` names the entrypoint reads — DERIVED FROM THE SCRIPT,
+   * not listed here, and that change is this test catching itself.
+   *
+   * It was three names, then four on 2026-09-01 when `PIFLEET_LLM_API_KEY_ENV`
+   * was added to close Defect A, and the docblock still said "three" while the
+   * file it pins had grown a fourth branch. It said so in its own words: "that
+   * is the staleness this whole describe block exists to prevent, so the count
+   * is asserted now rather than described." Then D8 removed that variable
+   * again, the entrypoint stopped reading it, and this test went on asserting
+   * it was emitted — stale a second time, in the same direction, for the same
+   * reason. A hand-maintained list of what another file reads is a list that
+   * will be wrong again.
+   *
+   * So the expectation is now READ OFF `docker/entrypoint.sh`: every
+   * `PIFLEET_LLM_*` name it expands outside a comment must be emitted, and the
+   * plan must emit no `PIFLEET_LLM_*` name the script does not read. The second
+   * half is what makes it bidirectional — a variable nobody reads is exactly
+   * what `PIFLEET_LLM_API_KEY_ENV` became, and nothing would have failed.
+   *
+   * The guard is `[ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n
+   * "${PIFLEET_LLM_MODELS:-}" ]` before writing models.json at all, so either
+   * one missing is silent — which is why `resolveWorker` now refuses a model:
+   * that decomposes to an empty string, the only reachable way to empty
+   * `PIFLEET_LLM_MODELS` from config.
    */
-  test("emits the provider, base URL and model names the entrypoint reads", async () => {
+  test("emits exactly the PIFLEET_LLM_* names the entrypoint reads", async () => {
+    const script = await readFile(
+      join(import.meta.dir, "..", "..", "docker", "entrypoint.sh"),
+      "utf8",
+    );
+    const read = new Set(
+      script
+        .split("\n")
+        .filter((l) => !l.trimStart().startsWith("#"))
+        .flatMap((l) => [...l.matchAll(/\$\{?(PIFLEET_LLM_[A-Z_]+)/g)].map((m) => m[1]!)),
+    );
+    // Anti-vacuity: an empty set would make both directions below trivially
+    // true, and a regex that stopped matching is the likeliest way to get one.
+    expect(read.size).toBeGreaterThanOrEqual(4);
+
     const loaded = await load(baseDoc());
-    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {
+      OMLX_API_KEY: "KEY-SO-THE-POINTER-IS-EMITTED",
+    });
+    const emitted = new Set(Object.keys(plan.vars).filter((k) => k.startsWith("PIFLEET_LLM_")));
+
+    expect([...read].filter((n) => !emitted.has(n))).toEqual([]);
+    expect([...emitted].filter((n) => !read.has(n))).toEqual([]);
+
+    // The values still matter, so the two sets agreeing on nothing useful
+    // cannot pass: these are the three the entrypoint branches on.
     expect(plan.vars["PIFLEET_LLM_PROVIDER"]).toBe("omlx");
     expect(plan.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://omlx.pifleet.internal:8000/v1");
     expect(plan.vars["PIFLEET_LLM_MODELS"]).toBe("TestModel");
@@ -252,11 +298,47 @@ describe("the --env-file contract with docker/entrypoint.sh", () => {
     expect(serializeEnvFile(plan.vars)).not.toContain("OMLX_API_KEY=");
   });
 
-  test("a present key is carried, under the configured name", async () => {
+  /**
+   * REWRITTEN FOR D8, and the old assertion is quoted here because its
+   * inversion is the point rather than a detail.
+   *
+   * It read `expect(plan.vars["MY_KEY"]).toBe("s3cret")` — the key delivered as
+   * an environment VALUE under the operator's chosen name. §6.6 keeps the rule
+   * and changes the delivery: the value goes to a 0444 file in the worker's
+   * secret store and the environment receives a fleet-owned pointer. So the
+   * same fixture now asserts the opposite about `vars` and asserts the delivery
+   * happened somewhere else, rather than simply dropping the old line — a test
+   * that only stopped checking would be indistinguishable from a key that
+   * stopped being delivered at all.
+   */
+  test("a present key is delivered as a FILE, never as an environment value", async () => {
     const loaded = await load(baseDoc({ llm: { model: "TestModel", api_key_env: "MY_KEY" } }));
     const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), { MY_KEY: "s3cret" });
     expect(plan.missingApiKey).toBe(false);
-    expect(plan.vars["MY_KEY"]).toBe("s3cret");
+    // The operator's name no longer carries anything in the environment.
+    expect(Object.keys(plan.vars)).not.toContain("MY_KEY");
+    // The fleet-owned pointer carries the container path, and only the path.
+    expect(plan.vars[LLM_API_KEY_FILE_VAR]).toBe(`${SECRETS_MOUNT}/MY_KEY`);
+    // And the value is on the one field that may hold one, under the
+    // operator's name — which is what keeps the log redactor able to see it.
+    expect(plan.secretFiles).toEqual([{ name: "MY_KEY", value: "s3cret" }]);
+  });
+
+  /**
+   * The keyless fleet gets NEITHER half, and this pins the pairing rather than
+   * either half alone.
+   *
+   * A pointer written without a file is the ENOENT-inside-the-first-call shape
+   * §5.9 describes; a file written without a pointer is a credential on disk
+   * nothing reads. Both are produced by one `if` in `buildWorkerEnv`, and this
+   * is the probe that would notice if they were ever split into two.
+   */
+  test("an absent key produces neither the pointer nor the file", async () => {
+    const loaded = await load(baseDoc({ llm: { model: "TestModel", api_key_env: "MY_KEY" } }));
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    expect(plan.missingApiKey).toBe(true);
+    expect(Object.keys(plan.vars)).not.toContain(LLM_API_KEY_FILE_VAR);
+    expect(plan.secretFiles).toEqual([]);
   });
 });
 

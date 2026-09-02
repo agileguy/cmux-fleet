@@ -196,24 +196,58 @@ export interface ModelSpec {
  * honoured when it names a real thinking level: model ids routinely contain
  * `:` -adjacent punctuation and a typo must surface as "unknown model" at the
  * server, not as a silently swallowed suffix.
+ *
+ * `isTagStyleProvider` turns that suffix parsing off for ONE provider
+ * (SRD-INFERENCE-PROVIDERS §2.4 "Defect C", D12). Some vendors spell a model
+ * id `name:tag` — Ollama's entire catalogue does, `gpt-oss:120b` and
+ * `qwen3.5:397b` — and the six thinking levels are ordinary words in a
+ * namespace the VENDOR owns, so a colliding tag is one rename away rather than
+ * hypothetical. Measured on the unfixed code, `ollama/some-model:high`
+ * resolved to model `some-model` with thinking `high`: the tag was gone and a
+ * level had been invented out of it. That failure does not surface here. It
+ * surfaces at the far end as `model-not-found` against a name the operator can
+ * read back off their `fleet.yaml` and see is correct, which is the most
+ * expensive shape a config bug can take.
+ *
+ * WHY A PREDICATE RATHER THAN A BOOLEAN. The flag belongs to the provider, and
+ * the provider is not something the CALLER knows — it is discovered in here,
+ * from the `provider/` prefix, falling back to the fleet default. A boolean
+ * parameter would oblige every caller to split that prefix itself first, just
+ * to decide what to pass, which is a second spelling of the split this
+ * function exists to own; ISC-264 is the standing record of what two
+ * spellings of one value cost to unpick. A predicate lets the caller answer
+ * only once the answer is knowable.
+ *
+ * It is also the narrowest thing that composes with §6.1's `llm.providers`
+ * map, which is a later phase and deliberately NOT built here: when that map
+ * lands it feeds this in one line — `(p) => cfg.llm.providers[p]?.tag_style
+ * === true` — with no change to this signature and no second reader of the
+ * block. Taking the map itself would mean inventing that block's type now, in
+ * the one file that must not be the place it is defined.
+ *
+ * OMITTED means "no provider is tag-style", which is exactly the behaviour
+ * this function had before the parameter existed, so every existing caller
+ * keeps its meaning unedited.
+ *
+ * THE PREFIX IS NOW SPLIT FIRST — the two steps traded places, because the
+ * provider has to be known before the flag can be consulted about it. The
+ * reordering is behaviour-preserving rather than merely believed to be. The
+ * only input on which the two orders could diverge is one whose LAST colon
+ * sits before the slash and whose suffix still parses as a level; that suffix
+ * necessarily contains the slash, and all six levels are single slash-free
+ * words, so it can never parse. In the other direction, truncating a trailing
+ * `:level` cannot move the FIRST `/`, since a level contains none. Both halves
+ * are pinned by tests rather than left as this paragraph.
  */
 export function decomposeModel(
   raw: string,
   fallbackProvider: string,
   mergedThinking: ThinkingLevel | undefined,
+  isTagStyleProvider?: (provider: string) => boolean,
 ): ModelSpec {
   let provider = fallbackProvider;
   let model = raw;
   let thinking = mergedThinking;
-
-  const colon = model.lastIndexOf(":");
-  if (colon !== -1) {
-    const suffix = model.slice(colon + 1);
-    if (ThinkingLevelSchema.safeParse(suffix).success) {
-      thinking = suffix as ThinkingLevel;
-      model = model.slice(0, colon);
-    }
-  }
 
   const slash = model.indexOf("/");
   if (slash > 0) {
@@ -221,7 +255,197 @@ export function decomposeModel(
     model = model.slice(slash + 1);
   }
 
+  if (!isTagStyleProvider?.(provider)) {
+    const colon = model.lastIndexOf(":");
+    if (colon !== -1) {
+      const suffix = model.slice(colon + 1);
+      if (ThinkingLevelSchema.safeParse(suffix).success) {
+        thinking = suffix as ThinkingLevel;
+        model = model.slice(0, colon);
+      }
+    }
+  }
+
   return { provider, model, thinking };
+}
+
+/**
+ * The `tag_style` predicate for one fleet, in the shape `decomposeModel` takes.
+ *
+ * This is the composition `decomposeModel`'s docstring promises when it argues
+ * for a predicate over a boolean, and it is deliberately the ONLY place that
+ * reads `tag_style`. Three call sites need the same answer — `resolveWorker`,
+ * `assertModelAllowed` and `doctor`'s allowlist verdict — and they must not
+ * disagree: `doctor` answering `false` where `up` answers `true` is precisely
+ * the shape ISC-256 exists to forbid, a green `doctor` over a config `up`
+ * refuses. One function, three callers, no second reading of the flag.
+ *
+ * A fleet with no `providers` map answers `false` to everything, which is the
+ * behaviour every existing config had before the map existed. That is not a
+ * defensive default: with no map there is no block to carry the flag, so
+ * `false` is the only answer that is actually true.
+ */
+export function tagStyleProviders(config: FleetConfig): (provider: string) => boolean {
+  const providers = config.llm.providers;
+  if (providers === undefined) return () => false;
+  return (provider) => providers[provider]?.tag_style === true;
+}
+
+/**
+ * The models allowlist governing ONE provider, from whichever spelling the
+ * document used.
+ *
+ * With a `providers` map the list lives in the block; without one it is the
+ * flat key, meaning the block for `llm.provider` (§6.1). ISC-403 refuses both
+ * spellings at once, so exactly one of these branches describes any given
+ * document and there is no merge to get wrong.
+ *
+ * Shared by `assertModelAllowed` and by `doctor`, and that sharing is the
+ * point rather than a convenience: ISC-256 requires `doctor`'s verdict and
+ * `up`'s gate to agree on the same config, and the cheapest way for them to
+ * disagree is to read the allowlist from two places while a fleet is being
+ * migrated from the flat keys to the map.
+ */
+export function providerAllowlist(config: FleetConfig, provider: string): readonly string[] {
+  const providers = config.llm.providers;
+  if (providers === undefined) return config.llm.models_allowlist;
+  return providers[provider]?.models_allowlist ?? [];
+}
+
+/**
+ * Does this provider run on someone else's hardware (D3)?
+ *
+ * ONE READING OF `hosted`, and the sharing is the whole point rather than a
+ * tidy-up. Two things now key on this flag and they key on it in opposite
+ * directions: D9 lets a hosted block's `relay_upstream` be a HOSTNAME (and
+ * then requires it resolved before the relay sees it), while §7.3's disclosure
+ * banner names every worker whose context reaches a hosted endpoint. Read from
+ * two places those can disagree, and the disagreement is silent in the
+ * direction that matters — a provider the relay treats as hosted but the
+ * banner does not is a worker sending its repository and its credentials to a
+ * vendor with nothing printed, which is precisely the state D10 accepted a
+ * reversal on the understanding that it could not happen.
+ *
+ * The parameter is structural rather than `FleetConfig` so that `relay.ts` can
+ * call it with its own narrower `FleetRelayConfigView`. Both carry the same
+ * field and this reads the same byte from either.
+ *
+ * `undefined` — no `providers` map at all — is FALSE, and that is the correct
+ * answer rather than a default. §6.1 keeps the flat `llm.*` keys as the
+ * default provider's shorthand and that shorthand has no `hosted` field to
+ * set, because `hosted` is required in a provider block and is never inferred
+ * (D3). A flat fleet is oMLX on the operator's own machine, so nothing about
+ * it leaves and no pre-D7 config acquires a banner it never asked for.
+ */
+export function providerIsHosted(
+  cfg: { llm: { providers?: Readonly<Record<string, { readonly hosted?: boolean }>> | undefined } },
+  provider: string,
+): boolean {
+  return cfg.llm.providers?.[provider]?.hosted === true;
+}
+
+/**
+ * The host variable holding ONE provider's Class 1 key (ISC-425).
+ *
+ * ## The defect this exists to make unrepeatable
+ *
+ * `buildWorkerEnv` read `llm.api_key_env` — the FLEET-WIDE field — for every
+ * worker whatever provider it resolved to. Measured on a live two-provider
+ * run whose blocks named `OLLAMA_API_KEY` and `VENDOR_B_API_KEY`:
+ *
+ *     workers/d7a/secrets/  -r--r--r--  OMLX_API_KEY
+ *     workers/d7b/secrets/  -r--r--r--  OMLX_API_KEY
+ *
+ * Both got the fleet default. The file mode and the read-only mount were
+ * exactly what ISC-408 requires; the CREDENTIAL was the operator's own oMLX
+ * key, and `entrypoint.sh` then writes it into `models.json` under the
+ * worker's RESOLVED provider. A worker dialing a third party therefore held a
+ * local key under that third party's name, one request away from sending it.
+ *
+ * ## Why there is no fallback, and why that is the schema's own argument
+ *
+ * `ProviderSchema` makes `api_key_env` REQUIRED with no default, and says why:
+ * the flat keys' defaults "describe oMLX on the operator's own machine",
+ * so inheriting them into a provider block is wrong by construction. A `??
+ * config.llm.api_key_env` here would reintroduce precisely that inheritance
+ * through the back door — and silently, since the result is a real variable
+ * name that resolves to a real key. `relayViewForProvider` refuses the same
+ * fallback for the same reason and says so in its own message; this is that
+ * rule applied to the credential rather than to the endpoint.
+ *
+ * Shared by `buildWorkerEnv` and by `assertModelsSupportToolCalls`, and the
+ * sharing is the point: the gate that CERTIFIES a provider and the worker that
+ * DIALS it must present the same credential, and the cheapest way for them to
+ * disagree is to read the name from two places.
+ */
+export function providerApiKeyEnv(config: FleetConfig, provider: string): string {
+  const providers = config.llm.providers;
+  // §6.1's shorthand: with no map the flat keys ARE this provider's block, so
+  // the fleet-wide name is not an inheritance, it is the block's own value.
+  if (providers === undefined) return config.llm.api_key_env;
+  const block = providers[provider];
+  if (block === undefined) {
+    throw new ConfigError(
+      `worker resolves to provider ${JSON.stringify(provider)}, which llm.providers does not ` +
+        `declare — declared: ${Object.keys(providers).join(", ") || "(none)"}. The credential ` +
+        `will not fall back to llm.api_key_env: that is how a second provider silently acquires ` +
+        `the default key and carries it to someone else's endpoint.`,
+    );
+  }
+  return block.api_key_env;
+}
+
+/**
+ * How long ONE provider's endpoint gets to answer the §5.9 tool-call probe
+ * (D16, ISC-419). `undefined` means UNSET — the caller's own default applies.
+ *
+ * ## Why this returns `undefined` instead of resolving the default itself
+ *
+ * The 60 s default lives in exactly one place: `probeNativeToolCalls`'s default
+ * parameter in `security/model-probe.ts`, where its docblock records the oMLX
+ * cold load it was sized against. Reading it here would require importing that
+ * module, and **this module must not import it** — the dependency runs the
+ * other way (`model-probe.ts` imports `resolveWorker` and `providerApiKeyEnv`
+ * from here), and `model-probe.ts`'s own header states why: `config/load.ts` is
+ * deliberately synchronous file-IO only, and a config loader that reaches the
+ * network is one that cannot be unit-tested without one.
+ *
+ * Restating `60_000` here to dodge the import would be worse than the import.
+ * It is the same defect ISC-264 cost a rename to find: two constants that
+ * describe one thing, agree on the day they are written, and drift the first
+ * time either is tuned. `undefined` passed to a parameter with a default IS the
+ * default, so handing the value straight through costs nothing and leaves the
+ * number with one home.
+ *
+ * ## Why absence is `undefined` rather than a throw, unlike `providerApiKeyEnv`
+ *
+ * Worth stating, because a reader arriving from the function directly above
+ * will have just read a `ConfigError` thrown for exactly this case and will
+ * reasonably ask why this one shrugs.
+ *
+ * The two are answering different questions. A missing `api_key_env` cannot be
+ * defaulted at all — §6.2 forbids inheriting the flat key, because that is how
+ * a second provider silently acquires oMLX's credential and carries it to
+ * someone else's endpoint — so there is no correct value to return and refusing
+ * is the only honest move. A missing BUDGET has a correct value: the default,
+ * which is what every pre-D7 fleet has always run on.
+ *
+ * And an undeclared provider is already refused, earlier and by name:
+ * `resolveWorker` (ISC-402) rejects a worker whose provider is not in the map
+ * before any probe is reached, so a `throw` here would be a second refusal for
+ * a state the caller cannot be in. `providerAllowlist` returns `[]` on this
+ * path for the same reason and this follows its shape rather than the one
+ * above it.
+ *
+ * The no-`providers`-map fleet also lands here as `undefined`, and that is
+ * D16's own argument rather than a fall-through: 60 s was sized against oMLX on
+ * the operator's own hardware, so it is CORRECT for a flat fleet. The problem
+ * D16 describes belongs to a hosted provider, and a hosted provider by
+ * definition has a providers map — which is why there is no flat
+ * `llm.probe_timeout_ms` spelling for this to read.
+ */
+export function providerProbeTimeoutMs(config: FleetConfig, provider: string): number | undefined {
+  return config.llm.providers?.[provider]?.probe_timeout_ms;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +552,81 @@ export function resolveWorker(loaded: LoadedConfig, id: string): ResolvedWorker 
   // merged `thinking:` key, wherever either was written.
   const mergedModel = pick("model", entry, role, d) ?? config.llm.model;
   const mergedThinking = pick("thinking", entry, role, d) ?? config.llm.thinking;
-  const spec = decomposeModel(mergedModel, config.llm.provider, mergedThinking);
+  const spec = decomposeModel(mergedModel, config.llm.provider, mergedThinking, tagStyleProviders(config));
+
+  /*
+   * A NON-EMPTY `model:` can decompose to an EMPTY model, and the failure is
+   * completely silent — which is why this refuses here rather than trusting
+   * `schema.ts`'s `.min(1)`.
+   *
+   * `schema.ts` enforces `min(1)` on the raw string, so `model: ""` is already
+   * refused. But `omlx/` and `:high` are both non-empty and both decompose to
+   * `model: ""` — the prefix split and the thinking strip each consume their
+   * side and leave nothing between them. Measured:
+   *
+   *   "omlx/"      -> { provider: "omlx", model: "" }
+   *   ":high"      -> { provider: "omlx", model: "", thinking: "high" }
+   *
+   * What happens next is the whole reason this is a refusal. `worker-env` sets
+   * `PIFLEET_LLM_MODELS=""`, so the entrypoint's
+   * `[ -n "${PIFLEET_LLM_MODELS:-}" ]` guard is FALSE and **no `models.json` is
+   * written at all** — exit 0, nothing on stderr. `render.ts` still pushes
+   * `--model ""`. Nothing in `src/` ever reads the rendered file back, and the
+   * container is `--rm`, so "no file", "empty key" and "wrong provider" are
+   * indistinguishable from the host. The one thing standing in front of it,
+   * `assertModelsSupportToolCalls`, returns early whenever
+   * `require_native_tool_calls: false` — a documented, supported setting — and
+   * then the fleet comes up clean and can reach no model at all.
+   *
+   * That is this file's own stated worst case, reachable from a one-character
+   * typo, so it fails at parse time naming the worker and the string.
+   */
+  if (spec.model === "") {
+    throw new ConfigError(
+      `worker "${entry.id}" has model: "${mergedModel}", which resolves to an empty model name. ` +
+        `A "provider/" prefix and a ":thinking" suffix each consume their side of the string; ` +
+        `written like this there is nothing left between them. Name a model.`,
+    );
+  }
+
+  /*
+   * ISC-402: a worker cannot resolve to a provider the document never declares.
+   *
+   * Only when a `providers` map exists. Without one there is nothing to check
+   * against — every existing `fleet.yaml` names its provider in the flat keys
+   * or not at all — and refusing here would break each of them.
+   *
+   * The provider reaches this line from one of two places and both must be
+   * covered: a `provider/` prefix the operator typed on THIS worker's `model:`,
+   * or `llm.provider` inherited when they typed no prefix. The second is the
+   * one worth naming, because nothing in the file says the word and the
+   * operator is reading a `model:` line that looks complete.
+   *
+   * Without this, an undeclared provider is not an error at all: it is a name
+   * with no block behind it, so `assertModelAllowed` finds no allowlist and
+   * constrains nothing, and every later phase that keys on the provider —
+   * `base_url`, the credential, the egress network, the relay — resolves
+   * against a block that does not exist. The failure surfaces as a worker that
+   * cannot reach a model, arbitrarily far from the typo.
+   *
+   * The message names the FILE because `config validate` may be run against a
+   * path the operator did not type, and the FIELD because `model:` and
+   * `llm.provider` are different lines to go fix.
+   */
+  const declared = config.llm.providers;
+  if (declared !== undefined && declared[spec.provider] === undefined) {
+    const known = Object.keys(declared);
+    const wrotePrefix = mergedModel.indexOf("/") > 0;
+    const field = wrotePrefix ? `the "${spec.provider}/" prefix on worker "${entry.id}"'s model:` : `llm.provider`;
+    throw new ConfigError(
+      `worker "${entry.id}" resolves to provider "${spec.provider}", which is not declared in ` +
+        `llm.providers in ${loaded.path}. It comes from ${field}. ` +
+        (wrotePrefix
+          ? ``
+          : `The worker's model: "${mergedModel}" names no provider, so it inherits the fleet default. `) +
+        `Declared: ${known.length === 0 ? "(none)" : known.map((k) => JSON.stringify(k)).join(", ")}.`,
+    );
+  }
 
   return {
     id: entry.id,
@@ -413,10 +711,48 @@ export class ModelNotAllowedError extends ConfigError {
  * is the dead-rule shape `EgressRuleSchema` already refuses to ship.
  */
 export function assertModelAllowed(loaded: LoadedConfig, worker: ResolvedWorker): void {
-  const allowlist = loaded.config.llm.models_allowlist;
+  const { llm } = loaded.config;
+  /*
+   * ISC-404: the list is the RESOLVED PROVIDER'S, not the fleet's.
+   *
+   * With a `providers` map the allowlist moved inside the block, and reading
+   * the flat key here would have made one fleet-wide list govern every
+   * provider — so a model probed against oMLX would authorize the same name on
+   * a hosted endpoint that never answered a probe. The allowlist's whole
+   * meaning is "these were probed for native tool calls (SRD §5.9)", and a
+   * probe is of a (provider, model) PAIR; carrying the verdict across
+   * providers is not a widening of the rule, it is a different rule.
+   *
+   * A declared provider with an empty `models_allowlist` constrains nothing,
+   * exactly as the flat key's empty default does. A provider that is not in
+   * the map cannot reach here at all — `resolveWorker` refuses it above — so
+   * the `?? []` is unreachable-by-construction rather than a fallback with an
+   * opinion, and it stays because `??` is cheaper to read than an assertion
+   * that restates a guarantee enforced in another function.
+   */
+  const allowlist = providerAllowlist(loaded.config, worker.provider);
   if (allowlist.length === 0) return;
-  const fallback = loaded.config.llm.provider;
-  const permitted = allowlist.map((e) => decomposeModel(e, fallback, undefined).model);
+  /*
+   * The fallback provider for an entry that names none: the block's own key
+   * with a map, the fleet default without one. Inside `providers.ollama.
+   * models_allowlist`, a bare `gpt-oss` means ollama's — there is no other
+   * provider that entry could be about — and using the fleet default there
+   * would prefix hosted entries with the local provider's name.
+   */
+  const fallback = llm.providers ? worker.provider : llm.provider;
+  const isTagStyle = tagStyleProviders(loaded.config);
+  /*
+   * ISC-424's GATE HALF. Both sides decompose with the SAME predicate, so on a
+   * tag-style provider `p/m:high` and `p/m:low` are two models and the second
+   * is refused by a list naming only the first. Before the predicate reached
+   * here the tag was eaten on both sides, both became `m`, and the gate
+   * admitted a tag variant nobody had probed — the allowlist is the fleet's
+   * record of what WAS probed (ISC-190), so admitting an unprobed variant is
+   * the gate failing at the one thing it is for. `doctor` reads the same flag
+   * through the same helper, which is what keeps its verdict and this refusal
+   * from disagreeing.
+   */
+  const permitted = allowlist.map((e) => decomposeModel(e, fallback, undefined, isTagStyle).model);
   if (permitted.includes(worker.model)) return;
   throw new ModelNotAllowedError(worker.id, worker.model, allowlist);
 }

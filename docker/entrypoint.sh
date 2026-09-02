@@ -19,10 +19,28 @@
 # plus an explicit apt install).
 #
 # Environment contract (injected by the supervisor via --env-file):
-#   PIFLEET_LLM_PROVIDER   provider name, default "omlx"
+#   PIFLEET_LLM_PROVIDER   provider name, default "omlx". THE WORKER'S RESOLVED
+#                          provider, not the fleet-wide one: a worker's `model:`
+#                          may carry a `provider/` prefix that overrides
+#                          `llm.provider`, and the same resolved value is what
+#                          `config/render.ts` puts on `pi --provider`. The two
+#                          have to name the same provider or Pi is launched
+#                          naming one its own models.json does not define.
 #   PIFLEET_LLM_BASE_URL   e.g. http://host.docker.internal:8000/v1
 #   PIFLEET_LLM_MODELS     comma-separated model ids; EMPTY means "render nothing"
-#   OMLX_API_KEY           local server credential (not a billing key — SRD §5.9)
+#   PIFLEET_LLM_API_KEY_FILE
+#                          The PATH of the file holding the provider credential
+#                          — `/secrets/<NAME>`, mode 0444, on the read-only
+#                          /secrets mount. A fleet-owned FIXED name carrying a
+#                          PATH (D8, SRD-INFERENCE-PROVIDERS §6.6); the operator
+#                          names the HOST variable via `llm.api_key_env` and
+#                          that name never reaches this container.
+#                          UNSET means the fleet configured no credential, which
+#                          is a supported fleet. SET-BUT-UNREADABLE is a
+#                          different event entirely and is fatal — see the
+#                          credential block below.
+#                          The credential is NOT in the environment under any
+#                          name (ISC-31, ISC-407).
 #   PIFLEET_HONEYPOT       "1" arms the escape-attempt listener and makes its
 #                          death fatal. UNSET means no listener at all, which is
 #                          how `image verify` and the acceptance containers run:
@@ -69,11 +87,167 @@ fi
 # JSON string escaping right in shell. A provider with an empty models list is
 # never written: Pi would refuse to register it, and an empty-but-present file
 # reads as "configured" to a human debugging the container.
+#
+# ## The credential arrives as a FILE, and its NAME is no longer this file's
+# ## problem (D8 — SRD-INFERENCE-PROVIDERS §6.6)
+#
+# This block has read the credential three ways. It read a literal
+# `${OMLX_API_KEY:-}`, which agreed with `worker-env.ts` only because both
+# strings happened to be `OMLX_API_KEY` — Defect A. It then followed
+# `PIFLEET_LLM_API_KEY_ENV` to whatever name the operator chose, which repaired
+# the disagreement but kept the indirection. **It now reads a PATH**, and that
+# is what makes Defect A permanent rather than patched: the entrypoint stops
+# needing to know the operator's chosen variable name at all, because the
+# indirection is a path and the name is the fleet's.
+#
+# It buys two more things beyond the defect. The credential is no longer in the
+# container's environment under ANY name, so `env` and a serialised crash dump
+# no longer disclose it — which is exactly what ISC-337..342 bought for Class 3,
+# and it makes ISC-31 pass for the right reason rather than by renaming the
+# variable out of the assertion's way. And §12.4's `env_allowlist` prohibition
+# stays INTACT rather than repealed: `env_allowlist` is the operator's grant
+# ceiling, and a provider key is fleet-assigned, not operator-granted.
+#
+# THE ENVIRONMENT READ IS GONE, NOT DEMOTED, and that is a deliberate refusal of
+# the obvious kindness. A file-then-environment fallback would look like
+# robustness and would resurrect the defect on the first day the pointer failed
+# to arrive: this file would silently read some other variable and render
+# `apiKey: ""` — Defect A verbatim, exit 0, nothing on stderr. Worse, a worker
+# that also holds `OMLX_API_KEY` through `secrets:` would authenticate to the
+# configured provider with the LOCAL oMLX credential, a wrong-credential 401
+# strictly harder to diagnose than the empty key it replaced. A channel with two
+# sources has two failure modes and no way to tell which one fired.
+#
+# ## UNSET means keyless; SET-AND-BROKEN means the host lied. They are not the
+# ## same event and they do not get the same behaviour.
+#
+# An absent pointer is a supported configuration. A local oMLX with no
+# credential is legitimate (SRD §5.9), `worker-env.ts`'s standing convention for
+# that case is to omit the variable rather than write it blank, and the
+# non-supervisor callers — `image verify`, the acceptance containers — run this
+# script with no worker env file at all. So: empty key, exit 0, no complaint.
+#
+# A pointer that is SET and cannot be honoured is the host side failing to write
+# what its own environment says it wrote, and inheriting the empty-key
+# behaviour there would reproduce §2.2's silent failure on a brand-new channel.
+# The guard below tests the base URL and the model list and NOT the key, so
+# `models.json` would still be written, Pi would still register the provider,
+# the container would still boot and `up` would still report success. The first
+# symptom is an authentication error at generation time, inside a container, on
+# a worker that looks healthy — and against a metered provider that reads at
+# first glance as a billing problem.
+#
+# SRD §5.9 has a standing ruling on exactly this shape. A `relay_upstream`
+# hostname "produces a relay that starts cleanly, reports ready, and then fails
+# every connection with a resolution error no operator-facing surface shows.
+# `config validate` refuses it, so the failure becomes a sentence instead."
+# This is that trade taken at the container's altitude, and it is why an EMPTY
+# file is fatal too: `cat` succeeds on an empty file, so every existence check
+# passes and the render proceeds with `apiKey: ""` — Defect A's exact output
+# reached by a different route.
+#
+# CHECKED WHETHER OR NOT models.json IS RENDERED, and that independence is the
+# structural half of the fix. §2.2's diagnosis of why Defect A was silent names
+# the coupling precisely: "the guard above the block is `[ -n BASE_URL ] &&
+# [ -n MODELS ]` — it does not test the key." Putting the credential check
+# inside that guard would make the credential's health contingent on two
+# unrelated variables, which is the same mistake approached from the other side.
+#
+# ## Why the PATH is validated, and what the validation does NOT close
+#
+# The old code validated the NAME against ENV_KEY_RE's own pattern. That guard
+# is not being dropped, it is being re-aimed, and against a strictly worse
+# consequence. A bad name degraded to an empty key; a bad PATH does not degrade
+# at all — it admits SOME OTHER FILE'S contents, and `models.json` lands on a
+# named volume that outlives `--rm`. An unvalidated pointer turns the credential
+# channel into a read primitive whose output is persisted, so `/proc/self/environ`
+# or `/etc/passwd` would be copied into a JSON string on that volume.
+#
+# The reason to check here rather than trust the host is the same one that kept
+# the identifier guard: this file reads an ENVIRONMENT VARIABLE, not config. The
+# host does constrain the value — `RESERVED_PREFIXES` blocks `PIFLEET_` from
+# `secrets:` at both the requested name and the derived pointer, and `schema.ts`
+# refuses a malformed or reserved `api_key_env` at parse time — but a
+# hand-assembled env file, a future harness, or a supervisor bug reaches this
+# variable with none of that applied.
+#
+# **WHAT THIS DOES NOT CLOSE, stated because a guard read as total is worse than
+# no guard.** `/secrets` is a SHARED namespace: `secretFilePath()` puts every
+# Class 3 grant at `/secrets/<name>` and D8 puts Class 1 in the same directory.
+# A pointer aimed at another grant's basename is shape-valid and this block will
+# read it, copying a Class 3 secret into `models.json` on a persisting volume.
+# Distinguishing the two requires the Class 3 name list, which exists only on
+# the host, so that half is the host's to close and is NOT closed here. The
+# checks below are the half a container can decide by itself: absolute, no `..`
+# segment, not a symlink, a readable regular file, non-empty.
+#
+# The `..` test is on SEGMENTS rather than substrings — a legitimate secret name
+# may contain dots — and `/secrets/..` is caught because the haystack is padded
+# on both ends, which is the case a naive "one segment below the mount" check
+# lets through: it carries no slash of its own.
+api_key=""
+api_key_file="${PIFLEET_LLM_API_KEY_FILE:-}"
+
+# Exit 73, following this file's own precedent for container-side refusals: 71
+# is the escape-attempt listener failing to arm and 72 is a tui worker with no
+# terminal, and a credential refusal must not be read as either.
+refuse_key_file() {
+  echo "pifleet: PIFLEET_LLM_API_KEY_FILE=${api_key_file} $1 (D8, SRD-INFERENCE-PROVIDERS §6.6). The fleet writes the provider credential to a 0444 file on the read-only /secrets mount and points this variable at it, so a pointer that cannot be honoured means the supervisor did not write what its own environment claims. Refusing to start: rendering models.json with an empty key would produce a worker that boots, registers its provider and reports healthy, and then fails authentication at generation time." >&2
+  exit 73
+}
+
+if [ -n "${api_key_file}" ]; then
+  case "${api_key_file}" in
+    /*) ;;
+    *) refuse_key_file "is not an absolute path" ;;
+  esac
+  case "/${api_key_file}/" in
+    *"/../"*) refuse_key_file "contains a '..' segment" ;;
+  esac
+  if [ -L "${api_key_file}" ]; then
+    refuse_key_file "is a symbolic link"
+  fi
+  if [ ! -f "${api_key_file}" ]; then
+    refuse_key_file "is not an existing regular file"
+  fi
+  # THE READ IS THE READABILITY CHECK. An explicit `[ ! -r ]` stood here and was
+  # deleted after a mutation measured it dead: removing it changed no observable
+  # behaviour, because `cat` fails on the same file and this branch refuses
+  # identically. It was strictly worse than the read it guarded — it cannot see
+  # a file that is readable but not openable, and it leaves a TOCTOU window
+  # between the test and the open that the read does not have.
+  #
+  # `if !` rather than a bare assignment, because under `set -e` a failing
+  # command substitution aborts the script with bash's own diagnostic and cat's
+  # exit status: measured, a 0000 file then exits 1 instead of 73, and the
+  # operator gets neither the sentence nor a code distinguishable from any other
+  # bash failure.
+  #
+  # HONEST ACCOUNT OF WHY THIS ONE AND NOT `-r`, because the measurement does
+  # not settle it and a reader should not think it did. The two are REDUNDANT:
+  # with `-r` restored, deleting this `if !` is still green, and with this `if !`
+  # present, deleting `-r` was still green. Either alone yields exit 73. Keeping
+  # the read is a judgement call — it covers strictly more (a file readable but
+  # not openable, an I/O error part-way through, and the TOCTOU window `-r`
+  # opens between its test and this open) — not something the tests force.
+  #
+  # Command substitution strips trailing newlines, which is what this wants both
+  # ways round: `writeWorkerSecretFiles` writes "the RAW value and NOTHING ELSE
+  # — no trailing newline, deliberately", and a file that acquired one anyway
+  # must not put it inside the JSON string.
+  if ! api_key="$(cat "${api_key_file}" 2>/dev/null)"; then
+    refuse_key_file "could not be read"
+  fi
+  if [ -z "${api_key}" ]; then
+    refuse_key_file "is empty"
+  fi
+fi
+
 if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
   jq -n \
     --arg provider "${PIFLEET_LLM_PROVIDER:-omlx}" \
     --arg baseUrl "${PIFLEET_LLM_BASE_URL}" \
-    --arg apiKey "${OMLX_API_KEY:-}" \
+    --arg apiKey "${api_key}" \
     --arg models "${PIFLEET_LLM_MODELS}" \
     '{
       providers: {

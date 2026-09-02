@@ -122,6 +122,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join } from "node:path";
@@ -135,6 +136,9 @@ import {
   type EgressPolicy,
   type EgressRule,
 } from "./egress.ts";
+import { providerIsHosted } from "../config/load.ts";
+import { EXIT } from "../contracts.ts";
+import { dockerNameGrammarOk, MAX_DOCKER_NAME } from "./docker-names.ts";
 import { assertDockerName, ensureUplinkNetwork } from "./network.ts";
 
 /**
@@ -299,6 +303,49 @@ export interface RelayTarget {
   readonly host: string;
   readonly port: number;
   readonly name: string;
+  /**
+   * What the EGRESS POLICY judges this target by, when that is not the string
+   * it dials (D9, §6.7, ISC-428). Absent on every non-hosted target, where the
+   * two are one string and always were.
+   *
+   * ## Why the target needs two hosts at all
+   *
+   * For a `hosted: true` provider, D9 splits a field that used to be one thing
+   * into two. `host` is the ADDRESS, resolved on the Docker host at `up` and
+   * stamped here, because the relay must dial an address: it resolves through
+   * Docker's embedded DNS, and a name matching an alias the relay itself
+   * publishes resolves TO THE RELAY, looping every forwarded connection into
+   * its own listener. `policyHost` is the NAME the operator wrote in
+   * `egress.allow`, because a vendor behind a global load balancer has no
+   * published range and authorizing today's A record is a pin that expires.
+   *
+   * §6.7 anticipated this as *"a change of input, not of mechanism"*, and that
+   * is right about `egress.ts` — `normalizeHost` and `decide` already match on
+   * names and neither changed. It was incomplete about the target: the changed
+   * input had to become REPRESENTABLE first, and a shape with one host cannot
+   * say "dial this, judge that".
+   *
+   * ## Optional, and never a fallback
+   *
+   * Absent means the pre-D9 rule, unchanged: `host` is judged. That keeps the
+   * stronger property on the default path without an edit at any existing call
+   * site — the same reason `relayUpstreamError`'s `allowHostname` defaults off.
+   *
+   * PRESENT means the policy reads THIS AND ONLY THIS. It must never widen to
+   * "match either form": an `egress.allow` naming the resolved literal has to
+   * be refused even though that literal is exactly what gets dialled, because
+   * D9's accepted cost is bounded by the operator authorizing a NAME. Matching
+   * either would turn that into "the name, or whatever it currently points at",
+   * which is a different and unstated bargain. `test/unit/
+   * d9-egress-name-authorization.test.ts` pins the refusal.
+   *
+   * Deliberately NOT part of `formatRelayTarget`, and so not part of the drift
+   * key: drift asks "would adopting this running relay serve the current
+   * config", and that is a question about what it FORWARDS. Two relays dialling
+   * the same address are the same relay. The authorization is re-checked from
+   * config on every `up` regardless, so it cannot go stale by being omitted.
+   */
+  readonly policyHost?: string;
 }
 
 /**
@@ -319,6 +366,127 @@ export interface RelayTarget {
 export type RelayConfigView = EgressConfigView & {
   llm: { base_url: string; relay_upstream?: string | null };
 };
+
+/**
+ * The endpoint half of ONE `llm.providers` entry (§6.2) — the only two fields
+ * of a provider block this module has any business reading.
+ *
+ * Structural like everything else here, and deliberately NARROWER than
+ * `ProviderSchema`: `api_key_env`, `models_allowlist` and `tag_style` are
+ * statements about credentials and about what the fleet will tolerate, and none
+ * of them changes a network name, a listen alias or a dial target. Naming them
+ * here would invite this file to grow an opinion about them.
+ *
+ * ## `hosted` is in, and the membership rule is why rather than an exception
+ *
+ * It used to be on the excluded list above, beside `api_key_env`, and the
+ * stated reason was that it *"changes no network name, listen alias or dial
+ * target"*. D9 (§6.7) makes that sentence false: a `hosted: true` block may
+ * name a HOSTNAME upstream, which `up` resolves on the host and stamps into the
+ * target as a literal, so `hosted` is now the flag that decides whether this
+ * module dials the string the operator wrote or an address derived from it.
+ * That is exactly the membership test the paragraph above states, so `hosted`
+ * joins by satisfying the rule rather than by an exemption from it.
+ *
+ * Optional at the TYPE level — `ProviderSchema` makes it REQUIRED and refuses
+ * to infer it (see its `hosted` docblock) — so that a structural fixture or a
+ * caller holding an older view still type-checks. Absent reads as `false`,
+ * which is the safe direction: the unresolved, IP-literal-only path.
+ */
+export type ProviderRelayView = {
+  base_url: string;
+  relay_upstream?: string | null;
+  hosted?: boolean;
+};
+
+/**
+ * The whole `llm:` block as D7 needs to see it: the flat keys, plus the map.
+ *
+ * `providers` is optional because §6.1 keeps the flat keys as the DEFAULT
+ * PROVIDER'S SHORTHAND rather than deprecating them — a `fleet.yaml` with no
+ * map is a one-provider fleet spelled the old way, and it must keep working
+ * byte-for-byte.
+ */
+export type FleetRelayConfigView = RelayConfigView & {
+  llm: {
+    base_url: string;
+    relay_upstream?: string | null;
+    providers?: Readonly<Record<string, ProviderRelayView>> | undefined;
+  };
+};
+
+/**
+ * Everything D7 derives for ONE provider in use — the unit `up` loops over.
+ *
+ * Returned as a record rather than left as four call sites computing four
+ * strings, because the four are only correct TOGETHER: `uplink` and `relay` are
+ * derived from `network`, and `aliases` and `targets` are derived from `view`.
+ * A caller that composed `network` itself and then asked for the relay name
+ * from something else would be the ISC-264 shape again.
+ *
+ * `targets` is a LIST holding exactly one entry, and the length is the point.
+ * §6.5.4's whole claim about D7 is that one relay per provider restores "exactly
+ * one destination" — a claim about a COUNT, which a singular field would make
+ * unfalsifiable. A future change that puts a second provider on one relay shows
+ * up here as a length of two, and ISC-409's probe fails.
+ */
+export interface ProviderBridge {
+  /** The `llm.providers` key, or the fleet's `llm.provider` for a flat config. */
+  readonly provider: string;
+  /** This provider's egress network — what its workers attach to. */
+  readonly network: string;
+  /** `uplinkNetworkName(network)`. */
+  readonly uplink: string;
+  /** `relayContainerName(network)`. */
+  readonly relay: string;
+  /** Every name this provider's relay answers to on ITS bridge, and no other. */
+  readonly aliases: readonly string[];
+  /** Exactly one — see above. */
+  readonly targets: readonly RelayTarget[];
+  /**
+   * What a `hosted: true` block's HOSTNAME upstream resolved to on the host,
+   * or `null` when nothing was resolved (D9, §6.7, ISC-426).
+   *
+   * `null` covers three cases and they are all the same case: a flat fleet, a
+   * non-hosted provider (whose schema still refuses a hostname outright), and a
+   * hosted provider that wrote a literal anyway. In every one of them
+   * `targets[0].host` IS the string the operator wrote, so there is no name to
+   * record beside it.
+   *
+   * ## Why it is a field here rather than recomputed at the ledger
+   *
+   * `targets[0].host` is the address after resolution; the NAME is gone from it
+   * by construction, and that is the point — §6.7's alias loop is only
+   * impossible if the name never reaches the relay. So the name has to be
+   * carried, and this is the record `up` writes into `egress_relay_ready`.
+   * Re-resolving it at the ledger to recover the name would be a SECOND
+   * resolution, which could answer differently from the one the relay is
+   * actually dialing and turn the audit record into a plausible lie.
+   *
+   * **Production reads this field** — `up.ts`'s `egress_relay_ready` row. That
+   * sentence is here because the last field added to this interface,
+   * `targets`, was computed correctly and read by nothing but the tests while
+   * `ensureEgressRelay` re-derived its own; see that function for the shape.
+   */
+  readonly upstreamResolution: RelayUpstreamResolution | null;
+  /** The projected view `ensureEgressRelay` is called with (§6.5.4). */
+  readonly view: RelayConfigView;
+}
+
+/**
+ * One hostname and the one address it resolved to, on the host, at `up`.
+ *
+ * Both halves are kept because ISC-426 asks for both: the relay dials
+ * `address`, `egress.allow` authorizes `name` (ISC-428), and *"what did this
+ * relay actually dial"* is only answerable months later if the ledger holds the
+ * pair rather than either half.
+ */
+export interface RelayUpstreamResolution {
+  /** The hostname exactly as `relay_upstream` spelled it, normalized. */
+  readonly name: string;
+  /** The IP literal stamped into the relay's target. */
+  readonly address: string;
+}
 
 /** A fully-resolved dial target: an explicit host and an explicit port. */
 export interface RelayUpstream {
@@ -373,8 +541,31 @@ export interface RelayUpstream {
  * An explicit port is REQUIRED, with no default. A bare host would have to
  * inherit a port from somewhere, and every candidate source is the `base_url`
  * this field exists to stop deriving things from.
+ *
+ * ## `allowHostname`, and why it is a parameter rather than a second function
+ *
+ * `SRD-INFERENCE-PROVIDERS` D9 (§6.7) permits a HOSTNAME upstream in one place
+ * and one place only: a `hosted: true` block in `llm.providers`, where the
+ * address belongs to a vendor behind a global load balancer with no published
+ * range, so pinning a literal is a recurring manual chore against a target that
+ * moves. There, `up` resolves the name ON THE HOST and stamps the literal into
+ * the target, so the relay still dials an address and neither of the two
+ * failures above can occur.
+ *
+ * Everything else in this function applies to that case unchanged — the
+ * `host:port` shape, the explicit port, the hostname/IP well-formedness — which
+ * is why this is one flag on one function rather than a second, nearly
+ * identical validator that would drift from this one on the next edit.
+ *
+ * The flag is OFF by default, so every existing caller keeps the stronger rule
+ * without an edit, and D9's scoping — "a non-hosted provider's block still
+ * refuses a hostname at `config validate`" — is enforced by omission rather
+ * than by remembering to pass `false`.
  */
-export function relayUpstreamError(raw: string): string | null {
+export function relayUpstreamError(
+  raw: string,
+  { allowHostname = false }: { allowHostname?: boolean } = {},
+): string | null {
   const parsed = splitHostPort(raw);
   if (parsed === null) {
     return (
@@ -385,7 +576,7 @@ export function relayUpstreamError(raw: string): string | null {
   const host = normalizeHost(parsed.host);
   if (host === null) return `${JSON.stringify(parsed.host)} is not a valid hostname or IP literal`;
   if (!validPort(parsed.port)) return `invalid port ${JSON.stringify(String(parsed.port))} — expected 1..65535`;
-  if (host !== RELAY_DEFAULT_DIAL_HOST && isIP(host) === 0) {
+  if (!allowHostname && host !== RELAY_DEFAULT_DIAL_HOST && isIP(host) === 0) {
     return (
       `${JSON.stringify(host)} is a hostname; relay_upstream must be an IP literal or ` +
       `${JSON.stringify(RELAY_DEFAULT_DIAL_HOST)}. The relay resolves through Docker's embedded ` +
@@ -433,9 +624,27 @@ function splitHostPort(raw: string): { host: string; port: number } | null {
  * Parse a validated `relay_upstream`. Throws on anything `relayUpstreamError`
  * refuses — the schema should have caught it first, so reaching this throw
  * means config validation was bypassed, not that the operator mistyped.
+ *
+ * ## `allowHostname` has to be here too, and its absence was a live defect
+ *
+ * Phase 2 landed D9's schema half — `ProviderSchema` passes
+ * `{ allowHostname: block.hosted }`, so a hosted block PARSES with a hostname
+ * — and stopped there. This function kept `relayUpstreamError`'s default, so a
+ * `fleet.yaml` that `config validate` accepted still threw from inside `up`
+ * the moment `providerRelayTarget` read it: *"is a hostname; relay_upstream
+ * must be an IP literal"*, about a field the validator had just approved. Found
+ * by ISC-426's tests, not by the type checker — the flag is a default, and a
+ * default cannot be forgotten loudly.
+ *
+ * The default stays `false` for the same reason it does on `relayUpstreamError`:
+ * every existing caller keeps the stronger rule with no edit, and D9's scoping
+ * is enforced by omission rather than by remembering to pass `false`.
  */
-export function parseRelayUpstream(raw: string): RelayUpstream {
-  const err = relayUpstreamError(raw);
+export function parseRelayUpstream(
+  raw: string,
+  { allowHostname = false }: { allowHostname?: boolean } = {},
+): RelayUpstream {
+  const err = relayUpstreamError(raw, { allowHostname });
   if (err !== null) throw new Error(`relay: llm.relay_upstream ${err}`);
   const parsed = splitHostPort(raw)!;
   // Through the SAME normalizer the policy matcher uses, so a trailing root dot
@@ -452,12 +661,16 @@ export function parseRelayUpstream(raw: string): RelayUpstream {
  * `host.docker.internal:<port from base_url>` — byte-for-byte the behaviour
  * `omlxRelayTarget` had before ISC-259.
  */
-export function relayUpstreamFor(cfg: RelayConfigView, listenPort: number): RelayUpstream {
+export function relayUpstreamFor(
+  cfg: RelayConfigView,
+  listenPort: number,
+  { allowHostname = false }: { allowHostname?: boolean } = {},
+): RelayUpstream {
   const raw = cfg.llm.relay_upstream;
   if (raw === null || raw === undefined || raw === "") {
     return { host: RELAY_DEFAULT_DIAL_HOST, port: listenPort };
   }
-  return parseRelayUpstream(raw);
+  return parseRelayUpstream(raw, { allowHostname });
 }
 
 /**
@@ -565,8 +778,177 @@ export function uplinkNetworkName(egressNetwork: string): string {
  */
 export function relayContainerName(egressNetwork: string): string {
   assertDockerName("network", egressNetwork);
-  const name = `pifleet-egress-relay-${egressNetwork}`;
+  const name = `${RELAY_NAME_PREFIX}${egressNetwork}`;
+  // Re-checked after composition, and under D7 this is the check that actually
+  // binds: `RELAY_NAME_PREFIX` is 21 characters, so the relay's name is the
+  // LONGEST string an operator-chosen provider key feeds. `providerKeyBudget`
+  // reserves exactly this much room so the refusal arrives with the field
+  // named; this stays as the backstop that proves the bound is real.
   assertDockerName("container", name);
+  return name;
+}
+
+/**
+ * The relay container name's fixed prefix — a constant because a budget is
+ * computed from its LENGTH (ISC-412).
+ *
+ * Spelling it inline in `relayContainerName` and again as a `21` inside
+ * `providerKeyBudget` is two facts that must agree and nothing making them:
+ * renaming the prefix would silently move the real limit while the budget kept
+ * reserving room for the old one, and the fleet would go back to failing with
+ * the derived-string message this criterion exists to replace.
+ */
+export const RELAY_NAME_PREFIX = "pifleet-egress-relay-";
+
+/**
+ * The longest provider key this fleet's `docker.network` leaves room for.
+ *
+ * Derived, never a literal: `MAX_DOCKER_NAME` comes from `docker-names.ts`
+ * where it is enforced, and the overhead comes from `RELAY_NAME_PREFIX` plus
+ * the single `-` that `providerNetworkName` joins with. The three names a key
+ * feeds are
+ *
+ *     network  <net>-<key>                            net + 1 + key
+ *     uplink   <net>-<key>-uplink                     net + 1 + key + 7
+ *     relay    pifleet-egress-relay-<net>-<key>       net + 1 + key + 21
+ *
+ * and the relay is the longest of the three, so bounding the key by the relay
+ * bounds all of them. That ordering is the whole reason a key can pass the
+ * NETWORK check and still blow the limit twenty characters later, which is the
+ * case ISC-412 names and the one a naive `128 - net - 1` budget would miss.
+ */
+export function providerKeyBudget(egressNetwork: string): number {
+  return MAX_DOCKER_NAME - RELAY_NAME_PREFIX.length - egressNetwork.length - 1;
+}
+
+/**
+ * Refuse an operator-chosen provider key NAMING THE FIELD (ISC-412).
+ *
+ * ## Why `assertDockerName` alone was not enough, when the bound already existed
+ *
+ * It did already refuse: the composed relay name goes through
+ * `assertDockerName("container", …)` and a 128-character bound is enforced
+ * there. What it produced was
+ *
+ *     egress: invalid docker network name "pifleet-egress-<something enormous>"
+ *
+ * — a string the operator never typed, from a module named for egress, with no
+ * mention of `llm.providers` anywhere in it. Every other value this codebase
+ * composes into a Docker name is one it derived itself, so naming the derived
+ * string has always been the same as naming the input. A PROVIDER KEY is the
+ * first one that is not: it is the operator's own word, and §6.5.2 calls this
+ * "the first composed name in this codebase that a long config value can push
+ * past Docker's limit". A refusal that does not say WHICH KEY, and by HOW MUCH,
+ * leaves the operator to reverse the composition by hand to find their own
+ * typo.
+ *
+ * ## Both halves name the field, not just the length one
+ *
+ * The grammar check moved in here too. A key of `--driver=host` is exactly as
+ * operator-chosen as a long one, and the flag-injection hazard
+ * `docker-names.ts` exists to close is reported best by pointing at the config
+ * key that carries it.
+ *
+ * The remedy names BOTH inputs because the budget is a function of both: the
+ * fleet's `docker.network` spends from the same 128 characters, so an operator
+ * whose key is already short learns that the network name is what left no room
+ * rather than being told to shorten something that cannot get shorter.
+ */
+export class ProviderKeyError extends Error {
+  /**
+   * USAGE, and the integer is the half of ISC-412 that a plain `Error` lost.
+   *
+   * `providerNetworkName` is reached from TWO call sites and the one that fires
+   * first is not the obvious one: `renderAllWorkers` runs at `up.ts:1016`,
+   * `egressBridgePlan` at `up.ts:1186`, so the render path always throws first
+   * and it is NOT inside the plan's `try`. A bare `Error` therefore escaped
+   * undiagnosed and `up` announced a config typo as
+   *
+   *     pifleet: internal error: egress: invalid docker network name "aaaa…"
+   *     EXIT=8
+   *
+   * `index.ts` is explicit that an internal error means *"file a bug, do not fix
+   * the command line"*, which is precisely the wrong instruction for an
+   * operator who mistyped their own `llm.providers` key.
+   *
+   * Typed rather than wrapped at the call site: `exitCodeForError` dispatches
+   * structurally through `isExitCoded`, so one typed throw is correct from BOTH
+   * paths at once. Wrapping `up.ts:1016` would fix only the path that happens
+   * to run first today, and would go quietly wrong the moment the order moved.
+   */
+  readonly exitCode = EXIT.USAGE;
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderKeyError";
+  }
+}
+
+export function assertProviderKey(egressNetwork: string, provider: string): void {
+  if (!dockerNameGrammarOk(provider)) {
+    throw new ProviderKeyError(
+      `relay: llm.providers.${JSON.stringify(provider)} is not a usable provider key. A key ` +
+        `becomes part of a Docker network and container name, so it must start with a letter ` +
+        `or digit and contain only letters, digits, '_', '.' and '-'. Rename the key in ` +
+        `llm.providers.`,
+    );
+  }
+  const budget = providerKeyBudget(egressNetwork);
+  if (provider.length > budget) {
+    const composed = `${RELAY_NAME_PREFIX}${egressNetwork}-${provider}`;
+    throw new ProviderKeyError(
+      `relay: llm.providers.${JSON.stringify(provider)} is ${provider.length} characters, ` +
+        `${provider.length - budget} too long. It composes into the relay container name ` +
+        `${JSON.stringify(composed)}, which is ${composed.length} characters and Docker's ` +
+        `limit is ${MAX_DOCKER_NAME}. Shorten the key in llm.providers to at most ${budget} ` +
+        `characters, or shorten docker.network ${JSON.stringify(egressNetwork)} ` +
+        `(${egressNetwork.length} characters), which spends from the same budget.`,
+    );
+  }
+}
+
+/**
+ * ONE provider's egress network — `<docker.network>-<provider>` (D7, §6.5.2).
+ *
+ * The third derivation in this trio and the one that makes the other two
+ * per-provider without either of them changing a line: `uplinkNetworkName` and
+ * `relayContainerName` are pure functions of a network name, so composing one
+ * more level in FRONT of them turns a fleet-wide uplink and a fleet-wide relay
+ * into a per-provider pair for free. That is the property §6.5.2 leans on when
+ * it calls D7 cheap, and it is why this is a separate function rather than an
+ * argument threaded through those two.
+ *
+ * The header's promise survives it — *"the exact strings are always recoverable
+ * from `fleet.yaml` alone, with no hunting through `docker ps`"*. There are
+ * simply more of them now, one set per provider key the operator wrote.
+ *
+ * Validated after composition for the same reason `uplinkNetworkName` is, and
+ * here the check finally earns its keep rather than merely being consistent: a
+ * provider key is OPERATOR-CHOSEN, so `pifleet-egress-relay-<network>-<provider>`
+ * is the first composed name in this codebase that a long config value can push
+ * past Docker's limit (§6.5.2). It fails at `up` NAMING THE FIELD — §6.5.2's
+ * wording, and ISC-412's — which is the right failure. An earlier revision of
+ * this docblock said "naming the composed string"; that was the behaviour, and
+ * it was the bug: see `assertProviderKey`.
+ */
+export function providerNetworkName(egressNetwork: string, provider: string): string {
+  assertDockerName("network", egressNetwork);
+  /*
+   * The provider key alone, BUDGETED AGAINST THE RELAY NAME rather than merely
+   * checked as a network name (ISC-412).
+   *
+   * `assertDockerName("network", provider)` stood here and refused too late in
+   * two different ways. It bounded the key at 128 on its own, so a key that fit
+   * a network name and then overflowed the 21-character-longer relay name got
+   * past it and blew up further down the call; and when it did refuse, it named
+   * a derived string rather than `llm.providers.<key>`. One call closes both.
+   */
+  assertProviderKey(egressNetwork, provider);
+  const name = `${egressNetwork}-${provider}`;
+  // Unreachable on LENGTH now — the budget above reserves the relay's prefix,
+  // which is strictly more room than this name needs — and kept anyway as the
+  // backstop for the composed grammar. A guard that only ever fires when the
+  // one above is wrong is exactly the guard worth keeping.
+  assertDockerName("network", name);
   return name;
 }
 
@@ -767,6 +1149,430 @@ export function relayListenAliases(cfg: RelayConfigView): string[] {
 }
 
 /**
+ * Project the fleet config down to the `RelayConfigView` for ONE provider.
+ *
+ * **This one function is why D7 changed nothing downstream of it.** §6.5.4's
+ * claim — *"`ensureEgressRelay`'s `const targets = [target] as const` needs no
+ * change at all"* — is only true because the per-provider-ness is resolved
+ * HERE, before the relay code runs, rather than by teaching every function
+ * below about a map. `omlxRelayTarget`, `relayListenEndpoint`,
+ * `relayListenAliases`, `relayGatePolicy` and `ensureEgressRelay` all keep
+ * reading a single `llm.base_url` and a single `llm.relay_upstream`; they are
+ * simply handed a different pair per provider.
+ *
+ * ## The `egress` half is carried through UNPROJECTED, and that is D7's bound
+ *
+ * `egress.allow` and `egress.google_hosts` stay fleet-wide, so every provider's
+ * relay is judged against the SAME operator-authored allowlist and every
+ * provider's CONNECT proxy enforces the same policy. §6.5.5 states the bound
+ * exactly: **D7 partitions MODEL reachability, not ALL reachability.** Splitting
+ * `egress.allow` per provider would be a second, unrequested feature, and it
+ * would quietly weaken `relayGatePolicy` — an operator's single hand-written
+ * allow entry is what authorizes a dial target, and per-provider allowlists is
+ * how one of them ends up authorizing nothing.
+ *
+ * ## Why a missing key THROWS instead of falling back to the flat block
+ *
+ * Inheriting the flat block is how a second provider silently acquires oMLX's
+ * URL — the exact failure `ProviderSchema` refuses field by field when it
+ * declines to copy the defaults down. The schema already refuses a worker whose
+ * `provider` is not declared, so reaching here with an unknown key means the two
+ * disagree, and a fleet that comes up pointing the wrong way is worse than one
+ * that does not come up.
+ */
+export function relayViewForProvider(cfg: FleetRelayConfigView, provider: string): RelayConfigView {
+  const providers = cfg.llm.providers;
+  // No map: §6.1's shorthand. The flat keys ARE this provider's block, so the
+  // config is already its own view and pre-D7 fleets behave identically.
+  if (providers === undefined) return cfg;
+  const block = providers[provider];
+  if (block === undefined) {
+    throw new Error(
+      `relay: worker resolves to provider ${JSON.stringify(provider)}, which llm.providers does ` +
+        `not declare — declared: ${Object.keys(providers).join(", ") || "(none)"}. The relay ` +
+        `will not fall back to the flat llm.base_url: that is how a second provider silently ` +
+        `acquires the default endpoint, and its credential with it.`,
+    );
+  }
+  return {
+    llm: { base_url: block.base_url, relay_upstream: block.relay_upstream ?? null },
+    egress: cfg.egress,
+  };
+}
+
+/**
+ * The one target ONE provider's relay carries, named after the provider.
+ *
+ * Split from `omlxRelayTarget` rather than parameterising it, because the NAME
+ * is the whole difference and `omlxRelayTarget`'s `"omlx"` is load-bearing for a
+ * flat fleet: the name is serialized into `PIFLEET_RELAY_TARGETS` and compared
+ * by `relayTargetsDrifted`, so renaming it on the flat path would report every
+ * existing relay as drifted and cycle it on the next `up` for no reason at all.
+ */
+export function providerRelayTarget(
+  view: RelayConfigView,
+  provider: string,
+  { allowHostname = false }: { allowHostname?: boolean } = {},
+): RelayTarget {
+  const listenPort = relayListenPort(view);
+  const upstream = relayUpstreamFor(view, listenPort, { allowHostname });
+  return { listenPort, host: upstream.host, port: upstream.port, name: provider };
+}
+
+/**
+ * Every bridge this run must stand up — one per provider IN USE (D7, §6.5.2).
+ *
+ * `resolved` is the provider each of THIS RUN'S workers resolves to, in launch
+ * order, duplicates and all. That argument shape is the containment property
+ * ISC-410 names, and it is worth being precise about why: the plan is built from
+ * what workers RESOLVED TO, never from `Object.keys(llm.providers)`. A provider
+ * an operator declared and no worker selected therefore contributes no network,
+ * no uplink, no relay container and no listen alias — there is no code path by
+ * which its name reaches Docker at all. **The fleet-wide design could not express
+ * that**: it published every declared endpoint as an alias on one shared bridge,
+ * so declaring a provider WAS opening a route to it for every worker on the
+ * fleet, whether or not anything used it (§6.5.1).
+ *
+ * Ordered and de-duplicated, in the same first-wins way `relayListenAliases` is
+ * and for the same reason: `up` walks this list creating networks and
+ * containers, and a list that reorders between runs makes an idempotent
+ * operation look like a changing one in the ledger.
+ *
+ * ## The flat config is NOT composed, and that is a decision
+ *
+ * With no `llm.providers` map the network stays the operator's `docker.network`
+ * verbatim instead of becoming `<network>-omlx`. §6.5.2's table states the
+ * composition unconditionally, but §6.1 is the governing sentence: the flat keys
+ * are *"retained as the default provider's shorthand"*, so a fleet with no map
+ * has exactly one provider and NOTHING TO PARTITION. Composing anyway would
+ * rename the network and the relay of every fleet that never asked for this
+ * feature, strand the relay each of them is running behind a name nothing looks
+ * for any more, and buy precisely nothing — D7's property is that reach tracks
+ * SELECTION, and where there is one provider every worker selects it.
+ *
+ * The cost, stated because it is real: writing a `providers:` map that declares
+ * a single endpoint identical to the flat keys DOES move the network. That is
+ * the migration, not an accident — opting into the map is opting into
+ * per-provider bridges — and it is one rule with one boundary rather than a
+ * per-field guess about which shape the operator meant.
+ */
+/**
+ * The network a worker on `provider` attaches to — THE ONE PLACE THAT DECIDES.
+ *
+ * Read by `egressBridgePlan`, which CREATES the bridges, and by
+ * `config/render.ts`, which ATTACHES workers to them. Those two agreeing is not
+ * optional and must not be arranged by two copies of the same ternary: a worker
+ * attached to a network no relay is on reaches nothing, and Docker does not
+ * refuse it — `docker run --network` on an absent name is an error, but on the
+ * BASE network it is a clean start onto a bridge whose relay serves a different
+ * provider's upstream. That is a worker dialing its own `base_url` and getting
+ * somebody else's endpoint, which is the failure §6.5.4 exists to prevent.
+ *
+ * This repo has closed that shape twice already, both times by deleting a
+ * predicate rather than duplicating it: ISC-188's mount-source rule, and D8's
+ * `/secrets` gate, where `render.ts` and `materialize.ts` each spelled out
+ * `w.secrets.length > 0` and would have diverged. One function, two callers.
+ *
+ * A FLAT fleet keeps the base network unchanged, byte for byte. §6.1 calls the
+ * flat block a shorthand for a one-provider map, but composing `<net>-<name>`
+ * for it would rename the network every existing run already uses and orphan
+ * every adopted relay — a migration this feature has no reason to ask for.
+ */
+export function workerEgressNetwork(
+  cfg: FleetRelayConfigView,
+  egressNetwork: string,
+  provider: string,
+): string {
+  return isFlatFleet(cfg) ? egressNetwork : providerNetworkName(egressNetwork, provider);
+}
+
+/**
+ * Whether this fleet uses the flat `llm.*` shorthand rather than a providers map.
+ *
+ * ONE reading of `llm.providers === undefined`, for the same reason this module
+ * now has one reading of the network name. Two decisions genuinely turn on this
+ * fact — which network a worker attaches to, and which target-naming function
+ * keeps a running relay's `PIFLEET_RELAY_TARGETS` stable — and they are
+ * different decisions that must never disagree about which fleet they are in.
+ * Spelling the condition twice is how they would eventually.
+ */
+export function isFlatFleet(cfg: FleetRelayConfigView): boolean {
+  return cfg.llm.providers === undefined;
+}
+
+/**
+ * Resolve a hostname to its addresses, ON THE HOST. Injected so no test dials
+ * DNS and no fixture depends on a vendor's live A record.
+ */
+export type HostAddressLookup = (hostname: string) => Promise<readonly string[]>;
+
+/**
+ * The production `HostAddressLookup`: `getaddrinfo`, in this process, on the
+ * host — which is the whole of D9's mechanism (§6.7).
+ *
+ * `dns.promises.lookup` and NOT `dns.resolve4`. The distinction is the reason
+ * the resolution is specified as happening "on the host" rather than merely
+ * "before the container": `lookup` goes through the platform resolver, so it
+ * honours `/etc/hosts`, the search domains, and whatever the operator's VPN or
+ * corporate resolver has configured — the same answer any other program on that
+ * machine would get. `resolve4` talks to a nameserver directly and would
+ * silently disagree with the machine it is running on, which is a worse failure
+ * than not resolving at all: the fleet would dial an address the operator
+ * cannot reproduce with `getent`.
+ *
+ * `verbatim: true` so the platform's own ordering arrives here untouched;
+ * `chooseUpstreamAddress` then imposes its own order, and it must be choosing
+ * from what the resolver said rather than from what Node re-sorted.
+ */
+export async function lookupHostAddresses(hostname: string): Promise<readonly string[]> {
+  const found = await dnsLookup(hostname, { all: true, verbatim: true });
+  return found.map((a) => a.address);
+}
+
+/**
+ * A resolution that did not produce a usable address — a config or network
+ * fault, never a bug in pifleet.
+ *
+ * Its own class because `up` must map it to a DIFFERENT exit code from the rest
+ * of `egressBridgePlan`'s throws. Everything else that function raises is a
+ * config error (an undeclared provider, a composed name Docker will not take)
+ * and exits `USAGE`, telling the operator to edit `fleet.yaml`. A resolver that
+ * did not answer is `BACKEND_UNAVAILABLE`: the config may be perfect and the
+ * VPN merely down, and sending that operator to edit a correct file is the
+ * wrong instruction. Distinguished by type rather than by matching the message,
+ * because a message is not an interface.
+ */
+export class RelayUpstreamResolutionError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly hostname: string,
+    detail: string,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `relay: could not resolve llm.providers.${provider}.relay_upstream host ` +
+        `${JSON.stringify(hostname)} on this host: ${detail}. A hosted provider may name a ` +
+        `hostname (D9, SRD §6.7), but 'up' must stamp the ADDRESS into the relay's target — the ` +
+        `relay resolves through Docker's embedded DNS, where this name would either fail every ` +
+        `connection or, if it matches an alias this relay publishes, resolve to the relay ` +
+        `itself and hang. Check the name and this machine's resolver, then re-run.`,
+      options,
+    );
+    this.name = "RelayUpstreamResolutionError";
+  }
+}
+
+/**
+ * Sort key that puts IPv4 first and orders each family deterministically.
+ *
+ * The `"4:"`/`"6:"` prefix does the family preference and the padding does the
+ * ordering, so one key expresses both and they cannot drift apart.
+ */
+function addressSortKey(address: string): string {
+  if (isIP(address) === 4) {
+    return `4:${address.split(".").map((o) => o.padStart(3, "0")).join(".")}`;
+  }
+  return `6:${address.toLowerCase()}`;
+}
+
+/**
+ * Pick ONE address out of an RRset, deterministically.
+ *
+ * ## Why not simply the resolver's first answer
+ *
+ * Because a global load balancer's RRset ROTATES. `relayTargetsDrifted` keys on
+ * `formatRelayTarget`, which contains the host, and a relay whose targets have
+ * "drifted" is torn down and rebuilt — a relay this module documents as SHARED,
+ * which other fleets on that bridge are forwarding through. Taking the
+ * resolver's first answer would therefore cycle a live relay on every `up`
+ * against any name with more than one A record, for no configuration change at
+ * all. Sorting costs nothing and makes the target a function of the RRset's
+ * CONTENTS rather than of its order.
+ *
+ * ## Why IPv4 wins when both families are offered
+ *
+ * The relay dials from a Docker bridge, and Docker's daemon does not enable
+ * IPv6 on user-defined bridges unless the operator turns it on. Choosing a AAAA
+ * on a v4-only bridge produces a relay that starts cleanly, reports ready and
+ * fails every connection — §6.7's exact failure shape, reintroduced by the
+ * mechanism meant to remove it. Stated from Docker's documented default rather
+ * than from a measurement taken here; the deterministic ordering below is what
+ * this file actually proves.
+ *
+ * Returns `null` for an empty or entirely unparseable list rather than
+ * throwing, so the caller owns the one error message.
+ */
+export function chooseUpstreamAddress(addresses: readonly string[]): string | null {
+  const usable = addresses.filter((a) => isIP(a) !== 0);
+  if (usable.length === 0) return null;
+  return usable.slice().sort((a, b) => (addressSortKey(a) < addressSortKey(b) ? -1 : 1))[0]!;
+}
+
+/**
+ * THE ONE PLACE A HOSTNAME UPSTREAM BECOMES AN ADDRESS (D9, §6.7, ISC-426).
+ *
+ * Called from `egressBridgePlan` and nowhere else, which is the containment
+ * this criterion is really about: `egressBridgePlan` is the single derivation
+ * of what a relay dials, so stamping the literal HERE means every consumer
+ * downstream — `ensureBridgeRelay`, `relayRunArgv`, `PIFLEET_RELAY_TARGETS`,
+ * the ledger row — carries the address without any of them knowing a
+ * resolution happened. A second call site would be a second answer to "what
+ * does this relay dial", which is the defect D7 shipped and §6.5.4 now guards.
+ *
+ * ## The two hosts that are NOT resolved, and both matter
+ *
+ * An IP LITERAL is returned untouched: there is nothing to resolve, and running
+ * `getaddrinfo` on it would make a hosted block with a pinned address depend on
+ * a resolver it currently does not need.
+ *
+ * `RELAY_DEFAULT_DIAL_HOST` is returned untouched and the reason is mechanical:
+ * `relayRunArgv` detects that exact string in the target list and adds
+ * `--add-host host-gateway`, which is how the container reaches the Docker
+ * host. Resolving it here would substitute an address, the string would no
+ * longer match, the flag would not be added, and the relay would dial whatever
+ * this MACHINE thinks `host.docker.internal` means — usually nothing. It is
+ * also not a name the resolution exists for: D9's chore is a vendor's address
+ * behind a load balancer, not Docker's own alias.
+ */
+async function stampUpstreamAddress(
+  provider: string,
+  host: string,
+  lookup: HostAddressLookup,
+): Promise<string> {
+  let addresses: readonly string[];
+  try {
+    addresses = await lookup(host);
+  } catch (err) {
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    throw new RelayUpstreamResolutionError(provider, host, detail, { cause: err });
+  }
+  const address = chooseUpstreamAddress(addresses);
+  if (address === null) {
+    throw new RelayUpstreamResolutionError(
+      provider,
+      host,
+      addresses.length === 0
+        ? "the resolver returned no addresses"
+        : `the resolver returned no usable IP address (got ${JSON.stringify(addresses)})`,
+    );
+  }
+  return address;
+}
+
+export async function egressBridgePlan(
+  cfg: FleetRelayConfigView,
+  egressNetwork: string,
+  resolved: readonly string[],
+  lookup: HostAddressLookup = lookupHostAddresses,
+): Promise<ProviderBridge[]> {
+  const seen = new Set<string>();
+  const plan: ProviderBridge[] = [];
+  for (const provider of resolved) {
+    if (seen.has(provider)) continue;
+    seen.add(provider);
+    const view = relayViewForProvider(cfg, provider);
+    const network = workerEgressNetwork(cfg, egressNetwork, provider);
+    /*
+     * ONE READING OF `hosted`, feeding BOTH halves of D9 — and that is the
+     * invariant, not a convenience.
+     *
+     * The same flag that PERMITS a hostname here is the flag that REQUIRES it
+     * to be resolved before the relay sees it. Read twice, they could disagree,
+     * and the disagreement has a direction that matters: permitted-but-unresolved
+     * is a hostname reaching Docker's embedded DNS, which is §6.7's alias loop —
+     * a hang with nothing in `docker logs`. Read once, that state is not
+     * expressible.
+     *
+     * `hosted !== true` — which includes EVERY flat fleet, since the flat
+     * shorthand has no `hosted` field to set — means `allowHostname` stays
+     * `false` AND no resolution runs, so a pre-D7 fleet's plan is unchanged
+     * byte for byte and no non-hosted provider acquires a resolution step it
+     * did not have. `ProviderSchema` refuses a hostname on those blocks at
+     * `config validate` (ISC-427), so both layers say the same thing.
+     */
+    // Through `providerIsHosted` rather than inline, because §7.3's disclosure
+    // banner now keys on the same flag: a second reading of it here is how the
+    // relay and the banner come to disagree about which endpoints are a
+    // vendor's, and a worker the banner omits is the silent bring-up ISC-417
+    // forbids. The expression is unchanged — see that function's docblock.
+    const hosted = providerIsHosted(cfg, provider);
+    // `omlxRelayTarget` on the flat path keeps the name `"omlx"` that every
+    // running relay already has stamped in `PIFLEET_RELAY_TARGETS`; see
+    // `providerRelayTarget` for why that is not cosmetic.
+    const target = isFlatFleet(cfg)
+      ? omlxRelayTarget(view)
+      : providerRelayTarget(view, provider, { allowHostname: hosted });
+    /*
+     * `hosted` HERE IS REDUNDANT, AND THAT IS MEASURED RATHER THAN ASSUMED.
+     *
+     * Deleting it from this line was mutation-tested and NOTHING went red —
+     * across the whole suite, not one file. The reason is the `allowHostname`
+     * on the line above: a non-hosted block naming a hostname is REFUSED by
+     * `providerRelayTarget` before this expression is evaluated, so no input
+     * exists that can distinguish this clause's presence from its absence.
+     * `omlxRelayTarget` refuses the same way on the flat path.
+     *
+     * It stays, and the reason is not superstition. Without it the line reads
+     * *"resolve any hostname"*, and its correctness then lives entirely in a
+     * guard fifteen lines up — one relaxation of the parse away from silently
+     * resolving names on blocks D9 explicitly refuses to weaken. With it, the
+     * two halves of the decision are spelled at the point each is used.
+     *
+     * What must NOT be read into it: this clause is not the enforcement. The
+     * enforcement is `allowHostname: hosted` above and `ProviderSchema`'s
+     * `superRefine` below that (ISC-427). A future reader hunting for what
+     * stops a non-hosted hostname should look there, and a future editor who
+     * deletes this line has broken nothing today.
+     */
+    const resolvable =
+      hosted && isIP(target.host) === 0 && target.host !== RELAY_DEFAULT_DIAL_HOST;
+    /*
+     * ONE RESOLUTION, and everything D9 needs is read off it.
+     *
+     * Three facts fall out of this single step and they must not be able to
+     * disagree: the address the relay DIALS (`target.host`), the name the
+     * egress policy JUDGES (`target.policyHost`, ISC-428), and the pair the
+     * ledger RECORDS (`upstreamResolution`). Held as one object rather than as
+     * three assignments, so there is no edit that sets one and forgets another
+     * — and the failure of forgetting is not cosmetic in any of the three
+     * directions. A `host` left as the name is §6.7's alias loop. A missing
+     * `policyHost` is every hosted relay refused at `default-deny`, which is
+     * what ISC-428 measured before this field existed. A missing record is a
+     * relay nobody can afterwards say what it dialled.
+     */
+    const resolution: RelayUpstreamResolution | null = resolvable
+      ? { name: target.host, address: await stampUpstreamAddress(provider, target.host, lookup) }
+      : null;
+    plan.push({
+      provider,
+      network,
+      uplink: uplinkNetworkName(network),
+      relay: relayContainerName(network),
+      // Derived from THIS provider's view, so a provider's hostname is
+      // published on its own bridge and on no other — and so `NO_PROXY` can be
+      // built per network rather than per fleet (§6.5.5).
+      aliases: relayListenAliases(view),
+      // The LITERAL, never the name. `relayRunArgv` serializes this into
+      // `PIFLEET_RELAY_TARGETS` verbatim, so a name surviving to here is a name
+      // the relay would hand to Docker's embedded DNS (§6.7).
+      // The LITERAL is dialled, the NAME is judged. `relayRunArgv` serializes
+      // this straight into `PIFLEET_RELAY_TARGETS`, so a name left in `host`
+      // is a name the relay hands to Docker's embedded DNS (§6.7); a name
+      // missing from `policyHost` is a relay `assertTargetsAllowed` refuses at
+      // `default-deny` (ISC-428). Both are set from `resolution` or neither is.
+      targets: [
+        resolution === null
+          ? target
+          : { ...target, host: resolution.address, policyHost: resolution.name },
+      ],
+      upstreamResolution: resolution,
+      view,
+    });
+  }
+  return plan;
+}
+
+/**
  * The policy the relay's own targets are judged against — deliberately NOT
  * `policyFromConfig` (ISC-253, ISC-259).
  *
@@ -891,16 +1697,65 @@ export function relayGatePolicy(cfg: RelayConfigView): EgressPolicy {
  * the Docker host at the listen port — `relayGatePolicy`'s rule 1. See that
  * function for why that is bounded by measurement (SRD §12.8) rather than by
  * assumption.
+ *
+ * ## What D9 changes here, and what it costs (§6.7, ISC-428)
+ *
+ * For a `hosted: true` provider the thing DIALLED and the thing AUTHORIZED stop
+ * being the same string: `up` resolves the name on the Docker host and stamps
+ * the literal into `target.host`, while the operator writes the NAME in
+ * `egress.allow`. So this loop reads `policyHost` where one is present.
+ *
+ * §6.7 called that *"a change of input, not of mechanism"*. Correct about the
+ * mechanism — `normalizeHost` and `decide` were already name-matchers and did
+ * not change — and incomplete about the input, which had to become
+ * representable before it could be changed: with one host per target, this
+ * function compared the resolved literal against a name-carrying allowlist and
+ * refused the relay at `default-deny`. D9 did not work at all until the target
+ * could carry both.
+ *
+ * **The property this gate holds for a hosted target is therefore weaker, in a
+ * way worth stating rather than burying.** It is no longer *"the operator
+ * authorized this exact address"* but *"the operator authorized this name, and
+ * the fleet recorded which address it resolved to at launch"*. Between the
+ * check and the dial there is one resolution, performed once and reused, so the
+ * window is small — but a hostile or compromised resolver moves that relay's
+ * dial target without `egress.allow` changing.
+ *
+ * **Two things bound it.** It cannot spread: ISC-427 keeps a non-hosted block
+ * refusing a hostname at `config validate`, so an operator cannot opt their own
+ * oMLX into this by editing a field. And it cannot widen: an `egress.allow`
+ * naming the resolved LITERAL does not admit a target whose `policyHost` is
+ * set, even though that literal is precisely what gets dialled — the
+ * authorization means the name, or it means nothing in particular.
  */
 export function assertTargetsAllowed(
   targets: readonly RelayTarget[],
   policy: EgressPolicy,
 ): void {
   for (const t of targets) {
-    const verdict = decide(t.host, t.port, policy);
+    // D9 (§6.7): the operator authorizes a NAME and the relay dials an ADDRESS,
+    // so the policy reads `policyHost` where one exists. `??` and not `||`: the
+    // fallback must trigger on ABSENCE, never on emptiness. `makeRule` refuses
+    // an unmatchable host, so `""` cannot come from config — but a future
+    // producer that stamped one would, under `||`, silently revert this target
+    // to being judged on the address it dials, which is the exact weakening the
+    // third clause of ISC-428 exists to refuse.
+    const judged = t.policyHost ?? t.host;
+    const verdict = decide(judged, t.port, policy);
     if (!verdict.allowed) {
+      // Name what was JUDGED, not only what is dialled. When D9 has split the
+      // two, a message showing only the address sends the operator to add that
+      // address to `egress.allow` — an entry that can never match, because the
+      // comparison above reads the name. They would then get this identical
+      // message a second time, on the one path a fleet cannot start without.
+      const dialled = `${t.host}:${t.port}`;
+      const via =
+        t.policyHost === undefined
+          ? dialled
+          : `${dialled} (authorized as ${JSON.stringify(t.policyHost)}, which is what the ` +
+            `policy compares — an egress.allow entry naming the address will NOT match)`;
       throw new Error(
-        `relay: refusing to forward ${t.name} -> ${t.host}:${t.port} — the egress policy denies ` +
+        `relay: refusing to forward ${t.name} -> ${via} — the egress policy denies ` +
           `it (rule: ${verdict.rule}). The relay may only carry destinations decide() allows; ` +
           `add an explicit egress.allow entry for it, or correct llm.base_url.`,
       );
@@ -1432,14 +2287,64 @@ export async function inspectRelayContainer(
  * that cannot be attributed to it would be a guess. The ledger keeps it
  * answerable after the fact, which is what it was always for.
  */
+export async function ensureBridgeRelay(
+  bridge: ProviderBridge,
+  exec: Exec = realExec,
+): Promise<RelayStatus> {
+  /*
+   * The ONE call `up` makes, and the reason it exists is that the argument it
+   * carries was previously forgettable.
+   *
+   * `ensureEgressRelay`'s fourth parameter has to be optional — a dozen callers
+   * predate it and the flat path must keep deriving `"omlx"` — and an optional
+   * argument that must be passed for correctness is an argument that will
+   * eventually not be. That is precisely how `ProviderBridge.targets` came to
+   * be a field the tests asserted on and production ignored. Here the plan's
+   * target is not passed by a caller at all; it is taken from the bridge, which
+   * is the only thing that ever had the right answer.
+   */
+  return ensureEgressRelay(bridge.view, bridge.network, exec, bridge.targets[0]);
+}
+
 export async function ensureEgressRelay(
   cfg: RelayConfigView,
   egressNetwork: string,
   exec: Exec = realExec,
+  planned?: RelayTarget,
 ): Promise<RelayStatus> {
+  /*
+   * THE PLAN'S TARGET, not a second derivation of it (D7).
+   *
+   * `omlxRelayTarget` stamps `name: "omlx"` UNCONDITIONALLY — the constant is
+   * load-bearing on the flat path and wrong on every other one. So while
+   * `relayViewForProvider` gave this function the right host and the right
+   * port, a two-provider fleet came up with both relays labelled `omlx`:
+   *
+   *     …-ollama-cloud  [{"listenPort":443,"host":"34.36.133.15","name":"omlx"}]
+   *     …-vendor-b      [{"listenPort":443,"host":"160.79.104.10","name":"omlx"}]
+   *
+   * measured on real containers, not inferred. `egressBridgePlan` had already
+   * computed the correct per-provider target into `ProviderBridge.targets`, and
+   * NOTHING IN PRODUCTION READ THAT FIELD: the tests asserted on it, and the
+   * relay derived its own. Two derivations of one fact that agree in the suite
+   * and disagree in the shipped artifact — the shape this repo has closed twice
+   * already, for the `/secrets` mount and for the worker's network, both times
+   * by deleting the second derivation rather than by keeping them in step.
+   *
+   * The fallback is NOT a convenience. Every relay running on an operator's
+   * machine today has `"name":"omlx"` stamped in its env, and the name is part
+   * of `formatRelayTarget`, which is the drift key: a caller that stopped
+   * producing that string would report every one of them as drifted and cycle
+   * live relays on the next `up`. So the flat path keeps deriving exactly what
+   * it always did, and `egressBridgePlan` — which already chooses
+   * `omlxRelayTarget` for a flat fleet for this same reason — passes it back in
+   * unchanged.
+   */
+  const target = planned ?? omlxRelayTarget(cfg);
   // Config first, Docker second: an unusable `llm.base_url` should fail before
-  // this function has created anything at all.
-  const target = omlxRelayTarget(cfg);
+  // this function has created anything at all. Still true when the target came
+  // from the plan — `egressBridgePlan` derives it through the same
+  // `relayListenEndpoint`, one step earlier and before any daemon call.
   const targets = [target] as const;
   // …and POLICY before Docker too. Judged against `relayGatePolicy`, NOT
   // `policyFromConfig` — the latter derives its `llm` rule from config fields

@@ -48,6 +48,7 @@ import {
   type WorkerPaths,
 } from "../run/paths.ts";
 import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
+import { workerEgressNetwork } from "../security/relay.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
 import { ConfigError, expandPath, resolveWorker, type LoadedConfig, type ResolvedWorker } from "./load.ts";
 import type { Toolchain } from "./schema.ts";
@@ -213,17 +214,6 @@ export function buildDockerArgv(
     image: string;
     piFlags: string[];
     hasBriefing: boolean;
-    /**
-     * Whether this worker asked for any secret at all.
-     *
-     * `w.secrets.length > 0` at every call site, and NOT the count of values
-     * actually resolved: `buildWorkerEnv` refuses the launch when a requested
-     * name is unallowlisted or unset, so a worker that reaches a container has
-     * every name it asked for. Deriving the mount from the REQUEST rather than
-     * from a resolved plan is what lets `render` — which never reads the host
-     * environment — describe the same mount `up` will make.
-     */
-    hasSecrets: boolean;
   },
 ): string[] {
   // `loaded.config.run` is deliberately NOT destructured here, and no local is
@@ -317,7 +307,21 @@ export function buildDockerArgv(
   argv.push("--pids-limit", String(docker.pids_limit));
   argv.push("--memory", docker.memory);
   argv.push("--cpus", String(docker.cpus));
-  argv.push("--network", docker.network);
+  /*
+   * THE WORKER'S PROVIDER'S BRIDGE, not the fleet's (D7, §6.5.4).
+   *
+   * `workerEgressNetwork` is imported rather than re-derived here, and that is
+   * the whole point of its existence: `up` CREATES the per-provider bridges
+   * through `egressBridgePlan`, this ATTACHES workers to them, and the two
+   * deciding separately is a defect Docker will not report. An absent network
+   * name is an error, but the BASE network is a clean start onto a bridge whose
+   * relay serves a different provider's upstream — a worker dialing its own
+   * `base_url` and reaching somebody else's endpoint, with its own credential.
+   *
+   * A flat fleet is unchanged: the function returns `docker.network` verbatim
+   * when there is no `providers:` map.
+   */
+  argv.push("--network", workerEgressNetwork(loaded.config, docker.network, w.provider));
   argv.push("--env-file", opts.worker.envFile);
 
   // Mount table (SRD §5.5). Nothing else is mounted — notably not the main
@@ -378,14 +382,47 @@ export function buildDockerArgv(
    * credential store and then reporting on what it wrote. Exactly the argument
    * `/policy/cloud-allow:ro` above already makes about the verbgate policy.
    *
-   * Emitted only for a worker that asked for something, on the same rule the
-   * briefing mount follows: a mount that appears unconditionally is one nobody
-   * notices has stopped tracking the thing it exists for, and an empty
-   * `/secrets` in a worker granted nothing says less than its absence does.
+   * UNCONDITIONAL UNDER D8, and the gate that used to stand here was removed
+   * rather than widened. This is the change ISC-407/ISC-408 rest on, so the
+   * reasoning is recorded at length.
+   *
+   * It read `if (opts.hasSecrets)`, meaning `w.secrets.length > 0`, and
+   * `materialize.ts` wrote the directory behind the IDENTICAL predicate,
+   * spelled out a second time. Two conditions that merely agree are the shape
+   * this repo keeps closing (ISC-188), and the failure here is silent in the
+   * usual direction: Docker CREATES a missing bind-mount source rather than
+   * refusing, so a mount without a directory yields an empty `/secrets` and a
+   * worker that cannot explain itself.
+   *
+   * D8 makes that divergence the COMMON case rather than a latent one. The
+   * Class 1 provider key is now delivered as a file in this store, and no
+   * worker requests it — every worker carries it and `w.secrets` is empty for
+   * most of them. Under the old gate such a worker got a perfectly well-formed
+   * `PIFLEET_LLM_API_KEY_FILE=/secrets/<NAME>` pointing into a directory that
+   * was never written and never mounted: §5.9's quiet-failure shape with an
+   * extra layer of plausibility on top, which is precisely what §6.6 exists to
+   * remove.
+   *
+   * The gate is DELETED rather than re-spelled because a boolean that is true
+   * for every worker is a decision nobody is making, and leaving it as a
+   * parameter would keep a knob whose only remaining use is to reintroduce the
+   * defect. With no predicate on either side there is nothing left to diverge:
+   * `materialize.ts` writes this directory for every worker too, and re-checks
+   * this exact argv string before it writes the env file that points into it.
+   *
+   * THIS SUPERSEDES ISC-340's SECOND CLAUSE — "a worker that asked for no
+   * secret gets no mount at all" — and the supersession is deliberate, not
+   * collateral. That clause was written when `/secrets` meant "what the
+   * operator granted", and the empty-mount argument it rests on ("an empty
+   * `/secrets` in a worker granted nothing says less than its absence does")
+   * was sound under that meaning. Under D8 `/secrets` means "material this
+   * worker holds", and a worker holding nothing is now the rare case — a
+   * keyless local oMLX with no grants — rather than the default. ISC-340's
+   * FIRST clause, the one the mutation record actually pins, is untouched: the
+   * mount is still `:ro`, still at the fixed container path, and still built
+   * from `workerPaths().secretsDir` rather than joined here.
    */
-  if (opts.hasSecrets) {
-    argv.push("-v", `${opts.worker.secretsDir}:${SECRETS_MOUNT}:ro`);
-  }
+  argv.push("-v", `${opts.worker.secretsDir}:${SECRETS_MOUNT}:ro`);
   // Container-local Pi state — NEVER the host ~/.pi/agent, which holds real
   // auth and sessions (SRD §5.5).
   argv.push("-v", `pifleet-piagent-${w.id}:/home/pi/.pi/agent`);
@@ -493,7 +530,6 @@ export async function renderWorker(
       image,
       piFlags: pi.slice(1),
       hasBriefing,
-      hasSecrets: w.secrets.length > 0,
     }),
     `docker argv for ${w.id}`,
   );

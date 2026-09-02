@@ -50,12 +50,21 @@ import {
 import { describeCredentialPlan, planCredential, resolveIdentity } from "../../security/adc.ts";
 import { realExec } from "../../container/run.ts";
 import { ensureEgressNetwork } from "../../security/network.ts";
+import {
+  disclosureFor,
+  formatDisclosureBanner,
+  type DisclosureRow,
+} from "../../security/disclosure.ts";
 import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
 import { containerFetch } from "../../security/probe-transport.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
 import {
-  ensureEgressRelay,
+  egressBridgePlan,
+  ensureBridgeRelay,
   formatRelayTarget,
+  RelayUpstreamResolutionError,
+  workerEgressNetwork,
+  type ProviderBridge,
   type RelayStatus,
 } from "../../security/relay.ts";
 import { detectRepoHazards, neutralizeRepoHazards } from "../../security/repo-hazards.ts";
@@ -211,6 +220,100 @@ export function tuiWorkerIds(loaded: LoadedConfig, workerIds: readonly string[])
   for (const workerId of workerIds) {
     if (!defined.has(workerId)) continue;
     if (resolveWorker(loaded, workerId).paneMode === "tui") out.push(workerId);
+  }
+  return out;
+}
+
+/**
+ * The provider each of `workerIds` resolves to — in launch order, duplicates
+ * kept. The input to `egressBridgePlan`, and the reason D7's containment
+ * property is a fact about this run rather than about the config file.
+ *
+ * **`resolveWorker`, not `Object.keys(config.llm.providers)`, and the
+ * difference is the whole of ISC-410.** The keys of the map are what an
+ * operator DECLARED; this is what workers SELECTED. Building the bridge plan
+ * from the declaration would put a network, a relay and a published listen
+ * alias behind a provider nothing in the fleet uses — which is precisely what
+ * the fleet-wide design did (§6.5.1: declaring a provider published its
+ * hostname on the one shared bridge for every worker on it), and precisely what
+ * D7 exists to stop.
+ *
+ * `resolveWorker` for the same reason `tuiWorkerIds` uses it: `provider` is
+ * assembled across `defaults` -> `roles` -> the worker override, and a second
+ * spelling of that merge here would be a guard that can disagree with the
+ * resolver that renders the argv.
+ *
+ * IDS THE CONFIG DOES NOT DEFINE are skipped, by the same membership test —
+ * the `PIFLEET_PI_COMMAND` double has no role, no provider and no container to
+ * attach to a network.
+ */
+/**
+ * The `egress_relay_ready` ledger row's `detail`, as a function (ISC-426).
+ *
+ * ## Why this is not an object literal at the append site any more
+ *
+ * It was, and the whole of D9's audit half was invisible because of it.
+ * Mutation-tested by deleting the resolution fields outright: the FULL suite —
+ * 3349 tests across 211 files — stayed green, because the only thing that
+ * produces this row is a real `up` against a real daemon, and the one test that
+ * reads it belongs to another criterion. A record nothing can reach is a record
+ * nothing can check, and §6.7 asks this row to keep *"what did this relay
+ * actually dial"* answerable months later.
+ *
+ * Exported for the same reason `resolvedProviders` above is: the assertion has
+ * to be able to reach production's derivation rather than a copy of it. A test
+ * that rebuilt this shape would agree with itself and with nothing else.
+ *
+ * ## The resolution fields are SPREAD, so a relay that resolved nothing is
+ * byte-identical to what it always wrote
+ *
+ * A flat pre-D7 fleet and a non-hosted provider get no key at all rather than a
+ * `null` one. `null` would read as *"we resolved and got nothing"*, which is a
+ * different and false claim about a provider whose schema refuses a hostname in
+ * the first place.
+ */
+export function egressRelayReadyDetail(
+  bridge: ProviderBridge,
+  status: RelayStatus,
+): Record<string, unknown> {
+  return {
+    name: status.name,
+    // Which provider this relay is FOR, and which network it is on. The name
+    // already encodes both, but only for a reader who knows the composition
+    // rule — and `report` reads these rows months later, when several relays
+    // differ by one suffix.
+    provider: bridge.provider,
+    network: bridge.network,
+    created: status.created,
+    script_sha256: status.scriptSha256,
+    targets: status.targets.map(formatRelayTarget),
+    /*
+     * BOTH halves of D9's resolution, or neither (ISC-426).
+     *
+     * `targets` above already carries the ADDRESS — it must, or the relay would
+     * be dialing a name through Docker's embedded DNS (§6.7) — and an address
+     * alone does not answer *"what did this relay dial, and on whose
+     * authority"*: `egress.allow` authorizes the NAME (ISC-428), so a reader
+     * holding only the literal cannot line the two up after the fact. The pair
+     * is the record; either half alone is not.
+     */
+    ...(bridge.upstreamResolution === null
+      ? {}
+      : {
+          relay_upstream_resolved: {
+            name: bridge.upstreamResolution.name,
+            address: bridge.upstreamResolution.address,
+          },
+        }),
+  };
+}
+
+export function resolvedProviders(loaded: LoadedConfig, workerIds: readonly string[]): string[] {
+  const defined = new Set(loaded.config.workers.map((w) => w.id));
+  const out: string[] = [];
+  for (const workerId of workerIds) {
+    if (!defined.has(workerId)) continue;
+    out.push(resolveWorker(loaded, workerId).provider);
   }
   return out;
 }
@@ -937,6 +1040,69 @@ export function register(program: Command): void {
         assertSecretsResolvable(loadedConfig, workers, process.env);
 
         /**
+         * §7.3's DISCLOSURE — the list of workers whose context will leave the
+         * machine, printed BEFORE anything is created (ISC-414, ISC-415).
+         *
+         * ## Why this is a print and not a refusal
+         *
+         * D10 ruled against the draft. A worker resolving to a `hosted: true`
+         * provider while holding `cloud_access: true` or a non-empty `secrets:`
+         * **stands up** — not gated, not warned-and-continued, permitted. §7.2
+         * is explicit that *"the fleet does not decide which of the operator's
+         * data is theirs to send. It makes sure they cannot send it without
+         * knowing."* So the thing that makes the reversal safe is that this
+         * line prints, and §7.4 records it in terms: *"the banner is the entire
+         * control."*
+         *
+         * ## Why HERE
+         *
+         * §7.3 says *"before creating anything"*, and the distance between that
+         * and the alternative is the difference between a disclosure and a
+         * receipt: a banner printed after the clones, the networks and the
+         * relay tells an operator what has already happened. This sits with the
+         * config-vs-config gates above — after them deliberately, since a run
+         * that is about to be refused sends nothing and a banner for it would
+         * be a false alarm — and before the image gate, before
+         * `ensureEgressNetwork`, before the first clone, before the daemon and
+         * before any supervisor.
+         *
+         * ## STDOUT, except under `--json`, and it is never suppressed
+         *
+         * ISC-414's probe asserts the banner on stdout, and that is where it
+         * goes for a person. `--json` is the one deviation and it is forced:
+         * every machine consumer of this command does `JSON.parse(stdout)` —
+         * the `--json` payload is a single object written at the end — so a
+         * banner on stdout would not disclose anything to a script, it would
+         * crash it. Redirected to stderr, which no consumer parses and every
+         * terminal and log shows. **Redirected, never dropped**: a `--json`
+         * bring-up that printed nothing would be the silent standup ISC-417
+         * forbids, reached through the flag a machine consumer is most likely
+         * to use, and both halves of that are asserted.
+         *
+         * The rows come from `disclosureFor` and from nowhere else. The launch
+         * record's copy calls the same function on the same worker — ISC-417
+         * compares the two sets and fails on a difference in either direction,
+         * which is a coin flip the moment two places decide who is on the list.
+         */
+        {
+          const disclosures: DisclosureRow[] = [];
+          const definedWorkers = new Set(loadedConfig.config.workers.map((w) => w.id));
+          for (const workerId of workers) {
+            // The `PIFLEET_PI_COMMAND` double names ids the config never
+            // defined, exactly as `assertModelsAllowed` and `resolvedProviders`
+            // skip them: a worker with no config has no provider to be hosted.
+            if (!definedWorkers.has(workerId)) continue;
+            const row = disclosureFor(loadedConfig, resolveWorker(loadedConfig, workerId));
+            if (row !== null) disclosures.push(row);
+          }
+          const banner = formatDisclosureBanner(disclosures);
+          if (banner !== null) {
+            if (opts.json === true) process.stderr.write(banner);
+            else process.stdout.write(banner);
+          }
+        }
+
+        /**
          * EVERY ROLE'S IMAGE MUST EXIST AND MUST VERIFY (ISC-32, ISC-189).
          *
          * Here, beside `assertModelsAllowed`, and for the identical reason that
@@ -1129,20 +1295,87 @@ export function register(program: Command): void {
       if (tuiWarning !== null) process.stderr.write(tuiWarning);
 
       /**
-       * The egress network must exist, and must be INTERNAL, before any
+       * THE BRIDGE PLAN — one egress network and one relay per provider IN USE
+       * (D7, SRD §6.5.2).
+       *
+       * Built from the providers this run's workers RESOLVED TO, so a provider
+       * declared in `llm.providers` that nothing selected reaches no line
+       * below: no `ensureEgressNetwork`, no `ensureEgressRelay`, no published
+       * alias, no ledger row. Under the fleet-wide design a declared provider
+       * was a route opened for every worker on the shared bridge whether or not
+       * anything used it (§6.5.1); here the declaration is inert until a worker
+       * names it.
+       *
+       * A flat `fleet.yaml` with no `providers` map yields exactly ONE bridge,
+       * on `docker.network` verbatim — see `egressBridgePlan` for why that case
+       * is not composed. Everything below therefore does for a pre-D7 fleet
+       * precisely what the single-network code it replaced did.
+       */
+      let egressBridges: readonly ProviderBridge[] = [];
+      if (egressNetwork !== null && loadedConfig !== null) {
+        try {
+          /*
+           * `await`, because building the plan now performs ONE host-side
+           * effect: a `hosted: true` provider's hostname `relay_upstream` is
+           * resolved here and the LITERAL is stamped into the target (D9,
+           * §6.7, ISC-426). It is deliberately inside `egressBridgePlan` rather
+           * than a step this line has to remember afterwards — the plan's
+           * target is the single derivation of what a relay dials, and a
+           * "resolve the plan" call a caller could omit is the same shape as
+           * the optional argument `ensureBridgeRelay` exists to remove.
+           */
+          egressBridges = await egressBridgePlan(
+            loadedConfig.config,
+            egressNetwork,
+            resolvedProviders(loadedConfig, workers),
+          );
+        } catch (err) {
+          /*
+           * TWO exit codes, because there are now two kinds of failure here.
+           *
+           * A composed name Docker will not take, or a worker resolving to an
+           * undeclared provider, is a config error: `USAGE`, edit `fleet.yaml`.
+           * A resolver that did not answer is not — the config may be exactly
+           * right and the machine's DNS merely down — so it reports
+           * `BACKEND_UNAVAILABLE` and does not send the operator to edit a
+           * correct file. Neither has created anything yet, which is why the
+           * plan is built before the first daemon call rather than lazily
+           * inside the loop.
+           */
+          const code =
+            err instanceof RelayUpstreamResolutionError ? EXIT.BACKEND_UNAVAILABLE : EXIT.USAGE;
+          throw new CliError(err instanceof Error ? err.message : String(err), code);
+        }
+      }
+
+      /**
+       * Each of those networks must exist, and must be INTERNAL, before any
        * container is attached to it.
        *
-       * `render.ts` already puts every worker on `docker.network`, so the
+       * `render.ts` already puts every worker on a fleet network, so the
        * attachment was never the gap — creation was. An absent network makes
        * `docker run` fail, which is loud and fine. A network of that name that
        * someone created WITHOUT `--internal` is the dangerous case: every
        * worker gets unrestricted egress while the fleet reports deny-all, and
        * nothing anywhere would say so. `ensureEgressNetwork` refuses to adopt
        * one rather than quietly using it (SRD §5.6, §12).
+       *
+       * THE EMPTY-PLAN CASE still runs that check, on the base network. A
+       * configured run whose named workers are all undefined in `fleet.yaml`
+       * has no provider to resolve and so no bridge — but `docker.network` may
+       * still exist on this host, and skipping the adopt-refusal because this
+       * particular run happened to launch nothing would drop a security check
+       * on a network the next run will use. No relay is created for it: a
+       * network nothing is attached to needs no forward.
        */
-      let egressInternal: boolean | null = null;
-      let egressGatewayBlocked: string | null = null;
-      if (egressNetwork !== null) {
+      const egressNetworks: Array<{ network: string; internal: boolean | null; gateway: string | null }> = [];
+      const plannedNetworks =
+        egressBridges.length > 0
+          ? egressBridges.map((b) => b.network)
+          : egressNetwork !== null
+            ? [egressNetwork]
+            : [];
+      for (const network of plannedNetworks) {
         try {
           /**
            * `ensureEgressNetwork` now guarantees BOTH halves of the posture:
@@ -1153,10 +1386,14 @@ export function register(program: Command): void {
            * is delivered through INPUT and never evaluated. Either half
            * missing throws here rather than starting a fleet that reports
            * deny-all while workers reach the host's sshd.
+           *
+           * Per network and not once: two providers are two bridges with two
+           * gateways, and a fleet that verified containment on one of them
+           * while the other's gateway was open would report a posture it does
+           * not have.
            */
-          const net = await ensureEgressNetwork(egressNetwork);
-          egressInternal = net.internal;
-          egressGatewayBlocked = net.gateway;
+          const net = await ensureEgressNetwork(network);
+          egressNetworks.push({ network, internal: net.internal, gateway: net.gateway });
         } catch (err) {
           // `err.message` rather than `String(err)`: these errors already
           // begin "egress: " / "relay: ", and `String(err)` prepends
@@ -1166,7 +1403,8 @@ export function register(program: Command): void {
       }
 
       /**
-       * …and the relay that reopens exactly one destination through it.
+       * …and the relay that reopens exactly one destination through each of
+       * them.
        *
        * The internal bridge denies the fleet's own model server along with
        * everything else, so without this every worker starts healthy and
@@ -1175,14 +1413,30 @@ export function register(program: Command): void {
        * one unchanged, and `down` never tears it down, for the same reason it
        * never removes the egress network.
        *
-       * It forwards oMLX ONLY. The Google endpoints in `egress.google_hosts`
-       * remain policy-level allow rules with no live relay path (ISC-253);
-       * a `cloud_access` worker on this bridge still cannot reach them.
+       * **The relay is built once per bridge, from that bridge's PROJECTED
+       * view AND that bridge's own target** (§6.5.4). The per-provider-ness
+       * lives in `relayViewForProvider` and in `egressBridgePlan`, so the
+       * sentence in this file's sibling header — *"the single container that
+       * re-opens exactly one destination"* — survives D7 rather than being
+       * retired by it. Each of these relays still carries exactly one target;
+       * there are simply as many relays as there are providers a worker asked
+       * for.
+       *
+       * An earlier revision of this comment said `ensureEgressRelay` was
+       * "called unchanged", and that was true and was the bug: called with the
+       * view alone it re-derived its target through `omlxRelayTarget` and
+       * labelled every provider's relay `omlx`. `ensureBridgeRelay` takes the
+       * target from the bridge so there is no argument for a caller to omit.
+       *
+       * Each forwards ITS OWN provider ONLY. The Google endpoints in
+       * `egress.google_hosts` remain policy-level allow rules with no live
+       * relay path (ISC-253); a `cloud_access` worker on any of these bridges
+       * still cannot reach them.
        */
-      let egressRelay: RelayStatus | null = null;
-      if (egressNetwork !== null && loadedConfig !== null) {
+      const egressRelays: Array<{ bridge: ProviderBridge; status: RelayStatus }> = [];
+      for (const bridge of egressBridges) {
         try {
-          egressRelay = await ensureEgressRelay(loadedConfig.config, egressNetwork);
+          egressRelays.push({ bridge, status: await ensureBridgeRelay(bridge) });
         } catch (err) {
           // `err.message` rather than `String(err)`: these errors already
           // begin "egress: " / "relay: ", and `String(err)` prepends
@@ -1235,11 +1489,59 @@ export function register(program: Command): void {
        * nothing was learned about the model). Both codes come off the thrown
        * error's own `exitCode` via the `ExitCoded` protocol.
        */
-      if (loadedConfig !== null && egressNetwork !== null) {
-        await assertModelsSupportToolCalls(
-          loadedConfig,
-          workers,
-          containerFetch({ network: egressNetwork }),
+      /**
+       * ## The gate is A CONFIG THAT LOADED, and nothing else (ISC-430)
+       *
+       * This read `if (loadedConfig !== null && egressNetwork !== null)`, and
+       * the second conjunct could not be false while the first was true:
+       * `egressNetwork` is assigned unconditionally from
+       * `loadedConfig.config.docker.network`, and `schema.ts` DEFAULTS that key
+       * to `pifleet-egress`. So the condition STATED a dependency on Docker
+       * being configured that the probe does not have, and a reader who
+       * believed it would be wrong about where the money goes — the same class
+       * of harm as ISC-264's two quietly-disagreeing constants.
+       *
+       * Behaviour is unchanged, deliberately: ISC-423 establishes that a
+       * headless fleet SHOULD probe, because its workers dial the provider
+       * whether or not a pane is drawn, and a per-backend opt-out from a
+       * mandatory gate is the shape ISC-420 already refused. What changed is
+       * that the condition now says the true precondition — a config parsed, so
+       * there are providers and models to probe — and the network is DERIVED
+       * from that same config at the point of use rather than carried here in a
+       * nullable that has to be re-checked. One check, one source; the two can
+       * no longer be made to disagree, which is what "delete the conjunct"
+       * would not have achieved (the body needs a `string`, and deleting it
+       * would not have typechecked).
+       */
+      if (loadedConfig !== null) {
+        /*
+         * ONE TRANSPORT PER PROVIDER, on that provider's own bridge (ISC-418).
+         *
+         * This was `containerFetch({ network: egressNetwork })` — one transport
+         * on `docker.network` — and under D7 that is the BASE bridge, which a
+         * providers-map fleet never creates. The probe container exited
+         * "network not found" and `up` could not stand such a fleet up at all
+         * with `require_native_tool_calls: true`; the workaround was to turn the
+         * gate off, which is the one thing §5.9 will not have.
+         *
+         * `workerEgressNetwork` rather than a third spelling of the composition:
+         * it already decides which bridge `egressBridgePlan` CREATES and which
+         * one `render.ts` ATTACHES a worker to, and a probe judging a third
+         * network would certify a path no worker takes.
+         */
+        const probeConfig = loadedConfig;
+        /*
+         * The base network, taken from the config rather than from the
+         * nullable above — `schema.ts` defaults this key, so it is a `string`
+         * here by the schema's own type and needs no second null check. That
+         * is the whole of ISC-430's fix: the dependency the gate has is on the
+         * CONFIG, and the network is something the config supplies.
+         */
+        const probeNetwork = probeConfig.config.docker.network;
+        await assertModelsSupportToolCalls(loadedConfig, workers, (provider) =>
+          containerFetch({
+            network: workerEgressNetwork(probeConfig.config, probeNetwork, provider),
+          }),
         );
       }
 
@@ -1336,12 +1638,21 @@ export function register(program: Command): void {
       if (tuiWarning !== null) {
         await ledger.append("tui_unattended", { detail: { workers: tuiWorkers } });
       }
-      if (egressNetwork !== null) {
+      /**
+       * ONE ROW PER NETWORK, not one row naming a list.
+       *
+       * A flat fleet still writes exactly the row it always wrote, with the
+       * same three fields. A two-provider fleet writes two, and that is the
+       * shape a reader of the ledger needs: `internal` and `gateway_blocked`
+       * are facts about ONE bridge, and folding two bridges into one row would
+       * force a reader to guess which network an unblocked gateway belonged to.
+       */
+      for (const net of egressNetworks) {
         await ledger.append("egress_network_ready", {
-          detail: { network: egressNetwork, internal: egressInternal, gateway_blocked: egressGatewayBlocked },
+          detail: { network: net.network, internal: net.internal, gateway_blocked: net.gateway },
         });
       }
-      if (egressRelay !== null) {
+      for (const { bridge, status: egressRelay } of egressRelays) {
         /**
          * `script_sha256` and `targets` are recorded on EVERY run, adopted or
          * created, and that is the point rather than an accident.
@@ -1355,13 +1666,22 @@ export function register(program: Command): void {
          * becomes visible at all. Recording it only on creation would miss
          * exactly the adopted case, which is the one nothing else can see.
          */
+        /*
+         * THE DETAIL COMES FROM ONE FUNCTION, not from a literal here.
+         *
+         * `script_sha256` and `targets` are recorded on EVERY run, adopted or
+         * created, and that is the point rather than an accident. The relay
+         * executes a bind-mounted file from the operator's working tree —
+         * mutable on the host side, and re-exec'd by `--restart unless-stopped`
+         * after a reboot — and `ensureEgressRelay` adopts a running relay
+         * without comparing what it forwards. The ledger is therefore the only
+         * place where "this run would have run different code, or forwarded
+         * somewhere else, than the last one" becomes visible at all. Recording
+         * it only on creation would miss exactly the adopted case, which is the
+         * one nothing else can see.
+         */
         await ledger.append("egress_relay_ready", {
-          detail: {
-            name: egressRelay.name,
-            created: egressRelay.created,
-            script_sha256: egressRelay.scriptSha256,
-            targets: egressRelay.targets.map(formatRelayTarget),
-          },
+          detail: egressRelayReadyDetail(bridge, egressRelay),
         });
         /**
          * A SEPARATE row, not a field on the one above, and deliberately so

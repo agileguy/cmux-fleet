@@ -33,25 +33,43 @@
 
 import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { TASK_POLICY_MOUNT } from "../../src/run/task-policy.ts";
+import { SECRETS_MOUNT } from "../../src/run/worker-env.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
-import { BudgetStateSchema, EXIT, type LedgerRecord } from "../../src/contracts.ts";
+import {
+  BudgetStateSchema,
+  EXIT,
+  type LedgerRecord,
+  WorkerLaunchSchema,
+} from "../../src/contracts.ts";
 import { runPaths, workerBranch, workerPaths } from "../../src/run/paths.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { readRunBudgetPolicy, readRunWorktrees } from "../../src/run/state.ts";
 import { inspectCloneDirt } from "../../src/run/worktree.ts";
 import { QUARANTINE_SUFFIX } from "../../src/security/repo-hazards.ts";
+// ISC-410's expected names are DERIVED, never typed: a literal would still pass
+// if the composition changed, and `up` would then be creating names this file
+// never looks for.
+import {
+  providerNetworkName,
+  relayContainerName,
+  uplinkNetworkName,
+} from "../../src/security/relay.ts";
 // The ISC-56 decoy waits for its own process to become visible to the very
 // scan `up` runs, rather than sleeping a hopeful interval — see
 // `startDecoyTrainingRun`.
 import { checkMlxTrainingGuard } from "../../src/safety/mlx-training-guard.ts";
 import { git, gitOk, seedGitRepo } from "../fixtures/synthetic-repo.ts";
 import { cliBudget } from "../support/budget.ts";
+// ISC-429 drives the REAL preflight against this file's shim, so the guard's
+// answer is production's rather than a restatement of it here.
+import { MountNotVisibleError, assertBindMountsVisible } from "../../src/container/mount-preflight.ts";
+import type { Exec } from "../../src/container/run.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -168,13 +186,29 @@ afterAll(async () => {
   // touched, which is the third time this note has recorded that and the whole
   // reason the instruction is a command rather than an increment.
   //
+  // RE-COUNTED at 57 when phase 6's two disclosure blocks landed, by the same
+  // command on the merged tree rather than by adding 5 to 47. The answer is 57,
+  // and the arithmetic an increment would have produced is 52 — because the
+  // number had drifted by FIVE this time, before either block was written. That
+  // is the fourth time this note has recorded a drift it did not cause, and the
+  // gap is now large enough to be worth naming: 47 was recorded against a
+  // revision, the file has grown by other hands since, and nobody re-ran the
+  // command because the number looked plausible. A budget that looks plausible
+  // is exactly the one nobody checks.
+  //
+  // The two new blocks contribute 5 of the 57 between them. Both spell their
+  // helpers `async () => await makeRig(...)` rather than returning the promise
+  // bare, specifically so this command can still see them — a returned promise
+  // is invisible to a grep for `await makeRig(`, and a rig this hook must tear
+  // down but cannot count is the one that leaks.
+  //
   // Charging every `down` the expensive per-spawn rate is deliberately
   // conservative — rigs whose test never reached `up` contribute zero spawns —
   // because the failure mode here is not a slow suite, it is the one this
   // hook's own docstring above exists to prevent: a timed-out `afterAll`
   // truncates the loop mid-way and leaks detached supervisors onto the
   // developer's machine, which this project has already paid for.
-}, cliBudget(47));
+}, cliBudget(57));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -281,6 +315,36 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       // (`br-<first 12>`) from them. A memorable non-hex id here would be a
       // stand-in that could not stand in.
       "      inspect)",
+      // ---------------------------------------------------------------
+      // OPT-IN ABSENCE, so `network create` is an observable event (ISC-410).
+      //
+      // The default answer below is "this network already exists, internal" for
+      // EVERY name, which sends `ensureEgressNetwork` down its adopt branch and
+      // means no `docker network create` is ever issued. Every pre-existing
+      // test in this file was written against that and still gets it.
+      //
+      // ISC-410 is a claim about what `up` CREATES, and an adopt-only shim can
+      // only witness what `up` MENTIONS. So a rig may ask for the other,
+      // equally real, daemon state: the network is absent until this shim has
+      // seen a `network create` for that exact name, and present afterwards.
+      // That is Docker's own behaviour, not a test-only seam, and it is what
+      // turns "the unused provider's bridge was never created" into a fact
+      // about a create argv rather than an inference from silence.
+      //
+      // Opt-in rather than default for one reason: flipping it globally would
+      // move every other test in this file off the adopt path — including the
+      // ISC-189 positive control, which depends on an `-uplink`-named BASE
+      // network being refused by the exists-but-not-internal branch that
+      // absence would skip.
+      //
+      // Absence is spelled the way the daemon spells it, because
+      // `inspectEgressNetwork` matches on that text and treats every other
+      // non-zero exit as a hard failure — a shim inventing its own wording
+      // would be caught as "daemon unreachable" three layers away from here.
+      '        if [ -n "${PIFLEET_SHIM_NETWORK_ABSENT:-}" ] && [ ! -f "$(dirname "$0")/.net-$3" ]; then',
+      '          echo "Error response from daemon: network $3 not found" >&2',
+      "          exit 1",
+      "        fi",
       // The uplink MUST report non-internal or ensureUplinkNetwork refuses it.
       '        case "$3" in',
       "          *-uplink)",
@@ -291,7 +355,15 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       "            ;;",
       "        esac",
       "        ;;",
-      "      create|connect)",
+      // `network create <…flags…> <name>` — the name is LAST in both argvs
+      // production builds (`--internal <name>` for the bridge, bare `<name>`
+      // for the uplink), so the marker is keyed off the final word rather than
+      // off a position that differs between the two.
+      "      create)",
+      '        for a in "$@"; do last="$a"; done',
+      '        : > "$(dirname "$0")/.net-$last"',
+      "        ;;",
+      "      connect)",
       "        ;;",
       "      *)",
       '        echo "docker shim: unexpected network argv: $*" >&2',
@@ -326,11 +398,44 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       //
       // The rewrite requires the trailing quote or slash so `/probe/1` cannot
       // match inside `/probe/10`.
+      //
+      // ONE `sed` COMMAND PER LINE, and that is not style (ISC-429).
+      //
+      // BSD `sed` — macOS's — reads a script in PIECES and treats a piece
+      // boundary as a LINE BREAK, whether the script arrived as an argument or
+      // through `-f`. A `;`-joined program is ONE line, so a boundary landing
+      // inside a substitute cuts it in half and `sed` dies with `unterminated
+      // substitute pattern`, having written nothing.
+      //
+      // THE THRESHOLD IS SHAPE-DEPENDENT, NOT A NUMBER, because it depends on
+      // where a boundary falls relative to a command. Measured against
+      // `/usr/bin/sed`, darwin 25.6.0 arm64, sweeping command count at a fixed
+      // command length: 20-byte commands first fail at 2,060 bytes, 34-byte at
+      // 2,074, 68-byte at 2,108 — all just past 2,048 — while a program of
+      // IDENTICAL 134-byte commands survived to 51,322. The program actually
+      // captured from an instrumented `up` first fails at 16 commands / 2,176
+      // bytes. So "under 2 kB" is the only safe reading of the old form.
+      //
+      // Newlines are read first, so a program whose every LINE is short has no
+      // ceiling this fleet can reach: 42 kB measured here, and 87 kB over 400
+      // mounts measured independently. No remaining limit was reachable.
+      //
+      // The relay's 3-mount probe builds a 694-byte program and never noticed.
+      // `up`'s worker probe builds two commands per mount over absolute
+      // `$TMPDIR` paths — 6,608 bytes for a four-worker fleet, measured — and
+      // every one of them died. The refusal that reached the operator said
+      // "the probe container reported nothing about this path", three layers
+      // from the cause, because the failure below was silent: see the exit
+      // status check.
       '    case " $* " in',
       '      *":/probe/0:ro "*)',
       "        script=''",
       "        sedexpr=''",
       "        prev=''",
+      // A literal newline, spelled the one way POSIX sh has: an open quote and
+      // a close quote on the next line.
+      "        NL='",
+      "'",
       '        for a in "$@"; do',
       '          if [ "$prev" = "-c" ]; then script="$a"; fi',
       '          if [ "$prev" = "-v" ]; then',
@@ -339,7 +444,7 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       '                src="${a%%:/probe/*}"',
       '                rest="${a#*:/probe/}"',
       '                idx="${rest%%:ro}"',
-      `                sedexpr="$sedexpr s#/probe/$idx'#$src'#g; s#/probe/$idx/#$src/#g;"`,
+      `                sedexpr="$sedexpr\${NL}s#/probe/$idx'#$src'#g\${NL}s#/probe/$idx/#$src/#g"`,
       "                ;;",
       "            esac",
       "          fi",
@@ -349,7 +454,21 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       '          echo "docker shim: mount probe carried no -c script: $*" >&2',
       "          exit 1",
       "        fi",
-      `        printf '%s\\n' "$script" | sed "$sedexpr" | sh`,
+      // THE REWRITE'S OWN FAILURE IS AN ERROR, not an empty answer.
+      //
+      // This used to be `printf … | sed … | sh`, whose exit status is `sh`'s.
+      // A `sed` that aborted fed `sh` an empty script, `sh` exited 0, and the
+      // shim reported SUCCESS WITH NO OUTPUT — which `probeBindMountSources`
+      // reads as "reported nothing about this path" for every mount, a
+      // diagnosis about the container that was true of the shim's own `sed`.
+      // Splitting the two makes a broken rewrite exit 1 with sed's own words,
+      // which the preflight quotes back as "the probe container exited 1: …".
+      `        rewritten="$(printf '%s\\n' "$script" | sed "$sedexpr" 2>&1)"`,
+      '        if [ $? -ne 0 ]; then',
+      '          echo "docker shim: mount probe rewrite failed: $rewritten" >&2',
+      "          exit 1",
+      "        fi",
+      `        printf '%s\\n' "$rewritten" | sh`,
       "        exit $?",
       "        ;;",
       "    esac",
@@ -500,6 +619,90 @@ async function writeDockerShim(binDir: string, callLog: string): Promise<void> {
       '            cat "$src/from-host" || exit 1',
       '            echo "container-wrote-this" > "$src/from-container"',
       "            exit 0",
+      "            ;;",
+      // ---------------------------------------------------------------
+      // THE WORKER CONTAINER ITSELF, stood in for — OPT-IN (ISC-429).
+      //
+      // Everything above answers a PREFLIGHT. This answers the launch: the
+      // `docker run -i … <image> pi --mode rpc …` a supervisor spawns and then
+      // speaks JSONL to over stdin/stdout. Without it the run reaches
+      // `up`'s idle gate and every worker dies there, so no test in this file
+      // could reach a COMPLETED container-path run — which is the whole of the
+      // coverage hole ISC-429 records.
+      //
+      // It stands in the way the two branches above do: by running the real
+      // thing on the host. `PIFLEET_SHIM_WORKER_PI` carries the SAME fake-Pi
+      // double `PIFLEET_PI_COMMAND` names on the non-container path, so the
+      // conversation the supervisor has is the one every other test in this
+      // file already trusts — and the argv it is handed is production's own,
+      // lifted from after the image rather than reconstructed.
+      //
+      // ONE path is translated: `--session-dir /sessions` becomes the host
+      // directory that `-v …:/sessions` was about to mount there. That is the
+      // same liberty the mount-probe branch takes, for the same reason — on a
+      // shared path the container's `/sessions` IS that host directory, so
+      // writing the transcript there is faithful rather than convenient. Every
+      // other flag is passed through untouched.
+      //
+      // OPT-IN, for the reason `PIFLEET_SHIM_NETWORK_ABSENT` is: unset, the
+      // argv falls to the refusal below, so every test written before this
+      // branch existed keeps the loud "unexpected worker-image run argv" it
+      // was written against. A shim that answered a worker launch by default
+      // would let a run that should have stopped somewhere walk past it.
+      //
+      // WHAT IT DOES NOT PROVE, said plainly: no container is started and no
+      // image is entered, so this is not evidence that the real entrypoint
+      // execs `pi`, that the mounts land where the argv says, or that the
+      // egress network is what the process can reach. Those need the
+      // Docker-gated `container` job. What it makes reachable is `up`'s own
+      // sequencing AFTER the mount preflight — the idle gate, the summary, the
+      // exit code — which is what was unreachable.
+      `          *" --session-dir /sessions "*)`,
+      '            if [ -z "${PIFLEET_SHIM_WORKER_PI:-}" ]; then',
+      '              echo "docker shim: unexpected worker-image run argv: $*" >&2',
+      "              exit 1",
+      "            fi",
+      // The host side of `/sessions`, read off the argv rather than guessed.
+      '            sessions=""',
+      '            prev=""',
+      '            for a in "$@"; do',
+      '              if [ "$prev" = "-v" ]; then',
+      '                case "$a" in',
+      '                  *":/sessions") sessions="${a%:/sessions}" ;;',
+      "                esac",
+      "              fi",
+      '              prev="$a"',
+      "            done",
+      '            if [ -z "$sessions" ]; then',
+      '              echo "docker shim: worker run carried no -v <host>:/sessions: $*" >&2',
+      "              exit 1",
+      "            fi",
+      // Drop everything up to and including the image; what remains is the
+      // command production put after it.
+      "            while [ $# -gt 0 ]; do",
+      '              case "$1" in',
+      "                pifleet/pi-worker:*) shift; break ;;",
+      "              esac",
+      "              shift",
+      "            done",
+      // Rotate the list once, substituting the one path that cannot survive
+      // outside a container.
+      "            n=$#",
+      "            i=0",
+      '            prev=""',
+      '            while [ "$i" -lt "$n" ]; do',
+      '              a="$1"',
+      "              shift",
+      '              if [ "$prev" = "--session-dir" ] && [ "$a" = "/sessions" ]; then',
+      '                a="$sessions"',
+      "              fi",
+      '              prev="$a"',
+      '              set -- "$@" "$a"',
+      "              i=$((i + 1))",
+      "            done",
+      // Unquoted on purpose: the variable carries a command AND its arguments,
+      // exactly as `PIFLEET_PI_COMMAND` does.
+      '            exec $PIFLEET_SHIM_WORKER_PI "$@"',
       "            ;;",
       "          *)",
       '            echo "docker shim: unexpected worker-image run argv: $*" >&2',
@@ -783,7 +986,75 @@ interface FleetOptions {
    * the entry precedence over its role), so each worker's grant is stated at
    * the worker rather than inferred from whichever one declared the role first.
    */
-  extraWorkers?: { id: string; role: string; cloudAccess?: boolean }[];
+  extraWorkers?: {
+    id: string;
+    role: string;
+    cloudAccess?: boolean;
+    model?: string;
+    /**
+     * The worker's `secrets:` REQUEST (ISC-415). Every name here must also be
+     * on `secretsAllowlist` and must have a value in `hostSecrets`, because
+     * `buildWorkerEnv` refuses an unallowlisted name and refuses one the host
+     * does not carry — a fixture that forgets either gets a refusal rather
+     * than the grant it meant to write.
+     */
+    secrets?: string[];
+    /** The worker's `isolation:`; omitted leaves the schema default. */
+    isolation?: string;
+  }[];
+  /**
+   * `secrets.env_allowlist` — the fleet-wide CEILING a worker's `secrets:`
+   * request is intersected against (§5.6, §12.4).
+   *
+   * Omitted by default, like `cloud:` and `providers:` above and for the same
+   * reason: an absent block and an empty one mean the same thing to the
+   * schema, so writing the key unconditionally would change the document every
+   * other test in this file loads for no gain.
+   */
+  secretsAllowlist?: string[];
+  /**
+   * Values for the granted secrets, put in the rig's environment.
+   *
+   * Separate from `secretsAllowlist` on purpose: the allowlist is what the
+   * fleet PERMITS and lives in the config, the value is what the host CARRIES
+   * and lives in the environment, and `up` reads them from those two different
+   * places. Marker strings, never credentials — and the disclosure tests rely
+   * on these being distinctive enough that finding one in a banner is proof of
+   * a leak rather than a coincidence.
+   */
+  hostSecrets?: Record<string, string>;
+  /**
+   * `llm.providers`, written as a map keyed by `name` (ISC-410).
+   *
+   * Omitted by default, which leaves the FLAT `llm.*` document every other test
+   * in this file loads — and that is load-bearing, not tidiness: a flat fleet
+   * gets exactly one bridge on `docker.network` verbatim, so writing this key
+   * unconditionally would rename the network every other assertion in this file
+   * names.
+   */
+  providers?: {
+    name: string;
+    hosted: boolean;
+    baseUrl: string;
+    apiKeyEnv: string;
+    relayUpstream: string;
+  }[];
+  /** `llm.provider`. Must be a key of `providers` when that map is written. */
+  llmProvider?: string;
+  /**
+   * `egress.allow` entries. Omitted by default — the flat fixture's relay
+   * carries `host.docker.internal`, which the default policy already permits.
+   *
+   * A providers map needs one entry per relay target, because `ensureBridgeRelay`
+   * refuses to forward a destination `decide()` denies.
+   */
+  egressAllow?: { host: string; port: number }[];
+  /**
+   * `PIFLEET_SHIM_NETWORK_ABSENT`: make the shimmed daemon report a network
+   * absent until it has been created, so `network create` is observable.
+   * See the `inspect` branch of `writeDockerShim` for why it is opt-in.
+   */
+  shimNetworkAbsent?: boolean;
   /**
    * The ISC-53 native-tool-call gate, TRI-STATE on purpose.
    *
@@ -857,6 +1128,16 @@ interface FleetOptions {
    * there is no image for a gate to be about.
    */
   containerPath?: boolean;
+  /**
+   * `PIFLEET_SHIM_WORKER_PI`: let the shim ANSWER a worker container launch
+   * with the fake-Pi double, instead of refusing the argv (ISC-429).
+   *
+   * Meaningful only with `containerPath`, and opt-in for the reason the shim
+   * branch records: every test written before it keeps the loud refusal. Set
+   * it and a container-path run can get past `up`'s idle gate, which is the
+   * only way anything in this file reaches a COMPLETED container-path run.
+   */
+  workerContainerDouble?: boolean;
   /** `PIFLEET_SHIM_IMAGE`: whether the shimmed image store holds the tag. */
   imagePresent?: boolean;
   /**
@@ -889,6 +1170,16 @@ interface FleetOptions {
    * this shim cannot actually run.
    */
   network?: string;
+  /**
+   * Write NO `docker.network` key at all, so the schema default supplies it
+   * (ISC-430).
+   *
+   * The gate this proves something about spends money, and the fixture is the
+   * only place the default can be exercised: every other config in this file
+   * writes the key, so a reader could not tell a real dependency on it from a
+   * defaulted one.
+   */
+  omitDockerNetwork?: boolean;
   /**
    * `backend.kind`, written into a `backend:` block (ISC-271).
    *
@@ -938,7 +1229,13 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
     ...(opts.backendKind === undefined ? [] : ["backend:", `  kind: ${opts.backendKind}`]),
     "docker:",
     '  pi_version: "0.79.6"',
-    `  network: ${opts.network ?? NETWORK}`,
+    /*
+     * OMITTED when a test asks (ISC-430). `docker.network` carries a schema
+     * default, so a config that never mentions it still yields one — which is
+     * the whole content of ISC-430 and cannot be shown by a fixture that always
+     * writes the key.
+     */
+    ...(opts.omitDockerNetwork === true ? [] : [`  network: ${opts.network ?? NETWORK}`]),
     "run:",
     `  repo: ${repo}`,
     ...(opts.maxConcurrent === undefined ? [] : [`  max_concurrent: ${opts.maxConcurrent}`]),
@@ -985,6 +1282,25 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
     ...(opts.modelsAllowlist === undefined
       ? []
       : [`  models_allowlist: [${opts.modelsAllowlist.join(", ")}]`]),
+    ...(opts.llmProvider === undefined ? [] : [`  provider: ${opts.llmProvider}`]),
+    ...(opts.providers === undefined
+      ? []
+      : [
+          "  providers:",
+          ...opts.providers.flatMap((p) => [
+            `    ${p.name}:`,
+            `      hosted: ${p.hosted}`,
+            `      base_url: ${p.baseUrl}`,
+            `      api_key_env: ${p.apiKeyEnv}`,
+            `      relay_upstream: ${p.relayUpstream}`,
+          ]),
+        ]),
+    // Before `roles:` and well before `workers:`, because a top-level key
+    // emitted between two list entries would silently truncate the sequence —
+    // the same hazard the `egress:` block at the bottom is placed around.
+    ...(opts.secretsAllowlist === undefined
+      ? []
+      : ["secrets:", "  env_allowlist:", ...opts.secretsAllowlist.map((n) => `    - ${n}`)]),
     "roles:",
     `  engineer: {${roleFields.join(", ")}}`,
     ...extraRoles.map((r) => `  ${r}: {}`),
@@ -993,8 +1309,23 @@ function fleetYaml(repo: string, opts: FleetOptions = {}): string {
     ...extraWorkers.map(
       (w) =>
         `  - {id: ${w.id}, role: ${w.role}` +
-        `${w.cloudAccess === undefined ? "" : `, cloud_access: ${w.cloudAccess}`}}`,
+        `${w.cloudAccess === undefined ? "" : `, cloud_access: ${w.cloudAccess}`}` +
+        // `provider/model`, which is how a worker SELECTS a provider — the one
+        // input `resolvedProviders` reads and therefore the only way a fixture
+        // can leave a declared provider unselected.
+        `${w.model === undefined ? "" : `, model: ${w.model}`}` +
+        `${w.isolation === undefined ? "" : `, isolation: ${w.isolation}`}` +
+        `${w.secrets === undefined ? "" : `, secrets: [${w.secrets.join(", ")}]`}}`,
     ),
+    // LAST, after the whole `workers:` sequence — a top-level key emitted
+    // between two list entries would silently truncate it.
+    ...(opts.egressAllow === undefined
+      ? []
+      : [
+          "egress:",
+          "  allow:",
+          ...opts.egressAllow.map((a) => `    - {host: ${a.host}, port: ${a.port}}`),
+        ]),
     "",
   ].join("\n");
 }
@@ -1100,6 +1431,21 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
         ? {}
         : { PIFLEET_SHIM_CONFIG_HASH: opts.shimConfigHash }),
       /**
+       * The SAME double the non-container path runs, spelled once above as
+       * `PIFLEET_PI_COMMAND` (ISC-429). Two spellings of one command would be
+       * two things to keep in step, so the value is built the same way — and
+       * a container-path rig that opts in therefore has the conversation
+       * every other test in this file already trusts.
+       */
+      ...(opts.workerContainerDouble === true
+        ? {
+            PIFLEET_SHIM_WORKER_PI: `${process.execPath} ${FAKE_PI} --scenario ${join(
+              SCENARIOS,
+              "happy.json",
+            )}`,
+          }
+        : {}),
+      /**
        * `verifyImage`'s `/workspace` write-through probe creates a scratch
        * directory under `daemonScratchRoot()`, which defaults to the
        * DEVELOPER's `~/.pifleet/scratch`. Pinned into this rig's own base so a
@@ -1107,6 +1453,28 @@ async function makeRig(opts: FleetOptions = {}): Promise<Rig> {
        * discipline `GOOGLE_APPLICATION_CREDENTIALS` applies to the ADC lookup.
        */
       PIFLEET_SCRATCH_DIR: join(base, "scratch"),
+      ...(opts.shimNetworkAbsent === true ? { PIFLEET_SHIM_NETWORK_ABSENT: "1" } : {}),
+      /**
+       * A value for every declared provider's `api_key_env` (ISC-410).
+       *
+       * `providerApiKeyEnv` refuses to fall back to `llm.api_key_env`, so a
+       * provider whose variable is unset produces a worker `up` reports as
+       * key-less. Not a refusal — but it would make the run's shape depend on
+       * whatever the developer's shell happens to export, which is the same
+       * argument the ADC fixture and both shims already make. Marker strings,
+       * not credentials.
+       */
+      ...Object.fromEntries(
+        (opts.providers ?? []).map((p) => [p.apiKeyEnv, `fixture-${p.name}-not-a-real-key`]),
+      ),
+      /**
+       * Values for granted `secrets:` (ISC-415). `buildWorkerEnv` raises
+       * `SecretMissingFromHostError` for a requested name the host does not
+       * carry, so without these a fixture that MEANT to test a grant would be
+       * testing a refusal instead — and the disclosure banner it is asserting
+       * would never print at all.
+       */
+      ...(opts.hostSecrets ?? {}),
     },
   };
   rigs.push(rig);
@@ -2681,6 +3049,19 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // gate holds its provenance file to the allow file's integrity bar, so a
     // writable one refuses every verb rather than yielding a forgeable ledger.
     [TASK_POLICY_MOUNT]: { directory: false, mode: 0o444 },
+    /*
+     * The secret store, present for EVERY worker since D8 — this rig's workers
+     * request no `secrets:` and still carry it, because the Class 1 provider
+     * key is delivered as a 0444 file in it and no worker requests that.
+     *
+     * 0755 on the DIRECTORY and not 0700: the mounted inode's own mode is the
+     * only one the container consults and it needs the execute bit to traverse
+     * to the files below. What 0700 was reaching for is bought one level up
+     * instead — `materialize.ts` tightens `<run>/workers/<id>` itself — which
+     * costs the container nothing because it enters at the mountpoint in its
+     * own namespace rather than walking the host chain.
+     */
+    [SECRETS_MOUNT]: { directory: true, mode: 0o755 },
     [BRIEFING_MOUNT]: { directory: false, mode: 0o644 },
     "/home/pi/.kube/config": { directory: false, mode: 0o644 },
   };
@@ -4083,6 +4464,1573 @@ describe("up refuses a tui worker on the effective headless backend (TUI spec it
       expect(up.stderr).not.toContain("chosen by --backend");
       await expectNothingLaunched(rig);
     },
+    cliBudget(1),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ISC-410 — a DECLARED provider nothing resolves to is inert, ON THE `up` PATH
+// ---------------------------------------------------------------------------
+
+/**
+ * `test/unit/relay-provider-bridges.test.ts` already proves the PLAN omits an
+ * unused provider, and that the plan's input comes from workers the real config
+ * loader resolved rather than from `Object.keys(llm.providers)`. That is a
+ * strong pin on `egressBridgePlan` and it is not what this block adds.
+ *
+ * What nothing re-checked is that **`up` creates from the plan**. `up.ts` walks
+ * `egressBridges` twice — once to `ensureEgressNetwork` every bridge, once to
+ * `ensureBridgeRelay` every bridge — and either loop rewritten to walk the
+ * DECLARED providers instead leaves `egressBridgePlan` untouched, every unit
+ * test green, and ISC-410 false on the only path an operator ever runs. That is
+ * this file's founding defect class verbatim: a control tested exhaustively as
+ * a module and held in place by nothing.
+ *
+ * The criterion's own probe is `docker network ls` and `docker ps` on a live
+ * three-provider fleet. This runs the REAL `up` against the PATH shim instead,
+ * so it needs no daemon and lands in the fast job — and it pays for that with
+ * `shimNetworkAbsent`, which makes the shimmed daemon report a network absent
+ * until it has been created. Without it every `ensureEgressNetwork` takes its
+ * adopt branch, no `network create` is ever issued, and the strongest available
+ * assertion would be about which names `up` MENTIONED.
+ *
+ * ## Anti-vacuity, which is the whole risk in a negative claim
+ *
+ * "The string is absent from the log" passes trivially if the log is empty, if
+ * `up` exited before the bridge loop, or if the config never reached that code.
+ * So the absence is asserted alongside positives read out of THE SAME LOG: the
+ * log is non-empty, and both USED providers' bridges, uplinks and relays were
+ * created by name. A run that never got near the loop fails those before it
+ * reaches the negative, which is the point — the positives are not decoration,
+ * they are what makes the negative mean anything.
+ *
+ * Every expected name is DERIVED, through the same `providerNetworkName` /
+ * `uplinkNetworkName` / `relayContainerName` the product composes with. A
+ * literal would still pass if the composition changed, and `up` would then be
+ * creating names this test never looks for.
+ */
+describe("a declared-but-unused provider creates nothing (ISC-410)", () => {
+  /**
+   * Two providers a worker names, one nothing names. The unused key is LAST so
+   * a plan built from `Object.keys` would put it last too — an off-by-one that
+   * dropped the final entry would then pass this test for the wrong reason —
+   * and the three names are chosen so no derived name is a substring of any
+   * other, which is what keeps `toContain` from being satisfied by an overlap.
+   */
+  const PROVIDERS = [
+    {
+      name: "alpha",
+      hosted: false,
+      baseUrl: "http://alpha.house.test:8000/v1",
+      apiKeyEnv: "ALPHA_API_KEY",
+      relayUpstream: "192.168.86.49:8000",
+    },
+    {
+      name: "bravo",
+      hosted: true,
+      baseUrl: "https://bravo.example.test/v1",
+      apiKeyEnv: "BRAVO_API_KEY",
+      relayUpstream: "104.18.0.1:443",
+    },
+    {
+      name: "charlie",
+      hosted: true,
+      baseUrl: "https://charlie.example.test/v1",
+      apiKeyEnv: "CHARLIE_API_KEY",
+      relayUpstream: "104.18.0.2:443",
+    },
+  ];
+
+  const USED = ["alpha", "bravo"];
+  const UNUSED = "charlie";
+
+  test(
+    "three declared, two resolved: only the two resolved bridges are created",
+    async () => {
+      const rig = await makeRig({
+        providers: PROVIDERS,
+        llmProvider: "alpha",
+        shimNetworkAbsent: true,
+        /**
+         * EVERY provider's upstream is allowed, INCLUDING the unused one.
+         *
+         * The two used providers need it — `ensureBridgeRelay` refuses to
+         * forward a destination the policy denies. Charlie does not need it and
+         * that is exactly why it is here: with charlie's upstream denied, "no
+         * network for charlie" would have a second, duller explanation, and a
+         * `up` that DID iterate declared providers would fail on the policy
+         * before it ever reached a `network create`. Allowing it removes the
+         * alternative and leaves only the claim under test.
+         */
+        egressAllow: PROVIDERS.map((p) => ({
+          host: p.relayUpstream.split(":")[0]!,
+          port: Number(p.relayUpstream.split(":")[1]),
+        })),
+        // `eng-1` inherits `llm.provider: alpha`; `eng-2` SELECTS bravo through
+        // its model prefix. Nothing anywhere selects charlie.
+        extraWorkers: [{ id: "eng-2", role: "engineer", model: "bravo/wiring-test-model" }],
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,eng-2",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      // `toMatchObject` on the pair rather than `toBe` on the code alone: a
+      // refusal here is almost always a fixture problem (an unallowed relay
+      // target, an undeclared provider), and the diff quotes `stderr` so the
+      // cause is named HERE instead of being reconstructed from an exit code.
+      // stderr is carried, never asserted — an unrelated warning must not turn
+      // this test red.
+      expect({ code: up.code, stderr: up.stderr }).toMatchObject({ code: EXIT.SUCCESS });
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+      const calls = await readDockerCalls(rig);
+      // ANTI-VACUITY 1. An absent or empty log satisfies every negative below
+      // without `up` having run a single docker command.
+      expect(calls.length).toBeGreaterThan(0);
+
+      const created = calls
+        .filter((l) => l.startsWith("network create "))
+        .map((l) => l.split(/\s+/).at(-1));
+
+      // ANTI-VACUITY 2. The POSITIVE half, from the same log: both resolved
+      // providers' bridges — and their uplinks — were created BY NAME. An `up`
+      // that exited before the bridge loop, or one whose config never carried
+      // the providers map, fails here rather than passing the negative below.
+      for (const p of USED) {
+        const net = providerNetworkName(NETWORK, p);
+        expect(created).toContain(net);
+        expect(created).toContain(uplinkNetworkName(net));
+      }
+
+      // …and each of those bridges got its relay STARTED, which is the second
+      // half of what a bridge is. `run` argv only: an `inspect` of the same
+      // name is `up` asking, not `up` creating.
+      for (const p of USED) {
+        const relay = relayContainerName(providerNetworkName(NETWORK, p));
+        expect(calls.some((l) => l.startsWith("run ") && l.includes(relay))).toBe(true);
+      }
+
+      // THE CRITERION. The declared-and-unused provider's derived names appear
+      // in NO docker argv of any kind — not created, not inspected, not
+      // connected, not run. Absence from the whole log is strictly stronger
+      // than absence from the create lines: `up` cannot have created a network
+      // it never named.
+      const unusedNet = providerNetworkName(NETWORK, UNUSED);
+      const unusedNames = [unusedNet, uplinkNetworkName(unusedNet), relayContainerName(unusedNet)];
+      for (const name of unusedNames) {
+        // Asserted per name rather than per line so a failure reports WHICH
+        // derived name leaked, not merely that some line was wrong.
+        expect(calls.filter((l) => l.includes(name))).toEqual([]);
+      }
+
+      // The same claim once more against the COUNT, because every assertion
+      // above is shaped "these are present / that one is not" and none of them
+      // would notice a third bridge under a name nothing here predicts. Two
+      // providers resolved: two bridges, two uplinks.
+      expect(created.filter((n) => n !== undefined && n.startsWith(`${NETWORK}-`)).length).toBe(4);
+
+      // And `up`'s own claim agrees with the daemon log. The ledger is the
+      // surface an operator reads; a fleet that created two bridges while
+      // reporting three would be lying in the direction ISC-410 cares about.
+      const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+      const readied = records
+        .filter((r) => r.actor === "cli-up" && r.event === "egress_network_ready")
+        .map((r) => r.detail?.["network"])
+        .sort();
+      expect(readied).toEqual(USED.map((p) => providerNetworkName(NETWORK, p)).sort());
+    },
+    // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 1965 ms (bun printed the per-test figure when this case
+    // failed under the Object.keys mutation), 2.23 s wall for a filtered
+    // single-test run including module load. Not reduced, for the reason every
+    // ceiling in this file keeps 90_000: the derived value is the FLOOR the
+    // audit checks against, not the value shipped.
+    90_000,
+  );
+});
+
+/**
+ * The disclosure banner and the launch record name the same workers
+ * (ISC-416, ISC-417).
+ *
+ * ## What "the same set" means, stated before it is asserted
+ *
+ * The two surfaces are produced at different moments and one of them is not
+ * always produced at all, so "the same set" is not self-evident and a
+ * comparison picked because it went green would be worth nothing. Three sets,
+ * over one run:
+ *
+ *   W — the workers this run SELECTS (`--workers`).
+ *   B — the worker ids the printed banner names.
+ *   L — the workers with a `launch.json` on disk.
+ *   D — the members of L whose record carries a non-null `disclosure`.
+ *
+ * **ISC-416 is `B` against the world:** the banner names every worker whose
+ * context leaves the machine, compared against a set typed into this file as a
+ * LITERAL, over W. It cannot be compared against anything `disclosureFor`
+ * produces, because that is the function under test — if it wrongly returned
+ * `null` for a worker that should be disclosed, the banner would omit it, the
+ * record would omit it, and any comparison between the two would agree
+ * perfectly while both were wrong. That is the "asserted against itself" shape,
+ * and only a literal from a config this file wrote can see through it.
+ *
+ * **ISC-417 is the two surfaces against each other: `D = B ∩ L`.**
+ *
+ * Scoped to `L` because the anti-criterion's subject is a worker STOOD UP
+ * silently, and a worker `up` never stood up cannot have been. That is not a
+ * convenience: `WorkerLaunchSchema`'s own docblock defines a missing record as
+ * meaning the run went through the `PIFLEET_PI_COMMAND` double, "which starts
+ * no container". The double run below is that case, held as its own test so
+ * the boundary is visible rather than inferred.
+ *
+ * **On the container-path run below `L = W`, so `B ∩ L` collapses to `B` and
+ * the assertion is full equality.** The intersection exists to keep the
+ * criterion WELL-DEFINED on a partial run — one refused after some records
+ * were written — not to soften it here.
+ *
+ * A mismatch fails in EITHER direction and both have a witness on disk:
+ *
+ *   - a record marked hosted whose worker the banner never named is a SILENT
+ *     STAND-UP — the operator was told nothing about a worker already talking
+ *     to a vendor, which is the whole of what §7.3's banner is the control for;
+ *   - a banner row whose own launch record carries no disclosure means the
+ *     recorded answer contradicts what the operator was told, and §7.3 wants
+ *     the record precisely so "was this run's ticket credential exposed to a
+ *     vendor" has an answer rather than a reconstruction.
+ *
+ * Neither direction is `⊆` in disguise: `D ⊆ B` alone would let a banner
+ * promise go unrecorded, and `B ⊆ D` alone would let a record name a worker
+ * nobody was told about.
+ *
+ * ## Anti-vacuity, which is where a set comparison goes to die
+ *
+ * `∅ = ∅ ∩ ∅` is true. Every guard below exists because some way of reaching
+ * that is reachable by a real mutation:
+ *
+ *   - `L = W` is asserted, so deleting every launch record does not empty the
+ *     domain into agreement;
+ *   - the banner PARSE is asserted to have found exactly `|D|` rows, so a regex
+ *     that silently matched nothing cannot supply `B = ∅`;
+ *   - the fixture has both a hosted and a non-hosted launched worker, so
+ *     neither "everything is disclosed" nor "nothing is" satisfies it;
+ *   - `provider` and `cloud_access` vary across the disclosed rows, so a row
+ *     that hard-coded either value fails;
+ *   - each row is asserted to appear on exactly ONE stream, so a banner written
+ *     to both cannot be quietly deduped into looking correct.
+ *
+ * ## Why this rig is a COMPLETED run now, and what that changed
+ *
+ * `containerPath: true` is what makes `up` write launch records at all — the
+ * double writes none. These two tests used to measure their sets over a run
+ * that REFUSED: against the docker PATH shim such a run reached
+ * `assertBindMountsVisible` and exited 3, which was harmless here because every
+ * launch record is on disk before that guard and `L = W` was asserted rather
+ * than assumed. ISC-429 found that refusal to be a defect in the shim's own
+ * `sed`, not a property of the product, and fixed it; `workerContainerDouble`
+ * then carries the run past `up`'s idle gate as well. So `B` and `L` are now
+ * compared over a run that SUCCEEDED, which is strictly more of the domain
+ * these criteria are about — the disclosure banner and the launch records of a
+ * fleet that actually stood up.
+ *
+ * The `L = W` guard is unchanged and still load-bearing for the same reason: a
+ * refusal that ever moved EARLIER, or a run that stopped short of launching
+ * every selected worker, fails this file instead of quietly shrinking the
+ * domain it compares over.
+ */
+describe("the disclosure banner and the launch record name the same workers (ISC-416, ISC-417)", () => {
+  /** Must match `fleetYaml`'s `docker.pi_version`, as in the ISC-32 block. */
+  const PINNED_PI_VERSION = "0.79.6";
+
+  /**
+   * One local provider and two hosted ones.
+   *
+   * TWO hosted providers rather than one so `provider` VARIES across the
+   * disclosed rows: with a single vendor a row that printed a constant would
+   * pass. The names are chosen so none is a substring of another.
+   */
+  const PROVIDERS = [
+    {
+      name: "alpha",
+      hosted: false,
+      baseUrl: "http://alpha.house.test:8000/v1",
+      apiKeyEnv: "ALPHA_API_KEY",
+      relayUpstream: "192.168.86.49:8000",
+    },
+    {
+      name: "bravo",
+      hosted: true,
+      baseUrl: "https://bravo.example.test/v1",
+      apiKeyEnv: "BRAVO_API_KEY",
+      relayUpstream: "104.18.0.1:443",
+    },
+    {
+      name: "charlie",
+      hosted: true,
+      baseUrl: "https://charlie.example.test/v1",
+      apiKeyEnv: "CHARLIE_API_KEY",
+      relayUpstream: "104.18.0.2:443",
+    },
+  ];
+
+  /**
+   * W. `eng-1` and `eng-2` inherit `llm.provider: alpha`; the other two select
+   * a hosted provider through their model prefix.
+   *
+   * TWO undisclosed workers rather than one, and the reason is a mutation
+   * rather than symmetry. With a single undisclosed worker, ANY defect that
+   * records a row for a worker the banner never named necessarily records one
+   * for every worker — `L \ D` empties, and the non-degeneracy guard fires
+   * before the set comparison is ever reached. The comparison would then never
+   * be shown to catch that direction, only the guard. A second undisclosed
+   * worker leaves `L \ D` non-empty under a one-worker mutation, so the
+   * EQUALITY is what reddens and the direction it names is the real one.
+   */
+  const SELECTED = ["eng-1", "eng-2", "rev-1", "qa-1"];
+
+  /**
+   * THE LITERAL — ISC-416's expectation, and the one set in this file that does
+   * not come from the code under test.
+   *
+   * It is derived by hand from `PROVIDERS` and the worker list below: `rev-1`
+   * resolves to `bravo` and `qa-1` to `charlie`, both `hosted: true`; `eng-1`
+   * resolves to `alpha`, which is not. If someone edits the fixture without
+   * editing this, the test fails — which is the correct cost of an expectation
+   * that refuses to be derived from the thing it is checking.
+   */
+  const HOSTED_BY_FIXTURE = ["qa-1", "rev-1"];
+
+  /**
+   * `cloud_access` per disclosed worker, also a literal.
+   *
+   * `rev-1` holds a Google identity and `qa-1` does not, which is what makes
+   * this field discriminating — and it is the D10 case §7.4 names as the one to
+   * watch, so the banner claiming it correctly is not a detail.
+   */
+  const CLOUD_ACCESS_BY_FIXTURE: Record<string, string> = { "rev-1": "true", "qa-1": "false" };
+
+  /**
+   * A banner row, parsed on STRUCTURE rather than on prose.
+   *
+   * The row lines are `key=value` and the header and footer are sentences, so
+   * this pins exactly the fields ISC-416 is about and stays green if the header
+   * is later reworded — while a change to the ROW format reddens it, which is
+   * correct, because the row IS the surface the criterion is about.
+   *
+   * A substring search for a worker id was rejected outright: `up` also prints
+   * `eng-1: 1 hazard(s) in its checkout` and `rev-1: /…/worktrees/rev-1 on
+   * fleet/…`, so `text.includes(id)` is satisfied by output with nothing to do
+   * with disclosure, and `B` would be right for the wrong reason on a run whose
+   * banner printed nothing at all.
+   */
+  const ROW = /^(?:!!| {2}) (\S+) {2}role=(\S+) {2}provider=(\S+) {2}isolation=(\S+) {2}repo=(.*)$/;
+
+  interface BannerRow {
+    workerId: string;
+    role: string;
+    provider: string;
+    isolation: string;
+    repo: string;
+  }
+
+  function bannerRows(text: string): BannerRow[] {
+    const out: BannerRow[] = [];
+    for (const line of text.split("\n")) {
+      const m = ROW.exec(line);
+      if (m === null) continue;
+      out.push({
+        workerId: m[1]!,
+        role: m[2]!,
+        provider: m[3]!,
+        isolation: m[4]!,
+        repo: m[5]!,
+      });
+    }
+    return out;
+  }
+
+  /** The `cloud_access=` continuation line for one worker, five spaces in. */
+  function cloudAccessFor(text: string, workerId: string): string | null {
+    const lines = text.split("\n");
+    for (const [i, line] of lines.entries()) {
+      const m = ROW.exec(line);
+      if (m === null || m[1] !== workerId) continue;
+      const next = lines[i + 1] ?? "";
+      const c = /^ {5}cloud_access=(\S+) {2}secrets=(.*)$/.exec(next);
+      return c === null ? null : c[1]!;
+    }
+    return null;
+  }
+
+  /**
+   * L and its records, read through `WorkerLaunchSchema` rather than as raw
+   * JSON: a record that stopped satisfying the contract must fail HERE, where
+   * the file is named, rather than as a missing property three assertions away.
+   */
+  async function launchRecords(
+    rig: Rig,
+    ids: readonly string[],
+  ): Promise<Map<string, ReturnType<typeof WorkerLaunchSchema.parse>>> {
+    const runIds = (await readdir(rig.root)).filter((e) => !e.startsWith("."));
+    expect(runIds).toHaveLength(1);
+    rig.runId = runIds[0]!;
+    const run = runPaths(rig.runId, rig.root);
+    const out = new Map<string, ReturnType<typeof WorkerLaunchSchema.parse>>();
+    for (const id of ids) {
+      const p = workerPaths(run, id).launchJson;
+      if (!(await Bun.file(p).exists())) continue;
+      out.set(id, WorkerLaunchSchema.parse(await Bun.file(p).json()));
+    }
+    return out;
+  }
+
+  /** The three-provider fleet, on the path that actually writes launch records. */
+  async function hostedRig(opts: { containerPath: boolean }): Promise<Rig> {
+    return makeRig({
+      containerPath: opts.containerPath,
+      imagePresent: opts.containerPath,
+      // Carries the container path all the way to a successful run rather than
+      // stopping at `up`'s idle gate — see the block header (ISC-429).
+      workerContainerDouble: opts.containerPath,
+      ...(opts.containerPath ? { shimPiVersion: PINNED_PI_VERSION } : {}),
+      providers: PROVIDERS,
+      llmProvider: "alpha",
+      // Every provider's upstream, including the two hosted ones:
+      // `ensureBridgeRelay` refuses to forward a destination the policy denies,
+      // and a refusal there would stop the run before any record was written.
+      egressAllow: PROVIDERS.map((p) => ({
+        host: p.relayUpstream.split(":")[0]!,
+        port: Number(p.relayUpstream.split(":")[1]),
+      })),
+      extraWorkers: [
+        // Second undisclosed worker — see `SELECTED` for why there are two.
+        { id: "eng-2", role: "engineer" },
+        { id: "rev-1", role: "reviewer", model: "bravo/wiring-test-model", cloudAccess: true },
+        { id: "qa-1", role: "qa", model: "charlie/wiring-test-model" },
+      ],
+    });
+  }
+
+  test(
+    "the banner names every hosted worker and no other, and the SAME set is in the launch records (ISC-416)",
+    async () => {
+      const rig = await hostedRig({ containerPath: true });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        SELECTED.join(","),
+        "--backend",
+        "headless",
+      ]);
+
+      // The rig's OUTCOME, stated so a different one is not mistaken for it.
+      // This run SUCCEEDS now (ISC-429); anything else means it stopped
+      // somewhere this test has not reasoned about, and the sets below would be
+      // measured over a state nobody chose.
+      expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+        code: EXIT.SUCCESS,
+      });
+      // The refusal this rig used to stop at, asserted ABSENT rather than
+      // merely no longer expected: it is the one failure whose exit code these
+      // sets are known to survive, so a silent return to it would look like a
+      // passing test measuring a smaller domain.
+      expect(up.stderr).not.toContain("bind-mount source(s) are not visible");
+
+      // ---------------------------------------------------------------
+      // B, and the two-stream rule. Exactly one stream carries each row;
+      // a banner written to both would double-count, and a parser that
+      // deduped would hide it.
+      // ---------------------------------------------------------------
+      const onOut = bannerRows(up.stdout);
+      const onErr = bannerRows(up.stderr);
+      expect(onErr).toEqual([]);
+      const rows = onOut;
+
+      // THE PARSE ITSELF, asserted before anything is concluded from it. A
+      // regex that matched nothing would supply `B = ∅`, and `∅ = ∅ ∩ L` is
+      // true — the criterion would pass on a banner that printed nothing.
+      expect(rows).toHaveLength(HOSTED_BY_FIXTURE.length);
+
+      // ISC-416, against the LITERAL rather than against the derivation.
+      const B = rows.map((r) => r.workerId).sort();
+      expect(B).toEqual([...HOSTED_BY_FIXTURE].sort());
+
+      // And the row CONTENT, from the same literal — `provider` varies across
+      // the two rows, so a banner printing a constant fails here.
+      const byId = new Map(rows.map((r) => [r.workerId, r]));
+      expect(byId.get("rev-1")).toMatchObject({
+        role: "reviewer",
+        provider: "bravo",
+        isolation: "worktree",
+        repo: rig.repo,
+      });
+      expect(byId.get("qa-1")).toMatchObject({
+        role: "qa",
+        provider: "charlie",
+        isolation: "worktree",
+        repo: rig.repo,
+      });
+      for (const [id, expected] of Object.entries(CLOUD_ACCESS_BY_FIXTURE)) {
+        expect(cloudAccessFor(up.stdout, id)).toBe(expected);
+      }
+
+      // ---------------------------------------------------------------
+      // The RECORD half of ISC-416 — "the SAME list appears in the launch
+      // record", and its probe: "a hosted worker missing from it fails".
+      // ---------------------------------------------------------------
+      const records = await launchRecords(rig, SELECTED);
+      // L = W. Without this the record comparison could be over a shrunken
+      // domain and nobody would see it.
+      expect([...records.keys()].sort()).toEqual([...SELECTED].sort());
+
+      const D = [...records.entries()]
+        .filter(([, r]) => r.disclosure !== null)
+        .map(([id]) => id)
+        .sort();
+      expect(D).toEqual([...HOSTED_BY_FIXTURE].sort());
+
+      // The non-hosted worker's record says `null` — a DECISION, not an
+      // omission. Without this the field could be "always present" and the
+      // set comparison above would still hold.
+      expect(records.get("eng-1")!.disclosure).toBeNull();
+
+      // The recorded row, field by field, against the same literal the banner
+      // was checked against. `worker_id` is compared to the DIRECTORY the file
+      // was read from, which is what makes a row written into the wrong
+      // worker's record a failure rather than a relabelling.
+      expect(records.get("rev-1")!.disclosure).toMatchObject({
+        worker_id: "rev-1",
+        role: "reviewer",
+        provider: "bravo",
+        isolation: "worktree",
+        repo: rig.repo,
+        cloud_access: true,
+      });
+      expect(records.get("qa-1")!.disclosure).toMatchObject({
+        worker_id: "qa-1",
+        role: "qa",
+        provider: "charlie",
+        isolation: "worktree",
+        repo: rig.repo,
+        cloud_access: false,
+      });
+
+      /*
+       * The two routes to the granted names, compared on disk.
+       *
+       * `secret_names` at the top level copies `WorkerEnvPlan.secretNames` (the
+       * DELIVERED grant); `disclosure.secret_names` copies the row's
+       * `secretNames` (the deduped REQUEST). They are equal only because every
+       * exclusion in `buildWorkerEnv`'s grant loop throws rather than skipping.
+       *
+       * STATED PLAINLY: on this fixture both are EMPTY, because
+       * `up-wiring.test.ts`'s rig has no knob for granting a worker `secrets:`.
+       * So this is a shape check, not a drift detector — it would not catch a
+       * throw turned into a `continue`. `test/unit/disclosure.test.ts` carries
+       * that equality properly; this is here so the two fields are compared at
+       * all on the real write path, and the residual is written down rather
+       * than left to be discovered by whoever trusts this line.
+       */
+      for (const id of HOSTED_BY_FIXTURE) {
+        const r = records.get(id)!;
+        expect(r.disclosure!.secret_names).toEqual(r.secret_names);
+      }
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "a mismatch between the banner and the record fails in EITHER direction (ISC-417)",
+    async () => {
+      const rig = await hostedRig({ containerPath: true });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        SELECTED.join(","),
+        "--backend",
+        "headless",
+      ]);
+      // Succeeds now, for the reason the ISC-416 test above states (ISC-429).
+      expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+        code: EXIT.SUCCESS,
+      });
+
+      const rows = bannerRows(up.stdout);
+      // The parse, again asserted non-empty before it is used — this test can
+      // be run alone and must not be able to pass on an empty banner.
+      expect(rows.length).toBeGreaterThan(0);
+      const B = new Set(rows.map((r) => r.workerId));
+
+      const records = await launchRecords(rig, SELECTED);
+      const L = new Set(records.keys());
+      // The domain, pinned. `L = W` here, so `B ∩ L` below is `B` — the
+      // intersection is what keeps this well-defined on a PARTIAL run, and
+      // this assertion is what stops it becoming an escape hatch on this one.
+      expect([...L].sort()).toEqual([...SELECTED].sort());
+
+      const D = new Set(
+        [...records.entries()].filter(([, r]) => r.disclosure !== null).map(([id]) => id),
+      );
+
+      // Both sides non-degenerate: at least one launched worker IS disclosed
+      // and at least one is NOT. Without this, "all" and "none" both satisfy
+      // an equality that then means nothing.
+      expect(D.size).toBeGreaterThan(0);
+      expect(L.size - D.size).toBeGreaterThan(0);
+
+      // THE CRITERION: D = B ∩ L.
+      const expected = [...B].filter((id) => L.has(id)).sort();
+      expect([...D].sort()).toEqual(expected);
+
+      // Stated once more as the two directions the criterion names, so a
+      // failure message says WHICH way it broke rather than printing two sets
+      // and leaving the reader to diff them.
+      expect([...D].filter((id) => !B.has(id))).toEqual([]); // stood up, never announced
+      expect(expected.filter((id) => !D.has(id))).toEqual([]); // announced, not recorded
+    },
+    cliBudget(1),
+  );
+
+  test(
+    "on the Pi double the banner still prints and there is no record to compare it to (ISC-417 boundary)",
+    async () => {
+      /**
+       * The case that makes the scope of ISC-417 explicit rather than implied.
+       *
+       * `PIFLEET_PI_COMMAND` starts no container, so `up` writes no launch
+       * record — `WorkerLaunchSchema`'s docblock calls that absence meaningful
+       * and not a gap. `L` is therefore empty and `D = B ∩ L` is vacuously
+       * true, which is CORRECT: nothing was stood up, so nothing was stood up
+       * silently.
+       *
+       * It is a test rather than a comment because the tempting "fix" for a
+       * vacuous case is to widen the comparison to W — and that would make
+       * ISC-417 fail on every double run in this repository, for a fleet that
+       * disclosed perfectly and created nothing. The banner still prints, which
+       * is the half that must NOT be conditional on the launch path: the double
+       * sends real context to a real vendor.
+       */
+      const rig = await hostedRig({ containerPath: false });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        SELECTED.join(","),
+        "--backend",
+        "headless",
+      ]);
+      expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+        code: EXIT.SUCCESS,
+      });
+
+      // B is unchanged by the launch path.
+      const rows = bannerRows(up.stdout);
+      expect(rows).toHaveLength(HOSTED_BY_FIXTURE.length);
+      expect(rows.map((r) => r.workerId).sort()).toEqual([...HOSTED_BY_FIXTURE].sort());
+
+      // And L is empty — for every selected worker, not just the disclosed ones.
+      const records = await launchRecords(rig, SELECTED);
+      expect([...records.keys()]).toEqual([]);
+    },
+    cliBudget(1),
+  );
+});
+
+describe("up discloses what leaves the machine (ISC-414, ISC-415)", () => {
+  /**
+   * A value that must never reach a terminal. `secretNames` is a `string[]` of
+   * NAMES and structurally cannot carry this, which is the whole reason the
+   * type is what it is — so finding it in a stream is proof of a real leak
+   * rather than a formatting slip.
+   */
+  const TICKET_VALUE = "sentinel-ticket-value-e41d";
+
+  const DISCLOSURE_PROVIDERS = [
+    {
+      name: "alpha",
+      hosted: false,
+      baseUrl: "http://alpha.house.test:8000/v1",
+      apiKeyEnv: "ALPHA_API_KEY",
+      relayUpstream: "192.168.86.49:8000",
+    },
+    {
+      name: "bravo",
+      hosted: true,
+      baseUrl: "https://bravo.example.test/v1",
+      apiKeyEnv: "BRAVO_API_KEY",
+      relayUpstream: "104.18.0.1:443",
+    },
+  ];
+
+  /**
+   * The banner's row grammar, parsed rather than substring-matched.
+   *
+   * A `toContain("cred-1")` against whole stdout passes when `cred-1` appears
+   * in the success summary and the banner never printed at all — which is
+   * precisely the silent bring-up ISC-417 forbids, sailing past a green test.
+   * Parsing rows means an assertion about the BANNER can only be satisfied by
+   * the banner.
+   */
+  interface ParsedRow {
+    mark: string;
+    id: string;
+    role: string;
+    provider: string;
+    isolation: string;
+    repo: string;
+    cloudAccess: string;
+    secrets: string[];
+  }
+
+  /**
+   * BOTH of a row's lines are parsed, and the second one is why.
+   *
+   * A `expect(up.stderr).toContain("TICKET_API_TOKEN")` looks like it asserts
+   * the banner discloses the grant. It does not, and this was caught by a
+   * mutation rather than by reading: `up` ALREADY prints an unrelated
+   * `pifleet: sec-1 is granted host secrets by name: TICKET_API_TOKEN` line to
+   * stderr, so that assertion stayed green with the banner's secret list
+   * emptied — the exact "a green test certifies the wrong thing" failure this
+   * repo keeps closing. Reading the name off the row's OWN continuation line
+   * means only the banner can satisfy it.
+   */
+  const bannerRows = (text: string): ParsedRow[] => {
+    const lines = text.split("\n");
+    const out: ParsedRow[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const head = /^(!!|  ) (\S+)  role=(\S+)  provider=(\S+)  isolation=(\S+)  repo=(.*)$/.exec(
+        lines[i]!,
+      );
+      if (head === null) continue;
+      // The continuation line is part of the ROW, so a banner that printed a
+      // head with no tail is malformed and must not parse as a valid row.
+      const tail = /^ {5}cloud_access=(\S+)  secrets=(.*)$/.exec(lines[i + 1] ?? "");
+      expect({ id: head[2], tail: lines[i + 1] }).toMatchObject({ id: head[2] });
+      if (tail === null) continue;
+      out.push({
+        mark: head[1]!,
+        id: head[2]!,
+        role: head[3]!,
+        provider: head[4]!,
+        isolation: head[5]!,
+        repo: head[6]!,
+        cloudAccess: tail[1]!,
+        secrets: tail[2] === "(none)" ? [] : tail[2]!.split(","),
+      });
+    }
+    return out;
+  };
+
+  /**
+   * `await makeRig(` spelled out rather than returned bare, and that is not a
+   * style choice: the `afterAll` hook's budget is counted with
+   * `grep -c 'await makeRig('`, so a helper that returned the promise
+   * unawaited would add two rigs the counting command cannot see — the exact
+   * silent drift that hook's docstring has already recorded three times.
+   */
+  const disclosureRig = async () =>
+    await makeRig({
+      providers: DISCLOSURE_PROVIDERS,
+      llmProvider: "alpha",
+      requireNativeToolCalls: false,
+      egressAllow: DISCLOSURE_PROVIDERS.map((p) => ({
+        host: p.relayUpstream.split(":")[0]!,
+        port: Number(p.relayUpstream.split(":")[1]),
+      })),
+      secretsAllowlist: ["TICKET_API_TOKEN"],
+      hostSecrets: { TICKET_API_TOKEN: TICKET_VALUE },
+      extraWorkers: [
+        // ISC-414: hosted provider AND a Google identity. The draft refused
+        // exactly this worker.
+        {
+          id: "cred-1",
+          role: "engineer",
+          model: "bravo/wiring-test-model",
+          cloudAccess: true,
+        },
+        // ISC-415: hosted provider AND a granted secret. The draft refused
+        // this one too.
+        {
+          id: "sec-1",
+          role: "engineer",
+          model: "bravo/wiring-test-model",
+          secrets: ["TICKET_API_TOKEN"],
+        },
+      ],
+    });
+
+  test(
+    "a credentialled worker on a hosted provider stands up, and up says so on stdout",
+    async () => {
+      const rig = await disclosureRig();
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,cred-1,sec-1",
+        "--backend",
+        "headless",
+      ]);
+      // HALF ONE OF BOTH CRITERIA. D10 permits this configuration; a refusal
+      // here is the draft behaviour reinstated. `stderr` is quoted in the diff
+      // so a fixture problem names itself instead of arriving as a bare 2.
+      expect({ code: up.code, stderr: up.stderr }).toMatchObject({ code: EXIT.SUCCESS });
+      // The non-json path prints `run <id>` rather than a JSON payload, so the
+      // id for teardown is read from that line.
+      const runId = /^run (\S+)$/m.exec(up.stdout)?.[1];
+      // ANTI-VACUITY: the run really did come up, so "it was not refused" is a
+      // fact about a fleet rather than about an early exit.
+      expect(runId).toBeDefined();
+      rig.runId = runId as string;
+
+      // HALF TWO. The banner, on stdout, parsed as rows.
+      const rows = bannerRows(up.stdout);
+      expect(rows.map((r) => r.id).sort()).toEqual(["cred-1", "sec-1"]);
+
+      // The NON-hosted worker is absent — asserted on rows, since `eng-1` also
+      // appears in `up`'s success summary further down the same stream.
+      expect(rows.some((r) => r.id === "eng-1")).toBe(false);
+
+      // Every field §7.3 names, on the rows that carry it.
+      for (const row of rows) {
+        expect(row.provider).toBe("bravo");
+        expect(row.role).toBe("engineer");
+        expect(row.isolation).toBe("worktree");
+        // §7.3: the credentialled line is the most conspicuous one `up` prints.
+        expect(row.mark).toBe("!!");
+      }
+
+      /*
+       * ISC-414 and ISC-415, read off the ROWS rather than off the stream.
+       *
+       * `cred-1` holds the Google identity and no secret; `sec-1` holds the
+       * granted secret and no identity. Asserting each on its own worker is
+       * what makes the two criteria separable — a banner that carried one
+       * field for both workers, or that leaked `sec-1`'s grant onto `cred-1`,
+       * fails here rather than satisfying a stream-wide `toContain`.
+       */
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      expect(byId.get("cred-1")?.cloudAccess).toBe("true");
+      expect(byId.get("cred-1")?.secrets).toEqual([]);
+      expect(byId.get("sec-1")?.cloudAccess).toBe("false");
+      expect(byId.get("sec-1")?.secrets).toEqual(["TICKET_API_TOKEN"]);
+
+      // NAMES ONLY. The widest-audience surface this feature has — a terminal,
+      // then scrollback, then a screen share.
+      expect(up.stdout).not.toContain(TICKET_VALUE);
+      expect(up.stderr).not.toContain(TICKET_VALUE);
+    },
+    // One `up` spawn. Counted, not estimated.
+    cliBudget(1),
+  );
+
+  /**
+   * THE TWO-SIDED `--json` PROBE.
+   *
+   * `--json`'s payload is a single object every machine consumer parses —
+   * every `JSON.parse(up.stdout.trim())` in this file is one — so the banner
+   * cannot go to stdout on that path without crashing the consumers it is
+   * meant to inform. It is REDIRECTED to stderr, never suppressed.
+   *
+   * Both directions are asserted IN ONE RUN, and that is the entire point of
+   * the test. "Absent from stdout" alone passes when the banner was dropped
+   * altogether — a silent bring-up of a credentialled worker on a vendor,
+   * reached through the flag a script is most likely to use, which is ISC-417's
+   * forbidden state arriving green. "Present on stderr" alone says nothing
+   * about whether stdout still parses. Neither half is worth anything without
+   * the other.
+   */
+  test(
+    "--json keeps stdout parseable and moves the same banner to stderr",
+    async () => {
+      const rig = await disclosureRig();
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,cred-1,sec-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect({ code: up.code, stderr: up.stderr }).toMatchObject({ code: EXIT.SUCCESS });
+
+      // DIRECTION ONE: stdout is still a single parseable object. This is the
+      // assertion that fails if the banner is written to stdout under --json.
+      const parsed = JSON.parse(up.stdout.trim()) as { run_id: string };
+      rig.runId = parsed.run_id;
+      expect(rig.runId).toBeDefined();
+      expect(bannerRows(up.stdout)).toHaveLength(0);
+      expect(up.stdout).not.toContain("DISCLOSURE");
+
+      // DIRECTION TWO: it is on stderr, naming the SAME workers the non-json
+      // run named. Dropping the banner passes direction one and fails here.
+      expect(up.stderr).toContain("DISCLOSURE");
+      const rows = bannerRows(up.stderr);
+      expect(rows.map((r) => r.id).sort()).toEqual(["cred-1", "sec-1"]);
+      // Off the rows, never off the stream — `up` prints an unrelated grant
+      // line naming the same variable to this very stream. See `bannerRows`.
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      expect(byId.get("cred-1")?.cloudAccess).toBe("true");
+      expect(byId.get("sec-1")?.secrets).toEqual(["TICKET_API_TOKEN"]);
+      expect(up.stderr).not.toContain(TICKET_VALUE);
+    },
+    cliBudget(1),
+  );
+});
+
+/**
+ * A container-path `up` can reach a SUCCESSFUL run against this file's shim
+ * (ISC-429).
+ *
+ * ## The defect, named
+ *
+ * The mount-probe branch of `writeDockerShim` rewrites production's own probe
+ * script by building one `sed` program out of two `s###g` commands per `-v`
+ * flag. Those commands used to be joined with `; `, which put the whole program
+ * on ONE LINE.
+ *
+ * macOS's BSD `sed` reads a script in PIECES and treats a piece boundary as a
+ * line break — whether the script arrives as an argument or through `-f`. A
+ * `;`-joined program is ONE line, so a boundary landing inside a substitute
+ * cuts it in half and `sed` dies with `unterminated substitute pattern`.
+ *
+ * THERE IS NO SINGLE THRESHOLD, and the number matters enough to say so.
+ * Whether a boundary kills a command depends on where it falls relative to one,
+ * so the ceiling is a function of the program's SHAPE. Measured against
+ * `/usr/bin/sed`, darwin 25.6.0 arm64, sweeping command count at a fixed
+ * command length: 20-byte commands first fail at 2,060 bytes, 34-byte at 2,074,
+ * 68-byte at 2,108 — all just past 2,048 — while a program of IDENTICAL
+ * 134-byte commands survived to 51,322 bytes. The program captured verbatim
+ * from an instrumented `up` first fails at 16 commands / 2,176 bytes. "Under
+ * 2 kB" is the only safe reading of the old form, which is why the tests below
+ * do not assert a constant: they RUN the old form on their own fixture and
+ * require it to fail.
+ *
+ * Newlines are read first, and no ceiling on that form was reachable: 42 kB
+ * measured here, 87 kB over 400 mounts measured independently.
+ *
+ * `ensureEgressRelay`'s probe carries 3 mounts and builds a 694-byte program,
+ * which is why the relay half always worked. `up`'s worker probe carries
+ * several mounts per worker over absolute `$TMPDIR` paths — 6,608 bytes for a
+ * four-worker fleet, measured from the shim's own call log — and died on every
+ * single invocation.
+ *
+ * ## Why it presented as silence rather than as an error
+ *
+ * The branch ended `printf … | sed "$sedexpr" | sh`, and a pipeline's exit
+ * status is its LAST command's. `sed` aborted, wrote nothing, and `sh` read an
+ * empty script and exited 0 — so the shim reported SUCCESS WITH NO OUTPUT.
+ * `probeBindMountSources` reads `code === 0` and an unparseable (empty) stdout
+ * as "the probe container reported nothing about this path", once per mount,
+ * and `assertBindMountsVisible` refuses the launch with exit 3. The diagnosis
+ * an operator saw was about the container; the fault was in the shim's `sed`.
+ *
+ * Both halves are fixed: one command per line removes the ceiling, and the
+ * rewrite's exit status is now checked separately from `sh`'s, so a future
+ * failure there is loud.
+ *
+ * ## What this block is for
+ *
+ * ISC-429 records the consequence as a COVERAGE HOLE. Every container-path run
+ * in this file stopped at that guard, so nothing here could assert what a
+ * COMPLETED container-path run does. Getting past the guard is necessary and
+ * not sufficient: the run then reaches `up`'s idle gate, where a supervisor
+ * waits on a container this shim cannot start. `PIFLEET_SHIM_WORKER_PI` — the
+ * opt-in worker stand-in — closes that half, and the first test below is the
+ * criterion's own probe: a container-path `up` that exits 0.
+ *
+ * ## The vacuity this block has to answer, said before the tests
+ *
+ * A shim can be made to satisfy "one `up` exits 0" by answering everything
+ * affirmatively, which turns a test double into a rubber stamp and silently
+ * guts every other assertion in this file. The fix must therefore keep the
+ * property the branch's own comment claims: **a source that genuinely does not
+ * exist still reports `x`, and the guard still refuses.**
+ *
+ * Test 2 is that control, and it is driven at TWO altitudes because production
+ * cannot express the first one on its own. `probeBindMountSources` SKIPS a
+ * source that is missing from the host — deliberately, and it says why: `docker
+ * run -v <missing>:<dst>` CREATES the source, so probing one would make the
+ * diagnostic the thing that materialized the directory it asked about. So
+ * "delete a mount source and watch the run refuse" is not a probe this product
+ * has; a deleted source is ISC-188's criterion, not ISC-292's. What is left is:
+ *
+ *   - the SHIM's own answer for a path that is not there, asked directly with
+ *     an argv in `probeArgv`'s shape, over a mount set large enough that the
+ *     old `; `-joined program would not have compiled; and
+ *   - the GUARD's behaviour when the container's answer and the host's
+ *     measurement disagree, driven through the real `assertBindMountsVisible`.
+ *
+ * Neither passes against a shim that answers affirmatively, and the first could
+ * not even have been asked of the one this file had yesterday.
+ */
+describe("a container-path up can reach a successful run (ISC-429)", () => {
+  /** Must match `fleetYaml`'s `docker.pi_version`, as in the ISC-32 block. */
+  const PINNED_PI_VERSION = "0.79.6";
+
+  /**
+   * Would the OLD, `; `-joined program have failed on this fixture?
+   *
+   * A CONSTANT WOULD HAVE BEEN A LIE HERE. The ceiling is shape-dependent (see
+   * the header: 2,060 bytes for one program shape, 51,322 for another), so
+   * "assert the fixture is bigger than N" would be asserting a number that does
+   * not describe the thing. This runs the old form instead, on this fixture's
+   * own paths and this machine's own `sed`, and reports whether it dies.
+   *
+   * Used as an anti-vacuity guard: a fixture that stopped being large enough —
+   * or a `sed` that lifted the limit — makes the tests below say so rather than
+   * pass while proving nothing about ISC-429.
+   */
+  async function oldStyleProgramFails(sources: readonly string[]): Promise<boolean> {
+    const program = sources
+      .map((src, i) => ` s#/probe/${i}'#${src}'#g; s#/probe/${i}/#${src}/#g;`)
+      .join("");
+    const proc = Bun.spawn(["sed", program], {
+      stdin: new Blob(["probe 0 '/probe/0/witness.txt'\n"]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return (await proc.exited) !== 0;
+  }
+
+  /**
+   * Does THIS platform's `sed` truncate a long one-line program AT ALL?
+   *
+   * ## Why the guard above needs this, measured on CI rather than reasoned
+   *
+   * `oldStyleProgramFails` is the anti-vacuity guard for the two tests below,
+   * and its own docblock anticipated "a `sed` that lifted the limit" — but
+   * treated that as a failure. It is not. It is a different PLATFORM.
+   *
+   * BSD `sed` (macOS) reads a script in pieces and treats a piece boundary as a
+   * line break, which is the whole of ISC-429's first mechanism. GNU `sed`
+   * (Linux, and therefore CI) has no such behaviour: measured on the CI runner,
+   * the fixture's 5,260-byte old-form program compiled cleanly and
+   * `oldFormDies` came back `false`, failing both tests on a machine where the
+   * DEFECT CANNOT OCCUR. Locally on darwin the same fixture dies, which is why
+   * this was green here and red there.
+   *
+   * So the regime is established explicitly instead of assumed, with a probe
+   * sized from a measured sweep of BOTH implementations rather than chosen to
+   * look extreme:
+   *
+   *   commands x 40-char paths   GNU sed 4.9 (debian)   BSD sed (darwin 26.6)
+   *      50  /   6,460 bytes            ok                     DIES
+   *     200  /  26,360 bytes            ok                     DIES
+   *     800  / 106,760 bytes            ok                     DIES
+   *
+   * 200 commands / ~26 kB sits far above every BSD ceiling measured for this
+   * shape and far below the first thing that breaks GNU.
+   *
+   * ## DO NOT MAKE THIS PROBE BIGGER. It was 2,000 commands and that was WRONG.
+   *
+   * At 471 kB the probe reported "truncating" on Linux too — not because GNU
+   * `sed` truncates, but because Linux caps a SINGLE argv argument at
+   * `MAX_ARG_STRLEN` (128 kB) and `exec` returned `E2BIG` before `sed` ever
+   * parsed anything. A bigger probe therefore stops measuring `sed` at all and
+   * silently reports every platform as truncating, which would have put CI
+   * straight back into the failure this branch exists to fix. Anything over
+   * ~128 kB measures the kernel.
+   *
+   * BOTH BRANCHES ASSERT. Where `sed` truncates, the fixture must be in the
+   * failing regime, exactly as before. Where it does not, `oldFormDies` must be
+   * FALSE — pinning the platform rather than skipping, so a `sed` that later
+   * GAINS the limit cannot quietly take the inapplicable path, and a fixture
+   * that dies for some unrelated reason is still a failure. What neither branch
+   * does is require a defect to reproduce on a platform that does not have it.
+   *
+   * The FIX is platform-independent and is what the rest of these tests
+   * measure: one command per line compiles everywhere, and `up` reaching exit 0
+   * over a real mount set is asserted on both.
+   */
+  let sedRegime: Promise<boolean> | null = null;
+  function sedTruncatesLongPrograms(): Promise<boolean> {
+    if (sedRegime === null) {
+      const pad = "z".repeat(40);
+      sedRegime = oldStyleProgramFails(
+        Array.from({ length: 200 }, (_, i) => `/tmp/${pad}${i}`),
+      );
+    }
+    return sedRegime;
+  }
+
+  /**
+   * The shim, addressed as a program rather than through PATH.
+   *
+   * `assertBindMountsVisible` builds an argv beginning with the literal
+   * `docker`; this maps that first word onto the shim this file writes and
+   * passes the rest through untouched, so what the guard measures is the same
+   * text a real `docker` would have received.
+   */
+  function shimExec(binDir: string): Exec {
+    return async (argv) => {
+      const proc = Bun.spawn([join(binDir, "docker"), ...argv.slice(1)], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, PATH: `${binDir}:${process.env["PATH"] ?? ""}` },
+      });
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      return { code: await proc.exited, stdout, stderr, timedOut: false };
+    };
+  }
+
+  /**
+   * `n` mount sources, each a directory holding one witness file.
+   *
+   * The count is a floor checked below rather than a matter of taste: the point
+   * of the fixture is that the program the shim builds from it is LONGER than
+   * the line BSD sed will compile.
+   */
+  async function seedMountSources(
+    base: string,
+    n: number,
+  ): Promise<Array<{ src: string; witness: string; size: number }>> {
+    const out: Array<{ src: string; witness: string; size: number }> = [];
+    for (let i = 0; i < n; i += 1) {
+      /*
+       * LONG, AND OF VARYING LENGTH — both measured requirements, not taste.
+       *
+       * Long because the program's size is a function of the PATHS: a fixture
+       * of three-character names sits under any ceiling however many there are.
+       * Varying because a program of IDENTICAL commands is the shape that
+       * survived to 51 kB in the sweep (see the block header) — the first
+       * version of this fixture used a fixed-width name, built a 7,840-byte
+       * old-form program, and `oldStyleProgramFails` correctly reported that it
+       * did not reproduce ISC-429 at all. A real mount set is ragged
+       * (`sessions`, `workers/eng-1/cloud-allow`, `skills/engineer`), so this
+       * one is too.
+       */
+      const src = join(
+        base,
+        `mount-source-${"segment-".repeat(1 + (i % 5))}${String(i).padStart(3, "0")}`,
+      );
+      await mkdir(src, { recursive: true });
+      const body = `witness-${i}\n`;
+      await writeFile(join(src, "witness.txt"), body);
+      out.push({ src, witness: "witness.txt", size: Buffer.byteLength(body) });
+    }
+    return out;
+  }
+
+  /**
+   * How many bytes of `sed` program the shim's probe branch builds for a mount
+   * set.
+   *
+   * A DERIVATION, not a second copy of the rewrite: it is used only to check
+   * that a fixture is big enough to be about the ceiling at all. If the
+   * rewrite's shape changes this stops describing it, which is a cost the two
+   * `toBeGreaterThan` assertions below make visible rather than silent.
+   */
+  function rewriteProgramBytes(sources: readonly string[]): number {
+    return sources.reduce(
+      (n, src, i) => n + `\ns#/probe/${i}'#${src}'#g\ns#/probe/${i}/#${src}/#g`.length,
+      0,
+    );
+  }
+
+  /** `probeArgv`'s shape: read-only, network-less, every mount `:ro`. */
+  function probeLikeArgv(mounts: readonly { src: string; ask: string }[], tag: string): string[] {
+    const argv = ["docker", "run", "--rm", "--read-only", "--network", "none"];
+    for (const [i, m] of mounts.entries()) argv.push("-v", `${m.src}:/probe/${i}:ro`);
+    const lines = [
+      `probe() { if [ -h "$2" ]; then echo "$1 l 0"; ` +
+        `elif [ -f "$2" ]; then echo "$1 f $(wc -c < "$2" | tr -d ' ')"; ` +
+        `elif [ -d "$2" ]; then echo "$1 d 0"; else echo "$1 x 0"; fi; }`,
+      ...mounts.map((m, i) => `probe ${i} '/probe/${i}${m.ask}'`),
+    ];
+    argv.push("--entrypoint", "/bin/sh", tag, "-c", lines.join("\n"));
+    return argv;
+  }
+
+  test(
+    "a container-path up exits 0, and the mount preflight it passed really ran",
+    async () => {
+      const rig = await makeRig({
+        containerPath: true,
+        workerContainerDouble: true,
+        imagePresent: true,
+        shimPiVersion: PINNED_PI_VERSION,
+        /*
+         * FOUR workers, which is what makes this the criterion's own probe
+         * rather than a smaller case that would have squeaked under the
+         * ceiling. The assertion below measures the fixture instead of
+         * trusting this comment.
+         */
+        extraWorkers: [
+          { id: "eng-2", role: "engineer" },
+          { id: "rev-1", role: "reviewer" },
+          { id: "qa-1", role: "qa" },
+        ],
+      });
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,eng-2,rev-1,qa-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+
+      // THE CRITERION. `stderr` is carried into the failure message rather
+      // than asserted, because the whole value of this probe when it breaks is
+      // reading WHERE the run stopped.
+      expect({ code: up.code, stderr: up.stderr.slice(-600) }).toMatchObject({
+        code: EXIT.SUCCESS,
+      });
+
+      /**
+       * A COMPLETED run, not merely a zero. `up` prints this payload after the
+       * idle gate, so a worker in it is one whose supervisor was OBSERVED idle
+       * — and `launch.json` exists only on the container path, so its presence
+       * is what says this run was not quietly the `PIFLEET_PI_COMMAND` double.
+       */
+      const parsed = JSON.parse(up.stdout.trim()) as {
+        run_id: string;
+        workers: Array<{ id: string }>;
+      };
+      rig.runId = parsed.run_id;
+      expect(parsed.workers.map((w) => w.id).sort()).toEqual(["eng-1", "eng-2", "qa-1", "rev-1"]);
+      const run = runPaths(rig.runId, rig.root);
+      for (const id of ["eng-1", "eng-2", "rev-1", "qa-1"]) {
+        const launch = WorkerLaunchSchema.parse(
+          await Bun.file(workerPaths(run, id).launchJson).json(),
+        );
+        expect(launch.image).toContain("pifleet/pi-worker:");
+      }
+
+      /**
+       * ANTI-VACUITY FOR THIS TEST. `exit 0` is also what a run that never
+       * reached the preflight would produce, and `assertBindMountsVisible` is
+       * called only when some worker has a launch argv. So the shim's own call
+       * log is read for the probe argv, and the mount set it carries is
+       * measured against the ceiling the fix exists for: a fixture that shrank
+       * under it would keep passing while proving nothing about ISC-429.
+       */
+      const calls = (await Bun.file(rig.dockerCalls).text()).split("\n");
+      const probes = calls
+        .filter((c) => c.includes(":/probe/0:ro "))
+        .map((c) => [...c.matchAll(/(\S+):\/probe\/\d+:ro/g)].map((m) => m[1]!));
+      expect(probes.length).toBeGreaterThan(0);
+      const widest = probes.sort((a, b) => b.length - a.length)[0]!;
+      const truncating = await sedTruncatesLongPrograms();
+      expect(
+        {
+          mounts: widest.length,
+          bytes: rewriteProgramBytes(widest),
+          oldFormDies: await oldStyleProgramFails(widest),
+        },
+        truncating
+          ? "this sed truncates long one-line programs, so the fixture must be in the failing regime"
+          : "this sed compiles a 26 kB one-line program that BSD sed cannot, so no fixture size can fail here — " +
+            "the size guard is inapplicable and ISC-429's other assertions carry the test",
+      ).toMatchObject({ oldFormDies: truncating });
+    },
+    /*
+     * ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`. It is
+     * NOT one process — this `up` starts four supervisors and four fake-Pi
+     * doubles behind them — but every one of those is detached and the
+     * command's own wait is the idle gate, whose cost `budget.ts` already
+     * charges through PER_SPAWN_IDLE_MS. `cliBudget(1)` is 11_400 ms; a
+     * one-worker version of this run measured 2.2 s.
+     */
+    cliBudget(1),
+  );
+
+  test(
+    "the same shim still reports a path that is not there, and the guard still refuses",
+    async () => {
+      const base = await mkdtemp(join(tmpdir(), "pifleet-mount-shim-"));
+      const bin = join(base, "bin");
+      await mkdir(bin, { recursive: true });
+      await writeDockerShim(bin, join(base, "docker-calls.log"));
+      const exec = shimExec(bin);
+      const sources = await seedMountSources(base, 30);
+
+      /**
+       * HALF ONE — the shim's own discrimination, asked directly.
+       *
+       * Directly, because production never asks about a path it did not just
+       * measure: `probeBindMountSources` skips a missing source outright (see
+       * the block header). The argv is `probeArgv`'s shape, and the mount set
+       * is asserted to be over the ceiling — so this is a question the shim
+       * could not have answered AT ALL before the fix, and what is asserted is
+       * that its answers DIFFER from each other rather than that they exist.
+       */
+      const truncating = await sedTruncatesLongPrograms();
+      expect(
+        {
+          bytes: rewriteProgramBytes(sources.map((s) => s.src)),
+          oldFormDies: await oldStyleProgramFails(sources.map((s) => s.src)),
+        },
+        truncating
+          ? "this sed truncates long one-line programs, so the fixture must be in the failing regime"
+          : "this sed compiles a 26 kB one-line program that BSD sed cannot, so no fixture size can fail here — " +
+            "the size guard is inapplicable and this test's discrimination assertions carry it",
+      ).toMatchObject({ oldFormDies: truncating });
+      const mounts = sources.map((s, i) => ({
+        src: s.src,
+        // One mount in thirty asks about a file nobody wrote. Every other asks
+        // about the witness that is really there.
+        ask: i === 7 ? "/no-such-witness.txt" : `/${s.witness}`,
+      }));
+      const answered = await exec(probeLikeArgv(mounts, "pifleet/pi-worker:probe"));
+      expect({ code: answered.code, stderr: answered.stderr }).toMatchObject({ code: 0 });
+      const lines = answered.stdout.trim().split("\n");
+      // Thirty answers, not "some output": a rewrite that silently dropped
+      // mounts would still produce a stdout.
+      expect(lines).toHaveLength(30);
+      expect(lines[7]).toBe("7 x 0");
+      expect(lines.filter((l) => l.endsWith(" x 0"))).toHaveLength(1);
+      for (const [i, s] of sources.entries()) {
+        if (i === 7) continue;
+        expect(lines[i]).toBe(`${i} f ${s.size}`);
+      }
+
+      /**
+       * HALF TWO — the REAL guard, over the REAL shim, still refuses.
+       *
+       * The disagreement is one production can actually reach and one the
+       * probe script is explicitly built to catch: `pathKind` stats the source
+       * and FOLLOWS symlinks, so the host measures a regular file of a known
+       * size, while the in-container script tests `-h` FIRST and answers `l`.
+       * The two answers differ, and a shim that had been softened into
+       * agreeing with whatever it was asked would not produce that.
+       */
+      const realFile = join(base, "kubeconfig-target");
+      await writeFile(realFile, "apiVersion: v1\n");
+      const link = join(base, "kubeconfig-symlink");
+      await symlink(realFile, link);
+
+      const argvs = [
+        ...sources.map((s) => ["docker", "run", "-v", `${s.src}:/workspace`, "img"]),
+        ["docker", "run", "-v", `${link}:/home/pi/.kube/config:ro`, "img"],
+      ];
+      let caught: unknown;
+      try {
+        await assertBindMountsVisible(argvs, "pifleet/pi-worker:probe", exec);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(MountNotVisibleError);
+      const err = caught as MountNotVisibleError;
+      expect(err.exitCode).toBe(3);
+      expect(err.message).toContain(link);
+      // ONLY that one. A shim reporting nothing about everything would name
+      // all thirty-one paths and still satisfy the two assertions above.
+      for (const s of sources) expect(err.message).not.toContain(s.src);
+
+      /*
+       * THE CONTROL FOR THE CONTROL: drop the symlink and the same guard, over
+       * the same shim and the same thirty sources, RESOLVES. Without it,
+       * "it refused" is indistinguishable from "it refuses everything" — which
+       * is precisely the state this fix was undoing.
+       */
+      await assertBindMountsVisible(argvs.slice(0, -1), "pifleet/pi-worker:probe", exec);
+
+      /**
+       * HALF THREE — DELETE A REAL BIND-MOUNT SOURCE, and record what actually
+       * happens, because it is not what one would guess.
+       *
+       * The SHIM still reports it missing: asked about the deleted path it
+       * answers `x`, which is the property the branch's comment claims and the
+       * one a rubber stamp could not have. That is asserted first.
+       *
+       * The GUARD, given the same deleted source, RESOLVES — it does not refuse
+       * with exit 3. That is production's deliberate choice and it says why:
+       * `docker run -v <missing>:<dst>` CREATES the source, so probing one would
+       * make the diagnostic the thing that materialized the directory it asked
+       * about. A missing source is ISC-188's criterion, not ISC-292's. Asserted
+       * rather than described, so a future change of that policy fails here
+       * instead of being discovered by someone reading this comment.
+       *
+       * Both halves matter to ISC-429: "the shim still reports missing" is the
+       * anti-rubber-stamp property, and "the guard skips it anyway" is why
+       * deletion alone cannot be the anti-vacuity probe for this criterion. The
+       * symlink above is, because it is the one disagreement a host-answering
+       * shim can actually produce.
+       */
+      const deleted = sources[3]!;
+      await rm(deleted.src, { recursive: true, force: true });
+      const afterDelete = await exec(
+        probeLikeArgv([{ src: deleted.src, ask: `/${deleted.witness}` }], "pifleet/pi-worker:probe"),
+      );
+      expect(afterDelete.stdout.trim()).toBe("0 x 0");
+      await assertBindMountsVisible(
+        [["docker", "run", "-v", `${deleted.src}:/workspace`, "img"]],
+        "pifleet/pi-worker:probe",
+        exec,
+      );
+
+      await rm(base, { recursive: true, force: true });
+    },
+    /*
+     * ISC-274 audit: no `up` spawn, but three shim invocations — one direct
+     * and two through `assertBindMountsVisible`, which charges one probe
+     * container per call. `cliBudget(3)` is the model's own answer for three
+     * spawn-reaching calls; the shim is a `/bin/sh` script and far cheaper than
+     * the CLI startup that figure is calibrated to, so this is generous rather
+     * than tight, which is the direction budget.ts asks for.
+     */
+    cliBudget(3),
+  );
+});
+
+/**
+ * §5.9's spend gate is reachable on the strength of a CONFIG, not of Docker
+ * (ISC-430).
+ *
+ * ## The defect this pins, which was never a behaviour
+ *
+ * `up` ran the mandatory tool-call probe under
+ * `if (loadedConfig !== null && egressNetwork !== null)`. `egressNetwork` is
+ * assigned unconditionally from `loadedConfig.config.docker.network`, and
+ * `schema.ts` DEFAULTS that key — so on every path where a config parses
+ * cleanly the second conjunct was implied by the first. The condition READ as
+ * though provider spend were gated on Docker being configured, and it was not.
+ * Behaviour was correct; the legibility was not, and a reader who trusted it
+ * would be wrong about where the money goes.
+ *
+ * ## Why a source-shaped test would not have been enough
+ *
+ * The fix could be undone by "simplifying" the derived network back into a
+ * nullable and re-adding the conjunct, and nothing about the SHAPE of the code
+ * would catch that — the suite would stay green while the gate silently
+ * acquired a Docker dependency that could, one schema edit later, actually be
+ * false. So the rule is pinned BEHAVIOURALLY: a config that never mentions
+ * `docker.network`, on the backend that draws no panes, still spends.
+ *
+ * ## The detector, and the control
+ *
+ * "Reached the gate" is `stub.requests.length` — the same load-bearing count
+ * the ISC-53 block uses, and for the same reason: an exit code cannot tell a
+ * run that probed from a run that skipped the probe and succeeded anyway.
+ *
+ * The control is a run that does NOT reach it, differing in ONE thing. Both
+ * cases below carry the same stub, the same `--backend headless`, the same
+ * `require_native_tool_calls: true` and the same models; the control names a
+ * `-uplink` network, which `ensureEgressNetwork` refuses several steps BEFORE
+ * the gate. Its request count is 0. So the probe can distinguish reaching from
+ * not-reaching, and "1" in the positive case is a measurement rather than a
+ * value it could not have failed to produce.
+ *
+ * It also says something true that the criterion is easy to over-read: Docker
+ * still gates the probe POSITIONALLY — a broken network stops the run earlier
+ * — but not CONDITIONALLY, which is the distinction the old `&&` erased.
+ */
+describe("the §5.9 spend gate is reachable on a config alone (ISC-430)", () => {
+  test(
+    "a headless up whose config never mentions docker.network still probes",
+    async () => {
+      const rig = await makeRig();
+      const stub = stubOmlx(STUB_TOOL_CALL);
+      try {
+        const cfg = join(rig.base, "no-docker-network.yaml");
+        await writeFile(
+          cfg,
+          fleetYaml(rig.repo, {
+            requireNativeToolCalls: true,
+            llmBaseUrl: stub.baseUrl,
+            omitDockerNetwork: true,
+          }),
+        );
+        // Asserted, not assumed: the fixture's whole job is that the key is
+        // absent, and a `fleetYaml` change that reintroduced it would leave
+        // this test passing for a reason unrelated to ISC-430.
+        expect(await Bun.file(cfg).text()).not.toContain("network:");
+
+        const up = await runCli(rig, [
+          "up",
+          "--config",
+          cfg,
+          "--workers",
+          "eng-1",
+          "--backend",
+          "headless",
+          "--json",
+        ]);
+        expect({ code: up.code, stderr: up.stderr.slice(-400) }).toMatchObject({
+          code: EXIT.SUCCESS,
+        });
+        rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+
+        // THE CLAIM. A config that says nothing about Docker's network, on the
+        // backend that draws nothing, still dialled the provider.
+        expect(stub.requests.length).toBe(1);
+        expect(stub.requests[0]!.path).toBe("/v1/chat/completions");
+        expect(Array.isArray(stub.requests[0]!.body["tools"])).toBe(true);
+
+        // …and the fleet then stood up, so this is the gate PASSING rather
+        // than the run stopping at it.
+        const { records } = await mergeLedger(runPaths(rig.runId, rig.root));
+        expect(records.map((r) => r.event)).toContain("supervisor_launched");
+      } finally {
+        await stub.stop();
+      }
+    },
+    // ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`. The
+    // stub is an in-process server, not a spawn.
+    cliBudget(1),
+  );
+
+  test(
+    "CONTROL: a run stopped before the gate never dials the provider",
+    async () => {
+      const rig = await makeRig();
+      const stub = stubOmlx(STUB_TOOL_CALL);
+      try {
+        /*
+         * IDENTICAL to the fixture above but for `network:`, which is named
+         * rather than omitted and ends `-uplink` — the shim answers that
+         * NON-internal and `ensureEgressNetwork` refuses to adopt it, several
+         * steps before the gate. One difference, one outcome.
+         */
+        const cfg = join(rig.base, "uplink-network.yaml");
+        await writeFile(
+          cfg,
+          fleetYaml(rig.repo, {
+            requireNativeToolCalls: true,
+            llmBaseUrl: stub.baseUrl,
+            network: `${NETWORK}-uplink`,
+          }),
+        );
+        const up = await runCli(rig, [
+          "up",
+          "--config",
+          cfg,
+          "--workers",
+          "eng-1",
+          "--backend",
+          "headless",
+        ]);
+        expect(up.code).toBe(EXIT.BACKEND_UNAVAILABLE);
+
+        // The detector can tell the two apart. Without this line, "1" above
+        // would be a number nothing showed could be anything else.
+        expect(stub.requests).toEqual([]);
+      } finally {
+        await stub.stop();
+      }
+    },
+    // ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`.
     cliBudget(1),
   );
 });

@@ -22,7 +22,14 @@
 
 import { isIP } from "node:net";
 import { EXIT } from "../contracts.ts";
-import { ConfigError, resolveWorker, type LoadedConfig } from "../config/load.ts";
+import {
+  ConfigError,
+  providerApiKeyEnv,
+  providerProbeTimeoutMs,
+  resolveWorker,
+  type LoadedConfig,
+} from "../config/load.ts";
+import { relayViewForProvider } from "./relay.ts";
 import { normalizeHost } from "./egress.ts";
 import {
   LEGACY_RELAY_LISTEN_ALIAS,
@@ -774,23 +781,48 @@ export async function assertModelsSupportToolCalls(
   loaded: LoadedConfig,
   workerIds: readonly string[],
   /**
-   * REQUIRED, for the reason spelled out on `probeNativeToolCalls`: a default
-   * of the global `fetch` is a host-side probe one omitted argument away, and
-   * ISC-260 is precisely the criterion that a host-side probe does not satisfy.
+   * REQUIRED, and a FACTORY rather than one transport (ISC-418, ISC-260).
+   *
+   * Required for the reason spelled out on `probeNativeToolCalls`: a default of
+   * the global `fetch` is a host-side probe one omitted argument away, and
+   * ISC-260 is precisely the criterion a host-side probe does not satisfy.
+   *
+   * A factory because under D7 each provider has its OWN egress bridge, and a
+   * provider's listen alias exists only on that bridge — measured: from
+   * provider A's network, provider B's alias is NXDOMAIN
+   * (`relay-provider-containment.test.ts`). One `containerFetch` bound to one
+   * network therefore cannot reach more than one provider, and the network it
+   * was bound to — `docker.network` — is the BASE bridge, which a providers-map
+   * fleet no longer creates at all. That is why `up` could not stand up such a
+   * fleet with `require_native_tool_calls: true`: the probe container died with
+   * "network not found" before any model was judged.
    */
-  fetchImpl: FetchLike,
+  fetchFor: (provider: string) => FetchLike,
 ): Promise<void> {
   if (!loaded.config.llm.require_native_tool_calls) return;
 
   const defined = new Set(loaded.config.workers.map((w) => w.id));
-  /** model → the workers that resolved to it, so a refusal can name them all. */
-  const byModel = new Map<string, string[]>();
+  /**
+   * (provider, model) → the workers that resolved to it (ISC-418).
+   *
+   * Keyed by the PAIR, not by the model alone. Two providers commonly serve the
+   * same model id — `gpt-oss` on the operator's oMLX and on a hosted catalogue
+   * is the ordinary case, not a contrived one — and de-duping on the id alone
+   * would certify one endpoint and silently pass the other. The dedup itself
+   * still matters for the reason it always did (six workers on one model is the
+   * normal fleet shape); it just has to dedup the right thing.
+   */
+  const byTarget = new Map<string, { provider: string; model: string; owners: string[] }>();
   for (const workerId of workerIds) {
     if (!defined.has(workerId)) continue;
-    const model = resolveWorker(loaded, workerId).model;
-    const owners = byModel.get(model);
-    if (owners === undefined) byModel.set(model, [workerId]);
-    else owners.push(workerId);
+    const w = resolveWorker(loaded, workerId);
+    // `\n` cannot occur in either half — both are `shortStr` config values on
+    // one line — so this composes without an escaping rule.
+    const key = `${w.provider}\n${w.model}`;
+    const hit = byTarget.get(key);
+    if (hit === undefined) {
+      byTarget.set(key, { provider: w.provider, model: w.model, owners: [workerId] });
+    } else hit.owners.push(workerId);
   }
 
   /**
@@ -807,11 +839,42 @@ export async function assertModelsSupportToolCalls(
    * The host-reachable derivation exists for surfaces that genuinely run on the
    * host and say so: `doctor`, whose report carries `"vantage": "host"`.
    */
-  const baseUrl = loaded.config.llm.base_url;
-  const apiKey = process.env[loaded.config.llm.api_key_env] ?? "";
-
-  for (const [model, owners] of byModel) {
-    const result = await probeNativeToolCalls(baseUrl, apiKey, model, fetchImpl);
+  for (const { provider, model, owners } of byTarget.values()) {
+    /*
+     * THIS PROVIDER'S endpoint and THIS PROVIDER'S key (ISC-418).
+     *
+     * Both read through the shared resolvers rather than off `loaded.config.llm`
+     * — `relayViewForProvider` is the same projection the relay is built from,
+     * and `providerApiKeyEnv` is the same one `buildWorkerEnv` hands the worker.
+     * A gate that certified a provider with a different endpoint or a different
+     * credential than the worker will present is a gate that certifies nothing:
+     * it would pass on the fleet default and the worker would 401 on its first
+     * turn, which is exactly the shape ISC-425 found in `worker-env.ts`.
+     */
+    const baseUrl = relayViewForProvider(loaded.config, provider).llm.base_url;
+    const apiKey = process.env[providerApiKeyEnv(loaded.config, provider)] ?? "";
+    /*
+     * THIS PROVIDER'S deadline, and the third member of the set above rather
+     * than a fourth thing (D16, ISC-419).
+     *
+     * It is read through a shared resolver for the same reason the endpoint and
+     * the credential are: it is a property of ONE endpoint, and the gate must
+     * judge that endpoint on the terms the operator declared for it. The number
+     * this replaces was sized against oMLX COLD LOADS on the operator's own
+     * hardware; measured against a hosted catalogue it left the two
+     * largest-parameter models at 42.1s and 56.9s — the second inside the
+     * 60s ceiling by three seconds, host-side and unqueued, so both are floors.
+     * Through the relay, in a container, behind D14's one-concurrent-request
+     * tier, they cross it, and `up` exits non-zero with a `timeout` verdict.
+     *
+     * `undefined` — the ordinary case, and every fleet with no `providers` map —
+     * IS the default: it is passed straight into a parameter that has one. That
+     * is deliberate and is why the resolver does not resolve the default
+     * itself. `PROBE_TIMEOUT_MS` keeps exactly one home, a few hundred lines up,
+     * next to the docblock explaining the load it was measured against.
+     */
+    const timeoutMs = providerProbeTimeoutMs(loaded.config, provider);
+    const result = await probeNativeToolCalls(baseUrl, apiKey, model, fetchFor(provider), timeoutMs);
     if (result.ok) continue;
     /**
      * The exit-code split, and the ONLY place it is decided.

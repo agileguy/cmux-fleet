@@ -274,6 +274,240 @@ describe("no headless acceptance test needs provider spend or a cloud endpoint (
 });
 
 // ---------------------------------------------------------------------------
+// ISC-423 — ISC-140 restated once `llm.providers` gave a credential two doors
+// ---------------------------------------------------------------------------
+
+/**
+ * The same anti-criterion as ISC-140, re-derived because the ground moved.
+ *
+ * ## What ISC-140 bought, and exactly where it stops
+ *
+ * The guard above greps `test/e2e/ ** / *.test.ts` for a credential-suffixed
+ * identifier or a non-loopback `http(s)` URL. It is a good guard and it is
+ * still here. It answers ONE question — "does a file whose name ends in
+ * `.test.ts`, in one directory, contain a spend-shaped literal" — and this
+ * feature moved the answer away from that question in two directions.
+ *
+ * ## Direction one: the reachable set is bigger than the directory
+ *
+ * `test/e2e/` does not contain the suite; it contains the suite's ENTRY
+ * POINTS. Every e2e file imports `test/support/spawn-cli.ts`, and every one
+ * of them reaches `test/fixtures/` by path — `fake-pi.ts` and
+ * `scenarios/*.json` are named in all three. A providers-map `fleet.yaml`
+ * planted as a fixture is read by the suite and invisible to ISC-140's glob,
+ * and a fixture directory is the FIRST place someone would put one, because
+ * that is where every other shared input already lives.
+ *
+ * The scope below is therefore the three roots the headless suite draws on,
+ * at any extension. `src/` is deliberately NOT among them: the product's own
+ * schema default is `http://omlx.pifleet.internal:8000/v1`, and a guard that
+ * banned endpoint literals in production code would fire on the subject
+ * matter rather than the defect — the ISC-139 mistake, in a new file.
+ *
+ * ## Direction two: `api_key_env` is a second spelling for a credential
+ *
+ * `llm.providers.<name>.api_key_env` NAMES an environment variable, and
+ * `base_url` is an endpoint that may be a real vendor's. ISC-140's credential
+ * regex was written before that map existed, and it keys on the SUFFIX
+ * `API_KEY|SECRET|TOKEN`. `api_key_env: OPENAI_KEY` is a real credential for a
+ * real vendor and carries none of those suffixes; neither does `MISTRAL_AUTH`,
+ * nor `RALLY_APIKEY`, which is a live variable on the maintainer's own
+ * machine. Widening the suffix list is not the fix — it is the same guess one
+ * notch out, and the next real key name will miss it too.
+ *
+ * ## WHY THIS EARNS ITS OWN CRITERION AND IS NOT PEDANTRY. MEASURED.
+ *
+ * `require_native_tool_calls` DEFAULTS TO TRUE (`schema.ts`), and since
+ * ISC-418 the §5.9 gate probes each distinct `(provider, model)` PAIR rather
+ * than each model id — so the cost of an `up` now scales with the provider
+ * map. What stops the headless suite paying it is NOT the backend. In
+ * `up.ts`, `egressNetwork` is assigned from `loadedConfig.config.docker.
+ * network` for ANY loaded config, on any backend, and the gate at the bottom
+ * of `up` runs whenever `loadedConfig !== null && egressNetwork !== null`.
+ * `--backend headless` is nowhere in that condition.
+ *
+ * Measured on this branch rather than reasoned about, with a providers-map
+ * `fleet.yaml` and `up --backend headless`: the run printed the D10 hosted
+ * disclosure banner and then exited 3 with
+ *
+ *     the mandatory native-tool-call probe (SRD §5.9) did not settle whether
+ *     model "gpt-oss" emits native tool calls — oMLX unreachable at
+ *     https://api.spend-detector.invalid/v1/chat/completions: fetch failed
+ *
+ * That is a real host-side request to the provider's own `base_url`, from a
+ * HEADLESS `up`. Point the same block at a vendor that exists and it is a
+ * billable request per pair, per `up`, and the e2e suite calls `up` once per
+ * fleet. **The only thing standing between the headless suite and that bill
+ * is that no e2e test passes `--config` or writes a `fleet.yaml` into its rig
+ * cwd** — and `spawn-cli.ts`'s own docblock advertises the second of those as
+ * a supported pattern: "point `cwd` at their own rig directory and put a
+ * `fleet.yaml` there". The criterion is one `writeFile` from false.
+ *
+ * ## What this half does and does not buy, stated because the trade is real
+ *
+ * It grades LITERALS in the reachable set. It cannot classify an arbitrary
+ * environment-variable name — there is no syntactic difference between
+ * `ACCEPTANCE_TEST_KEY` (a fake this tree already uses) and `MYCORP_KEY` (a
+ * real credential for a company this list has never heard of), and inventing
+ * a naming convention for fixtures to obey would be a bigger imposition than
+ * the defect. So the key half is deliberately narrow: it names REAL INFERENCE
+ * VENDORS, in ISC-139's shape — match the defect, not the category.
+ *
+ * The general case is the RUNTIME half, in
+ * `test/integration/headless-no-spend.test.ts`, which removes the fuel
+ * instead of guessing the spelling: it re-runs this suite with every
+ * credential-shaped variable stripped from the environment. A test that reads
+ * a key through a name no list here anticipated fails there. Neither half
+ * subsumes the other — this one runs in milliseconds on every unit run and
+ * catches a planted literal before it is ever executed; that one costs a
+ * minute and catches what no regex can see.
+ */
+describe("no file the headless suite reaches names provider spend (ISC-423)", () => {
+  /**
+   * The roots the headless suite draws on. `test/e2e/` is the suite;
+   * `test/support/` and `test/fixtures/` are what it imports and what it
+   * loads by path, and a hazard planted in either is a hazard for this suite
+   * whichever suite put it there.
+   */
+  const ROOTS = ["test/e2e", "test/support", "test/fixtures"] as const;
+
+  /**
+   * Hosts that cannot be a paid endpoint, by construction rather than by
+   * convention.
+   *
+   * Loopback, RFC 1918 / 5737 / 3927 literals, and the RFC 2606 + RFC 6761
+   * reserved names — `.test`, `.example`, `.invalid`, `.localhost` and
+   * `example.{com,net,org}` — which the IANA guarantees will never resolve to
+   * anyone's server. Plus this project's own two internal names.
+   *
+   * A RELAXATION over ISC-140, which admits loopback alone, and it is
+   * deliberate: these roots are shared with `test/integration/`, whose
+   * fixtures legitimately name `tickets.example.test`. A rule those files
+   * cannot satisfy is a rule someone eventually deletes. The relaxation costs
+   * nothing that matters — every name it admits is unroutable — and the guard
+   * still refuses `ollama.com` and `inference.agileguy.ca`, which are the two
+   * live endpoints this repository's own test tree already names elsewhere.
+   */
+  const RESERVED_HOST = [
+    /^(?:127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?|localhost)$/,
+    /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|169\.254\.)/,
+    /^(?:203\.0\.113\.|198\.51\.100\.|192\.0\.2\.)/,
+    /\.(?:test|example|invalid|localhost)$/,
+    /^(?:.*\.)?example\.(?:com|net|org)$/,
+    /^(?:.*\.)?pifleet\.internal$/,
+    /^host\.docker\.internal$/,
+  ];
+
+  /**
+   * Environment-variable names belonging to REAL inference vendors.
+   *
+   * The vendor token must be followed by `_`, so this matches `OPENAI_KEY`
+   * and `MISTRAL_AUTH` — neither of which carries an ISC-140 suffix — while
+   * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` does not match at all, because `\b`
+   * does not fire between two word characters. Prose is unaffected: the
+   * pattern is upper-case and needs the underscore tail.
+   *
+   * `GOOGLE` and `CLAUDE` are deliberately ABSENT. `GOOGLE_APPLICATION_
+   * CREDENTIALS` is ADC, which `cloud.adc` exists to use and which costs
+   * nothing per call, and `CLAUDE_*` is the subject matter of a tool that
+   * drives coding agents. Banning either would repeat ISC-139's first draft.
+   */
+  const VENDOR_KEY =
+    /\b(?:OPENAI|ANTHROPIC|MISTRAL|COHERE|GROQ|DEEPSEEK|PERPLEXITY|REPLICATE|HUGGINGFACE|FIREWORKS|OPENROUTER|MOONSHOT|DASHSCOPE|TOGETHER|ANYSCALE|XAI|GEMINI|VERTEX|BEDROCK|AZURE_OPENAI|OLLAMA_CLOUD)_[A-Z0-9_]+\b/g;
+
+  /**
+   * A host this guard is able to JUDGE: a DNS name or an IP literal, and
+   * nothing else.
+   *
+   * The three things this rejects are all real and all present in the tree
+   * today — `http://<host>:<port>` in `ticket-server.ts`'s docblock,
+   * `` `http://${opts.hostname}` `` in the same file, and a bare `http://…`
+   * inside an elided example in `dockerfile-copy.ts`. None of them is an
+   * endpoint; they are a placeholder, an interpolation and an ellipsis.
+   *
+   * **This is the guard's principal blind spot and it is named rather than
+   * papered over.** An endpoint assembled at runtime —
+   * `` `https://${vendorHost}/v1` `` — has no literal host to judge, so this
+   * test cannot see it, and neither could ISC-140's. Widening the URL pattern
+   * does not help: the vendor name would be in a variable somewhere else in
+   * the file, with no `https://` next to it to find it by. That case belongs
+   * to the runtime half, which does not care how the URL was spelled because
+   * it takes the credential away instead.
+   */
+  const HOST_LITERAL =
+    /^(?:\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*)$/;
+
+  /** `https://user@api.example.com:443/v1` -> `api.example.com`. */
+  function hostOf(url: string): string {
+    const authority = url.replace(/^https?:\/\//, "").split(/[/?#]/)[0] ?? "";
+    const afterUserinfo = authority.slice(authority.lastIndexOf("@") + 1);
+    return afterUserinfo.replace(/:\d+$/, "").toLowerCase();
+  }
+
+  async function reachableFiles(): Promise<string[]> {
+    const out: string[] = [];
+    for (const root of ROOTS) out.push(...(await filesUnder(`${root}/**/*`)));
+    return out.sort();
+  }
+
+  /**
+   * The anti-vacuity gate, and it asserts more than "some files were found".
+   *
+   * ISC-140 already defends the zero-files case. The failure THIS scope can
+   * suffer is subtler and would be silent: a glob that resolves one root and
+   * quietly misses the other two still finds plenty of files, and the guard
+   * would report green over exactly the directories that were added to it.
+   * So every root must contribute.
+   */
+  test("the scope reaches all three roots the headless suite draws on", async () => {
+    const files = await reachableFiles();
+    expect(files.length).toBeGreaterThan(20);
+    for (const root of ROOTS) {
+      expect(
+        files.filter((f) => f.startsWith(`${root}/`)).length,
+        `no files found under ${root}/; the guard is pointing at nothing there`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  test("no reachable file names an endpoint that could bill someone", async () => {
+    const offenders: string[] = [];
+    for (const rel of await reachableFiles()) {
+      const text = await read(rel);
+      for (const url of text.match(/https?:\/\/[^\s"'`)\]},]+/g) ?? []) {
+        const host = hostOf(url);
+        if (!HOST_LITERAL.test(host)) continue;
+        if (RESERVED_HOST.some((re) => re.test(host))) continue;
+        offenders.push(`${rel}: ${host}`);
+      }
+    }
+    expect(
+      offenders,
+      `the headless suite reaches a file naming a routable endpoint ` +
+        `(${offenders.join("; ")}). It must run on an air-gapped machine with ` +
+        `no account attached — and since ISC-418 the §5.9 gate costs a request ` +
+        `per (provider, model) pair, so an endpoint reached from here is a bill.`,
+    ).toEqual([]);
+  });
+
+  test("no reachable file names a real inference vendor's credential variable", async () => {
+    const offenders: string[] = [];
+    for (const rel of await reachableFiles()) {
+      for (const name of (await read(rel)).match(VENDOR_KEY) ?? []) {
+        offenders.push(`${rel}: ${name}`);
+      }
+    }
+    expect(
+      offenders,
+      `the headless suite reaches a file naming a real vendor credential ` +
+        `(${offenders.join("; ")}). A fixture's \`api_key_env\` is a second door ` +
+        `to the same spend ISC-140 closed; name a variable that cannot resolve ` +
+        `to anyone's account.`,
+    ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ISC-74 — no FleetBackend implementation launches or signals a supervisor
 // ---------------------------------------------------------------------------
 

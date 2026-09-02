@@ -1,7 +1,12 @@
 import type { Command } from "commander";
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
-import { ConfigValidationError, loadConfig } from "../../config/load.ts";
+import {
+  ConfigError,
+  ConfigValidationError,
+  loadConfig,
+  resolveAllWorkers,
+} from "../../config/load.ts";
 import {
   kubeconfigScopeWarning,
   observerTuiEpochWarning,
@@ -30,6 +35,22 @@ export function register(program: Command): void {
       }
       try {
         const loaded = await loadConfig(opts.config);
+        /*
+         * ISC-402. Parsing is not validating.
+         *
+         * `loadConfig` proves the DOCUMENT is well-formed; it does not perform
+         * the worker -> role -> defaults merge, so every refusal that can only
+         * be seen after that merge was invisible here. `validate` printed `ok:`
+         * for a config `up` then refused — an undeclared provider, or a
+         * `model:` that decomposes to nothing — which is worse than not having
+         * the command, because the operator has been told the file is fine.
+         *
+         * `resolveAllWorkers` is the merge and nothing else: no Docker, no
+         * network, no filesystem beyond the briefing paths already resolved
+         * during the parse. It is the same function `up` calls first, so what
+         * passes here is exactly what `up` will accept.
+         */
+        resolveAllWorkers(loaded);
         // Non-fatal (SRD-OBSERVER-001 §6.2, §6.6) — a document that trips
         // these still validates; see `schema.ts` for why each is a warning
         // and not a refusal.
@@ -56,6 +77,15 @@ export function register(program: Command): void {
         // the JSON stream on stdout stays one object either way.
         for (const w of warnings) process.stderr.write(w);
       } catch (err) {
+        // A merge-time refusal carries no field path — it is one sentence
+        // naming the worker — so it becomes the same USAGE exit as a schema
+        // failure rather than escaping as an internal error (exit 8).
+        if (err instanceof ConfigError && !(err instanceof ConfigValidationError)) {
+          if (opts.json) {
+            console.log(JSON.stringify({ valid: false, errors: [{ path: "", message: err.message }] }, null, 2));
+          }
+          throw new CliError(err.message, EXIT.USAGE);
+        }
         if (err instanceof ConfigValidationError) {
           if (opts.json) {
             console.log(JSON.stringify({ valid: false, path: err.file, errors: err.issues }, null, 2));

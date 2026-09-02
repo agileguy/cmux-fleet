@@ -8,9 +8,9 @@
  * green CI run cannot be mistaken for container coverage.
  */
 
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig, type LoadedConfig } from "../../src/config/load.ts";
@@ -261,7 +261,59 @@ describe("toolchain baseline (ISC-33..37)", () => {
   }, PROBE_TIMEOUT);
 });
 
-describe("entrypoint models.json rendering (ISC-39, ISC-40)", () => {
+describe("entrypoint models.json rendering (ISC-39, ISC-40, ISC-407)", () => {
+  /**
+   * THE CREDENTIAL ARRIVES ON A MOUNT, NOT IN THE ENVIRONMENT (D8, §6.6).
+   *
+   * This block delivered `OMLX_API_KEY=test-key` as an env var and asserted it
+   * came back out of `models.json`. That stopped being the contract: the
+   * entrypoint reads `PIFLEET_LLM_API_KEY_FILE` and the environment read is
+   * GONE rather than demoted, so the old shape would have rendered an empty key
+   * and failed here.
+   *
+   * It is repaired by delivering the key the way a real run delivers it —
+   * `/secrets/<NAME>` at 0444 on a read-only mount — rather than by restoring an
+   * environment fallback to keep the assertion true. A fallback is the one fix
+   * that would make this test pass and Defect A come back.
+   *
+   * THIS FILE IS WHERE THAT DISTINCTION CAN ACTUALLY BE OBSERVED. Everything
+   * else exercising the entrypoint runs it as a script on the host; only here
+   * does it run as PID 1 in the real image, under the real read-only root, as
+   * uid 10001. So ISC-407's "no variable whose VALUE equals the key" is asserted
+   * here against a REAL container environment, which is the thing `docker
+   * inspect` would show, and not against a serialised env file that models it.
+   */
+  const SECRET_NAME = "OMLX_API_KEY";
+  const KEY = "test-key";
+  let secretsDir = "";
+  let extra: string[] = [];
+
+  beforeAll(async () => {
+    // `makeDaemonScratch`, NOT `mkdtemp(tmpdir())`, and the difference is the
+    // whole reason `doctor` has a mount-visibility check. On macOS the daemon
+    // runs in a VM that shares only declared directories: `os.tmpdir()` is not
+    // one of them, so a bind mount from there comes up as an EMPTY directory
+    // with exit 0. Written the obvious way first, this test failed with the
+    // entrypoint's own exit 73 — "is not an existing regular file" — which is
+    // the refusal working correctly on a mount that silently delivered nothing.
+    secretsDir = await makeDaemonScratch("pifleet-image-secrets");
+    const f = join(secretsDir, SECRET_NAME);
+    // The RAW value and nothing else — `writeWorkerSecretFiles` writes no
+    // trailing newline, and the entrypoint's `$(cat ...)` strips one anyway, so
+    // a newline here would hide a real difference between the two ends.
+    await writeFile(f, KEY);
+    // 0444 is what `materialize.ts` writes and what ISC-408 names. The mount
+    // point itself stays root-owned on macOS (the daemon's VM squashes file
+    // ownership but not the mount point), which is exactly why the FILE has to
+    // be world-readable rather than merely owner-readable — uid 10001 opens it.
+    await chmod(f, 0o444);
+    extra = ["-v", `${secretsDir}:/secrets:ro`];
+  });
+
+  afterAll(async () => {
+    if (secretsDir) await rm(secretsDir, { recursive: true, force: true });
+  });
+
   // PIFLEET_WORKER_BIN is the entrypoint's documented test seam: pi itself
   // cannot print the rendered file, so the probe swaps in /bin/sh AFTER the
   // rendering step has run — same code path, observable output.
@@ -269,12 +321,12 @@ describe("entrypoint models.json rendering (ISC-39, ISC-40)", () => {
     PIFLEET_LLM_PROVIDER: "omlx",
     PIFLEET_LLM_BASE_URL: "http://omlx.pifleet.internal:8000/v1",
     PIFLEET_LLM_MODELS: "ModelA,ModelB",
-    OMLX_API_KEY: "test-key",
+    PIFLEET_LLM_API_KEY_FILE: `/secrets/${SECRET_NAME}`,
     PIFLEET_WORKER_BIN: "/bin/sh",
   };
 
   it("renders models.json from env into a path that survives the read-only root", async () => {
-    const r = await runInImage(["-c", 'cat "$HOME/.pi/agent/models.json"'], { env });
+    const r = await runInImage(["-c", 'cat "$HOME/.pi/agent/models.json"'], { env, extra });
     expect(r.code).toBe(0);
     const doc = JSON.parse(r.stdout) as {
       providers: Record<string, { baseUrl: string; apiKey: string; models: { id: string }[] }>;
@@ -285,9 +337,42 @@ describe("entrypoint models.json rendering (ISC-39, ISC-40)", () => {
     expect(omlx.models.map((m) => m.id)).toEqual(["ModelA", "ModelB"]);
   }, PROBE_TIMEOUT);
 
+  /**
+   * ISC-407, measured in a real container rather than modelled on the host.
+   *
+   * `env` in the container is the closest thing a test can get to what `docker
+   * inspect` reports, and the assertion is on the VALUE, not on any variable
+   * name: renaming the key out of an assertion's way is precisely the move
+   * ISC-31 was passing by, and it would pass a name-based check unchanged.
+   *
+   * The second half is what stops this being satisfiable by breaking the
+   * feature. A container that renders no key at all would trivially have no key
+   * in its environment, so the SAME container is asked for both facts at once:
+   * the key is absent from the environment AND present in `models.json`. Split
+   * across two runs, deleting the credential channel would turn one green and
+   * the other red; together, nothing passes both except the intended design.
+   */
+  it("the key is in models.json and in no environment variable (ISC-407)", async () => {
+    const r = await runInImage(
+      ["-c", 'env; echo "--- MODELS ---"; cat "$HOME/.pi/agent/models.json"'],
+      { env, extra },
+    );
+    expect(r.code).toBe(0);
+    const [envDump = "", modelsDump = ""] = r.stdout.split("--- MODELS ---");
+    expect(envDump).not.toContain(KEY);
+    // The pointer itself IS expected in the environment — it is a path, and
+    // that is the whole of D8. Asserting it here keeps the test honest about
+    // what it permits rather than implying /secrets left no trace.
+    expect(envDump).toContain(`PIFLEET_LLM_API_KEY_FILE=/secrets/${SECRET_NAME}`);
+    const doc = JSON.parse(modelsDump) as {
+      providers: Record<string, { apiKey: string }>;
+    };
+    expect(doc.providers["omlx"]!.apiKey).toBe(KEY);
+  }, PROBE_TIMEOUT);
+
   it("under a bare read-only root the file lands on the /tmp tmpfs", async () => {
     // No volume at /home/pi/.pi/agent here, so HOME must have been re-pointed.
-    const r = await runInImage(["-c", 'echo "HOME=$HOME"; ls "$HOME/.pi/agent"'], { env });
+    const r = await runInImage(["-c", 'echo "HOME=$HOME"; ls "$HOME/.pi/agent"'], { env, extra });
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("HOME=/tmp/pi-home");
     expect(r.stdout).toContain("models.json");
@@ -296,6 +381,7 @@ describe("entrypoint models.json rendering (ISC-39, ISC-40)", () => {
   it("an empty models list renders no provider at all", async () => {
     const r = await runInImage(["-c", 'test ! -e "$HOME/.pi/agent/models.json" && echo absent'], {
       env: { ...env, PIFLEET_LLM_MODELS: "" },
+      extra,
     });
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("absent");

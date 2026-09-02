@@ -79,6 +79,10 @@ import {
 } from "../config/load.ts";
 import { renderWorker } from "../config/render.ts";
 import { planCredential } from "../security/adc.ts";
+// The ONE derivation of "does this worker's context leave the machine". `up.ts`
+// prints its banner from the same function; ISC-417 is the assertion that no
+// second one exists. See the `disclosure` field below.
+import { disclosureFor } from "../security/disclosure.ts";
 import { makeWorkerAccessible, makeWorkerReadable } from "../container/mounts.ts";
 import {
   EXIT,
@@ -137,6 +141,42 @@ export class MaterializeError extends Error {
       cause instanceof Error ? { cause } : undefined,
     );
     this.name = "MaterializeError";
+  }
+}
+
+/**
+ * There is secret material to deliver and no mount to deliver it through.
+ *
+ * A BUG IN PIFLEET, not a config mistake, and typed that way deliberately: no
+ * `fleet.yaml` an operator can write reaches this state. It is reachable only
+ * by `config/render.ts` and this module disagreeing about whether the worker's
+ * secret store is mounted — the exact divergence D8 removed the predicates to
+ * prevent, caught if it is ever re-introduced on one side alone.
+ *
+ * `EXIT.INTERNAL` for the reason the run-root comparison above uses it: an
+ * honest exit code for a defect the operator cannot fix is worth more than a
+ * `ConfigError` that sends them looking through their own file for a line that
+ * is not wrong.
+ *
+ * The message names the COUNT of files rather than any name in them. A name
+ * here would be `llm.api_key_env` or an operator grant, and neither belongs in
+ * a diagnostic that a `report` may quote back; the count is enough to tell a
+ * reader which side of the seam moved.
+ */
+export class SecretStoreNotMountedError extends Error {
+  readonly exitCode = EXIT.INTERNAL;
+  constructor(
+    readonly workerId: string,
+    readonly fileCount: number,
+    readonly expectedMount: string,
+  ) {
+    super(
+      `worker "${workerId}" has ${fileCount} secret file(s) to deliver but its rendered ` +
+        `docker argv carries no ${expectedMount} — the store and its mount have gone out ` +
+        `of step, so the worker would start with a well-formed pointer into an empty ` +
+        `directory; this is a pifleet bug, not a fleet.yaml mistake`,
+    );
+    this.name = "SecretStoreNotMountedError";
   }
 }
 
@@ -935,14 +975,26 @@ export async function materializeWorkerInputs(
      * with an extra layer of plausibility on top. Writing the values first
      * means the pointer never exists before the thing it points at.
      *
-     * Gated on `w.secrets.length > 0`, which is the IDENTICAL predicate
-     * `render.ts` uses to decide whether to emit the `-v`. Two conditions that
-     * merely agree today would eventually not, and the failure is silent in
-     * the usual direction: Docker creates a missing bind-mount source rather
-     * than refusing, so a mount without a directory yields an empty `/secrets`
-     * and a worker that cannot explain itself.
+     * UNGATED UNDER D8, and the gate that used to stand here is gone from BOTH
+     * sides rather than widened on this one.
+     *
+     * It read `if (w.secrets.length > 0)` — the IDENTICAL predicate `render.ts`
+     * spelled out a second time to decide whether to emit the `-v`. Two
+     * conditions that merely agree today would eventually not, and the failure
+     * is silent in the usual direction: Docker creates a missing bind-mount
+     * source rather than refusing, so a mount without a directory yields an
+     * empty `/secrets` and a worker that cannot explain itself.
+     *
+     * D8 turned that from a latent divergence into the common case. The Class 1
+     * provider key is delivered as a file in this store and NO worker requests
+     * it, so `w.secrets` is empty for most workers that now hold one. `render.ts`
+     * therefore emits the mount unconditionally and this writes the directory
+     * unconditionally, which is not two predicates agreeing — it is no
+     * predicate at all, and nothing that does not exist can drift.
+     *
+     * The guard below is the part that survives a future edit to either side.
      */
-    if (w.secrets.length > 0) {
+    {
       await establishing(`the secret files for ${workerId}`, async () => {
         await refuseSymlinkDestination(paths.secretsDir);
         for (const secret of envPlan.secretNames) {
@@ -981,6 +1033,39 @@ export async function materializeWorkerInputs(
       });
     }
 
+    /*
+     * THE SEAM, RE-CHECKED AT THE ARGV BOUNDARY — and this is the control that
+     * outlives any future edit to the two blocks above.
+     *
+     * Deleting a predicate makes divergence impossible TODAY. It does not stop
+     * someone re-introducing one on a single side tomorrow, and the whole
+     * lesson of this file's header is that a mount and its source going out of
+     * step does not fail — it succeeds wrongly. So the invariant is asserted
+     * rather than assumed, and it is asserted against the ARGV THAT WILL
+     * ACTUALLY BE RUN rather than against a re-derived copy of `render.ts`'s
+     * reasoning. That is this module's Rule 1 — "derived from `renderWorker`,
+     * never re-derived" — applied to the one mount that carries a credential.
+     *
+     * The DANGEROUS DIRECTION is the one checked: material to deliver, with no
+     * mount to deliver it through. A worker in that state starts, reads a
+     * well-formed `PIFLEET_LLM_API_KEY_FILE` or `<NAME>_FILE`, and fails inside
+     * its first authenticated call, nowhere near the cause. The reverse — a
+     * mount whose store holds nothing — is harmless and stays legal, because
+     * the directory is now written for every worker and a keyless fleet with no
+     * grants is a supported setup rather than a defect.
+     *
+     * It runs BEFORE the env file is written, so a fleet that trips it has no
+     * pointer on disk at all. That is the same ordering argument the block
+     * above makes, extended one step: the pointer never exists before either
+     * the file it names OR the mount that carries it.
+     */
+    if (envPlan.secretFiles.length > 0) {
+      const mount = `${paths.secretsDir}:${SECRETS_MOUNT}:ro`;
+      if (!rendered.docker.includes(mount)) {
+        throw new SecretStoreNotMountedError(workerId, envPlan.secretFiles.length, mount);
+      }
+    }
+
     await establishing(`the env file for ${workerId}`, async () => {
       await refuseSymlinkDestination(paths.envFile);
       await writeWorkerEnvFile(paths.envFile, envPlan);
@@ -999,7 +1084,8 @@ export async function materializeWorkerInputs(
        */
       process.stderr.write(
         `pifleet: ${envPlan.apiKeyEnvName} is not set in this environment, so ${workerId}'s ` +
-          `env file carries no oMLX key; the worker will only reach a server that needs none\n`,
+          `secret store carries no provider key and its env file carries no pointer to one; ` +
+          `the worker will only reach a server that needs none\n`,
       );
     }
     if (envPlan.secretNames.length > 0) {
@@ -1080,6 +1166,28 @@ export async function materializeWorkerInputs(
        */
       non_credential_secrets: envPlan.nonCredentialSecretNames,
       /*
+       * The Class 1 key's NAME, so the harvest sweep can reach a credential the
+       * grant list deliberately does not claim (SRD D15, ISC-421).
+       *
+       * A PLAIN READ, and this is the fifth field on this record placed here by
+       * the same argument — `credential` records `planCredential`'s output,
+       * `secret_names` records `WorkerEnvPlan.secretNames`, `pane_mode` records
+       * `resolveWorker`'s, `disclosure` records `disclosureFor`'s. `up` resolves
+       * config in a cwd and environment the harvester does not share, and the
+       * decision this carries folds the provider's `hosted` flag with whether
+       * the key was actually in the host environment. Re-deriving either half at
+       * harvest time would mean resolving `fleet.yaml` from the harvester's cwd,
+       * which `harvest/patterns.ts` forbids for the reason that applies here
+       * unchanged: a run outlives the config that produced it.
+       *
+       * `envPlan.providerKeyName` and not `envPlan.apiKeyEnvName`. The latter is
+       * always populated — it is the diagnostic name for the `missingApiKey`
+       * message — so copying it would record a key for every keyless and every
+       * self-hosted run, and the harvester would report an unresolvable
+       * credential on all of them.
+       */
+      provider_key_name: envPlan.providerKeyName,
+      /*
        * The pane mode travels with the argv for the third time on this record,
        * and for the third instance of one reason: `up` resolved it in a cwd and
        * environment the detached supervisor does not share.
@@ -1094,6 +1202,52 @@ export async function materializeWorkerInputs(
        * failure names `pane_mode`.
        */
       pane_mode: w.paneMode,
+      /*
+       * The disclosure row, recorded so a harvested run can be ASKED whether
+       * this worker's context crossed to a vendor (SRD §7.3, ISC-416).
+       *
+       * ## This is a SPELLING MAP and it must stay one
+       *
+       * `disclosureFor` is the one function that decides whether a worker's
+       * context leaves the machine, and `up.ts` prints its banner from the same
+       * call. ISC-417 asserts the banner and this record name the same set of
+       * workers — so every value below is a plain read from the row, and any
+       * expression on a right-hand side here would be a SECOND derivation of a
+       * fact the banner derived once. The two would agree until the first edit
+       * that touched only one, and then disagree silently, in the direction
+       * where the operator is told nothing about a worker already talking to a
+       * vendor. That is the failure this criterion exists to make impossible,
+       * and it is reachable from here and nowhere else.
+       *
+       * ## `null` is an ANSWER, not a skip
+       *
+       * `disclosureFor` returns `null` for a worker whose provider is not
+       * `hosted: true` — every local provider, and every flat pre-D7 fleet,
+       * whose §6.1 shorthand has no `hosted` field to be true. Writing that
+       * `null` is what makes the record's silence a recorded decision rather
+       * than a field somebody forgot: a harvest reading `null` knows the
+       * question was asked and answered.
+       *
+       * ## Why `w` and not a re-resolution
+       *
+       * `w` is `resolveWorker`'s output, the same struct `render.ts` and
+       * `buildWorkerEnv` read in this scope — the identical discipline
+       * `pane_mode` above keeps. `up.ts` calls `disclosureFor` with the worker
+       * it resolved from the same loaded config, so the two calls differ in
+       * nothing.
+       */
+      disclosure: ((row) =>
+        row === null
+          ? null
+          : {
+              worker_id: row.workerId,
+              role: row.role,
+              provider: row.provider,
+              isolation: row.isolation,
+              repo: row.repo,
+              cloud_access: row.cloudAccess,
+              secret_names: row.secretNames,
+            })(disclosureFor(loaded, w)),
     };
     if (opts.writeLaunchRecord === true) {
       await establishing(`the launch record for ${workerId}`, async () => {
