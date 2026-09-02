@@ -4396,6 +4396,12 @@ describe("a declared-but-unused provider creates nothing (ISC-410)", () => {
         .sort();
       expect(readied).toEqual(USED.map((p) => providerNetworkName(NETWORK, p)).sort());
     },
+    // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
+    // measured idle is 1965 ms (bun printed the per-test figure when this case
+    // failed under the Object.keys mutation), 2.23 s wall for a filtered
+    // single-test run including module load. Not reduced, for the reason every
+    // ceiling in this file keeps 90_000: the derived value is the FLOOR the
+    // audit checks against, not the value shipped.
     90_000,
   );
 });
