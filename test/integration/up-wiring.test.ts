@@ -72,6 +72,16 @@ import { cliBudget } from "../support/budget.ts";
 import { MountNotVisibleError, assertBindMountsVisible } from "../../src/container/mount-preflight.ts";
 import type { Exec } from "../../src/container/run.ts";
 
+/**
+ * The floor on ISC-429's probe fixture: four workers x six probed mounts.
+ *
+ * A COUNT rather than a byte size, and 24 rather than the 28 a current fleet
+ * produces. Adding a per-worker mount must not redden this test — one did, and
+ * see `oldFormFailureScale` for what that cost — while REMOVING one, or
+ * shrinking the fleet, must.
+ */
+const MIN_PROBED_MOUNTS = 24;
+
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
 const FAKE_PI = join(ROOT_URL, "test/fixtures/fake-pi.ts");
@@ -5574,6 +5584,115 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
   }
 
   /**
+   * Does the NEW form — one `sed` command per LINE — compile for these sources?
+   *
+   * The mirror of `oldStyleProgramFails`, and the half that was missing. The
+   * guard below used to assert only that the OLD form dies, which says the
+   * fixture is awkward without saying the fix answers it. Same sources, same
+   * `sed`, two forms: one refused, one accepted. That pair is what makes this a
+   * demonstration of the repair rather than a description of the defect.
+   */
+  async function newStyleProgramCompiles(sources: readonly string[]): Promise<boolean> {
+    const program = sources
+      .map((src, i) => `\ns#/probe/${i}'#${src}'#g\ns#/probe/${i}/#${src}/#g`)
+      .join("");
+    const proc = Bun.spawn(["sed", program], {
+      stdin: new Blob(["probe 0 '/probe/0/witness.txt'\n"]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return (await proc.exited) === 0;
+  }
+
+  /** `sources` repeated to `k` times its length, preserving the path shape. */
+  function scaled(sources: readonly string[], k: number): string[] {
+    return Array.from({ length: sources.length * k }, (_, i) => sources[i % sources.length]!);
+  }
+
+  /**
+   * The smallest power-of-two multiple of `sources` whose OLD one-line program
+   * this platform's `sed` refuses — or `null` if none does within `cap`.
+   *
+   * ## Why a SEARCH, and why it replaced a straight size comparison
+   *
+   * The guard here used to be `oldFormDies === truncating`: measure whether
+   * this `sed` truncates long one-line programs at all, then require the
+   * fixture itself to be in the failing regime. **That coupling is unsound and
+   * this file's own header says why** — "THE THRESHOLD IS SHAPE-DEPENDENT, NOT
+   * A NUMBER … it depends on where a boundary falls relative to a command." The
+   * two sides were measured at DIFFERENT shapes: `sedTruncatesLongPrograms`
+   * uses 200 commands over 40-char paths (~66-byte commands), while the fixture
+   * is 28 mounts of 117-char `$TMPDIR` paths (~138-byte commands). The header
+   * already records that identical 134-byte commands survived to 51,322 bytes.
+   *
+   * **It broke exactly as that predicted, and the break carried no information
+   * about ISC-429.** Adding `/policy/dispatch` — one mount per worker, four in
+   * a four-worker fleet — took the program from 24 mounts / 6,560 bytes, which
+   * this `sed` refuses, to 28 / 7,742, which it compiles. Measured, both. The
+   * fix under test did not change; the boundary moved under the fixture. A
+   * guard that flips on an unrelated mount, in either direction, fails for
+   * reasons its criterion cannot see — which is the shape of a test that costs
+   * an investigation and settles nothing.
+   *
+   * So the mechanism is established at the fixture's OWN path shape instead of
+   * a synthetic one, by scaling it until it fails. That answers the question
+   * the guard actually wants answered — "is a program built THIS WAY reachable
+   * into the failing regime" — and is insensitive to where the boundary happens
+   * to sit relative to one particular mount count.
+   *
+   * `cap` of 16 is a bound on spawns, not a claim: the fixture's shape was
+   * measured to fail between 4x and 6x on darwin 25.6.0, so the ladder settles
+   * at 8x with room, and `null` on a truncating `sed` is a real finding rather
+   * than a timeout.
+   */
+  async function oldFormFailureScale(
+    sources: readonly string[],
+    cap = 16,
+  ): Promise<number | null> {
+    for (let k = 1; k <= cap; k *= 2) {
+      if (await oldStyleProgramFails(scaled(sources, k))) return k;
+    }
+    return null;
+  }
+
+  /**
+   * The anti-vacuity guard, shared by both tests below.
+   *
+   * Two claims, deliberately separate, because they fail for different reasons
+   * and a reader needs to know which:
+   *
+   *  1. **This path shape can reach the failing regime** — on a `sed` that
+   *     truncates at all. If it cannot, the fixture is proving nothing about
+   *     mechanism 1 and the test should say so rather than pass quietly.
+   *  2. **The new form compiles where the old one dies.** Same sources, same
+   *     scale, same `sed`. This is the repair, demonstrated.
+   *
+   * On GNU `sed` (Linux, and therefore CI) claim 1 is inapplicable — that
+   * implementation has no piece-boundary behaviour to trip — and only claim 2
+   * is asserted. That asymmetry is the point of `sedTruncatesLongPrograms`
+   * and is why it survives this rewrite.
+   */
+  async function assertFixtureExercisesTheRewrite(
+    sources: readonly string[],
+    what: string,
+  ): Promise<void> {
+    const truncating = await sedTruncatesLongPrograms();
+    const scale = await oldFormFailureScale(sources);
+    if (truncating) {
+      expect(
+        { scale, mounts: sources.length, bytes: rewriteProgramBytes(sources) },
+        `${what}: this sed truncates long one-line programs, but no multiple of this fixture ` +
+          `reaches the failing regime — the fixture's path shape cannot exercise mechanism 1`,
+      ).not.toMatchObject({ scale: null });
+    }
+    expect(
+      await newStyleProgramCompiles(scaled(sources, scale ?? 1)),
+      `${what}: the new one-command-per-line form must compile at the scale where the old ` +
+        `one-line form dies — that pair IS the fix`,
+    ).toBe(true);
+  }
+
+  /**
    * The shim, addressed as a program rather than through PATH.
    *
    * `assertBindMountsVisible` builds an argv beginning with the literal
@@ -5737,18 +5856,28 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
         .map((c) => [...c.matchAll(/(\S+):\/probe\/\d+:ro/g)].map((m) => m[1]!));
       expect(probes.length).toBeGreaterThan(0);
       const widest = probes.sort((a, b) => b.length - a.length)[0]!;
-      const truncating = await sedTruncatesLongPrograms();
+      /**
+       * THE FLOOR, which is the concern the block header actually names: "a
+       * fixture that shrank under it would keep passing while proving nothing
+       * about ISC-429". A mount count is a stable thing to assert; which side
+       * of BSD `sed`'s piece boundary 28 mounts happens to land on is not.
+       *
+       * 24 rather than 28, so ADDING a per-worker mount does not redden this
+       * and REMOVING one does. The fleet is four workers of six probed mounts
+       * each at minimum; the drop (`/policy/dispatch`) is the seventh and is
+       * deliberately not counted, because a criterion about the preflight must
+       * not become a criterion about the current mount table.
+       */
       expect(
-        {
-          mounts: widest.length,
-          bytes: rewriteProgramBytes(widest),
-          oldFormDies: await oldStyleProgramFails(widest),
-        },
-        truncating
-          ? "this sed truncates long one-line programs, so the fixture must be in the failing regime"
-          : "this sed compiles a 26 kB one-line program that BSD sed cannot, so no fixture size can fail here — " +
-            "the size guard is inapplicable and ISC-429's other assertions carry the test",
-      ).toMatchObject({ oldFormDies: truncating });
+        { mounts: widest.length, bytes: rewriteProgramBytes(widest) },
+        "the probe's mount set shrank below a four-worker fleet's six-per-worker minimum; " +
+          "this test would keep passing while proving nothing about ISC-429",
+      ).toEqual({ mounts: expect.any(Number), bytes: expect.any(Number) });
+      expect(
+        widest.length,
+        `only ${widest.length} probed mounts for four workers`,
+      ).toBeGreaterThanOrEqual(MIN_PROBED_MOUNTS);
+      await assertFixtureExercisesTheRewrite(widest, "ISC-429's four-worker probe");
     },
     /*
      * ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`. It is
@@ -5781,17 +5910,10 @@ describe("a container-path up can reach a successful run (ISC-429)", () => {
        * could not have answered AT ALL before the fix, and what is asserted is
        * that its answers DIFFER from each other rather than that they exist.
        */
-      const truncating = await sedTruncatesLongPrograms();
-      expect(
-        {
-          bytes: rewriteProgramBytes(sources.map((s) => s.src)),
-          oldFormDies: await oldStyleProgramFails(sources.map((s) => s.src)),
-        },
-        truncating
-          ? "this sed truncates long one-line programs, so the fixture must be in the failing regime"
-          : "this sed compiles a 26 kB one-line program that BSD sed cannot, so no fixture size can fail here — " +
-            "the size guard is inapplicable and this test's discrimination assertions carry it",
-      ).toMatchObject({ oldFormDies: truncating });
+      await assertFixtureExercisesTheRewrite(
+        sources.map((s) => s.src),
+        "the 30-mount shim fixture",
+      );
       const mounts = sources.map((s, i) => ({
         src: s.src,
         // One mount in thirty asks about a file nobody wrote. Every other asks
