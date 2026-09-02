@@ -3,11 +3,11 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 412/421
+progress: 412/449
 retired: 2
 mode: build
 started: 2026-07-27
-updated: 2026-09-01
+updated: 2026-09-02
 ---
 
 # cmux-fleet — Ideal State Artifact
@@ -822,6 +822,75 @@ the root-cause classification; this table is the index.
 | K-end-to-end | The full `up` → container → dispatch → settle → harvest chain and the proofs needing a real run | ISC-74, 119, 141, 147, 290 | C, D, E, F | no |
 
 ## Decisions
+
+- **2026-09-02 — SRD-TUI-DISPATCH's four OPEN decisions taken at their recommendations, and its
+  three blocking questions ANSWERED rather than deferred (ISC-431..ISC-458).** The document was
+  commissioned as a scope, and it put D2, D6, D9 and D12 to the owner and declared Q8 *"blocks the
+  design as specified"*. The instruction was to implement it. Deferring the four would have shipped
+  nothing; deferring Q8 would have shipped a worker that one mis-stage takes out of service.
+
+  **D2 = NO SURFACE ID, as recommended.** `docker attach --detach-keys=ctrl-]` means detach is one
+  keypress pifleet cannot observe, after which `paneKeystrokes` would type a markdown brief LINE BY
+  LINE into a host shell — outside every containment boundary, with no audit row and exit code 0.
+  Every guard available for it is weaker than the harm, and it is additionally a cmux-only design
+  wearing a general name: an adopted terminal in Terminal.app or over ssh yields no id at all, so
+  half the mode's users would get a refusal whose sentence says "no surface id" while the other half
+  get typing. That is ERRATUM 4's *"headless had been standing in for no pane exists"* conflation,
+  one level down. **The cost is real and is the operator's:** they lose the thing they did by hand
+  on 2026-09-02, work arriving in the pane without them typing it. §9 Q4 is the path that might
+  return it without the hazard, and it stays open.
+
+  **D6 = A REAL EPOCH, as recommended, through a new `stage` verb.** The refusal it routes around is
+  spelled `if (client === null)` PRECISELY so that deleting it fails to compile, so the verb is added
+  beside it rather than the guard being relaxed. **What this buys is a check that stops passing
+  vacuously**: `harvest/outbox.ts` refuses a result whose envelope epoch differs from the inbox
+  record's, and today a `tui` worker carries 0 on both sides so the gate is satisfied by an accident.
+  **What it costs is the first way this route can FAIL that gate** — the drop file, the inbox record
+  and the rendered prompt must carry the same epoch or a correct answer is refused, which is the
+  2026-08-30 regression `supervisor/index.ts:2289-2295` records in full.
+
+  **D9 = RECORD THE ATTACH CHILD, as recommended.** The pid is in scope at `up.ts:2568` and
+  discarded; `{pid, started}` makes "this terminal is still the worker's" checkable at the same
+  strength as every other liveness claim in the fleet. **It is a PARTIAL guard and must not be
+  described as more:** it catches a clean detach and a crashed terminal, and misses a re-attach from
+  elsewhere, a pane respawned onto a different program, and a second concurrent attach. Under D2 it
+  is a courtesy. Under a reversal of D2 it would be the primary safety control and is not strong
+  enough to be one — which is itself an argument for D2.
+
+  **D12 = DEFECT B CLOSES AS A CONSEQUENCE, as recommended.** A settle with no epoch has nothing to
+  write a task record under, and `wait` reads task records. Repairing it independently means
+  inventing a second identity for a turn, which is the two-spellings-of-one-fact hazard
+  `harvest/layout.ts:100-103` records as ISC-345's finding. **The cost: the backend-managed `tui`
+  route keeps a dead settle path** until someone backports the verb, and that path is now labelled
+  in place so nobody reads it as live.
+
+  **Q8 (cancellation) = ANSWERED: a `cancel` that RELEASES, not a `settle` that completes.** The
+  SRD called this blocking and had no answer; the answer turns out to be one method, because
+  `EpochManager` already separates the two facts it needs. `cancel(taskId, attemptId)` refuses
+  unless `live` matches the NAMED pair — cancelling "whatever is live" would let a cancel race a
+  real dispatch — refuses a `started` epoch (that is `abort`'s job), then clears `live` and DELETES
+  `attempts[key]` while leaving `last_accepted_epoch` advanced. **It appends nothing to `completed`,
+  and that is the whole decision:** a settled task pushes a `completed` row, and a later different
+  attempt against that `task_id` would then be refused `already_completed` — so cancel-fix-restage,
+  which is the exact motion an operator makes after a typo, would be refused by the release
+  mechanism itself.
+
+  **Q1 (deadline) = ANSWERED: it starts at the TRIGGER, and is documented approximate.** The only
+  observable is transcript growth, and growth after a stage could be the staged task or the
+  operator's own unrelated prompt. Nothing separates them, so the code says so rather than implying
+  a precision it does not have. Starting it at the stage was rejected on the SRD's own example: a
+  20-minute task staged before lunch would be `timed_out` before it begins.
+
+  **Q9 (`attempt_id`) = ANSWERED: derived from the task file's CONTENT.** The single-task `dispatch`
+  path falls back to `randomUUID()`, which would give the staged route no dedup at all — ISC-440
+  would fail while ISC-439 passed, which is the shape of a feature that looks delivered. Content
+  rather than `(task_id, run_id)` because an EDITED file is a different task and must allocate
+  fresh; `--auto`'s `auto:${spec.id}` is the same idea keyed on the list entry.
+
+  **NOT TAKEN, and left where the SRD left them:** Q2 (enumerating a container's attached clients),
+  Q3 (surface-id stability across a workspace rebuild), Q4 (a container-side trigger — the
+  highest-value question in the table), Q5 (`paneKeystrokes` against a shell), Q7 (the audit file's
+  provenance). None blocks the build; Q4 blocks the removal of D2's cost.
 
 - **2026-08-24 — `export_html` STAGES INSIDE THE RUN DIRECTORY and the CLI places the file; it does
   NOT gain an allowlist of permitted roots (ISC-276).** Owner ruling, taken because ISC-276's own note
@@ -3858,3 +3927,44 @@ and the second is what is true.
 - [x] ISC-428: the egress policy authorizes a hosted upstream by NAME while the relay dials the resolved ADDRESS, and both are true of the same run. *Probe: `egress.allow` carrying `{host: <name>, port}` admits a relay whose target is the literal; removing the name from `allow` refuses it, and an `allow` naming only the literal does NOT admit it.* This is the load-bearing half of D9's cost: the gate's property weakens from "the operator authorized this exact address" to "the operator authorized this name, and the fleet recorded what it resolved to", and the third clause of the probe is what proves the weakening is bounded rather than open. (D9, §6.7.) **[CLOSED 2026-09-02.]** **§6.7's claim that this is "a change of input, not of mechanism" is half true, and the false half was load-bearing.** The mechanism half is right — `normalizeHost` and `decide` already match on names, and NOT ONE LINE of `egress.ts` changed. But the input was not available to change: `assertTargetsAllowed` judged `t.host`, which under D9 IS the resolved literal, so a name-carrying `egress.allow` met a literal-carrying target at default-deny and **D9 did not work at all** — measured, before anything was written: `relay: refusing to forward ollama -> 34.36.183.157:443 — the egress policy denies it (rule: default-deny)`. A `RelayTarget` had one host serving as both the thing dialled and the thing judged, and D9 is precisely the case where those diverge. `RelayTarget` gains an optional `policyHost` and the policy judges `t.policyHost ?? t.host` — **`??` and not `||`, reasoned in place**: the fallback must trigger on ABSENCE, never on emptiness, or a future producer stamping `""` silently reverts a target to being judged on the address it dials. Deliberately NOT added to `formatRelayTarget`, so the drift key is unchanged: drift asks what a relay FORWARDS, and authorization is re-checked from config on every `up`. The refusal names what was JUDGED as well as what is dialled, because a message showing only the address sends the operator to add that address to `egress.allow` — an entry that can never match, on the one path a fleet cannot start without. **THE THIRD CLAUSE IS THE SOLE DETECTOR, proved rather than argued.** Widening the comparison to fall back to the literal leaves clauses 1 and 2 GREEN and reddens only *"an egress.allow naming ONLY the resolved literal does NOT admit it"* and the message probe — 3 pass, 2 fail, reproduced independently. Without that clause the criterion would have passed against a policy quietly matching either form, and D9's stated cost — *"the operator authorized this name"* — would have become *"or the address, whichever hits"*. **Also proved live in the same run as ISC-426:** the relay stood up and was ADMITTED with `egress.allow` naming `ollama.com` only, while its target dialled `34.36.133.15`. Restores checksum-verified. (D9, §6.7.)
 - [x] ISC-429: a container-path `up` against `up-wiring.test.ts`'s docker shim can reach a SUCCESSFUL run, rather than always refusing at `assertBindMountsVisible`. *Probe: a container-path `up` on the shim exits 0; today every one exits 3.* **[CLOSED 2026-09-02.]** **TWO mechanisms, and the second is why this took a phase to find.** (1) The shim built one `sed` program from two `s###g` commands per `-v`, joined with `; ` onto ONE LINE. BSD `sed` reads a script in pieces and treats a piece boundary as a line break, so a boundary landing inside a substitute cuts it in half and `sed` aborts with `unterminated substitute pattern`. (2) **The death was SILENT:** the branch ended `printf … | sed | sh`, and a pipeline's exit status is its LAST command's — `sed` aborted having written nothing, `sh` read an empty script and exited 0, so the shim reported SUCCESS WITH NO OUTPUT. `probeBindMountSources` reads `code === 0` plus unparseable stdout as "the probe container reported nothing about this path", once per mount. The operator's diagnosis was about the container; the fault was three layers away in the shim's own `sed`. Fixed both: one command per line, and the rewrite's status checked separately from `sh`'s, so the operator now reads `the probe container exited 1: docker shim: mount probe rewrite failed: sed: 1: … unterminated substitute pattern`. **THERE IS NO BYTE THRESHOLD, and the first attempt to name one was wrong and retracted in the history rather than quietly amended** (`f4a8298` says 4096; `64a00ff` corrects it). 4096 came from a synthetic sweep of 7- and 8-byte commands where alignment happened to move the first bite to that boundary. Measured properly, sweeping command COUNT at fixed command LENGTH: 20-byte commands first fail at 2,060 bytes, 34-byte at 2,074, 68-byte at 2,108 — while a program of IDENTICAL 134-byte commands survived to 51,322. Whether a read boundary kills a command depends on where it falls relative to one, so the ceiling is a function of the program's SHAPE and any constant written down is wrong. The relay's 3-mount program is 694 bytes and always worked; `up`'s four-worker program is 6,608 bytes and died every time; the real program replayed verbatim from an instrumented `up` first fails at 16 commands / 2,176 bytes. **The coordinator independently reproduced the shape-dependence and found their own earlier figure was the same kind of artefact:** two programs differing only in command-length distribution, ragged 4,772 bytes exit 0 against uniform 4,680 bytes exit 1 — the SMALLER one failing. **So the tests assert no constant.** They build the OLD `;`-joined program from their own fixture, run this machine's own `sed` on it, and require it to FAIL — and that guard immediately earned its keep during development, not merely under mutation: the first 30-source fixture used fixed-width directory names, built a 7,840-byte old-form program, and did NOT reproduce the failure, being the exact uniform shape that survived to 51 kB. The fixture is ragged now, like a real mount set. Newline-joined, no ceiling was reachable: 42 kB here, 87 kB over 400 mounts independently, and 60,000 lines / 420 kB; a line is `len(src) + ~15` bytes and macOS `PATH_MAX` is 1024, so a line physically cannot exceed ~1,040 bytes at any fleet size. This does not come back. **A THIRD thing was needed for exit 0:** passing the guard only moved the failure to `up`'s idle gate, where supervisors wait on containers the shim cannot start (exit 6, `worker eng-1 died during startup`). `PIFLEET_SHIM_WORKER_PI` answers a worker launch with the SAME fake-Pi double `PIFLEET_PI_COMMAND` names, translating only `--session-dir /sessions` to the host path. **Opt-in deliberately**, for the reason `PIFLEET_SHIM_NETWORK_ABSENT` is: unset, every existing test keeps its loud `unexpected worker-image run argv` refusal, so the new capability cannot quietly absorb a run that should have stopped. **Three mutations, restored and verified both ways:** the `;`-joined program reddens both ISC-429 tests (`up` 0 → 3, direct shim call 0 → 1 with sed's own words); a shim answering `f 9` for everything — the rubber stamp — reddens both. **The anti-vacuity proof is the SYMLINK, not the deletion, and the coordinator's brief was wrong about that.** Deleting a source leaves the shim correctly reporting `x 0` but the GUARD RESOLVES, because `mount-preflight.ts:194` skips a missing source BY DESIGN — `docker run -v <missing>:<dst>` CREATES it, so probing would make the diagnostic materialize the directory it asked about, and a missing source is ISC-188's criterion rather than this one. Verified by the coordinator in production source rather than taken on report. The symlink is the discriminator: the host stats a file while the probe tests `-h` first and answers `l`, the two disagree, and the real `assertBindMountsVisible` over the real shim refuses with exit 3 naming only the offending path, then resolves over the same thirty sources with that one dropped. All four rows are asserted, so a policy change fails here instead of being discovered by someone reading a comment. **ISC-416 and ISC-417 now measure a COMPLETED run** rather than one that refused at exit 3 — strictly more of the domain those criteria are about — with `L = W` unchanged and the old refusal string now asserted ABSENT, so a silent return to it cannot look like a pass over a shrunken domain. **[FILED 2026-09-02, out of phase 6's work, by the engineer who declined to fix it.]**
 - [x] ISC-430: `up`'s §5.9 spend gate is guarded by a condition that STATES a dependency it does not have. *Probe: assert the gate's reachability is expressed in terms of what makes the probe necessary rather than a Docker field; a guard whose second conjunct cannot be false while the first is true fails.* **[FILED AND CLOSED 2026-09-02, out of phase 7's work.]** The gate ran under `if (loadedConfig !== null && egressNetwork !== null)`, and `egressNetwork` is assigned unconditionally from `loadedConfig.config.docker.network` while `schema.ts` DEFAULTS that key to `pifleet-egress` — so on every path where a config parses cleanly the second conjunct was implied by the first. It READ as though provider spend were gated on Docker being configured, and a reader who trusted it would be wrong about where the money goes: the same class of harm as ISC-264's two quietly-disagreeing constants. **Behaviour was correct and is unchanged, deliberately.** ISC-423 establishes that a headless fleet SHOULD probe, because its workers dial the provider whether or not a pane is drawn, and a per-backend opt-out from a mandatory gate is the shape ISC-420 already refused. **"Delete the conjunct" was not available:** the body needs a `string` and the check was doing TypeScript narrowing, so deleting it would not typecheck. The network is now DERIVED from `loadedConfig` at the point of use, where the schema's own type makes it non-nullable — one check, one source, and a nullable carried ~500 lines from its assignment is gone, so the two can no longer be made to disagree. **The behavioural pin is the valuable half, and a source-shaped test would not have been enough:** the fix can be undone by "simplifying" the derived network back into a nullable and re-adding the conjunct, and nothing about the SHAPE of the code would catch that — the suite would stay green while the gate silently reacquired a Docker dependency that could, one schema edit later, actually be false. So the rule is pinned by behaviour: a config that NEVER MENTIONS `docker.network` (the fixture asserts the key is absent and the schema default supplies it), run with `--backend headless`, still dials the provider — `stub.requests.length === 1`, carrying tools — and then stands the fleet up. **The control differs in exactly ONE thing** and is what makes the `1` a measurement rather than a value the test could not have failed to produce: same stub, same backend, same `require_native_tool_calls: true`, same models, but a `-uplink` network that `ensureEgressNetwork` refuses several steps BEFORE the gate — 0 requests. `stub.requests.length` is the detector rather than the exit code, for the reason the ISC-53 block already gives: an exit code cannot tell a run that probed from a run that skipped the probe and succeeded anyway. **Mutation:** rewriting the gate as `loadedConfig !== null && docker.network !== "pifleet-egress"` — a REAL Docker dependency, exactly the misreading this criterion warns of — takes the positive case from 1 request to 0 and reddens it, while the control stays green. **A distinction the criterion is easy to over-read, recorded so it is not:** Docker still gates the probe POSITIONALLY — a broken network stops the run several steps earlier — but not CONDITIONALLY, which is what the old `&&` erased.
+
+**Group Z — dispatch to an adopted-terminal `tui` worker (ISC-431..ISC-458).** Filed 2026-09-02
+from `Docs/SRD-TUI-DISPATCH.md` §10, which proposed twenty-five and reserved five for the three
+questions it could not phrase. The twenty-five are ISC-431..ISC-455 verbatim in the SRD's own
+order; ISC-456..ISC-458 are the reserved three, now phrasable because the four OPEN decisions were
+taken at their recommendations (D2 no surface id, D6 a real epoch, D9 the attach guard, D12 Defect B
+as a consequence) and because Q1, Q8 and Q9 were answered rather than deferred. **ISC-459 and
+ISC-460 stay reserved.**
+
+**ISC-455 is the group's own grading standard and is deliberately an anti-criterion**: every
+criterion here must be checkable with no pty. ISC-377, ISC-378, ISC-379 and ISC-387 are all `[~]`
+for want of one, and a block that inherited that wall would be a block that could never close.
+
+- [ ] ISC-431: a pane-route dispatch writes `(task_id, epoch)` to `/policy/task` BEFORE the first byte is typed. *Probe: drive `sendViaPane` against a surface that fails at step 1 and read the file after the throw; a write that lands after the keystroke loop cannot pass.* (Defect A — `writeTaskPolicy`'s only real call site was the RPC handler this route never reaches, so every gated verb a pane-dispatched worker ran was ledgered against `<none>`.)
+- [ ] ISC-432: a gated cloud verb run by a backend-managed `tui` worker is ledgered under the task it was dispatched under. *Probe: the verbgate ledger row's `task_id` is the dispatched id, not `<none>`.*
+- [ ] ISC-433: `skills/pifleet-worker/SKILL.md` names the fenced `## This task` block as the source of `<task-id>`, and says the `#` heading is NOT it. *Probe: render a prompt whose `title` differs from its `task_id` and assert the id is present in a block the skill points at.* (Defect C — a title defaults to its id, so the old instruction was correct until someone named a task.)
+- [ ] ISC-434: `dispatch` at an adopted-terminal worker exits 0 and writes the inbox record, `/policy/task` and the drop file. *Probe: all three by content; a missing one fails.*
+- [ ] ISC-435: the staged prompt is byte-identical to what the rpc route renders for the same envelope. *Probe: render both and compare; a route-specific abbreviation fails.*
+- [ ] ISC-436: Anti: staging types nothing. *Probe: no backend method is called on the staged route — assert on a backend double that records every call, AND assert the CLI never loads a pane backend at all. This is D8, and it is the criterion that catches a future edit re-opening §4.3.*
+- [ ] ISC-437: the drop file is mode `0444`, mounted `:ro`, and rewritten IN PLACE. *Probe: the inode is unchanged across two stages; a rename fails.*
+- [ ] ISC-438: the verbgate refuses every verb when the drop file is writable. *Probe: chmod it and assert exit 78.*
+- [ ] ISC-439: a staged dispatch allocates an epoch >= 1, and the SAME epoch appears in the inbox record, the drop file and the ledger row. *Probe: all four values equal; a 0 anywhere fails.* (D6 replaces a vacuously-passing correlation with a real one, which is also the first way this route can fail it.)
+- [ ] ISC-440: re-staging the same task file at the same worker REPLAYS the original epoch rather than running the task twice. *Probe: stage, stage the same file again, assert `replayed: true`, the same epoch, and that the drop file was not rewritten.* (Item 4 of §1.3, and it passes only if ISC-458 holds.)
+- [ ] ISC-441: a staged task holds the worker — a second stage of a DIFFERENT task is refused `busy`. *Probe: the refusal names the live epoch.* (The cost D6 records, asserted rather than discovered.)
+- [ ] ISC-442: the supervisor's `stage` verb allocates and fences WITHOUT sending a prompt. *Probe: mutation — make `stage` fall through to `send` and assert the compile or the test fails.*
+- [ ] ISC-443: Anti: `cmd: "dispatch"` is still refused for `client === null`, with the reason unchanged. *Probe: the existing refusal, byte-identical.* (Its spelling is what narrows `client` for the `send` below; deleting it must still fail to compile.)
+- [ ] ISC-444: the `tui` transcript poll settles a turn when an epoch is live. *Probe: the first test in this repo that reaches `classifyTuiTurn` THROUGH the supervisor rather than calling it directly.* (Defect B — `em.allocate`'s only call site sits below the refusal, so `em.live` was never set and this path was unreachable.)
+- [ ] ISC-445: `wait` returns a NAMED non-zero for a staged-but-untriggered task rather than consuming its timeout. *Probe: stage, never trigger, assert the exit code and the reason inside a second.* (A `wait` that blocks on a key nobody pressed is the hang this design exists to avoid.)
+- [ ] ISC-446: `up --attach-here` records the attach child's `{pid, started}` from the LAUNCHER'S OWN record. *Probe: assert the pair is present and that no `ps` is shelled out to at that site.* (ISC-191's lesson.)
+- [ ] ISC-447: staging refuses when the recorded attach process is gone. *Probe: record a pair, kill it, stage, assert the refusal names the remedy.*
+- [ ] ISC-448: Anti: a reused pid does not satisfy the terminal guard. *Probe: same pid, different start time, assert the refusal.* (The ISC-144 shape.)
+- [ ] ISC-449: a staged task whose worker writes `/outbox/<task-id>/result.json` is harvested and appears in `pifleet artifacts --json`. *Probe: end to end on the headless-with-adoption shape.* (Item 3 of §1.3, and it should be written first and failed first.)
+- [ ] ISC-450: a staged task whose worker writes to a DIFFERENTLY NAMED directory produces the `unexplainedOutboxDirs` finding. *Probe: the finding names the directory.* (Today the dispatched set is empty on this route and no finding is possible at all.)
+- [ ] ISC-451: `report` names a staged-but-untriggered task. *Probe: stage, report, assert the line.*
+- [ ] ISC-452: the `tui` voided table distinguishes a STAGED dispatch from a hand-typed turn on ISC-84 and ISC-85. *Probe: assert both rows' text against the route; one table for both fails.* (D7's cost: the table becomes route-dependent, which is a real regression in the legibility that is most of what it is for.)
+- [ ] ISC-453: Anti: `--auto` still refuses an adopted-terminal worker with `pane_mode_tui_is_not_auto_schedulable`. *Probe: the existing rejection, unchanged.* (D13 — D6 removes the stated obstacle and not the real one: a DAG that blocks on a person reports nothing while it blocks.)
+- [ ] ISC-454: Anti: a `tui` worker on `headless` with `adopted_terminal: false` still gets the ORIGINAL refusal. *Probe: the original sentence, unchanged.* (The case D1 does not touch.)
+- [ ] ISC-455: Anti: no criterion in ISC-431..ISC-458 requires a real pty. *Probe: the whole block passes under the existing Docker gate with no terminal.* (The property ISC-377/378/379/387 lack and are `[~]` for.)
+- [ ] ISC-456: a staged epoch's deadline starts at the TRIGGER, not at the stage, and the supervisor says in its own comment that the signal is APPROXIMATE. *Probe: stage with a short `deadline_s`, wait past it without triggering, assert the task is not `timed_out`; then trigger and assert the clock starts.* (Q1 — the only observable is transcript growth, and growth after a stage could be the staged task or the operator's own unrelated prompt. Nothing separates them, and the code must not pretend otherwise.)
+- [ ] ISC-457: a staged task can be CANCELLED, returning the worker to idle, and a later DIFFERENT attempt against the same `task_id` is not refused `already_completed`. *Probe: stage, cancel, stage a different attempt of the same task, assert it allocates.* (Q8 — the SRD calls this blocking, and it is: `allocate` refuses `busy` while an epoch is live, so without a release the operator's first mis-stage takes the worker out of service. Cancellation must NOT be `settle`, because a settled task pushes a `completed` row and a task that never ran did not complete.)
+- [ ] ISC-458: Anti: a staged dispatch does not mint a random `attempt_id`. *Probe: stage the same task file twice and assert the two attempt ids are equal; assert an EDITED file yields a different one.* (Q9 — the single-task `dispatch` path falls back to `randomUUID()`, which would give the staged route no dedup at all and leave item 4 of §1.3 open while looking closed.)
