@@ -588,6 +588,125 @@ export const WorkerLaunchSchema = z
      * `WorkerLaunch` keeps describing an `rpc` worker without being edited.
      */
     pane_mode: z.enum(["rpc", "tui"]).default("rpc"),
+    /**
+     * This worker's DISCLOSURE row — the recorded answer to "did this worker's
+     * context leave the machine, and to whom" — or `null` when it did not
+     * (SRD §7.3, D10, ISC-416/417).
+     *
+     * ## What it is, and why it is a copy rather than a derivation
+     *
+     * `security/disclosure.ts:disclosureFor` is the ONE function that decides
+     * whether a worker's context crosses to a vendor, and this field is its
+     * OUTPUT, spelled snake_case. It is the fourth field on this record to be
+     * placed here by that argument — `credential` records `planCredential`'s
+     * output, `secret_names` records `WorkerEnvPlan.secretNames`, `pane_mode`
+     * records `resolveWorker`'s — and it is the one where a second derivation
+     * would be worst, because ISC-417 asserts that the BANNER `up` prints and
+     * THIS RECORD name the same set of workers. Two derivations make that
+     * criterion a coin flip: they agree until the first edit that touches only
+     * one of them, and the failure is silent in the direction that matters —
+     * an operator told nothing about a worker whose transcript is already at a
+     * vendor.
+     *
+     * **Every one of the seven values below is a plain read from the row. None
+     * may be recomputed here, and an expression on the right-hand side of one
+     * of them is the defect this field exists to prevent, not an optimisation.**
+     *
+     * ## NAMES ONLY, and the same type-level rule `secret_names` states
+     *
+     * `secret_names` here is a `string[]` of names for the reason the field
+     * above it gives at length: this record is read by the supervisor, by
+     * `down`, by `harvest` and by anything that renders a launch, so it must be
+     * structurally incapable of putting a credential in front of any of them.
+     * A disclosure row that carried a secret's VALUE would put the thing being
+     * disclosed into the record OF the disclosure.
+     *
+     * ## Why HERE and not in a file of its own
+     *
+     * `secret_names`' own answer, unchanged: `launch.json` is already the
+     * per-worker record of what `up` decided, it is already written by the one
+     * function that holds the resolved worker, and a new file would need a new
+     * name in `run/paths.ts` — a second `join()` computing a run-dir path is
+     * the ISC-188 defect this repo has closed once already.
+     *
+     * ## Its ABSENCE is meaningful, and it is meaningful in TWO ways now
+     *
+     * `null` HERE is a decision: `disclosureFor` answered "this worker's
+     * context does not leave the machine", which is every worker on a local
+     * provider and every worker on a flat pre-D7 fleet (§6.1's shorthand has no
+     * `hosted` field, so it can never produce a row). It is not an absence.
+     *
+     * A MISSING RECORD is the other absence, and `secret_names` already states
+     * what it means: no launch record means the run was started against the
+     * `PIFLEET_PI_COMMAND` double, which starts no container. That is what
+     * bounds ISC-417 — a worker `up` never stood up cannot have been stood up
+     * silently — and it is why that criterion compares the banner against the
+     * records that EXIST rather than against the workers that were selected.
+     *
+     * Defaulted to `null`, so every record written before this field existed
+     * parses as "nothing left the machine" — which is true of every one of
+     * them, because no fleet could declare a hosted provider until D7.
+     *
+     * ## Why the isolation enum is spelled out again here
+     *
+     * `IsolationSchema` lives in `config/schema.ts`, which imports THIS file.
+     * Importing it back is a cycle, and `pane_mode` above already settled the
+     * house answer: a durable wire contract spells its own values. The values
+     * must track `IsolationSchema`; `disclosureFor` returns the config type, so
+     * a value added there and not here fails to parse at the write rather than
+     * being written unvalidated.
+     */
+    disclosure: z
+      .object({
+        /**
+         * Redundant with this file's own location under `workers/<id>/`, and
+         * kept anyway: it is what makes a row that has been COPIED — into a
+         * report, a harvest summary, a bug attachment — still say who it is
+         * about. It is also the cheapest possible check that the row written
+         * here is the row derived for THIS worker.
+         */
+        worker_id: shortStr,
+        role: shortStr,
+        /** The provider KEY from `llm.providers` this worker resolved to. */
+        provider: shortStr,
+        isolation: z.enum(["worktree", "shared-ro", "none"]),
+        /**
+         * The CONFIGURED repository path, and deliberately not the worktree.
+         *
+         * §7.3 calls the repository the largest surface, so the row has to name
+         * it — but the banner prints before anything is created, and no
+         * worktree exists at that moment, while this record is written after
+         * one does. A field meaning "worktree" therefore could not be equal at
+         * the two call sites and would make ISC-417 unsatisfiable for a reason
+         * that has nothing to do with disclosure. The worktree path is a
+         * different fact and this record carries it already, in `argv`.
+         *
+         * `null` when `isolation` is `"none"` — the worker has no checkout.
+         */
+        repo: shortStr.nullable(),
+        cloud_access: z.boolean(),
+        /**
+         * The granted host-variable NAMES, from the row.
+         *
+         * This is the same fact as `secret_names` above, arrived at by a
+         * different route — that field copies `WorkerEnvPlan.secretNames`, the
+         * DELIVERED grant, and this one copies the row's `secretNames`, the
+         * deduped `ResolvedWorker.secrets`. The two are provably equal because
+         * every path in the grant loop that would exclude a name THROWS rather
+         * than skipping, and the loop's only `continue` is the dedupe.
+         *
+         * Recorded rather than elided, because the duplication is what makes
+         * that proof checkable on disk: `up` writes both, from two derivations,
+         * into one file, and an integration test compares them. If a future
+         * edit turns one of those throws into a skip, the two stop matching and
+         * a test goes red — where a single shared copy would have hidden the
+         * drift and let the banner and the record disagree in production.
+         */
+        secret_names: z.array(shortStr).max(MAX_ITEMS),
+      })
+      .strict()
+      .nullable()
+      .default(null),
   })
   .strict();
 

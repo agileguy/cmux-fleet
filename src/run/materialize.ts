@@ -79,6 +79,10 @@ import {
 } from "../config/load.ts";
 import { renderWorker } from "../config/render.ts";
 import { planCredential } from "../security/adc.ts";
+// The ONE derivation of "does this worker's context leave the machine". `up.ts`
+// prints its banner from the same function; ISC-417 is the assertion that no
+// second one exists. See the `disclosure` field below.
+import { disclosureFor } from "../security/disclosure.ts";
 import { makeWorkerAccessible, makeWorkerReadable } from "../container/mounts.ts";
 import {
   EXIT,
@@ -1176,6 +1180,52 @@ export async function materializeWorkerInputs(
        * failure names `pane_mode`.
        */
       pane_mode: w.paneMode,
+      /*
+       * The disclosure row, recorded so a harvested run can be ASKED whether
+       * this worker's context crossed to a vendor (SRD §7.3, ISC-416).
+       *
+       * ## This is a SPELLING MAP and it must stay one
+       *
+       * `disclosureFor` is the one function that decides whether a worker's
+       * context leaves the machine, and `up.ts` prints its banner from the same
+       * call. ISC-417 asserts the banner and this record name the same set of
+       * workers — so every value below is a plain read from the row, and any
+       * expression on a right-hand side here would be a SECOND derivation of a
+       * fact the banner derived once. The two would agree until the first edit
+       * that touched only one, and then disagree silently, in the direction
+       * where the operator is told nothing about a worker already talking to a
+       * vendor. That is the failure this criterion exists to make impossible,
+       * and it is reachable from here and nowhere else.
+       *
+       * ## `null` is an ANSWER, not a skip
+       *
+       * `disclosureFor` returns `null` for a worker whose provider is not
+       * `hosted: true` — every local provider, and every flat pre-D7 fleet,
+       * whose §6.1 shorthand has no `hosted` field to be true. Writing that
+       * `null` is what makes the record's silence a recorded decision rather
+       * than a field somebody forgot: a harvest reading `null` knows the
+       * question was asked and answered.
+       *
+       * ## Why `w` and not a re-resolution
+       *
+       * `w` is `resolveWorker`'s output, the same struct `render.ts` and
+       * `buildWorkerEnv` read in this scope — the identical discipline
+       * `pane_mode` above keeps. `up.ts` calls `disclosureFor` with the worker
+       * it resolved from the same loaded config, so the two calls differ in
+       * nothing.
+       */
+      disclosure: ((row) =>
+        row === null
+          ? null
+          : {
+              worker_id: row.workerId,
+              role: row.role,
+              provider: row.provider,
+              isolation: row.isolation,
+              repo: row.repo,
+              cloud_access: row.cloudAccess,
+              secret_names: row.secretNames,
+            })(disclosureFor(loaded, w)),
     };
     if (opts.writeLaunchRecord === true) {
       await establishing(`the launch record for ${workerId}`, async () => {
