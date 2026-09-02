@@ -182,13 +182,29 @@ afterAll(async () => {
   // touched, which is the third time this note has recorded that and the whole
   // reason the instruction is a command rather than an increment.
   //
+  // RE-COUNTED at 57 when phase 6's two disclosure blocks landed, by the same
+  // command on the merged tree rather than by adding 5 to 47. The answer is 57,
+  // and the arithmetic an increment would have produced is 52 — because the
+  // number had drifted by FIVE this time, before either block was written. That
+  // is the fourth time this note has recorded a drift it did not cause, and the
+  // gap is now large enough to be worth naming: 47 was recorded against a
+  // revision, the file has grown by other hands since, and nobody re-ran the
+  // command because the number looked plausible. A budget that looks plausible
+  // is exactly the one nobody checks.
+  //
+  // The two new blocks contribute 5 of the 57 between them. Both spell their
+  // helpers `async () => await makeRig(...)` rather than returning the promise
+  // bare, specifically so this command can still see them — a returned promise
+  // is invisible to a grep for `await makeRig(`, and a rig this hook must tear
+  // down but cannot count is the one that leaks.
+  //
   // Charging every `down` the expensive per-spawn rate is deliberately
   // conservative — rigs whose test never reached `up` contribute zero spawns —
   // because the failure mode here is not a slow suite, it is the one this
   // hook's own docstring above exists to prevent: a timed-out `afterAll`
   // truncates the loop mid-way and leaks detached supervisors onto the
   // developer's machine, which this project has already paid for.
-}, cliBudget(47));
+}, cliBudget(57));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -4933,6 +4949,251 @@ describe("the disclosure banner and the launch record name the same workers (ISC
       // And L is empty — for every selected worker, not just the disclosed ones.
       const records = await launchRecords(rig, SELECTED);
       expect([...records.keys()]).toEqual([]);
+    },
+    cliBudget(1),
+  );
+});
+
+describe("up discloses what leaves the machine (ISC-414, ISC-415)", () => {
+  /**
+   * A value that must never reach a terminal. `secretNames` is a `string[]` of
+   * NAMES and structurally cannot carry this, which is the whole reason the
+   * type is what it is — so finding it in a stream is proof of a real leak
+   * rather than a formatting slip.
+   */
+  const TICKET_VALUE = "sentinel-ticket-value-e41d";
+
+  const DISCLOSURE_PROVIDERS = [
+    {
+      name: "alpha",
+      hosted: false,
+      baseUrl: "http://alpha.house.test:8000/v1",
+      apiKeyEnv: "ALPHA_API_KEY",
+      relayUpstream: "192.168.86.49:8000",
+    },
+    {
+      name: "bravo",
+      hosted: true,
+      baseUrl: "https://bravo.example.test/v1",
+      apiKeyEnv: "BRAVO_API_KEY",
+      relayUpstream: "104.18.0.1:443",
+    },
+  ];
+
+  /**
+   * The banner's row grammar, parsed rather than substring-matched.
+   *
+   * A `toContain("cred-1")` against whole stdout passes when `cred-1` appears
+   * in the success summary and the banner never printed at all — which is
+   * precisely the silent bring-up ISC-417 forbids, sailing past a green test.
+   * Parsing rows means an assertion about the BANNER can only be satisfied by
+   * the banner.
+   */
+  interface ParsedRow {
+    mark: string;
+    id: string;
+    role: string;
+    provider: string;
+    isolation: string;
+    repo: string;
+    cloudAccess: string;
+    secrets: string[];
+  }
+
+  /**
+   * BOTH of a row's lines are parsed, and the second one is why.
+   *
+   * A `expect(up.stderr).toContain("TICKET_API_TOKEN")` looks like it asserts
+   * the banner discloses the grant. It does not, and this was caught by a
+   * mutation rather than by reading: `up` ALREADY prints an unrelated
+   * `pifleet: sec-1 is granted host secrets by name: TICKET_API_TOKEN` line to
+   * stderr, so that assertion stayed green with the banner's secret list
+   * emptied — the exact "a green test certifies the wrong thing" failure this
+   * repo keeps closing. Reading the name off the row's OWN continuation line
+   * means only the banner can satisfy it.
+   */
+  const bannerRows = (text: string): ParsedRow[] => {
+    const lines = text.split("\n");
+    const out: ParsedRow[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const head = /^(!!|  ) (\S+)  role=(\S+)  provider=(\S+)  isolation=(\S+)  repo=(.*)$/.exec(
+        lines[i]!,
+      );
+      if (head === null) continue;
+      // The continuation line is part of the ROW, so a banner that printed a
+      // head with no tail is malformed and must not parse as a valid row.
+      const tail = /^ {5}cloud_access=(\S+)  secrets=(.*)$/.exec(lines[i + 1] ?? "");
+      expect({ id: head[2], tail: lines[i + 1] }).toMatchObject({ id: head[2] });
+      if (tail === null) continue;
+      out.push({
+        mark: head[1]!,
+        id: head[2]!,
+        role: head[3]!,
+        provider: head[4]!,
+        isolation: head[5]!,
+        repo: head[6]!,
+        cloudAccess: tail[1]!,
+        secrets: tail[2] === "(none)" ? [] : tail[2]!.split(","),
+      });
+    }
+    return out;
+  };
+
+  /**
+   * `await makeRig(` spelled out rather than returned bare, and that is not a
+   * style choice: the `afterAll` hook's budget is counted with
+   * `grep -c 'await makeRig('`, so a helper that returned the promise
+   * unawaited would add two rigs the counting command cannot see — the exact
+   * silent drift that hook's docstring has already recorded three times.
+   */
+  const disclosureRig = async () =>
+    await makeRig({
+      providers: DISCLOSURE_PROVIDERS,
+      llmProvider: "alpha",
+      requireNativeToolCalls: false,
+      egressAllow: DISCLOSURE_PROVIDERS.map((p) => ({
+        host: p.relayUpstream.split(":")[0]!,
+        port: Number(p.relayUpstream.split(":")[1]),
+      })),
+      secretsAllowlist: ["TICKET_API_TOKEN"],
+      hostSecrets: { TICKET_API_TOKEN: TICKET_VALUE },
+      extraWorkers: [
+        // ISC-414: hosted provider AND a Google identity. The draft refused
+        // exactly this worker.
+        {
+          id: "cred-1",
+          role: "engineer",
+          model: "bravo/wiring-test-model",
+          cloudAccess: true,
+        },
+        // ISC-415: hosted provider AND a granted secret. The draft refused
+        // this one too.
+        {
+          id: "sec-1",
+          role: "engineer",
+          model: "bravo/wiring-test-model",
+          secrets: ["TICKET_API_TOKEN"],
+        },
+      ],
+    });
+
+  test(
+    "a credentialled worker on a hosted provider stands up, and up says so on stdout",
+    async () => {
+      const rig = await disclosureRig();
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,cred-1,sec-1",
+        "--backend",
+        "headless",
+      ]);
+      // HALF ONE OF BOTH CRITERIA. D10 permits this configuration; a refusal
+      // here is the draft behaviour reinstated. `stderr` is quoted in the diff
+      // so a fixture problem names itself instead of arriving as a bare 2.
+      expect({ code: up.code, stderr: up.stderr }).toMatchObject({ code: EXIT.SUCCESS });
+      // The non-json path prints `run <id>` rather than a JSON payload, so the
+      // id for teardown is read from that line.
+      const runId = /^run (\S+)$/m.exec(up.stdout)?.[1];
+      // ANTI-VACUITY: the run really did come up, so "it was not refused" is a
+      // fact about a fleet rather than about an early exit.
+      expect(runId).toBeDefined();
+      rig.runId = runId as string;
+
+      // HALF TWO. The banner, on stdout, parsed as rows.
+      const rows = bannerRows(up.stdout);
+      expect(rows.map((r) => r.id).sort()).toEqual(["cred-1", "sec-1"]);
+
+      // The NON-hosted worker is absent — asserted on rows, since `eng-1` also
+      // appears in `up`'s success summary further down the same stream.
+      expect(rows.some((r) => r.id === "eng-1")).toBe(false);
+
+      // Every field §7.3 names, on the rows that carry it.
+      for (const row of rows) {
+        expect(row.provider).toBe("bravo");
+        expect(row.role).toBe("engineer");
+        expect(row.isolation).toBe("worktree");
+        // §7.3: the credentialled line is the most conspicuous one `up` prints.
+        expect(row.mark).toBe("!!");
+      }
+
+      /*
+       * ISC-414 and ISC-415, read off the ROWS rather than off the stream.
+       *
+       * `cred-1` holds the Google identity and no secret; `sec-1` holds the
+       * granted secret and no identity. Asserting each on its own worker is
+       * what makes the two criteria separable — a banner that carried one
+       * field for both workers, or that leaked `sec-1`'s grant onto `cred-1`,
+       * fails here rather than satisfying a stream-wide `toContain`.
+       */
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      expect(byId.get("cred-1")?.cloudAccess).toBe("true");
+      expect(byId.get("cred-1")?.secrets).toEqual([]);
+      expect(byId.get("sec-1")?.cloudAccess).toBe("false");
+      expect(byId.get("sec-1")?.secrets).toEqual(["TICKET_API_TOKEN"]);
+
+      // NAMES ONLY. The widest-audience surface this feature has — a terminal,
+      // then scrollback, then a screen share.
+      expect(up.stdout).not.toContain(TICKET_VALUE);
+      expect(up.stderr).not.toContain(TICKET_VALUE);
+    },
+    // One `up` spawn. Counted, not estimated.
+    cliBudget(1),
+  );
+
+  /**
+   * THE TWO-SIDED `--json` PROBE.
+   *
+   * `--json`'s payload is a single object every machine consumer parses —
+   * every `JSON.parse(up.stdout.trim())` in this file is one — so the banner
+   * cannot go to stdout on that path without crashing the consumers it is
+   * meant to inform. It is REDIRECTED to stderr, never suppressed.
+   *
+   * Both directions are asserted IN ONE RUN, and that is the entire point of
+   * the test. "Absent from stdout" alone passes when the banner was dropped
+   * altogether — a silent bring-up of a credentialled worker on a vendor,
+   * reached through the flag a script is most likely to use, which is ISC-417's
+   * forbidden state arriving green. "Present on stderr" alone says nothing
+   * about whether stdout still parses. Neither half is worth anything without
+   * the other.
+   */
+  test(
+    "--json keeps stdout parseable and moves the same banner to stderr",
+    async () => {
+      const rig = await disclosureRig();
+      const up = await runCli(rig, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1,cred-1,sec-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect({ code: up.code, stderr: up.stderr }).toMatchObject({ code: EXIT.SUCCESS });
+
+      // DIRECTION ONE: stdout is still a single parseable object. This is the
+      // assertion that fails if the banner is written to stdout under --json.
+      const parsed = JSON.parse(up.stdout.trim()) as { run_id: string };
+      rig.runId = parsed.run_id;
+      expect(rig.runId).toBeDefined();
+      expect(bannerRows(up.stdout)).toHaveLength(0);
+      expect(up.stdout).not.toContain("DISCLOSURE");
+
+      // DIRECTION TWO: it is on stderr, naming the SAME workers the non-json
+      // run named. Dropping the banner passes direction one and fails here.
+      expect(up.stderr).toContain("DISCLOSURE");
+      const rows = bannerRows(up.stderr);
+      expect(rows.map((r) => r.id).sort()).toEqual(["cred-1", "sec-1"]);
+      // Off the rows, never off the stream — `up` prints an unrelated grant
+      // line naming the same variable to this very stream. See `bannerRows`.
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      expect(byId.get("cred-1")?.cloudAccess).toBe("true");
+      expect(byId.get("sec-1")?.secrets).toEqual(["TICKET_API_TOKEN"]);
+      expect(up.stderr).not.toContain(TICKET_VALUE);
     },
     cliBudget(1),
   );
