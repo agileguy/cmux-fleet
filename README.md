@@ -190,9 +190,11 @@ and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 
 harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
-There are zero `[ ]` criteria; every one has been attempted. Eleven are graded `[~]`
+There are zero `[ ]` criteria; every one has been attempted. Twelve are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
-falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
+falls short of the standard: ISC-498 is the fleet monitor's one, where the repaint RATE is
+measured (1.44/sec on the scheduler path) but whether a repaint visibly FLASHES is perceptual and
+needs a person at the pane; ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
 cannot observe a worker obeying it; ISC-432 and ISC-444 are the staged-dispatch block's two, both
 described above; and the four still open from 2026-08-31 for `pane_mode: tui` —
