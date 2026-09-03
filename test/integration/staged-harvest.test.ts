@@ -56,7 +56,7 @@ import { dispatchedTaskIds, unexplainedOutboxDirs } from "../../src/harvest/layo
 import { harvestTask } from "../../src/harvest/index.ts";
 import { splitDispatchPolicy } from "../../src/run/dispatch-policy.ts";
 import { attemptIdFor } from "../../src/cli/commands/dispatch.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 import { renderPrompt } from "../../src/supervisor/index.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { stat } from "node:fs/promises";
@@ -171,7 +171,10 @@ beforeAll(async () => {
   );
   cleanups.push(async () => server.stop());
   cleanups.push(() => rm(tmp, { recursive: true, force: true }));
-});
+  // The launch record's AGREEMENT check reaches one `ps` through
+  // `processStartTime`. A `ps` is not a `git` and charging it as one would make
+  // the count stop describing the body; the floor governs either way.
+}, opsBudget({ probe: 1 }));
 
 afterAll(async () => {
   for (const fn of cleanups.reverse()) await fn().catch(() => {});
@@ -221,7 +224,8 @@ describe("a staged dispatch is durable, and the harvest can see it (ISC-449)", (
 
   beforeAll(async () => {
     outcome = await stage(TASK);
-  });
+    // `stage()` reaches the same single `ps` probe as the outer fixture.
+  }, opsBudget({ probe: 1 }));
 
   /**
    * The trigger CANNOT be delivered here — there is no surface — and the

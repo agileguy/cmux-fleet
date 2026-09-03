@@ -39,7 +39,7 @@ import {
 } from "../../src/harvest/acceptance.ts";
 import { adjudicate } from "../../src/harvest/adjudicate.ts";
 import type { z } from "zod";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const GIT_ENV = {
   PATH: "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
@@ -114,7 +114,10 @@ beforeAll(async () => {
   // in — or resolves through — the worker's tree, the tests below flip.
   await git(repo, "checkout", "-q", "honest");
   await writeFile(join(repo, "data.txt"), "gone\n");
-});
+  // Seventeen `git` spawns: init, add, commit, rev-parse, and the four branch
+  // fixtures. `cliBudget(17)` = 193_800 ms would charge each of them the CLI's
+  // ~1900 ms startup, which none of them pays (ISC-509).
+}, opsBudget({ git: 17 }));
 
 afterAll(async () => {
   await rm(root, { recursive: true, force: true });

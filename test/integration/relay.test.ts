@@ -31,7 +31,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { connect } from "node:net";
-import { containerBudget } from "../support/budget.ts";
+import { containerBudget, opsBudget } from "../support/budget.ts";
 import {
   ensureEgressNetwork,
   ensureUplinkNetwork,
@@ -164,7 +164,9 @@ afterEach(async () => {
     }
     await docker(["network", "rm", n]);
   }
-});
+  // Per test: one `docker rm -f`, one network inspect, the ISC-51 rule removal,
+  // and one `docker network rm`. Four container operations, drained here.
+}, opsBudget({ container: 4 }));
 
 /**
  * Register every artifact `ensureEgressRelay` will create BEFORE creating it,

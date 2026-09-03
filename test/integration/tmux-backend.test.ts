@@ -25,7 +25,7 @@ import {
   parsePaneList,
   tmuxArgv,
 } from "../../src/backends/tmux/argv.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const SOCKET = `pifleet-it-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const CTX = { socketName: SOCKET, configFile: "/dev/null" };
@@ -42,7 +42,8 @@ afterAll(async () => {
   // Unconditional: a failed test must not leave a server squatting on the
   // socket for the next run to trip over.
   await realExec(tmuxArgv(CTX, ["kill-server"]));
-});
+  // One `tmux kill-server`, unconditionally.
+}, opsBudget({ tmux: 1 }));
 
 describe("workspace and pane bring-up", () => {
   test("4 workers → exactly 4 panes, each titled with its worker id, one window", async () => {

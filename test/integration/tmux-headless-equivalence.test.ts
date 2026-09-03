@@ -21,7 +21,7 @@ import type { FleetBackend } from "../../src/backends/types.ts";
 import { HeadlessBackend } from "../../src/backends/headless/index.ts";
 import { TmuxBackend } from "../../src/backends/tmux/index.ts";
 import { listPanesArgv, parsePaneList, tmuxArgv } from "../../src/backends/tmux/argv.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const SOCKET = `pifleet-eq-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const CTX = { socketName: SOCKET, configFile: "/dev/null" };
@@ -73,7 +73,8 @@ async function driveFleet(
 
 afterAll(async () => {
   await realExec(tmuxArgv(CTX, ["kill-server"]));
-});
+  // One `tmux kill-server`, unconditionally.
+}, opsBudget({ tmux: 1 }));
 
 describe("ISC-134: tmux and headless are interchangeable to the control plane", () => {
   test("the identical driver sequence yields identical backend-independent outcomes", async () => {

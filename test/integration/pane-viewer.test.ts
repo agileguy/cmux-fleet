@@ -23,7 +23,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -74,13 +74,15 @@ beforeAll(async () => {
   const up = await cli(["up", "--workers", "eng-1,eng-2", "--backend", "tmux", "--json"]);
   expect(up.code, `up stderr: ${up.stderr.slice(0, 600)}`).toBe(0);
   runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
-});
+  // One `pifleet up` on the tmux backend, which starts this rig's own server.
+}, opsBudget({ cli: 1, tmux: 1 }));
 
 afterAll(async () => {
   await cli(["down", "--run", runId, "--json"]).catch(() => {});
   await tmux(["kill-server"]).catch(() => {});
   await rm(rig.base, { recursive: true, force: true }).catch(() => {});
-});
+  // One `pifleet down` and one `tmux kill-server`.
+}, opsBudget({ cli: 1, tmux: 1 }));
 
 describe("every worker gets a pane that shows what it is doing", () => {
   test("one pane per worker, each titled with its worker id", async () => {

@@ -23,7 +23,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const CLI = join(new URL("../../", import.meta.url).pathname, "src/cli/index.ts");
 const SOCKET = `pifleet-down-${process.pid.toString(36)}`;
@@ -35,7 +35,9 @@ afterAll(async () => {
     stderr: "ignore",
   }).exited;
   for (const b of bases) await rm(b, { recursive: true, force: true }).catch(() => {});
-});
+  // One `tmux kill-server`. Charged at the tmux rate rather than `cliBudget(1)`:
+  // the measured tail here is a tmux SERVER start, not a CLI transpile.
+}, opsBudget({ tmux: 1 }));
 
 async function tmux(args: string[]): Promise<{ out: string; code: number }> {
   const p = Bun.spawn(["tmux", "-L", SOCKET, ...args], { stdout: "pipe", stderr: "pipe" });

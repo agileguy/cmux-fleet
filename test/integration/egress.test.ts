@@ -17,6 +17,7 @@ import {
   ensureEgressNetwork,
   inspectEgressNetwork,
 } from "../../src/security/network.ts";
+import { opsBudget } from "../support/budget.ts";
 
 const IMAGE = process.env.PIFLEET_TEST_IMAGE ?? "pifleet/pi-worker:verify";
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -51,7 +52,8 @@ const cleanupContainers: string[] = [];
 afterEach(async () => {
   for (const c of cleanupContainers.splice(0)) await docker(["rm", "-f", c]);
   for (const n of cleanupNetworks.splice(0)) await docker(["network", "rm", n]);
-});
+  // One `docker rm -f` and one `docker network rm` per test, both drained here.
+}, opsBudget({ container: 2 }));
 
 /**
  * The per-test ceiling for this file, DERIVED and written down (ISC-274).
