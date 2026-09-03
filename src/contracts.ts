@@ -1401,6 +1401,35 @@ export const DerivedFactsSchema = z.object({
   branch: shortStr.nullable(),
   base_ref: sha40.nullable(),
   head_ref: sha40.nullable(),
+  /**
+   * Whether this task was REPOSITORY WORK AT ALL — i.e. whether the dispatch
+   * envelope named a `host_workdir` for the harvester to derive facts from.
+   *
+   * ## Why the field exists
+   *
+   * Every git fact below has a vacuous spelling and none of them can be told
+   * apart from a real observation. `base_is_ancestor: false` is the one that
+   * costs: it is BOTH "the base was rewritten, distrust the diff" (ISC-151, a
+   * finding) and "there was never a base" (a no-op), and the adjudicator
+   * clamps to `unknown` on it. A read-only inquiry task — a ticket query, a
+   * cluster read — has no repository by design, so it arrives with every fact
+   * at its vacuous default and is graded as though its diff had been tampered
+   * with. MEASURED: a task that returned a well-formed envelope with every
+   * acceptance criterion met was reported `verdict: unknown` alongside "the
+   * base was rewritten and the diff cannot be trusted", which is a sentence
+   * about a repository that does not exist.
+   *
+   * ## Why the default is TRUE
+   *
+   * Opposite in direction to the caution elsewhere in this file, and
+   * deliberately so: `true` means "grade this as repository work", which is
+   * what every fact bundle written before this field existed described and
+   * what every fixture that constructs one still means. The clamp is
+   * load-bearing — it is what stops a rewritten base from grading green — so
+   * the default has to be the one that KEEPS it, and only the one construction
+   * that knows there is no repository opts out.
+   */
+  repository: z.boolean().default(true),
   /** ISC-151: false when `git merge-base --is-ancestor base HEAD` failed. */
   base_is_ancestor: z.boolean(),
   commits: z.array(sha40).max(MAX_ITEMS).default([]),

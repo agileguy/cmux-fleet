@@ -138,7 +138,16 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
   // ISC-151: a base that is not an ancestor of HEAD means the base was
   // rewritten, and `diff base...HEAD` can be shrunk to nothing by exactly that
   // move. The diff-derived facts are untrustworthy, so grading stops here.
-  if (!facts.base_is_ancestor) {
+  //
+  // `facts.repository` gates it, because `base_is_ancestor: false` is the
+  // VACUOUS default as well as the finding, and only one of the two is a
+  // reason to stop. A task dispatched without a `host_workdir` never had a
+  // base to rewrite; clamping it here reports a tampered diff to an operator
+  // who did not ask for a diff, and buries a result envelope that may be
+  // completely sound. Repository tasks are untouched — the clamp is what
+  // stops a rewritten base grading green, and it still runs for every one of
+  // them.
+  if (facts.repository && !facts.base_is_ancestor) {
     reasons.push(
       "base_ref is not an ancestor of HEAD: the base was rewritten and the diff cannot be trusted (ISC-151)",
     );

@@ -223,16 +223,36 @@ export async function harvestTask(
   const git: GitFacts = hasWorktree
     ? await deriveGitFacts(envelope.host_workdir, envelope.base_ref)
     : {
+        /**
+         * NO WORKDIR IS A KIND OF TASK, NOT A DEGRADED HARVEST.
+         *
+         * `repository: false` is the whole point of this branch. Without it
+         * the bundle below is indistinguishable from a repository task whose
+         * facts all failed to derive — same nulls, same
+         * `base_is_ancestor: false` — and the adjudicator reads that vacuous
+         * default as ISC-151's finding and clamps to `unknown`. A ticket query
+         * or a cluster read has no repository BY DESIGN, and grading it as a
+         * tampered diff makes its verdict unusable no matter how good its
+         * evidence is.
+         *
+         * The reason string is rewritten for the same reason. "repository
+         * facts unavailable" describes a failed derivation; nothing failed
+         * here, and an operator scanning `reasons` should not be sent looking
+         * for a git problem that does not exist.
+         */
         facts: DerivedFactsSchema.parse({
           branch: null,
           base_ref: null,
           head_ref: null,
+          repository: false,
           base_is_ancestor: false,
           harness: {},
         }),
         diffText: null,
         ok: false,
-        reasons: ["task has no host_workdir; repository facts unavailable"],
+        reasons: [
+          "task has no host_workdir: not repository work, graded on its result envelope and artifacts",
+        ],
       };
   reasons.push(...git.reasons);
 

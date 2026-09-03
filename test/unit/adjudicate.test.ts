@@ -518,3 +518,115 @@ function canonicalScramble(json: string): string {
   };
   return JSON.stringify(reorder(JSON.parse(json)));
 }
+
+// ---------------------------------------------------------------------------
+// A task with no repository is not a task with a rewritten one
+// ---------------------------------------------------------------------------
+
+/**
+ * `base_is_ancestor: false` carries two meanings and the clamp only wants one.
+ *
+ * ISC-151 reads it as "the base was rewritten, so `diff base...HEAD` can be
+ * shrunk to nothing by exactly that move" — a finding, and grading rightly
+ * stops. It is ALSO the vacuous default on a fact bundle for a task that never
+ * had a base: `harvest/index.ts` builds one of those for every dispatch whose
+ * envelope names no `host_workdir`, which is every read-only inquiry — a
+ * ticket query, a cluster read.
+ *
+ * MEASURED, and this is why the field was added rather than the clamp merely
+ * loosened: a ticketing task returned `status: success` with both of its
+ * acceptance criteria met and its artifacts on disk, and was reported
+ * `verdict: unknown` with "the base was rewritten and the diff cannot be
+ * trusted" — a sentence about a repository that did not exist, attached to the
+ * one task in the run whose evidence was complete.
+ *
+ * `facts.repository` states which of the two meanings applies, so neither has
+ * to be inferred from a default.
+ */
+describe("the ISC-151 ancestry clamp applies to repository work only", () => {
+  /** What `harvest/index.ts` builds when the envelope names no workdir. */
+  function inquiryFacts(over: Partial<z.input<typeof DerivedFactsSchema>> = {}): DerivedFacts {
+    return DerivedFactsSchema.parse({
+      branch: null,
+      base_ref: null,
+      head_ref: null,
+      repository: false,
+      base_is_ancestor: false,
+      commits: [],
+      files_changed: [],
+      diff_bytes: 0,
+      acceptance: [],
+      acceptance_context: null,
+      harness: { patterns: [], touched: [] },
+      tree_hash_quiesce: null,
+      tree_hash_harvest: null,
+      ...over,
+    });
+  }
+
+  /**
+   * THE REGRESSION. Fails against the ungated clamp, which returns early with
+   * the ancestry reason before it has looked at the envelope at all.
+   *
+   * The claim lists no files because the task changed none — asserting that
+   * explicitly, because ISC-92's over/under-claim rule compares the two lists
+   * and an inquiry task's agreement is that both are empty.
+   */
+  test("an inquiry task with an envelope is not clamped by a base it never had", () => {
+    const got = adjudicate(inquiryFacts(), claim("success", { files_changed: [], commits: [] }));
+
+    expect(got.reasons.join(" ")).not.toContain("ISC-151");
+    expect(got.reasons.join(" ")).not.toContain("the base was rewritten");
+  });
+
+  /**
+   * THE CONTROL ARM, and without it the test above is satisfied by deleting
+   * the clamp.
+   *
+   * A task that DOES have a repository and whose base is not an ancestor is
+   * the case ISC-151 was written for, and it must still stop grading. The only
+   * difference from the fixture above is the flag.
+   */
+  test("a repository task with a rewritten base still clamps", () => {
+    const got = adjudicate(facts({ base_is_ancestor: false }), claim("success"));
+
+    expect(got.verdict).toBe("unknown");
+    expect(got.reasons.join(" ")).toContain("ISC-151");
+  });
+
+  /**
+   * The envelope-less inquiry task still says so.
+   *
+   * Removing the clamp must not remove the STATEMENT that nothing was checked:
+   * a worker that wrote no `result.json` is exactly the case ISC-94's note and
+   * the harvester's discrepancy exist for, and an inquiry task has no diff to
+   * speak for it in the envelope's absence.
+   */
+  test("an inquiry task with no envelope is graded on derived facts and says so", () => {
+    const got = adjudicate(inquiryFacts(), null);
+
+    expect(got.reasons.join(" ")).not.toContain("ISC-151");
+    expect(got.reasons.join(" ")).toContain("no result envelope");
+  });
+
+  /**
+   * The DEFAULT's direction, asserted rather than assumed.
+   *
+   * Every fact bundle written before this field existed, and every fixture in
+   * this file that does not name it, must keep being graded as repository
+   * work — the clamp is what stops a rewritten base grading green, so the
+   * default has to be the one that keeps it.
+   */
+  test("a fact bundle that never names the field is repository work", () => {
+    const parsed = DerivedFactsSchema.parse({
+      branch: null,
+      base_ref: null,
+      head_ref: null,
+      base_is_ancestor: false,
+      harness: {},
+    });
+
+    expect(parsed.repository).toBe(true);
+    expect(adjudicate(parsed, null).reasons.join(" ")).toContain("ISC-151");
+  });
+});
