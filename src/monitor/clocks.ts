@@ -92,7 +92,8 @@ import { failed, never, ok, type GitStrip, type Region } from "./model.ts";
 import { readDockerContainers, type DockerPsRun } from "./read/docker.ts";
 import { readGit } from "./read/git.ts";
 import { readRuns, type PartialRunRow } from "./read/runs.ts";
-import { runIdsAscending, runsRoot } from "../run/paths.ts";
+import { refreshWorkerRow, type WorkerRead } from "./read/worker.ts";
+import { runIdsAscending, runPaths, runsRoot } from "../run/paths.ts";
 
 // ---------------------------------------------------------------------------
 // The periods
@@ -173,6 +174,31 @@ export const MEASURED_MS = Object.freeze({
    * rather than trusting this figure to hold. The duty-cycle guard plans for
    * the measured cost; the timeout is what plans for its absence.
    */
+  /**
+   * `refreshWorkerRow` PER WORKER — `state.json` only, satellites carried.
+   * n=30 over 6 live workers: 0.73 ms total, 0.122 ms each. The full
+   * three-file `readWorkerRow` is 0.35 ms each, which is why the fast path
+   * reads one file.
+   */
+  REFRESH_WORKER_STATE: 0.122,
+  /**
+   * The fast source's declared cost, at an ASSUMED 100 live workers.
+   *
+   * **This is the one number in this table that is an assumption rather than a
+   * measurement, and it is stated as one.** Everything else declares the cost
+   * at the fleet's worst measured size, which for the run walk is 500. The same
+   * rule applied to workers gives 61 ms — 12.2% of the fast clock, OVER budget
+   * — so the guard would refuse the placement §6.3 asks for, and §6.3's fast
+   * per-worker refresh would have no clock it fits on.
+   *
+   * 100 is defensible where 500 is not: every live worker is a CONTAINER, and
+   * 500 containers on one laptop is a different design problem than a monitor's
+   * refresh rate. The arithmetic ceiling is 410 workers (500 ms x 10% / 0.122),
+   * above which `FleetClocks` refuses at construction with the duty cycle in
+   * the message. That refusal is asserted, so the assumption fails loudly
+   * rather than degrading into a clock that never finishes a tick.
+   */
+  REFRESH_WORKERS_100: 12.2,
   READ_GIT: 36,
 });
 
@@ -730,6 +756,12 @@ export interface FleetSourceOptions {
   readonly containers?: () => ReadonlySet<string> | null;
   /** Repository the git strip watches. Defaults to the process's cwd. */
   readonly watchDir?: string;
+  /**
+   * The last walk's runs, for the fast per-worker refresh. A getter, on
+   * {@link FleetSourceOptions.containers}' reasoning — the fleet this reads is
+   * the one the SLOW clock last found, and a value would freeze it.
+   */
+  readonly knownRuns?: () => readonly PartialRunRow[];
 }
 
 /**
@@ -753,6 +785,7 @@ export function fleetSources(opts?: FleetSourceOptions) {
   const root = opts?.root ?? runsRoot();
   const containers = opts?.containers ?? (() => null);
   const watchDir = opts?.watchDir ?? process.cwd();
+  const knownRuns = opts?.knownRuns ?? ((): readonly PartialRunRow[] => []);
 
   return {
     /**
@@ -806,6 +839,32 @@ export function fleetSources(opts?: FleetSourceOptions) {
      * is what keeps that from becoming a stalled clock; it is not covered by
      * the guard, which can only plan for costs that were measurable.
      */
+    /**
+     * §6.3's fast clock, and the gap the scheduler shipped without.
+     *
+     * It re-reads `state.json` for the workers THE LAST WALK FOUND — not a
+     * second definition of which workers are live, which is what made this hard
+     * to place. `registry.ts` owns that question, `readRuns` asks it, and this
+     * source consumes the answer through a getter for the same reason
+     * `containers` is a getter: passing a value would freeze the first tick's
+     * fleet forever.
+     *
+     * A worker whose `state.json` has since vanished comes back `never` and the
+     * row is dropped, so a fleet that shrank is correct within one fast tick.
+     * A fleet that GREW is not visible here — that needs a walk, which the
+     * medium `runNames` scan promotes within one 5 s period of any change. So
+     * the enumeration lags by at most one medium period and the rows lag by at
+     * most one fast period, which are different bounds and both stated.
+     */
+    workers: {
+      clock: "fast",
+      measuredCostMs: MEASURED_MS.REFRESH_WORKERS_100,
+      read: (): Promise<readonly PartialRunRow[]> => refreshKnownWorkers(knownRuns(), {
+        root,
+        containers: containers(),
+      }),
+    },
+
     git: {
       clock: "medium",
       measuredCostMs: MEASURED_MS.READ_GIT,
@@ -830,6 +889,45 @@ export function fleetSources(opts?: FleetSourceOptions) {
       },
     },
   } as const satisfies SourceMap;
+}
+
+/**
+ * Re-read `state.json` for every worker in a known set (§6.3, the fast clock).
+ *
+ * Exported so the fast source has a testable subject, and written as a pure
+ * function of the previous rows so it can be driven from a literal.
+ *
+ * A worker region that was not `ok` on the last walk is CARRIED FORWARD
+ * UNCHANGED rather than retried. Retrying it here would make the fast clock's
+ * cost depend on how many workers are broken — the failure mode where a fleet
+ * with damaged state files becomes the one whose monitor polls hardest — and
+ * the walk that produced the failure is the thing that should try again.
+ */
+export async function refreshKnownWorkers(
+  previous: readonly PartialRunRow[],
+  opts: { readonly root?: string; readonly containers: ReadonlySet<string> | null },
+): Promise<readonly PartialRunRow[]> {
+  const out: PartialRunRow[] = [];
+  for (const run of previous) {
+    const paths = runPaths(run.runId, opts.root);
+    const workers: Region<WorkerRead>[] = [];
+    for (const before of run.workers) {
+      if (before.status !== "ok") {
+        workers.push(before);
+        continue;
+      }
+      const next = await refreshWorkerRow(paths, before.value.row.workerId, before.value.evidence, {
+        containers: opts.containers,
+      });
+      // A worker that has gone is dropped, not carried: `never` here means the
+      // directory is no longer there, and a stale row for a worker that ended
+      // is the confident-stale-value failure `Region` exists to prevent.
+      if (next.status === "never") continue;
+      workers.push(next);
+    }
+    if (workers.length > 0) out.push({ ...run, workers });
+  }
+  return out;
 }
 
 /** Set inequality over two name lists. Order-insensitive, by the argument above. */

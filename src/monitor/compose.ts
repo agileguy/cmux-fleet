@@ -143,6 +143,35 @@ export function joinRuns(
 }
 
 /**
+ * The fast clock's rows when it has produced any, the walk's otherwise.
+ *
+ * ## Why `ok` is the only status that wins
+ *
+ * The fast source can only refresh workers a previous WALK found, so before the
+ * first slow tick it has nothing and returns `never`. It can also fail on its
+ * own. In both cases the walk's rows are the better answer — they are older but
+ * they exist — and this is the one place in the design where a region is chosen
+ * over another rather than rendered beside it.
+ *
+ * **The chosen region carries its own `readAt` with it**, which is what keeps
+ * §6.4 honest: when the fast rows win, the fleet line ages from the fast tick
+ * and says `as of 0s`; when the walk's rows win, it ages from the walk. The
+ * marker never describes a different read from the one on screen.
+ *
+ * What it does NOT claim is that the run SET is that fresh. A run that appeared
+ * since the last walk is absent from both regions until the medium `runNames`
+ * scan promotes a walk, which is within one 5 s period of the change. Rows lag
+ * by at most one fast period, enumeration by at most one medium period; the two
+ * bounds are different and neither is hidden by preferring the fresher rows.
+ */
+function preferFresher(
+  walked: Region<readonly PartialRunRow[]>,
+  refreshed: Region<readonly PartialRunRow[]> | undefined,
+): Region<readonly PartialRunRow[]> {
+  return refreshed !== undefined && refreshed.status === "ok" ? refreshed : walked;
+}
+
+/**
  * A `FleetModel` from a scheduler snapshot (`clocks.ts:368`).
  *
  * **`now` comes from the caller and not from the snapshot**, because the
@@ -154,6 +183,8 @@ export function joinRuns(
 export function modelFrom(
   snapshot: {
     readonly runs: Region<readonly PartialRunRow[]>;
+    /** The fast clock's per-worker refresh (§6.3). See {@link preferFresher}. */
+    readonly workers?: Region<readonly PartialRunRow[]>;
     readonly containers: Region<readonly string[]>;
     readonly git: Region<GitStrip>;
   },
@@ -163,7 +194,7 @@ export function modelFrom(
     // The WALL clock, for the ladder. `opts.now` is monotonic and feeds the
     // staleness markers; handing it to `joinRuns` would render every attended
     // worker `active`. See `model.ts`'s two-clocks note.
-    runs: joinRuns(snapshot.runs, opts.nowEpochMs),
+    runs: joinRuns(preferFresher(snapshot.runs, snapshot.workers), opts.nowEpochMs),
     containers: snapshot.containers,
     git: snapshot.git,
     now: opts.now,

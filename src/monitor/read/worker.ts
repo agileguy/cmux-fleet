@@ -249,6 +249,72 @@ export async function readWorkerRow(
 }
 
 /**
+ * Re-read ONE worker's `state.json`, carrying its satellites forward (§6.3).
+ *
+ * ## Why only `state.json`, and why that is not a shortcut
+ *
+ * `presentation.json` is IMMUTABLE AFTER `up` (§2.7, and the field's own
+ * docblock above says so), and `attended.json` is written once and never
+ * removed (`report/collect.ts:266-268`). Re-reading either on a 500 ms clock
+ * would be two syscalls per worker per tick to observe a value that cannot have
+ * changed. The mutable half is `state.json`, which the supervisor rewrites
+ * every 250 ms — so it is the only file a fast clock has any reason to open.
+ *
+ * MEASURED: 0.122 ms per worker against 0.35 ms for the full three-file read.
+ * At the fleet sizes where the fast clock is admissible at all that is the
+ * difference between fitting the budget and not.
+ *
+ * ## The satellites are CARRIED, never re-derived
+ *
+ * `prior` comes from the last slow read. Passing it forward rather than
+ * defaulting it to `null` matters more than it looks: `activity.ts`'s ladder
+ * takes `adoptedTerminal` and `attendedMode` from those two files, and a fast
+ * refresh that dropped them would flip every attended worker to `rpc` twice a
+ * second — the exact conflation Finding A is about, arriving from the
+ * direction of an optimisation.
+ */
+export async function refreshWorkerRow(
+  run: RunPaths,
+  workerId: string,
+  prior: WorkerEvidence,
+  opts?: WorkerReadOptions,
+): Promise<Region<WorkerRead>> {
+  const now = opts?.now ?? monotonicMs;
+  const wallNow = opts?.wallNow ?? Date.now;
+  const containers = opts?.containers ?? null;
+  const paths = workerPaths(run, workerId);
+
+  let state: WorkerState | null;
+  try {
+    state = await readWorkerState(paths);
+  } catch (err) {
+    return failed(message(err), now());
+  }
+  // The worker's directory went away between the walk and this tick — a run
+  // that ended. `never` rather than `failed`: nothing is wrong, there is just
+  // nothing to read, and the caller drops the row.
+  if (state === null) return never();
+
+  const readAt = now();
+  return ok(
+    {
+      row: {
+        workerId,
+        runId: run.runId,
+        phase: state.phase,
+        transcriptAgeMs: transcriptAgeMs(state, wallNow()),
+        containerPresent:
+          containers === null ? null : containers.has(workerContainerName(run.runId, workerId)),
+        taskId: state.task_id,
+      },
+      // Fresh state, CARRIED satellites. See the header.
+      evidence: { ...prior, state },
+    },
+    readAt,
+  );
+}
+
+/**
  * Read a whole run's worker table, one isolated region per worker.
  *
  * The isolation is the point and it is structural: {@link readWorkerRow} owns

@@ -110,6 +110,16 @@ export function register(program: Command): void {
            * later stopped would keep rendering `up`.
            */
           containers: () => containerNameSet(clocks.snapshot().containers),
+          /*
+           * The fast clock's input: the workers THE LAST WALK FOUND. A getter
+           * for the same reason `containers` is one — the fleet this refreshes
+           * is whatever the slow clock last enumerated, and a value would pin
+           * it to the first tick forever.
+           */
+          knownRuns: () => {
+            const runs = clocks.snapshot().runs;
+            return runs.status === "ok" ? runs.value : [];
+          },
         }),
       );
 

@@ -52,32 +52,36 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { WorkerStateSchema } from "../../src/contracts.ts";
+import { deriveActivity } from "../../src/monitor/activity.ts";
+import { runPaths, workerPaths } from "../../src/run/paths.ts";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { regionAgeMs, type Region } from "../../src/monitor/model.ts";
 import {
-  admissibleClocks,
-  ClockBudgetError,
   CLOCK_PERIOD_MS,
-  containerNameSet,
-  driveClocks,
-  dutyCycle,
+  ClockBudgetError,
   FAST_PERIOD_MS,
   FleetClocks,
-  fleetSources,
   MAX_DUTY_CYCLE,
   MEASURED_MS,
   MEDIUM_PERIOD_MS,
+  SLOW_PERIOD_MS,
+  admissibleClocks,
+  containerNameSet,
+  driveClocks,
+  dutyCycle,
+  fleetSources,
   nameSetChanged,
   nowDefault,
   realTimers,
-  SLOW_PERIOD_MS,
-  unwrapRegion,
+  refreshKnownWorkers,
   type ClockName,
   type IntervalTimers,
   type Source,
+  unwrapRegion,
 } from "../../src/monitor/clocks.ts";
 
 // ---------------------------------------------------------------------------
@@ -1083,10 +1087,20 @@ describe("fleetSources against a fixture root", () => {
         { now: clock.now },
       );
       await clocks.tick();
-      expect(reads).toBe(1);
+      /*
+       * TWO consumers now, not one: `runs` needs the set for the walk's
+       * `containerPresent`, and the fast `workers` refresh needs it for the
+       * same field on every subsequent tick. The count is asserted as
+       * "at least one per consumer" rather than pinned, because pinning it
+       * makes adding a third consumer look like a regression — the property
+       * under test is that the getter is CALLED AGAIN, not how many callers
+       * there are.
+       */
+      const afterFirst = reads;
+      expect(afterFirst).toBeGreaterThanOrEqual(1);
       clock.set(SLOW_PERIOD_MS);
       await clocks.tick();
-      expect(reads).toBe(2);
+      expect(reads).toBeGreaterThan(afterFirst);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1433,5 +1447,211 @@ describe("the `after` ordering edge", () => {
     );
     // And it constructs, which is the constructor validation agreeing.
     expect(() => new FleetClocks(sources)).not.toThrow();
+  });
+});
+
+describe("the fast clock's source (§6.3) — and the ceiling its budget implies", () => {
+  test("fleetSources puts the per-worker refresh on the FAST clock", () => {
+    const sources = fleetSources({ root: "/nonexistent-root-for-declaration-check" });
+    expect(sources.workers.clock).toBe("fast");
+    expect(sources.workers.measuredCostMs).toBe(MEASURED_MS.REFRESH_WORKERS_100);
+  });
+
+  /**
+   * THE ASSUMPTION MADE FALSIFIABLE.
+   *
+   * Every other source declares its cost at the fleet's worst MEASURED size.
+   * Applying that rule to workers gives 500 x 0.122 = 61 ms, which is 12.2% of
+   * the fast clock and over the 10% budget — so the placement §6.3 asks for
+   * would be refused and the fast clock would have no source at all.
+   *
+   * The declared cost therefore assumes 100 live workers, which is an
+   * assumption and not a measurement. These two assertions are what stop it
+   * being a silent one: the arithmetic ceiling is computed here rather than
+   * remembered, and the 500-worker case is shown to be genuinely inadmissible
+   * so that nobody later "simplifies" the constant back to the measured size
+   * and gets a construction error they cannot explain.
+   */
+  test("the 500-worker cost really is over budget on the fast clock", () => {
+    const at500 = MEASURED_MS.REFRESH_WORKER_STATE * 500;
+    expect(dutyCycle(at500, "fast")).toBeGreaterThan(MAX_DUTY_CYCLE);
+    expect(admissibleClocks(at500)).not.toContain("fast");
+    // …and where it WOULD fit, so the fallback is on record.
+    expect(admissibleClocks(at500)).toContain("medium");
+  });
+
+  test("the ceiling is 410 workers, and past it construction refuses", () => {
+    const ceiling = Math.floor((CLOCK_PERIOD_MS.fast * MAX_DUTY_CYCLE) / MEASURED_MS.REFRESH_WORKER_STATE);
+    expect(ceiling).toBe(409);
+    expect(
+      () =>
+        new FleetClocks({
+          workers: {
+            clock: "fast" as const,
+            measuredCostMs: MEASURED_MS.REFRESH_WORKER_STATE * (ceiling + 200),
+            read: async () => [],
+          },
+        }),
+    ).toThrow(ClockBudgetError);
+  });
+});
+
+describe("refreshKnownWorkers", () => {
+  const evidence = (over: Record<string, unknown> = {}) =>
+    ({
+      state: { phase: "idle", session_present: true, transcript_activity: null, task_id: null },
+      presentation: { adopted_terminal: true },
+      attended: { mode: "tui" },
+      notes: [],
+      ...over,
+    }) as never;
+
+  const row = (workerId: string, runId: string) =>
+    ({
+      status: "ok" as const,
+      readAt: 0,
+      value: {
+        row: { workerId, runId, phase: "idle", transcriptAgeMs: null, containerPresent: null, taskId: null },
+        evidence: evidence(),
+      },
+    }) as never;
+
+  /**
+   * A worker whose last walk FAILED is carried forward untouched rather than
+   * retried. Retrying here makes the fast clock's cost depend on how many
+   * workers are broken — the fleet with damaged state files becomes the one
+   * whose monitor polls hardest — and the walk that produced the failure is the
+   * thing that should try again.
+   */
+  test("a failed region is carried forward, not retried", async () => {
+    const broken = { status: "failed" as const, readAt: 5, reason: "torn state.json" } as never;
+    const out = await refreshKnownWorkers(
+      [{ runId: "r1", workers: [broken] }] as never,
+      { root: "/nonexistent", containers: null },
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.workers[0]).toBe(broken);
+  });
+
+  /**
+   * A worker whose `state.json` has gone is DROPPED. Carrying it would be the
+   * confident-stale-value failure `Region` exists to prevent: a row for a
+   * worker that ended, rendered exactly like one that is running.
+   */
+  test("a worker whose state file has vanished is dropped, and an empty run with it", async () => {
+    const out = await refreshKnownWorkers(
+      [{ runId: "gone", workers: [row("w-1", "gone")] }] as never,
+      { root: "/nonexistent-root", containers: null },
+    );
+    expect(out).toEqual([]);
+  });
+
+  test("an empty known set is an empty result, not a walk", async () => {
+    expect(await refreshKnownWorkers([], { root: "/nonexistent", containers: null })).toEqual([]);
+  });
+
+  /**
+   * THE SATELLITES SURVIVE THE REFRESH — the mutation that got through.
+   *
+   * `refreshWorkerRow` reads only `state.json`, because `presentation.json` is
+   * immutable after `up` and `attended.json` is written once. The satellites
+   * therefore have to be CARRIED from the prior read. A refresh that rebuilt
+   * evidence from the one file it opened would set both to `null`, and
+   * `activity.ts`'s `isAttended` reads exactly those two fields — so every
+   * attended worker on the fleet would flip to `rpc` on the first fast tick and
+   * stay there, twice a second, for the life of the pane.
+   *
+   * That is Finding A reappearing from the direction of an optimisation, and
+   * the whole of §6.3's fast clock is what would introduce it. The fixture puts
+   * NEITHER satellite on disk, so anything that reaches the filesystem for them
+   * comes back empty and this fails; only carrying them forward passes.
+   */
+  test("the immutable satellites are carried, so an attended worker stays attended", async () => {
+    const base = await mkdtemp(join(tmpdir(), "monitor-refresh-"));
+    try {
+      const root = join(base, "runs");
+      const runId = "2026-09-02T00-00-00Z-rf01";
+      const run = runPaths(runId, root);
+      await mkdir(workerPaths(run, "w-1").dir, { recursive: true });
+      await writeFile(run.runJson, JSON.stringify({ schema: "pifleet.run/v1", run_id: runId }));
+      await writeFile(
+        workerPaths(run, "w-1").stateJson,
+        JSON.stringify(
+          WorkerStateSchema.parse({
+            schema: "pifleet.state/v1",
+            worker: "w-1",
+            run_id: runId,
+            pid: process.pid,
+            pgid: process.pid,
+            epoch: 0,
+            started_at: new Date().toISOString(),
+            phase: "busy",
+            session_present: true,
+            transcript_activity: null,
+          }),
+        ),
+      );
+      // NOTE: no presentation.json and no attended.json on disk, deliberately.
+
+      const prior = {
+        status: "ok" as const,
+        readAt: 0,
+        value: {
+          row: {
+            workerId: "w-1",
+            runId,
+            phase: "idle",
+            transcriptAgeMs: null,
+            containerPresent: null,
+            taskId: null,
+          },
+          evidence: {
+            state: { phase: "idle" },
+            presentation: { adopted_terminal: true },
+            attended: { mode: "tui" },
+            notes: ["a note from the walk"],
+          },
+        },
+      } as never;
+
+      const out = await refreshKnownWorkers([{ runId, workers: [prior] }] as never, {
+        root,
+        containers: null,
+      });
+
+      const w = out[0]!.workers[0]!;
+      expect(w.status).toBe("ok");
+      if (w.status !== "ok") return;
+      // The satellites came through untouched…
+      expect(w.value.evidence.presentation).toEqual({ adopted_terminal: true } as never);
+      expect(w.value.evidence.attended).toEqual({ mode: "tui" } as never);
+      expect(w.value.evidence.notes).toEqual(["a note from the walk"]);
+      // …and the mutable half is genuinely re-read, or the test proves nothing:
+      // `phase` was `idle` in the prior row and is `busy` on disk.
+      expect(w.value.row.phase).toBe("busy");
+      expect(w.value.evidence.state.phase).toBe("busy");
+
+      /*
+       * The property the carrying exists FOR, asserted through the ladder that
+       * consumes it — and asserted AS A CONTRAST, because the absolute value
+       * alone would not show what is at stake. The same state read with the
+       * satellites nulled is what the mutant produces, and it is `rpc`: a
+       * worker with a person's terminal attached, reported as one without.
+       */
+      const facts = {
+        adoptedTerminal: w.value.evidence.presentation?.adopted_terminal ?? null,
+        attendedMode: w.value.evidence.attended?.mode ?? null,
+        sessionPresent: w.value.evidence.state.session_present,
+        transcriptActivity: w.value.evidence.state.transcript_activity ?? null,
+        phase: w.value.row.phase,
+        containerPresent: w.value.row.containerPresent,
+      };
+      expect(deriveActivity(facts, Date.now())).not.toBe("rpc");
+      expect(deriveActivity({ ...facts, adoptedTerminal: null, attendedMode: null }, Date.now())).toBe(
+        "rpc",
+      );
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });
