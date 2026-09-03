@@ -659,3 +659,96 @@ describe("ISC-263: the proxy's policy", () => {
     expect(policyFromConfig(loaded.config).rules.map((r) => r.name)).toContain("llm");
   });
 });
+
+describe("a worker dials ITS OWN provider's endpoint, not the fleet default", () => {
+  /**
+   * ## The defect, found on a live two-provider fleet 2026-09-03
+   *
+   * ISC-401 fixed `PIFLEET_LLM_PROVIDER`, which read the fleet-wide
+   * `llm.provider` where it needed the worker's resolved one.
+   * `PIFLEET_LLM_BASE_URL` sat on the next line and kept reading fleet-wide
+   * `llm.base_url`, so the containers came up with:
+   *
+   *     PIFLEET_LLM_PROVIDER=ollama-cloud
+   *     PIFLEET_LLM_BASE_URL=http://omlx.pifleet.internal:8000/v1
+   *
+   * A worker told to use the hosted provider and pointed at the local one's
+   * alias. **Nothing caught it, because with ONE provider the fleet-wide and
+   * per-worker values agree by coincidence** — the same coincidence ISC-401's
+   * own docblock names, one line above the line that still had the bug.
+   *
+   * So the fixture below is deliberately a TWO-provider document where the two
+   * base URLs differ, which is the only shape in which a correct read and a
+   * lucky one are distinguishable.
+   */
+  const twoProviders = () =>
+    baseDoc({
+      llm: {
+        provider: "local",
+        model: "TestModel",
+        providers: {
+          local: {
+            hosted: false,
+            base_url: "http://omlx.pifleet.internal:8000/v1",
+            api_key_env: "OMLX_API_KEY",
+            models_allowlist: ["TestModel"],
+          },
+          vendor: {
+            hosted: true,
+            base_url: "https://vendor.example/v1",
+            relay_upstream: "203.0.113.7:443",
+            api_key_env: "VENDOR_API_KEY",
+            models_allowlist: ["VendorModel"],
+          },
+        },
+      },
+      roles: { eng: {}, remote: { model: "vendor/VendorModel" } },
+      workers: [
+        { id: "w1", role: "eng" },
+        { id: "wv", role: "remote" },
+      ],
+    });
+
+  test("each worker's BASE_URL is its own provider's, and the two differ", async () => {
+    const loaded = await load(twoProviders());
+    const local = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const remote = buildWorkerEnv(loaded, resolveWorker(loaded, "wv"), {});
+
+    expect(local.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://omlx.pifleet.internal:8000/v1");
+    expect(remote.vars["PIFLEET_LLM_BASE_URL"]).toBe("https://vendor.example/v1");
+    // The assertion the single-provider fixtures cannot make: the two are not
+    // the same string. A build that read fleet-wide passes both lines above
+    // only if the fleet default happens to be right for both workers.
+    expect(remote.vars["PIFLEET_LLM_BASE_URL"]).not.toBe(local.vars["PIFLEET_LLM_BASE_URL"]);
+  });
+
+  /**
+   * PROVIDER AND ENDPOINT MUST AGREE. Asserted together because the defect was
+   * precisely that they did not: the name resolved per worker and the URL did
+   * not, so each half looked right in isolation.
+   */
+  test("the provider name and the endpoint come from the same block", async () => {
+    const loaded = await load(twoProviders());
+    for (const [id, provider, url] of [
+      ["w1", "local", "http://omlx.pifleet.internal:8000/v1"],
+      ["wv", "vendor", "https://vendor.example/v1"],
+    ] as const) {
+      const plan = buildWorkerEnv(loaded, resolveWorker(loaded, id), {});
+      expect({ id, p: plan.vars["PIFLEET_LLM_PROVIDER"], u: plan.vars["PIFLEET_LLM_BASE_URL"] }).toEqual(
+        { id, p: provider, u: url },
+      );
+    }
+  });
+
+  /**
+   * §6.1's shorthand still holds: with NO providers map the flat `base_url` is
+   * the block for `llm.provider`, so a fleet that never writes a map is
+   * unaffected. Without this, the fix would be a breaking change for every
+   * existing config.
+   */
+  test("a fleet with no providers map still uses the flat base_url", async () => {
+    const loaded = await load(baseDoc({ llm: { model: "TestModel" } }));
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    expect(plan.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://omlx.pifleet.internal:8000/v1");
+  });
+});

@@ -418,6 +418,46 @@ export function providerHostDialView(
   return { llm: { base_url: block.base_url, relay_upstream: block.relay_upstream } };
 }
 
+/**
+ * What a WORKER dials for ONE provider — the other half of ISC-401's join.
+ *
+ * ## The defect this closes, found on a live fleet 2026-09-03
+ *
+ * ISC-401 fixed `PIFLEET_LLM_PROVIDER`, which read the fleet-wide
+ * `llm.provider` where it needed the worker's resolved one. `PIFLEET_LLM_BASE_URL`
+ * sat on the next line and kept reading fleet-wide `llm.base_url`, so on the
+ * first two-provider fleet the containers came up with:
+ *
+ *     PIFLEET_LLM_PROVIDER=ollama-cloud
+ *     PIFLEET_LLM_BASE_URL=http://omlx.pifleet.internal:8000/v1
+ *
+ * — a worker told to use the hosted provider and pointed at the local one's
+ * alias. It is the same shape as ISC-401 and invisible for the same reason:
+ * with one provider the fleet-wide and per-worker values agree by coincidence,
+ * so nothing distinguishes a correct read from a lucky one until a second
+ * provider exists.
+ *
+ * Throws for an undeclared provider, matching {@link providerApiKeyEnv} rather
+ * than {@link providerHostDialView}. The two differ deliberately: this value
+ * decides where a worker's context is SENT, so falling back to the fleet
+ * default is the endpoint equivalent of handing over the wrong key.
+ */
+export function providerBaseUrl(config: FleetConfig, provider: string): string {
+  const providers = config.llm.providers;
+  // §6.1's shorthand: with no map the flat keys ARE this provider's block.
+  if (providers === undefined) return config.llm.base_url;
+  const block = providers[provider];
+  if (block === undefined) {
+    throw new ConfigError(
+      `worker resolves to provider ${JSON.stringify(provider)}, which llm.providers does not ` +
+        `declare — declared: ${Object.keys(providers).join(", ") || "(none)"}. The endpoint will ` +
+        `not fall back to llm.base_url: a worker pointed at the wrong endpoint sends its whole ` +
+        `context there, which is the same failure as sending the wrong key.`,
+    );
+  }
+  return block.base_url;
+}
+
 export function providerApiKeyEnv(config: FleetConfig, provider: string): string {
   const providers = config.llm.providers;
   // §6.1's shorthand: with no map the flat keys ARE this provider's block, so

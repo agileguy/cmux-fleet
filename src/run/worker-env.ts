@@ -102,7 +102,12 @@ import { writeFile, chmod, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { LoadedConfig, ResolvedWorker } from "../config/load.ts";
 import { nonCredentialSecretNames, secretGrantNames } from "../config/schema.ts";
-import { ConfigError, providerApiKeyEnv, providerIsHosted } from "../config/load.ts";
+import {
+  ConfigError,
+  providerApiKeyEnv,
+  providerBaseUrl,
+  providerIsHosted,
+} from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
 import {
   LEGACY_RELAY_LISTEN_ALIAS,
@@ -562,7 +567,16 @@ export function buildWorkerEnv(
      * asserting either one against a constant.
      */
     PIFLEET_LLM_PROVIDER: w.provider,
-    PIFLEET_LLM_BASE_URL: llm.base_url,
+    /*
+     * THE OTHER HALF OF THE SAME JOIN, and it was left behind when ISC-401
+     * fixed the line above. Read fleet-wide, a two-provider fleet came up with
+     * `PIFLEET_LLM_PROVIDER=ollama-cloud` beside
+     * `PIFLEET_LLM_BASE_URL=http://omlx.pifleet.internal:8000/v1` — a worker
+     * told to use the hosted provider and pointed at the local one's alias.
+     * Invisible with one provider for exactly the reason the comment above
+     * gives: the fleet-wide and per-worker values agree by coincidence.
+     */
+    PIFLEET_LLM_BASE_URL: providerBaseUrl(loaded.config, w.provider),
     /*
      * `PIFLEET_LLM_API_KEY_ENV` STOOD HERE AND IS GONE (D8).
      *
