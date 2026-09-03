@@ -162,7 +162,7 @@ describe("an operations workspace that already exists is left alone", () => {
 });
 
 describe("creating the workspace", () => {
-  test("issues one create, three splits and four respawns, in pane order", async () => {
+  test("issues one create, two splits and three respawns, in pane order", async () => {
     const { client, calls } = fakeCmux();
 
     const result = await ensureOperations(client, OPTS);
@@ -177,9 +177,9 @@ describe("creating the workspace", () => {
       "new-split",
       "rename-tab",
       "respawn-pane",
-      "new-split",
-      "rename-tab",
-      "respawn-pane",
+      // Two splits, not three: `fleet-status` and `git-watch` merged into the
+      // single `monitor` pane (SRD-FLEET-MONITOR). The count is asserted rather
+      // than the shape so a pane silently reappearing is caught here too.
       "new-split",
       "rename-tab",
       "respawn-pane",
@@ -230,23 +230,27 @@ describe("creating the workspace", () => {
     const surfaceOf = (c: string[]) => c[c.indexOf("--surface") + 1];
     // surf-0 is the create's own surface; the rest come from splits. A stale
     // anchor would repeat an id here.
-    expect(respawns.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2", "surf-3"]);
+    expect(respawns.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2"]);
 
     const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
-    expect(splits.map((c) => c[1])).toEqual(["left", "down", "down"]);
+    expect(splits.map((c) => c[1])).toEqual(["left", "down"]);
     /*
-     * THE ANCHORS ARE THE WHOLE TEST, and the third is why `splitFrom` exists.
+     * THE ANCHORS ARE THE WHOLE TEST.
      *
      *   left  off surf-0 — ticketing lands to the LEFT of the observer
-     *   down  off surf-1 — fleet-status lands under TICKETING, the left column
-     *   down  off surf-0 — git-watch lands under the OBSERVER, the right column
+     *   down  off surf-1 — the monitor lands under TICKETING, the left column
      *
-     * That last one does not anchor on the pane before it. Splitting off
-     * surf-2 would stack a third row inside the left column and leave the
-     * right column full height — a 3+1 layout that still passes any assertion
-     * checking only the directions.
+     * **`splitFrom` no longer has a user, and that is the pane merge showing
+     * up here.** It existed for exactly one pane: `git-watch` had to anchor on
+     * surf-0 rather than on the pane before it, or it would have stacked a
+     * third row inside the left column instead of landing under the observer.
+     * With `fleet-status` and `git-watch` merged into one pane there is no
+     * second bottom pane to place, so every split now anchors on its
+     * predecessor. The field is still on the type and still honoured; what is
+     * gone is the caller. Recorded here rather than noticed later as an unused
+     * branch of unclear purpose.
      */
-    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-0"]);
+    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1"]);
   });
 
   test("each pane is renamed before its shell is replaced", async () => {
@@ -255,7 +259,7 @@ describe("creating the workspace", () => {
     const titles = calls
       .filter((c) => verb(["cmux", ...c]) === "rename-tab")
       .map((c) => c[c.indexOf("--title") + 1]);
-    expect(titles).toEqual(["observer", "ticketing", "fleet-status", "git-watch"]);
+    expect(titles).toEqual(["observer", "ticketing", "monitor"]);
   });
 
   test("each pane's command reaches the pane that was created for it", async () => {
@@ -272,8 +276,14 @@ describe("creating the workspace", () => {
     // are two runs, because --attach-here hands over one process's terminal.
     expect(commands[0]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[0]}'`);
     expect(commands[1]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[1]}'`);
-    expect(commands[2]).toContain("'status'");
-    expect(commands[3]).toContain(`-C '${CWD}'`);
+    /*
+     * The third pane is the monitor, and both halves of what it replaced are
+     * asserted: it is the monitor command, and it still reports on the
+     * INVOCATION directory rather than on cmux-fleet — which was `git-watch`'s
+     * most easily-broken property and is now carried by `--repo`.
+     */
+    expect(commands[2]).toContain("'monitor'");
+    expect(commands[2]).toContain(`'--repo' '${CWD}'`);
   });
 });
 

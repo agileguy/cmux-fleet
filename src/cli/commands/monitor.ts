@@ -65,8 +65,23 @@ export function register(program: Command): void {
     .option("--once", "print one frame and exit")
     .option("--poll <seconds>", "seconds between repaints (reads run on their own clocks)", "1")
     .option("--columns <n>", "frame width; defaults to the terminal's")
-    .option("--watch-dir <path>", "repository the git strip watches", process.cwd())
-    .action(async (opts: { once?: boolean; poll: string; columns?: string; watchDir: string }) => {
+    /*
+     * `--repo`, NOT `--watch-dir`, and the rename is forced by a criterion
+     * rather than by taste.
+     *
+     * ISC-493 requires the console's `watch(1)` prohibition to survive the pane
+     * merge with its subject restated, and that assertion is written as
+     * `expect(cmd).not.toMatch(/\bwatch\b/)` — a deliberately blunt tripwire
+     * for a MEASURED host fact: macOS ships no `watch(1)`, so the obvious way
+     * to write a refreshing pane fails on tick one with `command not found`,
+     * leaving a dead pane that looks configured. `--watch-dir` in the pane
+     * command matches that pattern (`-` is a word boundary), so keeping the
+     * flag would have meant loosening the tripwire to a narrower regex on
+     * behalf of a flag name. Weakening a guard to accommodate a spelling is the
+     * wrong trade; `--repo` is also the more accurate name.
+     */
+    .option("--repo <path>", "repository the git strip reports on", process.cwd())
+    .action(async (opts: { once?: boolean; poll: string; columns?: string; repo: string }) => {
       /*
        * `process.stdout.columns` is `undefined` when stdout is not a terminal —
        * a pipe, a test, a CI log. 100 is the fallback and it is the same number
@@ -79,14 +94,14 @@ export function register(program: Command): void {
       const pollMs = Math.max(250, Number(opts.poll) * 1_000);
 
       if (opts.once === true) {
-        const model = await composeFleet({ watchDir: opts.watchDir, columns });
+        const model = await composeFleet({ watchDir: opts.repo, columns });
         process.stdout.write(`${renderFleet(model).join("\n")}\n`);
         return;
       }
 
       const clocks: FleetClocks<ReturnType<typeof fleetSources>> = new FleetClocks(
         fleetSources({
-          watchDir: opts.watchDir,
+          watchDir: opts.repo,
           /*
            * A GETTER, closing over the scheduler's own snapshot. The container
            * set feeds the worker reader's `containerPresent`, and both live on
