@@ -1,6 +1,24 @@
 # System Requirements Document — a read-only fleet monitor TUI
 
-**SRD-FLEET-MONITOR-001 v0.1 — DRAFT FOR OWNER REVIEW**
+**SRD-FLEET-MONITOR-001 v0.2 — OWNER-REVIEWED, ACCEPTED FOR IMPLEMENTATION**
+
+**What changed in v0.2.** Four decisions were put to the owner on 2026-09-02 and all four were
+answered; the answers are folded in below rather than appended, and every place this document
+argued the other way is marked as superseded rather than rewritten into agreement.
+
+| Question | Answer | Where it landed |
+|---|---|---|
+| **Toolkit** (D2) | **Ink**, against this document's own recommendation of hand-rolled ANSI | §6.6, §6.6.1 (two new measurements), D2 rewritten, **Q10 opened** |
+| **Scope** | **Full SRD — all four views**, no first slice | §5.1 |
+| **Git strip default** (Q8, D12) | **Status first, commits behind `[c]`** — the reverse of D12's original | §6.8, §7.2, D12, Q8 closed |
+| **How to settle Q1** | **A throwaway worker in a scratch run**, not the live console panes | §9 Q1 |
+
+**One of those answers refuted a claim this document made confidently.** §6.6.1 records it: the
+recommendation for hand-rolled ANSI rested on "a component tree is not unit-testable the way a
+string-returning renderer is", and a fifteen-line probe showed `lastFrame()` returns a plain string
+that pins byte-for-byte exactly like a line array. The recommendation is preserved in D2 with its
+reasoning intact, marked superseded, because a reader deciding whether to revisit the toolkit needs
+to see what the argument was and precisely which part of it failed.
 Sits alongside `Docs/SRD.md` (SRD-PIFLEET-001), `Docs/SRD-TUI-DISPATCH.md` and
 `Docs/SRD-INFERENCE-PROVIDERS.md`. It proposes **no amendment to `Docs/SRD.md`** — a viewer that
 writes nothing needs no relaxation of anything — but it does propose **replacing panes 3 and 4 of
@@ -620,6 +638,16 @@ alternative — one clock, tuned to the fastest field — was costed and rejecte
 - The git strip that preserves what `git-watch` showed (§6.8, D12).
 - Degradation under width and height, stated as behaviour rather than discovered (§6.5, D14).
 
+**SCOPE CONFIRMED 2026-09-02 by the owner: all four views, no first slice.** The alternative put to
+the owner was to ship views 1 and 2 — the live fleet row and the per-worker detail — and defer the
+historic browser and the run-report view to a second branch. **That was declined, and the
+consequence is recorded here rather than discovered at grading time:** the branch must carry view 4,
+which calls `collectRunReport` (`collect.ts:147-289`) and runs `git merge-tree` per (worker, branch)
+plus `harvestTask` per task. §2.5 calls that path "seconds, not milliseconds" **without having
+measured it**, and Q7 is the probe. So the widest-scope answer also takes on the one open question
+whose cost is entirely unbounded today. §6.3's slow clock and Q7's pre-warm answer are therefore
+load-bearing for this scope in a way they would not have been for the two-view slice.
+
 ### 5.2 Non-goals
 
 - **Dispatch, steer, abort, stage, unstage, down, harvest — any command that changes anything.**
@@ -798,18 +826,77 @@ Options surveyed:
 | Option | What it buys | What it costs |
 |---|---|---|
 | **Hand-rolled ANSI over Bun's own stdout** | zero dependencies; total control of the repaint; `logs.ts`'s existing sanitiser applies unchanged; testable as a pure `(model) => string[]` function with no terminal | cursor addressing, a resize handler, and a diff-based repainter are all code someone must write and maintain — perhaps 300-500 lines |
-| **Ink** (React for terminals) | a real layout engine, flexbox, mature | pulls React and a reconciler into a repo whose entire dependency set is three data libraries; a component tree is not unit-testable the way a string-returning renderer is; and its repaint model is exactly the "repaint everything" shape `operations-plan.ts:655-663` measured as a visible flash |
+| **Ink** (React for terminals) | a real layout engine, flexbox, mature; **and `lastFrame()` returns a plain string, so the byte-exact line-array assertion this repository uses everywhere survives unchanged** (measured, §6.6.1) | pulls React and a reconciler into a repo whose entire dependency set is three data libraries; **rewrites the full frame including unchanged rows on every update** (measured, §6.6.1); and the npm registry is unreachable from the operator's host under the corporate middlebox, making the install a deliberate off-network act rather than a `bun add` |
 | **blessed / neo-blessed** | widgets, a screen diffing engine | unmaintained; large; the widget model wants to own the event loop, which fights a three-clock design |
 | **A Bun-native TUI kit adopted unassessed** | Bun-first ergonomics | unassessed *here*, and this repository's dependency posture makes an unassessed dependency the expensive option rather than the cheap one |
 
-**Recommended: hand-rolled ANSI, with the renderer factored as a pure function from a model to an
-array of lines.** The recommendation rests on one property rather than on taste: this repository
-verifies behaviour by calling pure functions with no environment
-(`operations-plan.ts:32-39`: "Every function here is PURE… the flag IS the behaviour, so the flags
-have to be pinnable byte-for-byte by a unit test with no cmux running"). A renderer that returns
-lines is pinnable by exactly that kind of test; a component tree is not. **The cost is real and
-should not be minimised: cursor addressing, `SIGWINCH`, and a minimal diff-repainter are all
-hand-written, and the first two of those are the ones nobody enjoys.** D2 holds it open.
+**DECIDED 2026-09-02 by the owner: Ink.** This document recommended hand-rolled ANSI and the owner
+chose otherwise, so the recommendation is recorded here as superseded rather than quietly edited
+away — the reasoning that produced it is still the reasoning a future reader needs in order to
+judge whether the choice should be revisited.
+
+**The recommendation rested on a claim that is false, and the probe below is the refutation.** The
+argument was: this repository verifies behaviour by calling pure functions with no environment
+(`operations-plan.ts:32-39` — "Every function here is PURE… the flag IS the behaviour, so the flags
+have to be pinnable byte-for-byte by a unit test with no cmux running"), *"a renderer that returns
+lines is pinnable by exactly that kind of test; a component tree is not."* The last four words are
+wrong, and that was the load-bearing half of the recommendation.
+
+### 6.6.1 The two measurements that settled the toolkit
+
+Both were run on the operator's host on 2026-09-02, against `ink@7.1.1` / `react@19.2.8` on
+`bun 1.3.11`.
+
+**Measurement 1 — byte-exact pinning SURVIVES. The rejection ground is refuted.**
+`ink-testing-library`'s `lastFrame()` returns a plain `string`, not a tree, so the assertion form
+this repository already uses works verbatim:
+
+```ts
+expect((lastFrame() ?? "").split("\n")).toEqual([
+  "run 2026-09-02T14-43-27Z-3906",
+  "eng-1   idle",
+]);                                                    // passes
+```
+
+There is therefore **no testability cost** to Ink, and §6.4's requirement that the renderer be a
+pure function of the model is unaffected: the component tree is the pure function, and the frame is
+its return value. A `(model) => string[]` seam is still specified — `renderFleet(model)` returns
+`lastFrame().split("\n")` — so every assertion in this design is written against lines, and Ink is
+an implementation detail behind that seam rather than a shape the tests have to know about.
+
+**Measurement 2 — the full-frame repaint is REAL, and it is the cost this decision accepts.** An
+Ink app whose fourth row changed on a 30 ms timer wrote all four rows on every update; the three
+static rows appeared in every captured write. So the "repaint everything" objection stands as
+stated.
+
+**What that costs is nonetheless smaller than `operations-plan.ts:655-663` measured, and the
+difference is mechanical rather than a matter of degree.** The incumbent's flash came from
+`clear; <command>; sleep` — the screen goes blank, a subprocess runs for tens of milliseconds, and
+output arrives after it. There is a real window in which the pane is empty. Ink has no subprocess
+and no blank window: it emits one atomic `write()` that overwrites the frame in place. Whether that
+still flashes visibly inside a cmux pane is **not established by either measurement**, and it is
+filed as **Q10** rather than assumed either way — the incumbent's own history is the precedent for
+measuring this instead of reasoning about it.
+
+**The dependency cost is accepted openly.** `package.json` goes from three runtime dependencies to
+five, and the two added are not data-shaped — `react` and `ink` bring a reconciler and a layout
+engine. Two facts bound the blast radius, both checked rather than assumed:
+
+- **The worker image never sees them.** `docker/Dockerfile` installs `bun` and Pi globally via
+  `npm install -g` and never runs `bun install` against this `package.json`. The monitor is a host
+  process in a cmux pane, so nothing about the container plane changes.
+- **CI installs them normally.** Every workflow job runs `bun install --frozen-lockfile` on GitHub
+  Actions, which has no corporate middlebox in front of the registry.
+
+**The install itself is the one operational cost with no workaround.** `registry.npmjs.org` accepts
+the TCP connection from the operator's host and then resets the TLS client hello — an SNI-based
+policy block by the endpoint security extension, not a routing failure. `bun add ink react` fails
+with `ConnectionClosed`, and an offline install from the bun cache fails too because Ink's
+transitive tree (`react-reconciler`, `cli-truncate`, `terminal-size`, `patch-console` and four more)
+is not cached. The dependencies were therefore added in a deliberate off-network act and are pinned
+in `bun.lock`; **every install after that resolves from the lockfile and the local cache, so this is
+a one-time cost and not a standing requirement.** It is recorded because a future contributor on the
+same network who deletes `node_modules` will hit it and should not have to rediscover the cause.
 
 ### 6.7 The Docker plane
 
@@ -841,10 +928,32 @@ Everything `git-watch` showed, in a strip rather than a pane, and the replacemen
 - **`--no-pager`**, without which the whole thing hangs at `(END)` (`operations-plan.ts:697-703`);
 - refresh no slower than the incumbent's 5 s for the *status* half.
 
-The compression: the commit list collapses to the top three plus a count, the status list to the
-first N paths plus `+K more`, both expandable to full height with a keystroke. **This is a real
-loss** — ten commits at a glance becomes three — and D12 is where it is costed rather than assumed
-away.
+**The compression, REVISED 2026-09-02 by the owner (Q8): status first, commits behind a keystroke.**
+The strip's default shows the branch line and the **full short status** — every dirty path, not a
+truncated list — and the commit list collapses to nothing but a `[c] commits` affordance that
+expands it to full height.
+
+```
+┌ git ─────────────────────────────┐
+│ ## main...origin/main [ahead 1]  │
+│  M src/config/render.ts          │
+│  M src/run/dispatch-policy.ts    │
+│ ?? Docs/SRD-FLEET-MONITOR.md     │
+│                                  │
+│ [c] commits                      │
+└──────────────────────────────────┘
+```
+
+**This reverses what this document originally proposed, and the reasoning is the owner's own answer
+to Q8: dirty paths change and a commit list on an idle branch does not.** A strip that is read at a
+glance should spend its rows on the half that moves. The commit list is not *lost* — D12's "kept in
+full and compressed by default" still holds — but it is now the half behind the keystroke.
+
+**The loss this incurs is smaller than the one it replaces, and it should still be named.** Ten
+commits at a glance becomes zero at a glance. The reader who wants branch context now pays a
+keypress for it, where previously the reader who wanted the full dirty list did. **Which of those
+two readers is the common one is the whole content of Q8, and it was settled by asking the operator
+rather than by reasoning** — this document had reasoned its way to the opposite answer.
 
 ---
 
@@ -863,7 +972,7 @@ of the operations console. The `development` console.
 |---|---|
 | Two independent failure domains in the bottom row | **One.** §6.1 — mitigated by per-region catching and a shell rung, both weaker than process isolation |
 | `redrawOnChange`'s exact no-flash guarantee, which is a property of comparing two strings | **A per-region diff**, which is a property of code rather than of shell. It can regress in a way the shell version could not |
-| Ten commits visible at a glance | **Three plus a count**, by default. D12 |
+| Ten commits visible at a glance | **None by default**, behind `[c]`. The full short status takes the rows instead. D12, revised by Q8 |
 | The whole git pane's output is a pure function of the repo, so it cannot be stale in a hidden way | **A long-lived model**, which can be stale — hence §6.4 exists at all |
 | `pifleet status --all`'s exact text, which scripts may be reading off a pane | Nothing changes for scripts (`status --json` is untouched), but a human who has memorised the six-word line has to re-learn |
 | Zero subprocess spawns other than the two commands | **One `docker ps` per 30 s**, plus git. D7 |
@@ -893,7 +1002,7 @@ as genuinely open: D2, D6, D7, D13 and D16.**
 | # | Decision | Specified in |
 |---|---|---|
 | **D1** | One pane, one process, one model of the fleet — replacing both watchers | §6.1 |
-| **D2** | **OPEN** — hand-rolled ANSI with a pure `(model) => string[]` renderer; no rendering dependency | §6.6 |
+| **D2** | **DECIDED 2026-09-02 (owner) — Ink**, behind a `(model) => string[]` seam. Supersedes this document's own recommendation of hand-rolled ANSI, whose stated ground (component trees are not byte-pinnable) was measured false | §6.6, §6.6.1 |
 | **D3** | Read-only is enforced structurally, by the `logs.ts` import-walk precedent | §4.2 |
 | **D4** | Three clocks — 500 ms / 5 s / 30 s — not one refresh interval | §6.3 |
 | **D5** | Every region states its age; a failed refresh replaces content with the reason | §6.4 |
@@ -903,7 +1012,7 @@ as genuinely open: D2, D6, D7, D13 and D16.**
 | **D9** | Activity is five named states, never collapsed into "busy" or "idle" | §3.1, §6.2 |
 | **D10** | The monitor never adjudicates; it reads what the harvest computed | §2.5, §5.2 |
 | **D11** | The event log is tailed from the end and never parsed whole on a clock | §2.4 |
-| **D12** | The git content is kept in full and compressed by default, not dropped | §6.8 |
+| **D12** | **REVISED 2026-09-02 (owner, Q8) — status first; commits behind `[c]`.** The git content is still kept in full and compressed by default; which half is compressed is reversed | §6.8 |
 | **D13** | **OPEN** — no `--json` mode | §5.2 |
 | **D14** | Below a floor, the monitor refuses with a sentence rather than truncating | §6.5 |
 | **D15** | No control socket, no pane text, no action of any kind | §5.2 |
@@ -949,24 +1058,39 @@ something misleading. **The cost: an operator with a short pane gets nothing ins
 and if the floor is set too high that is a regression against a status pane that at least printed six
 lines. §9 Q3 sets it by measurement, not by guess.
 
-### D2 — hand-rolled ANSI, no rendering dependency
+### D2 — Ink, behind a `(model) => string[]` seam
 
-**OPEN. Recommended: hand-rolled. Rejected recommendation: Ink; rejected: blessed; rejected: a
-Bun-native TUI kit adopted unassessed.**
+**DECIDED 2026-09-02 by the owner: Ink. Rejected: hand-rolled ANSI (this document's own
+recommendation); rejected: blessed; rejected: a Bun-native TUI kit adopted unassessed.**
 
-The argument is not "fewer dependencies is better". It is that this repository's entire verification
-posture is pure functions pinned byte-for-byte by tests that need no environment
-(`operations-plan.ts:32-39`), and a renderer that returns `string[]` fits that posture exactly while
-a component tree does not. The second argument is §6.5: the degradation ladder is a *stated
-requirement* with an ordering that must be asserted, and asserting "spend drops before activity age
-at 72 columns" is trivial against a line array and awkward against a reconciler.
+**The recommendation this supersedes, stated fairly before it is set aside.** The argument was never
+"fewer dependencies is better". It was that this repository's entire verification posture is pure
+functions pinned byte-for-byte by tests that need no environment (`operations-plan.ts:32-39`), and
+that a renderer returning `string[]` fits that posture while *"a component tree does not"*. A second
+argument ran alongside it: §6.5's degradation ladder is a stated requirement whose ordering must be
+asserted, and "spend drops before activity age at 72 columns" is trivial against a line array and
+awkward against a reconciler.
 
-**The cost, and it is the largest single cost in this document: cursor addressing, `SIGWINCH`
-handling and a diff-repainter are all hand-written, and none of them is interesting work.** A rough
-estimate is 300-500 lines of code that exists only to avoid a dependency, and that estimate is
-inferred rather than measured. If the owner rules the other way, the place to rule is here, and the
-consequence is that §6.5's ladder becomes harder to pin and §6.4's per-region staleness becomes a
-property of a component rather than of a line.
+**The first argument was measured and is false** (§6.6.1). `lastFrame()` returns a string, so the
+ladder assertion is written against `frame.split("\n")` exactly as it would have been against a
+hand-rolled renderer. The second argument dissolves with the first — both rested on the same
+mistaken premise about what an Ink test can assert. Recording this plainly matters more than
+recording the outcome: **the document was wrong about the thing it was most confident about, and a
+reader weighing a future toolkit change should know the recommendation fell to a fifteen-line probe
+rather than to a preference.**
+
+**What the decision costs, none of it hypothetical.** Two runtime dependencies that are not
+data-shaped, a full-frame repaint on every update (measured, and unlike the incumbent's `clear`
+there is no blank window — whether it flashes in a real pane is **Q10**), and a one-time
+off-network install because the corporate middlebox resets the registry's TLS handshake. §6.6.1
+carries the measurements and the blast-radius checks: the worker image never installs these, and CI
+installs them normally.
+
+**The seam that makes this reversible, and it is the reason the decision is cheap to unwind.**
+Every view exposes `render<View>(model): string[]`, and every test asserts against that array. Ink
+lives behind it. Swapping to a hand-rolled renderer later means reimplementing those functions and
+changing no test — so the 300-500 lines this decision avoids today remain avoidable-or-payable
+later, at the cost of writing them then rather than now.
 
 **One thing that is not an argument for either side, recorded so it is not mistaken for one:**
 `logs.ts`'s sanitiser (`:39-56`) applies unchanged under any toolkit, because it operates on strings
@@ -1111,19 +1235,22 @@ That is a worse sentence and a better criterion, and §9 Q9 is where the choice 
 **Q1 and Q3 block the design as specified; the rest do not.** Q1 decides whether the monitor's
 central column can exist at all for the workers the console actually shows, and Q3 decides whether
 the pane it must live in is big enough. Q5 does not block the shape but decides whether the design
-survives the operator's own disk in six months.
+survives the operator's own disk in six months. **Q8 is closed** (answered by the owner 2026-09-02);
+**Q10 is new**, opened by the toolkit decision in D2 and inheriting the one risk that decision
+knowingly took on.
 
 | # | Question | Probe that settles it | Blocks |
 |---|---|---|---|
-| **Q1** | **Can a monitor distinguish a wedged attended worker from an idle one before its first transcript entry?** Finding A: four of six live workers have an empty `sessions/` directory and `transcript_activity: null` after nine hours. `discoverSessionPath` (`supervisor/tui.ts:176`) suffix-matches `_<worker-id>.jsonl`, and the poll returns before writing the field when nothing matches. The expectation is that the honest answer is **no** — the worker has genuinely never spoken, and the correct rendering is a fifth state (`no transcript`) rather than a guess. **The expectation is not a finding.** | Type one character into one of those four panes, wait for Pi to answer, and watch whether `sessions/` gains a file and `transcript_activity` becomes non-null within one `TUI_POLL_MS`. Then check whether anything on disk distinguished the "before" state from an `rpc` worker's. | **§6.2's activity column and D9's fifth state.** If something does distinguish them, D9 gains a sixth state and the column is stronger. If nothing does, §6.2 must render `no transcript` and say plainly that it means "has never spoken", not "is stuck". |
+| **Q1** | **Can a monitor distinguish a wedged attended worker from an idle one before its first transcript entry?** Finding A: four of six live workers have an empty `sessions/` directory and `transcript_activity: null` after nine hours. `discoverSessionPath` (`supervisor/tui.ts:176`) suffix-matches `_<worker-id>.jsonl`, and the poll returns before writing the field when nothing matches. The expectation is that the honest answer is **no** — the worker has genuinely never spoken, and the correct rendering is a fifth state (`no transcript`) rather than a guess. **The expectation is not a finding.** | **DECIDED 2026-09-02 by the owner: a throwaway worker in a scratch run, NOT the live console panes.** Stand up a short-lived `pane_mode: tui` worker in its own run under a scratch `PIFLEET_RUNS_DIR`, snapshot `sessions/` and `state.json` before it has spoken, make it speak once, and watch whether `sessions/` gains a file and `transcript_activity` becomes non-null within one `TUI_POLL_MS`. Then check whether anything on disk distinguished the "before" state from an `rpc` worker's. **The rejected probe — typing into one of `eng-1`/`eng-2`/`tst-1`/`rev-1` — is more faithful and was refused on cost: it spends real inference on the operator's running fleet and writes a message into a live worker's transcript that the operator did not author.** The scratch run answers the same question about the same code path. | **§6.2's activity column and D9's fifth state.** If something does distinguish them, D9 gains a sixth state and the column is stronger. If nothing does, §6.2 must render `no transcript` and say plainly that it means "has never spoken", not "is stuck". |
 | **Q2** | **What does `docker stats --no-stream` actually cost against six containers?** §6.7 refuses it on a believed cost. The belief is that the non-streaming form still samples over a window per container and therefore takes on the order of a second regardless of container count. | Time `docker stats --no-stream` against the six live workers, ten times, and compare against `docker ps`. | **Only whether a CPU/memory column is possible at all.** Nothing else in the design depends on it. If it is cheap, it belongs on the slow clock and D7's refusal narrows to the streaming form. |
 | **Q3** | **What is the actual pane geometry, and what becomes unreadable first?** §3.5 reasons from `OPERATIONS_TOP_FRACTION = 2/3` to "roughly 80×10", and that is arithmetic on an unmeasured window size. | Open the operations console, run `stty size` in the bottom-left pane, then again after merging the bottom row into one pane, and shrink the terminal until the fleet row loses its activity column. | **§6.5's degradation order and D14's floor.** Both are currently stated as orderings with no numbers, which is exactly the shape that gets discovered at grading time. |
 | **Q4** | **Does a program started by cmux's shell injection receive `SIGWINCH`?** `--command` text is typed into the pane's shell (`operations-plan.ts:51-54`), so the monitor is a foreground job of that shell rather than a process cmux spawned directly. The expectation is yes — that is ordinary job control — but this repository has been wrong before about what a pane delivers, and §1.1's `less`-at-`(END)` finding is the precedent for measuring rather than assuming. | Start the monitor in an operations pane, resize the cmux window, and see whether it repaints at the new size. | **D2's resize handling.** If no signal arrives, the renderer must poll `process.stdout.columns`, which is a different and worse design. |
 | **Q5** | **How does the slow clock scale to 500 runs?** Measured: 403 ms at 80 runs holding `run.json`. The naive extension is ~2.5 s, which would exceed the incumbent's whole poll interval. The extrapolation assumes the cost is linear in runs and dominated by `ps` spawns; neither is established. | Synthesise 500 run directories (empty `run.json` plus a `workers/<id>/state.json` naming a dead pid) under a scratch `PIFLEET_RUNS_DIR` and time `liveRunIds` and `runIdsAscending` separately. | **D4's slow-clock period, and possibly D6.** If the walk is 2.5 s, 30 s is too fast and the monitor needs a live-set cache invalidated by the medium clock's name-set comparison — which §6.3 already sketches but does not require. |
 | **Q6** | **Does a run *disappearing* need to be faster than 30 s?** §6.3 makes appearance a 5 s event through a cheap name-set `readdir` and leaves disappearance on the slow clock, so a `down`-ed run can show as live for up to half a minute. | Run `pifleet down` on one console run and time how long the pane keeps claiming it is alive; ask whether that is worse than the incumbent's 5 s. | **§6.3's mitigation only.** The fix if it matters is cheap — `state.json`'s `phase: "dead"` is on the fast clock for known-live workers — but it should be a decision rather than an accident. |
 | **Q7** | **What does view 4 cost on the largest run on disk?** `collectRunReport` runs `git merge-tree` per (worker, branch) and `harvestTask` per task, and §2.5 calls it "seconds, not milliseconds" without measuring it. | Time `pifleet report --run 2026-08-30T23-41-07Z-1b0a --json` — the run holding the 24.7 MB event log — and again on the largest multi-worker run. | **Whether view 4 needs a progress indicator or merely a spinner**, and whether it can be pre-warmed on the slow clock for the selected run. Not the shape of the view. |
-| **Q8** | **Should the git strip default to status-only and expand to commits, rather than the reverse?** D12 chose three-commits-plus-status as the compressed default. The opposite — full short status, no commits until asked — may be the better trade, because dirty paths change and a commit list on an idle branch does not. | Ask the operator which half of the current git pane they actually read. This is the one question in this table that is settled by a person rather than a probe, and it should be asked rather than reasoned about. | **D12's default only.** Both halves are preserved either way. |
+| **Q8** | ~~Should the git strip default to status-only and expand to commits, rather than the reverse?~~ **ANSWERED 2026-09-02: YES — status first, commits behind `[c]`.** | Asked the operator, which is what this row said to do. The answer was the reverse of D12's original default, with the operator's stated reason matching the one this row conjectured: dirty paths change and a commit list on an idle branch does not. | **Closed.** D12 revised, §6.8 rewritten, §7.2's loss row updated. Both halves are still preserved; which one costs a keypress is reversed. |
 | **Q9** | **What is the falsifiable form of "an order of magnitude denser"?** §3.6's third property and D16's cost paragraph both name this as unresolved. | Count the distinct facts per worker row in the incumbent (two: the worker id, and `idle task=- supervisor=up`) and in a rendered mock of §6.2's row, and let the owner set the floor. | **D16, and the acceptance criterion §10 proposes for it.** A criterion whose threshold is a rhetorical figure will be graded `[~]` forever. |
+| **Q10** | **Does Ink's full-frame repaint flash visibly inside a cmux pane?** Measured (§6.6.1): Ink rewrites every row on every update, including unchanged ones. Measured separately: the incumbent's flash came from `clear` + subprocess, which leaves a blank window Ink does not have. **Whether one atomic overwrite still flashes is established by neither measurement**, and D2 accepted the repaint without settling it. | Run the monitor in a real operations pane at the 500 ms clock with a changing activity column, and watch. If it flashes, compare against an Ink build whose static regions are memoised so unchanged rows are not re-rendered. | **Nothing structural — the seam in D2 makes the renderer swappable — but it decides whether §6.4's fast clock can run at 500 ms or must slow down.** This is the one risk D2 knowingly took on, and it is filed rather than assumed because `operations-plan.ts:655-671` is precedent for this repository being wrong about exactly this. |
 
 ---
 

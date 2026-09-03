@@ -6,6 +6,13 @@
     "moduleResolution": "bundler",
     "moduleDetection": "force",
     "types": ["bun-types"],
+    // Ink is the rendering toolkit (SRD-FLEET-MONITOR D2, decided by the owner
+    // 2026-09-02 against this document's own recommendation). `react-jsx` is
+    // the automatic runtime, so no component file imports React just to satisfy
+    // the compiler; `jsxImportSource` names react explicitly rather than
+    // relying on the default, because the default changes with the runtime.
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
@@ -17,5 +24,10 @@
     "exactOptionalPropertyTypes": false,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  // `.tsx` is included alongside `.ts` rather than replacing it: the monitor's
+  // components are the only JSX in the repo and everything else stays plain
+  // TypeScript. Omitting the .tsx globs is the failure mode that matters —
+  // `tsc --noEmit` would pass by simply never opening the component files,
+  // which is the same false all-clear ISC-460's extension hit.
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"]
 }
