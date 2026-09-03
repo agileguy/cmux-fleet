@@ -195,3 +195,76 @@ describe("the status action actually consults the live-run selector", () => {
     expect(SRC).toMatch(/if \(live\.length > 0\) return live;/);
   });
 });
+
+/**
+ * ISC-494 — one damaged `state.json` must not end the run enumeration.
+ *
+ * ## The defect, observed rather than reasoned about
+ *
+ * `liveRunIds` and `latestLiveRunId` both walked every worker of every run
+ * calling `readWorkerState` and then `identityAlive`/`processStartTime`, and
+ * neither call was inside a `try`. Both throw rather than returning a sentinel,
+ * and deliberately so:
+ *
+ * - `readWorkerState` raises `StateReadError` when `state.json` EXISTS but
+ *   fails schema validation — `null` is reserved for absent (`state.ts:806-855`).
+ * - `processStartTime` raises `IdentityReadError` whenever `ps` writes a
+ *   diagnostic, because a failed read is not an absent process
+ *   (`procstart.ts:248-262` argues the case at length).
+ *
+ * So a single unparseable `state.json` anywhere under the runs root took out
+ * the whole enumeration, and with it `pifleet status`, `pifleet wait`, and
+ * anything else that asks which runs are alive. **Which worker it struck first
+ * was `readdir` order, so the failure was not deterministic.** It surfaced
+ * while building a 500-run tree to measure the slow clock: the probe died on
+ * the first malformed file rather than reporting a number.
+ *
+ * ## What these two assert, and why the second one is the important one
+ *
+ * The first proves the enumeration survives. The second proves it survives
+ * WITHOUT losing the live run standing next to the damaged one — a `break`, or
+ * a catch placed around the whole run rather than the worker, would pass the
+ * first test and fail the second, and that is precisely the fix a hurried
+ * reading of the traceback produces.
+ */
+describe("a damaged state.json degrades one worker, not the enumeration (ISC-494)", () => {
+  /** A `state.json` that exists, is valid JSON, and is not a `WorkerState`. */
+  async function makeDamagedWorker(root: string, runId: string): Promise<void> {
+    const run = runPaths(runId, root);
+    await mkdir(workerPaths(run, "broken").dir, { recursive: true });
+    await writeFile(workerPaths(run, "broken").stateJson, JSON.stringify({ not: "a worker state" }));
+  }
+
+  test("the live run is still found when a damaged worker sorts ahead of it", async () => {
+    const r = await root();
+    // `broken` sorts before `w1` in readdir order on every platform that sorts
+    // at all, so the damaged worker is reached first within the same run.
+    await makeRun(r, "2026-08-30T00-00-00Z-live", process.pid);
+    await makeDamagedWorker(r, "2026-08-30T00-00-00Z-live");
+
+    expect(await latestLiveRunId(r)).toBe("2026-08-30T00-00-00Z-live");
+  });
+
+  test("a damaged run does not hide a live run in a DIFFERENT directory", async () => {
+    const r = await root();
+    await makeRun(r, "2026-08-29T00-00-00Z-alive", process.pid);
+    // A whole run whose only worker is unreadable, sorting AFTER the live one
+    // so the walk meets it first on the descending scan.
+    await writeFile(
+      join(
+        r,
+        await (async () => {
+          const id = "2026-08-31T00-00-00Z-broke";
+          await mkdir(join(r, id), { recursive: true });
+          return id;
+        })(),
+        "run.json",
+      ),
+      JSON.stringify({ run_id: "2026-08-31T00-00-00Z-broke" }),
+    );
+    await makeDamagedWorker(r, "2026-08-31T00-00-00Z-broke");
+
+    // Without the per-worker catch this throws instead of answering.
+    expect(await latestLiveRunId(r)).toBe("2026-08-29T00-00-00Z-alive");
+  });
+});

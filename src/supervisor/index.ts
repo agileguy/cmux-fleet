@@ -1979,7 +1979,45 @@ async function main(): Promise<void> {
           try {
             if (state.session_path === null) {
               const found = await discoverSessionPath(run.sessionsDir, argv.workerId);
-              if (found.path === null) return;
+              if (found.path === null) {
+                /**
+                 * WATCHING, AND HAVE SEEN NOTHING — written here rather than
+                 * returned past (ISC-492).
+                 *
+                 * This early return used to be bare, and the cost was measured
+                 * rather than imagined: on 2026-09-02 four of six live attended
+                 * workers had carried `transcript_activity: null` for nine hours,
+                 * because a `tui` worker's session file is created lazily on its
+                 * FIRST ASSISTANT MESSAGE and a worker nobody has typed at yet
+                 * has none. `null` is the value an `rpc` worker also carries, so
+                 * every surface reading only `state.json` — `pifleet status`
+                 * included — rendered the two identically. **A worker that has
+                 * never spoken and a worker whose turns do not run here are
+                 * different facts, and the field existed to tell them apart.**
+                 *
+                 * `{entries: 0, last_growth_at: null}` is not a new shape and
+                 * needs no schema change: `entries: 0` is already legal, and
+                 * `last_growth_at: null` already means MEASURED-AND-NEVER-GREW
+                 * rather than not-measured — `contracts.ts` spells that out for
+                 * the case of a supervisor started against an existing
+                 * transcript. A watcher that has looked and found no file is in
+                 * exactly that epistemic position.
+                 *
+                 * **It does NOT mean the worker is stuck**, and nothing derived
+                 * from it may say so. Nothing on disk distinguishes a worker
+                 * that has never spoken from one that is wedged; this field
+                 * closes the first gap and makes no claim about the second.
+                 *
+                 * Written once and only on change, matching the flush discipline
+                 * the counter write below argues for — a poll that flushed every
+                 * tick would turn a 500 ms clock into a 500 ms write.
+                 */
+                if (state.transcript_activity === null) {
+                  state.transcript_activity = { entries: 0, last_growth_at: null };
+                  void flushState();
+                }
+                return;
+              }
               /**
                * The path, and ONLY the path.
                *

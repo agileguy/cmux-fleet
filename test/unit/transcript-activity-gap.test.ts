@@ -183,34 +183,59 @@ describe("ISC-492: the contract already distinguishes them, unchanged", () => {
  * find the docstring that describes a control just as happily as the code that
  * implements it.
  */
-describe("the writer does not yet use the room the contract has", () => {
+describe("the writer now uses the room the contract has (ISC-492, closed)", () => {
   const SUPERVISOR = stripComments(
     readFileSync(new URL("../../src/supervisor/index.ts", import.meta.url).pathname, "utf8"),
   );
 
   /**
-   * **WHEN THIS TEST FAILS, THE GAP IS CLOSED — DELETE THIS `describe` BLOCK.**
+   * **THIS BLOCK REPLACED A TRIPWIRE, AND THE REPLACEMENT IS THE POINT.**
    *
-   * It is pinned to the BLOCKER's presence on purpose. A probe asserting the
-   * repair's absence in some looser way would stay green through a partial fix;
-   * this one fails the moment the early return stops preceding the write, which
-   * is the only edit that can close the gap.
+   * The previous version asserted the DEFECT — that the early return preceded
+   * the only write, so no `tui` worker without a session file could ever be
+   * measured. It carried an instruction to delete it when it failed, and on
+   * 2026-09-02 it failed, because the gap was closed. What follows pins the
+   * repair in the same place, so a revert is caught by the same file rather
+   * than by nobody.
+   *
+   * The gap was not theoretical: four of six live attended workers had carried
+   * `transcript_activity: null` for nine hours, rendering identically to `rpc`
+   * workers on every surface that reads only `state.json`.
    */
-  test("the poll still returns before ever writing the field", () => {
-    const earlyReturn = SUPERVISOR.indexOf("if (found.path === null) return;");
-    const fieldWrite = SUPERVISOR.indexOf("state.transcript_activity = {");
-
-    expect(earlyReturn).toBeGreaterThan(-1);
-    expect(fieldWrite).toBeGreaterThan(-1);
-    // The ordering IS the defect: every path that reaches the write has already
-    // proved a session file exists, so no `tui` worker without one can be
-    // measured. `supervisor/index.ts:1982` versus `:2058`.
-    expect(earlyReturn).toBeLessThan(fieldWrite);
+  test("the no-file branch writes the field instead of returning past it", () => {
+    // The bare early return IS the defect, and its absence is the repair.
+    expect(SUPERVISOR).not.toContain("if (found.path === null) return;");
+    expect(SUPERVISOR).toContain("if (found.path === null) {");
   });
 
-  test("and there is exactly one site that writes it, so the gap has one repair", () => {
-    // Two write sites would mean the early return might be bypassed by the
-    // other one, and this whole file would be reasoning about the wrong branch.
-    expect([...SUPERVISOR.matchAll(/state\.transcript_activity = /g)]).toHaveLength(1);
+  test("the value written is the watching-and-saw-nothing one, not a growth claim", () => {
+    // `entries: 0` with `last_growth_at: null` means MEASURED-AND-NEVER-GREW.
+    // A non-zero entry count here would be a claim about speech that never
+    // happened, which is worse than the null it replaces.
+    expect(SUPERVISOR).toContain("state.transcript_activity = { entries: 0, last_growth_at: null };");
+  });
+
+  test("the write precedes the return, which is the ordering the defect had backwards", () => {
+    const branch = SUPERVISOR.indexOf("if (found.path === null) {");
+    const watchWrite = SUPERVISOR.indexOf(
+      "state.transcript_activity = { entries: 0, last_growth_at: null };",
+    );
+    const counterWrite = SUPERVISOR.indexOf("state.transcript_activity = {\n");
+    expect(branch).toBeGreaterThan(-1);
+    expect(watchWrite).toBeGreaterThan(branch);
+    // …and it is still ahead of the counter write, so the two do not race for
+    // the same field on the first poll after a file appears.
+    if (counterWrite > -1) expect(watchWrite).toBeLessThan(counterWrite);
+  });
+
+  test("it is written only on change, so a 500ms clock is not a 500ms write", () => {
+    // The guard matters: `flushState` on every poll would turn the transcript
+    // clock into a write loop, which is the cost the counter write below it
+    // already argues against at length.
+    expect(SUPERVISOR).toContain("if (state.transcript_activity === null) {");
+  });
+
+  test("there are exactly two write sites: the watching value and the counter", () => {
+    expect([...SUPERVISOR.matchAll(/state\.transcript_activity = /g)]).toHaveLength(2);
   });
 });
