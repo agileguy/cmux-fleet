@@ -1482,6 +1482,32 @@ the root-cause classification; this table is the index.
 
 ## Changelog
 
+- **conjectured:** ISC-274 generalised ISC-266 from one file to a class, so the 5000 ms default is
+  now gone from the subprocess-spawning suites. The criterion says so as a class rather than a file,
+  which is the durable form, and it is graded `[x]` on a grep anyone can re-run.
+  **refuted by:** CI's `load` job on the `fleet-monitor` branch, twice — 2026-09-03, at 5001.98 ms and
+  then 5000.11 ms on a rerun with no code change between them. The failure reported as `(fail)
+  (unnamed)`, which is bun's spelling for a HOOK that timed out, and the hook was
+  `test/e2e/lifecycle.test.ts`'s `afterAll`: seven `pifleet down` spawns on bun's inherited default.
+  **ISC-274's own probe cannot see it.** Read the criterion's wording — *"must give every `test(...)`
+  in it an explicit third argument"* — and the quantifier is over `test(...)`. A hook is not a
+  `test(...)`, so the sweep that closed 274 was correct and complete against what it said, and passed
+  over 74 hooks in `test/e2e/` and `test/integration/` that inherit 5000 ms. Nine carry a derived
+  ceiling, and one of those nine — `scale-16-workers.test.ts:240` at `120_000` — is someone hitting
+  this exact wall earlier and fixing their own file without generalising.
+  **learned:** a criterion that names its own probe's subject has scoped itself to that subject, and
+  the blind spot is not in the probe's rigour but in its QUANTIFIER. ISC-266's signature is a property
+  of *anything bun times*, and `test()` was only where it was first met. The cheap tell is
+  grammatical: when a criterion's probe sentence names a construct (`test(...)`, `describe(...)`, a
+  file glob) rather than the behaviour (`anything that spawns`), the constructs it does not name are
+  unexamined and read as green. Two further consequences worth carrying: the outer assertion blamed
+  the wrong thing — ISC-423's message says *"something in it needs a credential"* when nothing reached
+  for one — because a child suite's non-zero exit was attributed to the only cause that criterion was
+  watching for; and `[test] timeout` in `bunfig.toml` is not the lever, since bun 1.3.11 ignores it
+  (probed, recorded at the top of `budget.ts`), so every ceiling must be passed at the call site.
+  `lifecycle.test.ts` is budgeted here because it is what blocks this branch; the remaining 73 hooks
+  and the `groupLeader` fixture defect found alongside them are a harness change of their own.
+
 - **conjectured:** a check that compares two strings after normalising both is safe when the
   normalisation is the same function on each side. "Both sides means both sides" is the symmetric,
   obviously-correct reading, and `doctor`'s allowlist verdict was written that way on purpose.
