@@ -721,7 +721,52 @@ Workers inherit the operator's Google identity via **Application Default Credent
 
 ### 5.9 The LLM is a private oMLX instance
 
-**Every worker's model is served by a private oMLX instance the operator runs.** No hosted provider is involved, in any role, ever. **That prohibition is unchanged and is not what any amendment to this section has relaxed** — it is the constraint that deletes `usd_ceiling`, deletes the provider key, and collapses §12.4's Class 1 to a single env var.
+> **Amendment (2026-09-03) — the prohibition is BOUNDED, not repealed. Owner decision.**
+>
+> The paragraph below said *"No hosted provider is involved, in any role, ever"* and called that
+> prohibition unchanged by every prior amendment. **It is changed now**, and this note stands ahead of
+> it rather than replacing it, because the sentence it qualifies is one three other design decisions
+> were built on and a reader needs to see both.
+>
+> **What is now permitted.** A `hosted: true` provider declared in `llm.providers`, assigned per
+> worker. On this fleet that is Ollama Cloud, on the `engineer`, `tester` and `reviewer` roles — the
+> `development` console's four seats — and nothing else. Every other role, including `observer` and
+> `ticketing`, stays on the operator's own oMLX, and a role that names no provider prefix still
+> resolves to it.
+>
+> **What that costs, stated without hedging.** A third party now serves those workers' models, so
+> everything in an assigned worker's context reaches them: its transcript, its tool output, and the
+> repository under `/workspace` as the agent reads it. This is a reversal of the privacy axis the
+> 2026-08-25 amendment established, not an extension of it — that amendment moved the boundary from
+> LOCATION to OWNERSHIP and kept ownership absolute. This one gives up ownership for a named subset.
+> **There is no ceiling, timeout or scope that reduces a transcript after it has been sent.**
+>
+> **The exposure ladder gains a fourth row**, and it is the first whose key is a billing credential:
+>
+> | Shape | Where the key travels | Who serves the model |
+> |---|---|---|
+> | Docker host (default) | nowhere — loopback only | the operator |
+> | Trusted LAN peer | one unencrypted L2 hop | the operator |
+> | Private tunnel | the public internet, TLS to the tunnel edge | the operator |
+> | **Hosted provider** | **the public internet, to a third party** | **a vendor** |
+>
+> **Three consequences the original paragraph named, revisited rather than left standing.**
+> `usd_ceiling` is still absent and is now a real gap rather than a deleted field — a hosted provider
+> is metered and this fleet has no spend gate for it. The provider key is back, delivered as a
+> read-only `0444` file rather than an environment variable (ISC-407, ISC-408), which §12.4 is
+> explicit *"narrows the accident, not the agent"*. §12.4's Class 1 is no longer a single env var.
+>
+> **What is NOT permitted, and is enforced rather than conventional.** A worker not assigned to the
+> hosted provider is on a different egress bridge with no alias and no route to the vendor (D7,
+> ISC-409, ISC-410, ISC-411) — it cannot reach the endpoint even from its own `bash`. `hosted:` is
+> required and explicitly declared per provider, never inferred, because every available inference
+> misclassifies the tunnel shape this section spent an amendment establishing.
+>
+> The full argument, the measured evidence and the refusals are `Docs/SRD-INFERENCE-PROVIDERS.md`
+> (SRD-PROVIDERS-001), which this amendment ADOPTS — disposition (2), *bound*, per its §0.2. That
+> document is no longer a proposal.
+
+**Every worker's model is served by a private oMLX instance the operator runs, except where a `hosted: true` provider is explicitly declared and explicitly assigned — see the 2026-09-03 amendment above.** For every role that does not name one, no hosted provider is involved. That default is what still deletes `usd_ceiling` from the common path, keeps the provider key off every unassigned worker, and keeps §12.4's Class 1 to a single env var for them.
 
 > **Amendment (2026-08-25) — the constraint is PRIVACY, not LOCATION, and this section is retitled to say so.**
 >

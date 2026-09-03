@@ -378,6 +378,46 @@ export function providerIsHosted(
  * DIALS it must present the same credential, and the cheapest way for them to
  * disagree is to read the name from two places.
  */
+/**
+ * ONE provider's endpoint, in the two-field shape `hostReachableBaseUrl` takes.
+ *
+ * ## Why this exists — `doctor` was probing the wrong machine
+ *
+ * `hostReachableBaseUrl` reads `llm.base_url` and `llm.relay_upstream`, the
+ * FLAT keys, which §6.1 defines as shorthand for "the block for
+ * `llm.provider`". The moment a fleet writes a `providers:` map those flat keys
+ * are absent and take their SCHEMA DEFAULTS — and the default `base_url` names
+ * the container alias on port 8000. So `doctor` silently stopped probing the
+ * configured endpoint and started probing whatever answers on the Docker host's
+ * loopback, then reported that machine's model list as the fleet's.
+ *
+ * **Measured on this repository's own `fleet.yaml`, 2026-09-03**, moving a
+ * working config from flat keys to an identical `providers.omlx` block:
+ *
+ *     before  omlx (from host): ok 32 models served … allowlist 1/1 served
+ *     after   omlx (from host): ok completion probe → HTTP 404
+ *             DIAGNOSIS [misconfigured] allowlist-model-not-served: …
+ *
+ * Same endpoint, same allowlist, same models on the server — and a red verdict
+ * naming a misconfiguration that did not exist. A preflight that reports a
+ * healthy fleet as broken is the mirror of ISC-256's failure and costs the same
+ * thing: the next real diagnosis is not believed.
+ *
+ * `undefined` when the provider is not declared, so a caller can fall back to
+ * the flat keys rather than fabricating an endpoint. This deliberately does NOT
+ * throw the way {@link providerApiKeyEnv} does: a credential falling back is a
+ * key sent somewhere it should not go, while an endpoint falling back is the
+ * §6.1 shorthand working as specified.
+ */
+export function providerHostDialView(
+  config: FleetConfig,
+  provider: string,
+): { llm: { base_url: string; relay_upstream: string | null } } | undefined {
+  const block = config.llm.providers?.[provider];
+  if (block === undefined) return undefined;
+  return { llm: { base_url: block.base_url, relay_upstream: block.relay_upstream } };
+}
+
 export function providerApiKeyEnv(config: FleetConfig, provider: string): string {
   const providers = config.llm.providers;
   // §6.1's shorthand: with no map the flat keys ARE this provider's block, so

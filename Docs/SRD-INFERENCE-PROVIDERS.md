@@ -1,10 +1,14 @@
 # System Requirements Document — per-worker inference providers
 
-**SRD-PROVIDERS-001 v0.1 — DRAFT FOR OWNER REVIEW**
-Sits alongside `Docs/SRD.md` (SRD-PIFLEET-001) and **proposes an amendment to its §5.9 and §12.4**.
-Until that amendment is adopted, `Docs/SRD.md` wins and this document is a proposal, not a
-specification. Where this document and `Docs/SRD.md` disagree today, that disagreement is the
-subject of §4 rather than an oversight.
+**SRD-PROVIDERS-001 v0.2 — ADOPTED 2026-09-03, disposition (2) *bound***
+Sits alongside `Docs/SRD.md` (SRD-PIFLEET-001). Its amendment to §5.9 **has been adopted** by owner
+decision on 2026-09-03 and is written into that document at §5.9; this is a specification, not a
+proposal. §4's disagreement with `Docs/SRD.md` is resolved in this document's favour, on the bounded
+disposition it recommends in §0.2 — a hosted provider is legal for named roles and the default stays
+the operator's own oMLX, rather than the prohibition being repealed outright.
+
+**As configured on this fleet:** `ollama-cloud` (`hosted: true`) serves the `engineer`, `tester` and
+`reviewer` roles — the `development` console's four seats. Every other role resolves to `omlx`.
 
 ---
 
