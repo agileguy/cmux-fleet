@@ -80,7 +80,7 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-**Sixteen criteria are unattempted `[ ]`, and they are the only unmet ones.** The block
+**Fourteen criteria are unattempted `[ ]`, and they are the only unmet ones.** The block
 ISC-468..ISC-493 was filed 2026-09-02 as the done-condition for a read-only fleet-monitor
 TUI (`Docs/SRD-FLEET-MONITOR.md` v0.2), **before any of it was built** — deliberately, so the
 criteria are the specification rather than a description of what was written. The data plane
@@ -180,7 +180,7 @@ and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 
 harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
-Sixteen criteria are unattempted `[ ]` — what remains of the fleet-monitor
+Fourteen criteria are unattempted `[ ]` — what remains of the fleet-monitor
 block (see above). Every other criterion has been attempted. Eleven are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
