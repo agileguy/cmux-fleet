@@ -81,6 +81,45 @@ import { processStartTime } from "../safety/procstart.ts";
  *
  * @throws {IdentityReadError} `ps` could not be read for this pid.
  */
+/**
+ * The liveness fallback for a worker with NO REGISTRY ENTRY — and the reason it
+ * cannot be a bare `processStartTime` check.
+ *
+ * ## Observed on the operator's own fleet, 2026-09-03
+ *
+ * A run from 2026-09-01 was still being reported LIVE by `liveRunIds`. Its
+ * `tick-1` recorded pid 10251 and wrote `phase: "dead"`; its `registry.json`
+ * had `workers: {}`. The OS had since recycled 10251, and it belonged to a
+ * `rev-1` supervisor started two days later — so `processStartTime(10251)`
+ * returned a time, the fallback read that as "alive", and a two-day-old dead
+ * run reappeared in `pifleet status`, in `wait`, and in the console's
+ * `--recreate` scoping. **The monitor found it on its first real deployment**,
+ * because a `no container` cell beside a `phase dead` is exactly the
+ * contradiction §6.2 was built to make visible.
+ *
+ * {@link identityAlive} exists to prevent precisely this — it compares the
+ * process START TIME, which a recycled pid cannot match — but it needs a
+ * registered `started` stamp, and the fallback has none. `state.json` carries
+ * `started_at` as an ISO string while `processStartTime` returns `ps` format,
+ * so the two cannot be compared without a schema change.
+ *
+ * **So this closes the observed hole rather than the general one, and the
+ * residual is stated instead of implied.** A worker that WROTE `phase: "dead"`
+ * has reported its own end — `dead` is terminal, nothing follows it — so a
+ * recycled pid can no longer resurrect it. A recycled pid landing on a worker
+ * whose last written phase was `idle` or `busy` is still misread as alive; that
+ * needs an identity stamp in `state.json` and is a larger change than this
+ * fallback should make on its own.
+ *
+ * The direction of the change is one-way: it can only ever REMOVE runs that
+ * declared themselves dead, never add one, so nothing that was correctly live
+ * can be lost to it.
+ */
+async function notDeadAndRunning(state: WorkerState): Promise<boolean> {
+  if (state.phase === "dead") return false;
+  return (await processStartTime(state.pid)) !== null;
+}
+
 export async function identityAlive(id: ProcessIdentity): Promise<boolean> {
   const started = await processStartTime(id.pid);
   return started !== null && started === id.started;
@@ -1087,7 +1126,7 @@ export async function liveRunIds(root: string = runsRoot()): Promise<string[]> {
         alive =
           registered !== undefined
             ? await identityAlive({ pid: registered.pid, started: registered.started })
-            : (await processStartTime(state.pid)) !== null;
+            : await notDeadAndRunning(state);
       } catch {
         continue;
       }
@@ -1134,7 +1173,7 @@ export async function latestLiveRunId(root: string = runsRoot()): Promise<string
         alive =
           registered !== undefined
             ? await identityAlive({ pid: registered.pid, started: registered.started })
-            : (await processStartTime(state.pid)) !== null;
+            : await notDeadAndRunning(state);
       } catch {
         continue;
       }
