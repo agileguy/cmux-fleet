@@ -33,6 +33,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -212,5 +213,36 @@ describe("ISC-497: the frame width follows the pane, without depending on a sign
   test("a non-terminal stdout falls back, and to the width the render suite uses", () => {
     expect(frameColumns(null, undefined)).toBe(FALLBACK_COLUMNS);
     expect(FALLBACK_COLUMNS).toBe(100);
+  });
+
+  /**
+   * A SOURCE-TEXT GUARD, and it is one because a behavioural test is not
+   * available here — stated rather than disguised.
+   *
+   * `frameColumns` being right is not the same as the paint CALLING it. The
+   * original defect was precisely the call site: a `columns` captured once and
+   * used forever, with a perfectly correct width rule sitting unused beside it.
+   * Reverting `columns: columnsNow()` to `columns` in the action reintroduces
+   * the whole defect and **passes every test above**, because the paint lives
+   * inside a commander action that no unit test drives and driving it would
+   * need a real terminal, a scheduler and a live runs root — which ISC-491
+   * forbids this block from requiring.
+   *
+   * So this asserts the call site as text. It is weaker than a behavioural
+   * test and it fails on exactly the regression that matters, which is the
+   * trade being made. It is the same technique `monitor-readonly.test.ts` uses
+   * to pin the command's import surface, for the same reason: the file is the
+   * bridge between the CLI and the monitor, and some of what must hold about
+   * it is only visible in its text.
+   */
+  test("the paint re-reads the width rather than closing over a startup value", () => {
+    const src = readFileSync(
+      new URL("../../src/cli/commands/monitor.ts", import.meta.url).pathname,
+      "utf8",
+    );
+    expect(src).toContain("columns: columnsNow(),");
+    // And the rule is reached through the exported function, not re-spelled
+    // inline where it could drift from what this file tests.
+    expect(src).toContain("frameColumns(pinned, process.stdout.columns)");
   });
 });
