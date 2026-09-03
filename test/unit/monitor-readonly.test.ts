@@ -54,7 +54,41 @@ const ROOTS = [
   "monitor/compose.ts",
   "monitor/render.ts",
   "monitor/views/fleet.tsx",
+  /*
+   * Views 2-4's readers. Added with the modules rather than after them, because
+   * the walk's whole value is that a file cannot be in the monitor and outside
+   * the guard at the same time — and `read/report.ts` in particular is the one
+   * file in this design that reaches a verdict-producing module, so leaving it
+   * out of `ROOTS` to spare the assertions below would have removed exactly the
+   * file most worth walking.
+   */
+  "monitor/read/history.ts",
+  "monitor/read/detail.ts",
+  "monitor/read/report.ts",
 ];
+
+/**
+ * **VIEW 4, AND THE ONE EXEMPTION IN THIS FILE.**
+ *
+ * ISC-473 is worded *"the monitor never calls `adjudicate`, `harvestTask` or
+ * anything that produces a verdict **outside view 4**"*, and §6.2 defines view
+ * 4 as `collectRunReport` for one selected run. So a module that collects a run
+ * report is not a violation of that criterion, it is the criterion's carve-out
+ * arriving as code — and the two assertions below would fail on it for the
+ * exact behaviour the SRD specifies.
+ *
+ * **Named as one file rather than loosened into a predicate.** A test that
+ * skipped "any module whose name contains report" would exempt the next one
+ * too. This list is the set of files allowed to reach a verdict, it has one
+ * member, and adding a second is an edit somebody has to justify here.
+ *
+ * What is NOT exempted, and is what actually holds D10 up: `read/report.ts` is
+ * unreachable from every clock. `fleetSources` does not name it, `compose.ts`
+ * reaches it only through `fetchForView`'s `report` arm, and
+ * `monitor-clocks.test.ts` plus the call-graph probe below assert that no
+ * source's `read()` touches it.
+ */
+const VIEW_4 = ["monitor/read/report.ts"];
 
 /**
  * Every module reachable from `entry` by static relative import, as repo-
@@ -120,9 +154,51 @@ describe("ISC-468: nothing the monitor imports can write or command", () => {
   /**
    * The ledger is APPEND-ONLY STATE about gated verbs. A monitor that can write
    * it can forge an audit row, which is worse than a monitor that crashes.
+   *
+   * **THIS ASSERTION WAS NARROWED WHEN VIEW 4 SHIPPED, and the narrowing is the
+   * same shape — and the same conflict — ISC-473's is.** `run/ledger.ts` holds
+   * BOTH halves of the ledger: `LedgerWriter` (`:16`) and `mergeLedger`
+   * (`:83`). `collectRunReport`'s first act is `mergeLedger(run)`, and §6.2's
+   * view 4 IS `collectRunReport`, so the module is now in the closure by way of
+   * a READ that the SRD requires. The criterion as literally worded — "the
+   * ledger writer is not reachable" — cannot hold for a monitor that renders a
+   * report, and loosening it to pass would assert nothing.
+   *
+   * So the module-level check becomes a CALL-level one, which is what the
+   * criterion was actually about. `run/state.ts` set this precedent already:
+   * it exports `writeWorkerState` and the monitor imports it for
+   * `readWorkerState`, so the file's own header records that "what is actually
+   * required is that the monitor's own code never CALLS one". The ledger is now
+   * the second module in that position, and it is held the same way.
+   *
+   * Nothing is lost that was being checked: the reachability assertion never
+   * proved the monitor would not write a ledger row, only that it could not
+   * find the class. The name is what a write needs, and the name is what is
+   * asserted absent.
    */
-  test("the ledger writer is not reachable", () => {
-    expect([...CLOSURE].filter((m) => m === "run/ledger.ts")).toEqual([]);
+  test("no monitor module can construct a ledger writer", () => {
+    /*
+     * The read half is reachable EXACTLY where view 4 is reachable and nowhere
+     * else — which is a stronger statement than "only `read/report.ts` reaches
+     * it", because `compose.ts` imports that module and so reaches the ledger
+     * too. What must not exist is a SECOND route: a root that can reach the
+     * ledger without going through view 4 would be a monitor module holding
+     * ledger access for some other purpose, and that is the thing this
+     * assertion is actually for.
+     */
+    const reachesLedger = ROOTS.filter((rel) => transitiveImports(rel).has("run/ledger.ts"));
+    const reachesView4 = ROOTS.filter(
+      (rel) => VIEW_4.includes(rel) || VIEW_4.some((v) => transitiveImports(rel).has(v)),
+    );
+    expect(reachesLedger).toEqual(reachesView4);
+    expect(reachesLedger).toContain(VIEW_4[0]!);
+
+    for (const rel of ROOTS) {
+      const source = stripComments(readFileSync(join(SRC, rel), "utf8"));
+      for (const writer of ["LedgerWriter", "appendLedger", ".append("]) {
+        expect(source, `${rel} names the ledger writer ${writer}`).not.toContain(writer);
+      }
+    }
   });
 
   /**
@@ -315,6 +391,7 @@ describe("ISC-473: no verdict is produced outside view 4", () => {
   test("the monitor's own modules import nothing from harvest and no adjudicator", () => {
     const offenders: string[] = [];
     for (const rel of ROOTS) {
+      if (VIEW_4.includes(rel)) continue; // See VIEW_4 above.
       const source = stripComments(readFileSync(join(SRC, rel), "utf8"));
       for (const m of source.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
         const spec = m[1]!;
@@ -403,11 +480,70 @@ describe("ISC-473: no verdict is produced outside view 4", () => {
   test("no monitor module calls an adjudicator or a harvester", () => {
     const offenders: string[] = [];
     for (const rel of ROOTS) {
+      if (VIEW_4.includes(rel)) continue; // See VIEW_4 above.
       const source = stripComments(readFileSync(join(SRC, rel), "utf8"));
       for (const call of ["adjudicate(", "harvestTask(", "collectRunReport("]) {
         if (source.includes(call)) offenders.push(`${rel}: ${call}`);
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  /**
+   * THE EXEMPTION IS TWO-SIDED, so it cannot become a hole.
+   *
+   * A `continue` that skipped a file which had stopped needing skipping would
+   * be an exemption nobody ever notices is stale, and the next person to add a
+   * module here would reach for the same `continue`. So the carve-out is
+   * asserted from BOTH directions: the exempted file really does reach a
+   * verdict (or the exemption is dead and should go), and no OTHER root has
+   * quietly started to.
+   */
+  test("the view-4 exemption is live, and is the only file that needs it", () => {
+    for (const rel of VIEW_4) {
+      const source = stripComments(readFileSync(join(SRC, rel), "utf8"));
+      expect(source, `${rel} no longer reaches a verdict — retire its exemption`).toContain(
+        "collectRunReport(",
+      );
+    }
+    // And nothing else does. This is the assertion above, restated as the
+    // complement so the exemption list cannot silently grow by copy-paste.
+    const reaching = ROOTS.filter((rel) =>
+      stripComments(readFileSync(join(SRC, rel), "utf8")).includes("collectRunReport("),
+    );
+    expect(reaching).toEqual(VIEW_4);
+  });
+
+  /**
+   * `container/interrupt.ts` enters the monitor's closure with `launchPaneMode`
+   * (`read/worker.ts`'s `deriveVia`), and it also exports `interruptArgv`,
+   * which builds `docker kill --signal=INT`. **That is a second Docker argv in
+   * the closure of a viewer whose ISC-469 claim is that it has exactly one.**
+   *
+   * The import is still right — `dispatch.ts:286-289` says a second copy of the
+   * pane-mode rule "is how the CLI and the abort path would start disagreeing"
+   * — so what makes it safe is asserted instead of assumed, on both halves:
+   * the module can do nothing on its own (one type-only import, no spawn, no
+   * fs, no socket), and no monitor module names the argv builder.
+   */
+  test("the pane-mode rule is imported without importing a capability", () => {
+    const interrupt = readFileSync(join(SRC, "container/interrupt.ts"), "utf8");
+    const stripped = stripComments(interrupt);
+    // Its ENTIRE import list, pinned. A value import here would be a new
+    // capability arriving in the monitor's closure by way of a helper.
+    const imports = [...stripped.matchAll(/^import\s+(.+?)\s+from\s+["']([^"']+)["']/gm)].map(
+      (m) => `${m[1]!} from ${m[2]!}`,
+    );
+    expect(imports).toEqual(['type { WorkerLaunch }  from ../contracts.ts'.replace("  ", " ")]);
+    for (const primitive of ["Bun.spawn", "spawnSync", "node:fs", "node:child_process", "socket"]) {
+      expect(stripped, `container/interrupt.ts reaches ${primitive}`).not.toContain(primitive);
+    }
+    // And the monitor never names the verb the module can build.
+    for (const rel of ROOTS) {
+      expect(
+        stripComments(readFileSync(join(SRC, rel), "utf8")),
+        `${rel} names interruptArgv`,
+      ).not.toContain("interruptArgv");
+    }
   });
 });

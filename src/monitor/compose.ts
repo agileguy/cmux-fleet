@@ -26,10 +26,13 @@
 
 import { monotonicMs } from "../util/clock.ts";
 import { deriveActivity } from "./activity.ts";
-import { type FleetModel, type GitStrip, type Region, type RunRow, type WorkerRow, failed, never, ok } from "./model.ts";
+import { type FleetModel, type GitStrip, type Region, type RunRow, type ViewState, type WorkerRow, failed, never, ok } from "./model.ts";
 import { readDockerContainers } from "./read/docker.ts";
 import { readGit } from "./read/git.ts";
+import { readHistory } from "./read/history.ts";
 import { readRuns, type PartialRunRow } from "./read/runs.ts";
+import { readWorkerDetail } from "./read/detail.ts";
+import { readRunReport } from "./read/report.ts";
 import { readWorkerRows } from "./read/worker.ts";
 import { runPaths } from "../run/paths.ts";
 
@@ -211,6 +214,99 @@ export function modelFrom(
     now: opts.now,
     columns: opts.columns,
   };
+}
+
+/**
+ * Fetch the ONE payload the entered view needs, and leave the other two
+ * `never()` (§6.2, §6.3, §5.3, D8).
+ *
+ * ## What "costs nothing while unentered" has to mean to be checkable
+ *
+ * It cannot mean "is fast". It has to mean **no read happens at all**, because
+ * §5.3 defers `collectRunReport` on any clock and §6.3 gives views 2-4 no clock
+ * — and a payload that were merely cheap would still be paid for 120 times a
+ * minute by a pane nobody has left. So this function is a `switch` in which
+ * every arm calls exactly one reader, and the arms are mutually exclusive by
+ * construction: `ViewState` is a discriminated union carrying its own
+ * selection, so there is no state in which two payloads are wanted and none in
+ * which a payload is wanted with nothing to point it at.
+ *
+ * **`fleet` reads nothing.** That is the default view (`model.ts:206`), so the
+ * ordinary case of the ordinary session performs none of these reads ever —
+ * which is what makes the criterion an absence a test can observe rather than
+ * a latency it would have to measure.
+ *
+ * ## Why the entered payload REPLACES rather than accumulates
+ *
+ * Leaving view 3's rows in the model while the operator is in view 4 would put
+ * a run list on screen aged from whenever it was last fetched, with no clock
+ * behind it to refresh it and no marker distinguishing it from a live one.
+ * §6.4 allows a stale region only when something is still trying: *"as of 47s —
+ * refresh failed"* names a reader that ran. A payload from an abandoned view is
+ * a reader that is not running at all, and there is no honest rendering of
+ * that, so it goes back to `never` — "I could not look", which is exactly true
+ * of a view nobody is in.
+ *
+ * ## Never throws
+ *
+ * Every reader below already returns a `Region`, so this function has no `try`
+ * and no way to widen a blast radius it cannot see — the same structural
+ * argument `readWorkerRows` makes about its own loop.
+ */
+export async function fetchForView(
+  view: ViewState,
+  opts: {
+    readonly root?: string;
+    /** MONOTONIC, for `readAt`. */
+    readonly now?: () => number;
+    /** WALL CLOCK, for `RunHistoryRow.ageMs` only (`read/history.ts`). */
+    readonly wallNow?: () => number;
+  } = {},
+): Promise<Pick<FleetModel, "history" | "detail" | "report">> {
+  /*
+   * ANNOTATED rather than inferred. `never<T>()` has nothing to infer `T` from,
+   * so an unannotated literal here is `Region<unknown>` in all three slots and
+   * every spread below widens the payload instead of narrowing it — the shape
+   * where a reader's real type quietly stops being checked at the joining site.
+   */
+  const empty: Pick<FleetModel, "history" | "detail" | "report"> = {
+    history: never(),
+    detail: never(),
+    report: never(),
+  };
+  switch (view.kind) {
+    case "fleet":
+      return empty;
+    case "history":
+      return { ...empty, history: await readHistory(opts) };
+    case "worker":
+      return {
+        ...empty,
+        detail: await readWorkerDetail(runPaths(view.runId, opts.root), view.workerId, {
+          now: opts.now,
+        }),
+      };
+    case "report":
+      return { ...empty, report: await readRunReport(view.runId, opts) };
+  }
+}
+
+/**
+ * A model with one view entered — {@link fetchForView}'s result folded onto a
+ * frame that already has a fleet in it.
+ *
+ * Separated from the fetch so the fetch stays a pure function of a `ViewState`
+ * and this stays a pure function of two values. The fleet regions are carried
+ * through UNTOUCHED: entering view 4 must not re-walk the run tree, and a
+ * function that rebuilt the model would be the obvious place for that to creep
+ * in.
+ */
+export function withView(
+  model: FleetModel,
+  view: ViewState,
+  payload: Pick<FleetModel, "history" | "detail" | "report">,
+): FleetModel {
+  return { ...model, view, ...payload };
 }
 
 /**
