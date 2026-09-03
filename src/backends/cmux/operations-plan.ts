@@ -108,8 +108,17 @@ export const DEFAULT_OPERATIONS_WORKERS: readonly string[] = ["obs-1", "tick-1"]
  * Applied after the panes exist rather than as a split option, because
  * `new-split` takes no size: it halves, and the layout is corrected afterwards
  * against the container height cmux reports.
+ *
+ * 0.65, by owner decision 2026-09-03, superseding the 2 / 3 this replaces. The
+ * requirement was stated about the BOTTOM row — 35% of the height — and this
+ * constant is its complement, because the top row is the one every caller and
+ * every sibling constant is written in terms of. `applyTopFraction` converts
+ * where it has to: which row it moves depends on the DIRECTION of the
+ * correction, since only one of the two rows has a border it can address.
+ * `operations-plan.test.ts` pins the bottom share rather than this value, so
+ * the requirement is what a reader sees asserted.
  */
-export const OPERATIONS_TOP_FRACTION = 2 / 3;
+export const OPERATIONS_TOP_FRACTION = 0.65;
 
 /** Seconds between refreshes of the git pane. */
 export const DEFAULT_GIT_POLL_SECONDS = 5;

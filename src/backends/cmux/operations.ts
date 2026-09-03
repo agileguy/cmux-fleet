@@ -250,15 +250,49 @@ export async function createWorkspace(
  * `new-split` has no size argument — it halves — so the shape is corrected here
  * against the geometry cmux reports rather than requested up front.
  *
- * EACH COLUMN IS RESIZED SEPARATELY, and that is a property of the layout
- * rather than caution: a 2x2 built by splitting each column downward has two
- * independent horizontal dividers, and moving one leaves the other where it
- * was. Measured — resizing a single top pane moved only its own column and left
- * the console visibly uneven.
+ * A RESIZE ADDRESSES A BORDER, NOT A PANE, and that is the fact this function
+ * got wrong for as long as it existed.
+ *
+ * `resize-pane --pane <id> -U` asks cmux to move the border ABOVE that pane. A
+ * pane in the top row has none, and cmux refuses:
+ *
+ *   Error: invalid_state: Pane has no adjacent border in direction up
+ *
+ * So a top row that is too TALL cannot be corrected by shrinking a top pane;
+ * the only border between the rows is the one below it, and the pane that can
+ * move it upward is the one UNDERNEATH. The two directions therefore address
+ * different rows:
+ *
+ *   divider DOWN  (grow the top row)    -> `-D` on a TOP pane
+ *   divider UP    (shrink the top row)  -> `-U` on a BOTTOM pane
+ *
+ * Both always name a border that exists. Choosing the row by the SIGN of the
+ * correction is what makes that true, and it is why this is not simply a loop
+ * over the top row with a signed direction — which is what stood here, and
+ * which threw `invalid_state` into the `catch` below on every console whose
+ * top row needed to shrink. The layout then kept whatever `new-split` had
+ * produced and nothing said so.
+ *
+ * THE GEOMETRY IS RE-READ BEFORE EVERY PANE, for the second half of the same
+ * problem. The console this function actually builds is two agent panes over
+ * ONE full-width monitor, so both top panes share a SINGLE divider. Computing
+ * every delta from one snapshot moves that divider once per pane in the row,
+ * each move starting where the last one left it.
+ *
+ * MEASURED 2026-09-03 against a 1052px container asked for a 65% top row: both
+ * top panes were 629.6px, each was told to grow by the same 54.2px, and the row
+ * ended at 737.6px — 70.1%, which is the target plus one extra application.
+ * Re-reading drops the second pane's delta under the sub-pixel skip in that
+ * layout, while a row with independent dividers per column still sees a real
+ * delta for each and is corrected exactly as before. One rule covers both
+ * shapes because it asks what the layout currently is instead of assuming
+ * which one it is.
  *
  * Best-effort on purpose. A console whose panes are all correct but evenly
  * split is fully usable; refusing to return one because a cosmetic resize
- * failed would trade the whole feature for a nicety.
+ * failed would trade the whole feature for a nicety. That restraint is also
+ * what hid both defects above for as long as it did, so the `catch` now says
+ * what it swallowed.
  */
 async function applyTopFraction(
   client: CmuxClient,
@@ -270,23 +304,69 @@ async function applyTopFraction(
   // keeps "no correction wanted" distinguishable from "correction computed to
   // nothing", which is the difference between a stated layout and a lucky one.
   if (fraction === null) return;
+  /**
+   * A geometry read that cannot be parsed is SILENT, and a resize that is
+   * REFUSED is not. The two failures say different things: the first means
+   * this backend did not report a `container_frame` — every test double, and
+   * any cmux whose `list-panes` shape moved — so there is nothing to correct
+   * and nothing an operator could do. The second means the correction was
+   * computed, attempted, and rejected, which is the case that went unreported
+   * through every rebuild until it was measured.
+   */
+  let first: ReturnType<typeof parsePaneGeometry>;
   try {
-    const geo: ReturnType<typeof parsePaneGeometry> = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
-    if (geo.panes.length < 2) return;
-    const topY = Math.min(...geo.panes.map((p) => p.y));
-    const target = geo.containerHeight * fraction;
-    for (const pane of geo.panes) {
-      if (pane.y !== topY) continue;
+    first = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+  } catch {
+    return;
+  }
+  try {
+    if (first.panes.length < 2) return;
+    const topY = Math.min(...first.panes.map((p) => p.y));
+    const topTarget = first.containerHeight * fraction;
+    const topHeight = Math.max(
+      ...first.panes.filter((p) => p.y === topY).map((p) => p.height),
+    );
+    // Already right, and neither row needs a command. Checked before the row is
+    // chosen because the sign of a sub-pixel delta is noise, and acting on it
+    // would pick a row to issue a no-op against.
+    if (Math.abs(topTarget - topHeight) < 1) return;
+    const growTop = topTarget > topHeight;
+    // The row that OWNS the border for this direction, and the direction that
+    // names it from there. See the docblock: the other row has no such border
+    // and the call is refused.
+    const movingIds = first.panes
+      .filter((p) => (growTop ? p.y === topY : p.y !== topY))
+      .map((p) => p.paneId);
+    const dir = growTop ? "D" : "U";
+    for (const paneId of movingIds) {
+      const geo = parsePaneGeometry(await client.runOk(listPanesArgv(wsId)));
+      const pane = geo.panes.find((p) => p.paneId === paneId);
+      if (pane === undefined) continue;
+      // Expressed against the row being moved: the top row's target is the
+      // fraction, the bottom row's is its complement.
+      const target = geo.containerHeight * (growTop ? fraction : 1 - fraction);
       const delta = target - pane.height;
       // Sub-pixel deltas are what an already-correct layout produces; issuing
-      // them would be a no-op command per pane on every adoption.
+      // them would be a no-op command per pane on every adoption. With a shared
+      // divider this is also the arm that stops the second pane re-applying a
+      // correction the first one already made.
       if (Math.abs(delta) < 1) continue;
-      await client.runOk(
-        resizePaneArgv(pane.paneId, delta > 0 ? "D" : "U", Math.abs(delta)),
-      );
+      // Only ever the direction chosen above. A delta whose sign disagrees with
+      // it means the divider has already passed the target — the next pane's
+      // re-read will see that as sub-pixel or as an overshoot, and either way
+      // reversing here would fight the border from the row that cannot reach
+      // it.
+      if (delta < 0) continue;
+      await client.runOk(resizePaneArgv(paneId, dir, delta));
     }
-  } catch {
-    // See the docblock: layout is cosmetic, the console is not.
+  } catch (err) {
+    // See the docblock: layout is cosmetic, the console is not. But a silent
+    // catch is how `invalid_state` went unreported through every rebuild, so
+    // the operator gets a line and still gets a console.
+    process.stderr.write(
+      `operations: pane layout left as split ` +
+        `(${err instanceof Error ? err.message : String(err)})\n`,
+    );
   }
 }
 

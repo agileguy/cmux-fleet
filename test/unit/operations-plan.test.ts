@@ -28,6 +28,7 @@ import { assertCmuxText } from "../../src/backends/cmux/client.ts";
 import { logArgv, statusArgv } from "../../src/monitor/read/git.ts";
 import {
   DEFAULT_OPERATIONS_WORKERS,
+  OPERATIONS_TOP_FRACTION,
   OPERATIONS_WORKSPACE,
   monitorPaneCommand,
   operationsPanes,
@@ -519,5 +520,40 @@ describe("quoting", () => {
     expect(pifleetCommand("/r", ["up", "--workers", "a b"])).toBe(
       `bun run '/r/src/cli/index.ts' 'up' '--workers' 'a b'`,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The bottom row's share of the height
+// ---------------------------------------------------------------------------
+
+/**
+ * The requirement is stated about the BOTTOM row and asserted about it here,
+ * even though the constant it constrains is the top one.
+ *
+ * `applyTopFraction` resizes the panes sharing the minimum `y`, so the top
+ * fraction is the number the code can act on and the one the module exports.
+ * Asserting that number alone would pin an implementation detail and leave the
+ * thing actually asked for — a bottom row of 35% — nowhere in the suite, so a
+ * later edit that "simplified" the complement back to a half would pass.
+ *
+ * `toBeCloseTo` rather than `toBe`: the value is a decimal fraction and the
+ * complement of one is not exactly representable, which is a property of
+ * binary floating point and not of the layout. Two decimal places is three
+ * orders of magnitude finer than a terminal row.
+ */
+describe("the operations console reserves 35% of the height for the bottom row", () => {
+  test("the bottom row's share is 35%", () => {
+    expect(1 - OPERATIONS_TOP_FRACTION).toBeCloseTo(0.35, 2);
+  });
+
+  /**
+   * The direction, asserted separately, because "the bottom row is 35%" is
+   * also satisfied by 0.35 written into the top constant by mistake — which
+   * would put the SMALL row where the agents are and hand the status table and
+   * the git log two thirds of the window.
+   */
+  test("the top row keeps the majority of the height", () => {
+    expect(OPERATIONS_TOP_FRACTION).toBeGreaterThan(0.5);
   });
 });
