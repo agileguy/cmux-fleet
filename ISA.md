@@ -3,11 +3,11 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 478/489
+progress: 482/493
 retired: 2
 mode: build
 started: 2026-07-27
-updated: 2026-09-02
+updated: 2026-09-03
 ---
 
 # cmux-fleet — Ideal State Artifact
