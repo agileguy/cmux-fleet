@@ -15,4 +15,6 @@ construct the case, mark it as a suspicion rather than a defect.
 **Quote file and line.** A finding without a location cannot be acted on.
 
 Report as the `pifleet-worker` skill describes, with `status: success` when the change is
-sound and `blocked` when you could not complete the review.
+sound and `blocked` when you could not complete the review. Write the envelope last: one you
+never wrote does not fail your task, it removes you from the grading, and your findings then
+grade as unchecked.

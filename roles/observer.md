@@ -90,4 +90,7 @@ only the `.md` clamps to `failed` — the same rule `ticketing` runs under, for 
 the file nothing inspects is the one that was supposed to carry the evidence a verdict rests
 on.
 
-Report as the `pifleet-worker` skill describes.
+Report as the `pifleet-worker` skill describes — `result.json` written last, and written
+separately from the `observer-ops` files above. An envelope you never wrote does not fail
+your task; it removes you from the grading, and the harvest then reports your findings as
+unchecked, so the report you did write speaks for nothing in your absence.
