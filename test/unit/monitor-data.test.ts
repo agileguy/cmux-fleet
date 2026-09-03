@@ -42,6 +42,8 @@ import { readWorkerRow, refreshWorkerRow, deriveVia } from "../../src/monitor/re
 import { readHistory } from "../../src/monitor/read/history.ts";
 import { readRunReport } from "../../src/monitor/read/report.ts";
 import { readWorkerDetail } from "../../src/monitor/read/detail.ts";
+import { refreshKnownWorkers } from "../../src/monitor/clocks.ts";
+import { readRuns } from "../../src/monitor/read/runs.ts";
 import { composeFleet, fetchForView, withView } from "../../src/monitor/compose.ts";
 
 // ---------------------------------------------------------------------------
@@ -1031,5 +1033,72 @@ describe("ISC-508: readWorkerDetail carries the refusal surface, from the same d
     const detail = expectOk(await readWorkerDetail(run, "w-1"));
     expect(detail.via).toBeNull();
     expect(detail.fence).toBeNull();
+  });
+});
+
+/**
+ * ISC-496 — Q6: how long a `down`-ed run keeps being claimed as live, and what
+ * the operator is actually told during that window.
+ *
+ * §9 Q6 asks whether disappearance needs to be faster than 30 s, and its stated
+ * probe is "run `pifleet down` on one console run and time how long the pane
+ * keeps claiming it is alive". **That probe is not run here, deliberately.** It
+ * tears down a live console worker on the operator's own fleet to measure a
+ * property of the SCHEDULER, and the scheduler can be measured without
+ * destroying anything — this fixture answers the same question deterministically
+ * and does not need a stopwatch, a container, or a `down`.
+ *
+ * ## The answer, and it is better than the question assumed
+ *
+ * Q6's worry is that "a `down`-ed run can show as live for up to half a minute"
+ * because §6.3 leaves liveness on the slow clock. Both halves of that are true
+ * and the conclusion does not follow, because the two facts land on DIFFERENT
+ * clocks:
+ *
+ * - **`phase: "dead"` reaches the frame on the FAST clock (500 ms.)** The
+ *   `workers` source re-reads `state.json` for every known worker twice a
+ *   second, so the row stops saying `idle` almost immediately.
+ * - **The run leaves the list on the SLOW clock (30 s.)** `liveRunIds` is the
+ *   expensive walk and stays where §6.3 put it.
+ *
+ * So the operator is not told a lie for thirty seconds. They are told the truth
+ * in half a second — the worker is dead — and the run's ROW lingers until the
+ * next walk. §6.4's rule is that nothing is stale without saying so, and a row
+ * whose phase reads `dead` is not claiming to be alive.
+ */
+describe("ISC-496 (Q6): a dead worker is reported in half a second, not in thirty", () => {
+  test("the fast refresh carries `phase: dead` without waiting for the slow walk", async () => {
+    const root = await makeRoot("q6fast");
+    const run = await makeRun(root, "2026-09-02T00-00-00Z-q601");
+    const wp = await makeWorker(run, "w-1");
+
+    // The slow walk's answer: one live run, one idle worker.
+    const walked = await readRuns({ root, containers: null });
+    const before = expectOk(walked);
+    expect(before).toHaveLength(1);
+    expect(expectOk(before[0]!.workers[0]!).row.phase).toBe("idle");
+
+    // `down` happens: the supervisor writes `phase: dead`. Nothing else changes
+    // — the run directory is still there, which is exactly the window Q6 asks
+    // about.
+    await writeFile(wp.stateJson, JSON.stringify(stateFor(run.runId, "w-1", { phase: "dead" })));
+
+    // The FAST clock, with no slow walk in between.
+    const refreshed = await refreshKnownWorkers(before, { root, containers: null });
+    expect(expectOk(refreshed[0]!.workers[0]!).row.phase).toBe("dead");
+  });
+
+  test("the run itself leaves on the next slow walk, and that is the only 30 s wait", async () => {
+    const root = await makeRoot("q6slow");
+    const run = await makeRun(root, "2026-09-02T00-00-00Z-q602");
+    const wp = await makeWorker(run, "w-1");
+
+    expect(expectOk(await readRuns({ root, containers: null }))).toHaveLength(1);
+
+    await writeFile(wp.stateJson, JSON.stringify(stateFor(run.runId, "w-1", { phase: "dead" })));
+
+    // The same walk the slow clock runs. The run is gone, not merely quieter:
+    // `liveRunIds` requires a non-dead phase AND a live pid.
+    expect(expectOk(await readRuns({ root, containers: null }))).toHaveLength(0);
   });
 });
