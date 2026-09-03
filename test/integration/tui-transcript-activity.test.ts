@@ -236,3 +236,78 @@ describe("a tui supervisor reports transcript activity with no epoch (SRD §7.6)
     60_000,
   );
 });
+
+/**
+ * ISC-492 — the behavioural half, and the reason this file gained a second
+ * `describe` rather than the unit suite gaining another string assertion.
+ *
+ * `test/unit/transcript-activity-gap.test.ts` pins the REPAIR by reading
+ * `supervisor/index.ts` as text. That is worth having and it is not evidence
+ * that a supervisor behaves differently — a source-text assertion passes
+ * against code that never runs. This boots a real `tui` supervisor with no
+ * session file at all and reads what it actually wrote.
+ *
+ * **The gap this closes was measured, not imagined.** On 2026-09-02 four of
+ * six live attended workers had carried `transcript_activity: null` for nine
+ * hours, because a `tui` worker's session file is created lazily on its first
+ * assistant message and nobody had typed at them. `null` is what an `rpc`
+ * worker carries too, so `pifleet status` rendered the two identically and an
+ * operator could not tell a worker that had never spoken from one whose turns
+ * do not run here.
+ *
+ * This test needs no Docker: the rig's `docker` is a shell stub, so it runs in
+ * CI's ordinary `bun test test/integration` step rather than behind the
+ * container gate. That is deliberate — a criterion whose only probe sits
+ * behind a gate is the shape that gets graded `[~]` forever.
+ */
+describe("a tui supervisor with no session file says so rather than staying silent (ISC-492)", () => {
+  test(
+    "transcript_activity becomes entries:0 / last_growth_at:null, never left null",
+    async () => {
+      const rig = await bootTuiSupervisor();
+
+      // Up first: a field found on a corpse would prove nothing about the poll.
+      expect(await processStartTime(rig.pid)).not.toBeNull();
+
+      // NOTHING is written to rig.sessionPath. That absence is the whole
+      // fixture — this is the state every attended worker is in before the
+      // first thing anyone says to it.
+      const state = await waitFor<WorkerState>(
+        () => readWorkerState(rig.wp),
+        (s) => s.transcript_activity !== null,
+        20_000,
+      );
+
+      expect(state, "the poll never wrote the field at all — ISC-492 has regressed").not.toBeNull();
+      // THE CRITERION: measured-and-never-grew, which is a different fact from
+      // the `null` an rpc worker carries and from any positive entry count.
+      expect(state!.transcript_activity).toEqual({ entries: 0, last_growth_at: null });
+
+      // The discriminator the monitor's activity ladder depends on: this worker
+      // is attended and silent, and `session_present` stays false because no
+      // file exists to latch on.
+      expect(state!.session_present).toBe(false);
+      expect(state!.session_path).toBeNull();
+    },
+    /**
+     * A hand-picked literal under the standing ISC-274 exception, with the
+     * derivation written out because the guard requires it rather than as a
+     * courtesy.
+     *
+     * This test has 2 reachable spawn sites — the supervisor itself, and the
+     * `ps` behind `processStartTime` — so the derived ceiling would be
+     * `cliBudget(2)`. **That value does not govern.** Almost all of the
+     * duration here is the single 20_000 ms `waitFor` window, which exists
+     * because the supervisor polls on a 500 ms interval and a loaded machine
+     * may need many polls to get there. A ceiling derived from spawn count can
+     * land BELOW that window, and when it does bun kills the test while it is
+     * still legitimately waiting — so the failure names a timeout instead of
+     * the missing field, which is the diagnosis pointing at the wrong thing.
+     *
+     * 40_000 is the one window plus room for a cold supervisor start. Half of
+     * the sibling test's 60_000 above, because this one waits once where that
+     * one waits twice and has no deliberate inter-write pause.
+     */
+    40_000,
+  );
+});

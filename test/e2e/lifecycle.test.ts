@@ -42,6 +42,31 @@ interface Fleet {
 }
 
 const fleets: Fleet[] = [];
+
+/**
+ * THE HOOK NEEDS A BUDGET FOR THE SAME REASON EVERY `test()` HERE HAS ONE.
+ *
+ * ISC-266's sweep derived a ceiling for every `test()` in this repo and left
+ * the HOOKS on bun's 5000 ms default, which is how this one came to fail twice
+ * on CI's `load` job at 5001.98 ms and 5000.11 ms — `budget.ts`'s own recorded
+ * signature, "the timeout, not the work", and consistent under load rather
+ * than intermittent. The child suite it lives in passed at 118 s of load and
+ * missed the wall at 147 s, so the hook had no headroom at all rather than a
+ * little.
+ *
+ * DERIVED, not chosen. The body performs one `bun run <cli> down` per fleet in
+ * `fleets`, and `fleets` is pushed exactly once per `fleetUp` — seven call
+ * sites in this file, one per test. Seven spawns of the kind `cliBudget` is
+ * calibrated to, so `cliBudget(7)` = 7 x 1900 x CONTENTION 3 x SAFETY 2 =
+ * 79_800 ms. The `rm` is charged nothing because it starts no process, which
+ * is the same conservatism that charges every spawn the expensive rate.
+ *
+ * The count is the point: a test added here pushes an eighth fleet, and this
+ * number has to move with it rather than quietly absorb it.
+ *
+ * NOT fixable in `bunfig.toml` — bun 1.3.11 ignores `[test] timeout`, probed
+ * and recorded at the top of `budget.ts`. The ceiling has to be passed here.
+ */
 afterAll(async () => {
   // Belt and braces: every fleet is downed by its own test; this catches the
   // ones a failing test left behind so no supervisor outlives the suite.
@@ -49,7 +74,7 @@ afterAll(async () => {
     await cli(f, ["down", "--run", f.runId, "--json"]).catch(() => {});
     await rm(f.base, { recursive: true, force: true }).catch(() => {});
   }
-});
+}, cliBudget(7));
 
 async function cli(fleet: Fleet, args: string[]): Promise<CliResult> {
   const proc = await spawnCliProcess([...args], { cwd: fleet.base, env: { ...fleet.env } });

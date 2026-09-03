@@ -22,12 +22,14 @@
  *   that pane would fail on tick one.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import { assertCmuxText } from "../../src/backends/cmux/client.ts";
+import { logArgv, statusArgv } from "../../src/monitor/read/git.ts";
 import {
   DEFAULT_OPERATIONS_WORKERS,
   OPERATIONS_WORKSPACE,
-  gitWatchCommand,
+  monitorPaneCommand,
   operationsPanes,
   pifleetCommand,
 } from "../../src/backends/cmux/operations-plan.ts";
@@ -62,34 +64,40 @@ describe("the workspace identity", () => {
 });
 
 describe("the pane set", () => {
-  test("is exactly four panes, in creation order", () => {
+  test("is exactly three panes, in creation order", () => {
     // Order is contract: pane 1 consumes the workspace's initial surface and is
     // where the operator lands.
-    expect(plan().map((p) => p.title)).toEqual([
-      "observer",
-      "ticketing",
-      "fleet-status",
-      "git-watch",
-    ]);
+    expect(plan().map((p) => p.title)).toEqual(["observer", "monitor", "ticketing"]);
   });
 
-  test("the observer pane takes the whole top half; the other two tile beneath it", () => {
-    // The requested shape:
-    //
-    //   +-------------------------------+
-    //   |           observer            |
-    //   +---------------+---------------+
-    //   |  fleet-status |   git-watch   |
-    //   +---------------+---------------+
-    //
-    // `null` then `down` then `right` is the ONLY sequence that produces it,
-    // and each element is load-bearing. `down` first is what makes pane 1 a
-    // half rather than a column — the first split decides the major axis. The
-    // `right` that follows lands INSIDE the half `down` created, because each
-    // pane is split off the previous one; a `right` off pane 1 instead would
-    // put git-watch in the top row beside pane 1, which is the layout this
-    // replaced and which no assertion on directions alone would catch.
-    expect(plan().map((p) => p.split)).toEqual([null, "left", "down", "down"]);
+  test("the monitor spans the WHOLE bottom, and the agents share the top", () => {
+    /*
+     * The requested shape:
+     *
+     *   +---------------+---------------+
+     *   |   ticketing   |   observer    |
+     *   +-------------------------------+
+     *   |            monitor            |
+     *   +-------------------------------+
+     *
+     * **Creation order is the whole of why this works, and it is not reading
+     * order.** The FIRST split decides the major axis. The monitor is built
+     * SECOND so that split is `down` and the bottom spans the full width;
+     * `ticketing` then divides the top half. Built third — reading order — the
+     * monitor could only ever split one column, because by then the surface is
+     * already divided left/right and nothing spans both. That was the first
+     * version and it put the monitor in the bottom-left quarter.
+     *
+     * A directions-only assertion cannot catch it: `[null, "down", "left"]` and
+     * `[null, "left", "down"]` are the same three values in a different order
+     * and produce completely different consoles, which is why the ANCHORS are
+     * asserted in `operations-workspace.test.ts` as well.
+     */
+    expect(plan().map((p) => p.title)).toEqual(["observer", "monitor", "ticketing"]);
+    expect(plan().map((p) => p.split)).toEqual([null, "down", "left"]);
+    // `ticketing` cannot use the default anchor: the pane before it is the
+    // monitor, and splitting that would put it in the bottom row.
+    expect(paneNamed("ticketing").splitFrom).toBe(0);
   });
 
   test("exactly one pane is split off nothing — the initial surface is consumed once", () => {
@@ -305,101 +313,189 @@ describe("the agent pane", () => {
   });
 });
 
-describe("the fleet-status pane", () => {
+describe("the monitor pane — the eleven assertions that survived the merge", () => {
+  /**
+   * ## Why this block exists in this shape (ISC-493)
+   *
+   * `fleet-status` and `git-watch` were two panes with eleven assertions
+   * between them, and the merge took away every one of their SUBJECTS at once.
+   * Eleven tests went red simultaneously and none of them because anything was
+   * wrong — which is exactly the moment a measured constraint gets deleted
+   * because "the function it covered was renamed".
+   *
+   * So each is restated here against the pane that replaced them, and where a
+   * requirement is now met by a DIFFERENT mechanism the restatement says which
+   * one. Two could not be restated as written and both say why in place, rather
+   * than disappearing.
+   */
+  const monitorCmd = () => paneNamed("monitor").command;
+
+  // ---- from `the fleet-status pane` -------------------------------------
+
   test("refreshes forever, so the pane cannot print once and close", () => {
-    // The original requirement, unchanged: `pifleet status` on its own prints
-    // once and exits, which closes the pane — the same defect as pane 1's, in a
-    // place with no shell after it. What changed is HOW it keeps running.
-    const cmd = paneNamed("fleet-status").command;
-    expect(cmd).toMatch(/^prev=''; while :; do/);
-    expect(cmd).toContain("'status' '--all'");
-  });
-
-  test("CLEARS before each refresh — a standing pane is read at a glance", () => {
-    // `status --watch` APPENDS, and the live console measured what that costs:
-    // dozens of identical `run 2026-08-24… / eng-1: dead supervisor=gone`
-    // blocks scrolled past each other, so the pane was a transcript of how long
-    // a dead worker had been dead rather than a display of the fleet. Only the
-    // last screen is ever read; everything above it is cost with no reader.
-    expect(paneNamed("fleet-status").command).toContain("clear;");
-    // And specifically NOT the built-in watch, which is the form that appends.
-    expect(paneNamed("fleet-status").command).not.toContain("--watch");
-  });
-
-  test("survives a status that exits non-zero", () => {
-    // Without `|| true` the loop dies on the first refresh after a `down` —
-    // exactly when an operator looks at it — leaving a pane that stopped
-    // updating and does not say so.
-    expect(paneNamed("fleet-status").command).toContain("|| true");
-  });
-
-  test("polls on the SAME interval as the git pane, from the same flag", () => {
-    // One `--poll` governs both, so a `down` appears in the two panes at the
-    // same moment rather than in whichever happens to poll first.
-    expect(paneNamed("fleet-status", { gitPollSeconds: 11 }).command).toContain("sleep 11");
-    expect(paneNamed("git-watch", { gitPollSeconds: 11 }).command).toContain("sleep 11");
-  });
-});
-
-describe("the git-watch pane", () => {
-  test("reports on the INVOCATION directory, never on cmux-fleet", () => {
-    // The requirement, and the one most easily got wrong: this console is a
-    // place to stand while working on some other repository. Proved by
-    // mutation — passing `repoRoot` here reddens.
-    const cmd = paneNamed("git-watch").command;
-    expect(cmd).toContain(`-C '${CWD}'`);
-    expect(cmd).not.toContain(REPO);
-  });
-
-  test("runs git with --no-pager, or the loop stops at (END) forever", () => {
-    // MEASURED, not anticipated. On the first live run `git log` found a
-    // terminal on stdout, started `less`, and the pane sat at `(END)` waiting
-    // for a keypress. It showed a plausible commit list and refreshed never —
-    // a hang that looks exactly like a working watch.
-    const cmd = paneNamed("git-watch").command;
-    const gitCalls = [...cmd.matchAll(/git\s+(\S+)/g)].map((m) => m[1]);
-    expect(gitCalls.length, "no git invocations found — the probe has rotted").toBeGreaterThanOrEqual(2);
-    // EVERY invocation, not just the log: `status` pages too once its output
-    // is longer than the pane.
-    for (const first of gitCalls) expect(first).toBe("--no-pager");
-  });
-
-  test("is a shell loop, because macOS has no watch(1)", () => {
-    const cmd = paneNamed("git-watch").command;
-    expect(cmd).toMatch(/^prev=''; while :; do/);
-    // procps' `watch` is the obvious way to write this and fails on tick one
-    // here with `command not found`, leaving a dead pane that looks configured.
-    expect(cmd).not.toMatch(/\bwatch\b/);
-  });
-
-  test("shows branch and recent history, and clears before printing", () => {
-    const cmd = paneNamed("git-watch").command;
-    expect(cmd).toContain("status --short --branch");
-    expect(cmd).toContain("log --oneline -10");
     /*
-     * `clear` is immediately followed by the print, with nothing between them.
-     *
-     * The original rule was "clear BEFORE running the command", because a loop
-     * that cleared after printing left the pane blank for the length of the
-     * command and read as a hung console. The redraw-on-change loop inverts the
-     * order — the command has to run before its output can be compared — and
-     * satisfies the original requirement a stronger way: the output is already
-     * in hand when `clear` fires, so the blank window is not shortened, it does
-     * not exist. That is what this asserts, rather than a position that no
-     * longer means what it used to.
+     * The original requirement, unchanged; the mechanism is different for the
+     * third time. `pifleet status` printed once and exited, so it was wrapped
+     * in a shell loop; the monitor is a process that does not return until
+     * interrupted, so there is no loop to assert on. What CAN be asserted is
+     * that the pane does not run the one-shot form — `--once` prints a frame
+     * and exits, which is the original defect exactly.
      */
-    expect(cmd).toContain(`clear; printf '%s\\n' "$out"`);
-    // And the command runs into a capture, not straight at the terminal —
-    // which is what makes an unchanged tick draw nothing at all.
-    expect(cmd).toMatch(/out="\$\(git/);
+    expect(monitorCmd()).toContain("'monitor'");
+    expect(monitorCmd()).not.toContain("--once");
+  });
+
+  test("CLEARS before each refresh rather than appending", () => {
+    /*
+     * RESTATED, NOT RETIRED, and this is one of the two ISC-493 flagged.
+     *
+     * The original asserted `clear;` in the pane's shell text and `not
+     * --watch`. Neither is assertable now: the clearing moved inside the
+     * monitor process, which writes cursor-home-and-erase itself. The measured
+     * lesson is what matters — `status --watch` APPENDS, and the live console
+     * showed what that costs: dozens of identical `dead supervisor=gone` blocks
+     * scrolled past each other, so the pane was a transcript of how long a dead
+     * worker had been dead rather than a display of the fleet.
+     *
+     * Two assertions replace it: the pane must not reach for the appending form
+     * at all, and the monitor's own paint path must issue the erase. The second
+     * is a source assertion because there is no shell text left to read.
+     */
+    expect(monitorCmd()).not.toContain("--watch");
+    expect(monitorCmd()).not.toContain("status");
+    const source = readFileSync(
+      new URL("../../src/cli/commands/monitor.ts", import.meta.url).pathname,
+      "utf8",
+    );
+    // ESC[H (home) ESC[2J (erase) — written before every frame that changed.
+    expect(source).toContain("\\x1b[H\\x1b[2J");
+  });
+
+  test("survives a command that exits non-zero", () => {
+    /*
+     * `|| true` existed because the loop died on the first refresh after a
+     * `down` — exactly when an operator looks at it. There is no loop now, so
+     * the guarantee moved to the rung after it: `;` before `exec $SHELL -i`,
+     * never `&&`. The monitor exiting for ANY reason leaves a usable shell
+     * instead of closing the pane and taking the diagnosis with it.
+     */
+    expect(monitorCmd()).toContain("; exec $SHELL -i");
+    expect(monitorCmd()).not.toContain("&& exec");
+  });
+
+  test("takes its refresh interval from the same one flag both panes shared", () => {
+    /*
+     * ISC-490: `--poll` KEEPS ITS NAME AND CHANGES ITS MEANING, decided rather
+     * than left dangling. It used to be the read interval for two shell loops.
+     * It is now the REPAINT interval of one process whose reads are on three
+     * clocks of their own — so the operator-visible behaviour it governs, how
+     * quickly the pane reflects a change, is the same, which is why it keeps
+     * the name instead of being retired.
+     *
+     * The old assertion was that two panes polled in step. One pane cannot be
+     * out of step with itself, so what survives is the flag's route from the
+     * plan option to the command.
+     */
+    expect(paneNamed("monitor", { gitPollSeconds: 11 }).command).toContain("'--poll' '11'");
+    expect(paneNamed("monitor", { gitPollSeconds: 30 }).command).toContain("'--poll' '30'");
+  });
+
+  // ---- from `the git-watch pane` ----------------------------------------
+
+  test("reports on the INVOCATION directory, never on cmux-fleet", () => {
+    // The requirement most easily got wrong, and unchanged by the merge: this
+    // console is a place to stand while working on some OTHER repository.
+    // Proved by mutation — passing `repoRoot` here reddens.
+    const cmd = monitorCmd();
+    expect(cmd).toContain(`'--repo' '${CWD}'`);
+    // `repoRoot` still appears, because that is where the CLI itself lives.
+    // What must not happen is it arriving as the watched repository.
+    expect(cmd).not.toContain(`'--repo' '${REPO}'`);
+  });
+
+  test("runs git with --no-pager, or the reader stops at (END) forever", () => {
+    /*
+     * MEASURED, not anticipated, and it now lives one layer down. On the first
+     * live run `git log` found a terminal on stdout, started `less`, and the
+     * pane sat at `(END)` waiting for a keypress — a plausible commit list that
+     * refreshed never, which is the failure a screenshot cannot tell from
+     * success.
+     *
+     * The pane text no longer contains git at all, so the assertion follows the
+     * subject into `read/git.ts` rather than being dropped. Asserted on the
+     * ARGV BUILDERS, which is stronger than the old string match: it covers
+     * every invocation by construction rather than the ones a regex found.
+     */
+    expect(statusArgv("/w")).toContain("--no-pager");
+    expect(logArgv("/w")).toContain("--no-pager");
+  });
+
+  test("no watch(1), because macOS does not ship one", () => {
+    /*
+     * A HOST fact (`operations-plan.ts:47-50`), not a pane fact, which is
+     * precisely why it must outlive the pane that recorded it. `watch` is
+     * procps; macOS has none, so the obvious way to write a refreshing pane
+     * fails on tick one with `command not found` and leaves a dead pane that
+     * looks configured.
+     *
+     * The tripwire is deliberately BLUNT — any occurrence of the bare word.
+     * That bluntness has already been paid for once: the monitor's flag was
+     * originally `--watch-dir`, which matches, and it was renamed to `--repo`
+     * rather than narrowing this regex on behalf of a flag name.
+     */
+    expect(monitorCmd()).not.toMatch(/\bwatch\b/);
+  });
+
+  test("shows branch and recent history, and the strip carries both halves", () => {
+    /*
+     * The content requirement, moved to the reader with the git invocation. D12
+     * keeps both halves and Q8 decided which is shown first; what the old
+     * assertion protected is that NEITHER is dropped at the source, and that is
+     * what these pin.
+     */
+    expect(statusArgv("/w")).toContain("--short");
+    expect(statusArgv("/w")).toContain("--branch");
+    expect(logArgv("/w")).toContain("--oneline");
+    expect(logArgv("/w")).toContain("-10");
   });
 
   test("takes a poll interval and refuses a nonsensical one", () => {
-    expect(paneNamed("git-watch", { gitPollSeconds: 30 }).command).toContain("sleep 30");
-    // A zero or fractional interval is a busy loop on the operator's machine.
+    // Unchanged and still validated in the plan, because a zero or fractional
+    // interval is a busy loop on the operator's machine whichever process runs
+    // it. The monitor clamps as well, but the plan refusing early is what gives
+    // the operator a diagnosis instead of a spinning pane.
+    expect(paneNamed("monitor", { gitPollSeconds: 30 }).command).toContain("'--poll' '30'");
     expect(() => plan({ gitPollSeconds: 0 })).toThrow(/positive whole number/);
     expect(() => plan({ gitPollSeconds: 1.5 })).toThrow(/positive whole number/);
     expect(() => plan({ gitPollSeconds: Number.NaN })).toThrow(/positive whole number/);
+  });
+
+  // ---- new, and only assertable because of the merge ---------------------
+
+  test("is invoked through an absolute path, never a bare `pifleet`", () => {
+    // ISC-488. `:43-46`'s host fact: the bin is never linked, so a bare
+    // invocation fails with `command not found` in a pane that looks correctly
+    // configured — the same failure shape as `watch(1)`, from a different
+    // cause.
+    expect(monitorCmd()).toContain(`bun run '${REPO}/src/cli/index.ts' 'monitor'`);
+  });
+
+  test("the two shell-loop builders it replaced are gone, not merely unused", () => {
+    /*
+     * `statusWatchCommand` and `gitWatchCommand` were exported so their panes'
+     * criteria had something to assert against. After the merge nothing calls
+     * them. Keeping them would be the dead-field shape `contracts.ts:86-118`
+     * records, with the added cost that a reader could not tell which builder
+     * the console actually runs — so the deletion is asserted rather than
+     * assumed.
+     */
+    const source = readFileSync(
+      new URL("../../src/backends/cmux/operations-plan.ts", import.meta.url).pathname,
+      "utf8",
+    );
+    expect(source).not.toContain("export function statusWatchCommand");
+    expect(source).not.toContain("export function gitWatchCommand");
+    expect(source).not.toContain("function redrawOnChange");
   });
 });
 
@@ -408,8 +504,15 @@ describe("quoting", () => {
     // `--command` text is shell-INJECTED, not exec'd (SRD §4.1), so an
     // unquoted path is command injection by construction.
     const nasty = `/tmp/it's here; touch /tmp/pwned`;
-    const cmd = gitWatchCommand(nasty, 5);
+    const cmd = monitorPaneCommand("/r", nasty, 5);
     expect(cmd).toContain(`'/tmp/it'"'"'s here; touch /tmp/pwned'`);
+    /*
+     * Belt AND braces after the merge, because there are now TWO boundaries and
+     * only one of them is this quoting. The pane text is shell-injected, so the
+     * quoting above is what stops the injection there; the monitor then spawns
+     * git as ARGV with no shell at all (`read/git.ts`), so the same string
+     * cannot be re-interpreted one layer down. The old pane had only the first.
+     */
   });
 
   test("pifleetCommand quotes every argument it is given", () => {

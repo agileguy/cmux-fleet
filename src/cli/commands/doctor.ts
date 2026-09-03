@@ -13,7 +13,11 @@ import {
   tagStyleProviders,
   type LoadedConfig,
 } from "../../config/load.ts";
-import { resolveAllWorkers } from "../../config/load.ts";
+import {
+  providerApiKeyEnv,
+  providerHostDialView,
+  resolveAllWorkers,
+} from "../../config/load.ts";
 import { ThinkingLevelSchema } from "../../config/schema.ts";
 import type { FleetConfig, Toolchain } from "../../config/schema.ts";
 import { imageTag } from "../../container/image.ts";
@@ -1065,17 +1069,42 @@ async function probeOmlx(loaded: LoadedConfig | null): Promise<OmlxReport> {
    * `hostFacingBaseUrl` mistake with extra steps. The fallback keeps naming the
    * container alias, fails to resolve, and `vantageNote` says why.
    */
-  const baseUrl =
+  /*
+   * THE DEFAULT PROVIDER'S OWN BLOCK when a `providers:` map exists, and the
+   * flat keys only as §6.1's shorthand when it does not.
+   *
+   * Reading the flat keys unconditionally is what made `doctor` probe the
+   * Docker host's loopback instead of the configured endpoint the moment a
+   * fleet wrote a providers map — the flat keys are then absent and take their
+   * schema defaults, which name the container alias on port 8000. See
+   * `providerHostDialView`, where the before/after measurement is recorded.
+   *
+   * **This fixes the DEFAULT provider only, and the rest is named rather than
+   * left to be discovered.** `doctor` still probes exactly one endpoint, so on
+   * a two-provider fleet the non-default provider gets no model list, no
+   * allowlist comparison and no tool-call latency — which is
+   * `Docs/SRD-INFERENCE-PROVIDERS.md` §2.6's "the probe is single-provider by
+   * construction", still open. The difference is that it now reports the
+   * default provider truthfully instead of reporting a third machine's health
+   * as the fleet's.
+   */
+  const dialView =
     loaded === null
-      ? `http://${CONTAINER_HOSTNAME}:8000/v1`
-      : hostReachableBaseUrl(loaded.config);
-  const keyEnv = loaded?.config.llm.api_key_env ?? "OMLX_API_KEY";
+      ? null
+      : (providerHostDialView(loaded.config, loaded.config.llm.provider) ?? loaded.config);
+  const baseUrl =
+    dialView === null ? `http://${CONTAINER_HOSTNAME}:8000/v1` : hostReachableBaseUrl(dialView);
+  const keyEnv =
+    loaded === null ? "OMLX_API_KEY" : providerApiKeyEnv(loaded.config, loaded.config.llm.provider);
   const key = process.env[keyEnv] ?? "";
   const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
   const report: OmlxReport = {
     ok: false,
     baseUrl,
-    workerBaseUrl: loaded?.config.llm.base_url ?? `http://${CONTAINER_HOSTNAME}:8000/v1`,
+    // What a WORKER dials for the default provider — its own block's value when
+    // there is a map, the flat key otherwise. Same rule as `baseUrl` above.
+    workerBaseUrl:
+      dialView === null ? `http://${CONTAINER_HOSTNAME}:8000/v1` : dialView.llm.base_url,
     vantage: "host",
     models: [],
     allowlist: [],

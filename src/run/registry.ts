@@ -81,6 +81,45 @@ import { processStartTime } from "../safety/procstart.ts";
  *
  * @throws {IdentityReadError} `ps` could not be read for this pid.
  */
+/**
+ * The liveness fallback for a worker with NO REGISTRY ENTRY — and the reason it
+ * cannot be a bare `processStartTime` check.
+ *
+ * ## Observed on the operator's own fleet, 2026-09-03
+ *
+ * A run from 2026-09-01 was still being reported LIVE by `liveRunIds`. Its
+ * `tick-1` recorded pid 10251 and wrote `phase: "dead"`; its `registry.json`
+ * had `workers: {}`. The OS had since recycled 10251, and it belonged to a
+ * `rev-1` supervisor started two days later — so `processStartTime(10251)`
+ * returned a time, the fallback read that as "alive", and a two-day-old dead
+ * run reappeared in `pifleet status`, in `wait`, and in the console's
+ * `--recreate` scoping. **The monitor found it on its first real deployment**,
+ * because a `no container` cell beside a `phase dead` is exactly the
+ * contradiction §6.2 was built to make visible.
+ *
+ * {@link identityAlive} exists to prevent precisely this — it compares the
+ * process START TIME, which a recycled pid cannot match — but it needs a
+ * registered `started` stamp, and the fallback has none. `state.json` carries
+ * `started_at` as an ISO string while `processStartTime` returns `ps` format,
+ * so the two cannot be compared without a schema change.
+ *
+ * **So this closes the observed hole rather than the general one, and the
+ * residual is stated instead of implied.** A worker that WROTE `phase: "dead"`
+ * has reported its own end — `dead` is terminal, nothing follows it — so a
+ * recycled pid can no longer resurrect it. A recycled pid landing on a worker
+ * whose last written phase was `idle` or `busy` is still misread as alive; that
+ * needs an identity stamp in `state.json` and is a larger change than this
+ * fallback should make on its own.
+ *
+ * The direction of the change is one-way: it can only ever REMOVE runs that
+ * declared themselves dead, never add one, so nothing that was correctly live
+ * can be lost to it.
+ */
+async function notDeadAndRunning(state: WorkerState): Promise<boolean> {
+  if (state.phase === "dead") return false;
+  return (await processStartTime(state.pid)) !== null;
+}
+
 export async function identityAlive(id: ProcessIdentity): Promise<boolean> {
   const started = await processStartTime(id.pid);
   return started !== null && started === id.started;
@@ -1046,13 +1085,51 @@ export async function liveRunIds(root: string = runsRoot()): Promise<string[]> {
       continue;
     }
     for (const id of workerIds) {
-      const state = await readWorkerState(workerPaths(run, id));
-      if (state === null) continue;
-      const registered = registry?.workers[id];
-      const alive =
-        registered !== undefined
-          ? await identityAlive({ pid: registered.pid, started: registered.started })
-          : (await processStartTime(state.pid)) !== null;
+      /**
+       * ONE DAMAGED WORKER MUST NOT END THE ENUMERATION (ISC-494).
+       *
+       * Two calls in this loop throw rather than returning a sentinel, and
+       * neither was caught: `readWorkerState` raises `StateReadError` when
+       * `state.json` exists but fails schema validation — `null` is reserved
+       * for ABSENT (`state.ts:806-855`) — and `identityAlive`/`processStartTime`
+       * raise `IdentityReadError` whenever `ps` writes a diagnostic, which is a
+       * failed read rather than an absent process (`procstart.ts:248-262`
+       * argues at length for why that distinction has to be kept).
+       *
+       * So a single unparseable `state.json` anywhere under the runs root took
+       * out `liveRunIds` entirely, and with it every caller — `pifleet status`,
+       * `wait`, and anything else asking which runs are alive. **Which worker
+       * it hit first was `readdir` order, so the failure was not even
+       * deterministic.** Observed rather than reasoned about: a synthetic run
+       * tree built while measuring the 500-run walk terminated the probe on the
+       * first malformed state file.
+       *
+       * `continue` and not `break`, and treated exactly as `state === null`
+       * already was: **an unreadable worker is not evidence of death, it is an
+       * absence of evidence.** A run with one damaged worker and one live
+       * worker is still correctly live, because the live one is still visited.
+       * Only a run where NO worker can be read falls out — which is what the
+       * `readdir` catch above already does for a run whose worker directory is
+       * unreadable, so this widens no existing behaviour.
+       *
+       * The error is deliberately not logged here. This function is called on a
+       * poll by several surfaces, and a per-tick write on a corrupted tree is a
+       * log flood at exactly the moment someone is trying to read the logs. The
+       * monitor's own reader surfaces the reason per row (ISC-475).
+       */
+      let state: Awaited<ReturnType<typeof readWorkerState>>;
+      let alive: boolean;
+      try {
+        state = await readWorkerState(workerPaths(run, id));
+        if (state === null) continue;
+        const registered = registry?.workers[id];
+        alive =
+          registered !== undefined
+            ? await identityAlive({ pid: registered.pid, started: registered.started })
+            : await notDeadAndRunning(state);
+      } catch {
+        continue;
+      }
       if (alive) {
         live.push(runId);
         break;
@@ -1075,16 +1152,31 @@ export async function latestLiveRunId(root: string = runsRoot()): Promise<string
       continue;
     }
     for (const id of workerIds) {
-      const state = await readWorkerState(workerPaths(run, id));
-      if (state === null) continue;
-      // The SAME (pid, start-time) identity the snapshot below uses, not a
-      // second liveness rule: a run this selector called live and the table
-      // then called `gone` would be the defect wearing a different mask.
-      const registered = registry?.workers[id];
-      const alive =
-        registered !== undefined
-          ? await identityAlive({ pid: registered.pid, started: registered.started })
-          : (await processStartTime(state.pid)) !== null;
+      /**
+       * The same per-worker tolerance `liveRunIds` above now has (ISC-494), and
+       * it is here for a sharper reason than symmetry: this function picks the
+       * run every bare `pifleet status` and `pifleet wait` operates on, so one
+       * unparseable `state.json` under the runs root did not merely lose a row,
+       * it made the default run unresolvable and every one of those commands
+       * fail. Fixing only `liveRunIds` would have left the more reachable half
+       * of the same defect in place.
+       */
+      let state: Awaited<ReturnType<typeof readWorkerState>>;
+      let alive: boolean;
+      try {
+        state = await readWorkerState(workerPaths(run, id));
+        if (state === null) continue;
+        // The SAME (pid, start-time) identity the snapshot below uses, not a
+        // second liveness rule: a run this selector called live and the table
+        // then called `gone` would be the defect wearing a different mask.
+        const registered = registry?.workers[id];
+        alive =
+          registered !== undefined
+            ? await identityAlive({ pid: registered.pid, started: registered.started })
+            : await notDeadAndRunning(state);
+      } catch {
+        continue;
+      }
       if (alive) return runId;
     }
   }

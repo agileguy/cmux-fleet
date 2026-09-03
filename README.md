@@ -80,7 +80,34 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-**There are zero `[ ]` criteria.** The block ISC-431..ISC-467, filed 2026-09-02 as the
+**There are zero `[ ]` criteria.** The block ISC-468..ISC-493 was filed 2026-09-02 as
+the done-condition for a read-only fleet-monitor TUI (`Docs/SRD-FLEET-MONITOR.md` v0.2),
+**before any of it was built** — deliberately, so the criteria are the specification rather
+than a description of what was written. It is now closed: `pifleet monitor` reads the run
+tree, `docker ps` and git on three clocks, renders through a `(model) => string[]` seam, and
+has replaced the operations console's two watcher panes.
+
+**Three of the criteria corrected themselves on contact with the code, and the corrections
+are recorded in place rather than smoothed over.** ISC-468 leaned on a precedent that did not
+exist (no transitive import walk was in `test/` before it). ISC-473 as literally worded
+conflicts with ISC-472 in the same block and cannot pass — satisfying its closure reading
+means abandoning the shared reader the other criterion requires — so it is narrowed to what
+D10 is actually about. ISC-485 assumed Q3 would set the floor by measuring real panes; it is
+closed by DERIVATION instead, because a measured floor describes the terminal that was open
+that day and a derived one describes the design.
+
+**Two of the closed ones are fixes to shipped behaviour, not new surface, and they hold
+whether or not the monitor ever ships.** ISC-492: a `tui` supervisor's transcript poll
+returned before writing `transcript_activity` when no session file existed, so four of six
+live attended workers carried `null` for nine hours and were indistinguishable from `rpc`
+workers on every surface reading only `state.json`. ISC-494 — filed out of the reserve, from
+a defect the monitor's own readers surfaced: one unparseable `state.json` anywhere under the
+runs root threw out of `liveRunIds` and `latestLiveRunId`, breaking `pifleet status` and
+`pifleet wait` entirely, non-deterministically, on `readdir` order.
+
+ISC-495..ISC-498 remain in reserve for what Q3, Q9 and Q10 add once settled.
+
+**Before that block, there were zero.** The block ISC-431..ISC-467, filed 2026-09-02 as the
 done-condition for dispatch to an adopted-terminal `tui` worker
 (`Docs/SRD-TUI-DISPATCH.md`), is graded: thirty-five `[x]` and two `[~]`. Twenty-five were
 that document's own §10 list verbatim; ISC-456..ISC-458 are the three it reserved and could
@@ -163,9 +190,11 @@ and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 
 harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
-Every criterion has been attempted. Eleven are graded `[~]`
+There are zero `[ ]` criteria; every one has been attempted. Twelve are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
-falls short of the standard: ISC-331 has one unexercised surface (a live round trip); ISC-344,
+falls short of the standard: ISC-498 is the fleet monitor's one, where the repaint RATE is
+measured (1.44/sec on the scheduler path) but whether a repaint visibly FLASHES is perceptual and
+needs a person at the pane; ISC-331 has one unexercised surface (a live round trip); ISC-344,
 ISC-349 and ISC-350 ship guidance to workers, where a grep proving an instruction was shipped
 cannot observe a worker obeying it; ISC-432 and ISC-444 are the staged-dispatch block's two, both
 described above; and the four still open from 2026-08-31 for `pane_mode: tui` —

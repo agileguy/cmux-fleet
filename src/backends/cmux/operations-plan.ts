@@ -331,7 +331,6 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
   }
 
   const tuiWorkers = new Set(opts.tuiWorkers ?? []);
-  const status = statusWatchCommand(repoRoot, poll);
   /*
    * The AGENT half of pane 1. `workers[0]` — the pane shows one worker, and
    * the first named is the one the console is built around (`tick-1` by
@@ -422,6 +421,76 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       // the one that starts.
       split: null,
     },
+    {
+      title: "monitor",
+      /*
+       * ONE PANE WHERE THERE WERE TWO (SRD-FLEET-MONITOR §1, ISC-488).
+       *
+       * `fleet-status` and `git-watch` were two shell loops, each re-running a
+       * whole command on one shared `--poll` and diffing its output to decide
+       * whether to repaint. Both are now regions of a single process, and the
+       * thing that replaces them is not a third loop but a program with three
+       * clocks: the 1777 ms run walk on 30 s, `docker ps` beside it, the git
+       * strip on 5 s, and painting on its own interval so ages keep moving
+       * while nothing is being re-read.
+       *
+       * WHAT THE MERGE HAD TO KEEP, because each was paid for on a live console
+       * and none of them is recoverable by reasoning:
+       *
+       * - **No `watch(1)`** — a HOST fact (`:47-50`), not a pane fact. macOS
+       *   ships none, so the obvious way to write a refreshing pane fails on
+       *   tick one with `command not found` and leaves a dead pane that looks
+       *   configured. The monitor is a bun process and cannot invoke it; the
+       *   assertion survives pointed at this command, and the `--repo` flag is
+       *   named that way rather than `--watch-dir` so the tripwire can stay
+       *   blunt.
+       * - **Clears rather than appends** — `status --watch` APPENDS, and the
+       *   measured cost was a pane that became a transcript of how long a dead
+       *   worker had been dead. The monitor writes cursor-home-and-clear before
+       *   each frame, and only when the frame CHANGED, which is
+       *   the deleted `redrawOnChange`'s behaviour carried through the
+       *   rewrite.
+       * - **Survives a non-zero exit** — `|| true` existed because the loop
+       *   died on the first refresh after a `down`, which is exactly when an
+       *   operator looks at it. Here it is the `;` before the shell rung: the
+       *   monitor exiting for any reason drops to a usable shell rather than
+       *   closing the pane and taking the diagnosis with it.
+       * - **`-C <dir>`, never a `cd`** — the git half reports on the
+       *   INVOCATION directory. `watchDir`, never `repoRoot`; see the field's
+       *   docblock. It is passed as `--repo` and reaches `git -C` unchanged.
+       *
+       * `--poll` KEEPS ITS NAME AND CHANGES ITS MEANING, which ISC-490 requires
+       * be stated rather than left dangling. It used to be the read interval
+       * for two loops; it is now the REPAINT interval for one process whose
+       * reads are on their own clocks. The operator-visible behaviour it
+       * governs — how quickly the pane reflects a change — is the same, which
+       * is why it keeps the name instead of being retired.
+       */
+      command: `${monitorPaneCommand(repoRoot, watchDir, poll)}; exec $SHELL -i`,
+      /*
+       * DOWN off the OBSERVER, and SECOND in creation order — which is what
+       * makes it span the WHOLE bottom rather than a column of it.
+       *
+       * **The first split decides the major axis, and that is the entire
+       * reason this pane is created before `ticketing` rather than after it.**
+       * Built third, it could only ever split one column: by then the surface
+       * has already been divided left/right and there is no surface left that
+       * spans both. Built second, it splits the untouched workspace
+       * horizontally, `ticketing` then divides the TOP half, and the monitor
+       * keeps the full width.
+       *
+       *   +---------------+---------------+
+       *   |   ticketing   |   observer    |
+       *   +-------------------------------+
+       *   |            monitor            |
+       *   +-------------------------------+
+       *
+       * The cost is that pane order is no longer reading order, which is why
+       * `operations-plan.test.ts` resolves panes BY TITLE — a title is what a
+       * pane IS, its index is where it happened to land.
+       */
+      split: "down",
+    },
     ...(second === undefined
       ? []
       : [
@@ -433,36 +502,20 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
              * runs its own `up` rather than sharing one.
              */
             command: `${envPreamble()} ${ladder(second)}`,
-            // LEFT of the observer, which puts ticketing on the left of the top
-            // row and leaves the observer on the right.
+            /*
+             * LEFT of the OBSERVER — pane index 0 — and it cannot use the
+             * default anchor. The pane before it is now the monitor, and
+             * splitting that would put ticketing in the bottom row.
+             *
+             * **This revives `splitFrom`, which the pane merge had left without
+             * a caller.** It existed so `git-watch` could reach the observer
+             * rather than its predecessor; the same need reappears here for the
+             * same structural reason, one pane later.
+             */
             split: "left" as const,
+            splitFrom: 0,
           },
         ]),
-    {
-      title: "fleet-status",
-      command: status,
-      // DOWN off the pane before it — ticketing when there are two agent panes,
-      // the observer when there is only one. Either way it lands in the bottom
-      // of the LEFT column, because the pane it splits is the left one.
-      split: "down",
-    },
-    {
-      title: "git-watch",
-      // `git -C <dir>` rather than a `cd`: the loop reports on the invocation
-      // directory no matter where the pane's shell started, so a workspace cwd
-      // that failed to apply cannot silently redirect the pane at something
-      // else. `watchDir`, never `repoRoot` — see the field's docblock.
-      command: gitWatchCommand(watchDir, poll),
-      // DOWN off the OBSERVER — pane index 0 — and this is the one pane that
-      // cannot use the default anchor. Splitting off the previous pane
-      // (fleet-status) would stack a third row inside the left column; what is
-      // wanted is the bottom of the RIGHT column, under the observer.
-      //
-      // With one agent pane there is no right column, so it falls back to the
-      // previous pane and the old two-up bottom row is what comes out.
-      split: second === undefined ? "right" : "down",
-      ...(second === undefined ? {} : { splitFrom: 0 }),
-    },
   ];
 }
 
@@ -629,86 +682,36 @@ export function envPreamble(): string {
   return `set -a; [ -f "$HOME/.env" ] && . "$HOME/.env"; set +a;`;
 }
 
-/**
- * Pane 2: `pifleet status` on a clear-and-redraw loop, NOT `status --watch`.
- *
- * ## Why the built-in watch is the wrong tool for a standing pane
- *
- * `--watch` APPENDS. Measured on the live console 2026-08-30: the pane held
- * dozens of identical `run 2026-08-24T17-18-05Z-7f40 / eng-1: dead
- * supervisor=gone` blocks scrolled past each other, so the pane was a
- * transcript of how long a dead worker had been dead rather than a display of
- * what the fleet is doing. A standing pane in the corner of a workspace is read
- * at a GLANCE, and a glance can only read the last screen — everything above it
- * is cost with no reader.
- *
- * The same `while :; do clear; …; sleep n; done` shape as `gitWatchCommand`,
- * deliberately: that pane was confirmed working on the same live run, one
- * mechanism is one thing to debug, and the two panes then refresh in step so a
- * `down` shows up in both at the same moment rather than in whichever polls
- * first.
- *
- * NOT `--watch` piped through something that clears, and not `watch(1)`: the
- * first still holds a long-running process whose output nobody re-reads, and
- * the second is not installed by default on macOS.
- */
-/**
- * A poll loop that redraws ONLY when the output changed.
- *
- * `while :; do clear; cmd; sleep n; done` repaints every tick whether or not
- * anything moved, and on a standing console that is a visible flash several
- * times a minute against panes whose content is usually identical — the fleet
- * is idle and the branch has not moved. The flash is also the only motion in
- * the window, so it reads as activity when there is none.
- *
- * Capturing into a variable and comparing costs one thing worth naming: a
- * command writing to a pipe rather than a terminal turns its colour off. Any
- * caller that wants colour has to ask for it explicitly — see the git loop.
- *
- * `|| true` so a command that exits non-zero leaves the loop running. Without
- * it the pane dies on the first refresh after a `down`, which is exactly when
- * an operator looks at it.
- */
-function redrawOnChange(body: string, pollSeconds: number): string {
-  return (
-    `prev=''; while :; do out="$(${body} 2>&1)" || true; ` +
-    `if [ "$out" != "$prev" ]; then clear; printf '%s\\n' "$out"; prev="$out"; fi; ` +
-    `sleep ${pollSeconds}; done`
-  );
-}
-
-export function statusWatchCommand(repoRoot: string, pollSeconds: number): string {
-  // `--all`, because the console stands up one run per attached pane: a status
-  // pane showing only the newest would report half the console and look, to
-  // the operator, like the other half had died.
-  const status = pifleetCommand(repoRoot, ["status", "--all"]);
-  return redrawOnChange(status, pollSeconds);
-}
 
 /**
- * The git pane's poll loop.
+ * The merged monitor pane's command (ISC-488, ISC-489, ISC-490).
  *
- * Separate and exported so the "no `watch(1)`" rule has something to assert
- * against directly. `clear` at the top of each tick rather than at the bottom:
- * a loop that clears after printing leaves a blank pane between ticks, which
- * reads as a hung console.
+ * Exported so the criteria that survived the pane merge have something to
+ * assert against directly — a string built inline inside `operationsPanes` can
+ * only be tested through the whole plan. The two functions this replaces,
+ * `statusWatchCommand` and `gitWatchCommand`, were exported for the same reason
+ * and are DELETED rather than kept: after the merge nothing called them, and a
+ * pair of shell-loop builders surviving beside the process that replaced them
+ * would be the dead-field shape `contracts.ts:86-118` records — with the added
+ * cost that a reader could not tell which one the console actually runs.
+ *
+ * `pifleetCommand` and therefore an ABSOLUTE path through `bun run`, never a
+ * bare `pifleet`. `:43-46` records the host fact: the bin is never linked, so a
+ * bare invocation fails with `command not found` in a pane that looks correctly
+ * configured — the same failure shape as `watch(1)`, from a different cause.
  */
-export function gitWatchCommand(watchDir: string, pollSeconds: number): string {
-  // `--no-pager` IS THE WHOLE PANE. Measured on the first live run: `git log`
-  // found a terminal on stdout, started `less`, and the loop stopped at `(END)`
-  // waiting for a keypress that was never coming. The pane showed a plausible
-  // commit list, refreshed never, and looked like a working watch — the exact
-  // failure a screenshot cannot distinguish from success. `git -c core.pager=`
-  // and `GIT_PAGER=cat` both work too; this is the shortest, and it survives a
-  // user's `[pager]` config, which an unset environment variable does not.
-  //
-  // `-c color.ui=always` is required BECAUSE of the redraw-on-change loop: the
-  // output is captured into a variable to compare it, and git turns colour off
-  // when its stdout is not a terminal. Without this the flicker fix would
-  // silently take the branch and commit colouring with it.
-  const g = `git --no-pager -c color.ui=always -C ${shellQuote([watchDir])}`;
-  return redrawOnChange(
-    `${g} status --short --branch; echo; ${g} log --oneline -10`,
-    pollSeconds,
-  );
+export function monitorPaneCommand(
+  repoRoot: string,
+  watchDir: string,
+  pollSeconds: number,
+): string {
+  return pifleetCommand(repoRoot, [
+    "monitor",
+    "--repo",
+    watchDir,
+    "--poll",
+    String(pollSeconds),
+  ]);
 }
+
+
