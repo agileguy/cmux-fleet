@@ -10,6 +10,43 @@ the operator's own oMLX, rather than the prohibition being repealed outright.
 **As configured on this fleet:** `ollama-cloud` (`hosted: true`) serves the `engineer`, `tester` and
 `reviewer` roles — the `development` console's four seats. Every other role resolves to `omlx`.
 
+### Deployed assignment, 2026-09-03
+
+Recorded here rather than only in `fleet.yaml`, which is git-ignored: the probe evidence below is the
+justification for three model choices and would otherwise exist only on one machine.
+
+| Role | Workers | Model | `probeNativeToolCalls` on `https://ollama.com/v1` |
+|---|---|---|---|
+| `engineer` | eng-1, eng-2 | `kimi-k2.7-code` | ok — 1 native tool_call, 1268 ms |
+| `tester` | tst-1 | `gpt-oss:120b` | ok — 1 native tool_call, 620 ms |
+| `reviewer` | rev-1 | `deepseek-v4-pro:0813` | ok — 1 native tool_call, 1153 ms |
+| `observer`, `ticketing`, `sre`, `verifier` | obs-1/2, tick-1, sre-1/2, ver-1 | `Qwen3.5-35B-A3B-8bit` | — (oMLX, unchanged) |
+
+**Each was re-probed rather than taken from the vendor's `capabilities` array.** All six candidates
+considered advertise `tools` in `POST /api/show`, but §3.1 already establishes that array is an
+attestation about the *native* route and says nothing about the OpenAI-compatible path's response
+shape — and that path is the one this fleet dials. The three above were run through the repository's
+own `probeNativeToolCalls`, which requires both `finish_reason: "tool_calls"` and a non-empty
+`tool_calls[]`. All three are in §3.1's fast group; neither of the two slow models is deployed.
+
+**The two within-family choices are argued, because the owner named families and the catalogue
+carries several of each.** `kimi-k2.7-code` over `kimi-k3` — both current, both probe clean, and the
+code variant is specialised for what engineers do; `kimi-k3` is the swap for a general-purpose model.
+`deepseek-v4-pro:0813` over `deepseek-v4-flash:0731` — review should think longest per token read, so
+capability beats latency there, and the same trade runs the other way for the tester, which is why
+`gpt-oss:120b` being the fastest of the three sits on that role.
+
+**`tag_style: true` is load-bearing for two of the three.** `:120b` and `:0813` survive
+`decomposeModel` only because suffix stripping is off for this provider (D12); with it on, both would
+be read as thinking levels, stripped, and produce a model-not-found against a name the operator can
+see is correct.
+
+**Verified in the running containers, not inferred from config.** Each worker's rendered
+`models.json` names its own provider, base URL and model — e.g. eng-1 carries
+`ollama-cloud → https://ollama.com/v1 → [kimi-k2.7-code]` — and from inside eng-1 the vendor resolves
+to its own relay and answers `200`, while the *other* provider's endpoint is unreachable (D7,
+ISC-411).
+
 ---
 
 ## 0. Preamble
