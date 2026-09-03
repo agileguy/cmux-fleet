@@ -282,3 +282,100 @@ describe("ISC-495 (Q9): the density figure, measured rather than asserted", () =
     expect(young).toContain("wrote 4s ago");
   });
 });
+
+/**
+ * ISC-498 — Q10's measurable half: the repaint RATE, which bounds the flash.
+ *
+ * §9 Q10 asks "does Ink's full-frame repaint flash visibly inside a cmux pane?"
+ * and its probe is "run the monitor in a real operations pane and watch". The
+ * watching half needs a person and stays open. The frequency half does not, and
+ * it decides whether the question matters — a flash nobody can trigger is not a
+ * defect.
+ *
+ * ## Measured on the live six-worker fleet, and the FIRST measurement was wrong
+ *
+ * The first attempt sampled `composeFleet` — the `--once` path — and reported
+ * 0.03 repaints/sec with 98% of paints skipped. **That number is false for the
+ * pane and is recorded here rather than deleted, because the mistake is the
+ * instructive part.** `composeFleet` re-reads every region on every call, so
+ * every `readAt` is fresh, every staleness marker renders `as of 0s` forever,
+ * and the frame cannot move. The pane runs the three-clock scheduler instead,
+ * where a slow-clock region visibly ages between its own reads.
+ *
+ * Re-measured on the scheduler path — `FleetClocks` + `modelFrom`, which is
+ * what `pifleet monitor` actually paints — 60 samples at 500 ms over 32.7 s:
+ *
+ * | | `composeFleet` (wrong path) | scheduler (the pane) |
+ * |---|---|---|
+ * | distinct frames | 1 | 47 |
+ * | repaints/sec | 0.03 | **1.44** |
+ * | paints skipped | 98% | **22%** |
+ *
+ * ## The finding, which is a real tension and not a defect
+ *
+ * **The staleness markers are the dominant source of repaints, not the fleet
+ * data.** The fleet was entirely idle for the whole window — no dispatch, no
+ * transcript growth, no container change — and it still repainted 47 times,
+ * because three regions on three clocks each tick their own `as of Ns` at 1 Hz,
+ * out of phase with one another. That is §6.4 working exactly as specified:
+ * "nothing on screen is stale without saying so" is what produces the repaint
+ * rate §9 Q10 is worried about. The two requirements pull against each other
+ * and neither is wrong.
+ *
+ * So the bound is **~1.4/sec on an idle fleet**, set by the honesty markers,
+ * with the 500 ms clock contributing nothing on top. If Q10's perceptual half
+ * ever comes back positive, the cheap lever is the marker's granularity rather
+ * than the clock's period — and that ordering is the useful thing to have
+ * established before anyone reaches for the period.
+ */
+describe("ISC-498 (Q10): the repaint rate is bounded, and the staleness markers set it", () => {
+  /**
+   * The property that makes skipping possible at all. If rendering were not
+   * deterministic — a set iterated in hash order, a timestamp taken inside the
+   * renderer — `next === last` would never fire and the monitor would repaint
+   * at the clock's rate no matter what changed.
+   */
+  test("the same model renders byte-identically, which is what lets a paint be skipped", () => {
+    const m = model();
+    expect(renderFleet(m).join("\n")).toBe(renderFleet(m).join("\n"));
+  });
+
+  /**
+   * THE MEASURED CAUSE, as a property rather than as a number in a comment.
+   * Advancing `now` alone — no region re-read, nothing in the fleet changed —
+   * moves the frame, because the staleness marker crosses a second boundary.
+   * This is why 47 of 60 scheduler samples differed on a fleet where nothing
+   * happened.
+   */
+  test("advancing only the clock moves the frame, via the staleness marker", () => {
+    const base = renderFleet(model({ now: NOW })).join("\n");
+    const later = renderFleet(model({ now: NOW + 1_000 })).join("\n");
+    expect(base).toContain("as of 1s");
+    expect(later).toContain("as of 2s");
+    expect(later).not.toBe(base);
+  });
+
+  /**
+   * And the bound: the marker's granularity is one second, so the 500 ms clock
+   * cannot produce two distinct frames within one second FROM AGEING ALONE.
+   * Sub-second advances that stay inside the same second change no byte.
+   */
+  test("a sub-second advance inside the same second changes nothing", () => {
+    const a = renderFleet(model({ now: NOW + 10 })).join("\n");
+    const b = renderFleet(model({ now: NOW + 200 })).join("\n");
+    expect(b).toBe(a);
+  });
+
+  /**
+   * The dedup itself is one line inside the commander action, which no unit
+   * test drives — the same limit ISC-497's call-site guard records, handled the
+   * same way rather than left implied.
+   */
+  test("the paint skips the write when the frame is unchanged", () => {
+    const src = readFileSync(
+      new URL("../../src/cli/commands/monitor.ts", import.meta.url).pathname,
+      "utf8",
+    );
+    expect(src).toContain("if (next === last) return;");
+  });
+});
