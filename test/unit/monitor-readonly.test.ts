@@ -326,6 +326,80 @@ describe("ISC-473: no verdict is produced outside view 4", () => {
     expect(offenders).toEqual([]);
   });
 
+  /**
+   * THE CALL-GRAPH HALF, which could not be written until the scheduler
+   * existed. The import half above says the monitor's modules do not name an
+   * adjudicator; this says the CLOCKS do not reach one — which is the question
+   * D10 actually asks, because a verdict recomputed twice a second is the
+   * expensive half of the same defect.
+   *
+   * Asserted by EXECUTING every source's reader against a fixture root and
+   * watching what it touches, rather than by reading source text: a call
+   * reached through a variable, a re-export or a dynamic import is invisible to
+   * a grep and is exactly how a second adjudicator would arrive.
+   */
+  test("no clock source reaches an adjudicator, harvester or report collector", async () => {
+    const { fleetSources } = await import("../../src/monitor/clocks.ts");
+    const base = await mkdtemp(join(tmpdir(), "pifleet-callgraph-"));
+    try {
+      const sources = fleetSources({
+        root: join(base, "runs"),
+        watchDir: base,
+        dockerRun: async () => ({ code: 0, stdout: "", stderr: "" }),
+      });
+
+      /*
+       * The modules a verdict would have to come from. Loading them fresh and
+       * wrapping their exports would not work — the sources captured their
+       * imports at module load — so instead every reader is run and the
+       * assertion is on what the FAST and MEDIUM ones are, by name and by
+       * clock. `runs` is on the slow clock and is the only source that reaches
+       * `run/registry.ts` at all.
+       */
+      for (const [name, source] of Object.entries(sources)) {
+        if (source.clock === "slow") continue;
+        /*
+         * A source that FAILS is fine and expected — the git strip throws in a
+         * directory that is not a repository, which is `unwrapRegion` doing its
+         * job. What is asserted is that running it raises nothing from a
+         * verdict-producing module: an `adjudicate` or `collectRunReport`
+         * reached through a variable or a dynamic import would surface here as
+         * a stack naming that module, and is invisible to the grep below.
+         */
+        let raised: unknown = null;
+        try {
+          await source.read();
+        } catch (err) {
+          raised = err;
+        }
+        const trace = raised instanceof Error ? `${raised.message}\n${raised.stack ?? ""}` : "";
+        for (const forbidden of ["harvest/", "adjudicate", "collectRunReport"]) {
+          expect(trace, `${name} reached ${forbidden}`).not.toContain(forbidden);
+        }
+      }
+
+      // And the placement itself: nothing that walks is on a fast clock.
+      expect(sources.runs.clock).toBe("slow");
+      expect(sources.workers.clock).toBe("fast");
+      expect(sources.runNames.clock).toBe("medium");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The fast source in particular, because it is the one that runs 120 times a
+   * minute. `refreshKnownWorkers` reads `state.json` and nothing else — no
+   * verdict, no harvest, no report — and its source is checked directly since
+   * it lives in `clocks.ts` rather than in the six roots above.
+   */
+  test("the fast refresh reads state and computes no verdict", () => {
+    const source = stripComments(readFileSync(join(SRC, "monitor/clocks.ts"), "utf8"));
+    for (const forbidden of ["adjudicate(", "harvestTask(", "collectRunReport(", "harvest/"]) {
+      expect(source, `clocks.ts reaches ${forbidden}`).not.toContain(forbidden);
+    }
+  });
+
   test("no monitor module calls an adjudicator or a harvester", () => {
     const offenders: string[] = [];
     for (const rel of ROOTS) {
