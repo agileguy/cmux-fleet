@@ -1638,6 +1638,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet up [--config p] [--workers a,b] [--backend k] [--backend-fallback k]` | build run-dir, worktrees, skill bundles, containers, panes |
 | `pifleet daemon [--run r]` | registry/reaper (started by `up`; separately runnable) |
 | `pifleet status [--run r] [--watch]` | fleet snapshot |
+| `pifleet monitor [--once] [--poll s]` | live fleet viewer; read-only (SRD-FLEET-MONITOR) |
 | `pifleet worktrees [--run r]` | list every worker's per-worker checkout — branch, path, clean/dirty; the operator-visibility surface `git worktree list` no longer answers now that each worker is an independent clone rather than a linked worktree (§9.2 erratum) |
 | `pifleet dispatch --worker <id> --task <file\|->` / `--auto --tasks <f>` | send task envelopes |
 | `pifleet steer --worker <id> "msg"` | mid-turn correction |
