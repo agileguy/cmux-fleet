@@ -25,10 +25,10 @@
  */
 
 import { deriveActivity } from "./activity.ts";
-import { type FleetModel, type Region, type RunRow, type WorkerRow, failed, never, ok } from "./model.ts";
+import { type FleetModel, type GitStrip, type Region, type RunRow, type WorkerRow, failed, never, ok } from "./model.ts";
 import { readDockerContainers } from "./read/docker.ts";
 import { readGit } from "./read/git.ts";
-import { readRuns } from "./read/runs.ts";
+import { readRuns, type PartialRunRow } from "./read/runs.ts";
 import { readWorkerRows } from "./read/worker.ts";
 import { runPaths } from "../run/paths.ts";
 
@@ -68,41 +68,91 @@ export async function composeFleet(opts: ComposeOptions): Promise<FleetModel> {
     readGit({ watchDir: opts.watchDir, now }),
   ]);
 
-  let runs: Region<readonly RunRow[]>;
-  if (partial.status !== "ok") {
-    runs = partial.status === "failed" ? failed(partial.reason, partial.readAt) : never();
-  } else {
-    const built: RunRow[] = [];
-    for (const run of partial.value) {
-      const workers: WorkerRow[] = [];
-      for (const region of run.workers) {
-        // A worker whose own read failed is DROPPED from the row list rather
-        // than rendered as a guess. `run.workers` keeps the region so a future
-        // view can count the losses; inventing an `Activity` for a worker whose
-        // `state.json` would not parse is the one thing the ladder must not do.
-        if (region.status !== "ok") continue;
-        const { row, evidence } = region.value;
-        workers.push({
-          ...row,
-          activity: deriveActivity(
-            {
-              adoptedTerminal: evidence.presentation?.adopted_terminal ?? null,
-              attendedMode: evidence.attended?.mode ?? null,
-              sessionPresent: evidence.state.session_present,
-              transcriptActivity: evidence.state.transcript_activity ?? null,
-              phase: row.phase,
-              containerPresent: row.containerPresent,
-            },
-            now(),
-          ),
-        });
-      }
-      built.push({ ...run, workers });
-    }
-    runs = ok(built, partial.readAt);
-  }
+  return {
+    runs: joinRuns(partial, now()),
+    containers,
+    git,
+    now: now(),
+    columns: opts.columns,
+  };
+}
 
-  return { runs, containers, git, now: now(), columns: opts.columns };
+/**
+ * The join, as a pure function of a region and a moment.
+ *
+ * Separated from {@link composeFleet} because the scheduler needs the SAME
+ * join over a region it already holds — `FleetClocks` re-reads `runs` on its
+ * own clock and hands back a snapshot, and a second copy of this loop written
+ * against that snapshot is exactly the two-adjudicators shape D10 forbids. One
+ * expression produces an `Activity` for a row and both callers go through it.
+ *
+ * `now` is a VALUE and not a getter here, deliberately. Every row in one frame
+ * must be aged against one moment: a loop calling `Date.now()` per worker
+ * would give the first and last rows of a 500-worker fleet different presents,
+ * and two workers that grew their transcripts simultaneously would render
+ * different ages for no reason a reader could discover.
+ */
+export function joinRuns(
+  partial: Region<readonly PartialRunRow[]>,
+  now: number,
+): Region<readonly RunRow[]> {
+  if (partial.status === "never") return never();
+  if (partial.status === "failed") return failed(partial.reason, partial.readAt);
+
+  const built: RunRow[] = [];
+  for (const run of partial.value) {
+    const workers: WorkerRow[] = [];
+    for (const region of run.workers) {
+      // A worker whose own read failed is DROPPED from the row list rather
+      // than rendered as a guess. `run.workers` keeps the region so a future
+      // view can count the losses; inventing an `Activity` for a worker whose
+      // `state.json` would not parse is the one thing the ladder must not do.
+      if (region.status !== "ok") continue;
+      const { row, evidence } = region.value;
+      workers.push({
+        ...row,
+        activity: deriveActivity(
+          {
+            adoptedTerminal: evidence.presentation?.adopted_terminal ?? null,
+            attendedMode: evidence.attended?.mode ?? null,
+            sessionPresent: evidence.state.session_present,
+            transcriptActivity: evidence.state.transcript_activity ?? null,
+            phase: row.phase,
+            containerPresent: row.containerPresent,
+          },
+          now,
+        ),
+      });
+    }
+    built.push({ ...run, workers });
+  }
+  return ok(built, partial.readAt);
+}
+
+/**
+ * A `FleetModel` from a scheduler snapshot (`clocks.ts:368`).
+ *
+ * **`now` comes from the caller and not from the snapshot**, because the
+ * snapshot has no single moment: its four regions were read on three different
+ * clocks and each carries its own `readAt`. That is the point — §6.4's
+ * staleness marker is `now - readAt` per region, and a model that took its
+ * present from any one region would report that region as permanently fresh.
+ */
+export function modelFrom(
+  snapshot: {
+    readonly runs: Region<readonly PartialRunRow[]>;
+    readonly containers: Region<readonly string[]>;
+    readonly git: Region<GitStrip>;
+  },
+  opts: { readonly now: number; readonly columns: number },
+): FleetModel {
+  return {
+    runs: joinRuns(snapshot.runs, opts.now),
+    containers: snapshot.containers,
+    git: snapshot.git,
+    now: opts.now,
+    columns: opts.columns,
+  };
 }
 
 /**

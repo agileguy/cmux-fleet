@@ -50,6 +50,7 @@ const ROOTS = [
    * holds a reader and the activity ladder at once, which makes it the natural
    * place for someone to reach for a control call.
    */
+  "monitor/clocks.ts",
   "monitor/compose.ts",
   "monitor/render.ts",
   "monitor/views/fleet.tsx",
@@ -235,9 +236,22 @@ describe("ISC-468: the CLI command is a two-import surface", () => {
     readFileSync(new URL("../../src/cli/commands/monitor.ts", import.meta.url).pathname, "utf8"),
   );
 
-  test("it imports only composeFleet and renderFleet from the monitor", () => {
+  /**
+   * The import surface is PINNED rather than bounded, so growing it is a
+   * deliberate edit to this list and never a side effect. It has already caught
+   * one: wiring the three-clock scheduler added `clocks.ts` and failed here
+   * until the addition was made on purpose.
+   *
+   * Three modules is the whole of it — the scheduler, the join, the seam. Note
+   * what is NOT here and could plausibly have been: `read/*.ts` (the command has
+   * no business reading anything directly; `fleetSources` owns that) and
+   * `activity.ts` (deriving an `Activity` in a CLI command would be D10's second
+   * adjudicator, in the one place whose answer an operator reads).
+   */
+  test("it imports exactly three monitor modules, and no reader or adjudicator", () => {
     const monitorImports = [...CMD.matchAll(/from\s+["']([^"']*monitor[^"']*)["']/g)].map((m) => m[1]!);
     expect(monitorImports.sort()).toEqual([
+      "../../monitor/clocks.ts",
       "../../monitor/compose.ts",
       "../../monitor/render.ts",
     ]);
