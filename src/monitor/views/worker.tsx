@@ -212,12 +212,22 @@ function StateBlock({ detail, plan }: { detail: WorkerDetail; plan: WorkerLayout
           </Text>
         ) : null}
       </Box>
-      <Text wrap="truncate-end" color={degradedColour} bold={p.on && detail.credentialDegraded === true}>
+      {/*
+       * THE TWO FINDING LINES WRAP, and that is not the choice the cells above
+       * make. It was found by LOOKING at a narrow frame rather than by
+       * reasoning about one: at 26 columns a truncating exit line rendered
+       * `exit code 137 signal SI…`, losing the signal name — and `SIGKILL`
+       * versus `SIGTERM` is most of what the line is for.
+       *
+       * The rule, stated once and applied in three places in this file: **a
+       * cell truncates because it is holding a column open for its neighbours,
+       * and a finding has no neighbours.** Truncating one buys no alignment and
+       * costs the fact.
+       */}
+      <BodyLine color={degradedColour} dimColor={p.on && detail.credentialDegraded === false}>
         {`  ${credentialLine(detail.credentialDegraded)}`}
-      </Text>
-      <Text wrap="truncate-end" dimColor={p.on && detail.exit === null}>
-        {`  ${exitLine(detail.exit)}`}
-      </Text>
+      </BodyLine>
+      <BodyLine dimColor={p.on && detail.exit === null}>{`  ${exitLine(detail.exit)}`}</BodyLine>
     </Box>
   );
 }
@@ -324,7 +334,15 @@ export function Worker({
     <Box flexDirection="column" width={columns}>
       <Rule width={columns} />
       <RegionHeading text={head} failed={detail.status === "failed"} />
-      <Text wrap="truncate-end" dimColor={p.on}>{`  run ${selection.runId}`}</Text>
+      {/*
+       * The run line WRAPS while the heading above it truncates, and the split
+       * is the same one the finding lines make. The heading is a SUMMARY — an
+       * age and a count, whose loss at a narrow width costs a reader nothing
+       * the next line does not give them. This is the SELECTION: §6.2's stable
+       * `(run, worker)` pair, the thing every later action is addressed to and
+       * the thing an operator copies. A half-truncated run id names no run.
+       */}
+      <BodyLine dimColor={p.on}>{`  run ${selection.runId}`}</BodyLine>
       {mismatch !== null ? (
         <Text wrap="wrap" color={p.alarm} bold={p.on}>
           {`  detail is for ${mismatch} — not the selected worker`}

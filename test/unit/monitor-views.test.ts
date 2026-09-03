@@ -408,6 +408,38 @@ describe("ISC-504: a clipped event window says so", () => {
   });
 
   /**
+   * THE FINDING LINES SURVIVE A NARROW PANE WHOLE, and this was found by
+   * LOOKING at a rendered frame rather than by reasoning about one.
+   *
+   * At 26 columns view 2 rendered `exit code 137 signal SI…` — a truncated
+   * SIGNAL NAME, when `SIGKILL` versus `SIGTERM` is most of what the line is
+   * for. The rule the fix follows, stated once and applied in both places:
+   * **a cell truncates because it is holding a column open for its neighbours,
+   * and a finding has no neighbours** — so truncating one buys no alignment and
+   * costs the fact. The run line goes the same way: it is §6.2's stable
+   * selection, not a summary, and a half-truncated run id names no run.
+   *
+   * It lives in the ISC-504 block because it is that criterion's own class:
+   * information removed by the view without the view saying so.
+   */
+  test("the exit signal and the run id are not truncated at a narrow width", () => {
+    const frame = renderFleet(
+      onWorker({
+        columns: 26,
+        detail: ok(
+          { ...DETAIL, exit: { code: 137, signal: "SIGKILL" }, credentialDegraded: true },
+          NOW - 2_000,
+        ),
+      }),
+    )
+      .join(" ")
+      .replace(/\s+/g, " ");
+    expect(frame).toContain("SIGKILL");
+    expect(frame).toContain("credential DEGRADED");
+    expect(frame).toContain(RUN_A);
+  });
+
+  /**
    * THE EVENT LINES ARE NOT RE-CLIPPED (§6.2 View 2, ISC-345's hazard).
    *
    * A line longer than the pane must reach the frame whole — wrapped across
