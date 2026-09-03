@@ -60,7 +60,7 @@
 
 import { Box, Text } from "ink";
 
-import type { Region, WorkerDetail } from "../model.ts";
+import type { DispatchVia, FenceView, Region, WorkerDetail } from "../model.ts";
 import {
   BodyLine,
   Bullet,
@@ -228,8 +228,60 @@ function StateBlock({ detail, plan }: { detail: WorkerDetail; plan: WorkerLayout
         {`  ${credentialLine(detail.credentialDegraded)}`}
       </BodyLine>
       <BodyLine dimColor={p.on && detail.exit === null}>{`  ${exitLine(detail.exit)}`}</BodyLine>
+      {/*
+       * THE REFUSAL SURFACE, and it wraps for the same reason the two lines
+       * above do: it is a finding, not a cell holding a column open.
+       *
+       * This is §6.2's "a later action button has somewhere to be greyed out
+       * and a reason to give", rendered in the view an operator opens BEFORE
+       * acting on a worker. It is deliberately not on view 1's row: §6.5's
+       * ladder is already shedding cells at narrow widths, and two more would
+       * be dropped first and read never.
+       *
+       * `via: null` renders as "unknown" and NOT as `rpc`. The reader refuses
+       * to guess (`read/worker.ts`'s `deriveVia`), and a view that filled the
+       * gap with the permissive rung would undo that refusal one layer up —
+       * greying in a button the command behind it would refuse.
+       */}
+      <BodyLine dimColor={p.on && detail.via === null}>{`  ${viaLine(detail.via)}`}</BodyLine>
+      <BodyLine dimColor={p.on && detail.fence === null}>{`  ${fenceLine(detail.fence)}`}</BodyLine>
     </Box>
   );
+}
+
+/**
+ * How a dispatch WOULD reach this worker — read, never acted on (D15).
+ *
+ * The wording says what would happen rather than naming the enum, because the
+ * enum's three words mean nothing to someone who has not read `dispatch.ts`.
+ */
+function viaLine(via: DispatchVia | null): string {
+  switch (via) {
+    case "rpc":
+      return "dispatch would go over the control socket";
+    case "pane":
+      return "dispatch would be typed into this worker's pane";
+    case "staged":
+      return "dispatch would be STAGED — a person owns this terminal";
+    default:
+      // Not "would use rpc". See the block above.
+      return "dispatch route unknown — the launch record or presentation could not be read";
+  }
+}
+
+/**
+ * Whether an action would be refused `busy` or replayed (§6.2's third).
+ *
+ * `attemptCount` is carried even with no live epoch because it is what decides
+ * REPLAY: a `(task, attempt)` pair already in the fence returns its original
+ * epoch and runs nothing.
+ */
+function fenceLine(fence: FenceView | null): string {
+  if (fence === null) return "no fence yet — this worker has taken no epoch";
+  const attempts = `${fence.attemptCount} attempt${fence.attemptCount === 1 ? "" : "s"}`;
+  if (fence.liveTaskId === null) return `fence idle — ${attempts} on record`;
+  const abort = fence.abortRequested ? ", ABORT REQUESTED" : "";
+  return `fence LIVE on ${fence.liveTaskId}${abort} — ${attempts} on record`;
 }
 
 /**

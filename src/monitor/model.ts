@@ -338,6 +338,25 @@ export interface WorkerDetail {
   readonly credentialDegraded: boolean | null;
   /** `state.exit`, when the worker has one. */
   readonly exit: { readonly code: number | null; readonly signal: string | null } | null;
+  /**
+   * The refusal surface and the fence, CARRIED HERE AS WELL AS ON THE ROW.
+   *
+   * Not a duplicate of `WorkerRow.via`/`fence` by oversight — a duplicate on
+   * purpose, because ISC-503 forbids a view from reading another view's
+   * region. View 2 holding its own copy is what lets it render a worker the
+   * fleet walk has not found yet, and stops it going blank when that walk
+   * fails for reasons unrelated to the worker on screen. The DERIVATION is not
+   * duplicated: `read/worker.ts`'s `deriveVia` and `readFenceView` are the
+   * single definitions and `readRefusalSurface` calls both.
+   *
+   * View 1 does NOT render these, and that is deliberate rather than pending.
+   * §6.5's ladder already drops columns at narrow widths, and two more cells
+   * on a row that is shedding cells would be dropped first and read never.
+   * View 2 is where an operator goes before acting on a worker, which is the
+   * moment §6.2's "somewhere to be greyed out and a reason to give" is about.
+   */
+  readonly via: DispatchVia | null;
+  readonly fence: FenceView | null;
 }
 
 /**

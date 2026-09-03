@@ -967,3 +967,69 @@ describe("ISC-502: an unentered view performs no read", () => {
     ]);
   });
 });
+
+/**
+ * ISC-508's reader half.
+ *
+ * Every other assertion about the refusal surface in view 2 is written against
+ * a FIXTURE `WorkerDetail`, which means deleting `readWorkerDetail`'s
+ * `...(await surfaceP)` would leave all of them green — the view would render
+ * `undefined` fields from a payload nothing filled. This is the test that fails
+ * for that, and it is here rather than beside the view tests because it is a
+ * fact about the reader.
+ */
+describe("ISC-508: readWorkerDetail carries the refusal surface, from the same derivation", () => {
+  test("a tui worker at an adopted terminal reads as `staged`, with its fence", async () => {
+    const root = await makeRoot("detailsurface");
+    const run = await makeRun(root, "2026-09-02T00-00-00Z-ds01");
+    const wp = await makeWorker(run, "w-1");
+    await writeFile(wp.launchJson, JSON.stringify(tuiLaunch()));
+    await writeFile(
+      wp.presentationJson,
+      JSON.stringify({
+        schema: "pifleet.presentation/v1",
+        worker: "w-1",
+        backend: "headless",
+        adopted_terminal: true,
+        surface_ref: "surface:1",
+      }),
+    );
+    await writeFile(
+      wp.fenceJson,
+      JSON.stringify({
+        schema: "pifleet.fence/v1",
+        worker: "w-1",
+        last_accepted_epoch: 2,
+        ack_seq: null,
+        last_seq: 4,
+        live: null,
+        completed: [],
+        attempts: { "t-1:a-1": 1, "t-2:a-2": 2 },
+      }),
+    );
+
+    const detail = expectOk(await readWorkerDetail(run, "w-1"));
+    // The same answer `readWorkerRow` gives for the same worker — one
+    // derivation, two carriers. If these ever disagree there are two rules.
+    expect(detail.via).toBe("staged");
+    expect(expectOk(await readWorkerRow(run, "w-1")).row.via).toBe("staged");
+    expect(detail.fence).toEqual({
+      liveTaskId: null,
+      abortRequested: false,
+      attemptCount: 2,
+    });
+  });
+
+  test("an unreadable launch record leaves `via` null, not `rpc`", async () => {
+    const root = await makeRoot("detailsurfacebad");
+    const run = await makeRun(root, "2026-09-02T00-00-00Z-ds02");
+    const wp = await makeWorker(run, "w-1");
+    // Truncated: present and unparseable, which is the case the permissive
+    // default would answer wrongly.
+    await writeFile(wp.launchJson, JSON.stringify(rpcLaunch()).slice(0, 40));
+
+    const detail = expectOk(await readWorkerDetail(run, "w-1"));
+    expect(detail.via).toBeNull();
+    expect(detail.fence).toBeNull();
+  });
+});

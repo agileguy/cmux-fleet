@@ -98,6 +98,14 @@ const DETAIL: WorkerDetail = {
   outputTokens: 1_180,
   credentialDegraded: false,
   exit: null,
+  /*
+   * A `pane` worker with a live epoch — deliberately NOT the quietest values.
+   * `via: "rpc"` and `fence: null` are what a worker that has done nothing
+   * looks like, and a base fixture carrying them would make every assertion
+   * about the refusal surface pass on a row where there was nothing to refuse.
+   */
+  via: "pane",
+  fence: { liveTaskId: "t-7", abortRequested: false, attemptCount: 2 },
 };
 
 /**
@@ -789,6 +797,10 @@ describe("the new frames, pinned", () => {
       "  * phase running     turns 12        in 4210 out 1180",
       "  credential ok",
       "  no exit recorded",
+      // ISC-508. The refusal surface sits with the other findings, above the
+      // rule, because it is a fact about the worker and not part of its log.
+      "  dispatch would be typed into this worker's pane",
+      "  fence LIVE on t-7 — 2 attempts on record",
       RULE,
       "  14:43:01 tool_use Bash",
       "  14:43:02 tool_result ok",
@@ -896,5 +908,94 @@ describe("colour changes escapes, never text", () => {
     const coloured = renderFleet(onWorker(), { colour: true }).join("\n");
     expect(coloured).toContain("─");
     expect(coloured).not.toContain("---");
+  });
+});
+
+/**
+ * ISC-508 — the refusal surface reaches a screen.
+ *
+ * `WorkerRow.via` and `WorkerRow.fence` were read, joined, mutation-proved and
+ * carried by the model in ISC-499, and for one commit **no view rendered
+ * either**. View 1's ladder has no tier for them and `WorkerDetail` carried
+ * neither, so view 2 could not show them without reading `model.runs` — the
+ * cross-view read ISC-503 forbids. The fields were correct, tested, and
+ * invisible.
+ *
+ * The fix carries them in `WorkerDetail` as well, which is a deliberate
+ * duplicate of the DATA and never of the DERIVATION: `deriveVia` and
+ * `readFenceView` remain the single definitions and `readRefusalSurface` calls
+ * both.
+ */
+describe("ISC-508: the refusal surface is rendered, and `null` never reads as permissive", () => {
+  const withSurface = (over: Partial<WorkerDetail>): string =>
+    text(onWorker({ detail: ok({ ...DETAIL, ...over }, NOW - 2_000) }));
+
+  /**
+   * THE ASSERTION THE WHOLE CRITERION IS FOR.
+   *
+   * `deriveVia` returns `null` rather than `"rpc"` when the launch record or
+   * the presentation cannot be read, because no answer beats the permissive
+   * answer. A view that rendered the gap as `rpc` would undo that refusal one
+   * layer up — greying IN a button the command behind it would refuse — which
+   * is worse than the unrendered field this criterion replaced, because it is
+   * confidently wrong instead of merely absent.
+   */
+  test("an undetermined route says so and never names the permissive one", () => {
+    const frame = withSurface({ via: null });
+    expect(frame).toContain("dispatch route unknown");
+    expect(frame).not.toMatch(/dispatch would go over the control socket/);
+  });
+
+  test("the three routes render distinctly, and none is a substring of another", () => {
+    const rpc = withSurface({ via: "rpc" });
+    const pane = withSurface({ via: "pane" });
+    const staged = withSurface({ via: "staged" });
+    expect(rpc).toContain("would go over the control socket");
+    expect(pane).toContain("typed into this worker's pane");
+    expect(staged).toContain("STAGED — a person owns this terminal");
+    expect(new Set([rpc, pane, staged]).size).toBe(3);
+  });
+
+  /**
+   * `no fence yet` and `fence idle` are different facts and the pair that a
+   * reasonable implementation collapses: one worker has never taken an epoch,
+   * the other has taken some and holds none now. `Region`'s three states exist
+   * for the same distinction one layer up.
+   */
+  test("an absent fence and an idle fence are not the same sentence", () => {
+    const absent = withSurface({ fence: null });
+    const idle = withSurface({
+      fence: { liveTaskId: null, abortRequested: false, attemptCount: 3 },
+    });
+    expect(absent).toContain("no fence yet");
+    expect(idle).toContain("fence idle");
+    expect(idle).toContain("3 attempts on record");
+    expect(absent).not.toContain("fence idle");
+  });
+
+  test("a live epoch names its task, and an outstanding abort is shouted", () => {
+    const live = withSurface({
+      fence: { liveTaskId: "t-9", abortRequested: false, attemptCount: 1 },
+    });
+    const aborting = withSurface({
+      fence: { liveTaskId: "t-9", abortRequested: true, attemptCount: 1 },
+    });
+    expect(live).toContain("fence LIVE on t-9");
+    expect(live).not.toContain("ABORT");
+    expect(aborting).toContain("ABORT REQUESTED");
+    // Singular, because "1 attempts" is the tell of a count formatted by
+    // concatenation and nobody reading it twice.
+    expect(live).toContain("1 attempt on record");
+  });
+
+  /**
+   * ISC-503 still holds after the addition: view 2 renders its own payload and
+   * nothing else. Blanking `runs` entirely must not change one byte of the
+   * worker frame — if it does, the view is reading the fleet's region.
+   */
+  test("view 2 still renders from its own selection alone", () => {
+    const withRuns = text(onWorker());
+    const withoutRuns = text(onWorker({ runs: never() }));
+    expect(withoutRuns).toBe(withRuns);
   });
 });

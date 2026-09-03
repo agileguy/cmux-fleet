@@ -44,6 +44,7 @@ import { failed, never, ok, type Region, type WorkerDetail } from "../model.ts";
 import { workerPaths, type RunPaths } from "../../run/paths.ts";
 import { readWorkerState } from "../../run/state.ts";
 import { readEventTail } from "./events.ts";
+import { readRefusalSurface } from "./worker.ts";
 import type { WorkerState } from "../../contracts.ts";
 
 export interface ReadWorkerDetailOptions {
@@ -95,6 +96,10 @@ export async function readWorkerDetail(
   }
   if (state === null) return never();
 
+  // Read alongside the tail: independent files, and view 2 should not pay for
+  // them in series. `readRefusalSurface` owns the derivation (ISC-508).
+  const surfaceP = readRefusalSurface(run, workerId);
+
   const tail = await readEventTail(
     paths,
     opts?.windowBytes === undefined ? { now } : { windowBytes: opts.windowBytes, now },
@@ -137,6 +142,7 @@ export async function readWorkerDetail(
         state.exit.code === null && state.exit.signal === null
           ? null
           : { code: state.exit.code, signal: state.exit.signal },
+      ...(await surfaceP),
     },
     now(),
   );

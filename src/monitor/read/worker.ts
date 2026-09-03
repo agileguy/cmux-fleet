@@ -591,7 +591,7 @@ export function deriveVia(
  * region. See {@link readWorkerRow}'s note for why that one satellite does not
  * degrade to a note.
  */
-async function readFenceView(paths: WorkerPaths): Promise<FenceView | null> {
+export async function readFenceView(paths: WorkerPaths): Promise<FenceView | null> {
   const { stat } = await import("node:fs/promises");
   try {
     await stat(paths.fenceJson);
@@ -621,4 +621,54 @@ async function readFenceView(paths: WorkerPaths): Promise<FenceView | null> {
 function message(err: unknown): string {
   if (err instanceof Error) return err.message.split("\n")[0] ?? err.message;
   return String(err);
+}
+
+/**
+ * The refusal surface and the fence for ONE worker, for a caller that wants
+ * them without the rest of a row.
+ *
+ * ## Why this exists rather than view 2 reading the row it already has
+ *
+ * `WorkerRow` carries `via` and `fence` (ISC-499) and view 2 is a view OF a
+ * worker, so the obvious move is for view 2 to read `model.runs` and find its
+ * row there. **ISC-503 forbids exactly that** — each view renders only from
+ * its own selection — and the prohibition is not bureaucratic: a view 2 that
+ * reached into `model.runs` would render a worker the fleet walk had not found
+ * yet as though it did not exist, and would silently go blank whenever the
+ * slow clock's walk failed for reasons that have nothing to do with the worker
+ * on screen.
+ *
+ * So view 2's payload carries its own copy, and the thing that must not be
+ * duplicated is the DERIVATION, not the read. `deriveVia` and `readFenceView`
+ * are the single definitions and both are called here — a second `pane_mode`
+ * rule in this file would be D10's second adjudicator in the one place an
+ * operator looks before acting on a worker.
+ */
+export async function readRefusalSurface(
+  run: RunPaths,
+  workerId: string,
+): Promise<{ readonly via: DispatchVia | null; readonly fence: FenceView | null }> {
+  const paths = workerPaths(run, workerId);
+
+  let launch: WorkerLaunch | null = null;
+  let launchUnreadable = false;
+  try {
+    launch = await readWorkerLaunch(paths);
+  } catch {
+    // The same trade `readWorkerRow` makes: no answer beats the permissive
+    // answer, and `deriveVia` turns this flag into `null` rather than `rpc`.
+    launchUnreadable = true;
+  }
+
+  let presentation: Presentation | null = null;
+  try {
+    presentation = await readPresentation(paths);
+  } catch {
+    presentation = null;
+  }
+
+  return {
+    via: deriveVia(launch, launchUnreadable, presentation),
+    fence: await readFenceView(paths),
+  };
 }
