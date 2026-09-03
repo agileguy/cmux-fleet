@@ -176,7 +176,23 @@ function expectFailed<T>(region: Region<T>): string {
 // ---------------------------------------------------------------------------
 
 const MODULE_DIR = join(fileURLToPath(new URL("../../src/monitor/read/", import.meta.url)));
-const MODULES = ["runs.ts", "worker.ts", "events.ts", "docker.ts"] as const;
+/*
+ * Views 2-4's readers join the four view 1 shipped with. They are added HERE
+ * rather than given their own weaker check because ISC-471 and ISC-472 are
+ * properties of the data plane, not of a particular view: `history.ts` walks
+ * the runs root, `detail.ts` opens a worker directory, and `report.ts` resolves
+ * a run — each of which is exactly the place a second path-deriver or a local
+ * `JSON.parse` would arrive.
+ */
+const MODULES = [
+  "runs.ts",
+  "worker.ts",
+  "events.ts",
+  "docker.ts",
+  "history.ts",
+  "detail.ts",
+  "report.ts",
+] as const;
 
 /**
  * Strip comments so the greps below judge CODE.

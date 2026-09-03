@@ -83,6 +83,13 @@ const base: WorkerRow = {
    * is still one commit old. The fixtures below vary both fields so that
    * whichever view eventually renders them has asymmetric cases waiting, and so
    * that this comment fails to be true the moment someone acts on it.
+   *
+   * On THIS fixture both sit at their defaults: an
+   * `rpc` worker really would take the socket, and a worker that has taken no
+   * epoch really has no fence. Neither is a placeholder — `via: null` and
+   * `fence: null` are the "could not determine" values (`model.ts:271-275`) and
+   * a base fixture carrying them would make every derived fixture describe an
+   * unreadable worker.
    */
   via: "rpc",
   fence: null,
@@ -155,6 +162,12 @@ const healthy: FleetModel = {
   git: ok(GIT, NOW - 5_000),
   now: NOW,
   columns: 120,
+  /*
+   * The default view, and the three payloads it does not fetch. `never()` is
+   * what "nobody has entered this view" looks like in the model — distinct
+   * from `ok` with an empty value, which would claim the reader ran and found
+   * nothing (`model.ts:82-88`, `compose.ts`'s `fetchForView`).
+   */
   view: { kind: "fleet" },
   history: never(),
   detail: never(),

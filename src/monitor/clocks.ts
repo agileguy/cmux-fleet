@@ -179,26 +179,68 @@ export const MEASURED_MS = Object.freeze({
    * n=30 over 6 live workers: 0.73 ms total, 0.122 ms each. The full
    * three-file `readWorkerRow` is 0.35 ms each, which is why the fast path
    * reads one file.
+   *
+   * **SUPERSEDED as the fast source's input by {@link REFRESH_WORKER_ROW}, and
+   * kept because it is the baseline that number is a delta against.** The fast
+   * refresh now also re-reads `fence.json`, which §6.3 puts on this clock and
+   * which the row could not carry until `WorkerRow.fence` existed.
    */
   REFRESH_WORKER_STATE: 0.122,
+  /**
+   * `readWorkerLaunch` PER WORKER — the read `WorkerRow.via` added.
+   *
+   * Measured 2026-09-02 on the operator's own runs root: 101 worker
+   * directories under 98 runs, median of 5 reps after a warm pass, 11.98 ms
+   * total. Declared here rather than left in a docblock because the duty-cycle
+   * guard is the thing that decides whether a read may sit on a clock, and a
+   * number it cannot see is a number that stops constraining anything.
+   *
+   * It is NOT on any clock's critical path: the record is immutable after `up`,
+   * so this cost is paid once per worker by the 30 s walk (0.119 ms x 101 =
+   * 12 ms, 0.04% of the slow period) and never by the fast one.
+   */
+  READ_WORKER_LAUNCH: 0.119,
+  /**
+   * `fence.json` PER WORKER — one `stat`, then a read only when it exists.
+   *
+   * Measured the same way: 3.26 ms across 101 worker directories, of which 15
+   * actually hold a fence. §2.3 predicted this shape from two live workers
+   * ("neither has `fence.json`") and the whole disk agrees — 85% of the calls
+   * are a `stat` that returns ENOENT and stop.
+   */
+  READ_WORKER_FENCE: 0.032,
+  /**
+   * `refreshWorkerRow` PER WORKER as it now stands — `state.json` + `fence.json`.
+   *
+   * 13.94 ms across 101 workers, i.e. {@link REFRESH_WORKER_STATE} plus
+   * {@link READ_WORKER_FENCE} with the two measured together rather than
+   * summed on paper. The full five-file `readWorkerRow` is 0.412 ms each, which
+   * is still why the fast path does not run it.
+   */
+  REFRESH_WORKER_ROW: 0.138,
   /**
    * The fast source's declared cost, at an ASSUMED 100 live workers.
    *
    * **This is the one number in this table that is an assumption rather than a
    * measurement, and it is stated as one.** Everything else declares the cost
    * at the fleet's worst measured size, which for the run walk is 500. The same
-   * rule applied to workers gives 61 ms — 12.2% of the fast clock, OVER budget
+   * rule applied to workers gives 69 ms — 13.8% of the fast clock, OVER budget
    * — so the guard would refuse the placement §6.3 asks for, and §6.3's fast
    * per-worker refresh would have no clock it fits on.
    *
    * 100 is defensible where 500 is not: every live worker is a CONTAINER, and
    * 500 containers on one laptop is a different design problem than a monitor's
-   * refresh rate. The arithmetic ceiling is 410 workers (500 ms x 10% / 0.122),
+   * refresh rate. The arithmetic ceiling is 362 workers (500 ms x 10% / 0.138),
    * above which `FleetClocks` refuses at construction with the duty cycle in
    * the message. That refusal is asserted, so the assumption fails loudly
    * rather than degrading into a clock that never finishes a tick.
+   *
+   * **REVISED from 12.2 when `fence.json` joined the fast read**, which is the
+   * point of declaring the cost rather than labelling the source cheap: adding
+   * a per-worker read moved a number in a table that the constructor checks,
+   * instead of moving nothing at all.
    */
-  REFRESH_WORKERS_100: 12.2,
+  REFRESH_WORKERS_100: 13.8,
   READ_GIT: 36,
 });
 

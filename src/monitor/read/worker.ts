@@ -53,14 +53,25 @@
  * sites once using their own template literal, "one rename away from a `down`
  * that cleans up a container nobody launched"; §2.6 says a monitor becomes the
  * fifth caller and must use the function.
+ *
+ * **The refusal surface is MIRRORED, never re-derived.** `via` is what
+ * `dispatch` would do, and `dispatch` is the only authority on that
+ * (`cli/commands/dispatch.ts`'s `planDispatch` at `:291` and `sendViaPane`'s
+ * fork at `:533-:568`). {@link deriveVia} restates that decision arm for arm
+ * with the code cited beside each; it does not improve on it. A monitor whose
+ * greyed-out button disagreed with the command it grey-outs would be worse
+ * than one with no button, because the disagreement is invisible until someone
+ * presses the key — which is ISC-345's shape on the one surface D15 exists to
+ * prepare.
  */
 
 import { monotonicMs } from "../../util/clock.ts";
-import { failed, never, ok, type Region, type WorkerRow } from "../model.ts";
-import { workerContainerName, workerPaths, type RunPaths } from "../../run/paths.ts";
-import { readPresentation, readWorkerState } from "../../run/state.ts";
+import { failed, never, ok, type DispatchVia, type FenceView, type Region, type WorkerRow } from "../model.ts";
+import { workerContainerName, workerPaths, type RunPaths, type WorkerPaths } from "../../run/paths.ts";
+import { readFence, readPresentation, readWorkerLaunch, readWorkerState } from "../../run/state.ts";
+import { launchPaneMode } from "../../container/interrupt.ts";
 import { readAttended } from "../../attended/mode.ts";
-import type { AttendedRecord, Presentation, WorkerState } from "../../contracts.ts";
+import type { AttendedRecord, Presentation, WorkerLaunch, WorkerState } from "../../contracts.ts";
 
 /**
  * A `WorkerRow` with the one DERIVED field withheld — see the header.
@@ -100,6 +111,48 @@ export interface WorkerEvidence {
   readonly presentation: Presentation | null;
   /** Written once and never removed (`report/collect.ts:266-268`). */
   readonly attended: AttendedRecord | null;
+  /**
+   * `launch.json` — what `up` ACTUALLY RAN, and the only place `pane_mode`
+   * lives (`contracts.ts:693`).
+   *
+   * **This is a NEW read, and §6.2's second bullet asks for the wrong file.**
+   * The SRD says "a worker's `presentation.adopted_terminal` and `pane_mode`
+   * decide whether `dispatch` would refuse it", which reads as though both were
+   * fields of `presentation.json`. `pane_mode` is not in `presentation.json`
+   * and is not in `state.json`; it is a field of the launch record, and
+   * `dispatch` reaches it through `launchPaneMode` over the recorded argv
+   * rather than trusting the field alone. So `via` costs one more file than the
+   * SRD's sentence implies, and the alternative to paying for it is a `via`
+   * column derived from a file that cannot answer the question.
+   *
+   * The cost is affordable for a reason the other satellites already establish:
+   * the record is IMMUTABLE after `up` (`contracts.ts`: "`up` is the only
+   * process that resolves `pane_mode`, and this is its output"), so it is read
+   * on the slow walk and carried forward by the fast refresh exactly as
+   * `presentation.json` and `attended.json` are. MEASURED at 0.119 ms per
+   * worker on the operator's own runs root — see `MEASURED_MS` in `clocks.ts`,
+   * where the number is declared rather than assumed.
+   *
+   * `null` means the record is ABSENT, which is a positive fact rather than an
+   * absence of one: it is the `PIFLEET_PI_COMMAND` double, and `planDispatch`
+   * (`dispatch.ts:291`) and `planInterrupt` (`interrupt.ts:234`) both answer
+   * `rpc` for it, in as many words. See {@link launchUnreadable} for the case
+   * that is genuinely "I could not tell".
+   */
+  readonly launch: WorkerLaunch | null;
+  /**
+   * `launch.json` exists and could not be read — schema-invalid, torn, or
+   * unreadable.
+   *
+   * **A separate flag rather than folding into `launch === null`, and the two
+   * must not merge.** Absence is `rpc` by `planDispatch`'s explicit decision;
+   * a failed read is no answer at all and must produce `via: null`. Collapsing
+   * them would make a damaged launch record render as the most freely
+   * dispatchable worker in the fleet, which is precisely the reassuring lie
+   * `model.ts:271-275` refuses for `presentation.json`, arriving from the
+   * other file.
+   */
+  readonly launchUnreadable: boolean;
   /**
    * Satellites that could not be read, named rather than swallowed.
    *
@@ -229,6 +282,39 @@ export async function readWorkerRow(
     notes.push(message(err));
   }
 
+  let launch: WorkerLaunch | null = null;
+  let launchUnreadable = false;
+  try {
+    launch = await readWorkerLaunch(paths);
+  } catch (err) {
+    /*
+     * A NOTE and a FLAG, not a failed region. The row's other five fields are
+     * still true — they come from `state.json` — and what a damaged launch
+     * record costs is one column, which the flag turns into `via: null` and
+     * the note explains. This is the same trade `presentation` and `attended`
+     * take three lines up, for the reason `WorkerEvidence.notes` gives.
+     */
+    launchUnreadable = true;
+    notes.push(message(err));
+  }
+
+  /*
+   * The fence is the ONE satellite whose failure takes the row down, and the
+   * asymmetry is the contract's rather than this module's preference:
+   * `model.ts:172-177` says `fence: null` means "no fence has ever been
+   * written", full stop, and gives the failed read to "the enclosing Region".
+   * A note here would leave `fence: null` on screen carrying a meaning it does
+   * not have — a worker holding a live epoch would render as one that has
+   * never taken an epoch, which is the direction an action would later be
+   * WRONGLY offered in.
+   */
+  let fence: FenceView | null;
+  try {
+    fence = await readFenceView(paths);
+  } catch (err) {
+    return failed(message(err), now());
+  }
+
   const readAt = now();
   return ok(
     {
@@ -241,8 +327,10 @@ export async function readWorkerRow(
         containerPresent:
           containers === null ? null : containers.has(workerContainerName(run.runId, workerId)),
         taskId: state.task_id,
+        via: deriveVia(launch, launchUnreadable, presentation),
+        fence,
       },
-      evidence: { state, presentation, attended, notes },
+      evidence: { state, presentation, attended, launch, launchUnreadable, notes },
     },
     readAt,
   );
@@ -271,7 +359,25 @@ export async function readWorkerRow(
  * takes `adoptedTerminal` and `attendedMode` from those two files, and a fast
  * refresh that dropped them would flip every attended worker to `rpc` twice a
  * second — the exact conflation Finding A is about, arriving from the
- * direction of an optimisation.
+ * direction of an optimisation. `launch.json` joins them for the same reason
+ * and with the same justification: `up` is the only process that writes it,
+ * and `up` has already run.
+ *
+ * ## `fence.json` is the one satellite that is RE-READ, and §6.3 says so
+ *
+ * The three carried files are immutable after `up`. The fence is not — it is
+ * rewritten durably BEFORE every dispatch (`state.ts:718-727`) and again at
+ * settle, and §6.3 puts it on the 500 ms clock beside `state.json` for exactly
+ * that reason. Carrying it forward would make the `busy`/`replayable` answer
+ * as old as the last 30 s walk, which is the one fact a later action key would
+ * consult at the moment it mattered most.
+ *
+ * MEASURED on the operator's runs root, 2026-09-02: the fence read adds
+ * **0.032 ms** per worker, taking this function from 0.127 ms to **0.138 ms**.
+ * It is that cheap because §2.3's observation holds at scale — 15 of 101 worker
+ * directories on this disk hold a `fence.json` at all, so the ordinary case is
+ * one `stat` that returns ENOENT and no read. Declared in `clocks.ts`'s
+ * `MEASURED_MS` rather than assumed.
  */
 export async function refreshWorkerRow(
   run: RunPaths,
@@ -295,6 +401,13 @@ export async function refreshWorkerRow(
   // nothing to read, and the caller drops the row.
   if (state === null) return never();
 
+  let fence: FenceView | null;
+  try {
+    fence = await readFenceView(paths);
+  } catch (err) {
+    return failed(message(err), now());
+  }
+
   const readAt = now();
   return ok(
     {
@@ -306,8 +419,18 @@ export async function refreshWorkerRow(
         containerPresent:
           containers === null ? null : containers.has(workerContainerName(run.runId, workerId)),
         taskId: state.task_id,
+        /*
+         * RE-DERIVED from the carried documents rather than copied off the
+         * previous row, and the difference is not cosmetic: one expression in
+         * this repository turns a launch record and a presentation record into
+         * a `DispatchVia`, and a fast path that copied a value instead would
+         * be a second place the answer could come from — which is the shape
+         * that goes stale silently when the first one is fixed.
+         */
+        via: deriveVia(prior.launch, prior.launchUnreadable, prior.presentation),
+        fence,
       },
-      // Fresh state, CARRIED satellites. See the header.
+      // Fresh state and fence, CARRIED satellites. See the header.
       evidence: { ...prior, state },
     },
     readAt,
@@ -360,6 +483,133 @@ function transcriptAgeMs(state: WorkerState, now: number): number | null {
   const parsed = Date.parse(at);
   if (Number.isNaN(parsed)) return null;
   return Math.max(0, now - parsed);
+}
+
+/**
+ * Where a dispatch to this worker WOULD go — §6.2's refusal surface, D15.
+ *
+ * ## This is a MIRROR of `dispatch.ts`, arm for arm, and the arms are cited
+ *
+ * Every branch below is one branch of the real routing, and nothing here is
+ * this module's own idea about what should happen:
+ *
+ * | This function | `dispatch.ts` |
+ * |---|---|
+ * | `launch === null` -> `"rpc"` | `planDispatch:292` — *"`launch === null` is `rpc`, and that is a correction"* |
+ * | `launchPaneMode === "rpc"` -> `"rpc"` | `planDispatch:293-294` |
+ * | `launchPaneMode === "unknown"` -> `null` | `planDispatch:296` returns `{kind: "unavailable"}` |
+ * | `tui` + no presentation -> `null` | `sendViaPane:523-529` throws *"there is no pane to type into"* |
+ * | `tui` + `adopted_terminal` -> `"staged"` | `sendViaPane:541` -> `stageForAdoptedTerminal` |
+ * | `tui` + headless or no `surface_ref` -> `null` | `sendViaPane:544-568` throws *"nowhere to go"* |
+ * | `tui` otherwise -> `"pane"` | `sendViaPane:570` onward |
+ *
+ * `launchPaneMode` is IMPORTED from `container/interrupt.ts` rather than
+ * restated, which is what `dispatch.ts:286-289` says to do and why: it owns the
+ * field-plus-two-marks agreement rule, and "a second copy here is how the CLI
+ * and the abort path would start disagreeing about which plane a worker has".
+ * A monitor's copy would be the third. **That import is safe for a read-only
+ * viewer by construction, not by promise:** `container/interrupt.ts` imports
+ * exactly one thing, `type { WorkerLaunch }`, spawns nothing, and builds argv
+ * it does not run. The test asserts both halves so the safety is re-checked
+ * rather than remembered.
+ *
+ * ## The two `null`s, and why neither may become `"rpc"`
+ *
+ * `DispatchVia` has three members and every one of them is a claim that a
+ * route EXISTS. Three states here are not routes — a launch record that would
+ * not read, an argv whose marks disagree, and a `tui` worker with no
+ * addressable surface — and `null` is the only honest rendering of all three.
+ * `"rpc"` is the most permissive rung: it is the route with a fence, an epoch
+ * and no human in the loop, so an unreadable record rendering as `"rpc"` would
+ * put the freest possible answer on the least evidence. `model.ts:271-275`
+ * refuses that for `presentation.json` and the same refusal is owed to
+ * `launch.json`.
+ *
+ * ## The measured edge case this function does NOT paper over
+ *
+ * `activity.ts:29-33` records a worker on this fleet with `attended.json`
+ * present and `mode: "tui"` but `adopted_terminal` ABSENT, and the ladder ORs
+ * the two fields because of it. **This function does not OR them, and the
+ * difference is deliberate.** `dispatch` reads `presentation.adopted_terminal`
+ * and nothing else when it chooses the staged route (`sendViaPane:541`), so a
+ * `via` column that consulted `attended.json` would report `staged` for a
+ * worker `dispatch` would type into — a greyed-out button disagreeing with the
+ * command behind it, which is worse than no button. So `via` mirrors and
+ * `activity` ORs, they disagree about that one worker, and BOTH are right
+ * about their own question. What that disagreement actually reveals is a fact
+ * about `dispatch` rather than about this module, and it is recorded in the
+ * ISA rather than silently smoothed over here.
+ */
+export function deriveVia(
+  launch: WorkerLaunch | null,
+  launchUnreadable: boolean,
+  presentation: Presentation | null,
+): DispatchVia | null {
+  // No answer beats the permissive answer. See the header.
+  if (launchUnreadable) return null;
+  if (launch === null) return "rpc";
+
+  const mode = launchPaneMode(launch);
+  if (mode === "rpc") return "rpc";
+  // `unknown` is `planDispatch`'s `unavailable`: the marks disagree and it
+  // refuses to guess which control plane the worker has. So does this.
+  if (mode !== "tui") return null;
+
+  // From here down the worker is `tui` and `sendViaPane` owns the fork.
+  if (presentation === null) return null;
+  if (presentation.adopted_terminal) return "staged";
+  if (presentation.backend === "headless" || presentation.surface_ref === null) return null;
+  return "pane";
+}
+
+/**
+ * The two facts §6.2's third bullet asks for, and nothing else.
+ *
+ * ## Why this needs a `stat` that `readFence` does not
+ *
+ * `readFence` (`run/state.ts:709-715`) maps an ABSENT file to `emptyFence()`,
+ * which is right for the supervisor — a worker with no fence has taken no
+ * epoch, and an empty snapshot is the correct starting state to reason from.
+ * It is wrong for a viewer: `model.ts:172-177` reserves `fence: null` for "no
+ * fence has ever been written", and an empty `FenceView` is an affirmative
+ * claim that one WAS written and is currently idle. Those are different
+ * sentences on a row that a later action key would read, so the collapse is
+ * undone here rather than inherited.
+ *
+ * The existence question is asked FIRST because absence is the fleet's ordinary
+ * case — §2.3 measured two live workers and *"neither has `fence.json`"* — so
+ * the common path is one `stat` that fails and no read at all, rather than a
+ * read that fails followed by a `stat` that confirms it.
+ *
+ * **The race is real, bounded, and named.** A fence written between this `stat`
+ * and the read that follows renders as `null` for one fast tick, i.e. 500 ms.
+ * The opposite order would trade that for a worse one — a `stat` after a read
+ * cannot distinguish "never written" from "written and removed" either, and
+ * nothing removes a fence.
+ *
+ * A read that THROWS propagates, and the caller turns it into a `failed`
+ * region. See {@link readWorkerRow}'s note for why that one satellite does not
+ * degrade to a note.
+ */
+async function readFenceView(paths: WorkerPaths): Promise<FenceView | null> {
+  const { stat } = await import("node:fs/promises");
+  try {
+    await stat(paths.fenceJson);
+  } catch {
+    return null;
+  }
+  const snapshot = await readFence(paths);
+  return {
+    liveTaskId: snapshot.live?.task_id ?? null,
+    /*
+     * `false` and not `null` when there is no live epoch, because the field is
+     * a boolean in the contract and the question it answers — "would an action
+     * be refused because an abort is already outstanding" — has the answer
+     * `no` for a worker with no epoch. That is a fact, not a default.
+     */
+    abortRequested: snapshot.live?.abort_requested ?? false,
+    attemptCount: Object.keys(snapshot.attempts).length,
+  };
 }
 
 /**

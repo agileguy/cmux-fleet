@@ -1502,6 +1502,16 @@ describe("refreshKnownWorkers", () => {
       state: { phase: "idle", session_present: true, transcript_activity: null, task_id: null },
       presentation: { adopted_terminal: true },
       attended: { mode: "tui" },
+      /*
+       * The launch record joins the carried satellites when `WorkerRow.via`
+       * arrives, and it is `null` here on purpose: `deriveVia` reads an ABSENT
+       * record as `"rpc"` — `planDispatch`'s own answer for the
+       * `PIFLEET_PI_COMMAND` double — so this fixture exercises the arm that
+       * needs no file, which is what a bundle with no run tree behind it can
+       * honestly describe.
+       */
+      launch: null,
+      launchUnreadable: false,
       notes: [],
       ...over,
     }) as never;
@@ -1609,6 +1619,10 @@ describe("refreshKnownWorkers", () => {
             state: { phase: "idle" },
             presentation: { adopted_terminal: true },
             attended: { mode: "tui" },
+            // See the `evidence` helper above for why an absent launch record
+            // is the right fixture for a bundle with no run tree behind it.
+            launch: null,
+            launchUnreadable: false,
             notes: ["a note from the walk"],
           },
         },
