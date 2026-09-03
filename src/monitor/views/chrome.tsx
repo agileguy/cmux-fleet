@@ -35,7 +35,7 @@
  * `const FLOOR_… = 30`. **A number picked per view is exactly what ISC-485
  * refused**, and four independently-picked numbers cannot be checked against
  * each other at all. So the rule is reified: a view declares WHICH of its cells
- * may never be dropped, by name and width, and its floor is the sum. That makes
+ * may never be dropped, by name and width, and its floor follows. That makes
  * ISC-505 assertable as one property over four views — *"every view's floor is
  * the width its own never-dropped cells need, it draws at that width, and it
  * refuses one column below it"* — rather than as four remembered constants that
@@ -48,10 +48,23 @@
  * truncate or wrap on their own and do not have to fit BESIDE anything, so a
  * floor that included them would refuse to draw panes on which the view is
  * perfectly readable. The consequence is worth naming because it looks like a
- * defect: **a view built entirely out of full-width lines has a very low floor**
- * (view 4 is that view, and its floor is 3). That is the rule's honest output,
- * and inflating it would mean guessing at the width of content view 4 is
- * forbidden to parse.
+ * defect: **a view built entirely out of full-width lines has almost no columns
+ * to sum** — view 4 is that view, and the sum gives it 3.
+ *
+ * ## The second clause, which the sum alone got WRONG
+ *
+ * A floor of 3 was accepted as the rule's honest output, and the ISC-505 sweep
+ * then falsified it. The sweep asserts that every view refuses one column below
+ * its floor; view 4 did refuse at two columns, and the refusal came out as
+ * hard-broken fragments, because no word of it fits in two columns. **D14 says a
+ * refusal beats a misleading layout, which is false when the refusal IS the
+ * misleading layout** — so a floor lower than the view's own refusal needs is
+ * not an honest low number, it is a wrong one.
+ *
+ * Hence {@link refusalMinimum}: every floor is at least one column wider than
+ * the longest word of the sentence it would have to print. Still derived —
+ * it is a property of a string this module already owns — and it binds only for
+ * a view whose columns sum to less. Views 1-3 are untouched by it.
  */
 
 import { Box, Text } from "ink";
