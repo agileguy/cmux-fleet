@@ -46,6 +46,7 @@ import { describe, expect, test } from "bun:test";
 import { failed, never, ok } from "../../src/monitor/model.ts";
 import type { FleetModel, GitStrip, RunRow, WorkerRow } from "../../src/monitor/model.ts";
 import { renderFleet } from "../../src/monitor/render.ts";
+import { FLOOR_COLUMNS, planColumns } from "../../src/monitor/views/fleet.tsx";
 
 const NOW = Date.parse("2026-09-02T14:00:00.000Z");
 const RUN_A = "2026-09-02T14-43-27Z-3906";
@@ -555,3 +556,145 @@ const ACTIVITY_COL = 20;
 function activityCellOf(row: string): string {
   return row.slice(INDENT + ID_COL, INDENT + ID_COL + ACTIVITY_COL).trimEnd();
 }
+
+// ---------------------------------------------------------------------------
+// ISC-484 / ISC-485 — degradation and the floor
+// ---------------------------------------------------------------------------
+
+describe("ISC-484: the ladder degrades in a stated order, never at Ink's discretion", () => {
+  /**
+   * ## Why these assert an ORDER over a swept range rather than breakpoints
+   *
+   * A test naming the width at which each column disappears passes for a ladder
+   * whose rungs are in the wrong order — it would simply record the wrong
+   * order and keep recording it. §6.5's requirement is not "task goes at 83", it
+   * is that a column NEVER outlives one ranked below it. Asserted as a property
+   * over every width from the floor to well past full, the wrong order cannot
+   * survive at any width, and the constants stay free to change.
+   */
+  const widths = Array.from({ length: 90 }, (_, i) => FLOOR_COLUMNS + i);
+
+  test("no column outlives one that is dropped later", () => {
+    for (const columns of widths) {
+      const plan = planColumns(columns);
+      // task is dropped FIRST, so it may never be present when a later rung is
+      // already gone.
+      if (plan.showTask) {
+        expect({ columns, container: plan.showContainer }).toEqual({ columns, container: true });
+      }
+      if (plan.showContainer) {
+        expect({ columns, phase: plan.showPhase }).toEqual({ columns, phase: true });
+      }
+      // The run-id suffix shares the phase's tier — see `planColumns`' note on
+      // the one deviation from §6.5's ordering, and why it is not a rung.
+      expect({ columns, full: plan.runIdFull }).toEqual({ columns, full: plan.showPhase });
+    }
+  });
+
+  test("the plan is monotonic: widening never removes a column", () => {
+    for (let i = 1; i < widths.length; i++) {
+      const narrow = planColumns(widths[i - 1]!);
+      const wide = planColumns(widths[i]!);
+      for (const key of ["showTask", "showContainer", "showPhase", "runIdFull"] as const) {
+        if (narrow[key]) {
+          expect({ at: widths[i], key, kept: wide[key] }).toEqual({ at: widths[i], key, kept: true });
+        }
+      }
+    }
+  });
+
+  /**
+   * THE HALF §6.5 CARES MOST ABOUT. Between them the worker id and the activity
+   * cell are the entire answer to §1.3's first question, so no width above the
+   * floor may lose either — and the staleness marker that says how old the
+   * answer is must survive with them.
+   */
+  test("the id, the activity age and the staleness marker survive every width above the floor", () => {
+    for (const columns of [FLOOR_COLUMNS, 33, 40, 50, 66, 80, 100, 140]) {
+      const lines = renderFleet({ ...healthy, columns });
+      const row = rowFor(lines, "eng-3");
+      expect({ columns, row }).toEqual({ columns, row: expect.stringContaining("eng-3") });
+      // `quiet` reaches the frame as an AGE, never as a verdict word (§6.2).
+      expect({ columns, hasAge: row.includes("wrote 11m ago") }).toEqual({ columns, hasAge: true });
+      // …and the region's own age, which is what makes the row trustworthy.
+      expect({ columns, stale: lines[0]?.includes("as of") }).toEqual({ columns, stale: true });
+    }
+  });
+
+  test("the columns actually leave the frame in that order", () => {
+    const wide = rowFor(renderFleet({ ...healthy, columns: 120 }), "eng-3");
+    expect(wide).toContain("task t-18");
+    expect(wide).toContain("container");
+    expect(wide).toContain("phase");
+
+    const noTask = rowFor(renderFleet({ ...healthy, columns: 80 }), "eng-3");
+    expect(noTask).not.toContain("task t-18");
+    expect(noTask).toContain("container");
+
+    const noContainer = rowFor(renderFleet({ ...healthy, columns: 66 }), "eng-3");
+    expect(noContainer).not.toContain("container");
+    expect(noContainer).toContain("phase");
+
+    const bare = rowFor(renderFleet({ ...healthy, columns: 40 }), "eng-3");
+    expect(bare).not.toContain("phase");
+    expect(bare).toContain("wrote 11m ago");
+  });
+
+  /** The run id shortens to its suffix, which is the label `status` already uses. */
+  test("the run id becomes its suffix at the tier that drops the phase", () => {
+    const wide = renderFleet({ ...healthy, columns: 120 }).join("\n");
+    expect(wide).toContain("run 2026-09-02T14-43-27Z-3906");
+
+    const narrow = renderFleet({ ...healthy, columns: 40 }).join("\n");
+    expect(narrow).not.toContain("2026-09-02T14-43-27Z-3906");
+    expect(narrow).toContain("run 3906");
+  });
+});
+
+describe("ISC-485: below the floor it refuses, and the refusal is actionable", () => {
+  /**
+   * The floor is DERIVED, not probed — it is exactly the width the columns
+   * §6.5 forbids dropping require. This pins the derivation rather than the
+   * number, so changing a column width moves the floor and this still holds.
+   */
+  test("the floor is the width the never-dropped columns need, and nothing more", () => {
+    expect(FLOOR_COLUMNS).toBe(32);
+    // At the floor it still draws: a refusal one column too eager is a monitor
+    // that will not run on a pane it could have served.
+    const atFloor = renderFleet({ ...healthy, columns: FLOOR_COLUMNS });
+    expect(atFloor.join("\n")).toContain("eng-3");
+  });
+
+  test("one column below the floor it refuses instead of drawing", () => {
+    const lines = renderFleet({ ...healthy, columns: FLOOR_COLUMNS - 1 });
+    const text = lines.join(" ");
+    // NOT a truncated table. No worker, no run, no region line.
+    expect(text).not.toContain("eng-3");
+    expect(text).not.toContain("fleet —");
+    expect(text).not.toContain("run ");
+  });
+
+  /**
+   * The sentence names BOTH numbers, on `RunDirMountError`'s pattern
+   * (`paths.ts:755-791`): the size required and the size present. "Too narrow"
+   * sends an operator to the source to find out what would be wide enough.
+   */
+  test("the refusal names the required width and the actual one", () => {
+    const text = renderFleet({ ...healthy, columns: 20 }).join(" ");
+    expect(text).toContain(String(FLOOR_COLUMNS));
+    expect(text).toContain("20");
+    expect(text.toLowerCase()).toContain("columns");
+  });
+
+  /**
+   * The refusal WRAPS rather than truncating, which is the one place in this
+   * view where wrapping is right. Every other cell truncates to hold the column
+   * alignment; a truncated refusal would read `pifleet monitor needs at` and be
+   * exactly the unreadable output the refusal exists to avoid.
+   */
+  test("the refusal stays legible at an absurd width", () => {
+    const joined = renderFleet({ ...healthy, columns: 12 }).join(" ").replace(/\s+/g, " ");
+    expect(joined).toContain("needs at least 32 columns");
+    expect(joined).toContain("has 12");
+  });
+});

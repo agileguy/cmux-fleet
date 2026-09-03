@@ -70,6 +70,73 @@ const ID_COL = 8;
 const ACTIVITY_COL = 20;
 const PHASE_COL = 18;
 const TASK_COL = 12;
+/** Widest `containerCell` output — `container not checked`. */
+const CONTAINER_COL = 21;
+
+/**
+ * The narrowest pane this monitor will draw on, DERIVED rather than probed.
+ *
+ * §6.5 says the floor comes from Q3, a measurement of real pane geometry. That
+ * probe would set a number describing the operator's current terminal, and this
+ * one describes the design: it is exactly the width the columns §6.5 forbids
+ * dropping actually need — the indent, the worker id, and the activity cell.
+ * Below it there is no layout left to degrade to, which is a stronger statement
+ * than "narrower than the panes we happened to measure" and does not go stale
+ * when someone resizes a window.
+ *
+ * Note what is NOT in the sum. The staleness markers (`fleet — as of 6s — …`)
+ * are also never dropped, and they are not counted because they are full-width
+ * lines that truncate rather than columns that must fit beside each other. A
+ * floor that included them would refuse to draw panes on which the fleet table
+ * is perfectly readable.
+ */
+export const FLOOR_COLUMNS = INDENT.length + ID_COL + ACTIVITY_COL;
+
+/**
+ * Which optional columns survive at a given width (§6.5, D14, ISC-484).
+ *
+ * ## The order is the SRD's, with one documented deviation
+ *
+ * §6.5: "spend -> container uptime -> run-id suffix -> phase/epoch", with the
+ * activity age and the staleness marker never dropped.
+ *
+ * - **spend** is not in `FleetModel` at all, so there is nothing to drop first.
+ * - **task** is not in §6.5's list because the list predates the column. It is
+ *   dropped EARLIEST, and the reason is observable rather than aesthetic: on
+ *   this fleet every attended worker carries `task_id: null`, so it is the
+ *   column that most often contains nothing.
+ * - **run-id suffix and phase share a tier**, which is the deviation. §6.5
+ *   ranks the suffix ahead of the phase and this preserves that precedence, but
+ *   they cannot occupy separate tiers: the run id is on the BLOCK HEADER and
+ *   the phase is on the worker ROW, so shortening the id buys the row no width
+ *   whatsoever. Giving it a tier of its own would produce a band of widths in
+ *   which the header fits and every row still overflows — a ladder rung that
+ *   degrades nothing. Stated here rather than quietly reordered.
+ *
+ * A pure function of one number, exported, so ISC-484 can be asserted as an
+ * ORDER — "container survives every width at which task does" — rather than as
+ * a set of remembered breakpoints.
+ */
+export interface LayoutPlan {
+  readonly showTask: boolean;
+  readonly showContainer: boolean;
+  readonly showPhase: boolean;
+  readonly runIdFull: boolean;
+}
+
+const ROW_BASE = INDENT.length + ID_COL + ACTIVITY_COL;
+
+export function planColumns(columns: number): LayoutPlan {
+  const withPhase = ROW_BASE + PHASE_COL;
+  const withContainer = withPhase + CONTAINER_COL;
+  const withTask = withContainer + TASK_COL;
+  return {
+    showTask: columns >= withTask,
+    showContainer: columns >= withContainer,
+    showPhase: columns >= withPhase,
+    runIdFull: columns >= withPhase,
+  };
+}
 
 /**
  * How long ago, in the coarsest unit that still says something — seconds under a
@@ -207,15 +274,20 @@ function Cell({ width, children }: { width: number; children: string }) {
 }
 
 /** One worker: activity, phase, task, container — §6.2's row, minus what the model does not carry. */
-function WorkerLine({ row }: { row: WorkerRow }) {
+function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
   return (
     <Box>
       <Text>{INDENT}</Text>
+      {/* Never dropped: the id names the row, the activity cell IS the answer. */}
       <Cell width={ID_COL}>{row.workerId}</Cell>
       <Cell width={ACTIVITY_COL}>{activityCell(row)}</Cell>
-      <Cell width={PHASE_COL}>{`phase ${row.phase}`}</Cell>
-      <Cell width={TASK_COL}>{row.taskId === null ? "no task" : `task ${row.taskId}`}</Cell>
-      <Text wrap="truncate-end">{containerCell(row.containerPresent)}</Text>
+      {plan.showPhase ? <Cell width={PHASE_COL}>{`phase ${row.phase}`}</Cell> : null}
+      {plan.showTask ? (
+        <Cell width={TASK_COL}>{row.taskId === null ? "no task" : `task ${row.taskId}`}</Cell>
+      ) : null}
+      {plan.showContainer ? (
+        <Text wrap="truncate-end">{containerCell(row.containerPresent)}</Text>
+      ) : null}
     </Box>
   );
 }
@@ -227,13 +299,21 @@ function WorkerLine({ row }: { row: WorkerRow }) {
  * because blocking by run means it appears once instead of on every row, and a
  * suffix is only worth the ambiguity when it is paid for six times.
  */
-function RunBlock({ run }: { run: RunRow }) {
+function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
   const n = run.workers.length;
+  /*
+   * The SUFFIX is the last hyphen-delimited segment — `e533` from
+   * `2026-09-02T14-43-01Z-e533`, which is the part `pifleet status` and the
+   * console panes already use to name a run. Falling back to the whole id when
+   * there is no hyphen keeps a hand-made run id from rendering as an empty
+   * heading.
+   */
+  const label = plan.runIdFull ? run.runId : (run.runId.split("-").pop() ?? run.runId);
   return (
     <Box flexDirection="column">
-      <Text>{`  run ${run.runId} — ${n} worker${n === 1 ? "" : "s"}`}</Text>
+      <Text wrap="truncate-end">{`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}</Text>
       {run.workers.map((w) => (
-        <WorkerLine key={w.workerId} row={w} />
+        <WorkerLine key={w.workerId} row={w} plan={plan} />
       ))}
     </Box>
   );
@@ -295,6 +375,25 @@ function GitStripView({ region, now }: { region: Region<GitStrip>; now: number }
  * line is the whole of what is known.
  */
 export function Fleet({ model }: { model: FleetModel }) {
+  /*
+   * ISC-485: REFUSE, rather than draw something misleading.
+   *
+   * Below the floor there is no rung left — the id and the activity cell are
+   * what §6.5 forbids dropping, and they are the whole of `FLOOR_COLUMNS`. The
+   * alternative is what this component did before the ladder existed: hand the
+   * row to Ink's flexbox and let it drop whichever columns it liked, silently,
+   * which is exactly ISC-484's complaint.
+   *
+   * The sentence NAMES THE NUMBERS, both of them, on `RunDirMountError`'s
+   * pattern (`paths.ts:755-791`): a refusal an operator can act on beats one
+   * they have to investigate. "Too narrow" would send them to the source.
+   */
+  if (model.columns < FLOOR_COLUMNS) {
+    return (
+      <Text>{`pifleet monitor needs at least ${FLOOR_COLUMNS} columns; this pane has ${model.columns}.`}</Text>
+    );
+  }
+  const plan = planColumns(model.columns);
   return (
     <Box flexDirection="column" width={model.columns}>
       <Text wrap="truncate-end">
@@ -303,7 +402,7 @@ export function Fleet({ model }: { model: FleetModel }) {
         )}
       </Text>
       {model.runs.status === "ok"
-        ? model.runs.value.map((run) => <RunBlock key={run.runId} run={run} />)
+        ? model.runs.value.map((run) => <RunBlock key={run.runId} run={run} plan={plan} />)
         : null}
       <Text wrap="truncate-end">
         {regionLine("containers", model.containers, model.now, (names) =>
