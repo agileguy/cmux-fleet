@@ -692,6 +692,37 @@ export const WorkerLaunchSchema = z
      */
     pane_mode: z.enum(["rpc", "tui"]).default("rpc"),
     /**
+     * Whether this worker's staged briefs are TRIGGERED WITHOUT A HUMAN — the
+     * dispatch-trigger extension was mounted at launch (`render.ts`'s
+     * `paneMode === "tui" && autoTrigger` predicate).
+     *
+     * ## Why a reader needs this at all
+     *
+     * `staged_task_id` says a brief is staged. It cannot say whether anything
+     * is going to pick it up. Those are different facts for the same reason
+     * `pane_mode` and `phase` are: an unattended stage waits on a keypress and
+     * a stage on an auto-triggered worker waits on nothing at all — it is
+     * already on its way. `wait` settles the first immediately, because there
+     * is no event to wait for, and must NOT settle the second, because the
+     * only thing it has observed is the gap between staging and pickup.
+     *
+     * ## Why the record and not the argv
+     *
+     * `render.ts` pushes `--extension <DISPATCH_TRIGGER_PATH>` for exactly
+     * this predicate, so scanning the argv above would "work" — and it is
+     * refused here on `pane_mode`'s own argument, three fields up: a flag is
+     * evidence of a decision, not the decision. `up` is the only process that
+     * resolves `auto_trigger`, and this is its output.
+     *
+     * Defaulted FALSE, and the direction is deliberate. A launch record
+     * written before this field existed, and the `null` launch record every
+     * `PIFLEET_PI_COMMAND` double run has, both parse as "nobody will trigger
+     * this" — which restores the pre-existing behaviour exactly: answer the
+     * stage immediately rather than wait on it. The failure mode of the wrong
+     * default in the other direction is the hang §6.5 exists to prevent.
+     */
+    auto_trigger: z.boolean().default(false),
+    /**
      * This worker's DISCLOSURE row — the recorded answer to "did this worker's
      * context leave the machine, and to whom" — or `null` when it did not
      * (SRD §7.3, D10, ISC-416/417).

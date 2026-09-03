@@ -58,7 +58,7 @@
  * string in a docblock or in an unrelated function cannot satisfy them.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -586,6 +586,195 @@ describe("wait answers a staged task immediately (ISC-445)", () => {
 
     expect(exit).toBe(EXIT.TIMEOUT);
     expect(exit).not.toBe(EXIT.STAGED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An AUTO-TRIGGERED stage is not an untriggered one
+// ---------------------------------------------------------------------------
+
+/**
+ * The premise ISC-445 rests on is false for most of this fleet, and the block
+ * above cannot see it.
+ *
+ * §6.5 settles a staged task immediately because "nothing will start until a
+ * person presses a key". That is true of a seat a human occupies. It is not
+ * true of a worker launched with the dispatch-trigger extension mounted — and
+ * `auto_trigger` DEFAULTS TRUE (`config/load.ts`), so on a stock fleet every
+ * `tui` worker triggers its own stage seconds later with nobody at the
+ * terminal. For those workers `staged_task_id === taskId` is not a resting
+ * state; it is the gap between the stage landing and the transcript growth
+ * that clears it.
+ *
+ * Observed, twice out of two dispatches: `dispatch` returns `via: staged`,
+ * `wait` returns `staged_untriggered` and exit 9 inside a second, a concurrent
+ * `status` on the same run reports `phase: busy` with a transcript already
+ * growing, and the task goes on to succeed. Exit 9 was wrong when it was
+ * written, and it named a remedy — go press a key — for a worker nobody needs
+ * to visit.
+ *
+ * ## Why the launch record is the discriminator and not a delay
+ *
+ * A settle window alone would answer this by waiting a while before deciding,
+ * which buys the fix by spending the property ISC-445 asserts: its probe pins
+ * the answer to under a second against a ten-minute timeout, three orders of
+ * magnitude apart so it cannot pass by accident. `auto_trigger` is the fact
+ * itself rather than a proxy for it, so an unattended stage keeps answering in
+ * the same millisecond it always did.
+ */
+describe("wait distinguishes an armed stage from an unattended one", () => {
+  /** The launch record `up` writes, reduced to the fields the schema requires. */
+  async function plantLaunch(autoTrigger: boolean): Promise<void> {
+    await writeFile(
+      workerPaths(run, WORKER).launchJson,
+      JSON.stringify({
+        kind: "container",
+        argv: ["docker", "run", "--rm", "pifleet/pi-worker:test"],
+        container: `pifleet-${RUN_ID}-${WORKER}`,
+        image: "pifleet/pi-worker:test",
+        pane_mode: "tui",
+        auto_trigger: autoTrigger,
+      }),
+      "utf8",
+    );
+  }
+
+  async function clearLaunch(): Promise<void> {
+    await rm(workerPaths(run, WORKER).launchJson, { force: true });
+  }
+
+  afterEach(async () => {
+    await clearLaunch();
+    delete process.env["PIFLEET_STAGE_TRIGGER_GRACE_MS"];
+  });
+
+  /**
+   * THE REGRESSION. Fails against the pre-fix branch by returning 9 in a few
+   * milliseconds; the stage is on its way and the only correct thing `wait`
+   * can do with a 200ms deadline is spend it.
+   *
+   * The tiny timeout is deliberate and is the same device the control arm two
+   * blocks up uses: the expected behaviour IS to consume it, so a wait that
+   * settled early would be visible as a different exit code rather than as a
+   * faster one.
+   */
+  test("an armed stage is waited on, not reported as staged", async () => {
+    await plantInbox("T-ARMED");
+    await plantStagedWorker("T-ARMED");
+    await plantLaunch(true);
+
+    const { exit, stdout } = await runCli(await import("../../src/cli/commands/wait.ts"), [
+      "wait",
+      "--run",
+      RUN_ID,
+      "--task",
+      "T-ARMED",
+      "--timeout",
+      "200ms",
+      "--json",
+    ]);
+
+    expect(exit).toBe(EXIT.TIMEOUT);
+    expect(exit).not.toBe(EXIT.STAGED);
+    const payload = JSON.parse(stdout) as { tasks: Array<{ reason: string }> };
+    expect(payload.tasks[0]?.reason).toBe("wait_timeout");
+    expect(payload.tasks[0]?.reason).not.toBe("staged_untriggered");
+  });
+
+  /**
+   * THE OTHER DIRECTION, and without it the test above is satisfied by a
+   * `wait` that simply stopped answering staged tasks at all.
+   *
+   * `auto_trigger: false` is the seat `config/load.ts` describes as the one
+   * "that wants a human". Nothing is going to fire, so the original answer is
+   * the only correct one — and it must still arrive well inside the deadline,
+   * which is ISC-445's whole claim.
+   */
+  test("an unattended stage still answers immediately", async () => {
+    await plantInbox("T-UNATTENDED");
+    await plantStagedWorker("T-UNATTENDED");
+    await plantLaunch(false);
+
+    const started = Date.now();
+    const { exit, stdout } = await runCli(await import("../../src/cli/commands/wait.ts"), [
+      "wait",
+      "--run",
+      RUN_ID,
+      "--task",
+      "T-UNATTENDED",
+      "--timeout",
+      "10m",
+      "--json",
+    ]);
+    const elapsedMs = Date.now() - started;
+
+    expect(exit).toBe(EXIT.STAGED);
+    expect(elapsedMs).toBeLessThan(1_000);
+    const payload = JSON.parse(stdout) as { tasks: Array<{ reason: string }> };
+    expect(payload.tasks[0]?.reason).toBe("staged_untriggered");
+  });
+
+  /**
+   * THE BACKSTOP. An armed trigger that never fires must not be answered with
+   * either of the two lies available to it — `staged_untriggered` sends the
+   * reader to a keyboard, and falling through to the poll reports a clock.
+   *
+   * The grace is driven to zero through the env seam so the arm executes at
+   * unit speed. Pinning it structurally instead would let a branch that never
+   * runs go on looking correct, which is the failure this file's header
+   * objects to elsewhere.
+   */
+  test("an armed stage that never fires settles as a stalled trigger", async () => {
+    await plantInbox("T-STALLED");
+    await plantStagedWorker("T-STALLED");
+    await plantLaunch(true);
+    process.env["PIFLEET_STAGE_TRIGGER_GRACE_MS"] = "0";
+
+    const { exit, stdout } = await runCli(await import("../../src/cli/commands/wait.ts"), [
+      "wait",
+      "--run",
+      RUN_ID,
+      "--task",
+      "T-STALLED",
+      "--timeout",
+      "10m",
+      "--json",
+    ]);
+
+    expect(exit).toBe(EXIT.STAGED);
+    const payload = JSON.parse(stdout) as { tasks: Array<{ reason: string; verdict: string }> };
+    expect(payload.tasks[0]?.reason).toBe("staged_trigger_stalled");
+    expect(payload.tasks[0]?.verdict).toBe("unknown");
+  });
+
+  /**
+   * The absent launch record — every double-driven run in this suite, and any
+   * run written before the field existed — resolves to the unattended answer.
+   *
+   * This is the arm that keeps ISC-445's own probes green without editing
+   * them, and it is asserted rather than assumed because the default's
+   * DIRECTION is the load-bearing part: defaulting the other way would turn
+   * every one of those runs into the hang §6.5 exists to prevent.
+   */
+  test("no launch record reads as unattended", async () => {
+    await plantInbox("T-NOLAUNCH");
+    await plantStagedWorker("T-NOLAUNCH");
+    await clearLaunch();
+
+    const { exit, stdout } = await runCli(await import("../../src/cli/commands/wait.ts"), [
+      "wait",
+      "--run",
+      RUN_ID,
+      "--task",
+      "T-NOLAUNCH",
+      "--timeout",
+      "10m",
+      "--json",
+    ]);
+
+    expect(exit).toBe(EXIT.STAGED);
+    const payload = JSON.parse(stdout) as { tasks: Array<{ reason: string }> };
+    expect(payload.tasks[0]?.reason).toBe("staged_untriggered");
   });
 });
 

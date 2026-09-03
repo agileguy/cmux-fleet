@@ -1230,6 +1230,19 @@ export async function materializeWorkerInputs(
        */
       pane_mode: w.paneMode,
       /*
+       * The SAME predicate `render.ts` mounts the dispatch-trigger extension
+       * on, written down so a reader does not have to re-derive it from an
+       * argv (`WorkerLaunchSchema.auto_trigger`).
+       *
+       * It is the conjunction and not `w.autoTrigger` alone because
+       * `autoTrigger` defaults TRUE on every worker (`config/load.ts`) while
+       * the extension is mounted for `tui` workers only — an rpc worker is
+       * dispatched down the control socket and has no staged brief to trigger.
+       * Recording the raw field would tell `wait` that an rpc worker's stage
+       * is on its way when nothing was armed to bring it.
+       */
+      auto_trigger: w.paneMode === "tui" && w.autoTrigger,
+      /*
        * The disclosure row, recorded so a harvested run can be ASKED whether
        * this worker's context crossed to a vendor (SRD §7.3, ISC-416).
        *
