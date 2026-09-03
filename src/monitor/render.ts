@@ -15,23 +15,35 @@
  *
  * ## Why `ink-testing-library` is NOT used, though the SRD's probe used it
  *
- * Two reasons, and the second is the one that decides it.
+ * **One reason, and it is decisive on its own: it is a devDependency**
+ * (`package.json:32`). This module is production source — the monitor imports it
+ * to paint a pane — so importing a devDependency here works on a developer's
+ * machine and fails on any install that omits dev dependencies. That is a defect
+ * discovered by someone other than the author, which is the worst kind. The whole
+ * of what the library provides is the eleven lines of `Capture` below, and `ink`
+ * is already a runtime dependency, so the substitution costs nothing.
  *
- * 1. It is a **devDependency** (`package.json:32`). This module is production
- *    source — the monitor imports it to paint a pane — so importing a
- *    devDependency here works on a developer's machine and fails on any install
- *    that omits dev dependencies. That is a defect discovered by someone other
- *    than the author, which is the worst kind.
- * 2. **Its stdout hard-codes `columns` to 100 and offers no way to set it**
- *    (`node_modules/ink-testing-library/build/index.js` — `get columns() { return
- *    100; }`). `FleetModel.columns` exists because §6.5's degradation ladder and
- *    ISC-484/ISC-485 are requirements about width. A seam built on a stream that
- *    cannot vary its width could not express those criteria at all, and would
- *    have looked correct until the day someone tried to write them.
+ * **A second reason was claimed here and MEASURED FALSE; it is corrected rather
+ * than deleted, because the correction is the useful part.** The claim was that
+ * the library's stdout hard-codes `columns` to 100 with no way to set it
+ * (`node_modules/ink-testing-library/build/index.js` — `get columns() { return
+ * 100; }`), and that a seam built on it therefore could not express §6.5's
+ * degradation ladder or ISC-484/ISC-485. The hard-coding is real; the
+ * consequence is not. `views/fleet.tsx` puts `width={model.columns}` on its root
+ * `Box`, and an explicit width governs Ink's layout entirely — rendering the same
+ * model through a stream reporting 100 columns and one reporting 200 produces
+ * **byte-identical frames**, including for content long enough to truncate. So
+ * the width requirement is carried by the component, not by the stream, and this
+ * argument never held. It was found by a mutation that replaced `model.columns`
+ * with `100` here and was NOT killed by any test — which is the correct outcome
+ * for a mutant that changes no behaviour, and the wrong outcome for a comment
+ * asserting that it would.
  *
- * The whole of what the library provided is the eleven lines of `Capture` below,
- * and `ink` itself is already a runtime dependency, so the substitution costs
- * nothing and removes both problems.
+ * `Capture` is still constructed from `model.columns` rather than from a
+ * constant. Not because anything currently reads it, but because a stream that
+ * reported a width contradicting the model would be a trap for the first
+ * component that omitted an explicit width — and agreeing with the model costs
+ * one identifier.
  *
  * ## `debug: true` is load-bearing
  *

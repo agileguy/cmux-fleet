@@ -117,14 +117,17 @@ function regionLine<T>(
   now: number,
   summary: (value: T) => string,
 ): string {
-  // Narrowed on the DISCRIMINANT rather than on the age. `regionAgeMs` returns
-  // `null` for exactly the `never` case and nothing else (`model.ts:83`), but
-  // that is a fact about its body, not about its type, so a `null` age leaves
-  // `never` in the union and the `ok` branch below does not compile. Testing
-  // `status` says the same thing to a reader and lets the compiler check it —
-  // which is what the three-state `Region` was introduced for.
-  if (region.status === "never") return `${label} — no data`;
-  const asOf = `${label} — as of ${coarseAge(regionAgeMs(region, now) ?? 0)}`;
+  const age = regionAgeMs(region, now);
+  // `no data` is reached two ways and both state the same fact: this region has
+  // no age. `regionAgeMs` returns `null` exactly for `never` (`model.ts:83-85`),
+  // so today the two are the same test — but they are written as two because
+  // they fail differently. Testing the RETURN keeps the line correct if `Region`
+  // ever grows a fourth status whose age is unknown; testing the STATUS is what
+  // narrows `region` for the branches below. Dropping either one costs a real
+  // thing: without the first, a future status renders `as of NaN`; without the
+  // second, this does not typecheck.
+  if (age === null || region.status === "never") return `${label} — no data`;
+  const asOf = `${label} — as of ${coarseAge(age)}`;
   // ISC-478: the reason stands IN PLACE of the content. There is no branch here
   // that can append it beside a retained value, because `Region.failed` carries
   // no value to retain (`model.ts:47-56`) — the type does the enforcing and this

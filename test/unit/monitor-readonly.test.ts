@@ -42,6 +42,17 @@ const ROOTS = [
   "monitor/read/worker.ts",
   "monitor/read/events.ts",
   "monitor/read/docker.ts",
+  /*
+   * The join, the seam and the view. Added after the render engineer noted the
+   * hole: `ROOTS` named six modules and neither `render.ts` nor `fleet.tsx` was
+   * among them, so the closure had a gap exactly where the newest code was.
+   * `compose.ts` is the more important of the three — it is the only file that
+   * holds a reader and the activity ladder at once, which makes it the natural
+   * place for someone to reach for a control call.
+   */
+  "monitor/compose.ts",
+  "monitor/render.ts",
+  "monitor/views/fleet.tsx",
 ];
 
 /**
@@ -202,6 +213,48 @@ describe("ISC-470: a read-only runs root renders rather than throwing", () => {
         }
       }
       await rm(base, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+});
+
+describe("ISC-468: the CLI command is a two-import surface", () => {
+  /**
+   * `src/cli/commands/monitor.ts` cannot be a ROOT of the walk above, and the
+   * reason is worth stating because it looks like an omission. The walk asserts
+   * that nothing under `cli/commands/` is REACHABLE from the monitor; making a
+   * `cli/commands/` file a root would put it in its own closure and fail that
+   * assertion by construction.
+   *
+   * So the command gets the guard it actually needs instead. It is the one file
+   * that bridges the CLI and the monitor, which makes it the single place where
+   * a viewer could be turned into a control surface by adding one import — a
+   * `--steer` flag here would be a one-line change. What holds is that it
+   * imports exactly two things from the monitor and nothing else from it.
+   */
+  const CMD = stripComments(
+    readFileSync(new URL("../../src/cli/commands/monitor.ts", import.meta.url).pathname, "utf8"),
+  );
+
+  test("it imports only composeFleet and renderFleet from the monitor", () => {
+    const monitorImports = [...CMD.matchAll(/from\s+["']([^"']*monitor[^"']*)["']/g)].map((m) => m[1]!);
+    expect(monitorImports.sort()).toEqual([
+      "../../monitor/compose.ts",
+      "../../monitor/render.ts",
+    ]);
+  });
+
+  test("it reaches no control verb, socket or ledger", () => {
+    for (const forbidden of [
+      "rpc/client",
+      "run/ledger",
+      "dispatch",
+      "steer",
+      "abort",
+      "unstage",
+      "harvest",
+      "writeWorkerState",
+    ]) {
+      expect(CMD, `monitor command reaches ${forbidden}`).not.toContain(forbidden);
     }
   });
 });
