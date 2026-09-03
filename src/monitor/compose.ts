@@ -79,6 +79,13 @@ export async function composeFleet(opts: ComposeOptions): Promise<FleetModel> {
     runs: joinRuns(partial, wallNow()),
     containers,
     git,
+    // Views 2-4 are entered, never composed into a fleet tick (D8, §5.3).
+    // `never()` is the truthful state of a view nobody has asked for: it has
+    // not been read, as distinct from read-and-empty (`model.ts:57-65`).
+    view: { kind: "fleet" },
+    history: never(),
+    detail: never(),
+    report: never(),
     now: now(),
     columns: opts.columns,
   };
@@ -195,6 +202,10 @@ export function modelFrom(
     // staleness markers; handing it to `joinRuns` would render every attended
     // worker `active`. See `model.ts`'s two-clocks note.
     runs: joinRuns(preferFresher(snapshot.runs, snapshot.workers), opts.nowEpochMs),
+    view: { kind: "fleet" },
+    history: never(),
+    detail: never(),
+    report: never(),
     containers: snapshot.containers,
     git: snapshot.git,
     now: opts.now,
