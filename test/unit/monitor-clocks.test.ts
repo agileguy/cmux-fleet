@@ -1234,9 +1234,25 @@ describe("claims the source text makes", () => {
    * decision rather than the preference: `performance.now()` on a fresh
    * process is a few thousand, six orders below an epoch.
    */
-  test("nowDefault is wall clock, matching the published readAt units", () => {
-    expect(nowDefault()).toBeGreaterThan(1_600_000_000_000);
-    expect(Math.abs(nowDefault() - Date.now())).toBeLessThan(1_000);
+  /**
+   * REVERSED by owner decision on 2026-09-02. This test previously pinned
+   * `nowDefault` to `Date.now`, matching `readAt`'s then-published units; the
+   * decision made `readAt` monotonic and moved the wall clock to the two places
+   * whose other operand is a supervisor-written ISO stamp.
+   *
+   * The assertion is deliberately the STRONGEST available: not "it is
+   * monotonic" — which a wall clock also satisfies between two adjacent reads —
+   * but that its magnitude is nowhere near an epoch stamp. That is what makes
+   * the swap detectable at all, and it is the same property `model.ts`'s note
+   * relies on: subtract the wrong pair and the result clamps to zero.
+   */
+  test("nowDefault is the MONOTONIC clock, not wall clock", () => {
+    expect(nowDefault()).toBeLessThan(1_600_000_000_000);
+    expect(nowDefault()).toBeCloseTo(performance.now(), -2);
+    // Forward-moving, which is the property the due-ness arithmetic needs.
+    const a = nowDefault();
+    const b = nowDefault();
+    expect(b).toBeGreaterThanOrEqual(a);
   });
 
   /**

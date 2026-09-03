@@ -64,6 +64,7 @@
  * direction the argv assertion does not watch.
  */
 
+import { monotonicMs } from "../../util/clock.ts";
 import { failed, ok, type Region } from "../model.ts";
 
 /**
@@ -210,7 +211,7 @@ export async function readDockerContainers(opts?: {
   readonly now?: () => number;
 }): Promise<Region<readonly string[]>> {
   const run = opts?.run ?? realDockerPs;
-  const now = opts?.now ?? Date.now;
+  const now = opts?.now ?? monotonicMs;
 
   let result: DockerPsResult;
   try {

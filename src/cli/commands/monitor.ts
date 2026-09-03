@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 
 import { EXIT } from "../../contracts.ts";
+import { monotonicMs } from "../../util/clock.ts";
 import {
   FleetClocks,
   containerNameSet,
@@ -108,7 +109,14 @@ export function register(program: Command): void {
 
       const paint = (): void => {
         const next = renderFleet(
-          modelFrom(clocks.snapshot(), { now: Date.now(), columns }),
+          modelFrom(clocks.snapshot(), {
+            // Monotonic for the staleness markers, wall clock for the activity
+            // ladder. `model.ts`'s two-clocks note says why they are separate
+            // and what swapping them looks like on screen.
+            now: monotonicMs(),
+            nowEpochMs: Date.now(),
+            columns,
+          }),
         ).join("\n");
         if (next === last) return;
         try {

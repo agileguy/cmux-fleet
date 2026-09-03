@@ -12,6 +12,24 @@ argued the other way is marked as superseded rather than rewritten into agreemen
 | **Scope** | **Full SRD — all four views**, no first slice | §5.1 |
 | **Git strip default** (Q8, D12) | **Status first, commits behind `[c]`** — the reverse of D12's original | §6.8, §7.2, D12, Q8 closed |
 | **How to settle Q1** | **A throwaway worker in a scratch run**, not the live console panes | §9 Q1 |
+| **Clock units** (raised during implementation) | **`Region.readAt` and `FleetModel.now` are MONOTONIC; transcript ages stay WALL CLOCK** | `monitor/model.ts` two-clocks note, `test/unit/monitor-clock-units.test.ts` |
+
+**The clock-units decision, and why it needed one.** The three-clock scheduler surfaced that
+`readAt` was specified as epoch millis while every consumer *subtracts* it — and `util/clock.ts`
+is unambiguous (ISC-155) that subtracting two wall-clock readings is a bug, because an NTP step
+or a laptop suspend is exactly what a standing monitor sits through. But the fix could not be
+applied uniformly: `transcriptAgeMs` and the activity ladder compare against ISO stamps written
+by the **supervisor**, a different process with no monotonic origin in common, so those must
+remain wall clock — the same exemption `status.ts`'s `ago` already claims.
+
+The owner's answer was the mixed model: each comparison uses the clock that shares an origin with
+its other operand. The hazard this creates is that both clocks are `number`, so a swap is not a
+type error — it is a *reassuring* one. Monotonic minus epoch is about -1.76e12, which clamps to
+zero, so every worker renders `wrote 0s ago`, every region renders `as of 0s`, and every attended
+worker that has ever spoken renders `active`. All three are the most comforting frame the monitor
+can draw and all three are false. `test/unit/monitor-clock-units.test.ts` pins magnitude rather
+than monotonicity — "it goes forward" is true of both clocks — and five mutations covering every
+site that could make the swap are all caught by it.
 
 **One of those answers refuted a claim this document made confidently.** §6.6.1 records it: the
 recommendation for hand-rolled ANSI rested on "a component tree is not unit-testable the way a

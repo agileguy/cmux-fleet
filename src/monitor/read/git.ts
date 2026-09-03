@@ -43,6 +43,7 @@
  * nothing here that knows which half is shown.
  */
 
+import { monotonicMs } from "../../util/clock.ts";
 import { failed, ok, type GitStrip, type Region } from "../model.ts";
 
 /**
@@ -127,7 +128,7 @@ async function spawnGit(args: readonly string[]): Promise<{ ok: boolean; out: st
  * (`operations-plan.ts:668-670`).
  */
 export async function readGit(opts: ReadGitOptions): Promise<Region<GitStrip>> {
-  const now = opts.now ?? Date.now;
+  const now = opts.now ?? monotonicMs;
   const run = opts.run ?? spawnGit;
 
   try {

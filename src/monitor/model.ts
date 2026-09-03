@@ -26,6 +26,31 @@
  * ISC-477 asserts the difference because the wrong version is the one a
  * reasonable person writes first: an age computed at paint time is always
  * zero, always plausible, and always a lie.
+ *
+ * ## TWO CLOCKS, AND THEY ARE NOT INTERCHANGEABLE
+ *
+ * Owner decision, 2026-09-02, taken after the scheduler work surfaced it.
+ *
+ * - **`Region.readAt` and `FleetModel.now` are MONOTONIC** (`util/clock.ts`'s
+ *   `monotonicMs`, i.e. `performance.now`). They exist only to be subtracted
+ *   from one another, both stamps come from THIS process, and `util/clock.ts`
+ *   is unambiguous that subtracting two wall-clock readings is a bug (ISC-155).
+ *   A standing monitor is precisely the thing that sits through an NTP step and
+ *   a laptop suspend, so a wall-clock staleness marker would jump by the size
+ *   of the sleep the moment the lid opened.
+ * - **`WorkerRow.transcriptAgeMs` is derived from WALL CLOCK**, and must be. Its
+ *   other operand is an ISO stamp written by the SUPERVISOR — a different
+ *   process, with no monotonic origin in common. This is the same exemption
+ *   `status.ts:39-45` claims for `ago`, for the same reason.
+ *
+ * **Mixing them does not produce an error, it produces a plausible number**,
+ * which is why every site that touches either says which one it holds.
+ * `monotonicMs()` counts from process start, so it is a number in the hundreds
+ * while an epoch stamp is ~1.76e12. Subtract the wrong pair and
+ * `Math.max(0, …)` clamps the result to `0`: every worker renders `wrote 0s
+ * ago` and every region renders `as of 0s`, which is the most reassuring
+ * possible frame and entirely false. `test/unit/monitor-clock-units.test.ts`
+ * exists for exactly that swap.
  */
 
 /**

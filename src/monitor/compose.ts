@@ -24,6 +24,7 @@
  * the first time Docker Desktop is not running.
  */
 
+import { monotonicMs } from "../util/clock.ts";
 import { deriveActivity } from "./activity.ts";
 import { type FleetModel, type GitStrip, type Region, type RunRow, type WorkerRow, failed, never, ok } from "./model.ts";
 import { readDockerContainers } from "./read/docker.ts";
@@ -38,7 +39,10 @@ export interface ComposeOptions {
   /** Repository the git strip watches. */
   readonly watchDir: string;
   readonly columns: number;
+  /** MONOTONIC, for every `readAt` and for `FleetModel.now`. */
   readonly now?: () => number;
+  /** WALL CLOCK, for transcript ages and the activity ladder only. */
+  readonly wallNow?: () => number;
   /**
    * Container names from the last slow tick, or `null` when the slow clock has
    * not completed. Passing `undefined` makes this function run `docker ps`
@@ -56,7 +60,10 @@ export interface ComposeOptions {
  * one with no container column.
  */
 export async function composeFleet(opts: ComposeOptions): Promise<FleetModel> {
-  const now = opts.now ?? Date.now;
+  const now = opts.now ?? monotonicMs;
+  // The wall clock, for the transcript ages ONLY. See `model.ts`'s two-clocks
+  // note; the two are never substituted for one another.
+  const wallNow = opts.wallNow ?? Date.now;
 
   const containers = opts.containers ?? (await readDockerContainers({ now }));
   // `ok` -> a real set; anything else -> `null`, meaning NOT LOOKED AT. See the
@@ -64,12 +71,12 @@ export async function composeFleet(opts: ComposeOptions): Promise<FleetModel> {
   const containerSet = containers.status === "ok" ? new Set(containers.value) : null;
 
   const [partial, git] = await Promise.all([
-    readRuns({ root: opts.root, containers: containerSet, now }),
+    readRuns({ root: opts.root, containers: containerSet, now, wallNow }),
     readGit({ watchDir: opts.watchDir, now }),
   ]);
 
   return {
-    runs: joinRuns(partial, now()),
+    runs: joinRuns(partial, wallNow()),
     containers,
     git,
     now: now(),
@@ -94,7 +101,13 @@ export async function composeFleet(opts: ComposeOptions): Promise<FleetModel> {
  */
 export function joinRuns(
   partial: Region<readonly PartialRunRow[]>,
-  now: number,
+  /**
+   * WALL CLOCK epoch millis. It reaches only `deriveActivity`, whose sole
+   * comparison is against a supervisor-written ISO stamp — see that function's
+   * own note and `model.ts`'s. It is NOT `FleetModel.now`, which is monotonic,
+   * and the two must never be passed to each other.
+   */
+  nowEpochMs: number,
 ): Region<readonly RunRow[]> {
   if (partial.status === "never") return never();
   if (partial.status === "failed") return failed(partial.reason, partial.readAt);
@@ -120,7 +133,7 @@ export function joinRuns(
             phase: row.phase,
             containerPresent: row.containerPresent,
           },
-          now,
+          nowEpochMs,
         ),
       });
     }
@@ -144,10 +157,13 @@ export function modelFrom(
     readonly containers: Region<readonly string[]>;
     readonly git: Region<GitStrip>;
   },
-  opts: { readonly now: number; readonly columns: number },
+  opts: { readonly now: number; readonly nowEpochMs: number; readonly columns: number },
 ): FleetModel {
   return {
-    runs: joinRuns(snapshot.runs, opts.now),
+    // The WALL clock, for the ladder. `opts.now` is monotonic and feeds the
+    // staleness markers; handing it to `joinRuns` would render every attended
+    // worker `active`. See `model.ts`'s two-clocks note.
+    runs: joinRuns(snapshot.runs, opts.nowEpochMs),
     containers: snapshot.containers,
     git: snapshot.git,
     now: opts.now,

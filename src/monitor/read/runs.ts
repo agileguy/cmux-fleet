@@ -55,6 +55,7 @@
  * attempted from a viewer.
  */
 
+import { monotonicMs } from "../../util/clock.ts";
 import { ok, failed, type Region, type RunRow } from "../model.ts";
 import { runPaths, runsRoot, type RunPaths } from "../../run/paths.ts";
 import { liveRunIds } from "../../run/registry.ts";
@@ -89,7 +90,10 @@ export interface ReadRunsOptions {
   readonly root?: string;
   /** Container names from the last slow `docker ps`, or `null`. See `worker.ts`. */
   readonly containers?: ReadonlySet<string> | null;
+  /** MONOTONIC, for every `readAt` in the tree. */
   readonly now?: () => number;
+  /** WALL CLOCK, for `transcriptAgeMs` only (`read/worker.ts`). */
+  readonly wallNow?: () => number;
 }
 
 /**
@@ -119,7 +123,7 @@ export async function readRuns(
   opts?: ReadRunsOptions,
 ): Promise<Region<readonly PartialRunRow[]>> {
   const root = opts?.root ?? runsRoot();
-  const now = opts?.now ?? Date.now;
+  const now = opts?.now ?? monotonicMs;
 
   let runIds: readonly string[];
   try {
@@ -142,6 +146,8 @@ export async function readRuns(
       workers: await readWorkerRows(run, workerIds, {
         containers: opts?.containers ?? null,
         now,
+        // Threaded rather than defaulted, so one caller controls both clocks.
+        wallNow: opts?.wallNow,
       }),
     });
   }

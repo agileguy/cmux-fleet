@@ -55,6 +55,7 @@
  * fifth caller and must use the function.
  */
 
+import { monotonicMs } from "../../util/clock.ts";
 import { failed, never, ok, type Region, type WorkerRow } from "../model.ts";
 import { workerContainerName, workerPaths, type RunPaths } from "../../run/paths.ts";
 import { readPresentation, readWorkerState } from "../../run/state.ts";
@@ -131,7 +132,17 @@ export interface WorkerReadOptions {
    * never happened would manufacture that finding on no evidence.
    */
   readonly containers?: ReadonlySet<string> | null;
+  /** MONOTONIC, for `readAt`. Defaults to `monotonicMs`. */
   readonly now?: () => number;
+  /**
+   * WALL CLOCK, for `transcriptAgeMs` only. Defaults to `Date.now`.
+   *
+   * Separate from {@link now} and deliberately not defaulted from it: the two
+   * measure different things against different origins, and a test that sets
+   * one and forgets the other should get an obviously wrong number rather than
+   * a quietly wrong one.
+   */
+  readonly wallNow?: () => number;
 }
 
 /**
@@ -167,7 +178,17 @@ export async function readWorkerRow(
   workerId: string,
   opts?: WorkerReadOptions,
 ): Promise<Region<WorkerRead>> {
-  const now = opts?.now ?? Date.now;
+  const now = opts?.now ?? monotonicMs;
+  /*
+   * The WALL clock, and the only thing it is used for is `transcriptAgeMs`.
+   * See `model.ts`'s two-clocks note: that age's other operand is an ISO stamp
+   * written by the supervisor, a different process with no monotonic origin in
+   * common, so it is the one comparison here that must be wall clock. It does
+   * NOT default to `now` — a fallback that silently borrowed the monotonic
+   * clock would make every worker read `wrote 0s ago`, which is the exact
+   * failure the split exists to prevent.
+   */
+  const wallNow = opts?.wallNow ?? Date.now;
   const containers = opts?.containers ?? null;
   const paths = workerPaths(run, workerId);
 
@@ -215,7 +236,8 @@ export async function readWorkerRow(
         workerId,
         runId: run.runId,
         phase: state.phase,
-        transcriptAgeMs: transcriptAgeMs(state, readAt),
+        // `wallNow()`, NOT `readAt` — readAt is monotonic. See above.
+        transcriptAgeMs: transcriptAgeMs(state, wallNow()),
         containerPresent:
           containers === null ? null : containers.has(workerContainerName(run.runId, workerId)),
         taskId: state.task_id,

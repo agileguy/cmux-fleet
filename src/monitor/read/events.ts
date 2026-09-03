@@ -51,6 +51,7 @@
  */
 
 import { stat } from "node:fs/promises";
+import { monotonicMs } from "../../util/clock.ts";
 import { failed, ok, type Region } from "../model.ts";
 import { LineSplitter } from "../../util/jsonl.ts";
 import type { WorkerPaths } from "../../run/paths.ts";
@@ -135,7 +136,7 @@ export async function readEventTail(
   paths: WorkerPaths,
   opts?: { readonly windowBytes?: number; readonly now?: () => number },
 ): Promise<Region<EventTail>> {
-  const now = opts?.now ?? Date.now;
+  const now = opts?.now ?? monotonicMs;
   const windowBytes = Math.max(
     0,
     Math.min(opts?.windowBytes ?? EVENT_TAIL_BYTES, EVENT_TAIL_MAX_BYTES),

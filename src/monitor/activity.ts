@@ -206,11 +206,22 @@ function grewWithin(counters: TranscriptCounters | null, now: number, windowMs: 
  */
 export function deriveActivity(
   facts: WorkerFacts,
-  now: number,
+  /**
+   * WALL CLOCK epoch millis, and this is not a preference.
+   *
+   * The only thing it is compared against is `transcriptActivity.last_growth_at`
+   * — an ISO stamp written by the SUPERVISOR, a different process with no
+   * monotonic origin in common with this one. Passing the monotonic clock used
+   * for `Region.readAt` (`model.ts`'s two-clocks note) makes `now - grewAt` a
+   * number near -1.76e12, which is inside ANY window, so every attended worker
+   * that has ever spoken renders `active` — a liveness claim about processes
+   * that may all be finished. It fails as reassurance rather than as an error.
+   */
+  nowEpochMs: number,
   growthWindowMs: number = DEFAULT_GROWTH_WINDOW_MS,
 ): Activity {
   if (facts.containerPresent === false && facts.phase !== "dead") return "container-gone";
   if (!isAttended(facts)) return "rpc";
   if (!hasEverSpoken(facts)) return "no-transcript";
-  return grewWithin(facts.transcriptActivity, now, growthWindowMs) ? "active" : "quiet";
+  return grewWithin(facts.transcriptActivity, nowEpochMs, growthWindowMs) ? "active" : "quiet";
 }

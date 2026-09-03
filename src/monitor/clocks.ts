@@ -72,8 +72,9 @@
  *
  * ## A units hazard this module inherits and does NOT resolve
  *
- * `model.ts:44` specifies `readAt` as **epoch millis**, so {@link nowDefault}
- * is `Date.now`. Every consumer of `readAt` subtracts it (`regionAgeMs`,
+ * `model.ts` specifies `readAt` as **monotonic millis** since the owner's
+ * decision of 2026-09-02, so {@link nowDefault} is `monotonicMs`. Every
+ * consumer of `readAt` subtracts it (`regionAgeMs`,
  * `model.ts:83`), and `util/clock.ts:1-18` argues that subtracting two wall
  * clock readings is a bug — NTP steps and laptop suspend are exactly the
  * events a standing monitor sits through, and each one makes every age on
@@ -86,6 +87,7 @@
  * defect is recorded rather than silently half-fixed.**
  */
 
+import { monotonicMs } from "../util/clock.ts";
 import { failed, never, ok, type GitStrip, type Region } from "./model.ts";
 import { readDockerContainers, type DockerPsRun } from "./read/docker.ts";
 import { readGit } from "./read/git.ts";
@@ -360,8 +362,24 @@ export interface FleetClocksOptions {
   readonly now?: () => number;
 }
 
-/** See the header's units hazard. `Date.now` matches `model.ts:44` as published. */
-export const nowDefault: () => number = () => Date.now();
+/**
+ * MONOTONIC. Owner decision, 2026-09-02.
+ *
+ * This clock is the single source for BOTH due-ness and `readAt`, and both uses
+ * are differences taken inside this process — which is exactly what
+ * `util/clock.ts` reserves the monotonic clock for, and what it says wall clock
+ * must not be used for (ISC-155). A standing monitor is the thing that sits
+ * through an NTP step and a laptop suspend: with `Date.now` here, a lid closed
+ * for two hours makes every region report a two-hour staleness on the first
+ * frame after waking, and makes every clock fire on that frame because its
+ * period appears to have elapsed many times over.
+ *
+ * The wall clock has not disappeared — it moved to where its other operand
+ * lives. `transcriptAgeMs` and the activity ladder compare against ISO stamps
+ * written by the SUPERVISOR, and those take `Date.now` through their own named
+ * seam. See `model.ts`'s two-clocks note.
+ */
+export const nowDefault: () => number = monotonicMs;
 
 /**
  * The three clocks and the regions they produce.

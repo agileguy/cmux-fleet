@@ -698,10 +698,25 @@ describe("the worker row", () => {
     // Not attended at all: the field itself is null (`contracts.ts:119-122`).
     await writeWorker(run, "eng-3");
 
-    const now = () => 90_000;
-    expect(expectOk(await readWorkerRow(run, "eng-1", { now })).row.transcriptAgeMs).toBe(40_000);
-    expect(expectOk(await readWorkerRow(run, "eng-2", { now })).row.transcriptAgeMs).toBeNull();
-    expect(expectOk(await readWorkerRow(run, "eng-3", { now })).row.transcriptAgeMs).toBeNull();
+    /*
+     * `wallNow`, not `now`. The transcript stamp is written by the supervisor
+     * in ISO epoch time, so its age is a WALL-CLOCK difference; `now` is the
+     * monotonic clock behind `readAt` and has no shared origin with it
+     * (`model.ts`'s two-clocks note). The two are set to different values here
+     * on purpose: if the reader ever took the age from `now`, this reads 89_000
+     * instead of 40_000 rather than passing by coincidence.
+     */
+    const now = () => 1_000;
+    const wallNow = () => 90_000;
+    expect(expectOk(await readWorkerRow(run, "eng-1", { now, wallNow })).row.transcriptAgeMs).toBe(
+      40_000,
+    );
+    expect(
+      expectOk(await readWorkerRow(run, "eng-2", { now, wallNow })).row.transcriptAgeMs,
+    ).toBeNull();
+    expect(
+      expectOk(await readWorkerRow(run, "eng-3", { now, wallNow })).row.transcriptAgeMs,
+    ).toBeNull();
   });
 
   test("a future stamp clamps to zero rather than rendering a transcript that grew ahead of the clock", async () => {
@@ -711,7 +726,8 @@ describe("the worker row", () => {
       transcript_activity: { entries: 1, last_growth_at: new Date(90_000).toISOString() },
     });
     expect(
-      expectOk(await readWorkerRow(run, "eng-1", { now: () => 50_000 })).row.transcriptAgeMs,
+      expectOk(await readWorkerRow(run, "eng-1", { now: () => 7, wallNow: () => 50_000 })).row
+        .transcriptAgeMs,
     ).toBe(0);
   });
 });
