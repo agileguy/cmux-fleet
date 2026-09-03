@@ -63,7 +63,7 @@
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { containerBudget } from "../support/budget.ts";
+import { containerBudget, opsBudget } from "../support/budget.ts";
 import { PROBE_BUN_IMAGE } from "../support/probe-image.ts";
 
 const DOCKER = process.env["PIFLEET_DOCKER"] === "1";
@@ -195,7 +195,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (containerId !== "") await docker(["rm", "-f", containerId]);
-});
+  // One `docker rm -f`, and only when a container was started.
+}, opsBudget({ container: 1 }));
 
 /** Fail loudly rather than silently passing when the container never came up. */
 function requireSetup(): void {

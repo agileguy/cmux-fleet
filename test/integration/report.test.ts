@@ -18,7 +18,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EXIT, RunReportSchema } from "../../src/contracts.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
 const RUN_ID = "2026-07-27T00-00-00Z-rint";
@@ -138,7 +138,9 @@ beforeAll(async () => {
   );
 
   await writeFile(join(runDir, "inbox", "T-gone.json"), JSON.stringify(envelope("T-gone", "w-gone", wtGone)));
-});
+  // Twelve `git` spawns building the base repo and the w-good/w-liar worktrees.
+  // Under the floor, so 5000 ms — derived now rather than inherited (ISC-509).
+}, opsBudget({ git: 12 }));
 
 afterAll(async () => {
   await rm(tmp, { recursive: true, force: true });

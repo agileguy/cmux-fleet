@@ -52,7 +52,7 @@ import { networkInterfaces } from "node:os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { spawnCli, type CliResult } from "../support/spawn-cli.ts";
-import { gateBudget } from "../support/budget.ts";
+import { gateBudget, opsBudget } from "../support/budget.ts";
 import { daemonScratchRoot } from "../../src/container/mounts.ts";
 import { TicketOpsArtifactSchema } from "../../src/contracts.ts";
 import { startTicketServer, FIXTURE_OWNER, type TicketServerHandle } from "../fixtures/ticket-server.ts";
@@ -157,7 +157,9 @@ afterAll(async () => {
     await rm(rig.base, { recursive: true, force: true }).catch(() => undefined);
   }
   for (const s of servers) await s.close();
-});
+  // One `makeRig` call site, so one `pifleet down`; closing the stub servers
+  // starts no process.
+}, opsBudget({ cli: 1 }));
 
 function cli(rig: Rig, args: readonly string[], env: Record<string, string> = {}): Promise<CliResult> {
   return spawnCli(args, {

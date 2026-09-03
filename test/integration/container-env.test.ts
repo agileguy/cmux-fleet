@@ -67,6 +67,7 @@ import { materializeWorkerInputs } from "../../src/run/materialize.ts";
 import { ensureControlAuth } from "../../src/security/control-auth.ts";
 import { CREDENTIAL_ENV_VARS } from "../../src/security/adc.ts";
 import { classifyRunDirExposure, runPaths } from "../../src/run/paths.ts";
+import { opsBudget } from "../support/budget.ts";
 
 const IMAGE = process.env.PIFLEET_TEST_IMAGE ?? "pifleet/pi-worker:verify";
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -155,7 +156,8 @@ afterEach(async () => {
   for (const d of scratches.splice(0)) await rm(d, { recursive: true, force: true });
   if (RUNS_DIR_BEFORE === undefined) delete process.env["PIFLEET_RUNS_DIR"];
   else process.env["PIFLEET_RUNS_DIR"] = RUNS_DIR_BEFORE;
-});
+  // One `docker rm -f` per test; the scratch removals start no process.
+}, opsBudget({ container: 1 }));
 
 interface Started {
   name: string;

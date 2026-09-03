@@ -367,17 +367,60 @@ function collectSpawnSites(
 }
 
 // ---------------------------------------------------------------------------
-// Test call sites
+// Timed call sites — tests AND hooks
 // ---------------------------------------------------------------------------
+
+/**
+ * Which construct a site is, because the timeout is not in the same place.
+ *
+ * `test(title, fn, timeout)` takes it third; `afterAll(fn, timeout)` takes it
+ * SECOND. Collapsing the two would read a hook's timeout out of the argument
+ * slot that does not exist and report every budgeted hook as bare.
+ */
+type SiteKind = "test" | "hook";
 
 interface TestSite {
   readonly file: string;
   readonly line: number;
+  readonly kind: SiteKind;
   readonly title: string;
   readonly spawnCount: number;
   readonly hasTimeout: boolean;
   readonly derivationFound: boolean;
 }
+
+/**
+ * THE HOOKS ARE IN SCOPE, AND LEAVING THEM OUT COST A CI FAILURE (ISC-509).
+ *
+ * This guard was written to enforce ISC-274, and ISC-274 phrases its probe
+ * over `test(...)`: "a file that contains a spawn must give every `test(...)`
+ * in it an explicit third argument". So did this file, and both were complete
+ * against what they said. Neither could see a HOOK.
+ *
+ * The refutation, 2026-09-03: `test/e2e/lifecycle.test.ts`'s `afterAll` runs
+ * one `pifleet down` per fleet the suite created — seven — on bun's inherited
+ * 5000 ms, and failed CI's `load` job twice, at 5001.98 ms and then 5000.11 ms
+ * on a rerun with no code change between them. bun reports a timed-out hook as
+ * `(fail) (unnamed)`, which names no file and no test, and the enclosing
+ * assertion blamed a missing provider key. The suite was green on every idle
+ * runner throughout.
+ *
+ * The census at the time: 74 hooks across these roots inherited the default and
+ * nine carried a derived ceiling — and one of those nine, `scale-16-workers`'s
+ * `afterAll` at `120_000`, is someone hitting this same wall and budgeting
+ * their own file without generalising. That is the shape ISC-273 already
+ * documented for `test()` in `down-prune.test.ts`, recurring one construct
+ * over.
+ *
+ * ISC-266's signature is a property of ANYTHING bun times, and `test()` was
+ * only where it was first met. So the quantifier here is the construct-neutral
+ * one: every site bun applies a timeout to, whose body can reach a spawn.
+ *
+ * `bunfig.toml` is not an alternative — bun 1.3.11 ignores `[test] timeout`,
+ * probed and recorded at the top of `budget.ts`. The ceiling has to be at the
+ * call site, which is what makes a guard the only enforcement that works.
+ */
+const HOOK_NAMES = new Set(["beforeAll", "afterAll", "beforeEach", "afterEach"]);
 
 /**
  * `test`, `it`, `test.skip`, `test.skipIf(cond)(...)`, `test.each(rows)(...)`.
@@ -483,7 +526,16 @@ function enclosingStatement(node: ts.Node): ts.Node | null {
   return null;
 }
 
-/** Every `test(...)`/`it(...)` in one file, with its spawn reach and its derivation. */
+/**
+ * Every timed site in one file — `test(...)`/`it(...)` and every lifecycle
+ * hook — with its spawn reach and its derivation.
+ *
+ * The two shapes differ only in where the body and the ceiling sit:
+ * `test(title, fn, timeout)` against `afterAll(fn, timeout)`. A hook has no
+ * title, so it is labelled by its own name; bun's own report for a timed-out
+ * hook is `(unnamed)`, which is precisely the thing that made the CI failure
+ * hard to place, and a guard that repeated that would be no better.
+ */
 function scanTestFile(abs: string, repoRelative: string): TestSite[] {
   const mod = loadModule(abs);
   if (!mod) return [];
@@ -492,17 +544,36 @@ function scanTestFile(abs: string, repoRelative: string): TestSite[] {
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const base = testBaseName(node.expression);
-      if (base === "test" || base === "it") {
+      const isTest = base === "test" || base === "it";
+      const isHook = HOOK_NAMES.has(base);
+      if (isTest || isHook) {
         const args = node.arguments;
-        const body = args[1];
-        const timeout = args[2];
-        const titleNode = args[0];
+        const body = isTest ? args[1] : args[0];
+        const timeoutArg = isTest ? args[2] : args[1];
+        // A literal `undefined` in the slot is not a ceiling. bun reads that
+        // slot and finds nothing, so the site keeps the 5000 ms default — and
+        // a guard that counted it would report compliance for a number that
+        // was never applied. Cheap to write by accident when a helper threads
+        // an optional timeout through, which is why it is checked rather than
+        // assumed away.
+        const timeout =
+          timeoutArg !== undefined && timeoutArg.kind === ts.SyntaxKind.UndefinedKeyword
+            ? undefined
+            : timeoutArg !== undefined &&
+                ts.isIdentifier(timeoutArg) &&
+                timeoutArg.text === "undefined"
+              ? undefined
+              : timeoutArg;
+        const titleNode = isTest ? args[0] : undefined;
         const spawnSites =
           body === undefined ? [] : collectSpawnSites(mod, body, new Set<string>(), false);
         sites.push({
           file: repoRelative,
           line: mod.sf.getLineAndCharacterOfPosition(node.getStart(mod.sf)).line + 1,
-          title: (titleNode ? titleNode.getText(mod.sf) : "<unnamed>").replace(/\s+/g, " ").slice(0, 90),
+          kind: isTest ? "test" : "hook",
+          title: (titleNode ? titleNode.getText(mod.sf) : `${base}()`)
+            .replace(/\s+/g, " ")
+            .slice(0, 90),
           spawnCount: spawnSites.length,
           hasTimeout: timeout !== undefined,
           derivationFound:
@@ -522,10 +593,11 @@ function violations(sites: readonly TestSite[]): TestSite[] {
 }
 
 function describeViolation(s: TestSite): string {
+  const slot = s.kind === "test" ? "third" : "second";
   const why = !s.hasTimeout
-    ? `inherits bun's ${5_000} ms default (no third argument)`
+    ? `inherits bun's ${5_000} ms default (no ${slot} argument)`
     : "carries a ceiling with no written derivation (no cliBudget comparison in scope)";
-  return `${s.file}:${s.line}  ${s.title}\n      ${s.spawnCount} spawn call site(s) reachable; ${why}`;
+  return `${s.file}:${s.line}  [${s.kind}] ${s.title}\n      ${s.spawnCount} spawn call site(s) reachable; ${why}`;
 }
 
 async function inScopeFiles(): Promise<string[]> {
@@ -572,7 +644,14 @@ describe("no spawning test inherits bun's default timeout (ISC-274, ISC-273)", (
   test("down-prune.test.ts specifically: every test derives its ceiling", () => {
     const rel = "test/integration/down-prune.test.ts";
     const sites = scanTestFile(join(ROOT, rel), rel);
-    expect(sites.length).toBe(16);
+    // 17, not the 16 this pinned before ISC-509: the scan now returns the
+    // file's `afterAll` alongside its sixteen tests. The SPAWNING count is
+    // unchanged at 15 — that hook kills handles it already holds and removes
+    // directories, so it starts no process and is correctly not in scope.
+    // Both numbers are pinned because a scan that silently stopped finding
+    // this file would satisfy an empty violations list just as well.
+    expect(sites.length).toBe(17);
+    expect(sites.filter((s) => s.kind === "hook").length).toBe(1);
     expect(sites.filter((s) => s.spawnCount > 0).length).toBe(15);
     expect(violations(sites).map(describeViolation)).toEqual([]);
   });
@@ -661,6 +740,100 @@ describe("the guard can fail (mutation proof)", () => {
   test("a bare literal with no derivation is a violation", () => {
     const p = write("g.test.ts", `${PREAMBLE}test("x", async () => { Bun.spawn(["true"]); }, 30_000);\n`);
     expect(violations(scan(p)).length).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // The HOOK path (ISC-509). Every case above proves the `test()` quantifier;
+  // none of them would have failed while hooks were invisible, which is
+  // exactly how the defect reached CI. These are the ones that would.
+  // -------------------------------------------------------------------------
+
+  const HOOK_PREAMBLE =
+    `import { afterAll, beforeAll, test } from "bun:test";\n` +
+    `import { opsBudget } from "./budget.ts";\n`;
+
+  test("a spawning hook with no second argument is a violation", () => {
+    const p = write(
+      "h1.test.ts",
+      `${HOOK_PREAMBLE}afterAll(async () => { Bun.spawn(["true"]); });\ntest("x", () => {});\n`,
+    );
+    const sites = scan(p);
+    const hook = sites.find((x) => x.kind === "hook");
+    expect(hook?.spawnCount).toBe(1);
+    expect(hook?.hasTimeout).toBe(false);
+    expect(violations(sites).length).toBe(1);
+  });
+
+  test("the same hook with opsBudget in the SECOND slot is clean", () => {
+    const p = write(
+      "h2.test.ts",
+      `${HOOK_PREAMBLE}afterAll(async () => { Bun.spawn(["true"]); }, opsBudget({ cli: 1 }));\n` +
+        `test("x", () => {});\n`,
+    );
+    const sites = scan(p);
+    const hook = sites.find((x) => x.kind === "hook");
+    expect(hook?.hasTimeout).toBe(true);
+    expect(hook?.derivationFound).toBe(true);
+    expect(violations(sites).length).toBe(0);
+  });
+
+  /**
+   * A CEILING BUN CANNOT READ IS NOT A CEILING.
+   *
+   * Two ways to get one, and this covers both: a `undefined` sitting in the
+   * slot bun reads, and a real budget sitting in a slot bun ignores. The
+   * derivation evidence deliberately spans the whole call — a note may be
+   * written anywhere inside it — so `opsBudget` appearing as a THIRD argument
+   * to a hook satisfies the marker on text alone. Without the `undefined`
+   * check above, that combination reads as compliant while the site still runs
+   * at 5000 ms, which is the exact failure this criterion exists to catch,
+   * dressed as its own fix.
+   */
+  test("a ceiling in a slot bun does not read is not a ceiling", () => {
+    const p = write(
+      "h3.test.ts",
+      `${HOOK_PREAMBLE}afterAll(async () => { Bun.spawn(["true"]); }, undefined, opsBudget({ cli: 1 }));\n` +
+        `test("x", () => {});\n`,
+    );
+    const sites = scan(p);
+    const hook = sites.find((x) => x.kind === "hook");
+    // `undefined` occupies the slot bun reads, so the ceiling is still 5000.
+    expect(hook?.derivationFound).toBe(false);
+    expect(violations(sites).length).toBe(1);
+  });
+
+  test("a bare literal on a hook is a violation, exactly as on a test", () => {
+    const p = write(
+      "h4.test.ts",
+      `${HOOK_PREAMBLE}beforeAll(async () => { Bun.spawn(["true"]); }, 30_000);\ntest("x", () => {});\n`,
+    );
+    expect(violations(scan(p)).length).toBe(1);
+  });
+
+  test("a hook that spawns nothing needs no budget", () => {
+    const p = write(
+      "h5.test.ts",
+      `${HOOK_PREAMBLE}afterAll(async () => { const n = 1 + 1; void n; });\ntest("x", () => {});\n`,
+    );
+    const sites = scan(p);
+    const hook = sites.find((x) => x.kind === "hook");
+    expect(hook?.spawnCount).toBe(0);
+    expect(violations(sites).length).toBe(0);
+  });
+
+  test("all four hook names are recognised, not just afterAll", () => {
+    const p = write(
+      "h6.test.ts",
+      `import { afterAll, afterEach, beforeAll, beforeEach, test } from "bun:test";\n` +
+        `beforeAll(async () => { Bun.spawn(["true"]); });\n` +
+        `beforeEach(async () => { Bun.spawn(["true"]); });\n` +
+        `afterEach(async () => { Bun.spawn(["true"]); });\n` +
+        `afterAll(async () => { Bun.spawn(["true"]); });\n` +
+        `test("x", () => {});\n`,
+    );
+    const sites = scan(p);
+    expect(sites.filter((x) => x.kind === "hook").length).toBe(4);
+    expect(violations(sites).length).toBe(4);
   });
 
   test("a literal WITH an inline cliBudget audit note is accepted", () => {

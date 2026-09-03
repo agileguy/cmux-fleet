@@ -103,6 +103,7 @@ import {
 } from "../../src/run/paths.ts";
 import { readTaskRecord } from "../../src/run/state.ts";
 import { controlCall } from "../../src/supervisor/launch.ts";
+import { opsBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -258,7 +259,11 @@ afterAll(async () => {
   // Sixteen workers' run directories are a lot of inodes, and `down` ahead of
   // them talks to sixteen control sockets. The 5s default is not enough to
   // finish, and a teardown killed mid-flight is the leak this exists to close.
-}, 120_000);
+  // DERIVED, replacing a hand-picked 120_000. The loop runs one `pifleet down`
+  // per run directory and this file's subject is sixteen workers in one run, so
+  // sixteen is the bound. `opsBudget({ cli: 16 })` = 182_400 ms, wider than the
+  // literal it replaces rather than narrower (ISC-509).
+}, opsBudget({ cli: 16 }));
 
 interface CliResult {
   code: number;

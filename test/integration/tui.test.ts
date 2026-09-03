@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { AttendedRecordSchema, EXIT, RunReportSchema } from "../../src/contracts.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { workerContainerName } from "../../src/attended/mode.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -87,13 +87,15 @@ beforeAll(async () => {
   const up = await cli(["up", "--workers", "eng-1,eng-2", "--backend", "tmux", "--json"]);
   expect(up.code, `up stderr: ${up.stderr.slice(0, 600)}`).toBe(0);
   runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
-});
+  // One `pifleet up` on the tmux backend, which starts this rig's own server.
+}, opsBudget({ cli: 1, tmux: 1 }));
 
 afterAll(async () => {
   await cli(["down", "--run", runId, "--json"]).catch(() => {});
   await tmux(["kill-server"]).catch(() => {});
   await rm(rig.base, { recursive: true, force: true }).catch(() => {});
-});
+  // One `pifleet down` and one `tmux kill-server`.
+}, opsBudget({ cli: 1, tmux: 1 }));
 
 describe("one attended session, end to end", () => {
   test("--leave before any enter refuses and fabricates nothing", async () => {

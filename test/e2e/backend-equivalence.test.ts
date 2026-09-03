@@ -51,6 +51,7 @@ import { realExec } from "../../src/container/run.ts";
 import { TmuxBackend } from "../../src/backends/tmux/index.ts";
 import { tmuxArgv } from "../../src/backends/tmux/argv.ts";
 import type { Exec } from "../../src/container/run.ts";
+import { opsBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -107,7 +108,10 @@ afterAll(async () => {
     await rm(f.base, { recursive: true, force: true }).catch(() => {});
   }
   await realExec(tmuxArgv(CONTROL_CTX, ["kill-server"])).catch(() => {});
-});
+  // Five `makeFleet` call sites push five fleets; each costs one `pifleet down`
+  // and one `tmux kill-server`, and one more `kill-server` closes the control
+  // context. Five CLI, six tmux — counted, not estimated (ISC-509).
+}, opsBudget({ cli: 5, tmux: 6 }));
 
 async function cli(
   fleet: Fleet,

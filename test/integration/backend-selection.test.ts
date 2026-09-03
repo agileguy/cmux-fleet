@@ -33,7 +33,7 @@ import { join } from "node:path";
 import { EXIT } from "../../src/contracts.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { runPaths } from "../../src/run/paths.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const ROOT_URL = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT_URL, "src/cli/index.ts");
@@ -70,7 +70,10 @@ afterAll(async () => {
     }).exited.catch(() => {});
     await rm(rig.base, { recursive: true, force: true }).catch(() => {});
   }
-});
+  // Five `makeRig` call sites. Each rig is downed once per run directory it
+  // left behind — at most two, since a rig runs one `up` and a failed `up`
+  // still leaves a directory — plus one `tmux kill-server`. Ten CLI, five tmux.
+}, opsBudget({ cli: 10, tmux: 5 }));
 
 /**
  * A `cmux` whose socket is dead: `--version` and `--help` answer like the

@@ -19,6 +19,7 @@ import { createServer, connect, type Server, type Socket } from "node:net";
 import { once } from "node:events";
 
 import { makeRule } from "../../src/security/egress.ts";
+import { gateBudget } from "../support/budget.ts";
 
 const PROXY_SCRIPT = new URL("../../docker/connect-proxy.cjs", import.meta.url).pathname;
 
@@ -100,7 +101,10 @@ beforeAll(async () => {
       await Bun.sleep(50);
     }
   }
-});
+  // GATE-shaped, not spawn-shaped: the cost is the listener wait below — 100
+  // attempts at 50 ms — not the one `node` spawn that precedes it. `gateBudget`
+  // declines to re-apply CONTENTION for exactly this reason (ISC-509).
+}, gateBudget([5_000]));
 
 afterAll(async () => {
   proxy?.kill();
@@ -257,7 +261,8 @@ describe("the policy a fleet launches is the policy the proxy enforces (ISC-263)
         await Bun.sleep(50);
       }
     }
-  });
+    // The same 100 x 50 ms listener gate as the outer fixture.
+  }, gateBudget([5_000]));
 
   afterAll(() => {
     chainProxy?.kill();
@@ -344,7 +349,8 @@ describe("the relay entrypoint starts both listeners (ISC-263)", () => {
       },
     );
     await Bun.sleep(600);
-  });
+    // One fixed 600 ms settle for the relay, which is the whole cost here.
+  }, gateBudget([600]));
 
   afterAll(() => {
     relayProc?.kill();

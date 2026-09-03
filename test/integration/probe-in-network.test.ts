@@ -49,7 +49,7 @@ import { probeNativeToolCalls } from "../../src/security/model-probe.ts";
 import { ensureEgressNetwork } from "../../src/security/network.ts";
 import { RELAY_IMAGE } from "../../src/security/relay.ts";
 import { realExec } from "../../src/container/run.ts";
-import { containerBudget } from "../support/budget.ts";
+import { containerBudget, gateBudget, opsBudget } from "../support/budget.ts";
 
 const DOCKER = process.env["PIFLEET_DOCKER"] === "1";
 if (!DOCKER) {
@@ -160,12 +160,17 @@ beforeAll(async () => {
     await Bun.sleep(100);
   }
   throw new Error("the stub oMLX never announced itself");
-}, 180_000);
+  // DERIVED, replacing a hand-picked 180_000 with the same number stated as
+  // what it is: the stub-announcement gate below, 100 attempts each bounded by
+  // a 15 s `docker logs`. `gateBudget` applies SAFETY alone (ISC-509).
+}, gateBudget([180_000]));
 
 afterAll(async () => {
   if (!DOCKER) return;
   await cleanup();
-}, 120_000);
+  // `cleanup()` removes the stub container and the egress network, inspecting
+  // each first. Four container operations, replacing a hand-picked 120_000.
+}, opsBudget({ container: 4 }));
 
 /** The URL under test. Resolvable ONLY on the bridge — that is the point. */
 const STUB_BASE_URL = `http://${STUB_ALIAS}:${STUB_PORT}/v1`;

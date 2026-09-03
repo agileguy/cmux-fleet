@@ -170,25 +170,81 @@ function bystander(): { pid: number } {
  * so a test can prove the group had more than one process in it.
  */
 async function groupLeader(): Promise<{ pid: number; pgid: number; members: number[] }> {
-  const leader = Bun.spawn(["sh", "-c", "sleep 30 & sleep 30"], {
+  // Both `sleep`s are BACKGROUNDED and the shell then announces itself before
+  // `wait`ing. `echo` is a builtin, so it adds no fourth member — and after
+  // "ready" is on the pipe, both forks have already happened. See the
+  // readiness note below for why that ordering is the whole fix.
+  const leader = Bun.spawn(["sh", "-c", "sleep 30 & sleep 30 & echo ready; wait"], {
     detached: true,
-    stdout: "ignore",
+    stdout: "pipe",
     stderr: "ignore",
   });
   leader.unref();
-  // The shell has to reach its `sleep`s before the group has members.
-  for (let i = 0; i < 40; i++) {
-    const found = await groupMembers(leader.pid);
-    if (found.length >= 2) {
-      // The fixture is only usable if it really is its own leader; asserting
-      // it here means a test that follows cannot be quietly vacuous.
-      expect(await processGroupId(leader.pid)).toBe(leader.pid);
-      groups.push(leader.pid);
-      return { pid: leader.pid, pgid: leader.pid, members: found };
-    }
-    await new Promise((r) => setTimeout(r, 25));
+  /**
+   * READINESS IS ANNOUNCED, NOT SAMPLED (ISC-510).
+   *
+   * This used to poll `groupMembers` and return on `found.length >= 2`, and
+   * `2` is BELOW the shape this docblock documents: the group settles at
+   * THREE — the shell and both `sleep`s. So the gate could return between the
+   * shell's two forks and hand back `[sh, first-sleep]` as if it were the
+   * whole group.
+   *
+   * What that costs is not a slow fixture, it is a false failure in a test
+   * whose subject is something else. Four tests below close with
+   * `expect(await groupMembers(...)).toEqual(<snapshot>.members)` to prove a
+   * group was left UNTOUCHED, and a snapshot taken mid-fork disagrees with the
+   * settled group by one pid. CI's `load` job hit it on 2026-09-03:
+   * `[6705, 6707, +6708]`, "Expected -0, Received +1". The refusal under test
+   * had worked — `how: "group_unrecorded"`, exit `WORKER_DIED`, all of it —
+   * and the group had GAINED a member rather than losing one, which is the
+   * tell that the fixture was wrong and not the code. It did not recur on a
+   * rerun.
+   *
+   * TWO FIXES WERE TRIED AND ONE OF THEM FAILED ITS OWN PROBE, which is the
+   * reason this comment is long. Raising the gate to `>= 3` pins a number the
+   * shell is not obliged to produce: a shell may `exec` the last command in a
+   * `-c` string, replacing the leader and settling at two. Requiring the count
+   * to be STABLE across two consecutive reads is no better, and measurably
+   * so — with a pure-builtin busy loop between the forks, two reads 25 ms
+   * apart both return `[sh, first-sleep]`, the gate calls that settled, and
+   * the third member arrives afterwards. Measured: captured
+   * `[15462, 15464]`, settled `[15462, 15464, 15785]`. A stability window is
+   * only ever a guess about how long the gap is.
+   *
+   * So the shell says when it is done forking. After `ready` is on the pipe,
+   * both `sleep`s exist and nothing else will join, so the snapshot IS the
+   * settled set by construction — no polling, no window, nothing to lose under
+   * load. Probed against the same adversarial busy loop that defeated the
+   * stability gate: captured 3, settled 3.
+   *
+   * The equality assertions downstream are left as equality rather than
+   * relaxed to "contains". They are now TRUE as written, and `toEqual` says
+   * the group is exactly as it was, which is the stronger claim and the one
+   * those tests are about.
+   */
+  const reader = leader.stdout.getReader();
+  const decoder = new TextDecoder();
+  let announced = "";
+  while (!announced.includes("ready")) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    announced += decoder.decode(value);
   }
-  throw new Error(`group leader ${leader.pid} never acquired members`);
+  reader.releaseLock();
+  if (!announced.includes("ready")) {
+    throw new Error(`group leader ${leader.pid} exited before announcing readiness`);
+  }
+
+  const members = await groupMembers(leader.pid);
+  // Two is the floor a group signal needs something to reach beyond the
+  // leader; three is what this shell produces. Asserted rather than assumed so
+  // a shell that `exec`s its way down to one cannot make the tests vacuous.
+  expect(members.length).toBeGreaterThanOrEqual(2);
+  // The fixture is only usable if it really is its own leader; asserting it
+  // here means a test that follows cannot be quietly vacuous.
+  expect(await processGroupId(leader.pid)).toBe(leader.pid);
+  groups.push(leader.pid);
+  return { pid: leader.pid, pgid: leader.pid, members };
 }
 
 /** Every pid currently in a process group, straight from `ps`. */

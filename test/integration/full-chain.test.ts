@@ -132,7 +132,7 @@ import { existsSync } from "node:fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { spawnCli, type CliResult } from "../support/spawn-cli.ts";
 import { seedGitRepo } from "../fixtures/synthetic-repo.ts";
-import { gateBudget } from "../support/budget.ts";
+import { gateBudget, opsBudget } from "../support/budget.ts";
 import { runPaths, taskRecordPath, workerPaths } from "../../src/run/paths.ts";
 import { readTaskRecord, readWorkerState } from "../../src/run/state.ts";
 import { daemonScratchRoot } from "../../src/container/mounts.ts";
@@ -232,7 +232,8 @@ afterAll(async () => {
     }
     await rm(rig.base, { recursive: true, force: true }).catch(() => {});
   }
-});
+  // One `makeRig` call site, so one `pifleet down --prune --force`.
+}, opsBudget({ cli: 1 }));
 
 function cli(rig: Rig, args: readonly string[]): Promise<CliResult> {
   return spawnCli(args, {

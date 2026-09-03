@@ -31,7 +31,7 @@ import { join } from "node:path";
 
 import { resolveFromEnvelope, runAcceptance } from "../../src/harvest/acceptance.ts";
 import { makeDaemonScratch } from "../../src/container/mounts.ts";
-import { containerBudget } from "../support/budget.ts";
+import { containerBudget, opsBudget } from "../support/budget.ts";
 import { Deadline } from "../../src/util/clock.ts";
 
 const DOCKER = process.env["PIFLEET_DOCKER"] === "1";
@@ -124,7 +124,10 @@ beforeAll(async () => {
   await git(repo, "add", "-A");
   await git(repo, "commit", "--quiet", "-m", "base");
   head = await git(repo, "rev-parse", "HEAD");
-});
+  // Four `git` spawns build the fixture repo; `makeDaemonScratch` starts no
+  // process (mkdir/chmod/mkdtemp). Below the floor, so this is 5000 ms — but
+  // now DERIVED rather than inherited (ISC-509).
+}, opsBudget({ git: 4 }));
 
 afterAll(async () => {
   for (const d of cleanups) await rm(d, { recursive: true, force: true });

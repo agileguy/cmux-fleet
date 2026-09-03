@@ -21,7 +21,7 @@ import { workerWorktree } from "../../src/run/paths.ts";
 import { DEFAULT_HARNESS_PATTERNS, harnessSurfaceFor } from "../../src/harvest/acceptance.ts";
 import { deriveGitFacts } from "../../src/harvest/git.ts";
 import { worktreeContentHash } from "../../src/run/treehash.ts";
-import { cliBudget } from "../support/budget.ts";
+import { cliBudget, opsBudget } from "../support/budget.ts";
 
 const CLI = new URL("../../src/cli/index.ts", import.meta.url).pathname;
 const RUN_ID = "2026-07-27T00-00-00Z-hrvt";
@@ -507,7 +507,9 @@ beforeAll(async () => {
       }),
     );
   }
-});
+  // Twenty-seven `git` spawns — counted in the body, which builds a base repo,
+  // two worktrees with real commits, and an advanced `main` for ISC-151.
+}, opsBudget({ git: 27 }));
 
 afterAll(async () => {
   await rm(tmp, { recursive: true, force: true });

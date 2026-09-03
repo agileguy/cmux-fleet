@@ -76,7 +76,7 @@ import {
   resolveIdentity,
   tokenModeStartupEnv,
 } from "../../src/security/adc.ts";
-import { cliBudget, containerBudget } from "../support/budget.ts";
+import { cliBudget, containerBudget, opsBudget } from "../support/budget.ts";
 
 const IMAGE = process.env.PIFLEET_TEST_IMAGE ?? "pifleet/pi-worker:verify";
 const DOCKER = process.env.PIFLEET_DOCKER === "1";
@@ -145,7 +145,9 @@ afterEach(async () => {
   await Promise.all(
     containers.splice(0).map((name) => realExec(["docker", "rm", "-f", name])),
   );
-});
+  // One `docker rm -f` per test: `containers` is pushed at a single site and
+  // drained here after every test, so the count is one, not the file's total.
+}, opsBudget({ container: 1 }));
 
 /** How one container under test differs from the default token-mode shape. */
 interface ContainerShape {

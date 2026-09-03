@@ -221,3 +221,114 @@ export function gateBudget(gatesMs: readonly number[]): number {
   }
   return Math.max(BUN_DEFAULT_MS, gatesMs.reduce((a, b) => a + b, 0) * SAFETY);
 }
+
+// ---------------------------------------------------------------------------
+// Everything else that starts a process — and why it needs a MIXTURE
+// ---------------------------------------------------------------------------
+
+/**
+ * Worst warm `git` subprocess, measured — the fixture cost these suites pay.
+ *
+ * Taken 2026-09-03 on a 14-core macOS machine at load average 5.68, over 36
+ * consecutive spawns of `git add -A`, `git commit -q -m` and `git rev-parse
+ * HEAD` against a real three-commit repository under `mkdtemp`:
+ *
+ *   - min 22 ms, median 28 ms, max 51 ms.
+ *
+ * Rounded UP to 60 below. The spread is narrow because none of these touches a
+ * network or a pack of any size.
+ */
+export const PER_GIT_OP_MS = 60;
+
+/**
+ * Worst `tmux` subprocess, measured — and NOT the same distribution as `git`,
+ * which is the whole reason there are two constants rather than one.
+ *
+ * Taken in the same session, 24 spawns of `tmux new-session -d`, `tmux
+ * list-panes -a` and `tmux kill-server` against a private `TMUX_TMPDIR`:
+ *
+ *   - min 6 ms, median 8 ms, max 1118 ms.
+ *
+ * The median is a fifth of `git`'s and the max is twenty-two times it. The tail
+ * is the SERVER cold start — the first `new-session` after a `kill-server` pays
+ * for a new tmux server, and everything after it is nearly free. A single
+ * number covering both tools would have to be the tmux tail, which would then
+ * charge a seventeen-`git` fixture 122_400 ms for work that measures half a
+ * second. Rounded up to 1200.
+ */
+export const PER_TMUX_OP_MS = 1_200;
+
+/**
+ * Worst read-only OS probe, measured — `ps` and nothing heavier.
+ *
+ * Same session, 15 spawns of `ps -o pid=,lstart= -p <pid>`, the shape
+ * `processStartTime` uses: min 3 ms, median 4 ms, max 6 ms. Rounded up to 10.
+ *
+ * It earns a term rather than being folded into `git` because a hook that does
+ * nothing but confirm a pid is alive should not be charged a `git commit`, and
+ * because naming it `git` would make the count stop describing the body — the
+ * one property every count here exists to have.
+ */
+export const PER_PROBE_OP_MS = 10;
+
+/** What one site does, counted per tool because the tools do not cost alike. */
+export interface OpMix {
+  /** `bun run <cli> <command>` invocations — this project's own entrypoint. */
+  readonly cli?: number;
+  /** `git` subprocesses. */
+  readonly git?: number;
+  /** `tmux` subprocesses. */
+  readonly tmux?: number;
+  /** `docker run`/`exec`/`network`/`rm` operations. */
+  readonly container?: number;
+  /** Read-only OS probes — `ps` through `processStartTime` and its kin. */
+  readonly probe?: number;
+}
+
+/**
+ * The budget for a site that MIXES tools, counted per tool (ISC-509).
+ *
+ * WHY A MIXTURE AND NOT A FOURTH SINGLE-TOOL HELPER. `cliBudget`,
+ * `containerBudget` and `gateBudget` each assume a site's time goes on one
+ * thing, which held while the criterion quantified over `test(...)`. The hooks
+ * ISC-509 brought into scope are teardowns, and a teardown is mixed by nature:
+ * `backend-equivalence.test.ts`'s `afterAll` runs five `pifleet down`s AND six
+ * `tmux kill-server`s. Neither existing helper can express that. `cliBudget(5)`
+ * charges nothing for the tmux calls and UNDER-covers; `cliBudget(11)` charges
+ * the tmux calls at the CLI's rate, which makes the count no longer describe
+ * the body — and the count is the part a reader checks. This file already calls
+ * that "a derivation in appearance only"; the fix is to let the caller state
+ * what it actually does.
+ *
+ * `CONTENTION` and `SAFETY` both apply, unlike `gateBudget`: every term here is
+ * a process start, so it inflates under load exactly the way ISC-266 measured,
+ * and no term has already accounted for that.
+ *
+ * `BUN_DEFAULT_MS` is the floor, so this can never return a ceiling TIGHTER
+ * than the default it replaces — a two-`git` hook stays at 5000 rather than
+ * being cut to 720.
+ *
+ * The container term uses `PER_CONTAINER_OP_MS` and deliberately does NOT
+ * import `containerBudget`'s 60_000 cold floor: a hook that removes a container
+ * the suite already started is not paying for a daemon to come up. A site that
+ * IS paying cold-start should say so with `containerBudget`, which still exists
+ * and still floors at 60_000.
+ */
+export function opsBudget(mix: OpMix): number {
+  const terms: Array<[keyof OpMix, number, number]> = [
+    ["cli", mix.cli ?? 0, PER_SPAWN_IDLE_MS],
+    ["git", mix.git ?? 0, PER_GIT_OP_MS],
+    ["tmux", mix.tmux ?? 0, PER_TMUX_OP_MS],
+    ["container", mix.container ?? 0, PER_CONTAINER_OP_MS],
+    ["probe", mix.probe ?? 0, PER_PROBE_OP_MS],
+  ];
+  let total = 0;
+  for (const [name, count, cost] of terms) {
+    if (!Number.isInteger(count) || count < 0) {
+      throw new TypeError(`opsBudget expects a non-negative integer for ${name}, got ${count}`);
+    }
+    total += count * cost;
+  }
+  if (total === 0) throw new TypeError("opsBudget expects at least one operation");
+  return Math.max(BUN_DEFAULT_MS, total * CONTENTION * SAFETY);
+}
