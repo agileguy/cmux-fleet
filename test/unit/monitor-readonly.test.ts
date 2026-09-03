@@ -450,17 +450,31 @@ describe("ISC-468: the CLI command is a two-import surface", () => {
    * one: wiring the three-clock scheduler added `clocks.ts` and failed here
    * until the addition was made on purpose.
    *
-   * Three modules is the whole of it — the scheduler, the join, the seam. Note
-   * what is NOT here and could plausibly have been: `read/*.ts` (the command has
-   * no business reading anything directly; `fleetSources` owns that) and
-   * `activity.ts` (deriving an `Activity` in a CLI command would be D10's second
-   * adjudicator, in the one place whose answer an operator reads).
+   * Four modules is the whole of it — the scheduler, the join, the seam, and the
+   * contract. Note what is NOT here and could plausibly have been: `read/*.ts`
+   * (the command has no business reading anything directly; `fleetSources` and
+   * `fetchForView` own that) and `activity.ts` (deriving an `Activity` in a CLI
+   * command would be D10's second adjudicator, in the one place whose answer an
+   * operator reads).
+   *
+   * **`model.ts` was added deliberately on 2026-09-03, when views 2-4 became
+   * reachable**, and the argument for allowing it is the argument this pin
+   * exists to force someone to make. The command's job grew by exactly one
+   * thing: turning `--view`/`--worker`/`--run` into a `ViewState`. That type
+   * lives in `model.ts`, and `model.ts` is types plus three one-line Region
+   * constructors — it imports nothing itself, reaches no reader, and holds no
+   * derivation. It is the contract both sides of the seam are written against,
+   * which makes it the one monitor module a caller can hold without gaining any
+   * capability at all. The alternative was to let the command build the union
+   * from string literals and skip the import, which would have put a second
+   * spelling of `ViewState` in the file most likely to grow a control flag.
    */
-  test("it imports exactly three monitor modules, and no reader or adjudicator", () => {
+  test("it imports exactly four monitor modules, and no reader or adjudicator", () => {
     const monitorImports = [...CMD.matchAll(/from\s+["']([^"']*monitor[^"']*)["']/g)].map((m) => m[1]!);
     expect(monitorImports.sort()).toEqual([
       "../../monitor/clocks.ts",
       "../../monitor/compose.ts",
+      "../../monitor/model.ts",
       "../../monitor/render.ts",
     ]);
   });

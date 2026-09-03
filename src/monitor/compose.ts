@@ -53,6 +53,13 @@ export interface ComposeOptions {
    * do on the fast clock.
    */
   readonly containers?: Region<readonly string[]>;
+  /**
+   * Which of §6.2's four views to compose. Defaults to `{ kind: "fleet" }`,
+   * which is ISC-483's requirement — the first frame answers §1.3's first two
+   * questions with no input, so the view a caller does not name is the one
+   * that needs no selection.
+   */
+  readonly view?: ViewState;
 }
 
 /**
@@ -73,22 +80,34 @@ export async function composeFleet(opts: ComposeOptions): Promise<FleetModel> {
   // header: the difference is `container-gone` on nothing versus on everything.
   const containerSet = containers.status === "ok" ? new Set(containers.value) : null;
 
-  const [partial, git] = await Promise.all([
+  /*
+   * The view's own payload is fetched ALONGSIDE the fleet, not after it.
+   *
+   * For `{ kind: "fleet" }` this costs nothing — `fetchForView`'s fleet arm is
+   * a one-line `return empty` (ISC-502) — so the one-shot path has a single
+   * shape rather than a branch, and a caller cannot enter a view and forget to
+   * fill it. The three reads are independent, so they go in the same
+   * `Promise.all`: a `--once --view report` should not pay the run walk and
+   * then the report walk in series.
+   */
+  const view = opts.view ?? { kind: "fleet" };
+
+  const [partial, git, payload] = await Promise.all([
     readRuns({ root: opts.root, containers: containerSet, now, wallNow }),
     readGit({ watchDir: opts.watchDir, now }),
+    fetchForView(view, { root: opts.root, now, wallNow }),
   ]);
 
   return {
     runs: joinRuns(partial, wallNow()),
     containers,
     git,
-    // Views 2-4 are entered, never composed into a fleet tick (D8, §5.3).
-    // `never()` is the truthful state of a view nobody has asked for: it has
-    // not been read, as distinct from read-and-empty (`model.ts:57-65`).
-    view: { kind: "fleet" },
-    history: never(),
-    detail: never(),
-    report: never(),
+    // Views 2-4 are ENTERED, never composed into a fleet tick (D8, §5.3).
+    // On the fleet view all three of these are `never()` — not read, as
+    // distinct from read-and-empty (`model.ts:57-65`) — and `fetchForView`
+    // is what makes that a measured property rather than a literal here.
+    view,
+    ...payload,
     now: now(),
     columns: opts.columns,
   };
@@ -198,17 +217,31 @@ export function modelFrom(
     readonly containers: Region<readonly string[]>;
     readonly git: Region<GitStrip>;
   },
-  opts: { readonly now: number; readonly nowEpochMs: number; readonly columns: number },
+  opts: {
+    readonly now: number;
+    readonly nowEpochMs: number;
+    readonly columns: number;
+    readonly view?: ViewState;
+    /**
+     * Views 2-4's payload, fetched OFF the clocks and handed in.
+     *
+     * It is a parameter rather than something this function fetches because
+     * `modelFrom` is synchronous and must stay so: it runs on every paint —
+     * twice a second on the fast clock — and a paint that awaited a run walk
+     * would put Q5's cost on the repaint path, which is the one place §6.3
+     * forbids it. The caller owns when the payload is refreshed; this function
+     * only decides what a frame is made of.
+     */
+    readonly payload?: Pick<FleetModel, "history" | "detail" | "report">;
+  },
 ): FleetModel {
   return {
     // The WALL clock, for the ladder. `opts.now` is monotonic and feeds the
     // staleness markers; handing it to `joinRuns` would render every attended
     // worker `active`. See `model.ts`'s two-clocks note.
     runs: joinRuns(preferFresher(snapshot.runs, snapshot.workers), opts.nowEpochMs),
-    view: { kind: "fleet" },
-    history: never(),
-    detail: never(),
-    report: never(),
+    view: opts.view ?? { kind: "fleet" },
+    ...(opts.payload ?? { history: never(), detail: never(), report: never() }),
     containers: snapshot.containers,
     git: snapshot.git,
     now: opts.now,

@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 
 import { EXIT } from "../../contracts.ts";
+import { CliError } from "../index.ts";
 import { monotonicMs } from "../../util/clock.ts";
 import {
   FleetClocks,
@@ -8,7 +9,8 @@ import {
   driveClocks,
   fleetSources,
 } from "../../monitor/clocks.ts";
-import { composeFleet, modelFrom } from "../../monitor/compose.ts";
+import { composeFleet, fetchForView, modelFrom } from "../../monitor/compose.ts";
+import { never, type FleetModel, type ViewState } from "../../monitor/model.ts";
 import { renderFleet } from "../../monitor/render.ts";
 
 /**
@@ -58,6 +60,100 @@ import { renderFleet } from "../../monitor/render.ts";
  * own, which is correct and pointless for a one-shot. `composeFleet` reads
  * everything against one moment, which is what a snapshot on stdout means.
  */
+/**
+ * The four view names an operator can type, and the selection each needs.
+ *
+ * ## Why this is a function and not four `if`s in the action handler
+ *
+ * `ViewState` is a discriminated union that CANNOT represent a worker view
+ * with no worker (`model.ts`), which is the property the whole selection model
+ * rests on. That guarantee is only worth having if the place where operator
+ * input becomes a `ViewState` either produces a valid one or refuses — and a
+ * conversion buried in an action handler is reachable by no test without a
+ * terminal, which ISC-491 forbids the whole block from requiring. Exported and
+ * pure, it is the one function that has to be right and the one a test can
+ * actually drive.
+ *
+ * ## The refusals, and why an ignored flag is one of them
+ *
+ * A missing selection refuses, obviously. A SUPERFLUOUS one refuses too:
+ * `--view history --worker eng-1` names a worker the history view cannot show,
+ * and accepting it would print a run list while the operator believed they had
+ * asked about `eng-1`. That is the same class of defect as a viewer that shows
+ * a stale number confidently — the command did something reasonable and not
+ * the thing it was asked for. Refusing costs one retype; accepting costs a
+ * wrong belief, and §4.3 already decided which way that trade goes.
+ */
+export class ViewFlagError extends CliError {
+  constructor(message: string) {
+    /*
+     * A `CliError`, NOT a bare `Error` with `process.exitCode` set beside it.
+     * The first version of this did the latter and every refusal below exited
+     * **0** — `main` in `../index.ts` ends `await program.parseAsync(argv);
+     * return EXIT.SUCCESS;` and that return is assigned over whatever an
+     * action left on `process.exitCode`. So a script asking `monitor --view
+     * report` with no `--run` got the refusal on stderr and a success code,
+     * which is the worst of both. Throwing is the repo's actual convention
+     * (`status.ts`, `daemon.ts`, `worktrees.ts`) and the ladder carries it.
+     */
+    super(message, EXIT.USAGE);
+    this.name = "ViewFlagError";
+  }
+}
+
+export function viewFromFlags(flags: {
+  readonly view?: string;
+  readonly worker?: string;
+  readonly run?: string;
+}): ViewState {
+  const name = flags.view ?? "fleet";
+  const worker = flags.worker;
+  const run = flags.run;
+
+  const refuseExtra = (kind: string, allowed: readonly string[]): void => {
+    const given = [
+      worker === undefined ? null : "--worker",
+      run === undefined ? null : "--run",
+    ].filter((f): f is string => f !== null);
+    const extra = given.filter((f) => !allowed.includes(f));
+    if (extra.length > 0) {
+      throw new ViewFlagError(
+        `--view ${kind} takes ${allowed.length === 0 ? "no selection" : allowed.join(" and ")}; ` +
+          `${extra.join(" and ")} would be ignored. Drop ${extra.length === 1 ? "it" : "them"} ` +
+          `or pick the view that uses ${extra.length === 1 ? "it" : "them"}.`,
+      );
+    }
+  };
+
+  switch (name) {
+    case "fleet":
+      refuseExtra("fleet", []);
+      return { kind: "fleet" };
+    case "history":
+      refuseExtra("history", []);
+      return { kind: "history" };
+    case "worker":
+      refuseExtra("worker", ["--worker", "--run"]);
+      if (worker === undefined || run === undefined) {
+        throw new ViewFlagError(
+          "--view worker needs both --worker <id> and --run <id>. A worker view with no " +
+            "worker names nothing, which is why the model cannot represent one.",
+        );
+      }
+      return { kind: "worker", runId: run, workerId: worker };
+    case "report":
+      refuseExtra("report", ["--run"]);
+      if (run === undefined) {
+        throw new ViewFlagError("--view report needs --run <id>. A report is a report OF a run.");
+      }
+      return { kind: "report", runId: run };
+    default:
+      throw new ViewFlagError(
+        `unknown view ${JSON.stringify(name)}. The four are: fleet, worker, history, report.`,
+      );
+  }
+}
+
 export function register(program: Command): void {
   program
     .command("monitor")
@@ -82,7 +178,26 @@ export function register(program: Command): void {
      * wrong trade; `--repo` is also the more accurate name.
      */
     .option("--repo <path>", "repository the git strip reports on", process.cwd())
-    .action(async (opts: { once?: boolean; poll: string; columns?: string; repo: string; colour?: boolean }) => {
+    .option("--view <name>", "fleet | worker | history | report", "fleet")
+    .option("--worker <id>", "worker to show, for --view worker")
+    .option("--run <id>", "run to show, for --view worker and --view report")
+    .action(async (opts: {
+      once?: boolean;
+      poll: string;
+      columns?: string;
+      repo: string;
+      colour?: boolean;
+      view?: string;
+      worker?: string;
+      run?: string;
+    }) => {
+      /*
+       * The selection is resolved BEFORE anything is read. A refusal must cost
+       * nothing — an operator who typed `--view worker` and forgot `--worker`
+       * should not wait out a run walk to be told so, and on the polling path a
+       * bad selection must never reach the scheduler at all.
+       */
+      const view: ViewState = viewFromFlags(opts);
       /*
        * `process.stdout.columns` is `undefined` when stdout is not a terminal —
        * a pipe, a test, a CI log. 100 is the fallback and it is the same number
@@ -106,7 +221,7 @@ export function register(program: Command): void {
       const colour = opts.colour !== false && process.stdout.isTTY === true;
 
       if (opts.once === true) {
-        const model = await composeFleet({ watchDir: opts.repo, columns });
+        const model = await composeFleet({ watchDir: opts.repo, columns, view });
         process.stdout.write(`${renderFleet(model, { colour }).join("\n")}\n`);
         return;
       }
@@ -144,9 +259,48 @@ export function register(program: Command): void {
       let last: string | null = null;
       let done: (() => void) | null = null;
 
+      /*
+       * Views 2-4's payload, refreshed on its own timer and NEVER on the paint.
+       *
+       * `paint()` is synchronous and runs on the repaint interval; awaiting a
+       * run walk or a `collectRunReport` inside it would put those costs on the
+       * path §6.3 keeps clear. So the payload is a variable a slower loop
+       * replaces, and a frame renders whatever the last completed fetch left —
+       * which is exactly the staleness `Region.readAt` already displays, so it
+       * is visible rather than hidden.
+       *
+       * `inFlight` is not an optimisation. `collectRunReport` was measured at
+       * 117 ms (Q7) on the largest run on disk today, but that is a number
+       * about THIS disk, and a fetch slower than its own interval would
+       * otherwise stack one walk on the next until the process fell over.
+       */
+      let payload = { history: never(), detail: never(), report: never() } as Pick<
+        FleetModel,
+        "history" | "detail" | "report"
+      >;
+      let inFlight = false;
+      const PAYLOAD_MS = 5_000;
+
+      const refreshPayload = async (): Promise<void> => {
+        if (inFlight || view.kind === "fleet") return;
+        inFlight = true;
+        try {
+          payload = await fetchForView(view);
+        } catch (err) {
+          // Same contract as the scheduler's `onError`: a read that throws
+          // must not take the pane down. The regions stay as they were and
+          // keep displaying their own age.
+          process.stderr.write(`pifleet monitor: ${String(err)}\n`);
+        } finally {
+          inFlight = false;
+        }
+      };
+
       const paint = (): void => {
         const next = renderFleet(
           modelFrom(clocks.snapshot(), {
+            view,
+            payload,
             // Monotonic for the staleness markers, wall clock for the activity
             // ladder. `model.ts`'s two-clocks note says why they are separate
             // and what swapping them looks like on screen.
@@ -176,8 +330,16 @@ export function register(program: Command): void {
       // than four `never` regions reading `no data` — which is TRUE at that
       // instant and indistinguishable, to someone who has just started the
       // command, from a monitor that cannot see anything.
-      await clocks.tick();
+      // The payload is fetched BEFORE the first paint for the same reason the
+      // clocks are ticked before it: an opening frame of `no data` is true at
+      // that instant and indistinguishable, to someone who has just typed the
+      // command, from a monitor that cannot see anything.
+      await Promise.all([clocks.tick(), refreshPayload()]);
       paint();
+
+      const payloadTimer =
+        view.kind === "fleet" ? null : setInterval(() => void refreshPayload(), PAYLOAD_MS);
+      payloadTimer?.unref?.();
 
       const painter = setInterval(paint, pollMs);
       await new Promise<void>((resolve) => {
@@ -214,6 +376,11 @@ export function register(program: Command): void {
           if (stopped) return;
           stopped = true;
           clearInterval(painter);
+          // The payload timer is cleared beside the painter, not left to
+          // `unref` alone. `unref` stops a timer HOLDING the process open; it
+          // does not stop it FIRING, so a monitor shutting down on EPIPE would
+          // otherwise keep walking the runs root until the loop drained.
+          if (payloadTimer !== null) clearInterval(payloadTimer);
           driver.stop();
           resolve();
         };
