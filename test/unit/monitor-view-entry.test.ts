@@ -38,7 +38,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { EXIT } from "../../src/contracts.ts";
-import { ViewFlagError, viewFromFlags } from "../../src/cli/commands/monitor.ts";
+import {
+  FALLBACK_COLUMNS,
+  ViewFlagError,
+  frameColumns,
+  viewFromFlags,
+} from "../../src/cli/commands/monitor.ts";
 import { composeFleet } from "../../src/monitor/compose.ts";
 import { never } from "../../src/monitor/model.ts";
 
@@ -154,5 +159,58 @@ describe("ISC-507: every view is reachable, and only with the selection it needs
     expect(history.history.status).toBe("ok");
     expect(history.detail.status).toBe("never");
     expect(history.report.status).toBe("never");
+  });
+});
+
+/**
+ * ISC-497 — the frame follows the pane, and it does so without needing SIGWINCH.
+ *
+ * ## The defect
+ *
+ * `columns` was read ONCE at startup and never again, so a frame stayed frozen
+ * at whatever width the pane measured when the command began. Widening left
+ * §6.5's ladder dropping columns it no longer needed to. Narrowing left a frame
+ * wider than the terminal — which the terminal then wrapped, and avoiding that
+ * wrap is the whole purpose of dropping a column. **The degradation ladder was
+ * defeated by the one event it exists to survive**, and nothing failed: every
+ * width test passes against an explicit `model.columns`, and no test drove the
+ * command's own width resolution because it had none to drive.
+ *
+ * ## Why this makes Q4 informational rather than blocking
+ *
+ * §9 Q4 asks whether a program started by cmux's shell injection receives
+ * `SIGWINCH`, and says that if it does not, "the renderer must poll
+ * `process.stdout.columns`, which is a different and worse design". Polling is
+ * only worse when it is ADDED to a loop that did not have one. This loop
+ * already repaints on an interval, so re-reading a property it is about to use
+ * costs nothing measurable — and the frame is then correct whichever way Q4
+ * lands. The `resize` listener is kept as well, so a signal that does arrive
+ * repaints immediately instead of at the next tick; it is an optimisation, not
+ * the mechanism.
+ *
+ * Q4 therefore stays OPEN and stops blocking anything, which is a better
+ * outcome than answering it: a design that needs the answer is a design with a
+ * dependency on a terminal's behaviour, and ISC-491 spends the whole block
+ * avoiding exactly that.
+ */
+describe("ISC-497: the frame width follows the pane, without depending on a signal", () => {
+  test("with no pin, the terminal's current width wins", () => {
+    expect(frameColumns(null, 171)).toBe(171);
+    // The point of the rule: the SAME call with a different terminal width
+    // gives a different answer, which is what a frozen value could not do.
+    expect(frameColumns(null, 80)).toBe(80);
+  });
+
+  test("a pinned width is never overridden by the terminal", () => {
+    expect(frameColumns(60, 171)).toBe(60);
+    expect(frameColumns(60, undefined)).toBe(60);
+    // `--columns 80` is a claim about what the operator wants, not a
+    // measurement. A pin that moved would be a flag that does not do what it
+    // says.
+  });
+
+  test("a non-terminal stdout falls back, and to the width the render suite uses", () => {
+    expect(frameColumns(null, undefined)).toBe(FALLBACK_COLUMNS);
+    expect(FALLBACK_COLUMNS).toBe(100);
   });
 });

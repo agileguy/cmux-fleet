@@ -84,6 +84,40 @@ import { renderFleet } from "../../monitor/render.ts";
  * the thing it was asked for. Refusing costs one retype; accepting costs a
  * wrong belief, and §4.3 already decided which way that trade goes.
  */
+/**
+ * The frame width for the NEXT paint, as a rule rather than as a value.
+ *
+ * ## The defect this shape replaced
+ *
+ * The width used to be read once at startup and never again, so a frame was
+ * frozen at whatever the pane measured when the command began. Widening left
+ * §6.5's ladder dropping columns it no longer needed to; narrowing left a frame
+ * wider than the terminal, which the terminal then WRAPPED — and avoiding that
+ * wrap is the entire purpose of dropping a column, so the degradation ladder
+ * was defeated by the one event it exists to survive.
+ *
+ * ## Why a pinned width is never re-read
+ *
+ * `--columns 80` is a claim about what the operator wants, not a measurement.
+ * A pin that silently became 200 on the first resize would be a flag that does
+ * not do what it says, and the flag exists precisely so a frame can be produced
+ * at a width the terminal is not.
+ *
+ * ## Why 100 and not 80
+ *
+ * It is what `ink-testing-library` hard-codes, so a piped frame is comparable
+ * to the ones the render suite asserts on. `process.stdout.columns` is
+ * `undefined` whenever stdout is not a terminal — a pipe, a test, a CI log.
+ */
+export const FALLBACK_COLUMNS = 100;
+
+export function frameColumns(
+  pinned: number | null,
+  terminalColumns: number | undefined,
+): number {
+  return pinned ?? terminalColumns ?? FALLBACK_COLUMNS;
+}
+
 export class ViewFlagError extends CliError {
   constructor(message: string) {
     /*
@@ -204,7 +238,35 @@ export function register(program: Command): void {
        * `ink-testing-library` hard-codes, which makes a piped frame comparable
        * to the one the render suite asserts on.
        */
-      const columns = Number(opts.columns ?? process.stdout.columns ?? 100);
+      /*
+       * A FUNCTION, not a value, and the difference is a defect this replaced.
+       *
+       * `columns` was read once at startup and never again, so the frame was
+       * frozen at whatever width the pane happened to have when the command
+       * started. Widening left the ladder's columns dropped for no reason;
+       * narrowing left a frame wider than the terminal, which the terminal
+       * then wrapped — defeating §6.5's degradation entirely, because the
+       * whole point of dropping a column is to avoid exactly that wrap.
+       *
+       * **This deliberately does NOT depend on SIGWINCH, which makes §9 Q4
+       * informational rather than blocking.** Q4 asks whether a program
+       * started by cmux's shell injection receives the signal; §9 says that if
+       * it does not, "the renderer must poll `process.stdout.columns`, which is
+       * a different and worse design". It is only worse when polling is added
+       * to a paint loop that did not have one — and this loop already repaints
+       * on an interval, so re-reading a property it is about to use costs
+       * nothing measurable and is correct whichever way Q4 lands. The `resize`
+       * listener below is kept as well, so a signal that DOES arrive repaints
+       * immediately instead of at the next tick.
+       *
+       * An explicit `--columns` pins the width and is never re-read: an
+       * operator who names a number means it, and a `--columns 80` that
+       * silently became 200 on the first resize would be a flag that does not
+       * do what it says.
+       */
+      const pinned = opts.columns === undefined ? null : Number(opts.columns);
+      const columnsNow = (): number => frameColumns(pinned, process.stdout.columns);
+      const columns = columnsNow();
       // The PAINT interval, not a read interval — the reads are on their own
       // three clocks. See the header.
       const pollMs = Math.max(250, Number(opts.poll) * 1_000);
@@ -306,7 +368,7 @@ export function register(program: Command): void {
             // and what swapping them looks like on screen.
             now: monotonicMs(),
             nowEpochMs: Date.now(),
-            columns,
+            columns: columnsNow(),
           }),
           { colour },
         ).join("\n");
@@ -368,6 +430,15 @@ export function register(program: Command): void {
          *
          * Any other error is re-thrown. A full disk is not a reader who left.
          */
+        /*
+         * A resize repaints AT ONCE rather than at the next tick. The paint is
+         * already correct without this — `columnsNow()` is read per frame — so
+         * this only removes the up-to-one-interval lag between dragging a pane
+         * edge and the frame following. If Q4's answer turns out to be that no
+         * signal arrives, nothing here breaks and nothing above it changes.
+         */
+        process.stdout.on("resize", paint);
+
         process.stdout.on("error", (err: NodeJS.ErrnoException) => {
           if (err?.code !== "EPIPE") throw err;
           done?.();
