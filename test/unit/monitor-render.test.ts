@@ -66,13 +66,39 @@ const base: WorkerRow = {
   transcriptAgeMs: null,
   containerPresent: true,
   taskId: null,
+  /*
+   * §6.2's refusal surface and fence, CARRIED BY THE MODEL AND RENDERED BY NO
+   * VIEW — stated here rather than left for a reader to notice.
+   *
+   * `WorkerRow` gained `via` and `fence` so that "a later action button has
+   * somewhere to be greyed out and a reason to give" (§6.2's second and third
+   * "must be able to see"), and `model.ts:260-294` argues at length that they
+   * belong on the ROW rather than on view 2 because a button lives on a row.
+   * The argument is right and the fields are unrendered: view 1's ladder
+   * (ISC-484) has no tier for them and `WorkerDetail` — view 2's whole payload
+   * — carries neither, so view 2 cannot show them either without reading
+   * `model.runs`, which is exactly the cross-view read ISC-503 forbids.
+   *
+   * That is the dead-field shape `contracts.ts:86-118` records, caught while it
+   * is still one commit old. The fixtures below vary both fields so that
+   * whichever view eventually renders them has asymmetric cases waiting, and so
+   * that this comment fails to be true the moment someone acts on it.
+   */
+  via: "rpc",
+  fence: null,
 };
 
 const worker = (over: Partial<WorkerRow>): WorkerRow => ({ ...base, ...over });
 
 /** The five ladder states, one worker each, plus the sixth RENDERING of `quiet`. */
 const engRpc = worker({ workerId: "eng-1", activity: "rpc", phase: "running", taskId: "t-17" });
-const engSilent = worker({ workerId: "eng-2", activity: "no-transcript", phase: "idle" });
+const engSilent = worker({
+  workerId: "eng-2",
+  activity: "no-transcript",
+  phase: "idle",
+  // Attended: a dispatch would be TYPED into its pane, not sent over a socket.
+  via: "pane",
+});
 const engQuiet = worker({
   workerId: "eng-3",
   activity: "quiet",
@@ -84,9 +110,20 @@ const engActive = worker({
   activity: "active",
   transcriptAgeMs: 4_000,
   taskId: "t-19",
+  via: "staged",
+  // A LIVE epoch: an action addressed here would be refused `busy`.
+  fence: { liveTaskId: "t-19", abortRequested: false, attemptCount: 3 },
 });
 /** `quiet` whose transcript is MEASURED and has never grown — `status.ts:76`'s "no writes yet". */
-const engNeverGrew = worker({ workerId: "eng-5", activity: "quiet", runId: RUN_B });
+const engNeverGrew = worker({
+  workerId: "eng-5",
+  activity: "quiet",
+  runId: RUN_B,
+  // `presentation.json` absent. `model.ts:271-275` refuses to default this to
+  // `"rpc"`, because an unreadable record would then render as the worker most
+  // freely dispatchable — the reassuring lie in different clothes.
+  via: null,
+});
 /** `container-gone` with a FRESH age. The asymmetric fixture; see the header. */
 const revGone = worker({
   workerId: "rev-1",
@@ -118,6 +155,10 @@ const healthy: FleetModel = {
   git: ok(GIT, NOW - 5_000),
   now: NOW,
   columns: 120,
+  view: { kind: "fleet" },
+  history: never(),
+  detail: never(),
+  report: never(),
 };
 
 /**

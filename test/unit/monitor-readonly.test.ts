@@ -54,6 +54,28 @@ const ROOTS = [
   "monitor/compose.ts",
   "monitor/render.ts",
   "monitor/views/fleet.tsx",
+  /*
+   * VIEWS 2-4 AND THE CHROME THEY SHARE (ISC-506).
+   *
+   * Added with the views themselves rather than afterwards, because the gap
+   * this list had when `render.ts` and `fleet.tsx` were missing from it is the
+   * gap it would have again: **the closure would cover exactly the code that
+   * is oldest and least likely to acquire a writer, and miss the code being
+   * written today.** Three new files that render a worker, a run list and a
+   * report are precisely where someone reaches for "just one control call" —
+   * view 2 is the view an operator opens when a worker is in trouble, and a
+   * `[k]ill` key would live there.
+   *
+   * `chrome.tsx` is reachable from all four views, so the transitive walk
+   * would find it anyway. It is named explicitly because the write-primitive
+   * and adjudicator checks below iterate `ROOTS` rather than the closure, and
+   * a shared module those checks did not cover would be the one place a call
+   * could hide from them while being imported by every view.
+   */
+  "monitor/views/chrome.tsx",
+  "monitor/views/worker.tsx",
+  "monitor/views/history.tsx",
+  "monitor/views/report.tsx",
 ];
 
 /**
@@ -172,6 +194,116 @@ describe("ISC-468: nothing the monitor imports can write or command", () => {
 function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 }
+
+/**
+ * ISC-506 — **Anti: views 2-4 add no writer and no new subprocess argv.**
+ *
+ * Filed as an anti-criterion because the failure it guards is an ADDITION
+ * rather than a regression: nothing that exists today breaks it, and the thing
+ * that would break it looks like a feature. **View 2 is the view an operator
+ * opens when a worker is in trouble**, so it is the single most likely place in
+ * this design for someone to add a `[k]ill` key, a `[r]etry`, or a "just tail
+ * the log with `tail -f`" convenience — and each of those is one import.
+ *
+ * The writer half is already carried by the checks above, which now iterate the
+ * three new views because they were added to `ROOTS` alongside them. What is
+ * asserted here is the half those cannot see: that the SPAWN COUNT did not
+ * move. ISC-469 pins the monitor to exactly one distinct subprocess argv,
+ * `dockerPsArgv`, and pins it byte-for-byte and parameterless. Three new files
+ * that render text have no business changing that number, and a second argv
+ * would be the moment the viewer became a control surface.
+ */
+describe("ISC-506: views 2-4 add no writer and no new subprocess argv", () => {
+  /** The three files this criterion is actually about, plus the chrome they share. */
+  const NEW_VIEWS = [
+    "monitor/views/chrome.tsx",
+    "monitor/views/worker.tsx",
+    "monitor/views/history.tsx",
+    "monitor/views/report.tsx",
+  ];
+
+  /**
+   * TESTING THE TESTER, on `walks its own fixture`'s pattern. If these files
+   * were not in `ROOTS`, every write-primitive and adjudicator assertion above
+   * would pass over them by omission and this whole block would be decoration.
+   */
+  test("the new views are inside the guarded set, not beside it", () => {
+    for (const rel of NEW_VIEWS) {
+      expect(ROOTS, `${rel} is not guarded`).toContain(rel);
+      expect(CLOSURE.has(rel), `${rel} is not in the closure`).toBe(true);
+    }
+  });
+
+  /**
+   * The spawn primitives, by name, on the new files' own source.
+   *
+   * A view that shells out has stopped being a view — and the specific hazard
+   * is not `docker run`, which nobody would write here by accident. It is
+   * `tail`, `less`, `git show`: read-only-looking commands that put an
+   * arbitrary argv one edit away from a control verb, in a process whose whole
+   * claim is that it cannot issue one.
+   */
+  test("no view spawns a subprocess", () => {
+    const offenders: string[] = [];
+    for (const rel of NEW_VIEWS) {
+      const source = stripComments(readFileSync(join(SRC, rel), "utf8"));
+      for (const f of ["Bun.spawn", "spawnSync", "execFile", "execSync", "child_process", "$`"]) {
+        if (source.includes(f)) offenders.push(`${rel}: ${f}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  /**
+   * THE COUNT, over the monitor's OWN modules rather than over the new files —
+   * and NOT over the closure, which is a narrowing with the same cause ISC-473
+   * records two blocks down.
+   *
+   * Checking only the new views would miss the way this actually goes wrong: a
+   * view needs a fact, someone adds a reader for it, and the argv lands in
+   * `read/` rather than in the view. So the scope has to be wider than the three
+   * files. **But it cannot be the whole closure, and that was measured rather
+   * than assumed**: the first draft asserted exactly one spawning module and
+   * found nine, every one of them reached through `run/state.ts` — the module
+   * ISC-472 *requires* the monitor to use — down through `run/worktree.ts` into
+   * `harvest/git.ts`, `container/run.ts`, `safety/procstart.ts` and the rest.
+   * Those are not the monitor spawning; they are shared readers that also
+   * contain a spawn on a path the monitor never calls, and banning them would
+   * fail against a correct design.
+   *
+   * So the subject is `monitor/**`, which is the code this criterion is about
+   * and the code an edit to these views would touch. Two modules spawn today and
+   * both were already pinned: `read/docker.ts` byte-for-byte by ISC-469, and
+   * `read/git.ts` on its argv builders by ISC-493. **The list is pinned rather
+   * than counted**, so a third arriving names itself instead of moving a number.
+   */
+  test("only the two already-pinned monitor modules spawn anything", () => {
+    const spawning = [...CLOSURE]
+      .filter((rel) => rel.startsWith("monitor/") && existsSync(join(SRC, rel)))
+      .filter((rel) => stripComments(readFileSync(join(SRC, rel), "utf8")).includes("Bun.spawn"))
+      .sort();
+    expect(spawning).toEqual(["monitor/read/docker.ts", "monitor/read/git.ts"]);
+  });
+
+  /**
+   * And no view can reach the control plane by import, which the closure-wide
+   * checks above assert for the monitor as a whole — restated here per file so
+   * a failure names the view rather than the design.
+   */
+  test("no view imports a control verb, a socket or the ledger", () => {
+    const offenders: string[] = [];
+    for (const rel of NEW_VIEWS) {
+      const source = stripComments(readFileSync(join(SRC, rel), "utf8"));
+      for (const m of source.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+        const spec = m[1]!;
+        for (const forbidden of ["rpc/", "ledger", "cli/commands", "dispatch", "harvest/"]) {
+          if (spec.includes(forbidden)) offenders.push(`${rel}: ${spec}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
 
 describe("ISC-470: a read-only runs root renders rather than throwing", () => {
   /**

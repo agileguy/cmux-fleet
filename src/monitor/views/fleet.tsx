@@ -50,73 +50,20 @@
  */
 
 import { Box, Text } from "ink";
-import { createContext, useContext } from "react";
 
-import { regionAgeMs } from "../model.ts";
 import type { FleetModel, GitStrip, Region, RunRow, WorkerRow } from "../model.ts";
-
-/**
- * COLOUR IS OFF BY DEFAULT AND THAT IS NOT A STYLE PREFERENCE.
- *
- * Every byte-pinned assertion in `monitor-render.test.ts` compares plain text.
- * Ink emits SGR escapes inline when a `color` prop is set, so a coloured frame
- * turns `expect(row).toContain("wrote 11m ago")` into a comparison against
- * `\x1b[32mwrote 11m ago\x1b[39m` — every one of those tests would have to be
- * rewritten against escape codes, which is the "a component tree is not
- * pinnable" problem §6.6.1 refuted, arriving by a different route.
- *
- * So the palette is a CONTEXT with a plain default, and only `renderFleet`'s
- * caller turns it on. Tests get text; the pane gets colour; one component tree
- * produces both, so a styled frame cannot drift from the asserted one.
- */
-export interface Palette {
-  readonly on: boolean;
-  readonly dim: string | undefined;
-  readonly heading: string | undefined;
-  readonly alarm: string | undefined;
-  readonly warn: string | undefined;
-  readonly live: string | undefined;
-  readonly quiet: string | undefined;
-}
-
-export const PLAIN: Palette = {
-  on: false,
-  dim: undefined,
-  heading: undefined,
-  alarm: undefined,
-  warn: undefined,
-  live: undefined,
-  quiet: undefined,
-};
-
-/**
- * The pane palette.
- *
- * Chosen against a DARK terminal, which is what the console runs in, and kept
- * to the eight ANSI names rather than 256-colour or truecolour so it inherits
- * whatever theme the operator has configured instead of fighting it.
- *
- * The assignment is by SEVERITY and not by category, which is the point:
- * `container-gone` is red because it is the one row that always means
- * something is wrong; `no-transcript` is yellow because it means "has never
- * spoken", which needs a look but is not itself a fault (Q1(b) — it must never
- * be read as "stuck"); `active` is green; everything a monitor cannot judge is
- * grey. An operator scanning the pane should be able to find the red without
- * reading a word.
- */
-export const COLOUR: Palette = {
-  on: true,
-  dim: "gray",
-  heading: "cyan",
-  alarm: "red",
-  warn: "yellow",
-  live: "green",
-  quiet: "white",
-};
-
-const PaletteContext = createContext<Palette>(PLAIN);
-export const PaletteProvider = PaletteContext.Provider;
-const usePalette = (): Palette => useContext(PaletteContext);
+import {
+  Bullet,
+  Cell,
+  FloorRefusal,
+  RegionHeading,
+  Rule,
+  coarseAge,
+  deriveFloor,
+  regionLine,
+  usePalette,
+} from "./chrome.tsx";
+import type { Palette } from "./chrome.tsx";
 
 /**
  * Column widths, fixed so that two frames of the same fleet are comparable
@@ -129,7 +76,6 @@ const usePalette = (): Palette => useContext(PaletteContext);
  * sized for the ids this fleet actually issues (`eng-1`, `rev-1`, `w-0`); the
  * cost of the choice is stated at `Cell` below, where it is paid.
  */
-const INDENT = "    ";
 const ID_COL = 8;
 const ACTIVITY_COL = 20;
 const PHASE_COL = 18;
@@ -153,8 +99,20 @@ const CONTAINER_COL = 21;
  * lines that truncate rather than columns that must fit beside each other. A
  * floor that included them would refuse to draw panes on which the fleet table
  * is perfectly readable.
+ *
+ * It is expressed through `deriveFloor` (`chrome.tsx`) rather than as a bare
+ * sum, because views 2-4 need the same treatment and four independently-picked
+ * numbers cannot be checked against one another. Declaring WHICH cells may not
+ * be dropped makes ISC-505 one property over four views instead of four
+ * constants a reader has to take on trust.
  */
-export const FLOOR_COLUMNS = INDENT.length + ID_COL + ACTIVITY_COL;
+export const FLEET_FLOOR = deriveFloor("fleet", [
+  ["worker id", ID_COL],
+  ["activity", ACTIVITY_COL],
+]);
+
+/** The number itself, kept as its own export because every test names it. */
+export const FLOOR_COLUMNS = FLEET_FLOOR.columns;
 
 /**
  * Which optional columns survive at a given width (§6.5, D14, ISC-484).
@@ -188,7 +146,7 @@ export interface LayoutPlan {
   readonly runIdFull: boolean;
 }
 
-const ROW_BASE = INDENT.length + ID_COL + ACTIVITY_COL;
+const ROW_BASE = FLOOR_COLUMNS;
 
 export function planColumns(columns: number): LayoutPlan {
   const withPhase = ROW_BASE + PHASE_COL;
@@ -200,71 +158,6 @@ export function planColumns(columns: number): LayoutPlan {
     showPhase: columns >= withPhase,
     runIdFull: columns >= withPhase,
   };
-}
-
-/**
- * How long ago, in the coarsest unit that still says something — seconds under a
- * minute, minutes under an hour, hours above.
- *
- * **This duplicates `ago` (`status.ts:39-45`) deliberately and the duplication is
- * argued rather than overlooked.** `ago` takes an ISO string; every age here is
- * already milliseconds from `regionAgeMs` (`model.ts:83`), so reusing it would
- * mean formatting a stamp back into a string to parse it again. More decisively,
- * `status.ts` is a `commander` command module under `src/cli/commands/`, and
- * ISC-468 requires the monitor's transitive import list to contain nothing that
- * dispatches — importing a formatter from there would drag the CLI, the registry
- * and the state writer into the viewer's closure to save nine lines.
- *
- * The two must agree on the BOUNDARIES, and they do: `< 60` seconds, `< 3600`
- * minutes, hours above. A monitor that said `90s` where `status` said `1m` would
- * make an operator comparing two panes doubt both.
- */
-function coarseAge(ms: number): string {
-  const s = Math.round(ms / 1_000);
-  if (s < 60) return `${s}s`;
-  if (s < 3_600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3_600)}h`;
-}
-
-/**
- * §6.4's three renderings, which must not collapse, in one place so they cannot
- * drift apart between regions.
- *
- * **The `never` case is decided by the ABSENCE OF AN AGE rather than by the
- * status tag**, which is not a stylistic choice: `model.ts:75-85` defines a
- * never-read region as one that "has no age, and rendering one as `0ms` would be
- * the same lie ISC-477 guards against from the other side". Reading the null
- * back out is that definition used rather than restated, so a future change to
- * `regionAgeMs` cannot leave this function confidently printing `as of 0s` for a
- * region nothing ever read.
- *
- * `summary` is applied only in the `ok` case, and that is what keeps ISC-479
- * satisfiable: `no data` and `none running` are produced by different branches
- * and can never be spelled by the same code path.
- */
-function regionLine<T>(
-  label: string,
-  region: Region<T>,
-  now: number,
-  summary: (value: T) => string,
-): string {
-  const age = regionAgeMs(region, now);
-  // `no data` is reached two ways and both state the same fact: this region has
-  // no age. `regionAgeMs` returns `null` exactly for `never` (`model.ts:83-85`),
-  // so today the two are the same test — but they are written as two because
-  // they fail differently. Testing the RETURN keeps the line correct if `Region`
-  // ever grows a fourth status whose age is unknown; testing the STATUS is what
-  // narrows `region` for the branches below. Dropping either one costs a real
-  // thing: without the first, a future status renders `as of NaN`; without the
-  // second, this does not typecheck.
-  if (age === null || region.status === "never") return `${label} — no data`;
-  const asOf = `${label} — as of ${coarseAge(age)}`;
-  // ISC-478: the reason stands IN PLACE of the content. There is no branch here
-  // that can append it beside a retained value, because `Region.failed` carries
-  // no value to retain (`model.ts:47-56`) — the type does the enforcing and this
-  // function only has to not invent one.
-  if (region.status === "failed") return `${asOf} — refresh failed: ${region.reason}`;
-  return `${asOf} — ${summary(region.value)}`;
 }
 
 /**
@@ -335,38 +228,6 @@ function containerCell(present: boolean | null): string {
   return present ? "container up" : "no container";
 }
 
-/**
- * A fixed-width cell.
- *
- * `truncate-end` rather than `wrap`: a wrapped cell pushes every row below it
- * down and destroys the column alignment that is the entire reason an operator
- * can scan six workers in a glance. **The cost is real and is not hidden** — an
- * id longer than `ID_COL` loses characters, silently, which is the class of
- * thing §6.5 argues against. It is accepted here rather than solved because the
- * honest solution is the refusal ISC-485 specifies, and that criterion is open.
- */
-function Cell({
-  width,
-  color,
-  dimColor,
-  bold,
-  children,
-}: {
-  width: number;
-  color?: string | undefined;
-  dimColor?: boolean;
-  bold?: boolean;
-  children: string;
-}) {
-  return (
-    <Box width={width}>
-      <Text wrap="truncate-end" color={color} dimColor={dimColor} bold={bold}>
-        {children}
-      </Text>
-    </Box>
-  );
-}
-
 /** One worker: activity, phase, task, container — §6.2's row, minus what the model does not carry. */
 function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
   const p = usePalette();
@@ -380,9 +241,7 @@ function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
    */
   return (
     <Box>
-      <Text>{"  "}</Text>
-      <Text color={severity}>{p.on ? "●" : "*"}</Text>
-      <Text>{" "}</Text>
+      <Bullet color={severity} />
       {/* Never dropped: the id names the row, the activity cell IS the answer. */}
       <Cell width={ID_COL} bold={p.on}>{row.workerId}</Cell>
       <Cell width={ACTIVITY_COL} color={severity}>{activityCell(row)}</Cell>
@@ -486,53 +345,6 @@ function GitStripView({ region, now }: { region: Region<GitStrip>; now: number }
 }
 
 /**
- * A full-width rule, drawn with the character §6.5's degradation never has to
- * think about: it is one line of the frame's own width and it truncates to
- * nothing interesting.
- *
- * ASCII `-` when colour is off, box-drawing `─` when it is on. **This is the one
- * place the plain and coloured frames differ in TEXT rather than only in
- * escapes**, and it is deliberate: a rule is pure decoration, so a piped frame
- * that a grep or a diff reads is better off with the character that survives
- * every encoding, while the pane gets the one that looks like a rule. Nothing
- * downstream parses it — unlike the severity bullet, which carries meaning and
- * is therefore present in both.
- */
-function Rule({ width }: { width: number }) {
-  const p = usePalette();
-  return (
-    <Text dimColor={p.on}>{(p.on ? "─" : "-").repeat(Math.max(0, width))}</Text>
-  );
-}
-
-/** The floor refusal. Wraps rather than truncating — see {@link Fleet}. */
-function RefusalText({ children }: { children: string }) {
-  const p = usePalette();
-  return (
-    <Text color={p.alarm} bold={p.on}>
-      {children}
-    </Text>
-  );
-}
-
-/**
- * A region's header line: bold, and RED when that region's own refresh failed.
- *
- * The failure colour is on the heading rather than only in the reason text
- * because §6.4's requirement is that a stale or broken region be findable at a
- * glance. An operator scanning three headings should not have to read them to
- * see which one stopped working.
- */
-function RegionHeading({ text, failed }: { text: string; failed: boolean }) {
-  const p = usePalette();
-  return (
-    <Text wrap="truncate-end" bold={p.on} color={failed ? p.alarm : p.heading}>
-      {text}
-    </Text>
-  );
-}
-
-/**
  * The whole frame.
  *
  * `width={model.columns}` is on the root and nowhere else: it is the single
@@ -559,9 +371,7 @@ export function Fleet({ model }: { model: FleetModel }) {
    * they have to investigate. "Too narrow" would send them to the source.
    */
   if (model.columns < FLOOR_COLUMNS) {
-    return (
-      <RefusalText>{`pifleet monitor needs at least ${FLOOR_COLUMNS} columns; this pane has ${model.columns}.`}</RefusalText>
-    );
+    return <FloorRefusal floor={FLEET_FLOOR} have={model.columns} />;
   }
   const plan = planColumns(model.columns);
   return (

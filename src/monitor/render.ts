@@ -9,9 +9,18 @@
  *
  * Ink was the owner's decision on 2026-09-02, taken against the SRD's own
  * recommendation, and it is only cheap to unwind because of this file. So this
- * file stays small: one capture stream, one mount, one unmount. Every line of
- * layout lives in `views/fleet.tsx`, which a replacement would delete; every
- * line here is the twenty a replacement would rewrite.
+ * file stays small: one capture stream, one mount, one unmount, and one switch.
+ * Every line of layout lives under `views/` — `fleet.tsx`, `worker.tsx`,
+ * `history.tsx`, `report.tsx` and the `chrome.tsx` they share — all of which a
+ * replacement would delete; every line here is the twenty a replacement would
+ * rewrite.
+ *
+ * **The dispatch is the one thing that grew, and it grew by a switch rather than
+ * by a component.** §6.2's four views could have been one `<Monitor model>` that
+ * branched internally, which would have kept this file at its original length
+ * and moved the branch below the seam. It is here instead because the branch is
+ * on `model.view`, which is MODEL state, and a toolkit swap must be able to see
+ * which view it is reimplementing without reading a reconciler.
  *
  * ## Why `ink-testing-library` is NOT used, though the SRD's probe used it
  *
@@ -56,10 +65,15 @@
 
 import { EventEmitter } from "node:events";
 import { createElement } from "react";
+import type { ReactElement } from "react";
 import { render } from "ink";
 
 import type { FleetModel } from "./model.ts";
-import { COLOUR, Fleet, PLAIN, PaletteProvider } from "./views/fleet.tsx";
+import { COLOUR, PLAIN, PaletteProvider } from "./views/chrome.tsx";
+import { Fleet } from "./views/fleet.tsx";
+import { History } from "./views/history.tsx";
+import { RunReport } from "./views/report.tsx";
+import { Worker } from "./views/worker.tsx";
 
 /**
  * A stdout Ink can write to that is not a terminal.
@@ -87,7 +101,54 @@ class Capture extends EventEmitter {
 }
 
 /**
- * The fleet frame, as lines.
+ * THE DISPATCH — one view per `model.view.kind` (§6.2, D8).
+ *
+ * It is BEHIND `renderFleet` rather than beside it. A second exported entry
+ * point — `renderWorker(model)` — was the obvious shape and is the wrong one.
+ * `model.view` is a discriminated union precisely so that a worker view without
+ * a selection is not representable (`model.ts:343-355`), and two doors would
+ * hand that guarantee back: a caller holding a `{kind: "worker"}` model could
+ * call `renderFleet` and get a fleet frame for a selection nobody asked to
+ * leave. **One model, one view field, one function — the union decides, not the
+ * call site.**
+ *
+ * `switch` with no `default`: `ViewState` is exhausted, so this function's
+ * declared return type holds only while every arm is covered, and a fifth view
+ * fails the typecheck HERE rather than silently rendering the fleet. A
+ * `default` would install exactly that silence and would look like robustness.
+ *
+ * Each view is handed its OWN region and the selection out of `view`, never the
+ * whole model — **ISC-503 expressed as a parameter list rather than as a rule
+ * somebody has to remember.** `Fleet` takes the model because view 1's content
+ * IS three regions at once (runs, containers, git); the other three take one
+ * region each and are structurally unable to reach a second.
+ */
+function viewElement(model: FleetModel): ReactElement {
+  const view = model.view;
+  const now = model.now;
+  const columns = model.columns;
+  switch (view.kind) {
+    case "fleet":
+      return createElement(Fleet, { model });
+    case "worker":
+      return createElement(Worker, { detail: model.detail, selection: view, now, columns });
+    case "history":
+      return createElement(History, { history: model.history, now, columns });
+    case "report":
+      return createElement(RunReport, { report: model.report, selection: view, now, columns });
+  }
+}
+
+/**
+ * The frame, as lines.
+ *
+ * **The NAME stays `renderFleet` although it now renders four views**, and that
+ * is a deliberate trade rather than an oversight. D2's seam is about the SHAPE
+ * — `(model) => string[]`, with Ink entirely below it — and every assertion in
+ * `monitor-render.test.ts` names this function. A rename would touch all of
+ * them to prove nothing, at exactly the moment three new views land and a
+ * readable diff is worth most. The cost is a name narrower than its function,
+ * recorded here so the next reader does not mistake it for a missing dispatch.
  *
  * Mount, read, unmount — in that order, and the order is not incidental.
  * `unmount()` writes a final frame of its own, so reading after it returns the
@@ -130,7 +191,7 @@ export function renderFleet(model: FleetModel, opts?: { readonly colour?: boolea
     createElement(
       PaletteProvider,
       { value: opts?.colour === true ? COLOUR : PLAIN },
-      createElement(Fleet, { model }),
+      viewElement(model),
     ),
     {
       stdout: stdout as unknown as NodeJS.WriteStream,
