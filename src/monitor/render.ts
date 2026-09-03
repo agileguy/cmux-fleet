@@ -59,7 +59,7 @@ import { createElement } from "react";
 import { render } from "ink";
 
 import type { FleetModel } from "./model.ts";
-import { Fleet } from "./views/fleet.tsx";
+import { COLOUR, Fleet, PLAIN, PaletteProvider } from "./views/fleet.tsx";
 
 /**
  * A stdout Ink can write to that is not a terminal.
@@ -106,16 +106,41 @@ class Capture extends EventEmitter {
  * runtime state; a caller that wants to survive it can catch a named error,
  * which it cannot do with an empty string.
  */
-export function renderFleet(model: FleetModel): string[] {
+export function renderFleet(model: FleetModel, opts?: { readonly colour?: boolean }): string[] {
   const stdout = new Capture(model.columns);
-  const instance = render(createElement(Fleet, { model }), {
-    stdout: stdout as unknown as NodeJS.WriteStream,
-    stderr: stdout as unknown as NodeJS.WriteStream,
-    stdin: new EventEmitter() as unknown as NodeJS.ReadStream,
-    debug: true,
-    exitOnCtrlC: false,
-    patchConsole: false,
-  });
+  /*
+   * COLOUR IS OPT-IN, and the default is what every test in this design
+   * compares against.
+   *
+   * **Two independent gates, and both must be open.** This flag decides whether
+   * the components set `color` props at all; `chalk`'s own level — computed
+   * once from the real `process.stdout` when it is imported — decides whether
+   * those props produce SGR escapes. In a pane both are open and the frame is
+   * coloured; piped or redirected, chalk's gate closes on its own and the frame
+   * is plain text a grep can read, with no flag needed. A capture stream that
+   * declared itself a TTY was tried and does nothing: chalk is not consulted
+   * per-stream, so the honest mechanism is the ambient one every CLI uses. Ink emits SGR escapes inline, so a coloured frame turns
+   * `toContain("wrote 11m ago")` into a comparison against
+   * `\x1b[32mwrote 11m ago\x1b[39m`. One component tree produces both, so the
+   * painted frame cannot drift from the asserted one — what differs between
+   * them is escapes and nothing else, which is why the severity bullet is
+   * present in the plain frame too rather than appearing only when styled.
+   */
+  const instance = render(
+    createElement(
+      PaletteProvider,
+      { value: opts?.colour === true ? COLOUR : PLAIN },
+      createElement(Fleet, { model }),
+    ),
+    {
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stderr: stdout as unknown as NodeJS.WriteStream,
+      stdin: new EventEmitter() as unknown as NodeJS.ReadStream,
+      debug: true,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
+  );
   const frame = stdout.lastFrame;
   instance.unmount();
   instance.cleanup();

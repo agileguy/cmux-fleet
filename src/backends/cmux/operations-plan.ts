@@ -421,22 +421,6 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
       // the one that starts.
       split: null,
     },
-    ...(second === undefined
-      ? []
-      : [
-          {
-            title: "ticketing",
-            /*
-             * The same three-stage ladder the observer pane uses, for this
-             * pane's own worker and its own run. See `second` above for why it
-             * runs its own `up` rather than sharing one.
-             */
-            command: `${envPreamble()} ${ladder(second)}`,
-            // LEFT of the observer, which puts ticketing on the left of the top
-            // row and leaves the observer on the right.
-            split: "left" as const,
-          },
-        ]),
     {
       title: "monitor",
       /*
@@ -483,16 +467,55 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
        * is why it keeps the name instead of being retired.
        */
       command: `${monitorPaneCommand(repoRoot, watchDir, poll)}; exec $SHELL -i`,
-      // DOWN off the pane before it — ticketing when there are two agent panes,
-      // the observer when there is only one. Either way it lands in the bottom
-      // of the LEFT column, which is where `fleet-status` was.
-      //
-      // The observer keeps the FULL RIGHT COLUMN as a result, where it used to
-      // share it with `git-watch`. That is a gain rather than a compromise:
-      // that pane is Pi's own interface and it is the one pane here whose
-      // content is unbounded.
+      /*
+       * DOWN off the OBSERVER, and SECOND in creation order — which is what
+       * makes it span the WHOLE bottom rather than a column of it.
+       *
+       * **The first split decides the major axis, and that is the entire
+       * reason this pane is created before `ticketing` rather than after it.**
+       * Built third, it could only ever split one column: by then the surface
+       * has already been divided left/right and there is no surface left that
+       * spans both. Built second, it splits the untouched workspace
+       * horizontally, `ticketing` then divides the TOP half, and the monitor
+       * keeps the full width.
+       *
+       *   +---------------+---------------+
+       *   |   ticketing   |   observer    |
+       *   +-------------------------------+
+       *   |            monitor            |
+       *   +-------------------------------+
+       *
+       * The cost is that pane order is no longer reading order, which is why
+       * `operations-plan.test.ts` resolves panes BY TITLE — a title is what a
+       * pane IS, its index is where it happened to land.
+       */
       split: "down",
     },
+    ...(second === undefined
+      ? []
+      : [
+          {
+            title: "ticketing",
+            /*
+             * The same three-stage ladder the observer pane uses, for this
+             * pane's own worker and its own run. See `second` above for why it
+             * runs its own `up` rather than sharing one.
+             */
+            command: `${envPreamble()} ${ladder(second)}`,
+            /*
+             * LEFT of the OBSERVER — pane index 0 — and it cannot use the
+             * default anchor. The pane before it is now the monitor, and
+             * splitting that would put ticketing in the bottom row.
+             *
+             * **This revives `splitFrom`, which the pane merge had left without
+             * a caller.** It existed so `git-watch` could reach the observer
+             * rather than its predecessor; the same need reappears here for the
+             * same structural reason, one pane later.
+             */
+            split: "left" as const,
+            splitFrom: 0,
+          },
+        ]),
   ];
 }
 

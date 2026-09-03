@@ -129,8 +129,32 @@ const healthy: FleetModel = {
  * count and reports the id when it is wrong.
  */
 function rowFor(lines: readonly string[], workerId: string): string {
-  const hits = lines.filter((l) => l.trimStart().startsWith(`${workerId} `));
+  /*
+   * The row now opens with a severity bullet — `*` plain, `●` coloured — so the
+   * id is no longer the first token. Matching on the id ANYWHERE in the line
+   * would be looser than this file wants (a task id could contain one), so the
+   * bullet is stripped explicitly and the id must still be the first thing
+   * after it. That keeps the helper as strict as it was while surviving the
+   * one glyph that was added.
+   */
+  const hits = lines.filter((l) =>
+    l.trimStart().replace(/^[*●]\s*/, "").startsWith(`${workerId} `),
+  );
   expect({ workerId, matches: hits.length }).toEqual({ workerId, matches: 1 });
+  return hits[0] as string;
+}
+
+/**
+ * A region's heading line, by NAME rather than by index.
+ *
+ * `lines[0]` was the fleet heading until a full-width rule was drawn above it,
+ * at which point five tests started asserting against a row of dashes. An index
+ * is where a line happened to land; the name is what it is — the same argument
+ * `operations-plan.test.ts` makes for resolving panes by title.
+ */
+function headingFor(lines: readonly string[], region: string): string {
+  const hits = lines.filter((l) => l.startsWith(`${region} `) || l === region);
+  expect({ region, matches: hits.length }).toEqual({ region, matches: 1 });
   return hits[0] as string;
 }
 
@@ -318,8 +342,12 @@ describe("ISC-478: a failed region's reason renders in place of its content", ()
 
     // No worker ROW. Compared against the healthy frame so the assertion cannot
     // pass by the rows never having rendered at all.
-    const rows = (lines: readonly string[]) =>
-      lines.filter((l) => l.startsWith("    ") && /^\s+\S+\s{2,}/.test(l));
+    // A worker ROW is one that opens with the severity bullet — `*` plain,
+    // `●` coloured. Recognising rows by their four-space indent stopped working
+    // when the bullet was added, and the bullet is the better marker anyway: it
+    // is on every worker row and on nothing else, where the indent was also on
+    // continuation lines.
+    const rows = (lines: readonly string[]) => lines.filter((l) => /^\s*[*●]\s+\S/.test(l));
     expect(rows(renderFleet(healthy)).length).toBe(6);
     expect(rows(broken)).toEqual([]);
 
@@ -333,7 +361,7 @@ describe("ISC-478: a failed region's reason renders in place of its content", ()
 
   test("the failed region still carries its age, from when the read failed", () => {
     const broken = renderFleet({ ...healthy, runs: failed(REASON, NOW - 47_000) });
-    expect(broken[0]).toContain("as of 47s");
+    expect(headingFor(broken, "fleet")).toContain("as of 47s");
   });
 
   test("a failed docker read says so without blanking the fleet", () => {
@@ -368,8 +396,8 @@ describe("ISC-478: a failed region's reason renders in place of its content", ()
  */
 describe("ISC-479: never-read renders differently from read-and-empty", () => {
   test("the runs region distinguishes no data from no live runs", () => {
-    const neverRead = renderFleet({ ...healthy, runs: never() })[0];
-    const empty = renderFleet({ ...healthy, runs: ok([], NOW - 2_000) })[0];
+    const neverRead = headingFor(renderFleet({ ...healthy, runs: never() }), "fleet");
+    const empty = headingFor(renderFleet({ ...healthy, runs: ok([], NOW - 2_000) }), "fleet");
     expect(neverRead).toBe("fleet — no data");
     expect(empty).toBe("fleet — as of 2s — no live runs");
     expect(neverRead).not.toBe(empty);
@@ -389,7 +417,7 @@ describe("ISC-479: never-read renders differently from read-and-empty", () => {
    * must be absent entirely, not present with a zero.
    */
   test("a never-read region carries no age at all", () => {
-    expect(renderFleet({ ...healthy, runs: never() })[0]).not.toContain("as of");
+    expect(headingFor(renderFleet({ ...healthy, runs: never() }), "fleet")).not.toContain("as of");
   });
 });
 
@@ -405,7 +433,7 @@ describe("ISC-479: never-read renders differently from read-and-empty", () => {
 describe("ISC-477: every region shows an age derived from its own read", () => {
   test("three regions read at three times show three different ages", () => {
     const first = renderFleet(healthy);
-    expect(first[0]).toContain("as of 2s");
+    expect(headingFor(first, "fleet")).toContain("as of 2s");
     expect(first.find((l) => l.startsWith("containers"))).toContain("as of 12s");
     expect(first.find((l) => l.startsWith("git"))).toContain("as of 5s");
   });
@@ -415,13 +443,14 @@ describe("ISC-477: every region shows an age derived from its own read", () => {
     // paint time would be `0s` in both frames, which is the implementation a
     // reasonable person writes first and the reason this is asserted.
     const later = renderFleet({ ...healthy, now: NOW + 60_000 });
-    expect(later[0]).toContain("as of 1m");
+    expect(headingFor(later, "fleet")).toContain("as of 1m");
     expect(later.find((l) => l.startsWith("containers"))).toContain("as of 1m");
     expect(later.find((l) => l.startsWith("git"))).toContain("as of 1m");
   });
 
   test("the age coarsens the way `ago` does, and never reads as a bug", () => {
-    const at = (ms: number) => renderFleet({ ...healthy, runs: ok(RUNS, NOW - ms) })[0];
+    const at = (ms: number) =>
+      headingFor(renderFleet({ ...healthy, runs: ok(RUNS, NOW - ms) }), "fleet");
     expect(at(0)).toContain("as of 0s");
     expect(at(59_000)).toContain("as of 59s");
     expect(at(60_000)).toContain("as of 1m");
@@ -443,7 +472,9 @@ describe("ISC-477: every region shows an age derived from its own read", () => {
     // A region stamped in the FUTURE is a host clock skew, and `-3s` reads as a
     // bug in pifleet rather than as a skew — `status.ts:31-33` clamps for the
     // same reason and `regionAgeMs` already floors at zero (`model.ts:84`).
-    expect(renderFleet({ ...healthy, runs: ok(RUNS, NOW + 3_000) })[0]).toContain("as of 0s");
+    expect(headingFor(renderFleet({ ...healthy, runs: ok(RUNS, NOW + 3_000) }), "fleet")).toContain(
+      "as of 0s",
+    );
   });
 });
 
@@ -507,17 +538,21 @@ describe("ISC-486 (display half): the git strip keeps what the incumbent showed"
  */
 describe("the frame, pinned", () => {
   test("a two-run fleet renders exactly these lines", () => {
+    const RULE = "-".repeat(100);
     expect(renderFleet({ ...healthy, columns: 100 })).toEqual([
+      RULE,
       "fleet — as of 2s — 2 live runs",
       "  run 2026-09-02T14-43-27Z-3906 — 4 workers",
-      "    eng-1   not measured (rpc)  phase running     task t-17   container up",
-      "    eng-2   no transcript       phase idle        no task     container up",
-      "    eng-3   wrote 11m ago       phase idle        task t-18   container up",
-      "    eng-4   wrote 4s ago        phase idle        task t-19   container up",
+      "  * eng-1   not measured (rpc)  phase running     task t-17   container up",
+      "  * eng-2   no transcript       phase idle        no task     container up",
+      "  * eng-3   wrote 11m ago       phase idle        task t-18   container up",
+      "  * eng-4   wrote 4s ago        phase idle        task t-19   container up",
       "  run 2026-09-02T09-11-02Z-1180 — 2 workers",
-      "    eng-5   no writes yet       phase idle        no task     container up",
-      "    rev-1   container gone      phase running     task t-9    no container",
+      "  * eng-5   no writes yet       phase idle        no task     container up",
+      "  * rev-1   container gone      phase running     task t-9    no container",
+      RULE,
       "containers — as of 12s — 2 seen",
+      RULE,
       "git — as of 5s — ## fleet-monitor...origin/fleet-monitor [ahead 2] — /Users/op/repos/cmux-fleet",
       "   M src/monitor/render.ts",
       "  ?? src/monitor/views/fleet.tsx",
@@ -617,7 +652,10 @@ describe("ISC-484: the ladder degrades in a stated order, never at Ink's discret
       // `quiet` reaches the frame as an AGE, never as a verdict word (§6.2).
       expect({ columns, hasAge: row.includes("wrote 11m ago") }).toEqual({ columns, hasAge: true });
       // …and the region's own age, which is what makes the row trustworthy.
-      expect({ columns, stale: lines[0]?.includes("as of") }).toEqual({ columns, stale: true });
+      expect({ columns, stale: headingFor(lines, "fleet").includes("as of") }).toEqual({
+        columns,
+        stale: true,
+      });
     }
   });
 

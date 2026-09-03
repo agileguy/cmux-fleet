@@ -67,28 +67,37 @@ describe("the pane set", () => {
   test("is exactly three panes, in creation order", () => {
     // Order is contract: pane 1 consumes the workspace's initial surface and is
     // where the operator lands.
-    expect(plan().map((p) => p.title)).toEqual(["observer", "ticketing", "monitor"]);
+    expect(plan().map((p) => p.title)).toEqual(["observer", "monitor", "ticketing"]);
   });
 
-  test("the observer keeps the full right column; the monitor sits under ticketing", () => {
+  test("the monitor spans the WHOLE bottom, and the agents share the top", () => {
     /*
-     * The shape after the pane merge:
+     * The requested shape:
      *
      *   +---------------+---------------+
-     *   |   ticketing   |               |
-     *   +---------------+   observer    |
-     *   |    monitor    |               |
-     *   +---------------+---------------+
+     *   |   ticketing   |   observer    |
+     *   +-------------------------------+
+     *   |            monitor            |
+     *   +-------------------------------+
      *
-     * The observer GAINS the full right column, where it used to share it with
-     * `git-watch`. That is a gain rather than a compromise: it is Pi's own
-     * interface and the one pane here whose content is unbounded.
+     * **Creation order is the whole of why this works, and it is not reading
+     * order.** The FIRST split decides the major axis. The monitor is built
+     * SECOND so that split is `down` and the bottom spans the full width;
+     * `ticketing` then divides the top half. Built third — reading order — the
+     * monitor could only ever split one column, because by then the surface is
+     * already divided left/right and nothing spans both. That was the first
+     * version and it put the monitor in the bottom-left quarter.
      *
-     * `null` then `left` then `down` is what produces it. The `down` splits the
-     * PREVIOUS pane — ticketing — which is what keeps the monitor inside the
-     * left column instead of starting a third row across the whole workspace.
+     * A directions-only assertion cannot catch it: `[null, "down", "left"]` and
+     * `[null, "left", "down"]` are the same three values in a different order
+     * and produce completely different consoles, which is why the ANCHORS are
+     * asserted in `operations-workspace.test.ts` as well.
      */
-    expect(plan().map((p) => p.split)).toEqual([null, "left", "down"]);
+    expect(plan().map((p) => p.title)).toEqual(["observer", "monitor", "ticketing"]);
+    expect(plan().map((p) => p.split)).toEqual([null, "down", "left"]);
+    // `ticketing` cannot use the default anchor: the pane before it is the
+    // monitor, and splitting that would put it in the bottom row.
+    expect(paneNamed("ticketing").splitFrom).toBe(0);
   });
 
   test("exactly one pane is split off nothing — the initial surface is consumed once", () => {

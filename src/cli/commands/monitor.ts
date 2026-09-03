@@ -65,6 +65,7 @@ export function register(program: Command): void {
     .option("--once", "print one frame and exit")
     .option("--poll <seconds>", "seconds between repaints (reads run on their own clocks)", "1")
     .option("--columns <n>", "frame width; defaults to the terminal's")
+    .option("--no-colour", "plain text even on a terminal")
     /*
      * `--repo`, NOT `--watch-dir`, and the rename is forced by a criterion
      * rather than by taste.
@@ -81,7 +82,7 @@ export function register(program: Command): void {
      * wrong trade; `--repo` is also the more accurate name.
      */
     .option("--repo <path>", "repository the git strip reports on", process.cwd())
-    .action(async (opts: { once?: boolean; poll: string; columns?: string; repo: string }) => {
+    .action(async (opts: { once?: boolean; poll: string; columns?: string; repo: string; colour?: boolean }) => {
       /*
        * `process.stdout.columns` is `undefined` when stdout is not a terminal —
        * a pipe, a test, a CI log. 100 is the fallback and it is the same number
@@ -93,9 +94,20 @@ export function register(program: Command): void {
       // three clocks. See the header.
       const pollMs = Math.max(250, Number(opts.poll) * 1_000);
 
+      /*
+       * Colour when stdout is a terminal, and off when it is not — the
+       * `isTTY` convention every well-behaved CLI follows, so a piped or
+       * redirected frame is plain text a grep can read. `--no-colour` forces it
+       * off for a terminal that renders the palette badly; there is
+       * deliberately no flag to force it ON, because the only reason to want
+       * escapes in a pipe is to look at them, and `--once` into a terminal
+       * already does that.
+       */
+      const colour = opts.colour !== false && process.stdout.isTTY === true;
+
       if (opts.once === true) {
         const model = await composeFleet({ watchDir: opts.repo, columns });
-        process.stdout.write(`${renderFleet(model).join("\n")}\n`);
+        process.stdout.write(`${renderFleet(model, { colour }).join("\n")}\n`);
         return;
       }
 
@@ -142,6 +154,7 @@ export function register(program: Command): void {
             nowEpochMs: Date.now(),
             columns,
           }),
+          { colour },
         ).join("\n");
         if (next === last) return;
         try {

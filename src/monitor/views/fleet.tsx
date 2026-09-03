@@ -50,9 +50,73 @@
  */
 
 import { Box, Text } from "ink";
+import { createContext, useContext } from "react";
 
 import { regionAgeMs } from "../model.ts";
 import type { FleetModel, GitStrip, Region, RunRow, WorkerRow } from "../model.ts";
+
+/**
+ * COLOUR IS OFF BY DEFAULT AND THAT IS NOT A STYLE PREFERENCE.
+ *
+ * Every byte-pinned assertion in `monitor-render.test.ts` compares plain text.
+ * Ink emits SGR escapes inline when a `color` prop is set, so a coloured frame
+ * turns `expect(row).toContain("wrote 11m ago")` into a comparison against
+ * `\x1b[32mwrote 11m ago\x1b[39m` — every one of those tests would have to be
+ * rewritten against escape codes, which is the "a component tree is not
+ * pinnable" problem §6.6.1 refuted, arriving by a different route.
+ *
+ * So the palette is a CONTEXT with a plain default, and only `renderFleet`'s
+ * caller turns it on. Tests get text; the pane gets colour; one component tree
+ * produces both, so a styled frame cannot drift from the asserted one.
+ */
+export interface Palette {
+  readonly on: boolean;
+  readonly dim: string | undefined;
+  readonly heading: string | undefined;
+  readonly alarm: string | undefined;
+  readonly warn: string | undefined;
+  readonly live: string | undefined;
+  readonly quiet: string | undefined;
+}
+
+export const PLAIN: Palette = {
+  on: false,
+  dim: undefined,
+  heading: undefined,
+  alarm: undefined,
+  warn: undefined,
+  live: undefined,
+  quiet: undefined,
+};
+
+/**
+ * The pane palette.
+ *
+ * Chosen against a DARK terminal, which is what the console runs in, and kept
+ * to the eight ANSI names rather than 256-colour or truecolour so it inherits
+ * whatever theme the operator has configured instead of fighting it.
+ *
+ * The assignment is by SEVERITY and not by category, which is the point:
+ * `container-gone` is red because it is the one row that always means
+ * something is wrong; `no-transcript` is yellow because it means "has never
+ * spoken", which needs a look but is not itself a fault (Q1(b) — it must never
+ * be read as "stuck"); `active` is green; everything a monitor cannot judge is
+ * grey. An operator scanning the pane should be able to find the red without
+ * reading a word.
+ */
+export const COLOUR: Palette = {
+  on: true,
+  dim: "gray",
+  heading: "cyan",
+  alarm: "red",
+  warn: "yellow",
+  live: "green",
+  quiet: "white",
+};
+
+const PaletteContext = createContext<Palette>(PLAIN);
+export const PaletteProvider = PaletteContext.Provider;
+const usePalette = (): Palette => useContext(PaletteContext);
 
 /**
  * Column widths, fixed so that two frames of the same fleet are comparable
@@ -250,6 +314,22 @@ function activityCell(row: WorkerRow): string {
  * finding this monitor has on every worker at startup**, which would teach the
  * operator to ignore it by the second morning.
  */
+/** Severity colour for one ladder state. See {@link COLOUR}. */
+function activityColour(activity: WorkerRow["activity"], p: Palette): string | undefined {
+  switch (activity) {
+    case "container-gone":
+      return p.alarm;
+    case "no-transcript":
+      return p.warn;
+    case "active":
+      return p.live;
+    case "quiet":
+      return p.quiet;
+    case "rpc":
+      return p.dim;
+  }
+}
+
 function containerCell(present: boolean | null): string {
   if (present === null) return "container not checked";
   return present ? "container up" : "no container";
@@ -265,28 +345,63 @@ function containerCell(present: boolean | null): string {
  * thing §6.5 argues against. It is accepted here rather than solved because the
  * honest solution is the refusal ISC-485 specifies, and that criterion is open.
  */
-function Cell({ width, children }: { width: number; children: string }) {
+function Cell({
+  width,
+  color,
+  dimColor,
+  bold,
+  children,
+}: {
+  width: number;
+  color?: string | undefined;
+  dimColor?: boolean;
+  bold?: boolean;
+  children: string;
+}) {
   return (
     <Box width={width}>
-      <Text wrap="truncate-end">{children}</Text>
+      <Text wrap="truncate-end" color={color} dimColor={dimColor} bold={bold}>
+        {children}
+      </Text>
     </Box>
   );
 }
 
 /** One worker: activity, phase, task, container — §6.2's row, minus what the model does not carry. */
 function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
+  const p = usePalette();
+  const severity = activityColour(row.activity, p);
+  /*
+   * The BULLET is the only glyph added to the row, and it earns its column by
+   * carrying the severity where the eye lands first. It is a plain `*` when
+   * colour is off so that a piped frame and a painted one differ in escapes
+   * and nothing else — a monitor whose text content changes with its styling
+   * would make every assertion in this file a claim about the wrong frame.
+   */
   return (
     <Box>
-      <Text>{INDENT}</Text>
+      <Text>{"  "}</Text>
+      <Text color={severity}>{p.on ? "●" : "*"}</Text>
+      <Text>{" "}</Text>
       {/* Never dropped: the id names the row, the activity cell IS the answer. */}
-      <Cell width={ID_COL}>{row.workerId}</Cell>
-      <Cell width={ACTIVITY_COL}>{activityCell(row)}</Cell>
-      {plan.showPhase ? <Cell width={PHASE_COL}>{`phase ${row.phase}`}</Cell> : null}
+      <Cell width={ID_COL} bold={p.on}>{row.workerId}</Cell>
+      <Cell width={ACTIVITY_COL} color={severity}>{activityCell(row)}</Cell>
+      {plan.showPhase ? (
+        <Cell width={PHASE_COL} dimColor={p.on}>{`phase ${row.phase}`}</Cell>
+      ) : null}
       {plan.showTask ? (
-        <Cell width={TASK_COL}>{row.taskId === null ? "no task" : `task ${row.taskId}`}</Cell>
+        <Cell width={TASK_COL} dimColor={p.on}>
+          {row.taskId === null ? "no task" : `task ${row.taskId}`}
+        </Cell>
       ) : null}
       {plan.showContainer ? (
-        <Text wrap="truncate-end">{containerCell(row.containerPresent)}</Text>
+        <Text
+          wrap="truncate-end"
+          color={row.containerPresent === false ? p.alarm : undefined}
+          dimColor={p.on && row.containerPresent !== false}
+        >
+          {containerCell(row.containerPresent)}
+        </Text>
       ) : null}
     </Box>
   );
@@ -300,6 +415,7 @@ function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
  * suffix is only worth the ambiguity when it is paid for six times.
  */
 function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
+  const p = usePalette();
   const n = run.workers.length;
   /*
    * The SUFFIX is the last hyphen-delimited segment — `e533` from
@@ -311,7 +427,9 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
   const label = plan.runIdFull ? run.runId : (run.runId.split("-").pop() ?? run.runId);
   return (
     <Box flexDirection="column">
-      <Text wrap="truncate-end">{`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}</Text>
+      <Text wrap="truncate-end" color={p.heading}>
+        {`  run ${label} — ${n} worker${n === 1 ? "" : "s"}`}
+      </Text>
       {run.workers.map((w) => (
         <WorkerLine key={w.workerId} row={w} plan={plan} />
       ))}
@@ -335,13 +453,16 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
  * that rendered nothing would be indistinguishable from one that failed to read.
  */
 function GitStripView({ region, now }: { region: Region<GitStrip>; now: number }) {
+  const p = usePalette();
   const head = regionLine(
     "git",
     region,
     now,
     (g) => `${g.branchLine} — ${g.watchDir}`,
   );
-  if (region.status !== "ok") return <Text>{head}</Text>;
+  if (region.status !== "ok") {
+    return <RegionHeading text={head} failed={region.status === "failed"} />;
+  }
   const g = region.value;
   const shown = g.commitsExpanded ? g.commitLines : g.statusLines;
   const hidden = g.commitsExpanded
@@ -349,16 +470,65 @@ function GitStripView({ region, now }: { region: Region<GitStrip>; now: number }
     : `${g.commitLines.length} commit${g.commitLines.length === 1 ? "" : "s"}`;
   return (
     <Box flexDirection="column">
-      <Text wrap="truncate-end">{head}</Text>
+      <RegionHeading text={head} failed={false} />
       {shown.length === 0 ? (
-        <Text>{`  ${g.commitsExpanded ? "no commits" : "clean"}`}</Text>
+        <Text color={p.live}>{`  ${g.commitsExpanded ? "no commits" : "clean"}`}</Text>
       ) : (
         shown.map((line) => (
-          <Text key={line} wrap="truncate-end">{`  ${line}`}</Text>
+          <Text key={line} wrap="truncate-end" color={g.commitsExpanded ? p.dim : p.warn}>
+            {`  ${line}`}
+          </Text>
         ))
       )}
-      <Text>{`  [c] ${hidden}`}</Text>
+      <Text dimColor={p.on}>{`  [c] ${hidden}`}</Text>
     </Box>
+  );
+}
+
+/**
+ * A full-width rule, drawn with the character §6.5's degradation never has to
+ * think about: it is one line of the frame's own width and it truncates to
+ * nothing interesting.
+ *
+ * ASCII `-` when colour is off, box-drawing `─` when it is on. **This is the one
+ * place the plain and coloured frames differ in TEXT rather than only in
+ * escapes**, and it is deliberate: a rule is pure decoration, so a piped frame
+ * that a grep or a diff reads is better off with the character that survives
+ * every encoding, while the pane gets the one that looks like a rule. Nothing
+ * downstream parses it — unlike the severity bullet, which carries meaning and
+ * is therefore present in both.
+ */
+function Rule({ width }: { width: number }) {
+  const p = usePalette();
+  return (
+    <Text dimColor={p.on}>{(p.on ? "─" : "-").repeat(Math.max(0, width))}</Text>
+  );
+}
+
+/** The floor refusal. Wraps rather than truncating — see {@link Fleet}. */
+function RefusalText({ children }: { children: string }) {
+  const p = usePalette();
+  return (
+    <Text color={p.alarm} bold={p.on}>
+      {children}
+    </Text>
+  );
+}
+
+/**
+ * A region's header line: bold, and RED when that region's own refresh failed.
+ *
+ * The failure colour is on the heading rather than only in the reason text
+ * because §6.4's requirement is that a stale or broken region be findable at a
+ * glance. An operator scanning three headings should not have to read them to
+ * see which one stopped working.
+ */
+function RegionHeading({ text, failed }: { text: string; failed: boolean }) {
+  const p = usePalette();
+  return (
+    <Text wrap="truncate-end" bold={p.on} color={failed ? p.alarm : p.heading}>
+      {text}
+    </Text>
   );
 }
 
@@ -390,25 +560,30 @@ export function Fleet({ model }: { model: FleetModel }) {
    */
   if (model.columns < FLOOR_COLUMNS) {
     return (
-      <Text>{`pifleet monitor needs at least ${FLOOR_COLUMNS} columns; this pane has ${model.columns}.`}</Text>
+      <RefusalText>{`pifleet monitor needs at least ${FLOOR_COLUMNS} columns; this pane has ${model.columns}.`}</RefusalText>
     );
   }
   const plan = planColumns(model.columns);
   return (
     <Box flexDirection="column" width={model.columns}>
-      <Text wrap="truncate-end">
-        {regionLine("fleet", model.runs, model.now, (runs) =>
+      <Rule width={model.columns} />
+      <RegionHeading
+        text={regionLine("fleet", model.runs, model.now, (runs) =>
           runs.length === 0 ? "no live runs" : `${runs.length} live run${runs.length === 1 ? "" : "s"}`,
         )}
-      </Text>
+        failed={model.runs.status === "failed"}
+      />
       {model.runs.status === "ok"
         ? model.runs.value.map((run) => <RunBlock key={run.runId} run={run} plan={plan} />)
         : null}
-      <Text wrap="truncate-end">
-        {regionLine("containers", model.containers, model.now, (names) =>
+      <Rule width={model.columns} />
+      <RegionHeading
+        text={regionLine("containers", model.containers, model.now, (names) =>
           names.length === 0 ? "none running" : `${names.length} seen`,
         )}
-      </Text>
+        failed={model.containers.status === "failed"}
+      />
+      <Rule width={model.columns} />
       <GitStripView region={model.git} now={model.now} />
     </Box>
   );

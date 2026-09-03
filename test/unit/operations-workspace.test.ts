@@ -233,24 +233,25 @@ describe("creating the workspace", () => {
     expect(respawns.map(surfaceOf)).toEqual(["surf-0", "surf-1", "surf-2"]);
 
     const splits = calls.filter((c) => verb(["cmux", ...c]) === "new-split");
-    expect(splits.map((c) => c[1])).toEqual(["left", "down"]);
+    expect(splits.map((c) => c[1])).toEqual(["down", "left"]);
     /*
      * THE ANCHORS ARE THE WHOLE TEST.
      *
-     *   left  off surf-0 — ticketing lands to the LEFT of the observer
-     *   down  off surf-1 — the monitor lands under TICKETING, the left column
+     *   down  off surf-0 — the monitor takes the WHOLE bottom
+     *   left  off surf-0 — ticketing divides what is left, the TOP half
      *
-     * **`splitFrom` no longer has a user, and that is the pane merge showing
-     * up here.** It existed for exactly one pane: `git-watch` had to anchor on
-     * surf-0 rather than on the pane before it, or it would have stacked a
-     * third row inside the left column instead of landing under the observer.
-     * With `fleet-status` and `git-watch` merged into one pane there is no
-     * second bottom pane to place, so every split now anchors on its
-     * predecessor. The field is still on the type and still honoured; what is
-     * gone is the caller. Recorded here rather than noticed later as an unused
-     * branch of unclear purpose.
+     * **Both anchor on surf-0, and the second one is why `splitFrom` exists.**
+     * The pane before `ticketing` is the monitor; splitting that would put the
+     * ticketing agent in the bottom row. `splitFrom` briefly had no caller when
+     * the two watcher panes merged, and the same structural need reappeared one
+     * pane later for the same reason — a pane that must reach the ORIGINAL
+     * surface rather than its predecessor.
+     *
+     * The ORDER of the two directions is the layout. `["left", "down"]` is the
+     * same two values and produces a monitor in the bottom-left quarter, which
+     * is what this console shipped with for one recreate.
      */
-    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-1"]);
+    expect(splits.map(surfaceOf)).toEqual(["surf-0", "surf-0"]);
   });
 
   test("each pane is renamed before its shell is replaced", async () => {
@@ -259,7 +260,7 @@ describe("creating the workspace", () => {
     const titles = calls
       .filter((c) => verb(["cmux", ...c]) === "rename-tab")
       .map((c) => c[c.indexOf("--title") + 1]);
-    expect(titles).toEqual(["observer", "ticketing", "monitor"]);
+    expect(titles).toEqual(["observer", "monitor", "ticketing"]);
   });
 
   test("each pane's command reaches the pane that was created for it", async () => {
@@ -275,15 +276,17 @@ describe("creating the workspace", () => {
     // One worker per agent pane, each with its own `up` — two attended panes
     // are two runs, because --attach-here hands over one process's terminal.
     expect(commands[0]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[0]}'`);
-    expect(commands[1]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[1]}'`);
+    // Index 2, not 1: the monitor is created SECOND so its `down` split is the
+    // one that decides the major axis and gives it the full-width bottom.
+    expect(commands[2]).toContain(`'--workers' '${DEFAULT_OPERATIONS_WORKERS[1]}'`);
     /*
      * The third pane is the monitor, and both halves of what it replaced are
      * asserted: it is the monitor command, and it still reports on the
      * INVOCATION directory rather than on cmux-fleet — which was `git-watch`'s
      * most easily-broken property and is now carried by `--repo`.
      */
-    expect(commands[2]).toContain("'monitor'");
-    expect(commands[2]).toContain(`'--repo' '${CWD}'`);
+    expect(commands[1]).toContain("'monitor'");
+    expect(commands[1]).toContain(`'--repo' '${CWD}'`);
   });
 });
 
