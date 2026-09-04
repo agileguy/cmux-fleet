@@ -845,7 +845,30 @@ jobs:
           #         fails loudly here instead of silently skipping.
           #
           # 131 + 9 = 140.
-          TOTAL_EXPECTED: "140"
+          # 2026-09-04, re-derived by the hand method rather than incremented,
+          # and the re-derivation is the only reason the drift below is visible.
+          #
+          #   152 = the SEVENTEEN files listed in the run step, measured on this
+          #         branch with no daemon (20 pass, 132 skip) against a tree
+          #         with the block below stashed out. That is TWELVE
+          #         above the 140 recorded here, and NONE of the twelve are the
+          #         reply-plane work: the constant was already stale when this
+          #         branch started, so this job was failing before anything
+          #         below was written. Incrementing 140 by 6 would have produced
+          #         146, kept the job red, and buried the reason under a change
+          #         that did not cause it. The 12 are not attributed here
+          #         because attributing them honestly needs history this edit
+          #         does not have. What IS established is that they predate the
+          #         reply plane: `git stash push test/integration/verbgate.test.ts`
+          #         and a re-run gives 152, not 140.
+          #   +  6 = verbgate.test.ts's reply-plane block (SRD-REVIEW-CONSOLE
+          #         D6): the anti-vacuity mount check, the 0444 CONTROL, the
+          #         0644-under-:ro row, the dropped-:ro 78 row, the no-mount
+          #         row, and the ownership-squash fact the other five rest on.
+          #         The file went 26 -> 32 collected, measured alone both ways.
+          #
+          # 152 + 6 = 158.
+          TOTAL_EXPECTED: "158"
           # The exact NAMES of the only tests allowed to skip here — not
           # merely how many. A bare count (this used to be
           # MAX_HOST_ADC_SKIPS: "2", now 4 for the reason below) cannot tell

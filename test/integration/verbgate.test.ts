@@ -756,3 +756,99 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
     expect(lines).toContain("second");
   }, containerBudget(2));
 });
+
+/**
+ * The reply plane's `:ro`, against a real mount (SRD-REVIEW-CONSOLE §6.4, D6).
+ *
+ * `test/unit/replies.test.ts` runs this same gate under `/bin/sh` with its
+ * absolute paths re-rooted into a temp sandbox, and that is a sound probe of
+ * the SCRIPT. It cannot be a probe of the MOUNT: the host harness has no `:ro`
+ * to drop, because the process running it owns every path, so it emulates
+ * read-only-ness with 0555 parent directories and says so in its header. That
+ * establishes the loop reacts to a writable reply. It establishes nothing about
+ * whether Docker's `:ro` is what makes the reply unwritable, which is the whole
+ * claim `render.ts` makes when it appends the flag.
+ *
+ * The gap runs the wrong way on this platform, which is why it is worth closing
+ * rather than assuming. The VM squashes bind-mount file ownership to the
+ * container user, so a reply the host wrote 0444 appears inside the container
+ * OWNED BY uid 10001 — and an owner may chmod. The MODE protects nothing here.
+ * `:ro` is the only thing left, and the row below that mounts a 0644 reply
+ * read-only is the one that says so.
+ *
+ * ORDER IS LOAD-BEARING. `the mount is real` runs first and is not setup: when
+ * the daemon cannot see the host path it does not fail, it invents an EMPTY
+ * directory at the mount source (ISC-288, and re-encountered while writing
+ * this). Measured against a deliberately unshared scratch root, THREE of these
+ * rows still passed on the empty mount and only the anti-vacuity check and the
+ * 78 row went red. Without the first test this block would report a property it
+ * never observed.
+ */
+describe.skipIf(!DOCKER)("the reply plane is held read-only by the mount, not by the mode", () => {
+  /** The gate's own codes: 77 = verb declined, 78 = a gated surface is writable. */
+  const REFUSED = 77;
+  const POLICY_WRITABLE = 78;
+
+  /** A `/replies` holding one reply at `mode`, shaped the way the actor leaves it. */
+  async function replies(mode: number): Promise<string> {
+    const dir = await makeDaemonScratch("verbgate-replies");
+    scratches.push(dir);
+    await makeWorkerAccessible(dir, true);
+    const file = join(dir, "T-arch.json");
+    await writeFile(file, `${JSON.stringify({ status: "success" }, null, 2)}\n`);
+    await chmod(file, mode);
+    return dir;
+  }
+
+  /**
+   * A verb no allow list contains, so a gate whose integrity loop PASSED lands
+   * on 77 rather than on success. Deliberately a destructive one: if the gate
+   * ever failed open, this exits 0 against a real `gcloud` rather than quietly
+   * looking like a pass.
+   */
+  const DENIED = "gcloud compute instances delete pifleet-nonexistent";
+
+  async function gateExit(replyMount: string[]): Promise<number> {
+    const sb = await makeSandbox();
+    const p = Bun.spawn(
+      ["docker", "run", "--rm", ...sb.mounts, ...replyMount,
+       "--entrypoint", "bash", IMAGE, "-c", `${PRELUDE}\n${DENIED}`],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    return await p.exited;
+  }
+
+  test("the mount is real — without this every row below is green on an empty mount", async () => {
+    const dir = await replies(0o444);
+    const seen = await inImage("ls -1 /replies", ["-v", `${dir}:/replies:ro`]);
+    expect(seen.trim()).toBe("T-arch.json");
+  }, containerBudget(1));
+
+  test("CONTROL: :ro with a 0444 reply leaves the gate intact — the verb is merely declined", async () => {
+    const dir = await replies(0o444);
+    expect(await gateExit(["-v", `${dir}:/replies:ro`])).toBe(REFUSED);
+  }, containerBudget(1));
+
+  test(":ro holds a 0644 reply read-only, which the mode alone does NOT do here", async () => {
+    const dir = await replies(0o644);
+    expect(await gateExit(["-v", `${dir}:/replies:ro`])).toBe(REFUSED);
+  }, containerBudget(1));
+
+  test("a DROPPED :ro costs the whole worker — every verb refused with 78", async () => {
+    const dir = await replies(0o644);
+    expect(await gateExit(["-v", `${dir}:/replies`])).toBe(POLICY_WRITABLE);
+  }, containerBudget(1));
+
+  test("a fleet with no reply plane at all is unaffected by the new loop entry", async () => {
+    expect(await gateExit([])).toBe(REFUSED);
+  }, containerBudget(1));
+
+  test("a 0444 reply is owner-writable in the container, so the mode is not the control", async () => {
+    // The platform fact the four rows above rest on, asserted rather than
+    // commented: a Docker release that stopped squashing ownership would show
+    // up here instead of silently making them tautological.
+    const dir = await replies(0o444);
+    const owner = await inImage("stat -c '%u' /replies/T-arch.json", ["-v", `${dir}:/replies`]);
+    expect(owner.trim()).toBe("10001");
+  }, containerBudget(1));
+});
