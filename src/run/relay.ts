@@ -13,8 +13,12 @@
  * that each of the four effects is unreachable from a unit test for a DIFFERENT
  * reason, so no single trick would have substituted for the seam:
  *
- * - `dispatch` is `controlCall(run, workerId, msg)`, which resolves a unix
- *   socket path and reads the per-run control secret off disk.
+ * - `dispatch` is `sendTaskEnvelope`, which reads the worker's launch record to
+ *   decide whether the prompt travels by RPC or is STAGED into an attended
+ *   pane, builds the envelope from the run's worktree record, and writes the
+ *   durable inbox entry. (It was `controlCall` here until the adapter landed,
+ *   and that was wrong: `controlCall(…, {cmd: "dispatch"})` is the RPC half of
+ *   a two-plane decision, and every pane on this console is `tui`.)
  * - `awaitSettled` **has no implementation in this repository to import.** There
  *   is no `waitForTerminal` helper: `pifleet wait` polls
  *   `readTaskRecord(taskRecordPath(...))` in a private closure at 100 ms, and
@@ -362,11 +366,18 @@ export interface RelayTransport<R> {
    * Dispatch a task into a worker's own run.
    *
    * REJECTS if the dispatch did not land. The production adapter turns both
-   * failure shapes into a rejection: `controlCall` throws `SocketRequestError`
-   * on an unreachable socket, and answers `{accepted: false, reason: ...}` for a
-   * refusal — including `pane_mode_tui_has_no_rpc_dispatch`, which D13 makes
-   * reachable, since the implementation §0.7 records makes all four panes `tui`.
-   * A rejection here costs one lens, not the fan-out.
+   * failure shapes into a rejection: the dispatch path THROWS for an
+   * unreachable worker or a terminal that has gone, and RESOLVES with
+   * `{accepted: false, reason: ...}` for a supervisor-side refusal. A rejection
+   * here costs one lens, not the fan-out.
+   *
+   * **`pane_mode_tui_has_no_rpc_dispatch` is NOT one of those refusals**, and
+   * the correction is worth recording because this docblock used to say it was.
+   * D13 makes all four panes `tui`, so if it were, the adapter would be refused
+   * for every seat and the console would journal three children it never
+   * dispatched. An attended worker simply has no RPC dispatch surface: its
+   * envelope is STAGED, and `via: "staged"` is a success. The adapter delegates
+   * that choice to `sendTaskEnvelope` and examines only `accepted`.
    */
   dispatch(run: R, dispatch: RelayDispatch): Promise<void>;
   /** Resolve once the task has reached a terminal state, however that is observed. */
@@ -797,21 +808,35 @@ export interface RelayHarvestView {
  * method takes a run and a worker and resolves its own path, so `paths.ts` is
  * named in the production wiring and nowhere else.
  */
+/**
+ * What one dispatch attempt turned out to be — `SendOutcome`, narrowed to the
+ * fields the join can act on.
+ *
+ * **`via` is carried even though nothing here branches on it, and that is the
+ * point.** `rpc`, `pane` and `staged` are three different claims about how a
+ * prompt reached a worker, and all three can arrive with `accepted: true`. A
+ * shape that dropped the field would make a staged dispatch and an RPC one
+ * literally indistinguishable to a test — which is precisely how an adapter
+ * that could only speak RPC passed a suite that thought it covered dispatch.
+ */
+export interface RelaySendOutcome {
+  readonly accepted: boolean;
+  readonly via: "rpc" | "pane" | "staged";
+  readonly reason: string | null;
+  readonly error: string | null;
+  readonly epoch: number | null;
+}
+
 export interface RelayEffects {
-  /** `controlCall(run, workerId, msg)` — supervisor/launch.ts. */
-  controlCall(
-    run: RunPaths,
-    workerId: string,
-    msg: Record<string, unknown>,
-  ): Promise<Record<string, unknown>>;
-  /** The `pifleet.task/v1` envelope this dispatch travels in. */
-  buildEnvelope(
-    run: RunPaths,
-    worker: string,
-    dispatch: RelayDispatch,
-  ): Promise<Record<string, unknown>>;
-  /** `writeJsonAtomic(inboxTaskPath(run, taskId), envelope)` — SRD §7.1. */
-  recordInbox(run: RunPaths, taskId: string, envelope: Record<string, unknown>): Promise<void>;
+  /**
+   * Send one task to one worker, by whatever plane that worker actually has.
+   *
+   * **This is `sendTaskEnvelope` and it must not be anything narrower.** The
+   * seam used to be `controlCall`, which is the RPC half of a two-plane
+   * decision — and choosing the plane is not this module's to make. See
+   * `consoleTransport`'s `dispatch` for what that cost.
+   */
+  sendTask(run: RunPaths, worker: string, dispatch: RelayDispatch): Promise<RelaySendOutcome>;
   /** `readTaskRecord(taskRecordPath(workerPaths(run, worker), taskId))`. */
   readTaskRecord(
     run: RunPaths,
@@ -872,18 +897,22 @@ export const RELAY_SETTLE_DEADLINE_MS = 1_800_000;
  * A dispatch that did not land — and it exists because ONE of the two ways to
  * not land looks exactly like success.
  *
- * `controlCall` throws `SocketRequestError` for an unreachable socket, which no
- * implementation gets wrong. It also RESOLVES with `{accepted: false, reason}`
- * for a refusal, and an adapter written as `await controlCall(...)` treats that
- * as a delivered prompt. The console then joins, waits and harvests a task no
- * worker was ever told about — every lens reports `unknown`, and the failure is
- * reported against the reviewers rather than against the dispatch.
+ * The dispatch path THROWS for an unreachable worker or a terminal that has
+ * gone, which no implementation gets wrong. It also RESOLVES with
+ * `{accepted: false, reason}` for a supervisor-side refusal, and an adapter
+ * written as `await send(...)` treats that as a delivered prompt. The console
+ * then joins, waits and harvests a task no worker was ever told about — every
+ * lens reports `unknown`, and the failure is reported against the reviewers
+ * rather than against the dispatch.
  *
  * `refusal` is the supervisor's own reason string, kept as a FIELD rather than
- * only in the message, because the one that matters —
- * `pane_mode_tui_has_no_rpc_dispatch` — is a condition an operator fixes by
- * changing a pane mode, and a caller that had to match English to tell it apart
- * would be pinning a sentence rather than a rule.
+ * only in the message, because a caller — or a test — that had to match English
+ * to tell one refusal from another would be pinning a sentence rather than a
+ * rule.
+ *
+ * **`pane_mode_tui_has_no_rpc_dispatch` is NOT among the reasons this can now
+ * carry, and that is a fix rather than an omission.** It was, when this
+ * adapter spoke `cmd: "dispatch"` directly; see `consoleTransport`.
  */
 export class RelayDispatchError extends Error {
   constructor(
@@ -956,25 +985,41 @@ export function consoleTransport(
   const pollMs = opts.pollMs ?? RELAY_SETTLE_POLL_MS;
 
   return {
+    /**
+     * **THE PLANE IS NOT THIS MODULE'S TO CHOOSE, AND CHOOSING IT WAS A BUG.**
+     *
+     * This method used to call `controlCall(run, worker, {cmd: "dispatch", …})`
+     * directly. That is the RPC half of a two-plane decision, and the decision
+     * belongs to `planDispatch`, which reads the launch record `up` actually
+     * wrote. An attended worker has NO RPC dispatch surface — the supervisor
+     * answers `pane_mode_tui_has_no_rpc_dispatch`, correctly, because the
+     * question is wrong. Its envelope is STAGED instead: written into its
+     * read-only policy plane with the allocated epoch, recorded in the inbox,
+     * and followed by a one-line trigger at the surface. `via: "staged"` is a
+     * success, and a third distinct claim rather than a weaker `pane`.
+     *
+     * **D13 makes all four review-console panes `tui`, so the old spelling was
+     * refused for every seat on the console — not merely for the collation.**
+     * Every lens would come back `unknown`, the fan-out would journal three
+     * children it never dispatched, and the console would be indistinguishable
+     * from a working one on every observable it has. That is §6.4's own failure
+     * shape — "a collator that dispatched three reviews is indistinguishable
+     * from one that dispatched none" — reached from the host's side.
+     *
+     * So the effect is `sendTaskEnvelope`, which is THE dispatch path: it reads
+     * the launch record, routes, builds the envelope from the worktree record,
+     * writes the durable inbox entry on BOTH planes, and appends the ledger
+     * row. Nothing about which plane a worker has is decided here, and nothing
+     * about an envelope is spelled here twice.
+     */
     async dispatch(run: RunPaths, d: RelayDispatch): Promise<void> {
-      const envelope = await effects.buildEnvelope(run, d.worker, d);
-      let reply: Record<string, unknown>;
+      let outcome: RelaySendOutcome;
       try {
-        reply = await effects.controlCall(run, d.worker, {
-          cmd: "dispatch",
-          envelope,
-          attempt_id: relayAttemptId(d.worker, d),
-          /**
-           * `null`, always. The supervisor is the sole epoch allocator (§7.5),
-           * and a relay that requested one would be allocating on the caller's
-           * side of a fence whose whole purpose is that it has one writer.
-           */
-          requested_epoch: null,
-        });
+        outcome = await effects.sendTask(run, d.worker, d);
       } catch (err) {
-        // Shape one: the socket. `SocketRequestError` and anything else that
-        // escaped the transport land here together — from the join's point of
-        // view an unreachable supervisor and a broken one cost the same lens.
+        // Shape one: it threw. An unreachable supervisor, a launch record that
+        // names neither plane, a terminal that has gone — from the join's point
+        // of view they all cost the same one lens.
         throw new RelayDispatchError(
           d.worker,
           d.taskId,
@@ -983,26 +1028,23 @@ export function consoleTransport(
         );
       }
 
-      // Shape two, and the one that reads as success: a RESOLVED refusal.
-      if (reply["accepted"] !== true) {
-        const refusal = typeof reply["reason"] === "string" ? reply["reason"] : "rejected";
-        const detail = typeof reply["error"] === "string" ? reply["error"] : refusal;
-        throw new RelayDispatchError(d.worker, d.taskId, refusal, `${refusal} (${detail})`);
-      }
-
       /**
-       * THE INBOX RECORD, and it is not bookkeeping.
+       * Shape two, and the one that reads as success: a RESOLVED refusal.
        *
-       * `harvestTask` reads `<run>/inbox/<task>.json` first and answers
-       * `unavailableHarvest` when it is absent — "no dispatch record at
-       * inbox/<id>.json". Without this write every child of every fan-out
-       * would harvest `unknown`, every lens would be reported missing, and the
-       * console would blame three reviewers that had each done the work. It is
-       * written AFTER acceptance and carries the ASSIGNED epoch, exactly as
-       * `dispatch.ts` writes it, because an inbox record for a dispatch that
-       * was refused is a record of a task that does not exist.
+       * `accepted` is the ONLY field consulted. `via` is deliberately not
+       * examined — a guard that also required a particular plane would
+       * reintroduce exactly the defect above, in a form that looks like extra
+       * rigour.
        */
-      await effects.recordInbox(run, d.taskId, { ...envelope, epoch: reply["epoch"] });
+      if (!outcome.accepted) {
+        const refusal = outcome.reason ?? "rejected";
+        throw new RelayDispatchError(
+          d.worker,
+          d.taskId,
+          refusal,
+          `${refusal} (${outcome.error ?? refusal})`,
+        );
+      }
     },
 
     async awaitSettled(run: RunPaths, task: RelayTaskRef): Promise<void> {
@@ -1179,89 +1221,24 @@ export function makeConsoleFanOut(deps: {
  * share one resolution instead of racing to build two.
  */
 let effectModules: Promise<{
-  launch: typeof import("../supervisor/launch.ts");
+  dispatch: typeof import("../cli/commands/dispatch.ts");
   harvest: typeof import("../harvest/index.ts");
   state: typeof import("./state.ts");
   paths: typeof import("./paths.ts");
   replies: typeof import("./replies.ts");
-  jsonl: typeof import("../util/jsonl.ts");
-  contracts: typeof import("../contracts.ts");
-  schema: typeof import("../config/schema.ts");
+  ledger: typeof import("./ledger.ts");
 }> | null = null;
 
 function loadEffectModules(): NonNullable<typeof effectModules> {
   effectModules ??= (async () => ({
-    launch: await import("../supervisor/launch.ts"),
+    dispatch: await import("../cli/commands/dispatch.ts"),
     harvest: await import("../harvest/index.ts"),
     state: await import("./state.ts"),
     paths: await import("./paths.ts"),
     replies: await import("./replies.ts"),
-    jsonl: await import("../util/jsonl.ts"),
-    contracts: await import("../contracts.ts"),
-    schema: await import("../config/schema.ts"),
+    ledger: await import("./ledger.ts"),
   }))();
   return effectModules;
-}
-
-/**
- * The `pifleet.task/v1` envelope for a relayed child, filled the way
- * `sendTaskEnvelope` fills one.
- *
- * **The fields are copied from THE dispatch path rather than invented, and the
- * two that matter are `host_workdir` and `base_ref`.** §8.2 grades a task on
- * `git diff <base>...HEAD` in the worktree the envelope names, so an envelope
- * carrying the schema's placeholders — `"unset"` and forty zeroes — produces a
- * harvest with `repository: false` for a reviewer that has a checkout, and the
- * lens comes back `unknown` for a reason that has nothing to do with the
- * review. `readRunWorktrees` is the same record `dispatch.ts` reads, and it is
- * the only source that can be right: the branch git actually checked out and
- * the branch the envelope names are the same string, or the diff is graded
- * against a ref that does not exist.
- *
- * `deadline_s` is NOT taken from the request — D11 refuses both spellings of it
- * in the document, on the grounds that a request that could set it "can pin
- * three of the largest models in the catalogue open against the operator's API
- * key". 1500 is `dispatch.ts`'s own default for a task with no opinion.
- */
-async function buildRelayEnvelope(
-  run: RunPaths,
-  worker: string,
-  d: RelayDispatch,
-): Promise<Record<string, unknown>> {
-  const m = await loadEffectModules();
-  const recorded = await m.state.readRunWorktrees(run);
-  const wt = recorded.byWorker.get(worker);
-  return m.contracts.TaskEnvelopeSchema.parse({
-    schema: "pifleet.task/v1",
-    task_id: d.taskId,
-    run_id: run.runId,
-    // A placeholder the supervisor replaces with its allocation before
-    // anything durable records it — `dispatch.ts`'s comment, and its value.
-    epoch: 0,
-    attempt: 1,
-    worker,
-    dispatched_at: new Date().toISOString(),
-    title: d.title,
-    brief: d.brief,
-    repo: recorded.repo ?? "unset",
-    host_workdir: wt?.path ?? "unset",
-    container_workdir: "/workspace",
-    branch:
-      wt?.branch ??
-      m.paths.workerBranch(
-        recorded.branchPrefix ?? m.schema.DEFAULT_BRANCH_PREFIX,
-        run.runId,
-        worker,
-      ),
-    base_ref: wt?.baseSha ?? "0".repeat(40),
-    inputs: [],
-    acceptance: [],
-    constraints: [],
-    outbox: `/outbox/${d.taskId}`,
-    cloud_allow: [],
-    deadline_s: 1500,
-    depends_on: [],
-  }) as unknown as Record<string, unknown>;
 }
 
 /**
@@ -1272,14 +1249,52 @@ async function buildRelayEnvelope(
  * calls load-bearing for the unit suite.
  */
 export const productionRelayEffects: RelayEffects = {
-  async controlCall(run, workerId, msg) {
+  /**
+   * `sendTaskEnvelope` — THE dispatch path, and the whole of the plane
+   * decision.
+   *
+   * Its own docblock is the argument for calling it rather than reproducing
+   * it: *"the single-task command and the `--auto` scheduler both come through
+   * it, so envelope defaults, the inbox record and the ledger row cannot drift
+   * between them"*. The relay is now the third caller and inherits that
+   * property instead of becoming the exception to it — which matters most for
+   * the two envelope fields a hand-rolled copy gets wrong quietly:
+   * `host_workdir` and `base_ref` come from the worktree record, and an
+   * envelope carrying the schema's `"unset"` and forty zeroes harvests
+   * `repository: false` for a reviewer that has a perfectly good checkout.
+   *
+   * It also writes the durable inbox entry on BOTH planes. Without that,
+   * `harvestTask` finds no envelope and answers `unavailableHarvest`, so every
+   * lens of every fan-out comes back `unknown`.
+   *
+   * `requestedEpoch: null` always — the supervisor is the sole epoch allocator
+   * (§7.5). `attemptId` is derived rather than random so a pass that crashed
+   * between the dispatch and the journal REPLAYS instead of running the review
+   * twice; on the staged plane `sendTaskEnvelope` derives its own for the same
+   * reason, and the two agree by construction.
+   */
+  async sendTask(run, worker, d) {
     const m = await loadEffectModules();
-    return m.launch.controlCall(run, workerId, msg);
-  },
-  buildEnvelope: buildRelayEnvelope,
-  async recordInbox(run, taskId, envelope) {
-    const m = await loadEffectModules();
-    await m.jsonl.writeJsonAtomic(m.paths.inboxTaskPath(run, taskId), envelope);
+    const out = await m.dispatch.sendTaskEnvelope({
+      run,
+      worker,
+      taskId: d.taskId,
+      // Title and brief ONLY. Every other field is host-side, and `deadline_s`
+      // especially so: D11 refuses both spellings of it in the request document
+      // because "a request that could set it can pin three of the largest
+      // models in the catalogue open against the operator's API key".
+      partial: { title: d.title, brief: d.brief },
+      attemptId: relayAttemptId(worker, d),
+      requestedEpoch: null,
+      ledger: new m.ledger.LedgerWriter(run, `relay-${process.pid}`),
+    });
+    return {
+      accepted: out.accepted,
+      via: out.via,
+      reason: out.reason,
+      error: out.error,
+      epoch: out.epoch,
+    };
   },
   async readTaskRecord(run, worker, taskId) {
     const m = await loadEffectModules();

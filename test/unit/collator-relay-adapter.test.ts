@@ -18,16 +18,23 @@
  * that produces no visible failure.
  *
  * - **A refusal that arrives as a RESOLVED promise reads as success.**
- *   `controlCall` has two failure shapes and only one of them throws: an
- *   unreachable socket raises `SocketRequestError`, but a supervisor that
+ *   The dispatch path has two failure shapes and only one of them throws: an
+ *   unreachable worker or a dead terminal raises, but a supervisor that
  *   REFUSES answers `{accepted: false, reason: ...}` on a promise that
- *   fulfils. An adapter that awaits `controlCall` and returns is correct
- *   against the first and silently wrong against the second — and the second
- *   is the reachable one, because `pane_mode_tui_has_no_rpc_dispatch` is what
- *   the supervisor answers for every `pane_mode: tui` worker and D13's
- *   implementation makes all four panes `tui`. The core would then join, wait
- *   and harvest a task no worker was ever told about; every lens would report
+ *   fulfils. An adapter that awaits and returns is correct against the first
+ *   and silently wrong against the second. The core would then join, wait and
+ *   harvest a task no worker was ever told about; every lens would report
  *   `unknown` and the console would blame the reviewers.
+ *
+ * - **`pane_mode_tui_has_no_rpc_dispatch` is the NORMAL path, not a failure,
+ *   and reading it as one is the defect this file was rewritten to prevent.**
+ *   An attended worker has no RPC dispatch surface by design; its envelope is
+ *   STAGED and `via: "staged"` is a success. D13 makes all four console panes
+ *   `tui`, so an adapter that spoke `cmd: "dispatch"` itself would be refused
+ *   for every seat, journal three children it never dispatched, and be
+ *   indistinguishable from a working console on every observable. The fixtures
+ *   below therefore default every pane to `tui`, because a stand-in that
+ *   answers RPC for everybody makes both routes return the same shape.
  *
  * - **An unbounded `awaitSettled` is a wedge, not a slow test.** §6.7 arms
  *   `deadline_s` at the TRIGGER, and a `tui` worker's trigger is a keystroke
@@ -108,12 +115,23 @@ function request(parent = "T1"): DispatchRequest {
 }
 
 interface Recorder {
-  readonly control: Array<{ run: string; worker: string; msg: Record<string, unknown> }>;
-  readonly inbox: Array<{ run: string; taskId: string; epoch: unknown }>;
+  readonly sent: Array<{ run: string; worker: string; taskId: string; title: string; brief: string }>;
   readonly replies: Array<{ run: string; collator: string; child: string; reply: unknown }>;
   readonly harvested: string[];
   readonly slept: number[];
 }
+
+/**
+ * The four panes as they actually SHIP — every one of them `tui` (D13, §0.7).
+ *
+ * This is the fixture the first version of this file did not have, and its
+ * absence is what let a dispatch effect that only ever spoke `cmd: "dispatch"`
+ * look correct: a stand-in that answers RPC for everybody makes the staged and
+ * the RPC route return the SAME shape — `accepted: true` — so nothing could
+ * tell them apart. `via` is the field that can, and every assertion about a
+ * landed dispatch below names it.
+ */
+const ALL_PANES_TUI = new Set(["col-1", "rev-arch-1", "rev-ctx-1", "rev-lang-1"]);
 
 /**
  * Effects that succeed at everything, plus a recorder.
@@ -126,30 +144,33 @@ function effects(
   overrides: Partial<RelayEffects> = {},
 ): { fx: RelayEffects; rec: Recorder } {
   const rec: Recorder = {
-    control: [],
-    inbox: [],
+    sent: [],
     replies: [],
     harvested: [],
     slept: [],
   };
   let clock = 0;
   const fx: RelayEffects = {
-    async controlCall(run, worker, msg) {
-      rec.control.push({ run: run.runId, worker, msg });
-      return { accepted: true, epoch: 7 };
-    },
-    async buildEnvelope(run, worker, d) {
-      return {
-        schema: "pifleet.task/v1",
-        task_id: d.taskId,
-        run_id: run.runId,
+    /**
+     * The DEFAULT models the shipped console: every pane is `tui`, so every
+     * landed dispatch comes back `via: "staged"`. A fixture that answered
+     * `via: "rpc"` here would be a console nobody is going to run.
+     */
+    async sendTask(run, worker, d) {
+      rec.sent.push({
+        run: run.runId,
         worker,
+        taskId: d.taskId,
         title: d.title,
         brief: d.brief,
+      });
+      return {
+        accepted: true,
+        via: ALL_PANES_TUI.has(worker) ? "staged" : "rpc",
+        reason: null,
+        error: null,
+        epoch: 7,
       };
-    },
-    async recordInbox(run, taskId, envelope) {
-      rec.inbox.push({ run: run.runId, taskId, epoch: envelope["epoch"] });
     },
     async readTaskRecord() {
       return { verdict: "success" as Verdict };
@@ -201,34 +222,104 @@ describe("the export the poll loop resolves", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. `dispatch` — the two failure shapes, and the one that fulfils.
+// 2. `dispatch` — the ROUTE, and the two failure shapes.
 // ---------------------------------------------------------------------------
 
-describe("dispatch, over controlCall", () => {
+describe("dispatch, over THE dispatch path", () => {
   const seat = { worker: "rev-arch-1", taskId: "T1-arch", title: "t", brief: "b" };
 
-  test("copies dispatch.ts's message shape rather than inventing one", async () => {
+  /**
+   * **THE PROPERTY THE FIRST VERSION OF THIS ADAPTER GOT WRONG, AND THE ONE
+   * THIS BLOCK EXISTS FOR.**
+   *
+   * `pane_mode_tui_has_no_rpc_dispatch` is not a failure. It is the supervisor
+   * correctly answering a question nobody should have asked it: an attended
+   * worker has no RPC dispatch surface BY DESIGN, and `cmd: "dispatch"` is the
+   * wrong verb for one. The right verb is `cmd: "stage"` — the envelope is
+   * written durably into the worker's read-only policy plane and a short
+   * trigger is typed at the surface — and `sendTaskEnvelope` chooses between
+   * the two by reading the launch record through `planDispatch`.
+   *
+   * D13 makes all four review-console panes `tui`. So an adapter that spoke
+   * `cmd: "dispatch"` itself would be refused for EVERY seat on the console,
+   * every lens would report `unknown`, and the fan-out would journal three
+   * children it never dispatched — §6.4's own failure shape, in which "a
+   * collator that dispatched three reviews is indistinguishable from one that
+   * dispatched none".
+   *
+   * The adapter therefore owns NO routing. It delegates to the one function
+   * that does, and accepts whatever plane that function reports.
+   */
+  test("a `tui` seat lands via `staged`, and that is a SUCCESS", async () => {
     const { fx, rec } = effects();
+    // rev-arch-1 is tui in the shipped console, so the fixture stages it.
     await consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
-
-    expect(rec.control).toHaveLength(1);
-    const msg = rec.control[0]!.msg;
-    expect(msg["cmd"]).toBe("dispatch");
-    expect(msg["envelope"]).toBeDefined();
-    // Present and a string: `dispatch` records its attempt id so a re-send
-    // replays rather than double-running. An adapter that omitted the field
-    // would make every retry a fresh attempt.
-    expect(typeof msg["attempt_id"]).toBe("string");
-    // `null` — the supervisor is the sole epoch allocator (§7.5). An adapter
-    // that guessed an epoch here would be allocating on the caller's side.
-    expect(msg).toHaveProperty("requested_epoch", null);
-    expect(rec.control[0]!.worker).toBe("rev-arch-1");
-    expect(rec.control[0]!.run).toBe("run-arch");
+    expect(rec.sent).toEqual([
+      { run: "run-arch", worker: "rev-arch-1", taskId: "T1-arch", title: "t", brief: "b" },
+    ]);
   });
 
-  test("REJECTS when the socket is unreachable (controlCall throws)", async () => {
+  /**
+   * The same call, the same assertion, a different plane. `via` is the ONLY
+   * thing that differs between these two cases — which is exactly why a fixture
+   * that answered one shape for everybody could not see the defect.
+   */
+  test("an `rpc` seat lands via `rpc`, and that is the same success", async () => {
     const { fx } = effects({
-      async controlCall() {
+      async sendTask() {
+        return { accepted: true, via: "rpc", reason: null, error: null, epoch: 3 };
+      },
+    });
+    await consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
+  });
+
+  test("`pane` lands too — no plane is privileged", async () => {
+    const { fx } = effects({
+      async sendTask() {
+        return { accepted: true, via: "pane", reason: null, error: null, epoch: 4 };
+      },
+    });
+    await consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
+  });
+
+  /**
+   * STRUCTURAL, and deliberately so.
+   *
+   * The routing lives inside `sendTaskEnvelope` and is covered by that
+   * function's own suite; what this file has to pin is that the adapter GOES
+   * THROUGH it rather than around it. Behaviour cannot show that — a hand-rolled
+   * `cmd: "dispatch"` and a delegated call are indistinguishable at the
+   * `sendTask` seam, because the seam is below the routing. So the assertion is
+   * on the source, and it is the assertion that would have caught the original
+   * defect.
+   */
+  test("the adapter delegates routing and never speaks a dispatch verb itself", async () => {
+    const source = await Bun.file("src/run/relay.ts").text();
+    expect(source).toContain("sendTaskEnvelope");
+
+    /**
+     * COMMENTS STRIPPED FIRST, and the reason is a defect this assertion
+     * already had: the docblock explaining why `cmd: "dispatch"` was WRONG
+     * contains the string `cmd: "dispatch"`, so the naive check failed on the
+     * very prose that records the fix. A structural assertion that cannot tell
+     * code from the comment describing it is an assertion that punishes
+     * documentation.
+     */
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+    // The two verbs `sendTaskEnvelope` owns. Either one appearing in CODE here
+    // means a second dispatch path has grown in a module that must not have one.
+    expect(code).not.toContain('cmd: "dispatch"');
+    expect(code).not.toContain('cmd: "stage"');
+    // And the seam itself: `controlCall` is the RPC half of a decision this
+    // module must not make.
+    expect(code).not.toContain("controlCall");
+  });
+
+  test("REJECTS when the dispatch path throws (unreachable worker, dead terminal)", async () => {
+    const { fx } = effects({
+      async sendTask() {
         throw new Error("connect ENOENT /runs/run-arch/workers/rev-arch-1/control.sock");
       },
     });
@@ -237,61 +328,53 @@ describe("dispatch, over controlCall", () => {
   });
 
   /**
-   * THE DANGEROUS SHAPE. A resolved promise carrying a refusal.
-   *
-   * `pane_mode_tui_has_no_rpc_dispatch` is named explicitly rather than a
-   * generic refusal because it is the one D13 makes REACHABLE: the shipped
-   * console gives all four panes `pane_mode: tui`, and `supervisor/index.ts`
-   * answers exactly this for every one of them.
+   * THE SHAPE THAT READS AS SUCCESS: a resolved outcome carrying a refusal.
+   * `sendTaskEnvelope` returns `{accepted: false, reason}` rather than throwing
+   * for a supervisor-side rejection, so an adapter that awaited and returned
+   * would treat a refusal as a delivered prompt.
    */
   test("REJECTS on a RESOLVED refusal, and names the reason", async () => {
     const { fx } = effects({
-      async controlCall() {
+      async sendTask() {
         return {
           accepted: false,
-          reason: "pane_mode_tui_has_no_rpc_dispatch",
-          error: "worker rev-arch-1 is pane_mode: tui",
+          via: "rpc",
+          reason: "already_completed",
+          error: "task T1-arch has already settled",
+          epoch: null,
         };
       },
     });
     const p = consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
     await expect(p).rejects.toBeInstanceOf(RelayDispatchError);
     await p.catch((err: unknown) => {
-      expect(String(err)).toContain("pane_mode_tui_has_no_rpc_dispatch");
-      expect((err as RelayDispatchError).refusal).toBe("pane_mode_tui_has_no_rpc_dispatch");
+      expect(String(err)).toContain("already_completed");
+      expect((err as RelayDispatchError).refusal).toBe("already_completed");
     });
-  });
-
-  test("a refusal writes NO inbox record", async () => {
-    const { fx, rec } = effects({
-      async controlCall() {
-        return { accepted: false, reason: "busy" };
-      },
-    });
-    await consoleTransport("col-1", fx)
-      .dispatch(ARCH_RUN, seat)
-      .catch(() => undefined);
-    expect(rec.inbox).toHaveLength(0);
   });
 
   /**
-   * Without the inbox record `harvestTask` returns `unavailableHarvest` — "no
-   * dispatch record at inbox/<id>.json" — so EVERY lens would harvest
-   * `unknown` and the console would report three missing reviewers for three
-   * reviews that ran perfectly. `dispatch.ts` writes it on acceptance with the
-   * ASSIGNED epoch, and so must this.
+   * A refusal on the STAGED plane rejects identically. Asserted separately
+   * because "accepted is false" and "via is staged" is the combination a reader
+   * is most likely to mistake for a success — staging is the normal path, so a
+   * staged row looks right at a glance.
    */
-  test("acceptance records the inbox envelope with the supervisor's epoch", async () => {
-    const { fx, rec } = effects({
-      async controlCall() {
-        return { accepted: true, epoch: 42 };
+  test("a refusal is a refusal even when it came back `staged`", async () => {
+    const { fx } = effects({
+      async sendTask() {
+        return {
+          accepted: false,
+          via: "staged",
+          reason: "stale_epoch",
+          error: null,
+          epoch: null,
+        };
       },
     });
-    await consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
-    expect(rec.inbox).toEqual([{ run: "run-arch", taskId: "T1-arch", epoch: 42 }]);
+    const p = consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
+    await expect(p).rejects.toBeInstanceOf(RelayDispatchError);
   });
 });
-
 // ---------------------------------------------------------------------------
 // 3. `awaitSettled` — the poll that had no helper to import, and its bound.
 // ---------------------------------------------------------------------------
@@ -599,7 +682,7 @@ describe("the fan-out adapter's result mapping", () => {
     if (got.kind !== "not_dispatched") throw new Error("unreachable");
     expect(got.reason).toContain("rev-ctx-1");
     // Nothing was issued: a partial pass would leave reviews nobody joins.
-    expect(rec.control).toHaveLength(0);
+    expect(rec.sent).toHaveLength(0);
   });
 
   test("an unspellable parent answers `not_dispatched`, never a throw", async () => {
@@ -636,25 +719,65 @@ describe("the fan-out adapter's result mapping", () => {
     // No collation, and no replies: three 0444 files no brief names are three
     // files nothing reads and nothing reaps.
     expect(rec.replies).toHaveLength(0);
-    expect(rec.control.map((c) => c.msg["envelope"]).length).toBe(3);
+    expect(rec.sent.map((s) => s.taskId).sort()).toEqual(["T1-arch", "T1-context", "T1-lang"]);
   });
 
   /**
-   * One `tui` refusal costs ONE lens, not the fan-out — and the collation goes
-   * out claiming `partial`, naming the lens that is gone.
+   * **THE WHOLE CONSOLE AS IT SHIPS: four `tui` panes, nothing on RPC.**
+   *
+   * This is the case the first version of this adapter failed completely and
+   * silently. Every seat stages, every stage is a success, the join runs, the
+   * replies are published and the collation goes out — to a `tui` collator,
+   * which stages like everyone else. If the adapter ever reintroduces an RPC
+   * assumption, this is the test that reddens, and it reddens for all four
+   * seats at once rather than for the last hop alone.
    */
-  test("a single tui refusal costs one lens and the collation says `partial`", async () => {
+  test("an ALL-TUI console fans out, collates, and reports every child", async () => {
+    const { fx, rec } = effects();
+    const got = await fanOutWith(fx)({
+      run: COL_RUN,
+      sender: "col-1",
+      taskId: "T1",
+      request: request(),
+    });
+    expect(got.kind).toBe("dispatched");
+    if (got.kind !== "dispatched") throw new Error("unreachable");
+    expect([...got.children].sort()).toEqual(["T1-arch", "T1-context", "T1-lang"]);
+    // Four sends: three lenses and the collation. The collator is tui too.
+    expect(rec.sent).toHaveLength(4);
+    expect(rec.sent.map((s) => s.taskId)).toContain("T1-collate");
+    expect(rec.sent.find((s) => s.taskId === "T1-collate")?.worker).toBe("col-1");
+    // And the reports actually reached the collator's replies plane.
+    expect(rec.replies.map((r) => r.child).sort()).toEqual([
+      "T1-arch",
+      "T1-context",
+      "T1-lang",
+    ]);
+  });
+
+  /**
+   * One GENUINE refusal costs ONE lens, not the fan-out — and the collation
+   * goes out claiming `partial`, naming the lens that is gone.
+   *
+   * `stale_epoch` rather than `pane_mode_tui_has_no_rpc_dispatch`, and the
+   * substitution is the correction this file was rewritten around: the tui
+   * reason is not a refusal the console can receive any more, because the
+   * adapter no longer asks a tui worker for an RPC dispatch. A test that kept
+   * using it would be pinning a state the system can no longer reach, which is
+   * worse than not testing the case at all — it reads as coverage.
+   */
+  test("a single genuine refusal costs one lens and the collation says `partial`", async () => {
     // The override records for itself: the shared recorder is REPLACED by an
     // override, and a fixture that quietly kept recording would be measuring a
     // call this case never made.
-    const sent: Array<{ worker: string; msg: Record<string, unknown> }> = [];
+    const sent: Array<{ worker: string; taskId: string; brief: string }> = [];
     const { fx } = effects({
-      async controlCall(_run, worker, msg) {
-        sent.push({ worker, msg });
+      async sendTask(_run, worker, d) {
+        sent.push({ worker, taskId: d.taskId, brief: d.brief });
         if (worker === "rev-ctx-1") {
-          return { accepted: false, reason: "pane_mode_tui_has_no_rpc_dispatch" };
+          return { accepted: false, via: "staged", reason: "stale_epoch", error: null, epoch: null };
         }
-        return { accepted: true, epoch: 1 };
+        return { accepted: true, via: "staged", reason: null, error: null, epoch: 1 };
       },
     });
     const got = await fanOutWith(fx)({
@@ -669,12 +792,11 @@ describe("the fan-out adapter's result mapping", () => {
 
     const collation = sent.find((c) => c.worker === "col-1");
     expect(collation).toBeDefined();
-    const envelope = collation!.msg["envelope"] as { brief: string; task_id: string };
-    expect(envelope.task_id).toBe("T1-collate");
-    expect(envelope.brief).toContain("MISSING ASPECT: context");
-    expect(envelope.brief).toContain('status: "partial"');
+    expect(collation!.taskId).toBe("T1-collate");
+    expect(collation!.brief).toContain("MISSING ASPECT: context");
+    expect(collation!.brief).toContain('status: "partial"');
     // The lenses that DID report are not announced as missing — the negative is
     // the half that makes the assertion mean anything.
-    expect(envelope.brief).not.toContain("MISSING ASPECT: arch");
+    expect(collation!.brief).not.toContain("MISSING ASPECT: arch");
   });
 });
