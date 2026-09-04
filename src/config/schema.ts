@@ -340,6 +340,19 @@ export const RunSchema = z
     repo: shortStr,
     isolation: IsolationSchema.default("worktree"),
     branch_prefix: shortStr.default("fleet"),
+    /**
+     * The remote this operator consents to send to a HOSTED provider, echoed
+     * exactly. `null` means no consent, which is the default and the safe one.
+     *
+     * A URL rather than a boolean, deliberately. The launch directory overrides
+     * `run.repo` on this fleet, so the same `fleet.yaml` sends whichever
+     * repository the operator happened to `cd` into — and a blanket `true`
+     * written once, for a repository they had thought about, would silently
+     * cover every repository they had not. An echoed URL cannot transfer.
+     *
+     * `sensitive-repo.ts` holds the gate and the reason it exists.
+     */
+    hosted_repo_consent: shortStr.nullable().default(null),
     /** Bounded by measured oMLX throughput, not pane count (SRD §5.9 / F40). */
     max_concurrent: z.number().int().positive().default(2),
     /**

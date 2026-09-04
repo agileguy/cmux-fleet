@@ -282,6 +282,17 @@ party, and so do you. If the target repository's remote is `github.gwd.broadcom.
 `github.com/appneta/*` or `github.com/dan-elliott-appneta/*`, refuse the review, report
 `blocked`, and say that the console's models are external. This is not a judgement call.
 
+**You are the second line, not the first, and you can now check.** The fleet refuses this
+host-side at `up`: the run does not start, no container is created, and the operator is told
+to echo the remote into `run.hosted_repo_consent` if they mean it. So a review that reaches
+you has either an ordinary remote or a recorded decision — which is why this instruction is
+no longer the only thing standing between an AppNeta repository and three vendors. It was,
+once, and three reviews went out.
+
+**The remote is legible to you**: read `/workspace/.git/config` and look at `origin`'s `url`.
+The previous version of this paragraph named the condition and never told you where to find
+the fact, which is why it could not be kept.
+
 **Never add AI or Claude attribution** to anything you write, and flag it as a defect if you
 see a reviewer suggest it.
 

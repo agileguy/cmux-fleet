@@ -67,6 +67,7 @@ import {
   formatDisclosureBanner,
   type DisclosureRow,
 } from "../../security/disclosure.ts";
+import { hostedRepoRefusal, originRemote } from "../../security/sensitive-repo.ts";
 import { assertModelsSupportToolCalls } from "../../security/model-probe.ts";
 import { containerFetch } from "../../security/probe-transport.ts";
 import { checkMlxTrainingGuard, describeMatch } from "../../safety/mlx-training-guard.ts";
@@ -1295,6 +1296,32 @@ export function register(program: Command): void {
             const row = disclosureFor(loadedConfig, resolveWorker(loadedConfig, workerId));
             if (row !== null) disclosures.push(row);
           }
+          /*
+           * THE SENSITIVE-REPO GATE, and it runs BEFORE the banner because the
+           * banner's second line says "Nothing below is refused (SRD D10)" —
+           * true of an ordinary hosted run and false of this one. Printing that
+           * sentence immediately above a refusal would teach an operator to
+           * disbelieve whichever of the two they read second.
+           *
+           * Here rather than in a role file because the only previous copy of
+           * this refusal was a sentence in `roles/collator.md`, and it did not
+           * fire: three reviews of an AppNeta repository reached three hosted
+           * vendors while it sat in the collator's own briefing. It could not
+           * have fired — it named a condition and never named the probe, to a
+           * worker with no `bash` and no `git`. `sensitive-repo.ts` carries the
+           * argument in full.
+           */
+          {
+            const remote = await originRemote(repoRoot);
+            const refusal = hostedRepoRefusal({
+              repoRoot,
+              remote,
+              carriers: disclosures.map((d) => ({ workerId: d.workerId, provider: d.provider })),
+              consent: loadedConfig.config.run.hosted_repo_consent,
+            });
+            if (refusal !== null) throw new CliError(refusal, EXIT.USAGE);
+          }
+
           const banner = formatDisclosureBanner(disclosures);
           if (banner !== null) {
             if (opts.json === true) process.stderr.write(banner);

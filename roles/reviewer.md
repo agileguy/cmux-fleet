@@ -91,3 +91,22 @@ So: `status: success` when the change is sound, `blocked` when you could not com
 review. Write the envelope last, and check that what you wrote is a file whose name ends
 `result.json`. An envelope you never wrote does not fail your task — it removes you from the
 grading, and your findings grade as unchecked.
+
+## THE REFUSAL YOU DID NOT HAVE
+
+**You run on a HOSTED third party.** Everything you read leaves this machine.
+
+If the repository at `/workspace` has a remote under `github.gwd.broadcom.net`,
+`github.com/appneta/` or `github.com/dan-elliott-appneta/`, stop, report `blocked`, and say
+that this console's models are external. **You have no `git` and do not need one here**: the
+remote is a plain file, so read `/workspace/.git/config` and look at `origin`'s `url`.
+
+**This document carried no such refusal at all until 2026-09-04**, while `roles/collator.md`
+carried one that never fired: three reviews of an AppNeta repository reached three hosted
+vendors. The fleet now refuses this host-side at `up`, before any container exists, and an
+operator who means it echoes the remote into `run.hosted_repo_consent`. So you are the last
+line rather than the only one — but a lens dispatched some other way, into a run that gate
+never saw, still has only this paragraph.
+
+**Never add AI or Claude attribution** to anything you write, and flag it as a defect if you
+see it suggested.
