@@ -491,20 +491,55 @@ describe("the workspace heading is bold yellow, and only when colour is on", () 
   });
 
   /**
-   * THE TEST'S OWN CONTROL, and it is not decoration.
+   * THE CONTROL, REWRITTEN AFTER IT WAS FOUND TO BE THE THING IT WARNED ABOUT.
    *
-   * `COLOUR.warn` is ALREADY yellow. Had the heading reused `warn` instead of
-   * getting its own entry, both assertions above would pass and the palette's
-   * stated discipline — *"the assignment is by SEVERITY and not by category"* —
-   * would be broken: every workspace heading would be painted in the colour
-   * this design reserves for "has never spoken, needs a look". The entry must
-   * be its own, and it must not collide with the region heading either, or the
-   * two tiers become one to the eye.
+   * The previous version said in its own docblock: *"`COLOUR.warn` is ALREADY
+   * yellow. Had the heading reused `warn` instead of getting its own entry,
+   * both assertions above would pass"* — and then compared `workspace` against
+   * `heading`, `dim` and `live` and never against `warn`. It named the one
+   * collision that matters and omitted it. A reviewer's mutation
+   * (`fleet.tsx` `p.workspace` -> `p.warn`) survived the full unit AND
+   * integration suites.
+   *
+   * **The repair is NOT to assert they differ, because they do not.**
+   * `chrome.tsx` sets `warn: "yellow"` and `workspace: "yellow"`, and that is
+   * correct: the owner asked for a bold yellow workspace name. Two names for
+   * one colour was always the design, and the docblock there says so — what
+   * the separate entry buys is INDEPENDENCE, not distinctness. An assertion
+   * that they differ would fail against a correct palette.
+   *
+   * So the discrimination moves to where it can exist: an ASYMMETRIC palette
+   * in which the two are deliberately different, passed to the exported
+   * `workspaceHeadingStyle`. Under the real palette no test can tell
+   * `p.workspace` from `p.warn`; under this fixture only the correct one
+   * answers. That is the degenerate-fixture lesson applied to a palette — the
+   * fixture has to make the candidates distinguishable before an assertion
+   * about them means anything.
    */
-  test("it is its own palette entry, distinct from the region heading", () => {
+  test("the heading reads `workspace`, not `warn` — proved on a palette where they differ", () => {
+    // The real palette CANNOT discriminate, and saying so is the point.
+    expect(COLOUR.workspace).toBe(COLOUR.warn);
+
+    // So: a palette where they differ. Only a `p.workspace` read gives yellow.
+    const asym = { ...COLOUR, workspace: "yellow", warn: "magenta" };
+    expect(workspaceHeadingStyle(asym).color).toBe("yellow");
+
+    // And the mirror, so a mutation to a CONSTANT rather than to `p.warn`
+    // cannot pass by coincidence.
+    const swapped = { ...COLOUR, workspace: "magenta", warn: "yellow" };
+    expect(workspaceHeadingStyle(swapped).color).toBe("magenta");
+  });
+
+  /**
+   * The tiers that MUST stay visually apart, which is a different claim from
+   * the one above and is still worth pinning: a workspace heading painted the
+   * region heading's cyan would merge two levels of the frame to the eye.
+   */
+  test("it does not collide with the region heading or the row severities", () => {
     expect(COLOUR.workspace).not.toBe(COLOUR.heading);
     expect(COLOUR.workspace).not.toBe(COLOUR.dim);
     expect(COLOUR.workspace).not.toBe(COLOUR.live);
+    expect(COLOUR.workspace).not.toBe(COLOUR.alarm);
   });
 
   /**

@@ -26,7 +26,8 @@
  * config that was edited to something wrong.
  */
 
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
 
 import {
   DEFAULT_REVIEW_WORKERS,
@@ -38,8 +39,66 @@ import {
 } from "../../src/backends/cmux/operations-plan.ts";
 import { loadConfig, resolveWorker } from "../../src/config/load.ts";
 
-/** The operator's own config, loaded once — `describe` bodies are not async. */
-const LOADED = await loadConfig(new URL("../../fleet.yaml", import.meta.url).pathname);
+/**
+ * The operator's own `fleet.yaml` — READ ONLY WHERE IT EXISTS, and the whole
+ * of this block is about the fact that it usually does not.
+ *
+ * ## What was wrong, and why the audit could not see it
+ *
+ * This was a TOP-LEVEL `await loadConfig(...)`. `fleet.yaml` is gitignored
+ * (`.gitignore:9`; `git ls-files --error-unmatch fleet.yaml` errors), so on any
+ * clean checkout the await threw at IMPORT time and the file reported `0 pass,
+ * 1 fail, 1 error` — taking all thirteen tests down, including the eight that
+ * need no config at all. A machine dependency should cost the assertions that
+ * depend on the machine, never the whole file.
+ *
+ * **This is the fourth machine dependency in `test/unit`, and it is the mirror
+ * of the twenty-two `6f35f0d` removed.** That sweep enumerated three
+ * capabilities and was verified inside a worker container — which bind-mounts
+ * the maintainer's checkout and therefore HAS `fleet.yaml`. The environment
+ * that audited hermeticity was the one environment where this dependency is
+ * invisible, exactly as the operator's own machine was for the first
+ * twenty-two. What would have caught it is a sweep run somewhere that has the
+ * repository but not the operator's untracked config: a fresh `git worktree`,
+ * a `git archive` extraction, or CI itself.
+ *
+ * ## Why the config is still READ rather than restated as a fixture
+ *
+ * The header's argument stands: "a test that restates the config passes on a
+ * config that was edited to something wrong." Inlining a roster fixture would
+ * turn these five into a test of `resolveWorker` and stop them being a test of
+ * THIS FLEET's review console, which is the only thing they are for.
+ * `fleet.example.yaml` is tracked but declares none of `col-1`, `rev-arch-1`,
+ * `rev-ctx-1` or `rev-lang-1`, so it cannot stand in either.
+ *
+ * So they run where the fact exists and SKIP, by name, where it does not — the
+ * same disposition every gated probe in this repository already has. The eight
+ * layout assertions below are unaffected and now run in CI, which they did not
+ * before.
+ *
+ * ## A COLLECTED-COUNT QUIRK, measured here because it bites constants elsewhere
+ *
+ * `describe.skipIf` reports ONE MORE skip than the block holds. Measured in one
+ * worktree both ways: with `fleet.yaml` present this file is `13 pass, Ran 13`;
+ * with it absent, `8 pass, 6 skip, Ran 14` — and the guarded block contains
+ * five `it`s, not six. Bun counts the skipped `describe` itself as an entry.
+ *
+ * Harmless here, because the `test` job grades pass/fail rather than a total.
+ * Recorded because `probe-guard.sh` grades a COLLECTED total against a pinned
+ * `TOTAL_EXPECTED`, and a `describe.skipIf` added to any file in that job's
+ * list would move the total by n+1 rather than n — which is precisely the kind
+ * of off-by-a-little that made `TOTAL_EXPECTED` wrong by 12 and self-consistent
+ * at the same time.
+ */
+const CONFIG_PATH = new URL("../../fleet.yaml", import.meta.url).pathname;
+const HAVE_CONFIG = existsSync(CONFIG_PATH);
+
+/**
+ * Populated by `beforeAll` inside the guarded block, never at module scope —
+ * an import-time load is what took the file down, and moving it into the block
+ * is what bounds the blast radius to the assertions that need it.
+ */
+let LOADED: Awaited<ReturnType<typeof loadConfig>> | undefined;
 
 const REPO = "/repo";
 const BASE = { repoRoot: REPO, watchDir: "/work" } as const;
@@ -115,10 +174,22 @@ describe("the review console is a 2x2 with the collator in the landing seat", ()
  * looking at a console and noticing nothing was wrong — which is the failure
  * mode the whole console exists to defend against, applied to itself.
  */
-describe("the three reviewers run three different vendors", () => {
-  const loaded = LOADED;
+describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors", () => {
+  beforeAll(async () => {
+    LOADED = await loadConfig(CONFIG_PATH);
+  });
+  /*
+   * A GETTER, not a captured value. `describe` bodies run before `beforeAll`,
+   * so a `const loaded = LOADED` here would capture `undefined` and every
+   * assertion below would fail on a machine that HAS the config — turning a
+   * skip into a break, which is the opposite of the repair.
+   */
+  const loaded = () => {
+    if (LOADED === undefined) throw new Error("fleet.yaml was not loaded — beforeAll did not run");
+    return LOADED;
+  };
   const reviewers = ["rev-arch-1", "rev-ctx-1", "rev-lang-1"] as const;
-  const modelOf = (id: string) => resolveWorker(loaded, id).model;
+  const modelOf = (id: string) => resolveWorker(loaded(), id).model;
 
   it("gives each reviewer a DIFFERENT model", () => {
     /*
@@ -134,7 +205,7 @@ describe("the three reviewers run three different vendors", () => {
 
   it("keeps every reviewer on a hosted thinking model at full effort", () => {
     for (const id of reviewers) {
-      const w = resolveWorker(loaded, id);
+      const w = resolveWorker(loaded(), id);
       expect(w.thinking, `${id} must think hard — it is a reviewer`).toBe("high");
     }
   });
@@ -149,7 +220,7 @@ describe("the three reviewers run three different vendors", () => {
      */
     const angles = new Set<string>();
     for (const id of reviewers) {
-      const files = resolveWorker(loaded, id)
+      const files = resolveWorker(loaded(), id)
         .briefing.filter((b) => b.kind === "file")
         .map((b) => b.value);
       expect(files.some((f) => f.endsWith("roles/reviewer.md")), `${id} lost the shared discipline`).toBe(true);
@@ -169,18 +240,18 @@ describe("the three reviewers run three different vendors", () => {
      * argument for withholding it from a reviewer applies unchanged to the
      * worker that briefs them.
      */
-    const col = resolveWorker(loaded, "col-1");
+    const col = resolveWorker(loaded(), "col-1");
     expect(col.tools).toContain("write");
     expect(col.tools).not.toContain("bash");
     for (const id of reviewers) {
-      expect(resolveWorker(loaded, id).tools, `${id} must stay read-only`).not.toContain("bash");
-      expect(resolveWorker(loaded, id).tools, `${id} must stay read-only`).not.toContain("write");
+      expect(resolveWorker(loaded(), id).tools, `${id} must stay read-only`).not.toContain("bash");
+      expect(resolveWorker(loaded(), id).tools, `${id} must stay read-only`).not.toContain("write");
     }
   });
 
   it("puts every review seat on a keyboard", () => {
     for (const id of DEFAULT_REVIEW_WORKERS) {
-      expect(resolveWorker(loaded, id).paneMode, `${id} must be attended`).toBe("tui");
+      expect(resolveWorker(loaded(), id).paneMode, `${id} must be attended`).toBe("tui");
     }
   });
 });

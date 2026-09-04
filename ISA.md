@@ -1960,6 +1960,111 @@ the root-cause classification; this table is the index.
   `pifleet worktrees` (new CLI command, §10) replaces the operator-visibility `git worktree list`
   used to provide, since an independent clone has no entry in the parent's worktree list at all.
 
+- **conjectured:** the workspace-name feature was proved. Four rounds carried a mutation battery
+  each — 16, 8, 8 and 10 arms, every one "as expected", every negative control green, every restore
+  verified by `shasum -a 256 -c` and (from round 4) `git diff --stat`. The write-up named exactly one
+  hop as proved only by reading source: `up`'s write site, unreachable from a unit test.
+  **refuted by:** an end-of-phase review, which found three surviving mutations and two red CI jobs.
+  Two of the three are hops the write-up had counted as CLOSED. `planPanes` has two callers and only
+  `createWorkspace` was read, so `restartConsolePane` -> `spec.panes(opts)` survived; the scripts'
+  `--dry-run` pass of `SPEC.name` is a third call site with no reader at all, so deleting it from
+  `scripts/operations` and `scripts/development` survived at 72/72; and `scripts/review` had never
+  been spawned by any test in any form. The third is worse than a gap: the palette control's own
+  docblock said *"`COLOUR.warn` is ALREADY yellow … had the heading reused `warn` instead of getting
+  its own entry, both assertions above would pass"* and then compared `workspace` against `heading`,
+  `dim` and `live` and never against `warn`. It named the one collision that mattered and omitted it,
+  so `p.workspace` -> `p.warn` survived unit AND integration.
+  **learned:** a battery proves the arms you wrote, and the arms you write are drawn from the same
+  understanding that wrote the code — so a battery is evidence about a mechanism and never a census
+  of its call sites. The durable check is cheap and was not done: **enumerate the callers of the
+  function under test and confirm one arm per caller.** `planPanes` had two and the batteries had
+  one; the scripts had a third nobody counted. Second, and sharper: **a control cannot discriminate
+  between two values a fixture makes equal.** `warn` and `workspace` are both `"yellow"` by design —
+  the owner asked for yellow — so no assertion over the real palette can separate them, and the
+  repair is not to assert they differ (they must not) but to pass an ASYMMETRIC palette to the
+  exported `workspaceHeadingStyle`. That is the degenerate-fixture rule this project already had,
+  applied to a palette instead of to a set. The same rule then paid again: `scripts/review`'s dry-run
+  was about to be written up as an unassertable limitation, because the tracked `fleet.example.yaml`
+  declares none of its workers and every pane degrades to non-attended. `--workers` overrides the
+  roster; the fixture could produce the value after all. **A limitation that has not survived one
+  attempt to build the fixture is a limitation nobody has earned the right to document.**
+  **criterion now:** the three hops each have a reader — `restartConsolePane` in
+  `test/unit/workspace-name-wiring.test.ts`, all three `--dry-run` passes in
+  `test/integration/operations-console.test.ts` (review via a documented roster override whose
+  premise is itself pinned, so the workaround announces its own expiry), and the palette read via an
+  asymmetric-palette discrimination. Battery of 8 arms below, run in a scratch `git worktree` rather
+  than the live tree — see the next entry for why that matters.
+
+  | # | mutation | result | killed by |
+  |---|---|---|---|
+  | Q1 | `p.workspace` -> `p.warn` in the heading style | red 1 | heading reads `workspace`, not `warn` |
+  | Q2 | restart site drops the `planPanes` fold | red 2 | `restartConsolePane` carries the flag |
+  | Q3 | create site drops the fold | red 4 | all three consoles' end-to-end argv |
+  | Q4 | `scripts/operations` drops its dry-run name | red 2 | operations previews its own name |
+  | Q5 | `scripts/development` drops its dry-run name | red 2 | development previews its own name |
+  | Q6 | `scripts/review` drops its dry-run name | red 2 | review previews its own name |
+  | Q7 | the fold hardcodes a title instead of `spec.name` | red 6 | cross-console anti-degeneracy |
+  | Q8 | **negative control** — rename a binding and all its uses | **GREEN 442/0** | nothing, as required |
+
+- **conjectured:** a mutation battery is safe to run in the working tree, because every arm restores
+  by full path and verifies the restore before the next one starts.
+  **refuted by:** the fleet. Round 4's battery ran in the live checkout while the coordinator was
+  recreating ten workers from it; arm P9 renames `--workspace-name` to `--workspace-title` and holds
+  that mutation for the length of a full suite run. A worker spawning inside that window died with
+  `error: unknown option '--workspace-name'`. The restore discipline worked exactly as designed —
+  `up.ts` was byte-identical to the pre-battery snapshot afterwards, which is itself the signature of
+  a mutation applied and reverted — and it is why the cost was one worker rather than ten.
+  **learned:** restore-verified is a recovery property, not an isolation property. It bounds how long
+  a tree is wrong; it cannot stop anything reading the tree DURING that window, and a working tree
+  that a fleet spawns from is read continuously by processes the battery has no relationship with.
+  A second, epistemic half: asked afterwards whether the window had been open, the answer given was
+  "the battery had run to completion before your message arrived" — inferred from seeing a finished
+  battery in a tool result, which establishes when it finished relative to READING it and nothing
+  about when it finished relative to anyone else's clock. The provable claim was "the tree is
+  pristine now"; the claim made was about ninety seconds ago.
+  **criterion now:** batteries run in a scratch `git worktree` seeded from the branch, never in the
+  checkout the fleet spawns from. Restores are verified by `shasum -a 256 -c` AND `git diff --stat`,
+  because bytes matching a manifest cannot distinguish "restored" from "restored to the wrong
+  baseline". And a battery's own negative control must be semantics-preserving: round 5's first
+  control renamed a binding without its uses, which is a syntax break, reddened 41 tests and proved
+  nothing — a control that fails is not a finding about the code, it is a defect in the control.
+
+- **conjectured:** `test/unit` is hermetic. `6f35f0d` enumerated three machine capabilities, removed
+  twenty-two dependencies on them, and the sweep was verified inside a worker container.
+  **refuted by:** a branch-new file, `test/unit/review-plan.test.ts`, whose module scope held
+  `await loadConfig(new URL("../../fleet.yaml", …))`. `fleet.yaml` is gitignored, so on any clean
+  checkout the await threw at IMPORT and the file reported `0 pass, 1 fail, 1 error` — all thirteen
+  tests, including the eight needing no config, and a red `test` job.
+  **learned:** the audit ran in a worker container, which bind-mounts the maintainer's checkout and
+  therefore HAS `fleet.yaml`. **The environment that verified hermeticity was the one environment
+  where this dependency is invisible** — precisely the relationship the operator's own machine had to
+  the first twenty-two. An audit inherits the blind spots of wherever it runs, so a hermeticity sweep
+  has to run somewhere with the repository and without the operator's untracked state: a fresh
+  `git worktree`, a `git archive` extraction, or CI. Measured incidentally while fixing it, and worth
+  recording because it bites pinned totals: `describe.skipIf` reports one MORE skip than the block
+  holds (13 collected with the config present; `8 pass, 6 skip, Ran 14` without, over five `it`s), so
+  a `skipIf` added to a file `probe-guard.sh` grades would move its total by n+1.
+  **criterion now:** the config load moved inside a `describe.skipIf(!existsSync(...))` with a
+  `beforeAll`, so the five config assertions skip by name where the file is absent and the eight
+  layout assertions now run in CI, which they never did.
+
+- **conjectured:** `TOTAL_EXPECTED: "158"` was correct, derived by the hand method against the
+  container job's file list.
+  **refuted by:** `probe-guard.sh:189` exiting 1 on every run of the branch. Measured on a clean
+  worktree with gates unset, the SIXTEEN paths the run step actually passes give `8 pass, 138 skip,
+  0 fail — 146 across 16 files`. The derivation claimed the missing 12 were `relay-script.test.ts`
+  and that it was "named in the run step above"; `ci.yml:1060` excludes it in as many words, and had
+  since before that derivation was written.
+  **learned:** the arithmetic was SELF-CONSISTENT — relay-script does collect exactly 12, and
+  146 + 12 = 158 — so the number checked out against itself while describing a command nobody runs.
+  The hand method's own rule is that a derivation must re-read the RUN STEP rather than the previous
+  comment; that rule was stated in the comment being written and broken by it, because the file list
+  was read back out of the derivation's own conclusion. A derivation that QUOTES its command and its
+  output cannot make that mistake silently, because the list sits beside the number.
+  **criterion now:** 146, with the command and its measured output written into the comment. Not
+  fixed by adding relay-script to the list: `ci.yml:29` is a bare `bun test test/integration`, so it
+  already runs ungated in the fast job, and `:1060`'s reasoning holds.
+
 ## Verification
 
 *(Evidence per ISC, appended as each criterion passes.)*

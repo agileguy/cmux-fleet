@@ -48,9 +48,13 @@ import {
   reviewPanes,
 } from "../../src/backends/cmux/operations-plan.ts";
 import {
+  DEVELOPMENT_SPEC,
+  OPERATIONS_SPEC,
+  REVIEW_SPEC,
   ensureDevelopment,
   ensureOperations,
   ensureReview,
+  restartConsolePane,
 } from "../../src/backends/cmux/operations.ts";
 import { presentedWorkspace, register } from "../../src/cli/commands/up.ts";
 
@@ -329,6 +333,129 @@ describe("the real consoles tell cmux to run an up that names their workspace", 
   test("a console whose workers are all rpc emits no --workspace-name", async () => {
     const { client, calls } = fakeCmux();
     await ensureOperations(client, { repoRoot: REPO, watchDir: CWD, tuiWorkers: [] });
+    expect(respawnCommands(calls).join("\n")).not.toContain("--workspace-name");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE SECOND CALLER OF planPanes — the restart path
+// ---------------------------------------------------------------------------
+
+describe("a restarted pane names its workspace too", () => {
+  /**
+   * `planPanes` HAS TWO CALLERS and only one of them was read.
+   *
+   * `a2cc4f8`'s own commit message named this hop — *"one of them forgetting
+   * the fold would be a console whose restarted pane silently stopped naming
+   * its workspace while every other pane still did"* — and then tested only
+   * `createWorkspace`. A reviewer's mutation (`planPanes(spec, opts)` ->
+   * `spec.panes(opts)` at the restart site) survived unit and integration.
+   *
+   * `console-restart.test.ts` could not have caught it either, and the reason
+   * is worth naming because it is a fixture defect rather than a missing
+   * assertion: its `OPTS` carries no `tuiWorkers`, so `attach` is false for
+   * every pane it builds and `agentPaneCommand` suppresses the flag by design.
+   * The flag was UNOBSERVABLE there by construction — a fixture that cannot
+   * produce the value it would be asked about.
+   *
+   * So this asserts it where the fixture can: `tuiWorkers` set, one restart,
+   * the respawned command read back.
+   */
+  function fakeRestartCmux(
+    workspaceTitle: string,
+    titles: readonly string[],
+  ): { client: CmuxClient; calls: string[][] } {
+    const calls: string[][] = [];
+    const client = new CmuxClient({
+      exec: async (argv) => {
+        calls.push(argv.slice(1));
+        switch (verb(argv)) {
+          case "ping":
+            return ok("");
+          case "workspace list":
+            return ok(
+              JSON.stringify({
+                window_id: "win-1",
+                workspaces: [{ id: "ws-live", custom_title: workspaceTitle }],
+              }),
+            );
+          case "list-panes":
+            return ok(
+              JSON.stringify({
+                panes: [
+                  { id: "pane-1", selected_surface_id: "surf-1", index: 0 },
+                  { id: "pane-2", selected_surface_id: "surf-2", index: 1 },
+                  { id: "pane-3", selected_surface_id: "surf-3", index: 2 },
+                  { id: "pane-4", selected_surface_id: "surf-4", index: 3 },
+                ],
+              }),
+            );
+          case "list-pane-surfaces": {
+            const paneIdx = argv.indexOf("--pane");
+            const pane = argv[paneIdx + 1] ?? "";
+            const n = pane.replace("pane-", "");
+            return ok(
+              JSON.stringify({
+                surfaces: [
+                  { id: `surf-${n}`, title: titles[Number(n) - 1] ?? "x" },
+                ],
+              }),
+            );
+          }
+          default:
+            return ok("");
+        }
+      },
+    });
+    return { client, calls };
+  }
+
+  test("restartConsolePane respawns a command carrying --workspace-name", async () => {
+    const { client, calls } = fakeRestartCmux(DEVELOPMENT_SPEC.name, DEFAULT_DEVELOPMENT_WORKERS);
+    await restartConsolePane(
+      client,
+      DEVELOPMENT_SPEC,
+      { repoRoot: REPO, watchDir: CWD, tuiWorkers: [...DEFAULT_DEVELOPMENT_WORKERS] },
+      DEFAULT_DEVELOPMENT_WORKERS[0]!,
+    );
+    const commands = respawnCommands(calls);
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.join("\n")).toContain(`'--workspace-name' '${DEVELOPMENT_SPEC.name}'`);
+  });
+
+  /**
+   * ANTI-DEGENERACY: the restarted pane must name ITS OWN console. A fold that
+   * hardcoded a title, or read the console `label` rather than `spec.name`,
+   * would pass the test above for `development` and fail here.
+   */
+  test("a restarted review pane names review, not development", async () => {
+    const { client, calls } = fakeRestartCmux(REVIEW_SPEC.name, DEFAULT_REVIEW_WORKERS);
+    await restartConsolePane(
+      client,
+      REVIEW_SPEC,
+      { repoRoot: REPO, watchDir: CWD, tuiWorkers: [...DEFAULT_REVIEW_WORKERS] },
+      DEFAULT_REVIEW_WORKERS[0]!,
+    );
+    const joined = respawnCommands(calls).join("\n");
+    expect(joined).toContain(`'--workspace-name' '${REVIEW_SPEC.name}'`);
+    expect(joined).not.toContain(`'--workspace-name' '${DEVELOPMENT_SPEC.name}'`);
+    expect(joined).not.toContain(`'--workspace-name' '${OPERATIONS_SPEC.name}'`);
+  });
+
+  /**
+   * And the fixture defect that hid this is pinned as its own fact, so the
+   * next person to read `console-restart.test.ts` and wonder why it is silent
+   * has the answer: with no `tuiWorkers`, no pane attaches and the flag is
+   * correctly absent.
+   */
+  test("with no tuiWorkers a restarted pane carries no flag — why the old fixture was blind", async () => {
+    const { client, calls } = fakeRestartCmux(DEVELOPMENT_SPEC.name, DEFAULT_DEVELOPMENT_WORKERS);
+    await restartConsolePane(
+      client,
+      DEVELOPMENT_SPEC,
+      { repoRoot: REPO, watchDir: CWD },
+      DEFAULT_DEVELOPMENT_WORKERS[0]!,
+    );
     expect(respawnCommands(calls).join("\n")).not.toContain("--workspace-name");
   });
 });
