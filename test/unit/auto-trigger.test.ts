@@ -324,18 +324,26 @@ describe("the argv that loads it", () => {
   test("--no-extensions stays on the same argv", () => {
     const argv = buildPiArgv(worker(), false);
     expect(argv).toContain("--no-extensions");
-    expect(argv).toContain("--extension");
+    expect(argv).toContain(DISPATCH_TRIGGER_PATH);
   });
 
+  /*
+   * These two assert on the PATH, not on the `--extension` flag, and the
+   * distinction became load-bearing on 2026-09-04 when a second extension
+   * (truncation recovery) started loading UNCONDITIONALLY. Asserting the flag
+   * was absent used to mean "the auto-trigger did not load"; it now means "no
+   * extension loaded at all", which is a different and false claim. The path is
+   * what these tests were always about.
+   */
   test("auto_trigger: false gives the keystroke back", () => {
     const argv = buildPiArgv(worker({ autoTrigger: false }), false);
-    expect(argv).not.toContain("--extension");
+    expect(argv).not.toContain(DISPATCH_TRIGGER_PATH);
     expect(argv).toContain("--no-extensions");
   });
 
   /** An rpc worker is dispatched down the control socket; it has nothing to trigger. */
   test("an rpc worker never loads it, even with auto_trigger on", () => {
-    expect(buildPiArgv(worker({ paneMode: "rpc" }), false)).not.toContain("--extension");
+    expect(buildPiArgv(worker({ paneMode: "rpc" }), false)).not.toContain(DISPATCH_TRIGGER_PATH);
   });
 });
 

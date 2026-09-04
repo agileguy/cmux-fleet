@@ -1913,6 +1913,11 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       "--no-context-files",
       "--theme",
       "/opt/pifleet/themes",
+      // Truncation recovery, loaded in BOTH modes — unlike the auto-trigger
+      // below, which is `tui`-only. A 50KB bash cap is not a pane concept, and
+      // an rpc worker's operator is a program that will not read a footer.
+      "--extension",
+      "/opt/pifleet/truncation-recovery.ts",
       "--provider",
       "omlx",
       "--model",
@@ -1947,6 +1952,11 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       "--no-context-files",
       "--theme",
       "/opt/pifleet/themes",
+      // Truncation recovery, loaded in BOTH modes — unlike the auto-trigger
+      // below, which is `tui`-only. A 50KB bash cap is not a pane concept, and
+      // an rpc worker's operator is a program that will not read a footer.
+      "--extension",
+      "/opt/pifleet/truncation-recovery.ts",
       "--provider",
       "omlx",
       "--model",
@@ -1996,6 +2006,12 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       // extension — pifleet's, root-owned 0444 in the image — loads.
       "--extension",
       "/opt/pifleet/dispatch-trigger.ts",
+      // And truncation recovery after it, on every worker in both modes. Two
+      // `--extension` flags is the expected shape here, not a duplication:
+      // `--no-extensions` still denies DISCOVERY, so these two paths are the
+      // complete set of what executes in-process.
+      "--extension",
+      "/opt/pifleet/truncation-recovery.ts",
       "--provider",
       "omlx",
       "--model",
@@ -2052,12 +2068,26 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
      * adds a legitimate second difference, and the way to keep the force is to
      * name it as a two-element insertion — not to relax the equality. A THIRD
      * difference still fails, which is the whole point.
+     *
+     * The insertion point is the truncation-recovery flag, NOT `--provider`.
+     * That extension loads in both modes, so it is already in the derived rpc
+     * argv, and `buildPiArgv` emits the auto-trigger BEFORE it. Splicing at
+     * `--provider` would put the two in the wrong order and assert a sequence
+     * the renderer does not produce — which is how this test failed when the
+     * second extension landed, and it failed correctly.
      */
-    const at = expected.indexOf("--provider");
-    expect(at).toBeGreaterThan(-1);
+    const at = expected.indexOf("/opt/pifleet/truncation-recovery.ts") - 1;
+    expect(expected[at]).toBe("--extension");
     expected.splice(at, 0, "--extension", "/opt/pifleet/dispatch-trigger.ts");
     expect(expected.slice(0, 5)).toEqual(["docker", "run", "-i", "-t", "--rm"]);
     expect(tui.docker).toEqual(expected);
+    /*
+     * The mode-invariant half, stated directly: truncation recovery is in BOTH
+     * argvs. The derivation above would be equally satisfied by an extension
+     * that had vanished from both, since `expected` is built from `rpc`.
+     */
+    expect(rpc.docker).toContain("/opt/pifleet/truncation-recovery.ts");
+    expect(tui.docker).toContain("/opt/pifleet/truncation-recovery.ts");
     /*
      * …and there is no `-v` for it, which the equality above would ALSO satisfy
      * if both argvs had grown one. The extension is baked into the image at

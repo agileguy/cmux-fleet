@@ -435,6 +435,16 @@ COPY --chmod=0755 docker/honeypot.cjs /usr/local/bin/pifleet-honeypot
 # stops triggering silently, which is worse than any loud failure.
 COPY --chmod=0444 docker/pi-extensions/dispatch-trigger.ts /opt/pifleet/dispatch-trigger.ts
 
+# The truncation-recovery extension. Same reasoning as the file above on every
+# count — in-process, root-owned, 0444, denied to the worker — and it is loaded
+# for EVERY worker rather than only the auto-triggered ones, because a truncated
+# tool result is not a `tui` concept. An rpc worker truncates identically and
+# its operator is a program that will not notice.
+#
+# ADDING THIS COPY MEANT ADDING "pi-extensions/truncation-recovery.ts" TO
+# `BUILD_CONTEXT_ASSETS` in src/container/image.ts.
+COPY --chmod=0444 docker/pi-extensions/truncation-recovery.ts /opt/pifleet/truncation-recovery.ts
+
 USER 10001:10001
 WORKDIR /workspace
 ENV PI_OFFLINE=0 \

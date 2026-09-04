@@ -58,6 +58,18 @@ import { THEMES_DIR } from "./themes.ts";
 /** Container path the briefing file is mounted at. */
 export const BRIEFING_MOUNT = "/briefing/system-append.md";
 
+/**
+ * Container path of the truncation-recovery extension.
+ *
+ * Under `/opt/pifleet` for the reason `THEMES_DIR` is, and baked into the image
+ * as a root-owned 0444 layer rather than mounted, for the reason
+ * `DISPATCH_TRIGGER_PATH` is: Pi executes it IN-PROCESS with the full extension
+ * API, so a worker able to write it would be a worker able to rewrite its own
+ * tool results. A mount would carry that guarantee in a `:ro` flag one
+ * character from being dropped.
+ */
+export const TRUNCATION_RECOVERY_PATH = "/opt/pifleet/truncation-recovery.ts";
+
 /** Everything `render` prints and `up` will later execute. */
 export interface RenderedWorker {
   workerId: string;
@@ -226,6 +238,20 @@ export function buildPiArgv(w: ResolvedWorker, hasBriefing: boolean): string[] {
   if (w.paneMode === "tui" && w.autoTrigger) {
     argv.push("--extension", DISPATCH_TRIGGER_PATH);
   }
+  /*
+   * Truncation recovery — UNCONDITIONAL, and the difference from the block
+   * above is the point.
+   *
+   * The auto-trigger is gated because a staged brief is a `tui`-only concept.
+   * A truncated tool result is not: every worker runs commands, Pi clips bash
+   * output at 50KB in both modes, and the rpc worker's operator is a program
+   * that will not read a footer. Measured 2026-09-04 — `tick-1` received the
+   * last 50KB of a 56KB JSON document, which is unparseable by construction
+   * because tail truncation drops the opening delimiter first, and it re-ran
+   * the identical command rather than reading the complete output Pi had
+   * already written to disk. The extension's own header carries the detail.
+   */
+  argv.push("--extension", TRUNCATION_RECOVERY_PATH);
   argv.push("--provider", w.provider);
   argv.push("--model", w.model);
   if (w.thinking !== undefined) argv.push("--thinking", w.thinking);
