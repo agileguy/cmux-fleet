@@ -593,6 +593,34 @@ function canonicalScramble(json: string): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * What `harvest/index.ts:243-250` builds when the envelope names no workdir.
+ *
+ * Shared by the two describe blocks below rather than copied into each,
+ * deliberately. Both assert what the adjudicator does with THE BUNDLE THE
+ * HARVESTER ACTUALLY PRODUCES; two hand-maintained copies could drift apart —
+ * or drift away from `harvest/index.ts` — and the block whose copy went stale
+ * would keep passing while asserting nothing about production.
+ */
+function inquiryFacts(over: Partial<z.input<typeof DerivedFactsSchema>> = {}): DerivedFacts {
+  return DerivedFactsSchema.parse({
+    branch: null,
+    base_ref: null,
+    head_ref: null,
+    repository: false,
+    base_is_ancestor: false,
+    commits: [],
+    files_changed: [],
+    diff_bytes: 0,
+    acceptance: [],
+    acceptance_context: null,
+    harness: { patterns: [], touched: [] },
+    tree_hash_quiesce: null,
+    tree_hash_harvest: null,
+    ...over,
+  });
+}
+
+/**
  * `base_is_ancestor: false` carries two meanings and the clamp only wants one.
  *
  * ISC-151 reads it as "the base was rewritten, so `diff base...HEAD` can be
@@ -613,26 +641,6 @@ function canonicalScramble(json: string): string {
  * to be inferred from a default.
  */
 describe("the ISC-151 ancestry clamp applies to repository work only", () => {
-  /** What `harvest/index.ts` builds when the envelope names no workdir. */
-  function inquiryFacts(over: Partial<z.input<typeof DerivedFactsSchema>> = {}): DerivedFacts {
-    return DerivedFactsSchema.parse({
-      branch: null,
-      base_ref: null,
-      head_ref: null,
-      repository: false,
-      base_is_ancestor: false,
-      commits: [],
-      files_changed: [],
-      diff_bytes: 0,
-      acceptance: [],
-      acceptance_context: null,
-      harness: { patterns: [], touched: [] },
-      tree_hash_quiesce: null,
-      tree_hash_harvest: null,
-      ...over,
-    });
-  }
-
   /**
    * THE REGRESSION. Fails against the ungated clamp, which returns early with
    * the ancestry reason before it has looked at the envelope at all.
@@ -697,5 +705,134 @@ describe("the ISC-151 ancestry clamp applies to repository work only", () => {
 
     expect(parsed.repository).toBe(true);
     expect(adjudicate(parsed, null).reasons.join(" ")).toContain("ISC-151");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An empty diff is only a finding where a diff was possible
+// ---------------------------------------------------------------------------
+
+/**
+ * ISC-93's empty-diff rule, gated on `facts.repository` like the clamp above.
+ *
+ * The two blocks are the same defect found twice, eighty lines apart. ISC-151
+ * read the vacuous `base_is_ancestor: false` as a rewritten base; ISC-93 read
+ * the vacuous empty diff as fabricated work. In both, the field that says which
+ * of the two meanings applies is `facts.repository`, and in both, the task
+ * being punished is the one whose evidence was complete.
+ *
+ * MEASURED 2026-09-03. The `reviewer` role is `isolation: shared-ro`
+ * (`fleet.yaml:461`), so it is given no worktree; `harvest/index.ts:569` gates
+ * the acceptance exam on `hasWorktree`, so `facts.acceptance` stays empty; so
+ * the exemption arm keyed on `acceptance.verdict === "success"` is unreachable
+ * for this role BY CONSTRUCTION. Every honest review this fleet produced was
+ * graded `failed` for fabricating, and told to fix it with acceptance commands
+ * that a worktree-less role cannot run.
+ *
+ * SRD-REVIEW-CONSOLE §6.8 / D9 specifies the repair, and its stated probe is
+ * the first test below almost verbatim.
+ */
+describe("ISC-93's empty-diff rule applies to repository work only", () => {
+  /**
+   * THE REGRESSION, and the SRD's own probe: "harvest a task with
+   * `host_workdir: "unset"` claiming `success` with no diff, and assert the
+   * verdict is not `failed`; assert the reason names no diff at all."
+   *
+   * Both halves are load-bearing. Against the ungated rule the verdict is
+   * `failed`, so the grade assertion reddens on its own — but a repair that
+   * merely SOFTENED ISC-93 to `unknown` would satisfy "not failed" while still
+   * telling an operator their review fabricated an empty diff. The reason
+   * assertions pin the sentence as well as the grade.
+   *
+   * `toBe("success")` sits beside `not.toBe("failed")` because it is the
+   * substantive outcome D9 exists to unlock rather than a restatement of it:
+   * with no acceptance, `derived` is `unknown`, `unknown` is the lattice
+   * identity (ISC-94), and the review is therefore graded on its own claim —
+   * gradable at all, which is the whole point.
+   */
+  test("a no-workdir task claiming success with no diff is not graded as fabrication", () => {
+    const got = adjudicate(inquiryFacts(), claim("success", { files_changed: [], commits: [] }));
+
+    expect(got.verdict).not.toBe("failed");
+    expect(got.verdict).toBe("success");
+
+    const reasons = got.reasons.join(" ");
+    expect(reasons).not.toContain("ISC-93");
+    expect(reasons).not.toContain("empty diff");
+    expect(reasons).not.toContain("give it acceptance commands");
+  });
+
+  /**
+   * THE CONTROL ARM, and without it the test above is satisfied by deleting
+   * ISC-93 outright.
+   *
+   * This fixture differs from the one above in exactly one field. ISC-93 was
+   * written for a MEASURED worker that had no `bun` on PATH and reported `bun
+   * test -> exit 0, 27 pass` behind an empty diff; that worker had a workdir,
+   * so this is the case that must still fail. The remedy must still be named
+   * too — for a repository task acceptance commands are genuinely available,
+   * which is precisely what makes the sentence honest here and dishonest above.
+   */
+  test("a repository task claiming success with an empty diff still fails (ISC-93 intact)", () => {
+    const got = adjudicate(
+      facts({ files_changed: [], commits: [], diff_bytes: 0, acceptance: [] }),
+      claim("success", { files_changed: [], commits: [] }),
+    );
+
+    expect(got.verdict).toBe("failed");
+    expect(got.reasons.join(" ")).toContain("ISC-93");
+    expect(got.reasons.join(" ")).toContain("give it acceptance commands");
+  });
+
+  /**
+   * The exemption arm, co-located with the gate that could silence it.
+   *
+   * `CASES` already covers this, but not against THIS edit. The gate reads
+   * `facts.repository && …`, and an inverted or mis-scoped gate would skip the
+   * whole block — failure arm and exemption arm together — which no assertion
+   * on the failure arm can detect. Pinning it one test below the gate is what
+   * makes the three arms legible, and falsifiable, as a set.
+   */
+  test("a repository task's green harvester acceptance still exempts an empty diff", () => {
+    const got = adjudicate(
+      facts({
+        files_changed: [],
+        commits: [],
+        diff_bytes: 0,
+        acceptance: [run("passed", { cmd: "pytest -q" })],
+      }),
+      claim("success", { files_changed: [], commits: [] }),
+    );
+
+    expect(got.verdict).toBe("success");
+    expect(got.reasons.join(" ")).toContain("task whose product is not a change");
+  });
+
+  /**
+   * The DEFAULT's direction, asserted for ISC-93 as it already is for ISC-151.
+   *
+   * `repository` defaults to `true`, so every fact bundle written before the
+   * field existed — and every fixture in this file that does not name it —
+   * keeps ISC-93 live. Flipping that default to `false` would disable the rule
+   * fleet-wide while every other test in this block still passed, because each
+   * of them states the field explicitly.
+   *
+   * `base_is_ancestor: true` is named so ISC-151's clamp does not return first
+   * and grade this case on the wrong rule.
+   */
+  test("a fact bundle that never names the field still gets ISC-93", () => {
+    const parsed = DerivedFactsSchema.parse({
+      branch: null,
+      base_ref: null,
+      head_ref: null,
+      base_is_ancestor: true,
+      harness: {},
+    });
+
+    expect(parsed.repository).toBe(true);
+
+    const got = adjudicate(parsed, claim("success", { files_changed: [], commits: [] }));
+    expect(got.verdict).toBe("failed");
+    expect(got.reasons.join(" ")).toContain("ISC-93");
   });
 });

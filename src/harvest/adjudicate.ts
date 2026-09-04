@@ -17,7 +17,9 @@
  *   (SRD §8.2, class F5). A worker claiming a file the diff does not touch is
  *   flagged in `discrepancies` (ISC-92), and `success` with an empty diff is
  *   reported `failed` (ISC-93) — an envelope that describes work that did not
- *   happen is worse than no envelope at all.
+ *   happen is worse than no envelope at all. ISC-93 is gated on
+ *   `facts.repository`, as ISC-151's clamp is: a task that never had a
+ *   repository has no diff for "empty" to be a finding about.
  *
  * - **The harness-surface cap is applied AFTER combining with the claim**
  *   (ISC-150). Order matters: capped-derived `unknown` combined with claimed
@@ -227,8 +229,48 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
      * REASON, which now names the remedy — an information-shaped task is
      * gradable exactly when it carries acceptance commands, and silently
      * failing one whose operator did not know that is its own defect.
+     *
+     * GATED ON `facts.repository`, exactly as ISC-151's clamp 80 lines above
+     * is, and for the same reason: `emptyDiff` carries two meanings and this
+     * rule only wants one.
+     *
+     * For repository work it is a FINDING — the worker had a tree, touched
+     * nothing in it, and claimed success anyway. For a task dispatched without
+     * a `host_workdir` it is the VACUOUS DEFAULT. `harvest/index.ts:226-242`
+     * builds that bundle deliberately and says why in as many words: "NO
+     * WORKDIR IS A KIND OF TASK, NOT A DEGRADED HARVEST." There was never a
+     * tree, so `files_changed`, `commits` and `diff_bytes` are empty because
+     * there was nowhere for them to come from, and reading that as fabrication
+     * indicts a task for failing to produce an artifact nobody asked it for.
+     *
+     * MEASURED 2026-09-03, and why this is a prerequisite of the review console
+     * (SRD-REVIEW-CONSOLE §6.8, D9) rather than a tidy-up. The `reviewer` role
+     * is `isolation: shared-ro` (`fleet.yaml:461`), so no worktree is created,
+     * so `hasWorktree` is false, so `harvest/index.ts:569` never runs the
+     * acceptance exam, so `acceptance.verdict` can never be `success`. The
+     * exemption arm below was therefore UNREACHABLE BY CONSTRUCTION for the one
+     * role whose deliverable is, by definition, no diff at all: every honest
+     * review in the fleet was adjudicated as fabrication. Worse, the reason
+     * text offered a remedy — "give it acceptance commands" — that this role
+     * structurally cannot take, because acceptance needs a worktree to clone
+     * from and the absent worktree is the whole cause.
+     *
+     * REPOSITORY TASKS ARE UNTOUCHED, and that is the property a future edit
+     * must not spend. ISC-93 exists because a worker with no `bun` on PATH
+     * reported `bun test -> exit 0, 27 pass` behind an empty diff; that worker
+     * HAD a workdir, so `facts.repository` is true, so it still grades
+     * `failed`. Any widening of this gate — `!facts.repository || …`, or
+     * anything keyed on the acceptance list merely being empty — puts that
+     * case straight back.
+     *
+     * The gate skips the exemption arm along with the failure arm. That costs
+     * nothing today and is worth stating: acceptance cannot run without a
+     * worktree (`harvest/index.ts:569`), so a non-repository bundle's
+     * `acceptance` is empty by construction and there is no green run to exempt
+     * — but if that ever changes, note that a skipped ISC-93 needs no exemption
+     * from itself.
      */
-    if (claimed.status === "success" && emptyDiff) {
+    if (facts.repository && claimed.status === "success" && emptyDiff) {
       if (acceptance.verdict === "success") {
         reasons.push(
           "empty diff, but the acceptance commands passed when the harvester re-ran them " +
