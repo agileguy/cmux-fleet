@@ -36,7 +36,7 @@
  *   declarations rather than counting to three.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -122,6 +122,49 @@ describe("the task drop file", () => {
     const asDir = join(dir, "dispatch-policy");
     await mkdir(asDir);
     await expect(writeDispatchPolicy(asDir, IDENTITY, "# One\n")).rejects.toThrow();
+  });
+
+  /**
+   * THE WIDEN/NARROW WINDOW — the same hazard `replies.test.ts:206-241` closes
+   * on the reply plane, carried to the drop it was copied from.
+   *
+   * `writeDispatchPolicy` widens to 0644, calls `writeFile` — whose default `w`
+   * flag is `O_TRUNC` — and narrows back to 0444. A failure BETWEEN those two
+   * leaves the drop writable and truncated, permanently, because the write that
+   * would have repaired it is the stage that just failed. That is not one lost
+   * dispatch: `/policy/dispatch` is one of the three paths `docker/verbgate`'s
+   * integrity loop iterates, and a policy surface writable by the uid consulting
+   * it refuses EVERY gated verb with exit 78 — so the worker loses `git`, `gh`
+   * and the rest for the life of the container, and the brief it can now rewrite
+   * is the brief it is graded against.
+   *
+   * A directory planted at the drop's path is the deterministic way to fail the
+   * write between two chmods that both succeed — measured: `chmod` on it returns
+   * 0 and leaves mode 0644, `writeFile` on it returns EISDIR. EISDIR is not the
+   * interesting part and nothing here claims it is the only way in; ENOSPC and
+   * EIO reach the same window through a filesystem this test cannot arrange.
+   *
+   * THE MODE IS THE ASSERTION, and this is precisely why the sibling test above
+   * is not enough on its own: `rejects.toThrow()` passes with or without the
+   * repair, which is how this window survived in this file while its twin was
+   * being fixed next door.
+   */
+  test("narrows the drop back to 0444 even when the write itself fails", async () => {
+    const dir = await scratch();
+    const asDir = join(dir, "dispatch-policy");
+    await mkdir(asDir);
+    // Pre-set rather than left to the ambient umask: the assertion below is
+    // "restored to 0444", so the starting mode has to be 0444 for the test to
+    // be about the restore rather than about the runner.
+    await chmod(asDir, 0o444);
+
+    const err = await writeDispatchPolicy(asDir, IDENTITY, "# One\n").catch((e: unknown) => e);
+
+    // The WRITE's error propagates — not a chmod's, which would tell the caller
+    // the wrong thing about what went wrong and send them to the wrong file.
+    expect((err as NodeJS.ErrnoException).code).toBe("EISDIR");
+    // And the widen was undone. Without the restore this reads 0o644.
+    expect((await stat(asDir)).mode & 0o777).toBe(0o444);
   });
 });
 

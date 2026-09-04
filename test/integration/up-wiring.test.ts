@@ -50,7 +50,8 @@ import {
   type LedgerRecord,
   WorkerLaunchSchema,
 } from "../../src/contracts.ts";
-import { runPaths, workerBranch, workerPaths } from "../../src/run/paths.ts";
+import { runPaths, workerBranch, workerPaths, workerRepliesDir } from "../../src/run/paths.ts";
+import { relayJournalDir } from "../../src/run/relay-journal.ts";
 import { mergeLedger } from "../../src/run/ledger.ts";
 import { readRunBudgetPolicy, readRunWorktrees } from "../../src/run/state.ts";
 import { inspectCloneDirt } from "../../src/run/worktree.ts";
@@ -1511,6 +1512,37 @@ async function runCli(
       // depends on whatever the developer's machine happens to contain.
       ...(opts.home !== undefined ? { HOME: opts.home } : {}),
     } });
+}
+
+/**
+ * `runCli` with the child's UMASK pinned, and it goes through the same helper
+ * everything else does.
+ *
+ * **The umask is set on THIS process, not on a hand-built subprocess, and that
+ * is a correctness point rather than a style one.** A umask is inherited across
+ * fork and exec, so setting it here is what the child gets — while a second
+ * `Bun.spawn` built to carry it would be exactly the ambient-config trap
+ * `test/support/spawn-cli.ts` exists to close, and `hermetic-cli-spawn-guard.test.ts`
+ * would correctly refuse it. There is no version of this that both builds its
+ * own subprocess and stays hermetic.
+ *
+ * `try`/`finally` around one await, restoring the value `process.umask` itself
+ * returns. The window is a single call, and bun runs the tests in a file in
+ * order rather than concurrently, so nothing else in this file can observe the
+ * altered value — the same containment the `PIFLEET_RUNS_DIR` block below uses,
+ * for the same reason.
+ */
+async function runCliUnderUmask(
+  rig: Rig,
+  umask: number,
+  args: readonly string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const previous = process.umask(umask);
+  try {
+    return await runCli(rig, [...args]);
+  } finally {
+    process.umask(previous);
+  }
 }
 
 describe("up wires the security controls, in order (review finding 2)", () => {
@@ -3167,9 +3199,14 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
 
           const unchecked: string[] = [];
           const seen = new Set<string>();
+          /** Every HOST source this worker mounts — the absence check below needs the whole set, not the classified ones. */
+          const allSources: string[] = [];
           for (let i = 0; i < r.docker.length; i++) {
             if (r.docker[i] !== "-v") continue;
             const [source, target] = (r.docker[i + 1] ?? "").split(":");
+            // Collected before any classification, so a mount this table does
+            // not recognise is still covered by the journal-absence check.
+            if (source !== undefined && source.startsWith("/")) allSources.push(source);
             if (target === NAMED_VOLUME_TARGET) {
               // A `-v` source with no leading `/` IS a named volume, which is
               // precisely why this one needs no host path.
@@ -3195,6 +3232,33 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
           // …and every mount it does know about was actually emitted, so a
           // render that stops emitting one cannot pass by producing less.
           expect([...seen].sort()).toEqual(Object.keys(EXPECTED).sort());
+
+          /**
+           * THE RELAY JOURNAL IS IN NO MOUNT (SRD-REVIEW-CONSOLE §6.5).
+           *
+           * `<run>/relay` is what stops the actor re-dispatching a request it
+           * has already performed, and it is only trustworthy while the WORKER
+           * cannot reach it — a collator that could delete its own journal entry
+           * could buy another three reviewer dispatches per deletion, which is
+           * the unbounded fan-out D7 refuses, reached through the filesystem
+           * instead of through the schema.
+           *
+           * What holds that up is an ABSENCE from this table, not a guard:
+           * `classifyRunDirExposure` deliberately returns `null` for a source
+           * strictly UNDER the run dir, because the whole §5.5 table lives
+           * there. So it is asserted here, against the argv render actually
+           * produces, exactly as `RunPaths.auditDir` says a run-dir absence must
+           * be. The obvious wrong edit is putting the journal beside the request
+           * it journals, under `<run>/outbox/<worker>` — which this catches.
+           */
+          const journal = relayJournalDir(run.root);
+          for (const s of allSources) {
+            expect(s, `${s} exposes the relay journal`).not.toBe(journal);
+            expect(s.startsWith(`${journal}/`), `${s} is inside the relay journal`).toBe(false);
+            expect(journal.startsWith(`${s}/`), `the relay journal is inside mounted ${s}`).toBe(
+              false,
+            );
+          }
 
           /**
            * `--env-file` USED to be the one deliberate exemption, and this
@@ -3250,6 +3314,97 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // ISC-274 audit: stands. Two `up` spawns derive cliBudget(2) = 22_800 ms;
     // measured idle is 1028 ms. Not reduced.
     90_000,
+  );
+
+  /**
+   * THE 0755 IN THE TABLE ABOVE IS SATISFIED BY THE AMBIENT UMASK, AND THIS IS
+   * THE TEST THAT MAKES IT AN ASSERTION ABOUT THE CODE.
+   *
+   * `mkdir` under the umask 022 that every developer shell and `ubuntu-latest`
+   * hands out already yields 0755. So `[REPLIES_MOUNT]: { mode: 0o755 }` in
+   * `EXPECTED` passes whether or not `createRepliesDir`'s
+   * `makeWorkerAccessible(dir, false)` ran at all — and CI shares the blind spot
+   * rather than covering it, because nothing in the workflow overrides the
+   * umask. Measured: umask 022 → 755, umask 077 → 700.
+   *
+   * `test/unit/replies.test.ts` closes the same hole one layer down by
+   * pre-creating the directory at 0700 and asserting `createRepliesDir` REPAIRS
+   * it. That pin cannot be reproduced here, and the reason is structural rather
+   * than a matter of effort: `up` MINTS the run id, so there is no run directory
+   * to pre-create anything in until after the command under test has finished.
+   *
+   * So the pin is inverted instead of relocated. The child runs under `umask
+   * 077`, where a bare `mkdir` yields 0700 and only an explicit chmod can yield
+   * 0755. That is umask-INDEPENDENT in the sense that matters — the value is set
+   * by this test rather than read from the runner — so it passes and fails
+   * identically on a laptop and on CI.
+   *
+   * **What this reaches that the unit test cannot.** The unit test pins the
+   * chmod INSIDE `createRepliesDir`. This pins that `materialize.ts` still CALLS
+   * it: a materializer that dropped the call and did its own `mkdir` would keep
+   * every unit test green and keep the `EXPECTED` row green too, because the
+   * directory would still exist at the right path with the right type. The two
+   * probes are the two halves of one property and neither implies the other.
+   *
+   * ONLY the reply directory is asserted here, and the reason is a MEASUREMENT
+   * rather than scope discipline. Under this same `umask 077` spawn every other
+   * materialized inode this rig produces came out at exactly the mode `EXPECTED`
+   * wants — `task-policy` 444, `dispatch-policy` 444, `cloud-allow` 444, `env`
+   * 600, `outbox` 777, `skills` 755 — because each of those is set by an
+   * explicit chmod that a umask cannot touch. So the reply directory was the
+   * ONLY row in the table that the ambient umask was standing in for, which is
+   * what makes one assertion the right size for this probe.
+   *
+   * Two rows are not covered either way and are named so the silence is not read
+   * as coverage: `BRIEFING_MOUNT` and the kubeconfig exist only under the
+   * mounts test's own config above (`append_system_prompt`, `cloud_access:
+   * true`) and are absent from this rig, so this spawn says nothing about them.
+   */
+  test(
+    "the reply directory's 0755 is a chmod, not the runner's umask",
+    async () => {
+      const rig = await makeRig();
+      const up = await runCliUnderUmask(rig, 0o077, [
+        "up",
+        "--config",
+        rig.configPath,
+        "--workers",
+        "eng-1",
+        "--backend",
+        "headless",
+        "--json",
+      ]);
+      expect(up.code).toBe(EXIT.SUCCESS);
+      rig.runId = (JSON.parse(up.stdout.trim()) as { run_id: string }).run_id;
+      const run = runPaths(rig.runId, rig.root);
+
+      /**
+       * THE CONTROL, and without it this test is capable of passing vacuously.
+       *
+       * If the umask silently failed to reach the child — a spawn that reset
+       * it, a runtime that does not inherit it — `up` would run under the
+       * ambient 022 and the 0755 below would once again be free. The run
+       * directory is the cleanest
+       * witness available: `materialize.ts` deliberately chmods NOTHING above
+       * the mounted inodes ("Removed rather than tightened", :774-800), so its
+       * mode is whatever `mkdir` left, which is exactly the ambient umask made
+       * visible.
+       */
+      expect((await stat(run.root)).mode & 0o777).toBe(0o700);
+
+      // …and the mounted inode is 0755 anyway, which under this umask can only
+      // have come from `createRepliesDir`'s chmod.
+      const replies = workerRepliesDir(run.root, "eng-1");
+      expect((await stat(replies)).isDirectory()).toBe(true);
+      expect((await stat(replies)).mode & 0o777).toBe(0o755);
+      // Spelled as the two halves the mode is FOR, so a future edit that lands
+      // on some other 0755-adjacent value has to argue with both: group and
+      // other traverse and read, and neither writes.
+      expect((await stat(replies)).mode & 0o022).toBe(0);
+      expect((await stat(replies)).mode & 0o055).toBe(0o055);
+    },
+    // One `up` spawn, derived rather than chosen: cliBudget(1) = 11_400 ms.
+    cliBudget(1),
   );
 });
 

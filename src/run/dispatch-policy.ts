@@ -327,8 +327,32 @@ export function splitDispatchPolicy(body: string): {
  *    widened for the write and restored immediately. On POSIX the owner of a
  *    0444 file cannot open it for writing either, so this is not ceremony: skip
  *    it and the second stage of a run fails.
- * 3. **Truncate in place, then restore 0444.** Never rename; see the module
- *    docblock.
+ * 3. **Truncate in place, then restore 0444 — even when the write throws.**
+ *    Never rename; see the module docblock.
+ *
+ * Step 3's "even when the write throws" is the part that was missing, and it is
+ * the same repair `replies.ts:237-255` records for the same window. Between the
+ * widen and the narrow the file is 0644 AND `writeFile` has already truncated it
+ * (the default `w` flag is `O_TRUNC`), so an ENOSPC or an EIO in that window
+ * used to leave a drop that is empty, writable, and permanent — no later write
+ * is scheduled to repair it, because the stage that would have written the next
+ * brief is the one that just failed.
+ *
+ * That state costs a whole worker rather than one dispatch. The drop is one of
+ * the three paths `docker/verbgate`'s integrity loop iterates, and it answers a
+ * policy surface writable by the uid consulting it by refusing EVERY gated verb
+ * with exit 78 — so the worker does not merely lose the brief, it loses `git`,
+ * `gh` and every other gated verb for the life of the container. And the brief
+ * it can now write is the brief it is graded against.
+ *
+ * **A `catch` + rethrow rather than a bare `finally`, and the difference is
+ * which error the caller ends up holding.** A `finally` that chmods
+ * unconditionally throws ENOENT of its own when the write failed because the
+ * file was never created at all — masking the write's cause with a message
+ * about a chmod, on the one path where the cause is the only actionable thing.
+ * So: on the happy path the narrow is unguarded and any failure is loud, exactly
+ * as before; on the failure path the narrow is best-effort and the WRITE's error
+ * is what propagates.
  */
 export async function writeDispatchPolicy(
   file: string,
@@ -364,7 +388,15 @@ export async function writeDispatchPolicy(
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-  await writeFile(file, body);
+  try {
+    await writeFile(file, body);
+  } catch (writeErr) {
+    // The window this closes: the file is 0644 and already truncated. Narrow it
+    // back before propagating, and swallow only the NARROWING's own failure —
+    // never the write's, which is the error that says what actually happened.
+    await makeWorkerReadable(file, false).catch(() => {});
+    throw writeErr;
+  }
   await makeWorkerReadable(file, false);
 }
 

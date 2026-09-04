@@ -1688,6 +1688,7 @@ Commander.js under Bun. **Every command supports `--json`.**
 | `pifleet worktrees [--run r]` | list every worker's per-worker checkout — branch, path, clean/dirty; the operator-visibility surface `git worktree list` no longer answers now that each worker is an independent clone rather than a linked worktree (§9.2 erratum) |
 | `pifleet dispatch --worker <id> --task <file\|->` / `--auto --tasks <f>` | send task envelopes |
 | `pifleet steer --worker <id> "msg"` | mid-turn correction |
+| `pifleet relay [--run r] [--once] [--poll s]` | the review console's ACTOR (SRD-REVIEW-CONSOLE §6.5): poll collators' `dispatch-request.json`, validate, and perform the fan-out host-side. Restartable by design — its state is the run tree, so `--once` and the polling loop are the same pass. Beside `dispatch` because it is the same verb with a different asker: the operator dispatches, and `relay` is what turns a *collator's* request into dispatches |
 | `pifleet abort --worker <id>` | cancel current epoch |
 | `pifleet unstage --task <id> [--worker w]` | release a STAGED epoch that was never triggered, returning the worker to idle. Deliberately not `abort`: on a `pane_mode: tui` worker `abort` issues `docker kill --signal=INT`, which STOPS the worker (`src/attended/voided.ts`, ISC-81 row), whereas nothing has run here and nothing is settled (SRD-TUI-DISPATCH §9 Q8) |
 | `pifleet wait [--run r] [--task T\|--all] [--timeout d]` | block until settle/deadline |
