@@ -812,24 +812,122 @@ describe("up records the name only for a workspace it named itself", () => {
   });
 
   /**
+   * THE CONSOLE'S OWN NAME, supplied by the caller — the route that finally
+   * puts a real title on the operator's fleet.
+   *
+   * `up` cannot discover it (cmux exports no name variable) and must not ask
+   * cmux for it (ISC-137, and `--attach-here` needs no socket). But the console
+   * SCRIPT knows: `operations`, `development` and `review` are compile-time
+   * constants and the script is what asked cmux to create or match that title.
+   * So it travels as an argument from the one place that holds it.
+   */
+  test("a declared name is recorded on the adopted path", () => {
+    expect(presentedWorkspace({ workspace: WS_OPS }, { id: null }, NAME, "review")).toEqual({
+      ref: WS_OPS,
+      name: "review",
+    });
+  });
+
+  /**
+   * THE TRUTHFULNESS GATE, and it is gated on the REF rather than on the flag.
+   *
+   * A caller can pass `--workspace-name review` from a terminal that is not a
+   * cmux pane at all — a hand-typed `up --attach-here` in Terminal.app, or a
+   * script run outside its console. There is then no `CMUX_WORKSPACE_ID` and no
+   * ref, and a name recorded against nothing would be a label the monitor files
+   * under `no workspace recorded` while claiming to be `review`.
+   *
+   * So an absent ref takes the name with it. The invariant holds by
+   * construction rather than by the caller being careful, which is the only
+   * version of it worth having.
+   */
+  test("a declared name without a ref is discarded, not recorded", () => {
+    expect(presentedWorkspace({ workspace: null }, { id: null }, NAME, "review")).toEqual({
+      ref: null,
+      name: null,
+    });
+  });
+
+  /**
+   * The flag does NOT override a workspace pifleet named itself.
+   *
+   * `ensureWorkspace(createdName)` is the call that set cmux's `custom_title`,
+   * so recording anything else would put a name in `presentation.json` that
+   * contradicts the workspace it describes. The flag supplies a name that is
+   * otherwise unknowable; it is not a rename.
+   */
+  test("a declared name never overrides the name pifleet gave the workspace", () => {
+    expect(presentedWorkspace(null, { id: WS_DEV }, NAME, "review")).toEqual({
+      ref: WS_DEV,
+      name: NAME,
+    });
+  });
+
+  /**
+   * And omitting it is the ordinary case — every hand-typed `up --attach-here`
+   * and every console that has not been taught to pass it. Both spellings of
+   * "nobody said" behave the same.
+   */
+  /**
+   * AN EMPTY DECLARED NAME IS NOT A NAME — added after a battery arm survived.
+   *
+   * `--workspace-name ""`, or a shell expansion that produced nothing, arrives
+   * as `""`, which `??` does not catch. The record would then carry
+   * `workspace_name: ""` — a value shaped like "there is a name and it is
+   * empty". The view already falls back on it (that is what the fallback is
+   * for), so this was invisible on screen; it was still a false record.
+   */
+  test("an empty declared name is recorded as no name at all", () => {
+    expect(presentedWorkspace({ workspace: WS_OPS }, { id: null }, NAME, "").name).toBeNull();
+  });
+
+  test("no declared name leaves the adopted record nameless, as before", () => {
+    for (const absent of [undefined, null, ""]) {
+      expect(presentedWorkspace({ workspace: WS_OPS }, { id: null }, NAME, absent)).toEqual({
+        ref: WS_OPS,
+        name: null,
+      });
+    }
+  });
+
+  /**
    * THE INVARIANT, swept over every combination rather than spot-checked: a
    * name is never recorded without its ref. A label attached to no group is
    * either dropped silently or merged into `no workspace recorded` while
    * claiming to be something else.
    */
   test("a name is never recorded without a ref", () => {
+    /*
+     * SWEPT OVER THE DECLARED NAME TOO, and widening it was not optional: the
+     * flag adds a third input, so a sweep that fixed it at `undefined` would
+     * have stopped covering every path the moment `--workspace-name` existed —
+     * the shape where a criterion silently narrows while still reading as a
+     * sweep.
+     */
     for (const handedOver of [null, { workspace: null }, { workspace: WS_OPS }]) {
       for (const created of [{ id: null }, { id: WS_DEV }]) {
-        const r = presentedWorkspace(handedOver, created, NAME);
-        if (r.name !== null) {
-          expect({ case: JSON.stringify([handedOver, created]), ref: r.ref }).toEqual({
-            case: JSON.stringify([handedOver, created]),
-            ref: r.ref,
-          });
-          expect(r.ref, `name ${r.name} with no ref`).not.toBeNull();
+        for (const declared of [undefined, null, "review", ""]) {
+          const r = presentedWorkspace(handedOver, created, NAME, declared);
+          const where = JSON.stringify([handedOver, created, declared]);
+          if (r.name !== null) {
+            expect(r.ref, `name ${r.name} recorded with no ref at ${where}`).not.toBeNull();
+          }
         }
       }
     }
+  });
+
+  /**
+   * TESTING THE TESTER. The sweep above only means something if some
+   * combination actually produces a name — a function that returned `name:
+   * null` for everything would satisfy it completely.
+   */
+  test("the invariant sweep is not vacuous — some combination does yield a name", () => {
+    const named = [
+      presentedWorkspace(null, { id: WS_DEV }, NAME).name,
+      presentedWorkspace({ workspace: WS_OPS }, { id: null }, NAME, "review").name,
+    ];
+    expect(named).toEqual([NAME, "review"]);
   });
 });
 
@@ -1138,9 +1236,15 @@ describe("the workspace is read from presentation.json, not asked of cmux", () =
     )
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "");
-    expect(source).toContain("const presented = presentedWorkspace(handedOver, workspace, workspaceName)");
+    expect(source).toContain(
+      "const presented = presentedWorkspace(handedOver, workspace, workspaceName, opts.workspaceName)",
+    );
     expect(source).toContain("workspace_ref: presented.ref,");
     expect(source).toContain("workspace_name: presented.name,");
+    // The flag is registered, or `opts.workspaceName` is permanently undefined
+    // and the whole console route is dead while every assertion above passes.
+    expect(source).toContain('"--workspace-name <name>"');
+    expect(source).toContain("workspaceName?: string");
     // And the name pifleet passes to cmux is the same string it records, not a
     // second spelling of the template.
     expect(source).toContain("const workspaceName = `pifleet-${runId}`");

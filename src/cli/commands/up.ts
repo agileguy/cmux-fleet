@@ -721,12 +721,66 @@ export function presentedWorkspace(
   handedOver: { readonly workspace: string | null } | null,
   created: { readonly id: string | null },
   createdName: string,
+  /**
+   * `--workspace-name`: what the CALLER says this workspace is called.
+   *
+   * Only ever consulted on the ADOPTED path, and only as a name — never as a
+   * ref. A console script knows the title it asked cmux to create or match
+   * (`operations`, `development`, `review` are compile-time constants in
+   * `operations-plan.ts`), so it can state the name that `up`, running inside
+   * one of that workspace's panes, cannot discover for itself.
+   *
+   * `undefined` and `null` both mean "nobody said", which is the default and
+   * the honest answer for a hand-typed `up --attach-here`.
+   */
+  declaredName?: string | null,
 ): { readonly ref: string | null; readonly name: string | null } {
-  // An adopted workspace is one pifleet did not name. The ref still travels —
-  // it is what groups the workers — and the name is honestly absent.
-  if (handedOver !== null) return { ref: handedOver.workspace, name: null };
+  if (handedOver !== null) {
+    /*
+     * AN ADOPTED WORKSPACE IS ONE PIFLEET DID NOT NAME, so the only name that
+     * can be recorded here is one the caller supplied.
+     *
+     * **`createdName` is deliberately not reachable from this arm.** It is a
+     * perfectly good string in scope — `pifleet-<runId>` — and writing it here
+     * would label the operator's `development` console with a title cmux never
+     * gave it. That is the single most tempting wrong answer in this function
+     * and it is pinned by its own test.
+     *
+     * **The name is gated on the REF, not on the flag.** A caller can pass
+     * `--workspace-name review` from a terminal that is not a cmux pane at all;
+     * there is then no `CMUX_WORKSPACE_ID`, no ref, and a name recorded against
+     * nothing would be a label the monitor groups under `no workspace
+     * recorded` while claiming to be `review`. So an absent ref takes the name
+     * with it, which keeps the invariant below true by construction rather than
+     * by the caller being careful.
+     */
+    if (handedOver.workspace === null) return { ref: null, name: null };
+    /*
+     * AN EMPTY DECLARED NAME IS NOT A NAME. `--workspace-name ""` and a shell
+     * expansion that produced nothing both arrive here as `""`, which `??`
+     * does not catch — so without this the record would carry `workspace_name:
+     * ""`, a value shaped like "there is a name and it is empty".
+     *
+     * The view already survives it: `workspaceHeading` treats `""` as absent
+     * and falls back to the ref, which is the safety net the fallback exists to
+     * be. This is the other half, and the two guard different things — the
+     * RECORD should be truthful about what was known, and the VIEW should be
+     * robust about what it is handed. A battery arm survived on exactly this
+     * gap, which is how it was found.
+     */
+    const declared = declaredName === undefined || declaredName === "" ? null : declaredName;
+    return { ref: handedOver.workspace, name: declared };
+  }
   // No workspace was created, so there is nothing for a name to name.
   if (created.id === null) return { ref: null, name: null };
+  /*
+   * PIFLEET CREATED IT, so pifleet's own name is authoritative and the flag
+   * does NOT override it. `ensureWorkspace(createdName)` is the call that set
+   * cmux's `custom_title`, so recording anything else here would put a name in
+   * `presentation.json` that contradicts the workspace it describes — and the
+   * flag exists to supply a name that is otherwise unknowable, not to rename a
+   * workspace pifleet just named itself.
+   */
   return { ref: created.id, name: createdName };
 }
 
@@ -746,9 +800,35 @@ export function register(program: Command): void {
       "--attach-clear",
       "with --attach-here, clear the screen at handover so only the agent remains",
     )
+    .option(
+      /*
+       * WHAT THE CALLER SAYS THIS WORKSPACE IS CALLED — for the adopted path,
+       * where `up` cannot find out for itself.
+       *
+       * `up --attach-here` runs inside a pane of a workspace cmux already owns.
+       * The pane's environment carries `CMUX_WORKSPACE_ID` and nothing else:
+       * probed against the installed cmux 0.64.x, the binary exports
+       * `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID` and `CMUX_PANE_ID`, and no
+       * variable carrying a title. The name lives behind `cmux workspace list`,
+       * which `up` must not call — ISC-137 confines cmux imports to
+       * `src/backends/cmux/`, and `--attach-here` needs no cmux socket today.
+       *
+       * The console scripts DO know it: `operations`, `development` and
+       * `review` are compile-time constants, and the script is what asked cmux
+       * to create or match that title. So the knowledge travels as an argument
+       * from the one place that holds it, rather than being rediscovered by the
+       * one place that cannot.
+       *
+       * Optional everywhere. Absent, the record carries no name and the monitor
+       * falls back to the ref — which is the behaviour every existing record
+       * already gets.
+       */
+      "--workspace-name <name>",
+      "with --attach-here, the title of the cmux workspace this pane belongs to",
+    )
     .option("--i-know", "proceed despite a detected conflicting workload")
     .option("--json", "emit machine-readable output")
-    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean; attachHere?: boolean; attachClear?: boolean }) => {
+    .action(async (opts: { workers?: string; backend?: string; backendFallback?: string; config?: string; json?: boolean; iKnow?: boolean; attachHere?: boolean; attachClear?: boolean; workspaceName?: string }) => {
       /**
        * `--backend` carries NO commander default any more (ISC-271, and the
        * same shape as ISC-61 one option up).
@@ -2300,7 +2380,7 @@ export function register(program: Command): void {
          * the invariant (a name is never recorded without its ref) and for why
          * the adopted path records no name rather than resolving one.
          */
-        const presented = presentedWorkspace(handedOver, workspace, workspaceName);
+        const presented = presentedWorkspace(handedOver, workspace, workspaceName, opts.workspaceName);
         await writePresentation(wp, {
           schema: "pifleet.presentation/v1",
           worker: workerId,
