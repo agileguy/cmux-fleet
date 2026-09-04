@@ -104,6 +104,23 @@ describe("the worker documents only name container paths a worker actually has",
         .match(new RegExp(`${m[1]!}\\s*=\\s*"(/[^"]+)"`));
       if (decl !== null) found.add(decl[1]!);
     }
+    /*
+     * A destination computed by a FUNCTION, which the two forms above cannot
+     * see because there is no literal and no bare constant to read.
+     *
+     * `-v ${src}:${cloneSourceMount(src)}:ro` mounts the operator's working
+     * directory under a name derived from its basename, so the only fixed part
+     * — and the only part a document can cite — is the root the function
+     * builds on. Resolved from `mounts.ts` rather than allowlisted here, so
+     * that removing either the mount or the constant reddens this instead of
+     * leaving a stale permission behind.
+     */
+    if (RENDER.includes("cloneSourceMount(")) {
+      const root = readFileSync(`${ROOT}src/container/mounts.ts`, "utf8").match(
+        /WORKER_CLONE_SRC_ROOT\s*=\s*"(\/[^"]+)"/,
+      );
+      if (root !== null) found.add(root[1]!);
+    }
     return found;
   }
 
@@ -204,5 +221,51 @@ describe("the worker is told to read the epoch, not to guess it", () => {
   test("renderPrompt still emits the epoch line the instruction names", () => {
     const supervisor = readFileSync(`${ROOT}src/supervisor/index.ts`, "utf8");
     expect(supervisor).toContain("`epoch:   ${envelope.epoch}\\n`");
+  });
+});
+
+/**
+ * The clone mounts are NAMED, not merely present.
+ *
+ * This block exists because of a measured failure of the opposite assumption.
+ * `WORKER_SCRATCH_DIR`'s docblock claimed that putting the scratch at `~/repos`
+ * — where an agent would already reach — meant the capability "needs no prompt
+ * engineering to be discovered". The next run refuted it: with both mounts
+ * live, `tst-1` was asked to run another repository's tests, never looked at
+ * `/repos-src`, grepped its own `/workspace` for that repository's name, found
+ * unrelated source mentioning it, and wrote `{"success":true}`.
+ *
+ * A mount nothing mentions does not exist as far as an agent is concerned. So
+ * the mounts being in the argv is not the property worth testing — the worker
+ * document naming them is.
+ */
+describe("the worker is told about the paths it can clone from and into", () => {
+  test("the read-only source root is named", () => {
+    expect(SKILL).toContain("/repos-src");
+  });
+
+  test("the writable scratch is named, by the constant's own value", () => {
+    // Read from the source so a change to `WORKER_SCRATCH_DIR` that leaves the
+    // document behind reddens here rather than shipping a doc that lies.
+    const decl = readFileSync(`${ROOT}src/container/mounts.ts`, "utf8").match(
+      /WORKER_SCRATCH_DIR\s*=\s*`\$\{WORKER_HOME\}(\/[^`]+)`/,
+    );
+    expect(decl, "WORKER_SCRATCH_DIR declaration not found — this probe has rotted").not.toBeNull();
+    expect(SKILL).toContain(decl![1]!);
+  });
+
+  test("it is told to clone rather than work in the read-only source", () => {
+    expect(SKILL).toMatch(/git clone \/repos-src\//);
+  });
+
+  test("it is told NOT to clone from a URL", () => {
+    // Egress is an allowlist and a forge is not on it; and a remote clone
+    // would fetch the pushed state rather than the working copy under test.
+    expect(SKILL).toMatch(/Do not `git clone` from a URL/);
+  });
+
+  test("grepping /workspace for the project name is called out as not doing the task", () => {
+    // The exact shape of the measured failure.
+    expect(SKILL).toMatch(/Searching your own `\/workspace`/);
   });
 });

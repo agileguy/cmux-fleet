@@ -76,9 +76,25 @@ export const WORKER_HOME = "/home/pi";
  *   fatal: could not create leading directories of
  *   '/home/pi/repos/rally-cli': Read-only file system
  *
- * — the right instinct into a read-only root. Putting the scratch where the
- * agent already tried means the capability needs no prompt engineering to be
- * discovered, and it mirrors the operator's own host layout.
+ * — the right instinct into a read-only root. The path mirrors the operator's
+ * own host layout, so a brief that says `~/repos/rally-cli` names something
+ * real inside the container too.
+ *
+ * AN EARLIER VERSION OF THIS DOCBLOCK CLAIMED MORE THAN THAT, AND IT WAS
+ * WRONG. It said that putting the scratch where the agent already reached
+ * meant "the capability needs no prompt engineering to be discovered" — a
+ * prediction written as a finding. The next run falsified it: given the same
+ * brief with the mounts in place, `tst-1` did not reach for `~/repos` at all.
+ * It grepped its own `/workspace` for the string `rally-cli`, found unrelated
+ * source that mentions it, and wrote `{"success":true}` having cloned nothing
+ * and run no test. Harvest refused the envelope, which is the only reason the
+ * claim was caught.
+ *
+ * A mount nothing mentions does not exist as far as an agent is concerned.
+ * What makes this discoverable is `skills/pifleet-worker/SKILL.md`, which is
+ * mounted into every container and now names both paths in its "Where things
+ * are" table — the same place the outbox contract lives, so a role cannot opt
+ * out of knowing.
  *
  * NOT under `/workspace`. That is the run's git worktree, and harvest derives
  * its authoritative facts from that tree's branch and diff (SRD §7.3); an

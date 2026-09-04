@@ -16,13 +16,41 @@ you and the orchestrator that dispatched your task. It is the same for every rol
 | `/outbox/<task-id>` | where you write your result; the orchestrator reads it — `<task-id>` is a literal string you were given, never a name you choose (next section) |
 | `/skills` | read-only skill bundle |
 | `/policy/dispatch` | read-only. Present and non-empty only when your task was **staged** — see the next section. Holds the same identity block your prompt carries, plus the brief |
+| `/repos-src/<name>` | **another project, read-only**, when the operator started this run from one. It is their working copy — local branches and uncommitted changes included, not the pushed state. May be absent; `ls /repos-src` is how you find out what is there |
+| `~/repos` (`/home/pi/repos`) | **writable and executable.** The one place you may clone `/repos-src/<name>` into and build, test and dirty it. Not collected — see below |
 
 Nothing outside `/workspace` and `/outbox` is yours. Paths in your task are **container**
 paths; you never see or need a host path, and any absolute host path in a brief is a bug you
 should report rather than follow.
 
-`/tmp` and `/run` are writable scratch and some skills use them, but nothing there is collected
-— a file you leave in `/tmp` reaches no human. Only `/outbox/<task-id>` is read.
+### Working on a project that is not your `/workspace`
+
+A brief naming a project you do not have — *"run the tests for ~/repos/rally-cli"* — means the
+one mounted under `/repos-src`. **Check `/repos-src` first.** A host path in a brief is written
+from the operator's machine and names the same repository you have at `/repos-src/<its name>`;
+match it by the last path segment and use the container spelling.
+
+```sh
+ls /repos-src                                  # what is available
+git clone /repos-src/rally-cli ~/repos/rally-cli
+cd ~/repos/rally-cli && <its own test command>
+```
+
+Clone it — do not work in `/repos-src` directly, which is read-only on purpose.
+
+**Do not `git clone` from a URL.** Egress is an allowlist and a forge is almost certainly not
+on it, so a remote clone fails; and even where it worked it would fetch the *pushed* state
+rather than the working copy the operator is sitting in, which is usually the thing under
+test. If the project you were named is not under `/repos-src`, say so and stop — that is a
+`blocked` result naming what you looked for, not a reason to go to the network.
+
+**Searching your own `/workspace` for the project's name is not doing the task.** Finding the
+string `rally-cli` inside `/workspace` means your checkout mentions it, not that you have it.
+
+`/tmp`, `/run` and `~/repos` are writable scratch and some skills use them, but nothing there is
+collected — a file you leave in `/tmp` reaches no human. Only `/outbox/<task-id>` is read. So a
+clone under `~/repos` is yours to work in freely and yours to lose: anything that has to survive
+goes to your outbox, and `~/repos` is gone when this container is.
 
 ## Your task id is given to you, and it is the first thing to establish
 
@@ -214,8 +242,14 @@ These are mechanically impossible. Attempting them wastes your turn.
 
 Nothing stops these, and each of them is a real failure when it happens.
 
-- **Writing outside `/workspace` and `/outbox`.** `/tmp` and `/run` are writable and some skills
-  use them. Nothing there is collected, so work left outside your outbox is work nobody reads.
+- **Writing outside `/workspace` and `/outbox`.** `/tmp`, `/run` and `~/repos` are writable and
+  some skills use them. Nothing there is collected, so work left outside your outbox is work
+  nobody reads.
+- **Reporting success for a project you never obtained.** Measured 2026-09-04: a tester asked to
+  run another repository's tests grepped its own `/workspace` for that repository's name, found
+  the string in unrelated source, and wrote `{"success":true}`. Nothing was cloned and no test
+  ran. If you did not check `/repos-src`, you did not look; if the clone is not there, the honest
+  result is `blocked` naming what you looked for.
 - **AI attribution in a commit message.** No "generated with", no `Co-Authored-By` line, no
   mention of an AI tool or model. **Nothing checks your commits for this** — the guard in this
   repository scans pifleet's own source, not yours. Treat a slip here as seriously as committing
