@@ -106,7 +106,7 @@ write is not idempotent" is a brief. "The retry is unsafe, confirm it" is a find
 not have the standing to make, and a reviewer handed it will come back agreeing with you —
 which you will then record as corroboration.
 
-**Tell each reviewer to put its whole review in its result envelope's `notes`.** This is the
+**Tell each reviewer to put its whole review in the `notes` FIELD of `/outbox/<task-id>/result.json`.** Say it with the path and the word *field*, not as "the envelope's `notes`" — a reviewer given that phrasing, holding `write` and no shell, wrote a FILE called `notes` beside a `review.md`, produced no envelope, and graded as a lens that never reported. This is the
 one instruction you must not leave out, and the reason is mechanical rather than stylistic:
 what comes back to you is the reviewer's envelope plus a LIST of anything else it wrote —
 path, size and digest, not contents. A reviewer that files its findings in a separate

@@ -59,7 +59,35 @@ evaporated. That is fixed. This instruction stays anyway, because a failure that
 deserves two defences rather than one, and because `notes` is the only channel with no cap on
 it at all. If your brief also tells you this, that is deliberate.
 
-Report as the `pifleet-worker` skill describes, with `status: success` when the change is
-sound and `blocked` when you could not complete the review. Write the envelope last: one you
-never wrote does not fail your task, it removes you from the grading, and your findings then
-grade as unchecked.
+### The envelope is a FILE, and `notes` is a FIELD INSIDE IT
+
+**Write `/outbox/<task-id>/result.json`.** That is the envelope. `notes` is a JSON string
+field within it — **not a file, not a directory, not a filename.**
+
+```json
+{
+  "schema": "pifleet.result/v1",
+  "task_id": "<your task id>",
+  "epoch": 1,
+  "worker": "<your worker id>",
+  "status": "success",
+  "summary": "One or two sentences.",
+  "notes": "YOUR ENTIRE REVIEW GOES HERE, as one string.",
+  "blockers": []
+}
+```
+
+The `pifleet-worker` skill has the full field list; those are the ones that carry a review.
+
+**This is spelled out because the obvious misreading has already happened.** A reviewer told
+to "put your whole review in the envelope's `notes`", by a version of this document that
+named `result.json` nowhere, did the reasonable thing with a `write` tool and no shell: it
+created a FILE called `notes`, and put its summary in a second file beside it, both loose in
+its task directory instead of in the envelope. It wrote no envelope at all, and its review —
+8709 bytes of correct, located findings — was graded as a lens that never reported. Nothing went red. The
+collation recorded `reported: false` beside its name and rested on one reader instead of two.
+
+So: `status: success` when the change is sound, `blocked` when you could not complete the
+review. Write the envelope last, and check that what you wrote is a file whose name ends
+`result.json`. An envelope you never wrote does not fail your task — it removes you from the
+grading, and your findings grade as unchecked.

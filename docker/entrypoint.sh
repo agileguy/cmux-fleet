@@ -243,12 +243,25 @@ if [ -n "${api_key_file}" ]; then
   fi
 fi
 
+# `contextWindow` is OMITTED when PIFLEET_LLM_CONTEXT_WINDOW is empty, and that
+# is not cosmetic: Pi falls back to its own default (128,000) for a model with no
+# window, which is the behaviour every worker had before this variable existed.
+# Writing a zero or a guess instead would be worse than saying nothing — too
+# small wastes most of the model, too large makes the provider reject a request
+# outright once the history passes the real limit.
+#
+# WHY IT IS HERE AT ALL: this writer emitted `{id, name}` and nothing else, so
+# EVERY model in the fleet ran at Pi's 128k regardless of what its endpoint
+# served. Measured 2026-09-04: deepseek-v4-pro:0813 and kimi-k3 serve 1,048,576.
+# `rev-arch-1` therefore auto-compacted at 152,447 tokens — 12% of its window —
+# and then could not resume at all, losing a completed review.
 if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
   jq -n \
     --arg provider "${PIFLEET_LLM_PROVIDER:-omlx}" \
     --arg baseUrl "${PIFLEET_LLM_BASE_URL}" \
     --arg apiKey "${api_key}" \
     --arg models "${PIFLEET_LLM_MODELS}" \
+    --arg contextWindow "${PIFLEET_LLM_CONTEXT_WINDOW:-}" \
     '{
       providers: {
         ($provider): {
@@ -256,7 +269,10 @@ if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
           baseUrl: $baseUrl,
           api: "openai-completions",
           apiKey: $apiKey,
-          models: ($models | split(",") | map(select(length > 0)) | map({id: ., name: .}))
+          models: ($models | split(",") | map(select(length > 0)) | map(
+            {id: ., name: .}
+            + (if $contextWindow == "" then {} else {contextWindow: ($contextWindow | tonumber)} end)
+          ))
         }
       }
     }' > "${agent_dir}/models.json"

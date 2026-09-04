@@ -27,7 +27,12 @@ import { constants, type Dirent } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { MAX_ITEMS, ResultEnvelopeSchema, type ResultEnvelope } from "../contracts.ts";
+import {
+  MAX_ITEMS,
+  RESULT_ENVELOPE_NAME,
+  ResultEnvelopeSchema,
+  type ResultEnvelope,
+} from "../contracts.ts";
 
 /**
  * Hard byte cap on result.json, enforced from `lstat` BEFORE the read.
@@ -373,7 +378,7 @@ function changedPathProblem(p: string, loc: OutboxLocation): string | null {
  * trustworthy.
  */
 export async function readResultEnvelope(loc: OutboxLocation): Promise<OutboxRead> {
-  const path = join(loc.workerOutboxDir, loc.taskId, "result.json");
+  const path = join(loc.workerOutboxDir, loc.taskId, RESULT_ENVELOPE_NAME);
 
   let st: Awaited<ReturnType<typeof lstat>>;
   try {

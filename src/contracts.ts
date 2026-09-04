@@ -200,6 +200,22 @@ export const ArtifactRefSchema = z.object({
   path: shortStr,
 });
 
+/**
+ * The filename every worker's result envelope must have, inside its task's
+ * outbox directory: `/outbox/<task-id>/result.json`.
+ *
+ * It is a constant rather than a literal at the one read site because a role
+ * document that never spells it is a worker that never writes it. `rev-ctx-1`
+ * was told to "put your whole review in the envelope's `notes`" by a document
+ * that named `result.json` ZERO times, and — holding `write` and no shell —
+ * resolved `notes` to a PATH: it wrote `/outbox/<task-id>/notes` and
+ * `/outbox/<task-id>/review.md`, produced no envelope at all, and its review
+ * graded as a lens that never reported. Exporting the name lets the role
+ * documents cite it and lets `role-docs.ts` derive it, so the doc, the reader
+ * and the probe all spell it once.
+ */
+export const RESULT_ENVELOPE_NAME = "result.json";
+
 export const ResultEnvelopeSchema = z.object({
   schema: z.literal("pifleet.result/v1"),
   task_id: shortStr,

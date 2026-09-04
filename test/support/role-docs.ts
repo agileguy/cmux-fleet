@@ -35,6 +35,8 @@
  */
 import { readFileSync } from "node:fs";
 
+import { RESULT_ENVELOPE_NAME } from "../../src/contracts.ts";
+
 import {
   COLLATION_ARTIFACT_NAME,
   COLLATION_REPORT_NAME,
@@ -72,6 +74,11 @@ export function allowedContainerPaths(): ReadonlySet<string> {
     DISPATCH_POLICY_MOUNT,
     `/outbox/${TASK}`,
     `/outbox/${TASK}/${DISPATCH_REQUEST_FILE}`,
+    // The result envelope, derived from the constant the harvester reads. A role
+    // document that cannot cite this path is one whose worker does not write it —
+    // `rev-ctx-1` filed its whole review as loose files because `reviewer.md`
+    // named `result.json` nowhere.
+    `/outbox/${TASK}/${RESULT_ENVELOPE_NAME}`,
     `${REPLIES_MOUNT}/${CHILD}${REPLY_SUFFIX}`,
     collationArtifactPath(TASK.replace(/[<>]/g, "x")).replace("xtask-idx", TASK),
     collationReportPath(TASK.replace(/[<>]/g, "x")).replace("xtask-idx", TASK),

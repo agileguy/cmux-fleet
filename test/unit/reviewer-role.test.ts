@@ -1,3 +1,4 @@
+import { RESULT_ENVELOPE_NAME } from "../../src/contracts.ts";
 /**
  * `roles/reviewer.md` says only things that are true, and the one instruction
  * holding the review console together is pinned at BOTH ends.
@@ -116,7 +117,19 @@ describe("the whole review reaches the collator, and both ends say so", () => {
    * that survived would look like a complete guard.
    */
   test("the collator is still told to repeat the instruction in every brief", () => {
-    expect(COLLATOR).toContain("put its whole review in its result envelope's `notes`");
+    /*
+     * REWRITTEN 2026-09-04. This pinned the phrase "put its whole review in its
+     * result envelope's `notes`" — and that exact phrasing is what broke a live
+     * review. `rev-ctx-1`, holding `write` and no shell, read "the envelope's
+     * `notes`" as a FILENAME and wrote a file called `notes`, produced no
+     * envelope, and graded as a lens that never reported. So the probe now
+     * requires the two things that disambiguate it — the envelope's PATH and the
+     * word FIELD — rather than the sentence that misled a reader.
+     */
+    expect(COLLATOR, "the collator never names the envelope it tells reviewers to write").toContain(
+      `/outbox/<task-id>/${RESULT_ENVELOPE_NAME}`,
+    );
+    expect(COLLATOR, "the collator does not say `notes` is a field").toContain("`notes` FIELD");
   });
 
   test("the collator is told the reviewer role carries it too, and to say it anyway", () => {

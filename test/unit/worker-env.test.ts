@@ -808,3 +808,98 @@ describe("a worker dials ITS OWN provider's endpoint, not the fleet default", ()
     expect(plan.vars["PIFLEET_LLM_BASE_URL"]).toBe("http://omlx.pifleet.internal:8000/v1");
   });
 });
+
+/**
+ * THE CONTEXT WINDOW IS THE FLEET'S TO SET, AND IT NEVER SET IT.
+ *
+ * `docker/entrypoint.sh` rendered each model into `models.json` as `{id, name}`
+ * and nothing else, so the Pi agent fell back to its own default — 128,000 — for
+ * every model in the fleet regardless of what the endpoint actually served.
+ * Measured against the provider on 2026-09-04: `deepseek-v4-pro:0813` and
+ * `kimi-k3` serve 1,048,576. `rev-arch-1` therefore auto-compacted at 152,447
+ * tokens having used 12% of its window, and then could not resume at all —
+ * "Cannot continue from message role: assistant" — losing a completed review.
+ *
+ * ## Why the fixture puts the SAME model id on BOTH providers
+ *
+ * Deliberately asymmetric, because the degenerate fixture is the one that would
+ * pass here by accident. A map keyed only by model id — fleet-wide rather than
+ * per-provider — returns the right answer for every fixture in which each id
+ * appears once, which is every obvious fixture. `SharedModel` at two different
+ * windows is the only shape that can tell the two designs apart, and it is the
+ * real case: the same weights behind two endpoints are served with whatever
+ * window each operator configured, and the one that matters is the endpoint's.
+ */
+describe("a worker's context window is its own provider's", () => {
+  const sharedModel = () =>
+    baseDoc({
+    llm: {
+      provider: "local",
+      model: "SharedModel",
+      providers: {
+        local: {
+          hosted: false,
+          base_url: "http://omlx.pifleet.internal:8000/v1",
+          api_key_env: "OMLX_API_KEY",
+          models_allowlist: ["SharedModel"],
+          context_windows: { SharedModel: 32768 },
+        },
+        vendor: {
+          hosted: true,
+          base_url: "https://vendor.example/v1",
+          relay_upstream: "203.0.113.7:443",
+          api_key_env: "VENDOR_API_KEY",
+          models_allowlist: ["SharedModel", "Unmeasured"],
+          context_windows: { SharedModel: 1048576 },
+        },
+      },
+    },
+    roles: {
+      eng: {},
+      remote: { model: "vendor/SharedModel" },
+      quiet: { model: "vendor/Unmeasured" },
+    },
+    workers: [
+      { id: "w1", role: "eng" },
+      { id: "wv", role: "remote" },
+      { id: "wq", role: "quiet" },
+    ],
+    });
+
+  test("the same model id on two providers resolves to two different windows", async () => {
+    const loaded = await load(sharedModel());
+    const local = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    const remote = buildWorkerEnv(loaded, resolveWorker(loaded, "wv"), {});
+
+    expect(local.vars["PIFLEET_LLM_CONTEXT_WINDOW"]).toBe("32768");
+    expect(remote.vars["PIFLEET_LLM_CONTEXT_WINDOW"]).toBe("1048576");
+    // The arm that a fleet-wide map would fail: they are not the same answer.
+    expect(local.vars["PIFLEET_LLM_CONTEXT_WINDOW"]).not.toBe(
+      remote.vars["PIFLEET_LLM_CONTEXT_WINDOW"],
+    );
+  });
+
+  /**
+   * An unmeasured model keeps the agent's default, and the variable is EMPTY
+   * rather than a number of ours. `entrypoint.sh` omits `contextWindow` on
+   * empty, so this is the "behave exactly as before" path — the one that must
+   * not acquire a guess, because too large makes the provider reject whole
+   * requests once the history passes the real limit.
+   */
+  test("a model with no measured window is left to the agent's default", async () => {
+    const loaded = await load(sharedModel());
+    const quiet = buildWorkerEnv(loaded, resolveWorker(loaded, "wq"), {});
+    expect(quiet.vars["PIFLEET_LLM_CONTEXT_WINDOW"]).toBe("");
+  });
+
+  /** The variable is always present, so the entrypoint's `:-` never guesses. */
+  test("the variable is written for every worker, measured or not", async () => {
+    const loaded = await load(sharedModel());
+    for (const id of ["w1", "wv", "wq"]) {
+      const vars = buildWorkerEnv(loaded, resolveWorker(loaded, id), {}).vars;
+      expect(Object.keys(vars), `${id} has no window variable`).toContain(
+        "PIFLEET_LLM_CONTEXT_WINDOW",
+      );
+    }
+  });
+});

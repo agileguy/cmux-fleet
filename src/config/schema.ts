@@ -736,6 +736,29 @@ export const ProviderSchema = z
     /** Empty means "no allowlist", exactly as the flat key does. */
     models_allowlist: z.array(shortStr).max(64).default([]),
     /**
+     * Each model's REAL context window, by model id. Absent means the worker
+     * gets whatever the Pi agent defaults to.
+     *
+     * This exists because that default is 128,000 for every model, and the
+     * entrypoint's `models.json` writer emitted `{id, name}` and nothing else —
+     * so every model in this fleet ran at 128k regardless of what it could
+     * actually hold. Measured against the provider on 2026-09-04:
+     * `deepseek-v4-pro:0813` and `kimi-k3` are 1,048,576, so they were being
+     * run at 12% of capacity. `rev-arch-1` auto-compacted at 152,447 tokens on a
+     * model with a million, and then could not resume at all.
+     *
+     * PER PROVIDER rather than fleet-wide, because a model id says nothing about
+     * how the endpoint serving it is configured: the same weights behind two
+     * providers can be served with two different windows, and the one that
+     * matters is the endpoint's.
+     *
+     * Re-measure when a provider re-tags a model — the value is theirs, not ours:
+     *   curl -s https://<host>/api/show -H "Authorization: Bearer $KEY" \
+     *     -d '{"model":"<id>"}' | jq '.model_info | to_entries[]
+     *       | select(.key | endswith(".context_length"))'
+     */
+    context_windows: z.record(shortStr, z.number().int().positive()).default({}),
+    /**
      * Turns off `decomposeModel`'s `:thinking` suffix stripping for models on
      * this provider (D12, ISC-405). Off by default, so oMLX is unaffected and
      * no existing config changes meaning.

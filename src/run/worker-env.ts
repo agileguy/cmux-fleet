@@ -106,6 +106,7 @@ import {
   ConfigError,
   providerApiKeyEnv,
   providerBaseUrl,
+  providerContextWindow,
   providerIsHosted,
 } from "../config/load.ts";
 import { CREDENTIAL_ENV_VARS, tokenModeStartupEnv } from "../security/adc.ts";
@@ -607,6 +608,24 @@ export function buildWorkerEnv(
      * the opposite of what that check is for. One worker runs one model.
      */
     PIFLEET_LLM_MODELS: w.model,
+    /*
+     * The model's REAL context window, or "" for "let the agent default".
+     *
+     * Empty rather than absent because every value in this record is a string;
+     * the entrypoint treats empty as unset and omits `contextWindow` from
+     * `models.json`, which is exactly the behaviour every worker had before this
+     * line existed.
+     *
+     * It exists because that default is 128,000 for every model. `rev-arch-1`
+     * runs `deepseek-v4-pro:0813`, whose endpoint serves 1,048,576 — so it
+     * auto-compacted at 152,447 tokens having used 12% of the window, and then
+     * failed to resume with "Cannot continue from message role: assistant",
+     * losing a review it had already finished. The window was never the model's;
+     * it was ours, and we never set it.
+     */
+    PIFLEET_LLM_CONTEXT_WINDOW: String(
+      providerContextWindow(loaded.config, w.provider, w.model) ?? "",
+    ),
     /*
      * Arms the escape-attempt honeypot (ISC-125). Unconditional: every worker
      * is watched, and there is no config switch to turn it off, because an
