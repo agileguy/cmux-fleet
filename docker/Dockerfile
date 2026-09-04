@@ -101,7 +101,14 @@ COPY --chmod=0755 docker/verbgate /usr/local/bin/bq
 # --- optional toolchain layers, selected by build arg (§5.3) ---
 FROM base AS toolchain-base
 FROM base AS toolchain-node
-RUN npm install -g --ignore-scripts bun@1.3.12
+# `--ignore-scripts` is this image's supply-chain default, but bun's npm package
+# is only a stub: its postinstall is what fetches the ~100MB platform binary that
+# `bin/bun.exe` points at. Skip it and `bun` is still on PATH, but answers every
+# invocation with "Bun's postinstall script was not run" — so a tester asked to
+# run a Bun project's suite has no runner at all. Run that one known script by
+# name and the default stays in force for every other package.
+RUN npm install -g --ignore-scripts bun@1.3.12 \
+ && node "$(npm root -g)/bun/install.js"
 FROM base AS toolchain-python
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
  && rm -rf /var/lib/apt/lists/* \
@@ -110,7 +117,14 @@ FROM base AS toolchain-go
 RUN apt-get update && apt-get install -y --no-install-recommends golang-go \
  && rm -rf /var/lib/apt/lists/*
 FROM base AS toolchain-full
+# `--ignore-scripts` is this image's supply-chain default, but bun's npm package
+# is only a stub: its postinstall is what fetches the ~100MB platform binary that
+# `bin/bun.exe` points at. Skip it and `bun` is still on PATH, but answers every
+# invocation with "Bun's postinstall script was not run" — so a tester asked to
+# run a Bun project's suite has no runner at all. Run that one known script by
+# name and the default stays in force for every other package.
 RUN npm install -g --ignore-scripts bun@1.3.12 \
+ && node "$(npm root -g)/bun/install.js" \
  && apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv golang-go \
  && rm -rf /var/lib/apt/lists/* \
