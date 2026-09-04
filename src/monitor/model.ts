@@ -215,6 +215,33 @@ export interface WorkerRow {
    * to `"rpc"`.
    */
   readonly workspace: string | null;
+  /**
+   * The workspace's HUMAN NAME — `presentation.json`'s `workspace_name`, which
+   * is cmux's `custom_title` and round-trips the `--name` pifleet created the
+   * workspace with.
+   *
+   * ## It LABELS, it never IDENTIFIES — and the split is the whole point
+   *
+   * {@link WorkerRow.workspace} is the group KEY: a UUID, unique and stable.
+   * This is the group's LABEL. Grouping on the name instead would merge two
+   * distinct workspaces that happen to share a title, and nothing stops an
+   * operator from having two called `review`. So identity stays the ref and the
+   * name is only ever what gets printed.
+   *
+   * ## `null` is the ordinary case today, and the view falls back to the ref
+   *
+   * Recorded only when pifleet created and named the workspace. On the
+   * `up --attach-here` path — which is EVERY run on the operator's disk
+   * (measured 2026-09-04: 179 of 179 carry `backend: headless` with
+   * `adopted_terminal: true`) — the workspace is one cmux already owned, and
+   * all pifleet learns is the UUID in `CMUX_WORKSPACE_ID`; the installed cmux
+   * exports no name variable at all. Every record written before the field
+   * existed is `null` too.
+   *
+   * **A name is never invented to fill this.** A UUID is obviously an
+   * identifier; a fabricated label reads as a fact.
+   */
+  readonly workspaceName: string | null;
 }
 
 /** One live run and the workers under it. */

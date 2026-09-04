@@ -330,6 +330,7 @@ export async function readWorkerRow(
         via: deriveVia(launch, launchUnreadable, presentation),
         fence,
         workspace: deriveWorkspace(presentation),
+        workspaceName: deriveWorkspaceName(presentation),
       },
       evidence: { state, presentation, attended, launch, launchUnreadable, notes },
     },
@@ -440,6 +441,7 @@ export async function refreshWorkerRow(
          * in a live pane and no `--once` test ever reaches.
          */
         workspace: deriveWorkspace(prior.presentation),
+        workspaceName: deriveWorkspaceName(prior.presentation),
       },
       // Fresh state and fence, CARRIED satellites. See the header.
       evidence: { ...prior, state },
@@ -605,6 +607,34 @@ export function deriveVia(
  */
 export function deriveWorkspace(presentation: Presentation | null): string | null {
   return presentation?.workspace_ref ?? null;
+}
+
+/**
+ * The workspace's HUMAN NAME, when the record carries one.
+ *
+ * Separate from {@link deriveWorkspace} rather than returned beside it, because
+ * the two are read by different questions: the ref decides which group a worker
+ * is IN, the name decides what that group is CALLED. A single function
+ * returning a pair would tempt a caller to key a group on the pair, which is
+ * the merge bug {@link WorkerRow.workspaceName} warns about — two workspaces
+ * sharing a title must stay two groups.
+ *
+ * ## `null` MUST NOT BE FILLED IN HERE, and the view must not fill it either
+ *
+ * It means pifleet never recorded a name for this workspace, which today is the
+ * ordinary case: `up` records one only when it created and named the workspace
+ * itself, and on the adopted path the installed cmux exports no name to read
+ * (probed 2026-09-04). The display layer falls back to the REF, which is a
+ * worse label and a true one. Inventing a name — deriving it from the run id,
+ * from the repo, from anything — would put a plausible wrong word where an
+ * operator reads facts.
+ *
+ * The field is optional in the schema (`contracts.ts`), so every record written
+ * before it existed parses and answers `null` here rather than failing the
+ * whole presentation read and taking `via` and the activity ladder with it.
+ */
+export function deriveWorkspaceName(presentation: Presentation | null): string | null {
+  return presentation?.workspace_name ?? null;
 }
 
 /**

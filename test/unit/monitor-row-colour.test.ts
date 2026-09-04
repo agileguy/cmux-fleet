@@ -40,6 +40,7 @@ function row(over: Partial<WorkerRow> = {}): WorkerRow {
     via: null,
     fence: null,
     workspace: null,
+    workspaceName: null,
     ...over,
   };
 }

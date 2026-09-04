@@ -855,6 +855,47 @@ export const PresentationSchema = z.object({
   worker: workerId,
   backend: z.enum(["cmux", "tmux", "headless"]),
   workspace_ref: shortStr.nullable().default(null),
+  /**
+   * The workspace's HUMAN NAME — cmux's `custom_title`, which round-trips the
+   * `--name` pifleet passed to `workspace create` (SRD §4.1).
+   *
+   * ## Why a second field and not a parse of the first
+   *
+   * `workspace_ref` is a UUID. It is the right thing to GROUP by — it is
+   * stable, unique, and it is what every cmux verb addresses — and it is a poor
+   * thing to read: `72D01454-0368-4978-91B2-DD0B68BD8D3A` names nothing to an
+   * operator, while `development` does. The two answer different questions, so
+   * they are two fields rather than one that has to be interpreted.
+   *
+   * ## `.default(null)` IS LOAD-BEARING, not tidiness
+   *
+   * Every one of the 183 `presentation.json` records on the operator's disk
+   * predates this field (measured 2026-09-04). A required field would make all
+   * of them fail `PresentationSchema.parse`, which does not degrade to "no
+   * name" — it takes `via`, the activity ladder's `adopted_terminal`, and the
+   * workspace itself down with it, on every historical run at once. The
+   * default is what keeps this an additive change.
+   *
+   * ## `null` IS THE COMMON CASE TODAY, and honestly so
+   *
+   * It is recorded ONLY when pifleet itself created and named the workspace.
+   * On the `up --attach-here` path the workspace is one cmux already owned and
+   * the operator handed over; all pifleet learns of it is the UUID in
+   * `CMUX_WORKSPACE_ID`. **Probed against the installed cmux 0.64.x on
+   * 2026-09-04: the binary exports `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID` and
+   * `CMUX_PANE_ID`, and no variable carrying a workspace name or title.** The
+   * name exists only behind `cmux workspace list`, and reaching it from here
+   * would mean either importing a cmux symbol outside `src/backends/cmux/`
+   * (ISC-137 forbids it) or widening `FleetBackend` — and it would make
+   * `up --attach-here`, which needs no cmux socket today, newly depend on one
+   * for a cosmetic label.
+   *
+   * So the honest value is `null`, and the display layer falls back to the ref.
+   * **A name is never invented**: a guessed label on a workspace is worse than
+   * a UUID, because a UUID is obviously an identifier and a wrong name reads as
+   * a fact.
+   */
+  workspace_name: shortStr.nullable().default(null),
   surface_ref: shortStr.nullable().default(null),
   window_ref: shortStr.nullable().default(null),
   /**

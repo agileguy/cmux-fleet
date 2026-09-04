@@ -571,8 +571,29 @@ export const NO_WORKSPACE = "no workspace recorded";
  * anything", which is why they are excluded from every floor. Adding a tier for
  * it would make the ladder longer and buy the row not one character.
  */
-export function workspaceHeading(workspace: string | null): string {
-  return workspace === null ? NO_WORKSPACE : `workspace ${workspace}`;
+export function workspaceHeading(workspace: string | null, name: string | null = null): string {
+  if (workspace === null) return NO_WORKSPACE;
+  /*
+   * THE NAME WHEN THERE IS ONE, THE REF WHEN THERE IS NOT — and never anything
+   * derived from the ref to stand in for a name.
+   *
+   * `workspace development` is what the operator asked for and what cmux's own
+   * sidebar shows, so a name makes the heading cross-referenceable with the
+   * window they are looking at. `workspace 72D01454-…` is the fallback, and it
+   * is the COMMON path today rather than an edge case: `up` records a name only
+   * when it created the workspace itself, and every run on the operator's disk
+   * was adopted into a workspace cmux already owned (measured 2026-09-04, 179
+   * of 179), where the installed cmux exports no name to read.
+   *
+   * The fallback is the REF and not a shortened, prettified or otherwise
+   * invented label. A UUID announces itself as an identifier; a manufactured
+   * name reads as a fact, and this is a monitor.
+   *
+   * An empty string is treated as no name for the same reason `phaseCell("")`
+   * renders a dash: a heading reading `workspace ` with nothing after it is
+   * indistinguishable from one that failed to render.
+   */
+  return name === null || name === "" ? `workspace ${workspace}` : `workspace ${name}`;
 }
 
 /**
@@ -598,6 +619,29 @@ export function workspaceHeadingStyle(p: Palette): {
 export interface WorkspaceGroup {
   /** `null` for workers whose record names no workspace. See {@link NO_WORKSPACE}. */
   readonly workspace: string | null;
+  /**
+   * The group's LABEL — the first non-null `workspaceName` among its workers,
+   * or `null` when none of them carries one.
+   *
+   * ## Why "first non-null" rather than "the name" or "they must agree"
+   *
+   * A workspace outlives a run: 26 of the 29 workspaces on the operator's disk
+   * span more than one (measured 2026-09-04, one spans 14). So one group
+   * routinely holds workers written by several `up` invocations — and they can
+   * legitimately disagree, because the field is NEW. A run from yesterday
+   * carries `null`; one started after this change may carry `development`. Both
+   * describe the same workspace and neither is wrong.
+   *
+   * Refusing to label unless every worker agrees would therefore show a UUID
+   * for a workspace pifleet knows the name of, for as long as any old run
+   * survives — which is most of the time and exactly backwards. Taking the
+   * first non-null in model order upgrades the heading the moment one record
+   * knows the answer, and never downgrades it because an older one does not.
+   *
+   * **It is not a vote and not a merge**: the group's IDENTITY is
+   * {@link workspace}, always the ref. This only decides what gets printed.
+   */
+  readonly name: string | null;
   readonly runs: readonly RunRow[];
 }
 
@@ -697,7 +741,24 @@ export function groupByWorkspace(runs: readonly RunRow[]): readonly WorkspaceGro
     for (const [workspace, workers] of slices) push(workspace, { ...run, workers });
   }
 
-  return [...groups].map(([workspace, grouped]) => ({ workspace, runs: grouped }));
+  return [...groups].map(([workspace, grouped]) => ({
+    workspace,
+    /*
+     * The LABEL, resolved from the group's own members — see
+     * `WorkspaceGroup.name`. First non-null in model order: a group whose older
+     * runs predate the field must still show the name a newer one knows, or the
+     * heading would sit on a UUID for as long as any old run survives.
+     *
+     * `?? null` again, for the same untyped-input reason as `workspace` above:
+     * a hand-built row missing the field would otherwise make this `undefined`
+     * and print `workspace undefined`.
+     */
+    name:
+      grouped
+        .flatMap((r) => r.workers)
+        .find((w) => (w.workspaceName ?? null) !== null)?.workspaceName ?? null,
+    runs: grouped,
+  }));
 }
 
 /** One workspace's heading and the run blocks beneath it. */
@@ -718,7 +779,7 @@ function WorkspaceBlock({ group, plan }: { group: WorkspaceGroup; plan: LayoutPl
        * which is what makes it reviewable.
        */}
       <Text wrap="truncate-end" color={style.color} bold={style.bold}>
-        {workspaceHeading(group.workspace)}
+        {workspaceHeading(group.workspace, group.name)}
       </Text>
       {group.runs.map((run) => (
         <RunBlock key={`${group.workspace ?? ""}/${run.runId}`} run={run} plan={plan} />

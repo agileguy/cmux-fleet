@@ -57,7 +57,13 @@ import {
   workspaceHeadingStyle,
 } from "../../src/monitor/views/fleet.tsx";
 import { COLOUR, PLAIN } from "../../src/monitor/views/chrome.tsx";
-import { deriveWorkspace, readWorkerRow, refreshWorkerRow } from "../../src/monitor/read/worker.ts";
+import {
+  deriveWorkspace,
+  deriveWorkspaceName,
+  readWorkerRow,
+  refreshWorkerRow,
+} from "../../src/monitor/read/worker.ts";
+import { presentedWorkspace } from "../../src/cli/commands/up.ts";
 import { runPaths, workerPaths } from "../../src/run/paths.ts";
 import { PresentationSchema, WorkerStateSchema } from "../../src/contracts.ts";
 
@@ -78,6 +84,13 @@ const base: WorkerRow = {
   via: "rpc",
   fence: null,
   workspace: WS_OPS,
+  /*
+   * NO NAME on the base fixture, deliberately. It is the shape every record on
+   * the operator's disk has today — `up` records a name only for a workspace it
+   * created, and all 179 runs there were adopted into one cmux already owned.
+   * Fixtures that want a name state it, so the default exercises the FALLBACK.
+   */
+  workspaceName: null,
 };
 
 const row = (over: Partial<WorkerRow> = {}): WorkerRow => ({ ...base, ...over });
@@ -547,6 +560,333 @@ describe("the workspace heading is bold yellow, and only when colour is on", () 
 // The heading text
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// THE NAME — what the owner actually asked for, and the fallback that keeps it
+// honest when there is no name to show
+// ---------------------------------------------------------------------------
+
+describe("the heading prefers the workspace's name and falls back to its ref", () => {
+  /**
+   * THE REQUEST, at its simplest: a named workspace renders its name.
+   *
+   * `development`, not `72D01454-0368-4978-91B2-DD0B68BD8D3A`. The name is
+   * cmux's `custom_title`, so the heading now matches what the operator sees in
+   * cmux's own sidebar, which is the point of showing it rather than the id.
+   */
+  test("a named workspace renders its name, not its ref", () => {
+    const frame = renderFleet(
+      model([
+        {
+          runId: RUN_A,
+          workers: [row({ workerId: "eng-1", workspace: WS_DEV, workspaceName: "development" })],
+        },
+      ]),
+    ).join("\n");
+    expect(frame).toContain("workspace development");
+    expect(frame).not.toContain(WS_DEV);
+  });
+
+  /**
+   * THE FALLBACK, and it is the COMMON path rather than an edge case: every one
+   * of the 183 records on the operator's disk carries no name, because `up`
+   * records one only for a workspace it created and all 179 runs were adopted
+   * into one cmux already owned.
+   *
+   * The fallback is the REF — not a shortened ref, not a prettified one, not
+   * anything derived. A UUID announces itself as an identifier; an invented
+   * label reads as a fact.
+   */
+  test("a nameless workspace falls back to its ref", () => {
+    expect(workspaceHeading(WS_OPS, null)).toBe(`workspace ${WS_OPS}`);
+    const frame = renderFleet(
+      model([
+        { runId: RUN_A, workers: [row({ workerId: "eng-1", workspace: WS_OPS, workspaceName: null })] },
+      ]),
+    ).join("\n");
+    expect(frame).toContain(`workspace ${WS_OPS}`);
+  });
+
+  /**
+   * THE ASSERTION THE COORDINATOR ASKED FOR BY NAME. A nameless record must not
+   * render `undefined`, `null`, or an empty heading — a class of failure this
+   * suite has already caught once, when a fixture predating `workspace` printed
+   * `workspace undefined`.
+   *
+   * All four spellings are checked because they fail differently: `undefined`
+   * and `null` come from a missing field reaching the template, `workspace `
+   * with nothing after it from an empty-string name, and a bare `workspace`
+   * from a heading that dropped its subject entirely.
+   */
+  test("a nameless record never renders undefined, null or an empty heading", () => {
+    for (const name of [null, undefined as unknown as null, ""]) {
+      const heading = workspaceHeading(WS_OPS, name);
+      expect(heading).toBe(`workspace ${WS_OPS}`);
+      expect(heading).not.toContain("undefined");
+      expect(heading).not.toContain("null");
+      expect(heading.trim()).not.toBe("workspace");
+    }
+
+    const frame = renderFleet(
+      model([
+        {
+          runId: RUN_A,
+          workers: [
+            row({ workerId: "eng-1", workspace: WS_OPS, workspaceName: undefined as unknown as null }),
+            row({ workerId: "eng-2", workspace: WS_DEV, workspaceName: "" }),
+          ],
+        },
+      ]),
+    ).join("\n");
+    expect(frame).not.toContain("undefined");
+    expect(frame).not.toContain("workspace null");
+    expect(frame).toContain(`workspace ${WS_OPS}`);
+    expect(frame).toContain(`workspace ${WS_DEV}`);
+  });
+
+  /**
+   * THE IDENTITY IS THE REF, THE LABEL IS THE NAME — and conflating them merges
+   * two workspaces into one group.
+   *
+   * Nothing stops an operator having two workspaces titled `review`. A grouper
+   * keyed on the name would file both under one heading and the frame would
+   * claim a fleet that does not exist. The workers must stay in two groups even
+   * though the heading text is identical.
+   */
+  test("two workspaces sharing a name stay two groups", () => {
+    const groups = groupByWorkspace([
+      {
+        runId: RUN_A,
+        workers: [
+          row({ workerId: "eng-1", workspace: WS_OPS, workspaceName: "review" }),
+          row({ workerId: "eng-2", workspace: WS_DEV, workspaceName: "review" }),
+        ],
+      },
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.workspace)).toEqual([WS_OPS, WS_DEV]);
+    expect(groups.map((g) => g.name)).toEqual(["review", "review"]);
+  });
+
+  /**
+   * A group whose runs DISAGREE takes the first name it can find.
+   *
+   * This is the ordinary state of a live fleet rather than a corner: 26 of the
+   * 29 workspaces on this disk span more than one run, and the field is new, so
+   * a workspace routinely holds one run that knows its name and several older
+   * ones that do not. Refusing to label unless all agree would show a UUID for
+   * a workspace pifleet demonstrably knows the name of.
+   */
+  test("a name on any worker labels the whole group", () => {
+    const groups = groupByWorkspace([
+      { runId: RUN_A, workers: [row({ workerId: "old-1", workspace: WS_OPS, workspaceName: null })] },
+      {
+        runId: RUN_B,
+        workers: [row({ workerId: "new-1", runId: RUN_B, workspace: WS_OPS, workspaceName: "operations" })],
+      },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.name).toBe("operations");
+    expect(workspaceHeading(groups[0]!.workspace, groups[0]!.name)).toBe("workspace operations");
+  });
+
+  /**
+   * FIRST non-null, and the fixture is asymmetric so that "first" and "last"
+   * give different answers.
+   *
+   * **Added after a mutation survived.** The test above has exactly one named
+   * worker, so first and last are the same worker and a `.pop()` in place of
+   * `.find()` passed it — the degenerate-fixture failure, where a rule about
+   * ordering is asserted on data that has no order to get wrong. Two different
+   * names in one group is the smallest fixture that can tell them apart.
+   *
+   * A workspace CAN legitimately carry two names over time: cmux lets an
+   * operator retitle a workspace, so an older run may record `dev` where a
+   * newer one records `development`. Model order is what the rest of this view
+   * uses, so the heading follows it too rather than inventing a recency rule
+   * the model does not carry.
+   */
+  test("the FIRST name in model order wins, not the last", () => {
+    const groups = groupByWorkspace([
+      {
+        runId: RUN_A,
+        workers: [
+          row({ workerId: "a-1", workspace: WS_OPS, workspaceName: "dev" }),
+          row({ workerId: "a-2", workspace: WS_OPS, workspaceName: "development" }),
+        ],
+      },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.name).toBe("dev");
+    expect(groups[0]!.name).not.toBe("development");
+  });
+
+  /**
+   * And a null FIRST worker does not veto a later name — the two rules
+   * together ("skip nulls" and "take the first") need a fixture where each
+   * could fail alone.
+   */
+  test("a null on the first worker does not suppress a later name", () => {
+    const groups = groupByWorkspace([
+      {
+        runId: RUN_A,
+        workers: [
+          row({ workerId: "a-1", workspace: WS_OPS, workspaceName: null }),
+          row({ workerId: "a-2", workspace: WS_OPS, workspaceName: "operations" }),
+          row({ workerId: "a-3", workspace: WS_OPS, workspaceName: "later" }),
+        ],
+      },
+    ]);
+    expect(groups[0]!.name).toBe("operations");
+  });
+
+  /**
+   * And the name never leaks onto the group that has no workspace. `no
+   * workspace recorded` is a statement about the absence of a ref; a name
+   * appearing there would be a label on nothing.
+   */
+  test("the detached group is never given a name", () => {
+    const groups = groupByWorkspace([
+      {
+        runId: RUN_A,
+        workers: [row({ workerId: "eng-1", workspace: null, workspaceName: "development" })],
+      },
+    ]);
+    expect(workspaceHeading(groups[0]!.workspace, groups[0]!.name)).toBe(NO_WORKSPACE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R4 (round 2) — where the NAME comes from, and where it honestly cannot
+// ---------------------------------------------------------------------------
+
+describe("up records the name only for a workspace it named itself", () => {
+  const NAME = "pifleet-2026-09-04T10-00-00Z-aaaa";
+
+  /**
+   * The path where a name exists: pifleet called `ensureWorkspace(name)`, so
+   * the name is the INPUT and is known with no I/O at all.
+   */
+  test("a workspace pifleet created carries its ref and its name", () => {
+    expect(presentedWorkspace(null, { id: WS_DEV }, NAME)).toEqual({
+      ref: WS_DEV,
+      name: NAME,
+    });
+  });
+
+  /**
+   * THE ADOPTED PATH, which is every run on this machine.
+   *
+   * `up --attach-here` takes over a workspace cmux already owned. The ref
+   * arrives from `CMUX_WORKSPACE_ID`; the NAME is not obtainable — probed
+   * against the installed cmux 0.64.x, the binary exports `CMUX_WORKSPACE_ID`,
+   * `CMUX_SURFACE_ID` and `CMUX_PANE_ID` and nothing carrying a title. So the
+   * honest record is a ref with no name, and the view falls back.
+   *
+   * **`createdName` is passed and must be IGNORED.** It is a perfectly good
+   * string in that scope — `pifleet-<runId>` — and writing it here would label
+   * the operator's `development` console with a name it does not have. That is
+   * the single most tempting wrong answer in this function, so it is asserted
+   * directly rather than left to the shape.
+   */
+  test("an adopted workspace carries its ref and NO name", () => {
+    expect(presentedWorkspace({ workspace: WS_OPS }, { id: null }, NAME)).toEqual({
+      ref: WS_OPS,
+      name: null,
+    });
+    // Even when a workspace WAS created alongside, the handed-over one wins and
+    // still contributes no name.
+    expect(presentedWorkspace({ workspace: WS_OPS }, { id: WS_DEV }, NAME)).toEqual({
+      ref: WS_OPS,
+      name: null,
+    });
+  });
+
+  /**
+   * Headless with nothing handed over: no workspace at all, so no name. The
+   * arm exists separately from the adopted one because `createdName` is still
+   * in scope and still a valid string — a bare `handedOver === null` test would
+   * attach a name to a workspace that does not exist.
+   */
+  test("no workspace means no name", () => {
+    expect(presentedWorkspace(null, { id: null }, NAME)).toEqual({ ref: null, name: null });
+  });
+
+  /**
+   * THE INVARIANT, swept over every combination rather than spot-checked: a
+   * name is never recorded without its ref. A label attached to no group is
+   * either dropped silently or merged into `no workspace recorded` while
+   * claiming to be something else.
+   */
+  test("a name is never recorded without a ref", () => {
+    for (const handedOver of [null, { workspace: null }, { workspace: WS_OPS }]) {
+      for (const created of [{ id: null }, { id: WS_DEV }]) {
+        const r = presentedWorkspace(handedOver, created, NAME);
+        if (r.name !== null) {
+          expect({ case: JSON.stringify([handedOver, created]), ref: r.ref }).toEqual({
+            case: JSON.stringify([handedOver, created]),
+            ref: r.ref,
+          });
+          expect(r.ref, `name ${r.name} with no ref`).not.toBeNull();
+        }
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The schema — old records must still parse
+// ---------------------------------------------------------------------------
+
+describe("the presentation schema stays backward compatible", () => {
+  /**
+   * THE ASSERTION THE COORDINATOR ASKED FOR BY NAME.
+   *
+   * All 183 `presentation.json` records on the operator's disk predate
+   * `workspace_name`. A required field would fail every one of them — and that
+   * failure is not "no name", it takes `adopted_terminal`, `surface_ref` and
+   * the workspace itself down with it, on every historical run at once, because
+   * the whole record fails to parse.
+   */
+  test("a record written before the field existed still parses", () => {
+    const old = {
+      schema: "pifleet.presentation/v1",
+      worker: "eng-1",
+      backend: "headless",
+      workspace_ref: WS_OPS,
+      surface_ref: "068FDE04-AEE8-4C00-BA3B-4AC315A7AAEA",
+      window_ref: null,
+      adopted_terminal: true,
+    };
+    const parsed = PresentationSchema.parse(old);
+    expect(parsed.workspace_name).toBeNull();
+    // And the rest of the record survives — the point of the default.
+    expect(parsed.workspace_ref).toBe(WS_OPS);
+    expect(parsed.adopted_terminal).toBe(true);
+  });
+
+  test("a record carrying a name round-trips it", () => {
+    const parsed = PresentationSchema.parse({
+      schema: "pifleet.presentation/v1",
+      worker: "eng-1",
+      backend: "cmux",
+      workspace_ref: WS_DEV,
+      workspace_name: "development",
+    });
+    expect(parsed.workspace_name).toBe("development");
+  });
+
+  /**
+   * TESTING THE TESTER. The backward-compatibility case above is only
+   * meaningful if this schema actually rejects something — a `.parse` that
+   * accepted anything would make it vacuous.
+   */
+  test("the schema still refuses a record it should", () => {
+    expect(() =>
+      PresentationSchema.parse({ schema: "pifleet.presentation/v1", worker: "eng-1" }),
+    ).toThrow();
+  });
+});
+
 describe("the heading says what it is, in both frames", () => {
   /**
    * The plain frame has no colour to carry meaning, so the WORD has to. A
@@ -598,7 +938,12 @@ describe("the workspace is read from presentation.json, not asked of cmux", () =
     return run;
   }
 
-  async function makeWorker(run: ReturnType<typeof runPaths>, worker: string, ws: string | null) {
+  async function makeWorker(
+    run: ReturnType<typeof runPaths>,
+    worker: string,
+    ws: string | null,
+    name: string | null = null,
+  ) {
     const wp = workerPaths(run, worker);
     await mkdir(wp.dir, { recursive: true });
     await writeFile(
@@ -625,6 +970,7 @@ describe("the workspace is read from presentation.json, not asked of cmux", () =
             worker,
             backend: "headless",
             workspace_ref: ws,
+            workspace_name: name,
           }),
         ),
       );
@@ -695,6 +1041,112 @@ describe("the workspace is read from presentation.json, not asked of cmux", () =
    * reason: one expression in this repository turns a presentation record into
    * a workspace, so a fast path cannot drift from a slow one.
    */
+  /**
+   * THE NAME, END TO END — added after a mutation survived, and the survival is
+   * the reason this test exists rather than a nicety.
+   *
+   * The round-2 battery replaced `deriveWorkspaceName`'s body with `return
+   * null` and the whole 317-test suite stayed green. Every assertion about the
+   * name was on `presentedWorkspace` (the writer) or on `workspaceHeading` and
+   * `groupByWorkspace` (the view); nothing joined the two, so a reader that
+   * silently answered "no name" for every record would have shipped, and the
+   * heading would have fallen back to a UUID forever while every test agreed it
+   * was fine. Round 1 had exactly this test for `workspace` and it was not
+   * mirrored for the name.
+   */
+  test("a name on disk reaches the row", async () => {
+    const root = await makeRoot("name");
+    const run = await makeRun(root, RUN_A);
+    await makeWorker(run, "eng-1", WS_DEV, "development");
+
+    const read = expectOk<{ row: WorkerRow }>((await readWorkerRow(run, "eng-1")) as never);
+    expect(read.row.workspace).toBe(WS_DEV);
+    expect(read.row.workspaceName).toBe("development");
+  });
+
+  /**
+   * A record with a ref and NO name — the shape of all 183 records on the
+   * operator's disk — reads back as a null name, not as an absent field, an
+   * `undefined`, or a throw.
+   */
+  test("a record with no name reads back a null name, and still reads its ref", async () => {
+    const root = await makeRoot("noname");
+    const run = await makeRun(root, RUN_A);
+    await makeWorker(run, "eng-1", WS_OPS, null);
+
+    const read = expectOk<{ row: WorkerRow }>((await readWorkerRow(run, "eng-1")) as never);
+    expect(read.row.workspace).toBe(WS_OPS);
+    expect(read.row.workspaceName).toBeNull();
+  });
+
+  /**
+   * THE FAST-CLOCK PATH FOR THE NAME. The second survivor: dropping the name
+   * from `refreshWorkerRow` killed nothing, and the failure it hides is the one
+   * that only appears in a live pane — a correctly named heading for half a
+   * second after `up`, then a silent collapse to UUIDs on the first refresh.
+   */
+  test("the fast refresh carries the name forward as well as the ref", async () => {
+    const root = await makeRoot("fastname");
+    const run = await makeRun(root, RUN_A);
+    await makeWorker(run, "eng-1", WS_DEV, "development");
+
+    const first = expectOk<{ row: WorkerRow; evidence: never }>(
+      (await readWorkerRow(run, "eng-1")) as never,
+    );
+    expect(first.row.workspaceName).toBe("development");
+
+    const next = expectOk<{ row: WorkerRow }>(
+      (await refreshWorkerRow(run, "eng-1", first.evidence)) as never,
+    );
+    expect(next.row.workspace).toBe(WS_DEV);
+    expect(next.row.workspaceName).toBe("development");
+  });
+
+  /**
+   * The name's derivation as a pure function, mirroring the ref's below.
+   *
+   * `deriveWorkspaceName` was IMPORTED by this file and never called until the
+   * battery pointed it out — a dead import reads as coverage and is not.
+   */
+  test("the name derivation is one function with three honest answers", () => {
+    expect(deriveWorkspaceName({ workspace_name: "development" } as never)).toBe("development");
+    expect(deriveWorkspaceName({ workspace_name: null } as never)).toBeNull();
+    expect(deriveWorkspaceName(null)).toBeNull();
+  });
+
+  /**
+   * THE WRITE SITE, asserted STRUCTURALLY — and the limit is stated rather than
+   * papered over.
+   *
+   * A third mutation survived: replacing `workspace_name: presented.name` with
+   * `workspace_name: null` in `up.ts` killed nothing, because `up` cannot be
+   * invoked from a unit test — it needs a config, a backend, a container
+   * runtime and a runs root. So the helper is proved by value and the WIRING
+   * from helper to record is proved only by reading the source.
+   *
+   * That is weaker than a behavioural test and it is not nothing: it fails if
+   * someone writes a literal, drops the field, or reaches past the helper for
+   * `workspaceName`/`handedOver` directly — which are the ways this actually
+   * goes wrong. The honest verification is an integration test that runs `up`,
+   * and `test/integration/up-wiring.test.ts` is where it would live; it is
+   * another engineer's file this round.
+   */
+  test("up's write site takes both fields from the helper, not from literals", () => {
+    const source = readFileSync(
+      new URL("../../src/cli/commands/up.ts", import.meta.url).pathname,
+      "utf8",
+    )
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    expect(source).toContain("const presented = presentedWorkspace(handedOver, workspace, workspaceName)");
+    expect(source).toContain("workspace_ref: presented.ref,");
+    expect(source).toContain("workspace_name: presented.name,");
+    // And the name pifleet passes to cmux is the same string it records, not a
+    // second spelling of the template.
+    expect(source).toContain("const workspaceName = `pifleet-${runId}`");
+    expect(source).toContain("backend.ensureWorkspace(workspaceName)");
+  });
+
   test("the derivation is one function with three honest answers", () => {
     expect(deriveWorkspace({ workspace_ref: WS_OPS } as never)).toBe(WS_OPS);
     expect(deriveWorkspace({ workspace_ref: null } as never)).toBeNull();

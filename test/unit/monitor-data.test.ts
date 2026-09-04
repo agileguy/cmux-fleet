@@ -182,6 +182,14 @@ describe("ISC-499: the refusal surface and the fence are row properties", () => 
       "via",
       "workerId",
       "workspace",
+      /*
+       * `workspaceName` added alongside `workspace`, and they are two fields on
+       * purpose. The ref IDENTIFIES the group (a UUID, unique and stable); the
+       * name only LABELS it. Merging them into one field would let two distinct
+       * workspaces that happen to share a `custom_title` collapse into one group
+       * on screen — nothing stops an operator having two called `review`.
+       */
+      "workspaceName",
     ]);
     // And the derived answers are NOT duplicated into the evidence bundle,
     // which would give the fast path a second place to read them from.

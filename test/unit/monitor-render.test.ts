@@ -102,6 +102,8 @@ const base: WorkerRow = {
    * rather than the one it is most likely to get right.
    */
   workspace: null,
+  /* No name either, which is what a record with no workspace must carry. */
+  workspaceName: null,
 };
 
 const worker = (over: Partial<WorkerRow>): WorkerRow => ({ ...base, ...over });
