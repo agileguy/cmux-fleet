@@ -244,6 +244,23 @@ describe("rule 1 — a finding resolves inside the container workdir, or it is n
       line: 1,
       ok: false,
     },
+    /**
+     * THE BACKSLASH RULE'S OWN CASE, and the row above cannot serve as it.
+     *
+     * `/workspace\..\..\etc\passwd` is ONE POSIX segment that does not begin
+     * with `..`, so containment refuses it on its own and the backslash check is
+     * never load-bearing — a mutation deleting that check survives against it.
+     * This row resolves squarely INSIDE the workdir under POSIX rules, so
+     * containment accepts it and only the backslash refusal stands between it
+     * and a `located` count. That is ISC-247's confusion exactly: one path to
+     * this validator, traversal to any consumer that normalizes separators.
+     */
+    {
+      what: "a backslash inside the workdir",
+      file: "/workspace/src\\..\\..\\etc\\passwd",
+      line: 1,
+      ok: false,
+    },
   ];
 
   for (const c of cases) {
@@ -389,6 +406,43 @@ describe("adjudication — the census caps a review's verdict and cannot lift on
     );
     expect(adj.verdict).toBe("partial");
     expect(adj.reasons.join(" ")).toContain("no resolvable file:line");
+  });
+
+  /**
+   * A CEILING AND NOT AN ASSIGNMENT, and the two are separable only here.
+   *
+   * Every other case in this block has the census declining (claim not
+   * `success`) or the verdict already at `unknown`, whose rank is -1 — and
+   * ISC-154's void RETURNS EARLY, before the census block runs at all. So an
+   * assignment and a maximum agree on all of them.
+   *
+   * This fixture puts a FIRING census against a verdict below `partial`:
+   * ISC-93's empty-diff failure on a repository task, with a claim of `success`
+   * so the census is awake. The cap must leave `failed` alone; an assignment
+   * would raise it to `partial` — a worker's own document promoting a verdict
+   * the diff already refused.
+   */
+  test("the census cannot RAISE a verdict the diff already failed", () => {
+    const adj = adjudicate(
+      DerivedFactsSchema.parse({
+        branch: "fleet/run-1/col-1",
+        base_ref: SHA_BASE,
+        head_ref: SHA_HEAD,
+        base_is_ancestor: true,
+        commits: [],
+        files_changed: [],
+        diff_bytes: 0,
+        harness: { patterns: [], touched: [] },
+        collation: census({
+          findings: [
+            { statement: "elsewhere", file: "/etc/passwd", line: 1, raised_by: ["rev-arch-1"] },
+          ],
+        }),
+      }),
+      envelope("success"),
+    );
+    // ISC-93: success over an empty diff on a repository task.
+    expect(adj.verdict).toBe("failed");
   });
 
   test("the census never lifts a verdict the worker already downgraded", () => {

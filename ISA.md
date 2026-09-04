@@ -1482,6 +1482,52 @@ the root-cause classification; this table is the index.
 
 ## Changelog
 
+- **conjectured:** §6.8's structural census is a grading change, so its blast radius is the
+  harvester. The instrument reads a worker-authored document, produces a ceiling, and touches
+  nothing else — `adjudicate` gains a block, `reconcile` gains a selector, and the fact bundle
+  gains a field. Every one of those is inside `src/harvest/`, and the pins that could plausibly
+  break are the harvest suite's.
+  **refuted by:** ISC-468, on the shared tree. Grading a collation means `harvest/index.ts` must
+  consult `src/run/collation.ts`, which imports `collationTaskId` from `src/run/relay.ts`, which
+  names `cli/commands/relay.ts` in a type import and `import()`s `cli/commands/dispatch.ts` inside
+  `loadEffectModules`. The monitor reaches `harvest/index.ts` legitimately, through view 4's
+  `report/collect.ts` — so ONE import in the harvester put **all 27 CLI command modules** inside
+  the monitor's read-only closure. The jump was 1 to 27 rather than 1 to 1, which is the tell: an
+  edge that lands on a registry does not add a node, it adds a graph. `monitor-readonly.test.ts`
+  caught it; nothing in the harvest suite did, and nothing in it could have.
+  **learned:** the blast radius of a new IMPORT is not the module that writes it, it is every
+  closure that already reaches that module — and in a repository with an import-walk pin, adding a
+  dependency is a change to every root that transitively reaches you. The generalisable move is to
+  ask what is DOWNSTREAM of the thing you are importing before asking what is upstream of you: the
+  harvester was the wrong place to look, because the harvester was already in the monitor's closure
+  and had been for as long as view 4 has existed. The repair holds the seam rather than the pin —
+  `src/run/task-ids.ts` is a leaf with no relative imports at all, both `relay.ts` and
+  `collation.ts` take the ids from it, and `relay.ts` re-exports every name so no caller changed.
+  Weakening the assertion or allowlisting a module past it would have spent the one property that
+  makes the monitor a viewer rather than a control surface, to save a file move.
+
+- **conjectured:** §6.8's first rule can accept a workdir-relative finding path as well as an
+  absolute one, because `src/run/collation.ts` accepts both spellings and refusing a whole
+  collation over a spelling is *"a legal-document refusal presenting as a policy"*. The census
+  resolves either form against the real `container_workdir`, so both are checkable.
+  **refuted by:** the first fixture written against it. `join("/workspace", x)` maps EVERY string
+  without a leading `..` to somewhere inside the workdir, so the prose finding
+  `"the error handling could be tightened"` resolves to
+  `/workspace/the error handling could be tightened` and counted as LOCATED. The rule that §6.8
+  wrote to exclude prose was accepting prose, and the fixture that would have hidden it forever is
+  the obvious one — a bad path of `/etc/passwd`, which containment refuses for a reason that has
+  nothing to do with the relative arm.
+  **learned:** a containment check whose input space includes free text is not a containment check
+  for that half of its input, however correct the containment is. The asymmetric fixture is the
+  only thing that finds it: `/workspacex/a.ts` and `/workspace/../etc/passwd` separate `relative()`
+  from `startsWith`, and a plain-prose row separates the absolute arm from the relative one. The
+  same lesson landed twice more in the same battery — `/workspace\..\..\etc\passwd` is refused by
+  CONTAINMENT rather than by the backslash rule it was written for, so the backslash rule survived
+  its own mutation until a path that resolves INSIDE the workdir was added; and the adoption
+  guard's NUL turned out to prefix the `untitled` placeholder rather than separate elements, which
+  the battery found by reddening a mutation I had predicted green. Three times in one change, the
+  fixture agreed with the code for a reason unrelated to the rule under test.
+
 - **conjectured:** a defect whose mechanism is understood is fixed by the change that
   addresses the mechanism. `groupLeader()` returned a membership snapshot before the shell had
   finished forking, the mechanism was read off the CI output directly (`[6705, 6707, +6708]`, a
