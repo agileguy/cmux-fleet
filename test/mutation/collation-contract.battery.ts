@@ -39,7 +39,21 @@ if (W === undefined || W === "" || W.endsWith("/cmux-fleet")) {
 }
 const SRC = `${W}/src/run/collation.ts`;
 const ROLE = `${W}/roles/collator.md`;
-const TESTFILES = ["test/unit/collation.test.ts", "test/unit/collator-role.test.ts"];
+/**
+ * The reviewer's briefing — two files, because `load.ts` concatenates role and
+ * worker briefings into one prompt (D10's mechanism). A claim corrected in one
+ * and left standing in the other is a briefing that contradicts itself, so both
+ * are mutable here.
+ */
+const REVIEWER = `${W}/roles/reviewer.md`;
+const XFILE = `${W}/roles/review/cross-file-contracts.md`;
+/** Not tracked by git; copied into the worktree and restored like the rest. */
+const FLEET = `${W}/fleet.yaml`;
+const TESTFILES = [
+  "test/unit/collation.test.ts",
+  "test/unit/collator-role.test.ts",
+  "test/unit/reviewer-role.test.ts",
+];
 
 /**
  * The pristine copy is taken FROM THE WORKTREE at start-up rather than from a
@@ -49,6 +63,9 @@ const TESTFILES = ["test/unit/collation.test.ts", "test/unit/collator-role.test.
 const PRISTINE: Record<string, string> = {
   [SRC]: readFileSync(SRC, "utf8"),
   [ROLE]: readFileSync(ROLE, "utf8"),
+  [REVIEWER]: readFileSync(REVIEWER, "utf8"),
+  [XFILE]: readFileSync(XFILE, "utf8"),
+  [FLEET]: readFileSync(FLEET, "utf8"),
 };
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const TIMEOUT_MS = 30_000;
@@ -458,6 +475,133 @@ const MUTATIONS: M[] = [
     replace: "**This check is how a review is accepted.**",
     expect: "red",
   },
+  // ── The reviewer's briefing, and the mitigation pinned at both ends. ─────
+  {
+    id: "RV1",
+    what: "REVIEWER: the notes instruction is deleted from the reviewer's own role",
+    file: REVIEWER,
+    find: "## PUT YOUR WHOLE REVIEW IN THE ENVELOPE'S `notes`",
+    replace: "## On writing it up",
+    expect: "red",
+  },
+  {
+    id: "RV2",
+    what: "REVIEWER: the WHY is dropped — the instruction becomes a preference",
+    file: REVIEWER,
+    find: "path, size and checksum,\nand **not the contents**.",
+    replace: "path, size and checksum.",
+    expect: "red",
+  },
+  {
+    id: "RV3",
+    what: "REVIEWER: the collator's copy of the instruction is dropped (the braces)",
+    file: ROLE,
+    find: "**Tell each reviewer to put its whole review in its result envelope's `notes`.**",
+    replace: "**Tell each reviewer to write a thorough review.**",
+    expect: "red",
+  },
+  {
+    id: "RV4",
+    what: "REVIEWER: the mitigation stops being labelled a mitigation",
+    file: REVIEWER,
+    find: "**This is a workaround, and it is written here so it is not mistaken for the design.**",
+    replace: "**This is how the console works.**",
+    expect: "red",
+  },
+  {
+    id: "RV5",
+    what: "REVIEWER: the design note stops naming a recommendation",
+    file: SRC,
+    find: " * **Take A.**",
+    replace: " * **Either would do.**",
+    expect: "red",
+  },
+  {
+    id: "RV6",
+    what: "REVIEWER: the design note drops the recommendation's cost",
+    file: SRC,
+    find: " * **A's cost, stated rather than buried:**",
+    replace: " * **A is free:**",
+    expect: "red",
+  },
+  {
+    id: "RV7",
+    what: "REVIEWER: the false diff premise is restored in the role file",
+    file: REVIEWER,
+    find: "**Review what the brief names, against what the brief says it is for.**",
+    replace: "**Review the diff against its stated intent.**",
+    expect: "red",
+  },
+  {
+    id: "RV8",
+    what: "REVIEWER: the `There is no diff` correction is removed",
+    file: REVIEWER,
+    find: "**There is no diff.**",
+    replace: "The change is in front of you.",
+    expect: "red",
+  },
+  /**
+   * The ASYMMETRIC arm of RV8. The correction can be present in
+   * `roles/reviewer.md` while the aspect file concatenated after it still tells
+   * the reviewer to work from a diff — one prompt contradicting itself, which
+   * neither file alone can detect.
+   */
+  {
+    id: "RV9",
+    what: "REVIEWER: the false diff premise is restored in the ASPECT file only",
+    file: XFILE,
+    find: "**Read past the changed files.**",
+    replace: "**Read past the diff.**",
+    expect: "red",
+  },
+  {
+    id: "RV10",
+    what: "REVIEWER: the aspect file points at the task envelope again",
+    file: XFILE,
+    find: "**Verify the requirements one at a time.** If your brief states what the change is for,",
+    replace: "**Verify the requirements one at a time.** If the task envelope states what the change is for,",
+    expect: "red",
+  },
+  {
+    id: "RV11",
+    what: "REVIEWER: the document points at /policy/task for the intent (the plausible wrong fix)",
+    file: REVIEWER,
+    find: "and, when your task was staged, the same brief again at `/policy/dispatch`.",
+    replace: "and the envelope at `/policy/task`.",
+    expect: "red",
+  },
+  {
+    id: "RV12",
+    what: "REVIEWER: a reviewer is pointed at a sibling's reply (the sequential fan-out)",
+    file: REVIEWER,
+    find: "**Quote file and line.**",
+    replace: "Read `/replies/<child-task-id>.json` for what the others found. **Quote file and line.**",
+    expect: "red",
+  },
+  {
+    id: "RV13",
+    what: "REVIEWER: the location's spelling guidance is dropped",
+    file: REVIEWER,
+    find: "Give the path\nrepo-relative and the line as a bare number",
+    replace: "Give the location",
+    expect: "red",
+  },
+  {
+    id: "RV14",
+    what: "REVIEWER: the collator loses its instruction for a `path:line` it is handed",
+    file: ROLE,
+    find: "If a reviewer gave you\n  `src/foo.ts:12`, split it: the number belongs in `line`.",
+    replace: "Split any suffix off the path.",
+    expect: "red",
+  },
+  {
+    id: "RV15",
+    what: "REVIEWER: bash is granted to the reviewer role in config",
+    file: FLEET,
+    find: "    tools: [read, grep, find, ls]        # NO bash — see §12.1",
+    replace: "    tools: [read, grep, find, ls, bash]  # NO bash — see §12.1",
+    expect: "red",
+  },
   // ── Negative controls: must stay green or the battery reddens on anything. ─
   {
     id: "NC1",
@@ -568,6 +712,28 @@ const MUTATIONS: M[] = [
     file: SRC,
     find: "    disputed_by: z.array(workerId).max(MAX_COLLATION_LENSES).default([]),",
     replace: "    disputed_by: z.array(workerId).default([]),",
+    expect: "green",
+  },
+  /**
+   * The reviewer role's JUDGEMENT content, which is most of it and is not
+   * decidable. Recorded as a mutation so the boundary is measured rather than
+   * asserted: what these probes hold is the document's CLAIMS ABOUT THE SYSTEM,
+   * and everything else in it is guidance a person has to read.
+   */
+  {
+    id: "U8",
+    what: "UNCOVERED: the whole `Give the failing case` instruction is deleted",
+    file: REVIEWER,
+    find: '**Give the failing case.** "This could break with concurrent access" is a guess.',
+    replace: "**Guess freely.**",
+    expect: "green",
+  },
+  {
+    id: "U9",
+    what: "UNCOVERED: the ranking instruction is inverted",
+    file: REVIEWER,
+    find: "A correctness bug that silently produces a wrong answer outranks a\nmissing test",
+    replace: "A naming preference outranks a\ncorrectness bug",
     expect: "green",
   },
 ];

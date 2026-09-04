@@ -66,6 +66,67 @@
  * containment, disagree by a corner case, and the document is refused by the
  * half with the worse test.
  *
+ * ## THE GAP THIS CONTRACT CANNOT CLOSE — the reply plane starves it
+ *
+ * **Read this before concluding that a thin collation is a bad collator.** The
+ * schema below can insist a finding carries a location and a reader. It cannot
+ * make the reviewer's findings reach the collator at all, and today they very
+ * nearly do not.
+ *
+ * The measurement, not the suspicion. `relay.ts`'s `harvest` publishes the whole
+ * `TaskHarvest` bundle as the reply; that bundle's artifact list is
+ * `HarvestedArtifactSchema`, which is `{path, bytes, sha256}` — **no contents**.
+ * The reviewer's own `/outbox` is worker-scoped (`render.ts`,
+ * `-v <run>/outbox/<worker>:/outbox`), so the collator cannot open it either. A
+ * reviewer that files its review at `/outbox/<task-id>/files/review.md` and
+ * writes a two-line `summary` beside it has therefore written a document
+ * **nothing in this console can read**, and every status stays green while the
+ * findings evaporate. That is the same silent-success shape the old
+ * `roles/collator.md` had, one document over.
+ *
+ * The only channel that actually carries prose to the collator is the reviewer's
+ * result envelope — `summary`, `notes`, `blockers` — and
+ * `skills/pifleet-worker/SKILL.md` tells every worker to *"keep the result
+ * envelope itself small"*.
+ *
+ * **What is in place is a MITIGATION and must not be read as a fix.**
+ * `roles/reviewer.md` instructs the reviewer to put its whole review in `notes`,
+ * and `roles/collator.md` instructs the collator to repeat that instruction in
+ * every brief it writes. Two prompts, deliberately, because the failure is
+ * invisible: nothing goes red when a review is unreadable. Both are instructions
+ * to a model, and neither is a guarantee.
+ *
+ * ## The two real fixes, and which one to take
+ *
+ * Both are changes to the ACTOR (§6.5) and to the reply payload, neither of which
+ * is decided yet — `replies.ts`'s own header records that the reply's schema
+ * "belongs to the actor" and that §9 Q4 leaves the actor's home BLOCKING.
+ *
+ * - **A — inline the artifact contents into the reply.** The actor already reads
+ *   the outbox to harvest, and `writeReply` takes `unknown`, so this is a payload
+ *   change and nothing else: attach each `artifacts[]` entry's text under a byte
+ *   cap, beside the digest that already names it.
+ * - **B — give the reply a contents channel of its own**, a second mount or a
+ *   `/replies/<child-task-id>/` directory the collator lists.
+ *
+ * **Take A.** Four reasons, in descending order of force. D6 rejected exactly B's
+ * shape — a directory the collator enumerates — on the argument that a listing
+ * re-introduces the discoverability the outbox contract denies in the other
+ * direction, and B would reverse that decision to solve a payload problem. A
+ * needs no new mount, so it costs nothing in `assertNoRunDirMount`, nothing in
+ * `docker/verbgate`'s policy-integrity loop, and nothing in the mount table; B
+ * costs a line in each. `replies.ts` already reserves the payload decision for
+ * the actor, so A fills a hole the module left open rather than opening a new
+ * one. And the byte cap A needs is a decision that module already records as
+ * owed — *"whether the drop needs a byte cap the way `/policy/dispatch` does"* —
+ * so A closes two open questions with one number instead of adding a third.
+ *
+ * **A's cost, stated rather than buried:** the reply grows by the size of every
+ * artifact, so a reviewer that writes a 10 MB log makes a reply no model can
+ * read. A is only correct WITH the cap, and a cap means truncation — which has
+ * to arrive in the collation brief as a named missing thing, the way §6.6
+ * already names a missing lens, rather than as prose that quietly stops.
+ *
  * ## The finding COUNT is authored AND derived, and that is the point
  *
  * `findings.length` is authoritative — nothing downstream may trust

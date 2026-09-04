@@ -2168,6 +2168,87 @@ the root-cause classification; this table is the index.
   re-runs at 61 mutations, 0 unexpected, from a measured green baseline — which the battery now
   refuses to run without, because a suite that is already red reports every mutation as caught.
 
+- **conjectured:** the collator-role defect was one document's problem, and `roles/reviewer.md`
+  — older, shorter, and carrying no paths or wire tags at all — was clean by inspection.
+  **refuted by:** grepping its two opening claims instead of reading them. *"Review the diff
+  against its stated intent. The task envelope says what the change was supposed to do."* is
+  false in **both halves**. The reviewer is `tools: [read, grep, find, ls]` with no bash, so it
+  cannot run `git diff`, and nothing in `render.ts`, `task-policy.ts` or `dispatch-policy.ts`
+  puts a diff anywhere a worker can reach; `renderPrompt` (`supervisor/index.ts`) emits the
+  title, the brief, the acceptance lines and four identity values, and never the envelope. The
+  same false premise stood a second time in `roles/review/cross-file-contracts.md`
+  (*"Read past the diff"*, *"If the task envelope states"*), which `load.ts` CONCATENATES onto the
+  role file — so the correction had to land in both or the reviewer would read one prompt
+  contradicting itself.
+  **learned:** the near-miss is the part worth recording. `/policy/task` **is** mounted, **is**
+  named for the task, and holds `task_id` and `epoch` for the verbgate's provenance line —
+  `writeTaskPolicy(path, task_id, epoch)`. A repair that pointed the reviewer there would have
+  read as MORE precise than the error it replaced and would have been wrong in the same way, and
+  it is the repair a careful reader arrives at. So the rule is not "grep the claim" but "grep the
+  claim and then read what the thing you found actually contains" — a mount whose name matches the
+  sentence is the strongest available evidence for a false belief. The battery carries it as RV11,
+  the plausible wrong fix, applied deliberately so the probe has to distinguish it.
+  **criterion now:** `test/unit/reviewer-role.test.ts` holds the whole CONCATENATED briefing —
+  role file plus all three aspect files — against the code, and RV9 mutates the aspect file alone
+  to prove the role file's correction cannot cover for it. RV15 grants the reviewer `bash` in
+  `fleet.yaml` and reddens, so "this document does not tell the reviewer to use tools it lacks"
+  is checked against the GRANT rather than against a comment claiming one.
+
+- **conjectured:** the reviewer's whole review reaches the collator, because the reply plane
+  publishes the entire `TaskHarvest` bundle and a review is one of the things a reviewer produces.
+  **refuted by:** reading `HarvestedArtifactSchema`, which is `{path, bytes, sha256}` — **no
+  contents** — and `render.ts`'s `-v <run>/outbox/<worker>:/outbox`, which is worker-scoped. A
+  reviewer that files its review at `/outbox/<task-id>/files/review.md` and writes a two-line
+  `summary` beside it has produced a document **nothing in this console can open**, and
+  `skills/pifleet-worker/SKILL.md` actively pushes reviewers that way: *"Keep the result envelope
+  itself small"* and *"Anything that is not a code change… goes in `/outbox/<task-id>/files/`"*.
+  Every status stays green while the findings evaporate — the same silent-success shape as the
+  invented `/outbox/fanout.json`, arriving through a document that is CORRECT.
+  **learned:** a wrong instruction and a right instruction pointed at a broken channel fail
+  identically and are found by different means. The first is caught by grepping a claim; the
+  second only by asking what CROSSES a boundary, field by field, and the tell is a schema with a
+  digest where a body should be — a digest is what you carry when the thing itself is somewhere
+  the reader can reach, and here it is not.
+  **criterion now, and it is a MITIGATION rather than a fix.** `roles/reviewer.md` instructs the
+  reviewer to put its whole review in `notes`; `roles/collator.md` instructs the collator to
+  repeat that in every brief. Two prompts on purpose, because nothing reddens when a review is
+  unreadable, and both are instructions to a model rather than guarantees. **The label is itself
+  asserted** (RV4) so the workaround cannot quietly become the design. The real fix is a change to
+  the actor's reply payload and is not this phase: **A** — inline each artifact's text into the
+  reply under a byte cap — or **B** — a contents channel of its own. `src/run/collation.ts`'s
+  header recommends **A** and says why: B reverses D6, which rejected exactly a directory the
+  collator enumerates; A needs no new mount, so it costs nothing in `assertNoRunDirMount`, the
+  verbgate's integrity loop or the mount table; `replies.ts` already reserves the payload decision
+  for the actor, so A fills a hole rather than opening one; and A's byte cap is a decision that
+  module already records as owed. A's cost is stated with it — the reply grows by every artifact,
+  so A is only correct WITH the cap, and a truncation has to arrive in the collation brief as a
+  named missing thing the way §6.6 already names a missing lens.
+
+- **TENSION, recorded rather than resolved: §6.8's required `file:line` has no room for a
+  finding that is about the whole design.** `CollationFindingSchema` makes `file` and `line`
+  mandatory, on §10's probe — *"a collation whose findings carry no resolvable `file:line` is not
+  `success`"* — and that is the right reading of what was asked. **The cost is that "the whole
+  approach is wrong", "there is no test strategy" and "this abstraction was introduced before its
+  second caller" cannot enter the structural record at all.** Those are among the most valuable
+  things three senior readers produce, and they are exactly the findings with no line number.
+  The pressure this puts on a model is the part that makes it a tension rather than a limitation:
+  a collator that has such a finding and a schema that will not take it without a location is a
+  collator with a reason to INVENT a plausible one — which is the precise fabrication the
+  instrument exists to make expensive. **The workaround in place** is that
+  `roles/collator.md` sends location-free observations to the prose report at
+  `/outbox/<task-id>/files/review.md`, where an argument can be made, and tells the collator in as
+  many words not to manufacture a line number to get one into the JSON. That is honest and it is
+  weaker than it sounds: the prose report is not graded, so a review whose most important finding
+  is architectural is a review whose most important finding is invisible to every count in the
+  record. **What would resolve it**, and neither is this phase's to take: a second array for
+  located-less findings, graded separately and never counted toward the consensus bands — which
+  costs a schema change and a census change and re-opens what "a finding" means; or a `scope` on a
+  finding admitting `"design"` beside a file, which is cheaper and immediately becomes the value
+  every model reaches for when it cannot find a line. **The first is the one to take if it is
+  taken**, because the second's failure mode is that the located requirement quietly stops
+  applying. Revisit with §9 Q6, which is the same question about a different axis: whether a
+  datum belongs beside the verdict or folded into it.
+
 ## Verification
 
 *(Evidence per ISC, appended as each criterion passes.)*

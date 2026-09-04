@@ -70,6 +70,11 @@ path, size and digest, not contents. A reviewer that files its findings in a sep
 artifact and writes you a two-line summary has written a review you cannot read, and you
 will not find out until turn two when it is too late to ask again.
 
+`roles/reviewer.md` carries the same instruction, so a reviewer already has it. **Say it
+anyway.** The failure is silent in every direction — nothing goes red, no status changes, and
+the review simply is not there — so it is worth two copies rather than one, and yours is the
+copy that survives a lens being dispatched some other way.
+
 **3. Write your result envelope with `status: "success"` and end your turn.** Issuing the
 fan-out is the whole of this task and you have done it. Name all four derived ids in `notes`
 — for a task `T` they are `T-arch`, `T-context`, `T-lang` and `T-collate` — because that
