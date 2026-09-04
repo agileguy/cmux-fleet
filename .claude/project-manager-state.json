@@ -1,124 +1,195 @@
 {
-  "srd_path": "Docs/SRD-INFERENCE-PROVIDERS.md",
+  "srd_path": "Docs/SRD-REVIEW-CONSOLE.md",
   "repo_path": "/Users/de895996/repos/cmux-fleet",
-  "branch": "inference-providers",
-  "owner_constraints": {
-    "no_pr_until": "all phases complete AND explicit owner okay",
-    "review_cadence": "end of each phase, fix before advancing",
-    "single_branch": true
-  },
-  "total_phases": 8,
+  "branch_model": "long-lived",
+  "branch": "feature/collator-dispatch",
+  "base_branch": "fleet-harness-truthfulness",
+  "baseline_commit": "0dafd45",
+  "total_phases": 4,
   "current_phase": 3,
   "completed_phases": [
-    {
-      "n": 1,
-      "name": "The three latent defects (D13 prerequisites)",
-      "commits": 6,
-      "branch_range": "2f552dc..8bc13b8",
-      "closed": [
-        "ISC-401",
-        "ISC-406"
-      ],
-      "graded_tilde": [
-        "ISC-405"
-      ],
-      "filed_during_review": [
-        "ISC-424"
-      ],
-      "review": "two reviewers; reorder cleared by 61882-input differential; entrypoint guard cleared in the real image; found and fixed the api_key_env clobber hole and the empty-model hole",
-      "tests": "2429 pass / 0 fail"
-    },
-    {
-      "n": 2,
-      "name": "llm.providers map, schema and resolution",
-      "commits": 6,
-      "branch_range": "380e4fb..a82e252",
-      "closed": [
-        "ISC-402",
-        "ISC-403",
-        "ISC-404",
-        "ISC-405",
-        "ISC-420",
-        "ISC-424"
-      ],
-      "graded_tilde": [],
-      "review": "integrated 2A+2B by cherry-pick; every claim re-proved independently by mutation with checksum-verified restores; found and fixed a shadowed `served` binding (TDZ trap) and an orphaned docblock left above an unrelated describe",
-      "suite": "3117 pass / 135 skip / 0 fail",
-      "note": "ISC-402's CLI probe is the one that mattered: unit tests pinned the refusal, nothing pinned that `config validate` ever reached it, and it did not -- validate printed ok: for documents `up` refused"
-    }
+    0,
+    1,
+    2
   ],
   "status": "in_progress",
+  "integration": {
+    "target_repo": "/Users/de895996/repos/rally-cli",
+    "console": "review",
+    "workspace_id": "EC23CD87-CF25-46F6-8262-E6D70A1ACD51",
+    "rule": "NEVER --recreate the review workspace. Restart workers only: scripts/review --restart <id>"
+  },
+  "answered_questions": {
+    "Q1": "ANSWERED by owner 2026-09-04: rally-cli is cleared for hosted multi-vendor review.",
+    "Q4": "SETTLED: `pifleet relay`, a restartable host-side actor whose state is derived entirely from the run tree, so idempotency is the supervision story.",
+    "D8/Q9": "ANSWERED by owner 2026-09-04: WEAK VERDICT, the SRD's own recommendation. Grade structurally (required shape + consensus counts) and record an ordinary success/partial/failed. No new terminal state, no coverage datum. Accepted cost, stated in D8: the verdict is substantially the worker's own claim and this design does not fix that; it bounds the claim's SHAPE and records who said what.",
+    "Q10": "ANSWERED 2026-09-04 by the phase-2 review, not by a separate probe: Q10's own criterion was 'if the surface-unavailable case gives a first-class \"here is the line, I could not type it\" answer, tui is fine and D13 should be withdrawn'. stageForAdoptedTerminal returns accepted:true WITH error:trigger.reason (dispatch.ts:1812-1837) - exactly that answer. CONDITIONAL on the P2 fix landing, since the adapter currently discards the field. => tui seats stand; D13 withdrawn."
+  },
   "phases": [
     {
+      "n": 0,
+      "slug": "grading-prerequisite",
+      "name": "D9: a shared-ro worker's result is gradable"
+    },
+    {
       "n": 1,
-      "name": "The three latent defects (D13 prerequisites)",
-      "isc": [
-        "ISC-401",
-        "ISC-405",
-        "ISC-406"
-      ]
+      "slug": "request-plane",
+      "name": "The request plane and the /replies mount"
     },
     {
       "n": 2,
-      "name": "llm.providers map, schema and resolution",
-      "isc": [
-        "ISC-402",
-        "ISC-403",
-        "ISC-404",
-        "ISC-420"
-      ]
+      "slug": "relay-actor",
+      "name": "The relay: fan-out, join, idempotency"
     },
     {
       "n": 3,
-      "name": "Credential channel as a file pointer (D8)",
-      "isc": [
-        "ISC-407",
-        "ISC-408"
-      ]
-    },
-    {
-      "n": 4,
-      "name": "Per-provider networks and relays (D7)",
-      "isc": [
-        "ISC-409",
-        "ISC-410",
-        "ISC-411",
-        "ISC-412",
-        "ISC-413"
-      ]
-    },
-    {
-      "n": 5,
-      "name": "relay_upstream resolved at up, hosted only (D9)",
-      "isc": []
-    },
-    {
-      "n": 6,
-      "name": "The loud gates, not refusals (D10)",
-      "isc": [
-        "ISC-414",
-        "ISC-415",
-        "ISC-416",
-        "ISC-417"
-      ]
-    },
-    {
-      "n": 7,
-      "name": "Per-provider probe and budget (D16)",
-      "isc": [
-        "ISC-418",
-        "ISC-419"
-      ]
-    },
-    {
-      "n": 8,
-      "name": "Harvest sweep for Class 1 keys (D15)",
-      "isc": [
-        "ISC-421",
-        "ISC-422",
-        "ISC-423"
-      ]
+      "slug": "collator-protocol",
+      "name": "Collator protocol, console wiring, structural grading"
     }
   ],
-  "notes": "ISC-31 restated AFTER the code lands per SRD section 10; ISC-140 at risk. RECURRING SETUP HAZARD: agent worktrees are cut from stale bases -- make every agent print `git log --oneline -1` on turn one and say so. PHASE 3 HAZARD briefed to 3A: materialize.ts writes the secret store behind `w.secrets.length > 0` and render.ts gates the /secrets mount on the SAME predicate; a Class 1 key with no Class 3 secrets needs both widened or the pointer aims at an unmounted directory. Engineer/Architect agent maxTurns raised 50 -> 75 in ~/.claude/agents/ on owner request."
+  "phase_0_commits": [
+    "4e4e2ac",
+    "de821cf"
+  ],
+  "out_of_band_commits": {
+    "5ab68f4": "truncation recovery \u2014 defect found during integration, not in the SRD"
+  },
+  "review_at_end_of_each_phase": true,
+  "pr_policy": "Do NOT open a PR. Ask the owner when all phases are complete.",
+  "known_gaps_deferred_to_phase_3": [
+    "scripts/review has no adoption guard (SRD 6.10)",
+    "Q10: all four seats are tui; D13 wants three rpc \u2014 owner decision, blocks nothing",
+    "'up refuses before allowlist widened' needs restating against a synthetic allowlist",
+    "ISC-511+ criteria are unfiled in ISA.md (30 proposed in SRD section 10)",
+    "D8 structural grading entirely absent: console can dispatch reviews it cannot grade (relay.ts:807 tells the collator to claim a status with nothing checking it)",
+    "REVIEW_CONSOLE_ROSTER.reviewers and REVIEW_CONSOLE_ASPECTS are two unpinned spellings of the same three ids"
+  ],
+  "phase_1_commits": {
+    "5d3e371": "1A: dispatch-request schema + 27 tests",
+    "cc5f5e5": "1B: /replies mount, verbgate integrity loop, SRD row",
+    "42282d5": "PM: :ro proved against a real container; TOTAL_EXPECTED re-derived 140->158 (was already 12 short)",
+    "eab3180": "review fix: fd-bounded read (O_NOFOLLOW|O_NONBLOCK+fstat) closes the lstat/readFile TOCTOU; task-id grammar; 27->45 tests",
+    "79a1431": "review fix: verbgate split by kind (bare literal would break the image build at uid 0); fixture defects incl. PM's 0777",
+    "8121848": "CI: the 12-test drift attributed to relay-script.test.ts"
+  },
+  "phase_1_review": {
+    "reviewers": [
+      "trust-boundary",
+      "test-integrity"
+    ],
+    "verified_by_pm": [
+      "TOCTOU: symlink/FIFO/64MiB exploits all reproduced against the FIXED reader and refused; secret not leaked, FIFO 0ms",
+      "path escape ../../.. refused, legitimate id unaffected",
+      "S1 glob-vs-literal non-discrimination reproduced with a side-by-side gate probe",
+      "S2 umask premise confirmed: mkdir 022->0755 identical to makeWorkerAccessible(dir,false)"
+    ],
+    "open": "verbgate glob decision + fixture defects (incl. PM's own 0777 in 42282d5) with second engineer"
+  },
+  "phase_1_final": {
+    "suite": "4018 pass / 149 skip / 0 fail, 4167 tests, 251 files, 687s",
+    "tsc": "clean",
+    "image_verify": "green"
+  },
+  "carried_into_phase_2": [
+    "src/run/dispatch-policy.ts:363 has the same unprotected-chmod shape fixed in writeReply",
+    "test/integration/up-wiring.test.ts shares the umask blind spot at REPLIES_MOUNT",
+    "S4 from the trust-boundary review: nothing bounds fan-out DEPTH; a collator can re-fan-out on its collation turn and paste one child's findings into another's brief, defeating the concurrency anti-criterion on round two"
+  ],
+  "phase_2_commits": {
+    "f39722f": "2A: fan-out/join core, injected transport, depth refusal (collation_parent); 12 mutations",
+    "cbef6df": "2B: relay journal + pifleet relay + carry-forward chmod/umask fixes; M10 survivor found and closed",
+    "994c403": "monitor: fleet view grouped by workspace",
+    "0c1f076": "consoleFanOut production adapter over injected RelayEffects; 17 mutations, 2 controls",
+    "af52ebc": "adapter delegates plane choice to sendTaskEnvelope; tui panes stage (cmd:stage), not dispatch. Pre-fix: zero dispatches reported as 'dispatched 3 children' and JOURNALLED",
+    "76cb423": "collation_failed arm: children journalled, failed collation named; closes the unbounded repeat (epochs 104-106 re-run before, 'already dispatched, unchanged' after)",
+    "93ef990": "monitor: workspace heading shows a name when there is one",
+    "f4a82ba": "up --workspace-name; adopted path records the caller-declared name",
+    "a2cc4f8": "operations-plan threads spec.name into the up argv; N14 closed by observation",
+    "2c06665": "review fixes 1/2: F1 security regression closed by PREFLIGHT (keystrokes are typed BEFORE sendTaskEnvelope returns, so a via post-check is too late); none_landed arm split from not_collated; RelayChild.issued; run map requires liveness and REFUSES on ambiguity; relay --run resolves a collator. 21 red / 3 green",
+    "0417f87": "review fixes 2/2: T1 brief->lens fixture (subset + excludes first seat + per-worker briefs); consoleRunResolution extracted so the candidate set executes; loadFanOut guard DELETED (premise destroyed by f39722f's runtime import); loop survives a throw; already_done suppressed in the command not the pass; collation reason durable in the LEDGER. Battery + table committed at test/mutation/. 31 mutations: 26 red, 2 controls, 1 semantic no-op",
+    "22592b4": "review fixes: TOTAL_EXPECTED 158->146 (verified by RUNNING probe-guard, not arithmetic); review-plan.test.ts hermeticity (fleet.yaml is gitignored - clean checkout went 0 pass/1 error -> 3545 pass); palette discrimination via an ASYMMETRIC palette (warn and workspace are both yellow BY DESIGN - asserting they differ would fail a correct palette); restart + dry-run hops now read; ISA.md gains 4 changelog entries. 7 red / 1 control"
+  },
+  "phase_2_in_flight": {
+    "consoleFanOut adapter": "production RelayTransport over controlCall/harvestTask/writeReply; pifleet relay refuses EXIT.INTERNAL until it lands",
+    "monitor workspace NAME": "heading is currently a UUID; up.ts must record the name, monitor falls back to ref for the 183 existing records"
+  },
+  "phase_2_remaining_workflow": [
+    "1. land adapter + monitor name",
+    "2. full suite + tsc on merged tree",
+    "3. END-OF-PHASE REVIEW: parallel reviewers, disjoint angles (same as Phase 1)",
+    "4. fix what the review finds, mutation-proved",
+    "5. restart the operations monitor pane (./scripts/operations --restart monitor) once the name is verified",
+    "6. then Phase 3"
+  ],
+  "corrections_by_engineers": [
+    "PM was WRONG that a task-id-only journal key leaves the repeat arm open: keying on (sender,taskId) closes it; adding the digest to the KEY would open it, since every rewrite becomes a new key and buys another fan-out. Digest is recorded and compared, not keyed.",
+    "PM's brief wrongly listed test/unit/relay.test.ts as NEW; it is the 1362-line EGRESS relay suite. Clobbered and restored byte-exact. Collator tests live in collator-relay.test.ts."
+  ],
+  "phase_2_merged_tree": {
+    "suite": "4193 pass / 149 skip / 0 fail, 4342 tests, 256 files, 683s",
+    "tsc": "clean",
+    "note": "skip count flat at 149 vs phase 1 -> no new gated tests hiding"
+  },
+  "phase_2_review": {
+    "reviewers": [
+      "security-authority",
+      "protocol-conformance",
+      "test-integrity (running)"
+    ],
+    "findings_dispatched_to_engineer": {
+      "P1_HIGH": "not_collated on survived==0 is ALSO zero-landed; maps to dispatched and is journalled -> review lost permanently. relay.ts:688,1253-1256; cli/relay.ts:386-390",
+      "P2_HIGH": "staged-but-never-triggered returns accepted:true WITH error; adapter reads accepted only -> 30min stall then loss. dispatch.ts:1812-1837; relay.ts:1092",
+      "S1_HIGH": "REGRESSION from af52ebc: non-adopted pane plane types the brief line-by-line (paneKeystrokes) + SUBMIT_KEY. brief is unsanitized by design. Refuse via:'pane'.",
+      "S2_HIGH_MED": "resolveConsoleRuns scans the GLOBAL runsRoot with no console/fleet/liveness scoping -> another run can capture a lens. SRD:1014 wanted --console review.",
+      "S3_MED": "pifleet relay with no --run resolves newest live run = a REVIEWER's (collator is pane 1, created first); then enumerates and prints nothing forever."
+    },
+    "held_back_pending_test_review": [
+      "relay process exits on any throw; nothing restarts it; scripts/review never starts it",
+      "already_done prints every poll forever, burying the one row that matters",
+      "collation_failed reason is not durable (no journal field, no ledger row)"
+    ],
+    "confirmed_sound": [
+      "status lattice: relay never takes a min; verdicts verbatim; timed_out/aborted unfolded",
+      "epochs: relay never allocates; supervisor sole allocator; no stale epoch reachable",
+      "repeat window absorbed by content-derived attempt id replayed ahead of already_completed and busy",
+      "staging did NOT widen what a request can set: partial is a literal 4-field object, no spread",
+      "reply path cannot be steered: hostile parent_task_id refused twice; writeReply takes dir+id not a path",
+      "journal out of reach of the party it constrains: 0600, absent from the S5.5 mount table (asserted vs real argv)"
+    ],
+    "engineer_corrections_to_pm": [
+      "F1 fix direction: PM said refuse via:'pane' on the returned value; sendViaPane types the keystrokes and presses Enter BEFORE returning, so the refusal had to be a preflight. PM's shape named the hazard after the damage.",
+      "T2: PM described 'every reviewer resolves to the oldest run, dispatching at a dead supervisor'. No longer reachable once ambiguity refuses - a worker resolves only when exactly ONE live run holds it. reverse() now orders the REFUSAL, and was kept for that with a test."
+    ],
+    "engineer_self_reports": [
+      "earlier happy-path demo only completed BECAUSE the old adapter ignored a real trigger failure - the harness was demonstrating the defect as success",
+      "moving fixtures onto the real parser exposed a SECOND unreachable test written this phase ('../escape' parent, which the real parser refuses); same class as the tui-refusal test deleted two rounds earlier"
+    ],
+    "uncovered_declared_not_counted": [
+      "productionRelayEffects.deliveryPlane - injected seam, harness only",
+      "the D3 ledger append - relayPass's ledger is optional and unit fixtures pass none",
+      "pin precedence for the collator - no test pins that a pin for the sender is ignored",
+      "=> all three want an integration-shaped relayPass fixture with a real LedgerWriter over a temp run dir"
+    ]
+  },
+  "pm_own_errors_this_phase": [
+    "'examine accepted and nothing else' was too broad: right for plane preference, wrong for delivery safety (S1) and for did-it-happen (P2)",
+    "briefed the monitor engineer that scripts/ built the pane command; it is agentPaneCommand in operations-plan.ts"
+  ],
+  "phase_3_scope": {
+    "name": "Collator protocol, console wiring, structural grading",
+    "items": [
+      "roles/collator.md - the collation protocol rewrite",
+      "console wiring: scripts/review must start the relay actor (see S3/MED - it starts nothing today)",
+      "D8 structural grading: WEAK VERDICT per owner. Check shape + consensus counts; ordinary verdict enum. Do NOT build an acceptance script that greps the collator's own artifact - the SRD names that 'using the fabrication guard to launder a fabrication'.",
+      "reporting"
+    ],
+    "must_not": "no acceptance command on review tasks; there is no argv whose exit code is evidence that judgement happened (D8)"
+  },
+  "phase_2_final": {
+    "suite": "4222 pass / 149 skip / 0 fail, 4371 tests, 256 files, 674s",
+    "tsc": "clean",
+    "ci": "probe-guard total=146 expected=146 rc=0; clean-checkout unit suite 3545 pass / 6 skip / 0 fail",
+    "commits_on_branch": 22,
+    "findings_closed": 16
+  }
 }
