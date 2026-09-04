@@ -856,11 +856,18 @@ jobs:
           #         branch started, so this job was failing before anything
           #         below was written. Incrementing 140 by 6 would have produced
           #         146, kept the job red, and buried the reason under a change
-          #         that did not cause it. The 12 are not attributed here
-          #         because attributing them honestly needs history this edit
-          #         does not have. What IS established is that they predate the
-          #         reply plane: `git stash push test/integration/verbgate.test.ts`
-          #         and a re-run gives 152, not 140.
+          #         that did not cause it.
+          #
+          #         THE TWELVE ARE relay-script.test.ts, which collects exactly
+          #         12 and is named in the run step above while being absent
+          #         from the 15- and 16-file lists the derivations at 140 and
+          #         earlier were measured against. The constant was derived from
+          #         a list that had drifted from the command beside it — which
+          #         is the failure the hand method exists to catch, and the
+          #         reason a derivation must re-read the RUN STEP rather than
+          #         the previous comment. 140 + 12 = 152, confirmed by
+          #         `git stash push test/integration/verbgate.test.ts` and a
+          #         re-run.
           #   +  6 = verbgate.test.ts's reply-plane block (SRD-REVIEW-CONSOLE
           #         D6): the anti-vacuity mount check, the 0444 CONTROL, the
           #         0644-under-:ro row, the dropped-:ro 78 row, the no-mount
