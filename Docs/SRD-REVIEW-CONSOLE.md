@@ -201,7 +201,7 @@ disagree.**
 | | Status |
 |---|---|
 | **§9 Q7 — the collator's model** | **Settled: `ollama-cloud/deepseek-v4-pro:0813`, deliberately the same as the architecture reviewer**, on the argument that collation is the same long-reasoning shape and *"costs nothing in diversity: the collator does not vote, it reports who said what."* That reasoning is sound and Q7 should be closed on it — with §4.4's note that a fourth hosted seat is *"four copies of the diff leaving the machine, not three"*, which the config states itself |
-| **§6.2's allowlist prerequisite** | **Done.** `models_allowlist` is five entries; `qwen3.5:397b` and `kimi-k3` are on it |
+| **§6.2's allowlist prerequisite** | **Done, then NARROWED.** It reached five entries as §6.2 required; the owner's later 2026-09-04 decision took it to three — `glm-5.3`, `gemma4:31b`, `gpt-oss:120b` — because the models the other two entries served are no longer named by any role. See §6.2's amendment |
 | **Worker ids** | `col-1`, `rev-arch-1`, `rev-ctx-1`, `rev-lang-1` — better than this document's `rev-a/b/c`, because the id names the lens and the id is what `dispatch --worker` takes (`operations-plan.ts:650-656`). **Read §6 with those ids substituted** |
 | **A per-worker `toolchain` override** | `rev-lang-1` carries `toolchain: node` over `reviewer`'s `base`, because the TypeScript lens needs `tsc` and base has none. This document missed it and it is correct |
 | **D13 — three reviewers on `rpc`** | **DISAGREES. All four workers are `pane_mode: tui`**, so the console is four adopted terminals, matching `development`. §8 D13 is therefore a live disagreement rather than a settled decision, and §6.1's argument for `rpc` should be answered or D13 withdrawn |
@@ -829,6 +829,26 @@ half that should be taken with it.
 ### 6.2 The workers and the models — settled
 
 **Owner decision, 2026-09-04.** Three reviewers, three vendors, one aspect each.
+
+> **AMENDED by owner decision later on 2026-09-04, and the original picks are kept below rather than
+> overwritten because the ARGUMENT for them is what this section is for.** `kimi-k3` is not to be used
+> as a reviewer model. The seats now run:
+>
+> | Worker | Model | Window | Why this seat |
+> |---|---|---|---|
+> | `rev-arch-1` | `ollama-cloud/glm-5.3` | 1,048,576 | the frontier reasoner of the three, for the angle that thinks longest per token read |
+> | `rev-ctx-1` | `ollama-cloud/gemma4:31b` | 262,144 | the larger WINDOW of the two remaining — this angle reads widest, and 131,072 is a ceiling this console has been measured hitting |
+> | `rev-lang-1` | `ollama-cloud/gpt-oss:120b` | 131,072 | reads focused files, so least hurt by the smallest window |
+>
+> **The three-vendor property survives**: Zhipu, Google and OpenAI replace DeepSeek, Qwen and
+> Moonshot one-for-one, so every consensus argument below stands unchanged. The collator moves to
+> `glm-5.3` and so keeps Q7's arrangement — the same model as the architecture reviewer. Separately,
+> every `development` console seat moves to `glm-5.3`; that console's seats do not cross-check each
+> other, so uniformity there costs no signal. `thinking: high` is unchanged for all four review seats,
+> and all three models attest `thinking` and `tools`. Probed host-side 2026-09-04: `glm-5.3` 1342ms,
+> `gemma4:31b` 525ms, `gpt-oss:120b` 1050ms.
+>
+> The original three, superseded:
 
 | Worker | Aspect (`SKILL.md:94-96`) | Model | `thinking` |
 |---|---|---|---|

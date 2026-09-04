@@ -27,7 +27,7 @@
  */
 
 import { beforeAll, describe, expect, it } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import {
   DEFAULT_REVIEW_WORKERS,
@@ -91,6 +91,8 @@ import { loadConfig, resolveWorker } from "../../src/config/load.ts";
  * at the same time.
  */
 const CONFIG_PATH = new URL("../../fleet.yaml", import.meta.url).pathname;
+/** `roles/collator.md` is TRACKED, unlike `fleet.yaml` — resolved the same way regardless. */
+const COLLATOR_DOC = new URL("../../roles/collator.md", import.meta.url).pathname;
 const HAVE_CONFIG = existsSync(CONFIG_PATH);
 
 /**
@@ -201,6 +203,45 @@ describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors",
      */
     const models = reviewers.map(modelOf);
     expect(new Set(models).size).toBe(reviewers.length);
+  });
+
+  it("names each reviewer's ACTUAL model in the collator's own briefing table", () => {
+    /*
+     * `roles/collator.md` opens with a table of the three reviewers and the
+     * model each one runs, and the collator writes its briefs from it. That
+     * table is a COPY of `fleet.yaml`, so it can go stale in the one direction
+     * nothing else notices: the config changes, the doc keeps naming the model
+     * that used to be there, and every other probe in this file still passes.
+     *
+     * MEASURED 2026-09-04: it had already gone stale that way. The seats moved
+     * to glm-5.3 / gemma4:31b / gpt-oss:120b and the doc still said
+     * deepseek-v4-pro / qwen3.5:397b / kimi-k3 — three names, all wrong, in the
+     * document whose entire job is telling the collator who it is briefing.
+     *
+     * The check runs BOTH WAYS on purpose. Requiring only that each row's model
+     * is one the console runs would pass on a doc that gives every row the same
+     * model; requiring only that every configured model appears somewhere would
+     * pass on a doc that swapped two rows. The pairing is the assertion.
+     */
+    const doc = readFileSync(COLLATOR_DOC, "utf8");
+    for (const id of reviewers) {
+      const row = doc.split("\n").find((l) => l.startsWith(`| \`${id}\``));
+      expect(row, `roles/collator.md has no table row for ${id}`).toBeDefined();
+      const named = [...row!.matchAll(/`([^`]+)`/g)].map((m) => m[1]!).slice(1);
+      expect(
+        named,
+        `${id}'s row names ${JSON.stringify(named)} — it runs ${modelOf(id)}`,
+      ).toContain(modelOf(id));
+    }
+    // And no row may name a model this console does not run: a leftover name
+    // beside the right one still tells the collator something false.
+    const configured = new Set(reviewers.map(modelOf));
+    for (const id of reviewers) {
+      const row = doc.split("\n").find((l) => l.startsWith(`| \`${id}\``))!;
+      for (const named of [...row.matchAll(/`([^`]+)`/g)].map((m) => m[1]!).slice(1)) {
+        expect(configured.has(named), `${id}'s row names \`${named}\`, which no reviewer runs`).toBe(true);
+      }
+    }
   });
 
   it("keeps every reviewer on a hosted thinking model at full effort", () => {
