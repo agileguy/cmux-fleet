@@ -75,9 +75,14 @@
  * the other: the depth bound is a property of an ID and needs no state, and the
  * repeat bound is a property of HISTORY and cannot be had without it.
  */
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+
 import { SESSION_ID_RE, type Verdict } from "../contracts.ts";
 import { replyMountPath } from "./replies.ts";
 import type { DispatchRequest } from "./dispatch-request.ts";
+import type { RunPaths } from "./paths.ts";
+import type { RelayFanOutInput, RelayFanOutResult } from "../cli/commands/relay.ts";
 
 /**
  * The longest a derived task id may be.
@@ -738,3 +743,648 @@ function collationBrief(
   lines.push(`Write your result envelope with status: ${JSON.stringify(claim)}.`);
   return lines.join("\n");
 }
+
+// ===========================================================================
+// THE PRODUCTION ADAPTER — `consoleFanOut` and the four host effects.
+// ===========================================================================
+//
+// Everything above this line is pure and holds the run as an opaque type
+// parameter. Everything below it is the half that touches the host, and it is
+// in THIS file rather than a module of its own for the reason
+// `src/cli/commands/relay.ts` gives when it names the symbol it looks up:
+// `RelayTransport` is declared here, and splitting an interface from its only
+// implementation across two modules is how the two drift.
+//
+// ## Why the four real modules are imported LAZILY and not at the top
+//
+// The module docblock says relay is kept free of `paths.ts`, and that "is what
+// lets a test drive the whole join with three strings". That property is
+// load-bearing for `collator-relay.test.ts`, which imports this file: a static
+// import of `harvest/index.ts` would pull the repository-cloning, container-
+// running half of the codebase into the import graph of a suite whose whole
+// point is that it needs none of it.
+//
+// So the four production effects are resolved by a memoised dynamic import on
+// FIRST USE. The types come in through `import type`, which is erased, so the
+// compile-time coupling is complete and the runtime coupling is zero until
+// somebody actually dispatches something. `import type { RelayFanOutInput }`
+// from the CLI is the same trick doing something sharper: that module
+// dynamically imports THIS one, so a value import would be a genuine cycle.
+
+/**
+ * A task record, as much of it as the poll needs.
+ *
+ * Structural rather than `TaskRecord` itself, so nothing here depends on
+ * `state.ts` at runtime. The real record satisfies it by having a `verdict`,
+ * and the production wiring below is where that is checked by the compiler.
+ */
+export interface RelayTaskRecordView {
+  readonly verdict: Verdict;
+}
+
+/** A harvest bundle, likewise — `TaskHarvest` satisfies it. */
+export interface RelayHarvestView {
+  readonly harvest: { readonly verdict: Verdict };
+}
+
+/**
+ * The host effects, one level below `RelayTransport`.
+ *
+ * `RelayTransport` is what the JOIN needs; this is what the transport needs.
+ * The extra layer earns itself twice. It is where the injectable clock lives —
+ * without which the deadline below could only be tested by waiting half an hour
+ * for it — and it is what keeps every path derivation out of this module: each
+ * method takes a run and a worker and resolves its own path, so `paths.ts` is
+ * named in the production wiring and nowhere else.
+ */
+export interface RelayEffects {
+  /** `controlCall(run, workerId, msg)` — supervisor/launch.ts. */
+  controlCall(
+    run: RunPaths,
+    workerId: string,
+    msg: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  /** The `pifleet.task/v1` envelope this dispatch travels in. */
+  buildEnvelope(
+    run: RunPaths,
+    worker: string,
+    dispatch: RelayDispatch,
+  ): Promise<Record<string, unknown>>;
+  /** `writeJsonAtomic(inboxTaskPath(run, taskId), envelope)` — SRD §7.1. */
+  recordInbox(run: RunPaths, taskId: string, envelope: Record<string, unknown>): Promise<void>;
+  /** `readTaskRecord(taskRecordPath(workerPaths(run, worker), taskId))`. */
+  readTaskRecord(
+    run: RunPaths,
+    worker: string,
+    taskId: string,
+  ): Promise<RelayTaskRecordView | null>;
+  /** `harvestTask(run, taskId)` — harvest/index.ts. */
+  harvestTask(run: RunPaths, taskId: string): Promise<RelayHarvestView>;
+  /** `writeReply(workerRepliesDir(run.root, collator), childTaskId, reply)`. */
+  writeReply(run: RunPaths, collator: string, childTaskId: string, reply: unknown): Promise<void>;
+  /** Milliseconds. Injected so the deadline below needs no wall clock to test. */
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+/**
+ * The poll interval, and it is `wait.ts:25`'s number deliberately.
+ *
+ * §6.5 records that `pifleet wait` polls `readTaskRecord` in a private closure
+ * at 100 ms and that there is no helper to import — which is the whole reason
+ * `awaitSettled` is a seam rather than a call. Spelling the same interval is
+ * the honest way to reuse a decision that cannot be imported: two pollers over
+ * the same file at different rates would be two answers to a question nobody
+ * knew had been asked twice.
+ */
+export const RELAY_SETTLE_POLL_MS = 100;
+
+/**
+ * How long the join waits before it stops believing a child will settle.
+ *
+ * **§6.7's `deadline_s`, which defaults to 1800 (`contracts.ts:1770`) — but
+ * armed HERE, at the call, and that difference is the entire reason this bound
+ * exists at all.** The supervisor's own deadline is armed at the TRIGGER rather
+ * than at stage, which `supervisor/index.ts` defends because "setting
+ * `deadlineMs` at stage time would make a 20-minute task `timed_out` before it
+ * begins". For a `pane_mode: tui` worker the trigger is a person typing in a
+ * pane this process cannot see or reach — so under D13's implementation, where
+ * all four panes are `tui`, the supervisor's deadline may never arm, no task
+ * record may ever be written, and a poll with no bound of its own never
+ * returns.
+ *
+ * That is the wedge, and it is the same shape as the FIFO defect Phase 1 nearly
+ * shipped: not a crash, not an error, just an actor that stops. §6.5's argument
+ * for a restartable host-side process is worth nothing if the process can hang.
+ *
+ * **On expiry this REJECTS rather than resolving, and the caller is why it
+ * matters less than it looks.** `fanOut` joins with `Promise.allSettled` and
+ * discards the outcomes, so a rejection here does NOT cost the lens directly —
+ * the harvest still runs, finds no task record, and the lens goes missing by
+ * the ordinary route with `verdict: "unknown"`. What rejecting buys is honesty
+ * at this seam: resolving would assert a terminal state was observed, and the
+ * next reader to build on `awaitSettled` would inherit that lie. What the bound
+ * itself buys is that the actor gets to the harvest at all.
+ */
+export const RELAY_SETTLE_DEADLINE_MS = 1_800_000;
+
+/**
+ * A dispatch that did not land — and it exists because ONE of the two ways to
+ * not land looks exactly like success.
+ *
+ * `controlCall` throws `SocketRequestError` for an unreachable socket, which no
+ * implementation gets wrong. It also RESOLVES with `{accepted: false, reason}`
+ * for a refusal, and an adapter written as `await controlCall(...)` treats that
+ * as a delivered prompt. The console then joins, waits and harvests a task no
+ * worker was ever told about — every lens reports `unknown`, and the failure is
+ * reported against the reviewers rather than against the dispatch.
+ *
+ * `refusal` is the supervisor's own reason string, kept as a FIELD rather than
+ * only in the message, because the one that matters —
+ * `pane_mode_tui_has_no_rpc_dispatch` — is a condition an operator fixes by
+ * changing a pane mode, and a caller that had to match English to tell it apart
+ * would be pinning a sentence rather than a rule.
+ */
+export class RelayDispatchError extends Error {
+  constructor(
+    readonly worker: string,
+    readonly taskId: string,
+    /** The supervisor's refusal code, or `null` when the socket itself failed. */
+    readonly refusal: string | null,
+    detail: string,
+  ) {
+    super(`dispatch of ${taskId} to ${worker} did not land: ${detail}`);
+    this.name = "RelayDispatchError";
+  }
+}
+
+/** The join gave up on a child. See `RELAY_SETTLE_DEADLINE_MS`. */
+export class RelaySettleTimeoutError extends Error {
+  constructor(
+    readonly worker: string,
+    readonly taskId: string,
+    readonly waitedMs: number,
+  ) {
+    super(
+      `no task record for ${taskId} appeared under ${worker} within ${waitedMs} ms, so the join ` +
+        `stopped waiting. Under §6.7 the supervisor's own deadline_s is armed at the TRIGGER, and ` +
+        `a tui worker's trigger is a keystroke — so a task nobody started never settles and an ` +
+        `unbounded wait here would wedge the actor rather than fail it.`,
+    );
+    this.name = "RelaySettleTimeoutError";
+  }
+}
+
+/**
+ * The attempt id for a relayed dispatch — DERIVED from the content, not minted.
+ *
+ * `dispatch.ts:139` spells this same construction as `attemptIdFor`, and it is
+ * respelled here rather than imported for `MAX_RELAY_TASK_ID_CHARS`'s reason
+ * one file over: that symbol lives in a commander command module, and importing
+ * it would drag the CLI into the runtime graph of a module the CLI dynamically
+ * imports.
+ *
+ * **Derived rather than random because the journal is written LAST.** That
+ * ordering is `relay-journal.ts`'s and it is right — journalling first turns a
+ * crash into a review that silently never happens — but its cost is that a
+ * crash between the dispatch and the journal entry makes the next pass fan out
+ * again. With a random attempt id that is three reviews run twice. With a
+ * derived one the supervisor recognises the pair and REPLAYS, so the cost of
+ * the safe ordering drops from a duplicate review to a no-op.
+ */
+function relayAttemptId(worker: string, dispatch: RelayDispatch): string {
+  const content = JSON.stringify([worker, dispatch.taskId, dispatch.title, dispatch.brief]);
+  return `relay:${createHash("sha256").update(content).digest("hex").slice(0, 16)}`;
+}
+
+/**
+ * The four host effects, satisfied.
+ *
+ * `collator` is closed over rather than passed, and that is what makes
+ * `publishReply(collatorRun, childTaskId, reply)` implementable at all: the
+ * reply belongs in the collator's own replies directory, the signature carries
+ * the run but not the worker, and the collator is a property of the REQUEST —
+ * one per fan-out — rather than of the console. Inverting the worker→run map to
+ * recover it would give the wrong answer the moment two workers share a run.
+ */
+export function consoleTransport(
+  collator: string,
+  effects: RelayEffects,
+  opts: { deadlineMs?: number; pollMs?: number } = {},
+): RelayTransport<RunPaths> {
+  const deadlineMs = opts.deadlineMs ?? RELAY_SETTLE_DEADLINE_MS;
+  const pollMs = opts.pollMs ?? RELAY_SETTLE_POLL_MS;
+
+  return {
+    async dispatch(run: RunPaths, d: RelayDispatch): Promise<void> {
+      const envelope = await effects.buildEnvelope(run, d.worker, d);
+      let reply: Record<string, unknown>;
+      try {
+        reply = await effects.controlCall(run, d.worker, {
+          cmd: "dispatch",
+          envelope,
+          attempt_id: relayAttemptId(d.worker, d),
+          /**
+           * `null`, always. The supervisor is the sole epoch allocator (§7.5),
+           * and a relay that requested one would be allocating on the caller's
+           * side of a fence whose whole purpose is that it has one writer.
+           */
+          requested_epoch: null,
+        });
+      } catch (err) {
+        // Shape one: the socket. `SocketRequestError` and anything else that
+        // escaped the transport land here together — from the join's point of
+        // view an unreachable supervisor and a broken one cost the same lens.
+        throw new RelayDispatchError(
+          d.worker,
+          d.taskId,
+          null,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+
+      // Shape two, and the one that reads as success: a RESOLVED refusal.
+      if (reply["accepted"] !== true) {
+        const refusal = typeof reply["reason"] === "string" ? reply["reason"] : "rejected";
+        const detail = typeof reply["error"] === "string" ? reply["error"] : refusal;
+        throw new RelayDispatchError(d.worker, d.taskId, refusal, `${refusal} (${detail})`);
+      }
+
+      /**
+       * THE INBOX RECORD, and it is not bookkeeping.
+       *
+       * `harvestTask` reads `<run>/inbox/<task>.json` first and answers
+       * `unavailableHarvest` when it is absent — "no dispatch record at
+       * inbox/<id>.json". Without this write every child of every fan-out
+       * would harvest `unknown`, every lens would be reported missing, and the
+       * console would blame three reviewers that had each done the work. It is
+       * written AFTER acceptance and carries the ASSIGNED epoch, exactly as
+       * `dispatch.ts` writes it, because an inbox record for a dispatch that
+       * was refused is a record of a task that does not exist.
+       */
+      await effects.recordInbox(run, d.taskId, { ...envelope, epoch: reply["epoch"] });
+    },
+
+    async awaitSettled(run: RunPaths, task: RelayTaskRef): Promise<void> {
+      const started = effects.now();
+      for (;;) {
+        const record = await effects.readTaskRecord(run, task.worker, task.taskId);
+        if (record !== null) return;
+        // Checked BEFORE the sleep and against the time already spent, so the
+        // bound is the deadline rather than the deadline plus one interval —
+        // and so a zero deadline gives up immediately instead of polling once.
+        if (effects.now() - started >= deadlineMs) {
+          throw new RelaySettleTimeoutError(task.worker, task.taskId, effects.now() - started);
+        }
+        await effects.sleep(pollMs);
+      }
+    },
+
+    async harvest(run: RunPaths, task: RelayTaskRef): Promise<RelayHarvest> {
+      const bundle = await effects.harvestTask(run, task.taskId);
+      return {
+        /**
+         * VERBATIM. `timed_out` and `aborted` are supervisor verdicts and are
+         * carried through unchanged — folding them to `failed` would make the
+         * record say a reviewer produced a failing review when what happened is
+         * that it never reported, and it reddens `RelayChild`'s tests one layer
+         * up. `harvestStatus` is deliberately not consulted: an untrustworthy
+         * harvest already yields `unknown`, so a second test would be a second
+         * rule for one fact.
+         */
+        verdict: bundle.harvest.verdict,
+        /**
+         * The WHOLE bundle is the reply, not the verdict. `replies.ts` pretty-
+         * prints on the argument that "the reader is a model with the file's
+         * whole contents in one gulp" and names "a nested harvest record" as
+         * the thing it is formatting — this is that record.
+         */
+        reply: bundle,
+      };
+    },
+
+    async publishReply(collatorRun: RunPaths, child: string, reply: unknown): Promise<void> {
+      // `writeReply` and never a reimplementation of it: it owns the
+      // chmod-0644 → truncate-in-place → chmod-0444 recipe, and the recipe is
+      // truncate-in-place because a bind mount pins the INODE. A write-and-
+      // rename would leave the collator's mount showing the old file forever.
+      await effects.writeReply(collatorRun, collator, child, reply);
+    },
+  };
+}
+
+/**
+ * worker → run, for D4's four runs.
+ *
+ * Every input is injected, so this is testable without a runs directory — and
+ * more importantly, so the SEARCH ORDER is testable, which is the part with a
+ * wrong answer that works most of the time.
+ *
+ * The collator's own run is used for the collator without a search, and is
+ * tried first for everyone else. That is not an optimisation: a console
+ * assembled as one run (a fixture, a `scripts/` driver, any future single-run
+ * arrangement) resolves entirely from it, and a console assembled as four
+ * resolves the collator from the run the request was READ from — which is the
+ * only run in the whole set this process can be certain about.
+ *
+ * **A worker no run holds is left OUT of the map rather than defaulted.** The
+ * core answers a missing entry with `run_unresolved`, which the poll declines
+ * to journal and retries on the next tick — and "the console is still coming
+ * up" is exactly the state that produces it. The plausible fallback, using the
+ * collator's run, is the one that must not be written: the collator's
+ * supervisor would ACCEPT a reviewer's task, and three lenses would be one
+ * worker with three transcripts.
+ */
+export async function resolveConsoleRuns(input: {
+  readonly collator: string;
+  readonly collatorRun: RunPaths;
+  readonly workers: readonly string[];
+  /** Candidate runs, newest first. */
+  listRuns(): Promise<readonly RunPaths[]>;
+  hasWorker(run: RunPaths, worker: string): Promise<boolean>;
+}): Promise<Map<string, RunPaths>> {
+  const runs = new Map<string, RunPaths>();
+  const unresolved: string[] = [];
+
+  for (const worker of input.workers) {
+    if (worker === input.collator) {
+      runs.set(worker, input.collatorRun);
+      continue;
+    }
+    if (await input.hasWorker(input.collatorRun, worker)) {
+      runs.set(worker, input.collatorRun);
+      continue;
+    }
+    unresolved.push(worker);
+  }
+
+  // The scan happens at most once, and only if something is actually missing.
+  // Listing the runs root per worker would re-stat every run in the fleet three
+  // times per tick for an answer that cannot differ between them.
+  if (unresolved.length > 0) {
+    const candidates = await input.listRuns();
+    for (const worker of unresolved) {
+      for (const run of candidates) {
+        if (await input.hasWorker(run, worker)) {
+          runs.set(worker, run);
+          break;
+        }
+      }
+    }
+  }
+  return runs;
+}
+
+/**
+ * `relayFanOut`'s three outcomes, in the two shapes the JOURNAL tells apart.
+ *
+ * `not_collated` maps to `dispatched` and the direction reads backwards until
+ * you hold it against the journal's purpose: a fan-out where zero children
+ * succeeded dispatched no COLLATION, but it did dispatch the three children.
+ * Recording it as `not_dispatched` would have the relay reissue three reviews
+ * on the next tick for a request that already consumed them.
+ *
+ * `refused` maps to `not_dispatched` for the mirror reason: nothing was
+ * issued, so a journal entry would mark a fan-out complete that never happened
+ * — and under D5 the collator has already settled, so nothing downstream would
+ * ever notice.
+ */
+function toFanOutResult(outcome: RelayOutcome): RelayFanOutResult {
+  if (outcome.kind === "refused") {
+    return { kind: "not_dispatched", reason: outcome.reason };
+  }
+  /**
+   * Nulls dropped — a `null` `taskId` is a seat the request never named, and an
+   * id nothing can be looked up by is not evidence of a dispatch. The COLLATION
+   * id is deliberately absent too: `children` is the list a reader reconciles
+   * against the collator's own envelope, and the collation is the host's own
+   * follow-up rather than something the request bought.
+   */
+  const children = outcome.children.map((c) => c.taskId).filter((id): id is string => id !== null);
+  return { kind: "dispatched", children };
+}
+
+/**
+ * The adapter, over injected composition. `consoleFanOut` is this with the real
+ * effects bound; the seam is here so the mapping above can be tested against a
+ * fan-out driven by closures rather than by a fleet.
+ */
+export function makeConsoleFanOut(deps: {
+  resolveRuns(input: RelayFanOutInput): Promise<ReadonlyMap<string, RunPaths>>;
+  transport(collator: string): RelayTransport<RunPaths>;
+  aspects?: readonly AspectSeat[];
+}): (input: RelayFanOutInput) => Promise<RelayFanOutResult> {
+  return async (input: RelayFanOutInput): Promise<RelayFanOutResult> => {
+    const outcome = await relayFanOut<RunPaths>({
+      request: input.request,
+      sender: input.sender,
+      runs: await deps.resolveRuns(input),
+      transport: deps.transport(input.sender),
+      ...(deps.aspects === undefined ? {} : { aspects: deps.aspects }),
+    });
+    return toFanOutResult(outcome);
+  };
+}
+
+/**
+ * The real modules, resolved ONCE on first use.
+ *
+ * Dynamic and memoised for the reason the section header gives: a static import
+ * of `harvest/index.ts` and `supervisor/launch.ts` would put the container- and
+ * git-driving half of the repository into the import graph of every test that
+ * imports this file — including `collator-relay.test.ts`, whose stated property
+ * is that it drives the whole join with three strings.
+ *
+ * The promise is cached rather than the modules, so two concurrent first calls
+ * share one resolution instead of racing to build two.
+ */
+let effectModules: Promise<{
+  launch: typeof import("../supervisor/launch.ts");
+  harvest: typeof import("../harvest/index.ts");
+  state: typeof import("./state.ts");
+  paths: typeof import("./paths.ts");
+  replies: typeof import("./replies.ts");
+  jsonl: typeof import("../util/jsonl.ts");
+  contracts: typeof import("../contracts.ts");
+  schema: typeof import("../config/schema.ts");
+}> | null = null;
+
+function loadEffectModules(): NonNullable<typeof effectModules> {
+  effectModules ??= (async () => ({
+    launch: await import("../supervisor/launch.ts"),
+    harvest: await import("../harvest/index.ts"),
+    state: await import("./state.ts"),
+    paths: await import("./paths.ts"),
+    replies: await import("./replies.ts"),
+    jsonl: await import("../util/jsonl.ts"),
+    contracts: await import("../contracts.ts"),
+    schema: await import("../config/schema.ts"),
+  }))();
+  return effectModules;
+}
+
+/**
+ * The `pifleet.task/v1` envelope for a relayed child, filled the way
+ * `sendTaskEnvelope` fills one.
+ *
+ * **The fields are copied from THE dispatch path rather than invented, and the
+ * two that matter are `host_workdir` and `base_ref`.** §8.2 grades a task on
+ * `git diff <base>...HEAD` in the worktree the envelope names, so an envelope
+ * carrying the schema's placeholders — `"unset"` and forty zeroes — produces a
+ * harvest with `repository: false` for a reviewer that has a checkout, and the
+ * lens comes back `unknown` for a reason that has nothing to do with the
+ * review. `readRunWorktrees` is the same record `dispatch.ts` reads, and it is
+ * the only source that can be right: the branch git actually checked out and
+ * the branch the envelope names are the same string, or the diff is graded
+ * against a ref that does not exist.
+ *
+ * `deadline_s` is NOT taken from the request — D11 refuses both spellings of it
+ * in the document, on the grounds that a request that could set it "can pin
+ * three of the largest models in the catalogue open against the operator's API
+ * key". 1500 is `dispatch.ts`'s own default for a task with no opinion.
+ */
+async function buildRelayEnvelope(
+  run: RunPaths,
+  worker: string,
+  d: RelayDispatch,
+): Promise<Record<string, unknown>> {
+  const m = await loadEffectModules();
+  const recorded = await m.state.readRunWorktrees(run);
+  const wt = recorded.byWorker.get(worker);
+  return m.contracts.TaskEnvelopeSchema.parse({
+    schema: "pifleet.task/v1",
+    task_id: d.taskId,
+    run_id: run.runId,
+    // A placeholder the supervisor replaces with its allocation before
+    // anything durable records it — `dispatch.ts`'s comment, and its value.
+    epoch: 0,
+    attempt: 1,
+    worker,
+    dispatched_at: new Date().toISOString(),
+    title: d.title,
+    brief: d.brief,
+    repo: recorded.repo ?? "unset",
+    host_workdir: wt?.path ?? "unset",
+    container_workdir: "/workspace",
+    branch:
+      wt?.branch ??
+      m.paths.workerBranch(
+        recorded.branchPrefix ?? m.schema.DEFAULT_BRANCH_PREFIX,
+        run.runId,
+        worker,
+      ),
+    base_ref: wt?.baseSha ?? "0".repeat(40),
+    inputs: [],
+    acceptance: [],
+    constraints: [],
+    outbox: `/outbox/${d.taskId}`,
+    cloud_allow: [],
+    deadline_s: 1500,
+    depends_on: [],
+  }) as unknown as Record<string, unknown>;
+}
+
+/**
+ * The four host effects, for real.
+ *
+ * Every path in the console is derived HERE and nowhere else, which is what
+ * lets the module above stay free of `paths.ts` — the property its docblock
+ * calls load-bearing for the unit suite.
+ */
+export const productionRelayEffects: RelayEffects = {
+  async controlCall(run, workerId, msg) {
+    const m = await loadEffectModules();
+    return m.launch.controlCall(run, workerId, msg);
+  },
+  buildEnvelope: buildRelayEnvelope,
+  async recordInbox(run, taskId, envelope) {
+    const m = await loadEffectModules();
+    await m.jsonl.writeJsonAtomic(m.paths.inboxTaskPath(run, taskId), envelope);
+  },
+  async readTaskRecord(run, worker, taskId) {
+    const m = await loadEffectModules();
+    return m.state.readTaskRecord(
+      m.paths.taskRecordPath(m.paths.workerPaths(run, worker), taskId),
+    );
+  },
+  async harvestTask(run, taskId) {
+    const m = await loadEffectModules();
+    return m.harvest.harvestTask(run, taskId);
+  },
+  async writeReply(run, collator, childTaskId, reply) {
+    const m = await loadEffectModules();
+    const dir = m.paths.workerRepliesDir(run.root, collator);
+    try {
+      await m.replies.writeReply(dir, childTaskId, reply);
+    } catch (err) {
+      /**
+       * A MISSING REPLIES DIRECTORY IS DIAGNOSED, NOT CREATED — and the
+       * distinction is the whole of D6's failure mode.
+       *
+       * `createRepliesDir` is `materialize.ts`'s, called BEFORE `docker run`,
+       * and its docblock says why the ordering rather than the mkdir is the
+       * point: "Docker CREATES a missing bind-mount source instead of refusing,
+       * so a `-v` whose host directory nobody made comes up as an empty
+       * `/replies` that can never gain content". So if this directory is absent
+       * NOW, the collator's container was never started against it — and an
+       * adapter that helpfully created one would write three reports into a
+       * directory nothing is mounted from. The host would record a delivered
+       * fan-out, the collator would read an empty `/replies`, and the console
+       * would collate from nothing while every observable said it worked. That
+       * is the silent-empty-mount failure arriving through the repair rather
+       * than through the fault.
+       *
+       * So it propagates. `fanOut` does not catch `publishReply`, `relayPass`
+       * lets a throw through without journalling, and the next pass retries —
+       * which is the correct handling for a console that is not built yet. All
+       * that is added here is a sentence saying which directory and whose job
+       * it is, because a bare ENOENT on a path an operator never typed sends
+       * them looking in the wrong place.
+       */
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(
+          `the collator "${collator}" has no replies directory at ${dir}, so the report for ` +
+            `"${childTaskId}" could not be delivered (SRD-REVIEW-CONSOLE D6). That directory is ` +
+            `created by \`pifleet up\` before the container starts, and it is NOT created here on ` +
+            `purpose: Docker makes a missing bind-mount source rather than refusing, so a run ` +
+            `that reached this point has a collator mounted on a different directory — writing ` +
+            `here would deliver three reports nothing can read. Nothing was journalled; the pass ` +
+            `retries. Rebuild the run with \`pifleet up\`.`,
+          { cause: err },
+        );
+      }
+      throw err;
+    }
+  },
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/**
+ * **THE EXPORT `src/cli/commands/relay.ts` LOOKS UP BY NAME.**
+ *
+ * That module does `mod["consoleFanOut"]` inside its action and refuses with
+ * `EXIT.INTERNAL` when it is not a function, naming the missing symbol. The
+ * string is spelled in two files that cannot see each other, so
+ * `collator-relay-adapter.test.ts` pins the pair — a rename on either side is a
+ * red test rather than a console that comes up, polls forever and dispatches
+ * nothing.
+ *
+ * The composition is the whole of it: resolve the worker→run map for this
+ * console (D4 — four runs), build a transport bound to THIS request's collator,
+ * hand both to the pure core, and translate its three outcomes into the two the
+ * journal tells apart. Every decision is one file up or one file down; none of
+ * them is here.
+ */
+export const consoleFanOut: (input: RelayFanOutInput) => Promise<RelayFanOutResult> =
+  makeConsoleFanOut({
+    async resolveRuns(input) {
+      const m = await loadEffectModules();
+      const root = m.paths.runsRoot();
+      return resolveConsoleRuns({
+        collator: input.sender,
+        collatorRun: input.run,
+        // The sender plus every seat on the console. Seats the request did not
+        // name cost one `existsSync` each and buy a map that does not depend on
+        // which lenses this particular request happened to ask for.
+        workers: [input.sender, ...REVIEW_CONSOLE_ASPECTS.map((s) => s.worker)],
+        // Newest first: a console restarted after a crash has an older run
+        // holding the same worker id, and the dead one must not win.
+        listRuns: async () => {
+          const ids = await m.paths.runIdsAscending(root);
+          return ids.reverse().map((id) => m.paths.runPaths(id, root));
+        },
+        /**
+         * The worker's DIRECTORY, which `up` creates, and not its `state.json`,
+         * which its supervisor writes. The two differ exactly while a console
+         * is still coming up — the window in which this question is asked most
+         * — and requiring the state file would leave a worker unresolvable for
+         * as long as its supervisor takes to write one. `run_unresolved` is a
+         * retry, so the cheaper predicate costs a tick and the stricter one
+         * costs a fan-out that never happens.
+         */
+        hasWorker: async (run, worker) => existsSync(m.paths.workerPaths(run, worker).dir),
+      });
+    },
+    transport: (collator) => consoleTransport(collator, productionRelayEffects),
+  });
