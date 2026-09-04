@@ -118,7 +118,22 @@ FROM base AS toolchain-node
 RUN npm install -g --ignore-scripts bun@1.3.12 \
  && node "$(npm root -g)/bun/install.js"
 FROM base AS toolchain-python
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
+# `python3-pip` alongside `uv`, and the reason is not redundancy.
+#
+# A cloned project's own instructions say `pip install -r requirements.txt`, and
+# a tester following them must not hit `pip: command not found` and have to
+# invent an equivalent. `uv` stays because it is the faster path and the one
+# this fleet's own docs prefer; `uv pip install` speaks the same surface.
+#
+# PEP 668: Debian marks the system interpreter EXTERNALLY-MANAGED, so a bare
+# `pip install` into it refuses with `error: externally-managed-environment`.
+# That refusal is correct and is left in place — the answer is a venv, which is
+# why `python3-venv` is here, and `~/repos` is writable and executable so one
+# can be created next to the clone. A worker that reads the refusal will do the
+# right thing; one that is handed a system-wide install would poison the image
+# for every later task in the same container.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip \
  && rm -rf /var/lib/apt/lists/* \
  && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 FROM base AS toolchain-go
@@ -134,7 +149,7 @@ FROM base AS toolchain-full
 RUN npm install -g --ignore-scripts bun@1.3.12 \
  && node "$(npm root -g)/bun/install.js" \
  && apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-venv golang-go \
+      python3 python3-venv python3-pip golang-go \
  && rm -rf /var/lib/apt/lists/* \
  && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 FROM toolchain-${TOOLCHAIN} AS final
