@@ -98,6 +98,34 @@ export function listPanesArgv(workspaceId: string): string[] {
   return ["list-panes", "--workspace", workspaceId, ...JSON_IDS];
 }
 
+/**
+ * `list-pane-surfaces --workspace <ws> --pane <pane>` — one pane's surfaces,
+ * each with the TITLE `rename-tab` gave it.
+ *
+ * THIS IS THE ONLY WAY TO ASK CMUX WHICH WORKER A PANE IS, and the reason it
+ * exists is that {@link listPanesArgv} does not report titles while pane INDEX
+ * is not the console's worker order. Measured on the live development console
+ * 2026-09-04, whose workers are `eng-1,eng-2,tst-1,rev-1`:
+ *
+ *   index 0 -> eng-1    index 1 -> tst-1
+ *   index 2 -> eng-2    index 3 -> rev-1
+ *
+ * Index 1 is the THIRD worker. `developmentPanes` builds a 2x2 with
+ * `splitFrom`, so creation order and cmux's index disagree, and anything that
+ * addressed a pane by position would respawn `tst-1` when asked for `eng-2` —
+ * destroying a live agent to restart a different one. `operations-plan.ts`
+ * already says a title is what a pane IS and its index is where it landed;
+ * this is that rule reaching cmux.
+ *
+ * `--pane` is REQUIRED. Without it the verb answers for the focused pane only,
+ * which is a different question that happens to look like this one.
+ */
+export function listPaneSurfacesArgv(workspaceId: string, paneId: string): string[] {
+  assertCmuxValue("workspace id", workspaceId);
+  assertCmuxValue("pane id", paneId);
+  return ["list-pane-surfaces", "--workspace", workspaceId, "--pane", paneId, ...JSON_IDS];
+}
+
 export type SplitDirection = "right" | "down" | "left" | "up";
 
 export function newSplitArgv(workspaceId: string, surfaceId: string, dir: SplitDirection): string[] {

@@ -30,7 +30,12 @@ import {
   OPERATIONS_WORKSPACE,
   operationsPanes,
 } from "../src/backends/cmux/operations-plan.ts";
-import { cmuxReachable, ensureOperations } from "../src/backends/cmux/operations.ts";
+import {
+  OPERATIONS_SPEC,
+  cmuxReachable,
+  ensureOperations,
+  restartConsolePane,
+} from "../src/backends/cmux/operations.ts";
 import { runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/operations [options]
@@ -42,6 +47,7 @@ const USAGE = `Usage: scripts/operations [options]
   --poll <seconds>  git pane refresh interval (default: 5)
   --dry-run         print the pane plan and exit without touching cmux
   --recreate        close an existing operations workspace and rebuild it
+  --restart <title> respawn ONE pane by title, leaving the others running
   -h, --help        this message
 `;
 
@@ -201,6 +207,33 @@ async function main(argv: string[]): Promise<number> {
   // a console, so one whose panes have died, or whose commands were built by an
   // older version of this script, is adopted forever and reported as "already
   // in place — changed nothing", which is true and useless.
+  /*
+   * `--restart <title>` — one pane, and nothing else touched.
+   *
+   * TITLE, not worker id, because this console's panes are not all workers:
+   * `fleet-status` and the monitor are panes too, and a wedged watch pane is
+   * as worth restarting as a wedged agent. `restartConsolePane` resolves
+   * against the PLAN, so the set of legal values is whatever this console
+   * builds, and a title that is not one of them is refused with the list.
+   *
+   * The run teardown is scoped to a run actually holding that id, so naming a
+   * watch pane stops nothing and simply respawns it.
+   */
+  const restartFlag = flag(argv, "--restart");
+  if (restartFlag !== undefined) {
+    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
+    for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
+      process.stderr.write(`operations: stopping run ${runId} before restarting ${restartFlag}\n`);
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
+    const r = await restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
+    process.stdout.write(
+      `operations: respawned the ${restartFlag} pane (surface ${r.surfaceId}) ` +
+        `in workspace ${r.workspaceId}; the other panes were not touched\n`,
+    );
+    return EXIT.SUCCESS;
+  }
+
   const recreate = argv.includes("--recreate");
   const result = await ensureOperations(client, { ...opts, tuiWorkers }, recreate);
   process.stdout.write(

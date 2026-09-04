@@ -36,6 +36,7 @@ import {
   CmuxClient,
   assertCmuxValue,
   focusPaneArgv,
+  listPaneSurfacesArgv,
   listPanesArgv,
   newSplitArgv,
   pingArgv,
@@ -51,6 +52,7 @@ import {
   parseListPanes,
   parseNewSplit,
   parsePaneGeometry,
+  parsePaneSurfaces,
   parseWorkspaceCreate,
   parseWorkspaceList,
   type PaneListed,
@@ -132,6 +134,124 @@ export interface EnsureResult {
   /** False when an `operations` workspace was already there and was left alone. */
   readonly created: boolean;
   readonly workspaceId: string;
+}
+
+/** A console pane, resolved to the title `createWorkspace` gave it. */
+export interface TitledPane {
+  readonly paneId: string;
+  readonly surfaceId: string;
+  /** `null` when the pane carries no title — see {@link parsePaneSurfaces}. */
+  readonly title: string | null;
+}
+
+/**
+ * Every pane in a workspace, each carrying its title.
+ *
+ * One `list-panes` plus one `list-pane-surfaces` per pane. The second call is
+ * per-pane because the verb answers for ONE pane and defaults to the focused
+ * one, so a single call would describe whichever pane the operator last
+ * clicked and would look like an answer about all of them.
+ */
+export async function titledPanes(
+  client: CmuxClient,
+  workspaceId: string,
+): Promise<TitledPane[]> {
+  const panes = parseListPanes(await client.runOk(listPanesArgv(workspaceId)));
+  const out: TitledPane[] = [];
+  for (const p of panes) {
+    const surfaces = parsePaneSurfaces(
+      await client.runOk(listPaneSurfacesArgv(workspaceId, p.paneId)),
+    );
+    /*
+     * The SELECTED surface is the pane, and its absence is not a reason to
+     * skip the pane. A pane cmux reports with no selected surface still holds
+     * one, and dropping it here would turn "this console is in a state I did
+     * not expect" into "that worker has no pane", which reads as a typo and
+     * sends the operator to fix the wrong thing.
+     */
+    const chosen = surfaces.find((s) => s.selected) ?? surfaces[0];
+    if (chosen === undefined) continue;
+    out.push({ paneId: p.paneId, surfaceId: chosen.surfaceId, title: chosen.title });
+  }
+  return out;
+}
+
+/**
+ * Which surface holds `title`, or `null`.
+ *
+ * Title, never index — see {@link listPaneSurfacesArgv} for the measurement
+ * that makes the distinction load-bearing rather than stylistic.
+ */
+export function surfaceForTitle(panes: readonly TitledPane[], title: string): string | null {
+  return panes.find((p) => p.title === title)?.surfaceId ?? null;
+}
+
+/** What {@link restartConsolePane} did, for the caller to report. */
+export interface RestartResult {
+  readonly workspaceId: string;
+  readonly surfaceId: string;
+  /** The titles the console actually holds, for a refusal message. */
+  readonly present: readonly (string | null)[];
+}
+
+/**
+ * Restart ONE console pane, leaving every other pane alone.
+ *
+ * This is the whole of "restart a single worker" in a console, and it is a
+ * pane operation rather than a container one for a reason worth stating: a
+ * worker's container is a CHILD of its supervisor (`supervisor/index.ts` —
+ * on the `rpc` path the supervisor's `child` IS a foreground `docker run`),
+ * and each agent pane runs its own `up --attach-here`, so the pane owns the
+ * run, the run owns the supervisor, and the supervisor owns the container.
+ * Replacing the container under a live supervisor would leave the supervisor
+ * holding a handle to a process that no longer exists. Respawning the pane
+ * re-enters at the top of that chain and lets the existing, tested `up` path
+ * rebuild all of it.
+ *
+ * The caller is responsible for stopping any run the worker still holds
+ * BEFORE calling this. Respawning a pane kills the pane's process tree, which
+ * is not the same as quiescing a run: the supervisor would be signalled by the
+ * shell rather than told to shut down, and the container it launched detached
+ * would outlive it as an orphan.
+ */
+export async function restartConsolePane(
+  client: CmuxClient,
+  spec: WorkspaceSpec,
+  opts: OperationsPlanOptions,
+  title: string,
+): Promise<RestartResult> {
+  const workspaceId = await findWorkspace(client, spec.name);
+  if (workspaceId === null) {
+    throw new Error(
+      `${spec.name}: no ${spec.name} workspace is open, so there is no pane to restart — ` +
+        `open the console first`,
+    );
+  }
+  const plan = spec.panes(opts);
+  const planned = plan.find((p) => p.title === title);
+  if (planned === undefined) {
+    throw new Error(
+      `${spec.name}: '${title}' is not a pane this console plans — it holds ` +
+        `${plan.map((p) => p.title).join(", ")}`,
+    );
+  }
+  const panes = await titledPanes(client, workspaceId);
+  const surfaceId = surfaceForTitle(panes, title);
+  if (surfaceId === null) {
+    /*
+     * The open console does not hold the pane the plan names. That is a real
+     * divergence — a `--workers` set that differs from the one the console was
+     * built with, or a pane closed by hand — and it is reported with what IS
+     * there rather than as "not found", because the two fixes differ.
+     */
+    throw new Error(
+      `${spec.name}: no pane titled '${title}' in the open console, which holds ` +
+        `${panes.map((p) => p.title ?? "(untitled)").join(", ")} — ` +
+        `rebuild it with --recreate if the worker set changed`,
+    );
+  }
+  await client.runOk(respawnPaneArgv(workspaceId, surfaceId, planned.command));
+  return { workspaceId, surfaceId, present: panes.map((p) => p.title) };
 }
 
 /**

@@ -178,6 +178,45 @@ export function parseListPanes(stdout: string): PaneListed[] {
   return out;
 }
 
+/** One surface inside a pane, as `list-pane-surfaces --json` reports it. */
+export interface PaneSurface {
+  surfaceId: string;
+  /** The `rename-tab` title. For a console pane this is the worker id. */
+  title: string | null;
+  selected: boolean;
+}
+
+/**
+ * `list-pane-surfaces --json --id-format uuids` → `{surfaces:[{id, title, …}]}`.
+ *
+ * A surface with NO title is kept, with `title: null`, rather than dropped. A
+ * pane whose title never landed is the case a caller most needs to see: it is
+ * indistinguishable from "no such worker" if it is silently filtered out here,
+ * and the two want opposite responses — one is a console to rebuild, the other
+ * is a typo.
+ */
+export function parsePaneSurfaces(stdout: string): PaneSurface[] {
+  const o = asObject("list-pane-surfaces output", stdout);
+  const list = o["surfaces"];
+  if (!Array.isArray(list)) {
+    throw new CmuxParseError("list-pane-surfaces output (no surfaces array)", stdout);
+  }
+  const out: PaneSurface[] = [];
+  for (const entry of list) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    const surfaceId = pick(e, ["id", "ref"]);
+    if (surfaceId === null) continue;
+    const title = e["title"];
+    out.push({
+      surfaceId,
+      title: typeof title === "string" && title !== "" ? title : null,
+      selected: e["selected"] === true,
+    });
+  }
+  return out;
+}
+
 /** One pane's vertical extent, in the pixel space `list-panes --json` reports. */
 export interface PaneGeometry {
   paneId: string;
