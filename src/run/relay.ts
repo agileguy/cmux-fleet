@@ -404,6 +404,19 @@ export interface RelayChild {
    */
   readonly verdict: Verdict;
   readonly succeeded: boolean;
+  /**
+   * Whether a dispatch for this lens ACTUALLY LANDED.
+   *
+   * **Distinct from `taskId !== null`, and the distinction is what makes the
+   * journal honest.** `taskId` is the id this lens was PLANNED under: it is
+   * populated the moment the fan-out decides to ask for the lens, and it
+   * survives a dispatch that was refused, so a reader using it as evidence of a
+   * dispatch records three reviews for a fan-out that issued none.
+   * `relay-journal.ts` documents its `children` as "the child task ids the
+   * fan-out issued … written by the thing that actually performed the
+   * dispatches", and this is the field that makes that sentence true.
+   */
+  readonly issued: boolean;
   /** Why this lens is missing, in a form the collation brief can print. */
   readonly note: string;
 }
@@ -413,6 +426,31 @@ export type RelayRefusal = "run_unresolved" | "underivable_id";
 export type RelayOutcome =
   | { kind: "refused"; code: RelayRefusal; reason: string }
   | { kind: "not_collated"; reason: string; children: readonly RelayChild[] }
+  /**
+   * Lenses were asked for and NOT ONE dispatch landed.
+   *
+   * **Split out of `not_collated` because the two shared a `kind` and a child
+   * count while meaning opposite things, and the shared one was journalled.**
+   * §6.6's `not_collated` is "every lens reported and none survived" — real work
+   * happened, three tasks exist, and the journal must record them or the next
+   * tick runs them again. This is "nothing was ever started", and journalling it
+   * marks a fan-out complete that never occurred: `already_done` on every later
+   * tick, the reviews never run, and the operator's row says
+   * `dispatched 3 children`. Permanent, silent, and the exact defect class the
+   * wrong-verb fix closed once already.
+   *
+   * **Reachable without anything being broken.** A second review requested while
+   * round one's reviewers are mid-turn: every `stage` reaches
+   * `EpochManager.allocate`, which answers `busy` while a fence is live
+   * (`rpc/epoch.ts`), `stageForAdoptedTerminal` throws on a refused stage, and
+   * all three dispatches reject. Three closed reviewer terminals reach it too,
+   * through `terminalRefusal`.
+   *
+   * `children` is carried so the notes survive — each one says why its lens
+   * never left the host — and the caller retries, because a busy console is a
+   * console that will be free later.
+   */
+  | { kind: "none_landed"; reason: string; children: readonly RelayChild[] }
   | {
       kind: "collated";
       collation: RelayDispatch;
@@ -639,6 +677,7 @@ async function fanOut<R>(
         taskId: null,
         verdict: "unknown",
         succeeded: false,
+        issued: false,
         note: "the request never named this reviewer, so the lens was not applied",
       };
     }
@@ -650,6 +689,9 @@ async function fanOut<R>(
         taskId: plan.taskId,
         verdict: "unknown",
         succeeded: false,
+        // PLANNED but never issued — see `RelayChild.issued`. The id is kept so
+        // an operator can correlate the refusal; it is not evidence of a dispatch.
+        issued: false,
         note: dispatchNote,
       };
     }
@@ -661,6 +703,7 @@ async function fanOut<R>(
         taskId: plan.taskId,
         verdict: "unknown",
         succeeded: false,
+        issued: true,
         note: "it was dispatched but could not be harvested",
       };
     }
@@ -670,12 +713,36 @@ async function fanOut<R>(
       taskId: plan.taskId,
       verdict: harvested.verdict,
       succeeded: harvested.verdict === "success",
+      issued: true,
       note:
         harvested.verdict === "success"
           ? ""
           : `it settled \`${harvested.verdict}\` and produced no report`,
     };
   });
+
+  // ── Nothing left the host ─────────────────────────────────────────────────
+  //
+  // Checked BEFORE the survivor count, because `survived.length === 0` is true
+  // of both this and an honest `not_collated` and only one of them may be
+  // journalled. `routed.length > 0` is the discriminator that keeps them apart:
+  // it says lenses were ASKED FOR. When it is zero the request named no seat
+  // this console holds — nothing was attempted and nothing failed, which is a
+  // valid no-op that SHOULD be journalled rather than re-evaluated forever.
+  if (routed.length > 0 && landed.length === 0) {
+    return {
+      kind: "none_landed",
+      reason:
+        `${routed.length} lens/lenses were dispatched and NOT ONE landed, so nothing is running ` +
+        `and nothing may be journalled — a record here would mark this fan-out done and the ` +
+        `reviews would never run. The pass retries. Per lens: ` +
+        children
+          .filter((c) => c.taskId !== null)
+          .map((c) => `${c.aspect} — ${c.note}`)
+          .join("; "),
+      children,
+    };
+  }
 
   const survived = children.filter((c) => c.succeeded);
   const missing = children.filter((c) => !c.succeeded);
@@ -872,6 +939,16 @@ export interface RelayHarvestView {
  * literally indistinguishable to a test — which is precisely how an adapter
  * that could only speak RPC passed a suite that thought it covered dispatch.
  */
+/**
+ * How a prompt reaches a worker — and the only classification the relay makes.
+ *
+ * `"typed"` is not a plane `dispatch.ts` names; it is this module's word for
+ * `planDispatch`'s `pane` with `adopted_terminal: false`, because from here the
+ * interesting property is not which pane it is but that DELIVERY IS A KEYSTROKE
+ * STREAM CARRYING THE PAYLOAD.
+ */
+export type RelayDeliveryPlane = "rpc" | "staged" | "typed" | "unknown";
+
 export interface RelaySendOutcome {
   readonly accepted: boolean;
   readonly via: "rpc" | "pane" | "staged";
@@ -890,6 +967,22 @@ export interface RelayEffects {
    * `consoleTransport`'s `dispatch` for what that cost.
    */
   sendTask(run: RunPaths, worker: string, dispatch: RelayDispatch): Promise<RelaySendOutcome>;
+  /**
+   * How a prompt would reach this worker, asked BEFORE anything is sent.
+   *
+   * **A preflight and not a post-check, because on the typed plane the damage is
+   * done by the time `sendTask` returns.** `sendViaPane`'s non-adopted branch
+   * builds a keystroke plan from the whole rendered prompt and types it line by
+   * line, then presses Enter; the `via: "pane"` in its answer is a report of
+   * what already happened. Reading it after the fact would name the hazard, not
+   * prevent it.
+   *
+   * `"typed"` is the non-adopted `tui` pane. `"staged"` is the adopted one —
+   * safe, because only `STAGED_TRIGGER_LINE` reaches the surface. `"rpc"` is the
+   * control socket. `"unknown"` is a launch record whose marks disagree, which
+   * `planDispatch` already refuses to guess about, and which this refuses too.
+   */
+  deliveryPlane(run: RunPaths, worker: string): Promise<RelayDeliveryPlane>;
   /** `readTaskRecord(taskRecordPath(workerPaths(run, worker), taskId))`. */
   readTaskRecord(
     run: RunPaths,
@@ -931,9 +1024,25 @@ export const RELAY_SETTLE_POLL_MS = 100;
  * record may ever be written, and a poll with no bound of its own never
  * returns.
  *
- * That is the wedge, and it is the same shape as the FIFO defect Phase 1 nearly
- * shipped: not a crash, not an error, just an actor that stops. §6.5's argument
- * for a restartable host-side process is worth nothing if the process can hang.
+ * **That premise was overstated and is corrected here.** On the staged route the
+ * trigger IS normally typed, the turn starts, and the supervisor's deadline arms
+ * like any other — so "the deadline may never arm" is the exception, not the
+ * ordinary case. The exception is real but now handled one layer up: a stage
+ * whose trigger could not be sent comes back `accepted: true` with an `error`,
+ * and `dispatch` rejects it rather than letting the join wait out a keystroke
+ * that is not coming.
+ *
+ * What this bound actually covers is therefore narrower and still worth having:
+ * a supervisor that dies mid-turn, a turn that never settles, a task record that
+ * never appears for a reason nobody predicted. It is a backstop against an actor
+ * that stops, which is the same shape as the FIFO defect Phase 1 nearly shipped.
+ *
+ * **The ordering against the child's own deadline is what keeps it a backstop.**
+ * The envelope this relay sends carries `deadline_s: 1500` — `dispatch.ts`'s
+ * default for a task that names none, and the relay names none because D11
+ * refuses the field in the request. 1800 > 1500, so the child settles
+ * `timed_out` on its own clock first and the join observes a real record. If
+ * either number moves, that ordering is the property to re-check.
  *
  * **On expiry this REJECTS rather than resolving, and the caller is why it
  * matters less than it looks.** `fanOut` joins with `Promise.allSettled` and
@@ -1013,6 +1122,15 @@ export class RelaySettleTimeoutError extends Error {
  * again. With a random attempt id that is three reviews run twice. With a
  * derived one the supervisor recognises the pair and REPLAYS, so the cost of
  * the safe ordering drops from a duplicate review to a no-op.
+ *
+ * **It does NOT match the staged route's own `attemptIdFor(JSON.stringify(partial))`
+ * and an earlier version of this comment claimed it did.** The two strings
+ * differ — different inputs, different prefixes. The replay property survives
+ * anyway, and for a reason worth stating rather than assuming: `EpochManager`
+ * keys attempts on `attemptKey(taskId, attemptId)`, and the task id is derived,
+ * stable, and in the key. So each route replays against ITS OWN previous
+ * attempt, which is all either of them needs; what would break is a task
+ * re-dispatched across two different planes, which this console never does.
  */
 function relayAttemptId(worker: string, dispatch: RelayDispatch): string {
   const content = JSON.stringify([worker, dispatch.taskId, dispatch.title, dispatch.brief]);
@@ -1066,6 +1184,66 @@ export function consoleTransport(
      * about an envelope is spelled here twice.
      */
     async dispatch(run: RunPaths, d: RelayDispatch): Promise<void> {
+      /**
+       * ── PREFLIGHT: is this delivery SAFE? ────────────────────────────────
+       *
+       * **`d.brief` is written by a container and this is the one plane that
+       * TYPES it.** `dispatch-request.ts` says outright that it does not
+       * sanitize `title` or `brief` — deliberately, because the staged drop's
+       * contract is byte-identity with the RPC route. That is sound while the
+       * payload is written to a file. `sendViaPane`'s non-adopted branch instead
+       * splits the rendered prompt on newlines and types every line into the
+       * surface, then presses Enter. `assertPaneTypeableLine` bounds length and
+       * refuses C0/DEL and embedded newlines; it permits every shell
+       * metacharacter there is.
+       *
+       * And the surface is not reliably the agent. `docker attach
+       * --detach-keys=ctrl-]` makes detach a single keypress pifleet cannot
+       * observe, and after it — or after the container exits — the pane hosts
+       * the operator's own shell. `stageForAdoptedTerminal`'s safety argument
+       * says this in as many words: what may land in a shell is
+       * `STAGED_TRIGGER_LINE`, which begins `#` and cannot execute, *"rather
+       * than a markdown brief delivered line by line"*. On this branch it is
+       * exactly the markdown brief, delivered line by line.
+       *
+       * So it is refused, before a byte is sent, and refused for the run rather
+       * than the fleet: one lens is lost and the collation says so.
+       *
+       * ## Why this is not the mistake the previous docblock warned about
+       *
+       * That docblock said to examine `accepted` and nothing else, because a
+       * guard requiring a particular plane is how the console came to refuse
+       * every `tui` worker. It was right about the question it was answering and
+       * too broad for the question it was not. There are THREE questions here
+       * and only the first is about preference:
+       *
+       *   1. **Which plane should the relay PREFER?** None. `sendTaskEnvelope`
+       *      reads the launch record and decides; the relay must not.
+       *   2. **Is this delivery SAFE for container-authored text?** Not on the
+       *      typed plane, whatever the launch record prefers. Refusing one plane
+       *      because its delivery mechanism is a keystroke stream is not a
+       *      preference between planes.
+       *   3. **Did it actually HAPPEN?** `accepted` alone does not answer this
+       *      either — see the deferred trigger below.
+       */
+      const plane = await effects.deliveryPlane(run, d.worker);
+      if (plane === "typed" || plane === "unknown") {
+        throw new RelayDispatchError(
+          d.worker,
+          d.taskId,
+          plane === "typed" ? "pane_delivery_types_the_brief" : "delivery_plane_unknown",
+          plane === "typed"
+            ? `"${d.worker}" is a tui pane with no adopted terminal, so its prompt is DELIVERED BY ` +
+              `TYPING — every line of the brief, then Enter. This brief was written by a container ` +
+              `and is not sanitized, and a detached or exited pane hosts the operator's shell. ` +
+              `Nothing was sent. Give the worker an adopted terminal (\`up --attach-here\`) so its ` +
+              `dispatches are STAGED, where only a comment line reaches the surface.`
+            : `the launch record for "${d.worker}" names neither a consistent rpc nor a consistent ` +
+              `tui shape, so how its prompt would be delivered is unknown. Nothing was sent — a ` +
+              `guess here is a guess about whether a container's brief gets typed into a shell.`,
+        );
+      }
+
       let outcome: RelaySendOutcome;
       try {
         outcome = await effects.sendTask(run, d.worker, d);
@@ -1081,14 +1259,7 @@ export function consoleTransport(
         );
       }
 
-      /**
-       * Shape two, and the one that reads as success: a RESOLVED refusal.
-       *
-       * `accepted` is the ONLY field consulted. `via` is deliberately not
-       * examined — a guard that also required a particular plane would
-       * reintroduce exactly the defect above, in a form that looks like extra
-       * rigour.
-       */
+      // Shape two, and the one that reads as success: a RESOLVED refusal.
       if (!outcome.accepted) {
         const refusal = outcome.reason ?? "rejected";
         throw new RelayDispatchError(
@@ -1096,6 +1267,57 @@ export function consoleTransport(
           d.taskId,
           refusal,
           `${refusal} (${outcome.error ?? refusal})`,
+        );
+      }
+
+      /**
+       * BACKSTOP for the preflight. Reached only if the launch record and the
+       * route disagree, which the preflight cannot rule out because they are two
+       * reads at two moments. It is too late to prevent the typing — that is
+       * what the preflight is for — but a lens whose brief was typed into a
+       * surface must not then be counted, waited on and collated as though it
+       * were a review.
+       */
+      if (outcome.via === "pane") {
+        throw new RelayDispatchError(
+          d.worker,
+          d.taskId,
+          "pane_delivery_types_the_brief",
+          `the dispatch to "${d.worker}" was delivered by TYPING the brief into its pane. The ` +
+            `preflight is meant to make this unreachable; reaching it means the launch record ` +
+            `changed under the pass. The lens is dropped rather than collated.`,
+        );
+      }
+
+      /**
+       * ── Shape three: ACCEPTED, and it still did not happen. ──────────────
+       *
+       * `stageForAdoptedTerminal` returns `accepted: true` with
+       * `error: trigger.reason` when the drop is durable but the trigger line
+       * could not be typed — which is every adopted terminal that announces no
+       * pane id: Terminal.app, ssh, a bare tmux pane. The envelope is on disk and
+       * a person can run the task; nothing is running now.
+       *
+       * **Counting that as landed is a thirty-minute stall and then a lost
+       * lens.** `awaitSettled` would poll for a task record that cannot appear
+       * until a human types the line, for the full deadline, and `relayPass` is
+       * serial — three of them stop the actor for an hour and a half.
+       *
+       * So it is a rejection, and the trigger instruction travels in the message
+       * because it is the one thing that lets the operator rescue the review.
+       * The refusal code is the supervisor's own ledger event name, so a caller
+       * matches a rule rather than a sentence. On the next pass the derived
+       * attempt id makes the re-stage a REPLAY, so retrying costs nothing and
+       * may find the trigger has since been typed.
+       */
+      if (outcome.error !== null) {
+        throw new RelayDispatchError(
+          d.worker,
+          d.taskId,
+          "stage_trigger_deferred",
+          `"${d.taskId}" was STAGED for "${d.worker}" but its turn was never triggered, so no task ` +
+            `record can appear and the join would wait out its whole deadline for a keystroke: ` +
+            `${outcome.error}`,
         );
       }
     },
@@ -1170,15 +1392,30 @@ export function consoleTransport(
  * supervisor would ACCEPT a reviewer's task, and three lenses would be one
  * worker with three transcripts.
  */
+/**
+ * The map, plus the workers it REFUSED to resolve and why.
+ *
+ * Ambiguity is returned rather than swallowed so the fan-out's refusal can name
+ * the competing runs. A worker that is merely absent and one that matched three
+ * runs are both missing from `runs`, and only the second is an operator's
+ * problem to disambiguate.
+ */
+export interface ConsoleRunMap {
+  readonly runs: ReadonlyMap<string, RunPaths>;
+  /** worker → the run ids that all hold it. Never has a single-element entry. */
+  readonly ambiguous: ReadonlyMap<string, readonly string[]>;
+}
+
 export async function resolveConsoleRuns(input: {
   readonly collator: string;
   readonly collatorRun: RunPaths;
   readonly workers: readonly string[];
-  /** Candidate runs, newest first. */
+  /** Candidate runs. ORDER IS NOT A TIEBREAK — see the scan below. */
   listRuns(): Promise<readonly RunPaths[]>;
   hasWorker(run: RunPaths, worker: string): Promise<boolean>;
-}): Promise<Map<string, RunPaths>> {
+}): Promise<ConsoleRunMap> {
   const runs = new Map<string, RunPaths>();
+  const ambiguous = new Map<string, readonly string[]>();
   const unresolved: string[] = [];
 
   for (const worker of input.workers) {
@@ -1199,15 +1436,47 @@ export async function resolveConsoleRuns(input: {
   if (unresolved.length > 0) {
     const candidates = await input.listRuns();
     for (const worker of unresolved) {
+      /**
+       * EVERY match, then refuse if there is more than one — never "the newest
+       * wins".
+       *
+       * **This is an authority decision wearing the clothes of a lookup.** Worker
+       * ids are not unique across runs; two consoles stand side by side and are
+       * told apart by run, not by worker id. So a scan that takes the newest
+       * candidate resolves `rev-arch-1` to whichever run most recently
+       * materialised that id — including an unrelated fleet a colleague brought
+       * up a minute ago, and including a dead run, since `down` removes
+       * containers and not directories.
+       *
+       * What follows a wrong answer is not a failed dispatch. It is a review
+       * dispatched into ANOTHER run's worker: that run's control secret, that
+       * run's tool grant, that run's model, that run's repository graded — and
+       * the reply harvested back into this console and collated as this
+       * console's lens. D11's whole argument is that the model and the grant
+       * were validated at `up`, and that validation is per-run. Nothing
+       * downstream can detect the crossing.
+       *
+       * A refusal costs a tick and names both runs. Picking one costs the
+       * property the console exists to provide, silently. The operator's fix is
+       * to say which run they meant.
+       */
+      const matches: RunPaths[] = [];
       for (const run of candidates) {
-        if (await input.hasWorker(run, worker)) {
-          runs.set(worker, run);
-          break;
-        }
+        if (await input.hasWorker(run, worker)) matches.push(run);
+      }
+      if (matches.length === 1) {
+        runs.set(worker, matches[0]!);
+        continue;
+      }
+      if (matches.length > 1) {
+        ambiguous.set(
+          worker,
+          matches.map((r) => r.runId),
+        );
       }
     }
   }
-  return runs;
+  return { runs, ambiguous };
 }
 
 /**
@@ -1225,17 +1494,38 @@ export async function resolveConsoleRuns(input: {
  * ever notice.
  */
 function toFanOutResult(outcome: RelayOutcome): RelayFanOutResult {
-  if (outcome.kind === "refused") {
+  /**
+   * `none_landed` joins `refused` here, and it is the whole of the fix.
+   *
+   * Both mean NOTHING IS RUNNING, which is the only question the journal is
+   * entitled to ask. `not_collated` reads as their neighbour and is their
+   * opposite: three tasks exist and must not be re-issued. Before this arm
+   * existed the three shared one code path, and the case that must never be
+   * journalled was journalled — `already_done` forever, reviews never run.
+   */
+  if (outcome.kind === "refused" || outcome.kind === "none_landed") {
     return { kind: "not_dispatched", reason: outcome.reason };
   }
   /**
-   * Nulls dropped — a `null` `taskId` is a seat the request never named, and an
-   * id nothing can be looked up by is not evidence of a dispatch. The COLLATION
-   * id is deliberately absent too: `children` is the list a reader reconciles
-   * against the collator's own envelope, and the collation is the host's own
+   * ISSUED ONLY — and filtering on `issued` rather than on `taskId !== null` is
+   * the correction, not a tidy-up.
+   *
+   * `taskId` is populated when a lens is PLANNED and survives a dispatch that
+   * was refused, so the null filter alone recorded the ids the fan-out INTENDED.
+   * `relay-journal.ts` describes this list as "the child task ids the fan-out
+   * issued … written by the thing that actually performed the dispatches" — the
+   * host's independent copy of what really happened, and the whole point of
+   * having it is that it was produced by the party that did the work rather than
+   * by the model that asked for it. A planned id in that slot makes it a second
+   * copy of the request.
+   *
+   * The COLLATION id is deliberately absent too: the collation is the host's own
    * follow-up rather than something the request bought.
    */
-  const children = outcome.children.map((c) => c.taskId).filter((id): id is string => id !== null);
+  const children = outcome.children
+    .filter((c) => c.issued)
+    .map((c) => c.taskId)
+    .filter((id): id is string => id !== null);
   /**
    * `collation_failed` is `dispatched` PLUS a reason, and both halves matter.
    *
@@ -1262,20 +1552,74 @@ function toFanOutResult(outcome: RelayOutcome): RelayFanOutResult {
  * fan-out driven by closures rather than by a fleet.
  */
 export function makeConsoleFanOut(deps: {
-  resolveRuns(input: RelayFanOutInput): Promise<ReadonlyMap<string, RunPaths>>;
+  resolveRuns(input: RelayFanOutInput): Promise<ConsoleRunMap>;
   transport(collator: string): RelayTransport<RunPaths>;
   aspects?: readonly AspectSeat[];
 }): (input: RelayFanOutInput) => Promise<RelayFanOutResult> {
   return async (input: RelayFanOutInput): Promise<RelayFanOutResult> => {
+    const { runs, ambiguous } = await deps.resolveRuns(input);
+
+    /**
+     * FAIL CLOSED on any ambiguity, before a single dispatch.
+     *
+     * Not "only if this request needs the ambiguous seat": a console in which
+     * one worker id resolves to two live runs is a console whose identity is
+     * unsettled, and dispatching the seats that happen to be unambiguous would
+     * produce a review whose lenses came from two different fleets — with a
+     * consensus count that reads as corroboration.
+     *
+     * `not_dispatched`, so nothing is journalled and the pass retries: the
+     * operator's remedy is to say which runs are theirs (`PIFLEET_RELAY_RUNS`),
+     * or to bring the other console down.
+     */
+    if (ambiguous.size > 0) {
+      const detail = [...ambiguous.entries()]
+        .map(([worker, ids]) => `"${worker}" is held by ${ids.join(", ")}`)
+        .join("; ");
+      return {
+        kind: "not_dispatched",
+        reason:
+          `the worker→run map is ambiguous, so nothing was dispatched: ${detail}. Worker ids are ` +
+          `not unique across runs and this console is four of them (D4), so choosing one would ` +
+          `dispatch a review into another fleet's worker — its control secret, its tool grant, ` +
+          `its model, its repository — and collate the reply here as though it were this ` +
+          `console's lens. Pin the map with PIFLEET_RELAY_RUNS=worker=runId,... or stop the ` +
+          `other console.`,
+      };
+    }
+
     const outcome = await relayFanOut<RunPaths>({
       request: input.request,
       sender: input.sender,
-      runs: await deps.resolveRuns(input),
+      runs,
       transport: deps.transport(input.sender),
       ...(deps.aspects === undefined ? {} : { aspects: deps.aspects }),
     });
     return toFanOutResult(outcome);
   };
+}
+
+/**
+ * `PIFLEET_RELAY_RUNS` — `worker=runId` pairs, comma separated, or `null` when
+ * unset.
+ *
+ * The escape hatch §6.5 wanted and the shipped CLI has no flag for. A malformed
+ * entry is ignored rather than fatal for one reason only: this is a hint that
+ * REPLACES a guess, and a typo that fell back to the host-wide scan would be
+ * worse than one that leaves a worker unresolved. An unresolved worker refuses
+ * loudly; a silent fallback is the defect this whole mechanism exists to close.
+ */
+function relayRunPins(raw: string | undefined): Map<string, string> | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  const pins = new Map<string, string>();
+  for (const pair of raw.split(",")) {
+    const at = pair.indexOf("=");
+    if (at <= 0) continue;
+    const worker = pair.slice(0, at).trim();
+    const runId = pair.slice(at + 1).trim();
+    if (worker !== "" && runId !== "") pins.set(worker, runId);
+  }
+  return pins;
 }
 
 /**
@@ -1297,6 +1641,8 @@ let effectModules: Promise<{
   paths: typeof import("./paths.ts");
   replies: typeof import("./replies.ts");
   ledger: typeof import("./ledger.ts");
+  registry: typeof import("./registry.ts");
+  interrupt: typeof import("../container/interrupt.ts");
 }> | null = null;
 
 function loadEffectModules(): NonNullable<typeof effectModules> {
@@ -1307,6 +1653,8 @@ function loadEffectModules(): NonNullable<typeof effectModules> {
     paths: await import("./paths.ts"),
     replies: await import("./replies.ts"),
     ledger: await import("./ledger.ts"),
+    registry: await import("./registry.ts"),
+    interrupt: await import("../container/interrupt.ts"),
   }))();
   return effectModules;
 }
@@ -1365,6 +1713,31 @@ export const productionRelayEffects: RelayEffects = {
       error: out.error,
       epoch: out.epoch,
     };
+  },
+  /**
+   * The two reads `sendViaPane` makes, made one moment earlier.
+   *
+   * `launchPaneMode` is imported rather than reproduced — it owns the
+   * field-plus-two-marks agreement rule, and a second copy here is how this
+   * module and `dispatch.ts` would come to disagree about which plane a worker
+   * has. `launch === null` is the `PIFLEET_PI_COMMAND` double, which `planDispatch`
+   * and the supervisor both call `rpc`; this agrees with them rather than
+   * re-deriving it.
+   *
+   * The `adopted_terminal` read is the one that matters: it is the exact
+   * predicate `sendViaPane` branches on, so "staged" here means "that function
+   * will take the staged fork" rather than a guess about it.
+   */
+  async deliveryPlane(run, worker) {
+    const m = await loadEffectModules();
+    const wp = m.paths.workerPaths(run, worker);
+    const launch = await m.state.readWorkerLaunch(wp);
+    if (launch === null) return "rpc";
+    const mode = m.interrupt.launchPaneMode(launch);
+    if (mode === "rpc") return "rpc";
+    if (mode === "unknown") return "unknown";
+    const presentation = await m.state.readPresentation(wp);
+    return presentation?.adopted_terminal === true ? "staged" : "typed";
   },
   async readTaskRecord(run, worker, taskId) {
     const m = await loadEffectModules();
@@ -1446,29 +1819,72 @@ export const consoleFanOut: (input: RelayFanOutInput) => Promise<RelayFanOutResu
     async resolveRuns(input) {
       const m = await loadEffectModules();
       const root = m.paths.runsRoot();
+      const workers = [input.sender, ...REVIEW_CONSOLE_ASPECTS.map((s) => s.worker)];
+
+      /**
+       * AN EXPLICIT MAP WINS, and it is the shape the SRD actually asked for.
+       *
+       * §6.5's preferred home is "a new `pifleet relay --console review` process,
+       * started by `scripts/review`" whose merit is that it "holds the worker→run
+       * map THE SCRIPT ALREADY COMPUTES". The scan below exists because that flag
+       * does not, and it is strictly the weaker answer: the script knows which
+       * four runs it created, and the scan can only guess from what is on disk.
+       * `PIFLEET_RELAY_RUNS` is that map, spelled as `worker=runId` pairs, and it
+       * makes the guess unnecessary rather than safer.
+       */
+      const pinned = relayRunPins(process.env["PIFLEET_RELAY_RUNS"]);
+      if (pinned !== null) {
+        const runs = new Map<string, RunPaths>();
+        for (const worker of workers) {
+          const runId = worker === input.sender ? input.run.runId : pinned.get(worker);
+          if (runId === undefined) continue;
+          runs.set(worker, worker === input.sender ? input.run : m.paths.runPaths(runId, root));
+        }
+        return { runs, ambiguous: new Map<string, readonly string[]>() };
+      }
+
       return resolveConsoleRuns({
         collator: input.sender,
         collatorRun: input.run,
         // The sender plus every seat on the console. Seats the request did not
-        // name cost one `existsSync` each and buy a map that does not depend on
-        // which lenses this particular request happened to ask for.
-        workers: [input.sender, ...REVIEW_CONSOLE_ASPECTS.map((s) => s.worker)],
-        // Newest first: a console restarted after a crash has an older run
-        // holding the same worker id, and the dead one must not win.
+        // name cost one probe each and buy a map that does not depend on which
+        // lenses this particular request happened to ask for.
+        workers,
         listRuns: async () => {
           const ids = await m.paths.runIdsAscending(root);
           return ids.reverse().map((id) => m.paths.runPaths(id, root));
         },
         /**
-         * The worker's DIRECTORY, which `up` creates, and not its `state.json`,
-         * which its supervisor writes. The two differ exactly while a console
-         * is still coming up — the window in which this question is asked most
-         * — and requiring the state file would leave a worker unresolvable for
-         * as long as its supervisor takes to write one. `run_unresolved` is a
-         * retry, so the cheaper predicate costs a tick and the stricter one
-         * costs a fan-out that never happens.
+         * A LIVE worker, not merely a directory that once existed.
+         *
+         * `existsSync(workerPaths(run, worker).dir)` was the predicate and it is
+         * the reason the scan could capture a stranger: `pifleet down` removes
+         * containers and leaves directories, so every run this operator has ever
+         * started still answers `true` for every worker it ever materialised.
+         * The candidate set was therefore "every run on the host", and with the
+         * newest-wins tiebreak that was "whichever fleet came up most recently".
+         *
+         * Liveness narrows it to runs with a supervisor actually holding the
+         * seat, which is the only kind that could serve a dispatch anyway. It
+         * does NOT make the answer unique — two live consoles still collide —
+         * and that is what the ambiguity refusal above is for. The two together
+         * are the fix; either alone is not.
+         *
+         * A worker whose supervisor has not written `state.json` yet reads as
+         * not-live and the fan-out retries, which is correct for a console still
+         * coming up.
          */
-        hasWorker: async (run, worker) => existsSync(m.paths.workerPaths(run, worker).dir),
+        hasWorker: async (run, worker) => {
+          const wp = m.paths.workerPaths(run, worker);
+          if (!existsSync(wp.dir)) return false;
+          try {
+            const state = await m.state.readWorkerState(wp);
+            if (state === null || state.phase === "dead") return false;
+            return (await m.registry.processStartTime(state.pid)) !== null;
+          } catch {
+            return false;
+          }
+        },
       });
     },
     transport: (collator) => consoleTransport(collator, productionRelayEffects),

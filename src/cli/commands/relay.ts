@@ -71,6 +71,7 @@
 
 import type { Command } from "commander";
 import { readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 
 import { CliError } from "../index.ts";
 import { EXIT } from "../../contracts.ts";
@@ -81,7 +82,14 @@ import {
   readDispatchRequest,
 } from "../../run/dispatch-request.ts";
 import { classifyRequest, recordDispatch } from "../../run/relay-journal.ts";
-import { inboxTaskPath, type RunPaths } from "../../run/paths.ts";
+import {
+  inboxTaskPath,
+  runIdsAscending,
+  runPaths,
+  runsRoot,
+  workerPaths,
+  type RunPaths,
+} from "../../run/paths.ts";
 import { resolveRunPaths } from "../worker-preflight.ts";
 
 /**
@@ -479,6 +487,49 @@ async function loadFanOut(): Promise<RelayFanOut> {
 const DEFAULT_POLL_S = 2;
 
 /**
+ * The run to poll when the operator names none — the COLLATOR's, never merely
+ * the newest.
+ *
+ * **`resolveRunPaths(undefined)` is the wrong default here and the failure is
+ * silent.** It answers the newest LIVE run, which is right for `shell`, `abort`
+ * and `exec` — verbs aimed at whatever the operator is working on now. This
+ * command is aimed at one specific run: `relayPass` reads a single run's inbox,
+ * and only the collator's inbox can hold a task whose outbox carries a dispatch
+ * request. Under D4 the console is four runs and the collator is pane 1, created
+ * FIRST, so the newest live run is a reviewer's — and a relay pointed there
+ * enumerates its inbox, finds no collator task, and reports nothing. In loop
+ * mode `emit` prints nothing for an empty pass, so it does that forever, in
+ * silence, looking exactly like a relay with no work to do.
+ *
+ * That is §6.4's failure shape occurring inside the command written to prevent
+ * it: a console that dispatched nothing is indistinguishable from one with
+ * nothing to dispatch.
+ *
+ * So the default is derived from the ROSTER rather than from recency: the newest
+ * live run that actually materialised a collator. Refusing when there is none
+ * beats polling a run that cannot answer — the operator is told which ids were
+ * looked for, and `--run` remains the override for anything unusual.
+ */
+async function resolveCollatorRun(roster: ConsoleRoster): Promise<RunPaths> {
+  const root = runsRoot();
+  const ids = (await runIdsAscending(root)).reverse();
+  for (const id of ids) {
+    const run = runPaths(id, root);
+    for (const collator of roster.collators) {
+      if (existsSync(workerPaths(run, collator).dir)) return run;
+    }
+  }
+  throw new CliError(
+    `no run under ${root} holds a collator (${roster.collators.join(", ")}), so there is no ` +
+      `inbox that could carry a dispatch request. \`relay\` polls ONE run and only a collator's ` +
+      `run can hold a request — the newest live run is a reviewer's under D4, and polling it ` +
+      `would report nothing forever rather than failing. Start the console, or name the run ` +
+      `explicitly with --run.`,
+    EXIT.USAGE,
+  );
+}
+
+/**
  * One line per outcome, for the operator who is watching rather than parsing.
  *
  * **Exported for the unit suite**, on `classifyWorker`'s precedent one directory
@@ -521,7 +572,10 @@ export function register(program: Command): void {
         );
       }
 
-      const run = await resolveRunPaths(opts.run);
+      const run =
+        opts.run === undefined
+          ? await resolveCollatorRun(REVIEW_CONSOLE_ROSTER)
+          : await resolveRunPaths(opts.run);
       const fanOut = await loadFanOut();
       const cache: InboxWorkerCache = new Map();
 

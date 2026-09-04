@@ -78,6 +78,7 @@ import {
 import { renderOutcome } from "../../src/cli/commands/relay.ts";
 import {
   DISPATCH_REQUEST_SCHEMA,
+  REVIEW_CONSOLE_ROSTER,
   type DispatchRequest,
 } from "../../src/run/dispatch-request.ts";
 
@@ -173,6 +174,14 @@ function effects(
         error: null,
         epoch: 7,
       };
+    },
+    /**
+     * The shipped console: `tui` panes with ADOPTED terminals, so every
+     * dispatch is staged. A fixture defaulting to "rpc" would make the typed
+     * plane unreachable and the security refusal untestable.
+     */
+    async deliveryPlane() {
+      return "staged";
     },
     async readTaskRecord() {
       return { verdict: "success" as Verdict };
@@ -275,13 +284,95 @@ describe("dispatch, over THE dispatch path", () => {
     await consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
   });
 
-  test("`pane` lands too — no plane is privileged", async () => {
+  /**
+   * **DELETED AND REPLACED: this block used to assert that `via: "pane"` lands
+   * "too — no plane is privileged".** That test pinned a security defect.
+   *
+   * The non-adopted `tui` pane route does not write a file; it TYPES the
+   * rendered prompt into the surface line by line and presses Enter. The brief
+   * is container-authored and explicitly unsanitized, and a detached or exited
+   * pane hosts the operator's shell. Keeping the old assertion green would have
+   * required keeping that path open.
+   */
+  test("the TYPED plane is refused BEFORE anything is sent", async () => {
+    let sent = 0;
+    const { fx } = effects({
+      async deliveryPlane() {
+        return "typed";
+      },
+      async sendTask() {
+        sent += 1;
+        return { accepted: true, via: "pane", reason: null, error: null, epoch: 4 };
+      },
+    });
+    const p = consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
+    await expect(p).rejects.toBeInstanceOf(RelayDispatchError);
+    // PREFLIGHT: nothing was sent. A post-check would be too late — by the time
+    // `sendTask` returns `via: "pane"` the keystrokes are already typed.
+    expect(sent).toBe(0);
+    await p.catch((err: unknown) => {
+      expect((err as RelayDispatchError).refusal).toBe("pane_delivery_types_the_brief");
+    });
+  });
+
+  test("a launch record whose marks disagree is refused, not guessed", async () => {
+    let sent = 0;
+    const { fx } = effects({
+      async deliveryPlane() {
+        return "unknown";
+      },
+      async sendTask() {
+        sent += 1;
+        return { accepted: true, via: "rpc", reason: null, error: null, epoch: 4 };
+      },
+    });
+    await expect(
+      consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat),
+    ).rejects.toBeInstanceOf(RelayDispatchError);
+    expect(sent).toBe(0);
+  });
+
+  /**
+   * The backstop, for a launch record that changed between the preflight and
+   * the send. Too late to prevent the typing — but a lens whose brief was typed
+   * at a surface must not then be waited on and collated as a review.
+   */
+  test("a `pane` result is refused even when the preflight said staged", async () => {
     const { fx } = effects({
       async sendTask() {
         return { accepted: true, via: "pane", reason: null, error: null, epoch: 4 };
       },
     });
-    await consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
+    await expect(
+      consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat),
+    ).rejects.toBeInstanceOf(RelayDispatchError);
+  });
+
+  /**
+   * ACCEPTED, durable, and still not running. `stageForAdoptedTerminal` answers
+   * this whenever the adopted terminal announces no pane id — Terminal.app,
+   * ssh, a bare tmux pane. Counting it as landed costs the full join deadline
+   * and then the lens.
+   */
+  test("ACCEPTED with a deferred trigger is REJECTED, carrying the instruction", async () => {
+    const { fx } = effects({
+      async sendTask() {
+        return {
+          accepted: true,
+          via: "staged",
+          reason: null,
+          error: "no pane id for this surface; run `pifleet trigger rev-arch-1` in the pane",
+          epoch: 9,
+        };
+      },
+    });
+    const p = consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
+    await expect(p).rejects.toBeInstanceOf(RelayDispatchError);
+    await p.catch((err: unknown) => {
+      expect((err as RelayDispatchError).refusal).toBe("stage_trigger_deferred");
+      // The instruction is the one thing that rescues the operator.
+      expect(String(err)).toContain("pifleet trigger rev-arch-1");
+    });
   });
 
   /**
@@ -509,7 +600,7 @@ describe("resolveConsoleRuns", () => {
 
   test("the collator's own run is used for the collator, never searched for", async () => {
     let searched = 0;
-    const runs = await resolveConsoleRuns({
+    const { runs } = await resolveConsoleRuns({
       collator: "col-1",
       collatorRun: COL_RUN,
       workers: ["col-1"],
@@ -525,7 +616,7 @@ describe("resolveConsoleRuns", () => {
 
   test("a reviewer sharing the collator's run resolves without a scan", async () => {
     let scanned = 0;
-    const runs = await resolveConsoleRuns({
+    const { runs } = await resolveConsoleRuns({
       collator: "col-1",
       collatorRun: COL_RUN,
       workers: ["rev-arch-1"],
@@ -540,7 +631,7 @@ describe("resolveConsoleRuns", () => {
   });
 
   test("each reviewer resolves to the run that actually holds it (D4)", async () => {
-    const runs = await resolveConsoleRuns({
+    const { runs } = await resolveConsoleRuns({
       collator: "col-1",
       collatorRun: COL_RUN,
       workers: ["rev-arch-1", "rev-ctx-1", "rev-lang-1"],
@@ -568,21 +659,26 @@ describe("resolveConsoleRuns", () => {
    *
    * So both candidates hold `rev-arch-1` and the newest must win.
    */
-  test("when two runs hold the same worker, the NEWEST wins", async () => {
+  test("when two runs hold the same worker, NEITHER wins — it is ambiguous", async () => {
     const newest = fakeRun("run-new");
     const corpse = fakeRun("run-old");
-    const runs = await resolveConsoleRuns({
+    const { runs, ambiguous } = await resolveConsoleRuns({
       collator: "col-1",
       collatorRun: COL_RUN,
       workers: ["rev-arch-1"],
-      // Newest first, which is the order the production wiring builds.
+      // Order is deliberately NOT a tiebreak any more — both are reported.
       listRuns: async () => [newest, corpse],
       // Not in the collator's run — otherwise the collator-first branch answers
       // before the scan is reached and this measures the wrong thing.
       hasWorker: async (run, w) => run.runId !== "run-col" && w === "rev-arch-1",
     });
-    expect(runs.get("rev-arch-1")).toBe(newest);
-    expect(runs.get("rev-arch-1")).not.toBe(corpse);
+    // NOT resolved to either. Worker ids are not unique across runs, and
+    // picking the newest is how a review gets dispatched into another fleet's
+    // worker — its secret, its grant, its model, its repo — and collated here.
+    expect(runs.has("rev-arch-1")).toBe(false);
+    expect(ambiguous.get("rev-arch-1")).toEqual(["run-new", "run-old"]);
+    expect(newest.runId).toBe("run-new");
+    expect(corpse.runId).toBe("run-old");
   });
 
   /**
@@ -593,7 +689,7 @@ describe("resolveConsoleRuns", () => {
    * supervisor, which accepts it.
    */
   test("a worker no run holds is simply absent from the map", async () => {
-    const runs = await resolveConsoleRuns({
+    const { runs } = await resolveConsoleRuns({
       collator: "col-1",
       collatorRun: COL_RUN,
       workers: ["rev-arch-1"],
@@ -612,7 +708,7 @@ describe("resolveConsoleRuns", () => {
 describe("the fan-out adapter's result mapping", () => {
   function fanOutWith(fx: RelayEffects, runs = CONSOLE_RUNS) {
     return makeConsoleFanOut({
-      resolveRuns: async () => runs,
+      resolveRuns: async () => ({ runs, ambiguous: new Map() }),
       transport: (sender) => consoleTransport(sender, fx),
     });
   }
@@ -790,7 +886,11 @@ describe("the fan-out adapter's result mapping", () => {
     });
     expect(got.kind).toBe("dispatched");
     if (got.kind !== "dispatched") throw new Error("unreachable");
-    expect([...got.children].sort()).toEqual(["T1-arch", "T1-context", "T1-lang"]);
+    // ISSUED ONLY: rev-ctx-1's dispatch was refused, so its PLANNED id is not
+    // journalled. `relay-journal.ts` calls this list "the ids the fan-out
+    // issued", and a planned id there makes it a second copy of the request.
+    expect([...got.children].sort()).toEqual(["T1-arch", "T1-lang"]);
+    expect(got.children).not.toContain("T1-context");
 
     const collation = sent.find((c) => c.worker === "col-1");
     expect(collation).toBeDefined();
@@ -897,7 +997,7 @@ describe("a collation that does not land", () => {
   test("the adapter maps it to `dispatched`, so the three reviews are journalled", async () => {
     const { fx } = collatorRefuses();
     const got = await makeConsoleFanOut({
-      resolveRuns: async () => CONSOLE_RUNS,
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
       transport: (sender) => consoleTransport(sender, fx),
     })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
 
@@ -921,12 +1021,12 @@ describe("a collation that does not land", () => {
    */
   test("`reason` is present ONLY on the failure — the clean pass has none", async () => {
     const failed = await makeConsoleFanOut({
-      resolveRuns: async () => CONSOLE_RUNS,
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
       transport: (sender) => consoleTransport(sender, collatorRefuses().fx),
     })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
 
     const clean = await makeConsoleFanOut({
-      resolveRuns: async () => CONSOLE_RUNS,
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
       transport: (sender) => consoleTransport(sender, effects().fx),
     })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
 
@@ -953,7 +1053,7 @@ describe("a collation that does not land", () => {
       },
     });
     const got = await makeConsoleFanOut({
-      resolveRuns: async () => CONSOLE_RUNS,
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
       transport: (sender) => consoleTransport(sender, fx),
     })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
     if (got.kind !== "dispatched") throw new Error("unreachable");
@@ -990,5 +1090,155 @@ describe("a collation that does not land", () => {
     });
     expect(line).toContain("1 children");
     expect(line).not.toContain("did not land");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. Nothing landed — the state that must NEVER be journalled.
+// ---------------------------------------------------------------------------
+
+/**
+ * **`survived.length === 0` is true of two opposite states and only one may be
+ * journalled.** §6.6's `not_collated` is "every lens reported and none
+ * survived": three tasks exist, and the journal must record them or the next
+ * tick runs them again. `none_landed` is "nothing was ever started", and
+ * journalling THAT marks a fan-out complete that never happened — `already_done`
+ * on every later tick, the reviews never run, and the operator's row reads
+ * `dispatched 3 children`.
+ *
+ * Reachable with nothing broken: a second review requested while round one is
+ * mid-turn makes every `stage` hit a live fence and answer `busy`.
+ */
+describe("a fan-out where nothing landed", () => {
+  function nothingLands(): { fx: RelayEffects; rec: Recorder } {
+    return effects({
+      async sendTask(_run, worker, d) {
+        throw new Error(`worker ${worker} refused to stage ${d.taskId}: busy`);
+      },
+    });
+  }
+
+  test("the core answers `none_landed`, not `not_collated`", async () => {
+    const { fx } = nothingLands();
+    const outcome = await relayFanOut<RunPaths>({
+      request: request(),
+      sender: "col-1",
+      runs: CONSOLE_RUNS,
+      transport: consoleTransport("col-1", fx),
+    });
+    expect(outcome.kind).toBe("none_landed");
+  });
+
+  test("it is NOT journalled — the adapter answers `not_dispatched`", async () => {
+    const { fx } = nothingLands();
+    const got = await makeConsoleFanOut({
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
+      transport: (sender) => consoleTransport(sender, fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+
+    expect(got.kind).toBe("not_dispatched");
+    if (got.kind !== "not_dispatched") throw new Error("unreachable");
+    expect(got.reason).toContain("NOT ONE landed");
+  });
+
+  /**
+   * THE DISCRIMINATOR, and for the third time it is deliberately not the child
+   * count. "Nothing landed" and "nothing survived" produce the same three seats
+   * and the same zero survivors; only `kind` separates them, and the pair is
+   * asserted together so a mutation collapsing them cannot pass by satisfying
+   * the half that is easy.
+   */
+  test("`nothing landed` and `nothing survived` are told apart", async () => {
+    // Nothing survived: every dispatch LANDS, every harvest is timed_out.
+    const survivedNone = effects({
+      async harvestTask() {
+        return { harvest: { verdict: "timed_out" as Verdict } };
+      },
+    }).fx;
+    const landedNone = nothingLands().fx;
+
+    const a = await makeConsoleFanOut({
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
+      transport: (sender) => consoleTransport(sender, survivedNone),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+
+    const b = await makeConsoleFanOut({
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
+      transport: (sender) => consoleTransport(sender, landedNone),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+
+    // Work happened -> journalled, with the three ids.
+    expect(a.kind).toBe("dispatched");
+    if (a.kind !== "dispatched") throw new Error("unreachable");
+    expect([...a.children].sort()).toEqual(["T1-arch", "T1-context", "T1-lang"]);
+
+    // Nothing happened -> NOT journalled.
+    expect(b.kind).toBe("not_dispatched");
+  });
+
+  test("a request naming no seat this console holds is a no-op, and IS journalled", async () => {
+    const { fx } = effects();
+    const empty = { ...request(), requests: [] } as DispatchRequest;
+    const got = await makeConsoleFanOut({
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
+      transport: (sender) => consoleTransport(sender, fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: empty });
+    // Nothing was ATTEMPTED, so nothing failed. Journalled so it is not
+    // re-evaluated on every tick forever.
+    expect(got.kind).toBe("dispatched");
+    if (got.kind !== "dispatched") throw new Error("unreachable");
+    expect(got.children).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. An ambiguous console is refused, not guessed.
+// ---------------------------------------------------------------------------
+
+describe("worker→run ambiguity", () => {
+  test("ANY ambiguous seat stops the whole fan-out before a dispatch", async () => {
+    const { fx, rec } = effects();
+    const got = await makeConsoleFanOut({
+      resolveRuns: async () => ({
+        runs: CONSOLE_RUNS,
+        ambiguous: new Map([["rev-arch-1", ["run-a", "run-b"]]]),
+      }),
+      transport: (sender) => consoleTransport(sender, fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+
+    expect(got.kind).toBe("not_dispatched");
+    if (got.kind !== "not_dispatched") throw new Error("unreachable");
+    expect(got.reason).toContain("run-a");
+    expect(got.reason).toContain("run-b");
+    // Fail CLOSED: the unambiguous seats are not dispatched either. A review
+    // whose lenses came from two fleets would report as corroboration.
+    expect(rec.sent).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. The roster and the aspect table are two spellings of one list.
+// ---------------------------------------------------------------------------
+
+/**
+ * Not live today, and cheap to keep that way.
+ *
+ * `REVIEW_CONSOLE_ROSTER.reviewers` decides whose requests are ACCEPTED;
+ * `REVIEW_CONSOLE_ASPECTS` decides which seats are WALKED. They are independent
+ * spellings of the same three ids. A roster that gained a fourth reviewer with
+ * no seat would accept requests naming it and then drop that lens from BOTH
+ * `children` and `missing` — a lens that is neither reported nor reported
+ * missing, which is the one outcome §6.6's brief cannot describe.
+ */
+describe("the roster and the aspect table agree", () => {
+  test("every reviewer holds exactly one aspect, and every aspect one reviewer", () => {
+    const seated = REVIEW_CONSOLE_ASPECTS.map((s) => s.worker).sort();
+    expect([...REVIEW_CONSOLE_ROSTER.reviewers].sort()).toEqual(seated);
+  });
+
+  test("no collator holds a seat", () => {
+    for (const c of REVIEW_CONSOLE_ROSTER.collators) {
+      expect(REVIEW_CONSOLE_ASPECTS.some((s) => s.worker === c)).toBe(false);
+    }
   });
 });
