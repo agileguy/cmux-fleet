@@ -33,6 +33,7 @@ import {
   type TaskEnvelope,
   type Verdict,
 } from "../contracts.ts";
+import { collationCeiling } from "../run/collation.ts";
 import { workerOutboxDir, workerPaths, taskRecordPath, type RunPaths } from "../run/paths.ts";
 import { readTaskRecord, readWorkerLaunch, readWorkerState } from "../run/state.ts";
 import { worktreeContentHash } from "../run/treehash.ts";
@@ -550,6 +551,18 @@ export async function harvestTask(
         git.facts.files_changed.map((f) => f.path),
         opts.harnessPatterns,
       ),
+      /**
+       * The collation census (SRD-REVIEW-CONSOLE §6.8, D8), from the reconciler
+       * that held the descriptor — a FACT, so it is inside `facts_hash` and an
+       * adjudication that reads it replays (ISC-153).
+       *
+       * `null` for every task whose outbox held no `collation.json`, which is
+       * every task in this fleet except a review console's collation. That is
+       * the correct shape rather than an omission: `censusCeiling` returns
+       * `null` for a null census, so nothing else in the pipeline changes for
+       * any other role.
+       */
+      collation: reconciled.collation,
     };
 
     /**
@@ -765,6 +778,45 @@ export async function harvestTask(
       );
     }
 
+    /**
+     * §6.8's THIRD RULE and its two siblings — `src/run/collation.ts`'s
+     * `collationCeiling`, applied HERE and not in `adjudicate`.
+     *
+     * WHY HERE. It needs two things the fact bundle does not carry and should
+     * not: the parsed DOCUMENT (its `missing`/`refused`/`ok` arms are about the
+     * artifact, and the adjudicator never sees a descriptor) and the TASK ID.
+     * The task id is the load-bearing one. §6.6 makes a review two tasks — the
+     * fan-out `T`, which settles the moment the request is issued and correctly
+     * writes no collation, and `T-collate`, which is the one that reads three
+     * replies. Every other task in the fleet is also missing a collation. So a
+     * rule that fired on "no collation artifact" without that guard would cap
+     * every `success` in the fleet, and `isCollationTaskId` is what makes the
+     * function unmisusable rather than documented-as-not-to-be.
+     *
+     * WHY NOT DUPLICATED IN `adjudicate`. The census's own ceiling implements
+     * §6.8's FIRST rule only — the location check, which needs the run's
+     * `container_workdir` and which the collation schema explicitly delegates.
+     * Rules 2 and 3 have exactly one implementation each and neither is here:
+     * attribution is `CollationSchema`'s `superRefine`, and this is rule 3.
+     *
+     * A CEILING, and the `rank` guard is what makes that true rather than
+     * intended: `rank("unknown")` is -1, so a harvest ISC-154 or ISC-151 already
+     * refused to grade is untouched, and nothing this reads can raise a verdict.
+     */
+    const collationCap = collationCeiling(
+      taskId,
+      // No envelope is `unknown`, which is NOT `success`, so the rule declines —
+      // deliberately. A task whose worker wrote nothing is graded on the
+      // harvester's own evidence, and a document the worker wrote must not pull
+      // that down. `collationCeiling`'s header makes the same argument.
+      claimed?.status ?? "unknown",
+      reconciled.collationRead,
+    );
+    if (collationCap.reason !== null && rank(verdict) > rank(collationCap.status)) {
+      verdict = collationCap.status;
+      reasons.push(collationCap.reason);
+    }
+
     // The supervisor's terminal verdicts outrank derived evidence: `aborted`
     // and `timed_out` are facts about the RUN, not inferences from the tree
     // (§7.3), and no amount of clean diff makes an aborted task complete.
@@ -826,6 +878,17 @@ export async function harvestTask(
         artifacts: reconciled.artifacts,
       },
       discrepancies,
+      /**
+       * §6.8's second rule made VISIBLE IN THE RECORD: the consensus bands, the
+       * finding counts, and every shape defect the census found, published
+       * beside the verdict they capped rather than only summarised into it.
+       *
+       * A reader of `pifleet artifacts --json` for a collation task can see
+       * `3/3` and `1/3` without opening the artifact. `facts_hash` covers the
+       * same numbers, so the published copy and the graded copy are provably
+       * the same measurement.
+       */
+      collation: factsWithHarness.collation,
       session_path: state?.session_path ?? null,
       facts_hash: adj.facts_hash,
     });

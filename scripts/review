@@ -39,14 +39,38 @@
  * carries the matching refusal for Broadcom and AppNeta remotes.
  *
  * Running it twice is safe and is the expected way to get back to the console:
- * a `review` workspace that already exists is selected, not rebuilt. See
- * `src/backends/cmux/operations.ts` for why rebuilding would be destruction.
+ * a `review` workspace that already exists is selected, not rebuilt — unless its
+ * panes are not this console's, in which case it is REFUSED rather than adopted
+ * (§6.10). See `adoptionRefusal` for the measured reason that guard exists.
  *
- * Only I/O lives here. The decisions are in `src/backends/cmux/operations-plan.ts`
- * and `src/backends/cmux/operations.ts`, where `test/unit/review-plan.test.ts`
- * re-checks them on every run.
+ * ## THE FIFTH PROCESS
+ *
+ * Four panes are four workers and none of them is the ACTOR. A collator can only
+ * ask for a fan-out by writing `dispatch-request.json` into its outbox; something
+ * host-side has to read that and perform the dispatches, and that something is
+ * `pifleet relay`. Without it this console has four healthy workers and no way
+ * for the collator's request to become three reviews.
+ *
+ * So this script starts one, and `src/run/console-relay.ts` is where the
+ * supervision story is written down — including the part of it that is not
+ * honoured. Read that header before assuming the relay is looked after.
+ *
+ * WHY IT IS NOT WAITED FOR. On a fresh `--recreate` or a first run, the four
+ * `pifleet up`s have not finished when this returns, so no run exists to point a
+ * relay at. This script does NOT block waiting for them: `up` runs the tool-call
+ * gate over every allowlisted model *"sequential and mandatory"*, which §6.2
+ * measures at up to 7.5 minutes worst case, and a console script that hangs for
+ * minutes is one an operator kills. It prints the one-line remedy instead — run
+ * this script again, which is the thing the docblock above already says is the
+ * way back to the console.
+ *
+ * Only I/O lives here. The decisions are in `src/backends/cmux/operations-plan.ts`,
+ * `src/backends/cmux/operations.ts`, `src/run/status-runs.ts` and
+ * `src/run/console-relay.ts`, where the unit suites re-check them on every run.
  */
 
+import { closeSync, openSync } from "node:fs";
+import { rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { CmuxClient } from "../src/backends/cmux/client.ts";
@@ -63,8 +87,18 @@ import {
   ensureReview,
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
+import {
+  RelayRecordSchema,
+  consoleRelayArgv,
+  readRelayStatus,
+  relayLogPath,
+  relayRecordPath,
+  signalRelay,
+} from "../src/run/console-relay.ts";
+import { REVIEW_CONSOLE_ROSTER } from "../src/run/dispatch-request.ts";
 import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
-import { runsHoldingAny } from "../src/run/status-runs.ts";
+import { processStartTime } from "../src/safety/procstart.ts";
+import { consoleRunPins, relayRunPinValue, runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/review [options]
 
@@ -78,6 +112,10 @@ const USAGE = `Usage: scripts/review [options]
   --task <path>     with --restart: recreate the worker, then dispatch this
                     task to the run it comes back in. Waits for any task it
                     is already holding to finish; never recreates over work.
+  --no-relay        do not start the actor. The console then has four workers
+                    and nothing that turns a collator's dispatch request into
+                    reviews; use it when running 'pifleet relay' by hand.
+  --relay-stop      stop this console's actor and exit, touching no pane.
   -h, --help        this message
 `;
 
@@ -101,6 +139,17 @@ async function main(argv: string[]): Promise<number> {
   const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
   const watchDir = process.cwd();
 
+  /*
+   * `--relay-stop` is answered BEFORE the cmux probe, and that is the point of
+   * it: the reason an operator reaches for it is usually that the console is
+   * already gone, and a flag whose whole job is to stop a stray host process
+   * must not require the GUI that stray process outlived.
+   */
+  if (argv.includes("--relay-stop")) {
+    await stopRelay("because --relay-stop was given");
+    return EXIT.SUCCESS;
+  }
+
   const workersFlag = flag(argv, "--workers");
 
   const opts = {
@@ -119,6 +168,17 @@ async function main(argv: string[]): Promise<number> {
   };
 
   /**
+   * The console's four workers, resolved ONCE.
+   *
+   * The relay's `PIFLEET_RELAY_RUNS` pin has to name the same set the panes were
+   * built from, or it pins three of four and `consoleRunResolution` — which
+   * takes the pinned branch whole — leaves the fourth unresolved for the life of
+   * the process. Re-deriving `opts.workers ?? DEFAULT_REVIEW_WORKERS` at each
+   * site is how those two sets come to differ under a `--workers` flag.
+   */
+  const reviewWorkers = opts.workers ?? DEFAULT_REVIEW_WORKERS;
+
+  /**
    * Which of these workers want Pi's own interface — READ FROM THE CONFIG, for
    * the reason `scripts/development` records: assuming it would put
    * `--attach-here` on a worker that resolves to `rpc`, and `up` correctly
@@ -128,7 +188,7 @@ async function main(argv: string[]): Promise<number> {
   let tuiWorkers: string[] = [];
   try {
     const loaded = await loadConfig(opts.configPath ?? `${repoRoot}/fleet.yaml`);
-    const set = opts.workers ?? DEFAULT_REVIEW_WORKERS;
+    const set = reviewWorkers;
     tuiWorkers = set.filter((w) => resolveWorker(loaded, w).paneMode === "tui");
   } catch (err) {
     process.stderr.write(
@@ -161,7 +221,9 @@ async function main(argv: string[]): Promise<number> {
    * consoles' runs are somebody else's and must survive a review rebuild.
    */
   if (argv.includes("--recreate")) {
-    const mine = new Set(opts.workers ?? DEFAULT_REVIEW_WORKERS);
+    // BEFORE the runs go down, not after: the relay holds their ids.
+    await stopRelay("before the console's runs are stopped");
+    const mine = new Set(reviewWorkers);
     const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
     for (const runId of runsHoldingAny(json, mine)) {
       process.stderr.write(`review: stopping run ${runId} before rebuilding\n`);
@@ -190,6 +252,14 @@ async function main(argv: string[]): Promise<number> {
    */
   const restartFlag = flag(argv, "--restart");
   if (restartFlag !== undefined) {
+    /*
+     * ANY pane, not only the collator's. The relay holds `--run` for the
+     * collator and a `PIFLEET_RELAY_RUNS` pin for the other three, both fixed
+     * for the life of the process, so respawning a reviewer's pane leaves a
+     * relay whose pin names a run that no longer exists — and a pinned worker
+     * that cannot be resolved refuses every fan-out, quietly, forever.
+     */
+    await stopRelay(`before the ${restartFlag} pane is respawned`);
     const taskFlag = flag(argv, "--task");
     const restartPane = async (): Promise<string> => {
       const r = await restartConsolePane(client, REVIEW_SPEC, { ...opts, tuiWorkers }, restartFlag);
@@ -242,6 +312,7 @@ async function main(argv: string[]): Promise<number> {
           `stopped ${r.stopped.length === 0 ? "nothing" : r.stopped.join(", ")}) ` +
           `and dispatched ${taskFlag}\n${r.dispatched}`,
       );
+      if (!argv.includes("--no-relay")) await startRelay(repoRoot, reviewWorkers);
       return EXIT.SUCCESS;
     }
 
@@ -255,6 +326,7 @@ async function main(argv: string[]): Promise<number> {
       `review: respawned the ${restartFlag} pane (surface ${surfaceId}); ` +
         `the other panes were not touched\n`,
     );
+    if (!argv.includes("--no-relay")) await startRelay(repoRoot, reviewWorkers);
     return EXIT.SUCCESS;
   }
 
@@ -267,7 +339,192 @@ async function main(argv: string[]): Promise<number> {
       : `review: workspace ${result.workspaceId} is already in place — selected it, ` +
         `changed nothing (use --recreate to rebuild its panes)\n`,
   );
+
+  /**
+   * THE FIFTH PROCESS, started last.
+   *
+   * After the panes and never before them: on an adoption the runs are already
+   * up and the pin resolves immediately, and on a fresh create nothing is up yet
+   * either way. Starting first would only mean pointing a relay at the console
+   * that existed a moment ago.
+   *
+   * A failure here does NOT fail the script. The console was built, which is
+   * what the operator asked for; `startRelay` prints the remedy on every path it
+   * declines, and an exit code that reported "no console" because a background
+   * poller could not start would be the wrong answer to the wrong question.
+   */
+  if (!argv.includes("--no-relay")) await startRelay(repoRoot, reviewWorkers);
   return EXIT.SUCCESS;
+}
+
+/**
+ * Stop this console's actor, if one we recorded is still running.
+ *
+ * Called before anything that stops a run — `--recreate` and every `--restart`
+ * — because a relay's whole configuration is run ids. It holds `--run <id>` for
+ * the collator and, when the map was complete, a `PIFLEET_RELAY_RUNS` pin for
+ * the other three; both are fixed for the life of the process. Restarting ANY
+ * pane invalidates them, and a relay left pointing at a dead run polls forever
+ * in silence, which is §6.4's failure shape reached from the operator's side.
+ *
+ * An UNREADABLE record is left exactly where it is and nothing is signalled.
+ * The pid in it could not be identified, and a pidfile whose identity cannot be
+ * confirmed is the one thing this must never send a signal to — `down.ts`
+ * refuses every pid it cannot confirm for the same reason.
+ */
+async function stopRelay(why: string): Promise<void> {
+  const path = relayRecordPath();
+  const status = await readRelayStatus(path);
+  switch (status.kind) {
+    case "absent":
+      return;
+    case "unreadable":
+      process.stderr.write(
+        `review: the relay record at ${path} could not be read (${status.reason}); ` +
+          `nothing was signalled and the file was left alone\n`,
+      );
+      return;
+    case "stale":
+      await rm(path, { force: true });
+      return;
+    case "live": {
+      const outcome = signalRelay(status.record.pid);
+      process.stderr.write(
+        `review: stopping the relay (pid ${status.record.pid}, run ${status.record.run_id}) ` +
+          `${why} — ${outcome}\n`,
+      );
+      if (outcome !== "refused") await rm(path, { force: true });
+      return;
+    }
+  }
+}
+
+/**
+ * Start this console's actor, or say precisely why it was not started.
+ *
+ * ## Idempotent, because "run it again" is the whole supervision story
+ *
+ * `src/run/console-relay.ts` argues it: a relay derives its state from the run
+ * tree, so restarting one costs nothing and losing one costs only latency. That
+ * only holds if something restarts it, and the something is this script — which
+ * the docblock at the top already calls the expected way back to the console. So
+ * a LIVE relay is left alone and a dead record is replaced, and running
+ * `./scripts/review` twice never produces two.
+ *
+ * ## The pin is all-or-nothing and usually absent on a fresh create
+ *
+ * `PIFLEET_RELAY_RUNS` is §6.5's preferred shape — *"holds the worker→run map
+ * the script already computes"* — and `relayRunPinValue` refuses to spell a
+ * partial one, because `consoleRunResolution` takes the pinned branch WHOLE and
+ * a worker missing from the pin is missing for the life of the process. On a
+ * fresh create no run exists yet, so nothing is pinned and nothing is started;
+ * on the re-run that adopts the console, all four are live and the pin is exact.
+ * The fallback in between is the relay's own scan, which is re-taken every tick
+ * and therefore converges as the console comes up.
+ */
+async function startRelay(repoRoot: string, workers: readonly string[]): Promise<void> {
+  const path = relayRecordPath();
+  const existing = await readRelayStatus(path);
+  if (existing.kind === "live") {
+    process.stdout.write(
+      `review: the relay is already running (pid ${existing.record.pid}, run ` +
+        `${existing.record.run_id}); its output is in ${existing.record.log_path}\n`,
+    );
+    return;
+  }
+  if (existing.kind === "unreadable") {
+    process.stderr.write(
+      `review: the relay record at ${path} could not be read (${existing.reason}), so no relay ` +
+        `was started — the console has no actor. Remove that file once you know what the pid in ` +
+        `it belongs to.\n`,
+    );
+    return;
+  }
+
+  /**
+   * WHICH worker is the collator comes from the ROSTER, not from pane order.
+   * `relayPass` reads ONE run's inbox and only a collator's inbox can hold a
+   * dispatch request, so pointing the relay anywhere else produces a process
+   * that reports nothing forever and looks like one with no work to do.
+   */
+  const collator = workers.find((w) => REVIEW_CONSOLE_ROSTER.collators.includes(w));
+  if (collator === undefined) {
+    process.stderr.write(
+      `review: none of ${workers.join(", ")} is a collator ` +
+        `(${REVIEW_CONSOLE_ROSTER.collators.join(", ")}), so there is no inbox a dispatch ` +
+        `request could arrive in and no relay was started\n`,
+    );
+    return;
+  }
+
+  const map = consoleRunPins(await runOutput(repoRoot, ["status", "--all", "--json"]), workers);
+  const runId = map.pins.get(collator);
+  if (runId === undefined) {
+    const why =
+      map.ambiguous.has(collator)
+        ? `${collator} is held by ${(map.ambiguous.get(collator) ?? []).join(", ")}, so which run ` +
+          `is this console's is not decidable from the outside`
+        : `no live run holds ${collator} yet`;
+    process.stdout.write(
+      `review: the relay was NOT started — ${why}. The console has four workers and nothing that ` +
+        `turns a collator's dispatch request into reviews until it is. Run ./scripts/review again ` +
+        `once the panes have come up.\n`,
+    );
+    return;
+  }
+
+  const pinned = relayRunPinValue(map, workers);
+  const logPath = relayLogPath();
+  // Appended to, never truncated: the log is the only place a refusal a detached
+  // process printed can be read afterwards, and a restart must not erase the
+  // reason the previous relay stopped.
+  const fd = openSync(logPath, "a");
+  let proc: Bun.Subprocess;
+  try {
+    proc = Bun.spawn(consoleRelayArgv(`${repoRoot}/src/cli/index.ts`, runId), {
+      cwd: repoRoot,
+      env: pinned === null ? process.env : { ...process.env, PIFLEET_RELAY_RUNS: pinned },
+      stdin: "ignore",
+      stdout: fd,
+      stderr: fd,
+    });
+  } finally {
+    closeSync(fd);
+  }
+  // Detached from this script's lifetime: the console outlives the command that
+  // opened it, and so must its actor.
+  proc.unref();
+
+  /**
+   * The identity is captured AFTER the spawn and from the OS, never invented.
+   * A record carrying a pid and a `started` this process made up would compare
+   * unequal to itself on the next run and every relay would look stale.
+   */
+  let started: string;
+  try {
+    started = (await processStartTime(proc.pid)) ?? "";
+  } catch {
+    started = "";
+  }
+  await writeFile(
+    path,
+    `${JSON.stringify(
+      RelayRecordSchema.parse({
+        schema: "pifleet.consolerelay/v1",
+        pid: proc.pid,
+        started,
+        run_id: runId,
+        pinned,
+        started_at: new Date().toISOString(),
+        log_path: logPath,
+      }),
+    )}\n`,
+  );
+  process.stdout.write(
+    `review: started the relay (pid ${proc.pid}) polling run ${runId}` +
+      `${pinned === null ? " with no worker pin — it will scan for the reviewers' runs" : ` pinned to ${pinned}`}\n` +
+      `review: its output is in ${logPath}; stop it with ./scripts/review --relay-stop\n`,
+  );
 }
 
 /**

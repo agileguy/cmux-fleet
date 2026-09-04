@@ -224,6 +224,61 @@ export function surfaceForTitle(panes: readonly TitledPane[], title: string): st
   return panes.find((p) => p.title === title)?.surfaceId ?? null;
 }
 
+/**
+ * WHY A WORKSPACE MAY NOT BE ADOPTED — SRD-REVIEW-CONSOLE §6.10, and `null` when
+ * it may.
+ *
+ * ## The measured hazard, not a hypothetical one
+ *
+ * §0.5 correction 5: **a `review` workspace already existed on this machine**
+ * before this console did, and `findWorkspaceByTitle` matches `custom_title`
+ * EXACTLY. So `ensureWorkspace` adopts it, `--recreate` closes it, and
+ * `--restart <id>` respawns one of its panes with a `pifleet up` command. Every
+ * one of those is destruction of a window somebody was working in, arrived at by
+ * a name collision, and §6.10 states the consequence in as many words: *"Silently
+ * adopting a person's workspace and respawning its panes is data loss."*
+ *
+ * ## Verify rather than refuse outright, which §6.10 offers as the alternative
+ *
+ * The bare refusal — "a `review` workspace exists, pass `--recreate`" — would
+ * also refuse the LEGITIMATE re-open, and `scripts/review`'s own docblock says
+ * re-running it *"is the expected way to get back to the console"*. Verifying is
+ * the arm that keeps that: a workspace whose panes are this console's panes is
+ * this console, and one whose panes are anything else is somebody's window.
+ *
+ * ## Titles as a MULTISET, and why not in order
+ *
+ * `createWorkspace` titles each pane with its worker id (`operations-plan.ts`,
+ * *"The id is also what `dispatch --worker` takes, so the title is the
+ * argument"*), so the planned titles are exactly what a console of ours holds. A
+ * multiset comparison catches a missing pane, an extra pane, an unfamiliar pane
+ * and a duplicated one.
+ *
+ * ORDER IS DELIBERATELY NOT CHECKED. `list-panes` does not promise creation
+ * order, so an order comparison would refuse a healthy console on a property
+ * cmux never guaranteed — a FALSE refusal, which here means telling an operator
+ * to `--recreate` a console that was fine, i.e. causing the exact destruction
+ * this guard exists to prevent. The layout is re-asserted by the plan on every
+ * rebuild and is checked structurally by the plan's own suite.
+ */
+export function adoptionRefusal(
+  workspaceName: string,
+  present: readonly (string | null)[],
+  planned: readonly string[],
+): string | null {
+  const key = (xs: readonly (string | null)[]): string =>
+    [...xs].map((t) => t ?? " untitled").sort().join("");
+  if (key(present) === key(planned)) return null;
+  return (
+    `${workspaceName}: a workspace already titled '${workspaceName}' is open and its panes are ` +
+    `not this console's. It holds ${
+      present.length === 0 ? "no panes" : present.map((t) => t ?? "(untitled)").join(", ")
+    }; this console plans ${planned.join(", ")}. It is NOT adopted: adopting it would respawn ` +
+    `those panes with pifleet commands and lose whatever is in them. Rename or close that ` +
+    `workspace, or pass --recreate to replace it deliberately.`
+  );
+}
+
 /** What {@link restartConsolePane} did, for the caller to report. */
 export interface RestartResult {
   readonly workspaceId: string;
@@ -584,9 +639,36 @@ export async function ensureWorkspace(
   spec: WorkspaceSpec,
   opts: OperationsPlanOptions,
   recreate = false,
+  /**
+   * §6.10's adoption guard, OPT-IN — `undefined` keeps this function's existing
+   * behaviour byte for byte.
+   *
+   * Opt-in rather than universal because the hazard is not universal. §6.10
+   * scopes the refusal to `scripts/review`, and it is scoped there because
+   * `review` is the console whose name collided with a workspace that was
+   * already open. `operations` and `development` have been adopting their own
+   * workspaces for months against consoles this repository created, and turning
+   * a guard on for them would convert every stale-but-mine console — the exact
+   * state the `--recreate` docblock above describes and tolerates — into a
+   * refusal. A guard that fires on the healthy case is one that gets deleted.
+   *
+   * The predicate is passed IN rather than derived from `spec`, so this function
+   * stays a workspace operation and the console-shaped policy stays with the
+   * console.
+   */
+  guard?: (panes: readonly TitledPane[]) => string | null,
 ): Promise<EnsureResult> {
   const existing = await findWorkspace(client, spec.name);
   if (existing !== null && !recreate) {
+    /**
+     * CHECKED BEFORE THE SELECT, not after. `selectWorkspaceArgv` raises
+     * somebody else's window to the front and steals their focus, which is a
+     * small harm and still one this refusal has no reason to cause.
+     */
+    if (guard !== undefined) {
+      const refusal = guard(await titledPanes(client, existing));
+      if (refusal !== null) throw new Error(refusal);
+    }
     await client.runOk(selectWorkspaceArgv(existing));
     return { created: false, workspaceId: existing };
   }
@@ -623,11 +705,30 @@ export async function ensureDevelopment(
   return ensureWorkspace(client, DEVELOPMENT_SPEC, opts, recreate);
 }
 
-/** {@link ensureWorkspace} for the four-agent multi-model review console. */
+/**
+ * {@link ensureWorkspace} for the four-agent multi-model review console, WITH
+ * §6.10's adoption guard.
+ *
+ * The one console that carries it, and the reason is `Docs/SRD-REVIEW-CONSOLE.md`
+ * §0.5 correction 5: a `review` workspace was already open on this machine
+ * before this feature existed. See {@link adoptionRefusal}.
+ *
+ * `--recreate` is deliberately NOT guarded. It is the operator saying "replace
+ * that workspace", which is the whole remedy the refusal names, and a flag whose
+ * own error message tells you to pass it and then refuses when you do is not a
+ * guard, it is a wall.
+ */
 export async function ensureReview(
   client: CmuxClient,
   opts: OperationsPlanOptions,
   recreate = false,
 ): Promise<EnsureResult> {
-  return ensureWorkspace(client, REVIEW_SPEC, opts, recreate);
+  const planned = planPanes(REVIEW_SPEC, opts).map((p) => p.title);
+  return ensureWorkspace(client, REVIEW_SPEC, opts, recreate, (panes) =>
+    adoptionRefusal(
+      REVIEW_SPEC.name,
+      panes.map((p) => p.title),
+      planned,
+    ),
+  );
 }

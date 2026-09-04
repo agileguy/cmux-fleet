@@ -1021,6 +1021,121 @@ export const LedgerRecordSchema = z.object({
 export type LedgerRecord = z.infer<typeof LedgerRecordSchema>;
 
 // ---------------------------------------------------------------------------
+// The STRUCTURAL CENSUS of a collation (SRD-REVIEW-CONSOLE §6.8, D8).
+// ---------------------------------------------------------------------------
+
+/**
+ * What the harvester COUNTED in a collation document, and what it found wrong
+ * with the shape of it.
+ *
+ * ## THIS IS NOT ACCEPTANCE AND MUST NEVER BE SPELLED AS ACCEPTANCE
+ *
+ * `AcceptanceRunSchema` records the exit codes of commands THE HARVESTER
+ * re-ran, resolved from the base SHA, in a fresh clone, in a container the
+ * worker never touched — `adjudicate.ts` calls that *"the one piece of evidence
+ * in this function a fabricating worker cannot author"*. **A census has none of
+ * that.** Every number in this object is read out of a JSON file the worker
+ * wrote, in a directory the worker owns, describing findings the worker chose to
+ * report. It bounds the SHAPE of a claim; it does not verify the claim, and it
+ * cannot: §6.8 is explicit that there is no argv whose exit code is evidence
+ * that judgement happened, and that *"calling it acceptance would be claiming an
+ * independence it does not possess."*
+ *
+ * So the census sits BESIDE `acceptance` in the fact bundle rather than inside
+ * it, is named for counting rather than for certifying, and its clamp can only
+ * ever lower a verdict. A review's verdict remains substantially the worker's
+ * own claim; what this adds is that the claim has to have a checkable shape and
+ * that its consensus counts are on the record where a person can read them.
+ *
+ * ## What each number is a count OF
+ *
+ * `declared` is the document's own `finding_count` — the worker's arithmetic.
+ * `counted` is `findings.length` — the harvester's. They are separate fields
+ * precisely so a document that says "4 findings" over a list of two is a visible
+ * disagreement rather than a number nobody re-added.
+ *
+ * `located` and `attributed` are the two per-finding rules of §6.8, counted
+ * rather than asserted, so a partial failure ("seven findings, five located") is
+ * legible in the record instead of collapsing to a boolean.
+ */
+export const CollationCensusSchema = z.object({
+  /**
+   * Whether the artifact parsed as a collation document at all.
+   *
+   * `false` is a DIFFERENT state from an absent census, and both are reachable:
+   * a task with no collation artifact carries `null` here and no census, while a
+   * task whose `collation.json` is truncated, hostile, or some other document
+   * entirely carries a census with `readable: false`. Folding the two together
+   * would make "nobody wrote one" and "somebody wrote something unreadable"
+   * indistinguishable, which is the shape of silence §6.4 spends its header on.
+   */
+  readable: z.boolean(),
+  /** `CollationRefusal`'s code when the artifact was refused; `null` otherwise. */
+  refusal: shortStr.nullable().default(null),
+  /**
+   * The document's OWN `finding_count`; `null` when it could not be read.
+   *
+   * Published BESIDE `counted` and deliberately not reconciled with it.
+   * `src/run/collation.ts` requires the field and does not cross-check it, on
+   * the argument that this pair is the point: a collator that writes a prose
+   * report with four findings and a list with two has truncated itself, and
+   * neither number says so alone. Capping on the disagreement would make the
+   * datum cost something to record, which is how a field like that comes to be
+   * quietly omitted.
+   */
+  declared: z.number().int().nonnegative().nullable().default(null),
+  /** `findings.length` — the number every consumer counts. */
+  counted: z.number().int().nonnegative().default(0),
+  /** Findings whose `file`+`line` resolve inside the container workdir mount. */
+  located: z.number().int().nonnegative().default(0),
+  /**
+   * §6.8's DENOMINATOR: how many lenses the console had, how many reported, and
+   * which aspects did not.
+   *
+   * A count of readers who agreed is not `3/3` without it — a finding raised by
+   * two of three and one raised by two of two both read as `2`. Recorded as a
+   * DATUM and consulted by no ceiling: §9 Q6 has not settled whether coverage
+   * belongs on the verdict axis at all (*"a two-lens review is complete work
+   * with a missing lens"*), and this record is what lets that question stay open
+   * rather than being answered by a grader that had to pick something.
+   */
+  lenses_total: z.number().int().nonnegative().default(0),
+  lenses_reported: z.number().int().nonnegative().default(0),
+  lenses_missing: z.array(shortStr).max(MAX_ITEMS).default([]),
+  /**
+   * §6.8's second rule, MADE VISIBLE: findings grouped by how many reviewers
+   * raised them, ascending. `[{reviewers: 1, findings: 2}, {reviewers: 3,
+   * findings: 1}]` against `lenses_total: 3` is "two 1/3s and one 3/3".
+   *
+   * A histogram rather than a per-finding list because the record's job here is
+   * the consensus BAND — §1.3's arithmetic is over how many independent readers
+   * agreed — and the findings themselves are in the artifact, digested and
+   * hashed in `derived.artifacts`, for anyone who needs them.
+   */
+  agreement: z
+    .array(
+      z.object({
+        reviewers: z.number().int().nonnegative(),
+        findings: z.number().int().nonnegative(),
+      }),
+    )
+    .max(MAX_ITEMS)
+    .default([]),
+  /**
+   * Location defects, already escaped and safe to print. EMPTY means every
+   * finding resolved.
+   *
+   * Only §6.8's FIRST rule produces entries here. Rule 2 is enforced by
+   * `CollationSchema` — a document with an unattributed finding never parses —
+   * and rule 3 is `collationCeiling`'s, guarded on the task id. A census
+   * therefore reports the one class of defect that a schema structurally cannot
+   * see, and nothing it can.
+   */
+  defects: z.array(text).max(MAX_ITEMS).default([]),
+});
+export type CollationCensus = z.infer<typeof CollationCensusSchema>;
+
+// ---------------------------------------------------------------------------
 // Harvested artifact (SRD §8.4) — what `pifleet artifacts --json` returns.
 // ---------------------------------------------------------------------------
 
@@ -1112,6 +1227,24 @@ export const HarvestSchema = z.object({
   }),
   /** Claims contradicted by derived facts, e.g. a file the worker did not touch. */
   discrepancies: z.array(text).max(MAX_ITEMS).default([]),
+  /**
+   * The structural census of this task's collation artifact (§6.8, D8), or
+   * `null` when the outbox held none.
+   *
+   * TOP LEVEL, beside `claimed` and `derived` rather than inside either, and the
+   * placement is the honest one. It is not `claimed`: the worker did not write
+   * these numbers, the harvester counted them. It is not `derived` either, in
+   * the sense that block means — `derived` is git and the harvester's own exam,
+   * evidence that exists independently of anything the worker said, and this is
+   * a measurement OF what the worker said. A third kind of evidence gets a third
+   * place, so a reader of the report is never invited to weigh it as either.
+   *
+   * PUBLISHED rather than computed and dropped, on the ISC-153 precedent
+   * `facts_hash` records: §6.8's second rule is that *"`3/3` and `1/3` are
+   * visible in the record"*, and a consensus count that never reaches the record
+   * satisfies neither half of what it is for.
+   */
+  collation: CollationCensusSchema.nullable().default(null),
   session_path: shortStr.nullable().default(null),
   /**
    * sha256 over the canonical form of the fact bundle the verdict was reached
@@ -1479,6 +1612,25 @@ export const DerivedFactsSchema = z.object({
   acceptance: z.array(AcceptanceRunSchema).max(MAX_ITEMS).default([]),
   acceptance_context: AcceptanceContextSchema.nullable().default(null),
   harness: HarnessSurfaceSchema,
+  /**
+   * The structural census of this task's collation artifact, or `null` when the
+   * outbox held none (SRD-REVIEW-CONSOLE §6.8, D8).
+   *
+   * IN THE FACT BUNDLE, so it is covered by `facts_hash` and an adjudication
+   * that reads it stays replayable — the ISC-153 property every other rule in
+   * `adjudicate` already has. The alternative was to clamp from the reconciler
+   * as ISC-332's ticket-ops check does; that check is keyed on a descriptor and
+   * genuinely cannot be a fact, whereas a census is a small structured
+   * measurement the harvester takes once and the adjudicator then only weighs.
+   *
+   * BESIDE `acceptance` AND NOT INSIDE IT, deliberately and permanently. See
+   * `CollationCensusSchema`: `acceptance` holds evidence a worker cannot author
+   * and this holds counts read out of a document a worker wrote, and the whole
+   * of D8 is that the second must not be able to borrow the first's word.
+   * `facts.acceptance` stays empty for a review task, which is the correct
+   * answer — a review has nothing to re-execute — and is asserted as such.
+   */
+  collation: CollationCensusSchema.nullable().default(null),
   /**
    * ISC-154: the worktree hash at quiesce and at harvest end. Differing values
    * mean something kept writing after the worker was supposed to be done, so

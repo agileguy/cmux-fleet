@@ -35,7 +35,7 @@
 interface StatusDocument {
   readonly runs?: readonly {
     readonly run_id?: unknown;
-    readonly workers?: readonly { readonly id?: unknown }[];
+    readonly workers?: readonly { readonly id?: unknown; readonly alive?: unknown }[];
   }[];
 }
 
@@ -73,4 +73,109 @@ export function runsHoldingAny(statusJson: string, workers: ReadonlySet<string>)
     }
   }
   return out;
+}
+
+/** What one console's worker→run map looks like when it is read off `status`. */
+export interface ConsoleRunPins {
+  /** Worker → the ONE live run holding it. */
+  readonly pins: ReadonlyMap<string, string>;
+  /** Workers no live run holds. Ordered as `workers` was given. */
+  readonly missing: readonly string[];
+  /** Workers more than one live run holds, with the ids, newest-document-order. */
+  readonly ambiguous: ReadonlyMap<string, readonly string[]>;
+}
+
+/**
+ * The console's worker→run map, for `PIFLEET_RELAY_RUNS`.
+ *
+ * ## Why the launching script is the right place to compute this
+ *
+ * §6.5 prefers *"a new `pifleet relay --console review` process, started by
+ * `scripts/review`"* on the ground that it *"holds the worker→run map the script
+ * already computes"*, and `relay.ts`'s own comment concedes the alternative is
+ * weaker: *"the script knows which four runs it created, and the scan can only
+ * infer from what is on disk."* This is that map, and it is derived from the
+ * same document `--recreate` already reads rather than from a second source.
+ *
+ * ## LIVE workers only, which is the same predicate the scan uses
+ *
+ * `alive` is `status`'s own (pid, start-time) identity check, and requiring it
+ * here is not belt-and-braces: `pifleet down` removes containers and LEAVES
+ * DIRECTORIES, so every run the operator has ever started still lists every
+ * worker it ever materialised. A pin computed from mere presence would point a
+ * relay at a corpse and there would be nothing to notice it, because a pin
+ * REPLACES the scan that would otherwise have found the live one.
+ *
+ * ## Ambiguity is reported, never resolved
+ *
+ * Worker ids are not unique across runs, and two consoles up at once is the
+ * ordinary state of this machine. `relay.ts` fails closed on that for a reason
+ * worth not re-deciding here — a review dispatched into another fleet's worker
+ * is collated as this console's lens — so this function reports the collision
+ * and leaves the choice to nobody. The caller's correct response is to emit no
+ * pin at all; see the note there for why a PARTIAL pin is worse than none.
+ */
+export function consoleRunPins(
+  statusJson: string,
+  workers: readonly string[],
+): ConsoleRunPins {
+  const holders = new Map<string, string[]>();
+  for (const w of workers) holders.set(w, []);
+
+  let doc: StatusDocument;
+  try {
+    doc = JSON.parse(statusJson) as StatusDocument;
+  } catch {
+    // Unreadable status pins nothing, exactly as it stops nothing above: the
+    // relay then falls back to its own scan, which is the weaker answer and
+    // still an answer.
+    doc = {};
+  }
+  const runs = Array.isArray(doc?.runs) ? doc.runs : [];
+
+  for (const run of runs) {
+    const runId = run?.run_id;
+    if (typeof runId !== "string" || runId === "") continue;
+    const entries = Array.isArray(run.workers) ? run.workers : [];
+    for (const w of entries) {
+      if (typeof w?.id !== "string") continue;
+      const held = holders.get(w.id);
+      if (held === undefined) continue;
+      if (w.alive !== true) continue;
+      if (!held.includes(runId)) held.push(runId);
+    }
+  }
+
+  const pins = new Map<string, string>();
+  const missing: string[] = [];
+  const ambiguous = new Map<string, readonly string[]>();
+  for (const w of workers) {
+    const held = holders.get(w) ?? [];
+    if (held.length === 1) pins.set(w, held[0]!);
+    else if (held.length === 0) missing.push(w);
+    else ambiguous.set(w, held);
+  }
+  return { pins, missing, ambiguous };
+}
+
+/**
+ * `PIFLEET_RELAY_RUNS`'s value, or `null` when no complete map can be spelled.
+ *
+ * ## ALL OR NOTHING, and the partial map is the trap
+ *
+ * `consoleRunResolution` takes the pinned branch WHOLE: if the variable is set
+ * at all, the host-wide scan never runs, and a worker the pin does not name is
+ * simply absent from the map for the life of the process. So a pin emitted while
+ * the console is still coming up — three `pifleet up`s still starting, one run
+ * visible — would freeze that incomplete answer permanently, and the relay would
+ * refuse every fan-out with `run_unresolved` forever while looking configured.
+ *
+ * The scan is the weaker answer and it has one property the pin does not: it is
+ * re-taken on every tick, so it converges as the console comes up. Emitting
+ * nothing until the map is complete keeps that, and the completeness test is the
+ * whole of this function.
+ */
+export function relayRunPinValue(map: ConsoleRunPins, workers: readonly string[]): string | null {
+  if (map.pins.size !== workers.length) return null;
+  return workers.map((w) => `${w}=${map.pins.get(w)!}`).join(",");
 }

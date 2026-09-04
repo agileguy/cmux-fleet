@@ -142,7 +142,7 @@
 import { z } from "zod";
 
 import { MAX_ITEMS, SESSION_ID_RE, type Verdict, workerId } from "../contracts.ts";
-import { collationTaskId, isCollationTaskId } from "./relay.ts";
+import { collationTaskId, isCollationTaskId } from "./task-ids.ts";
 
 /** The wire tag, so a reader can refuse a shape it does not know. */
 export const COLLATION_SCHEMA = "pifleet.collation/v1";

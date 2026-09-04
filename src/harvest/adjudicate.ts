@@ -36,6 +36,14 @@
  *   but a different verdict on replay = adjudicator bug; a different hash =
  *   harvester bug. Hashing the verdict into the bundle would collapse those
  *   two distinct failures into one undiagnosable blob.
+ *
+ * - **A collation's STRUCTURAL CENSUS can cap a verdict and can never lift one**
+ *   (SRD-REVIEW-CONSOLE §6.8, D8). The rules are in `collation-census.ts`; what
+ *   matters here is what the census is NOT. It counts a JSON document the worker
+ *   wrote, so it carries none of the independence the acceptance block below
+ *   carries, it is never spelled as acceptance, and it never writes to
+ *   `facts.acceptance` — which stays empty for a review task, correctly, because
+ *   a review has nothing to re-execute.
  */
 
 import { createHash } from "node:crypto";
@@ -49,6 +57,7 @@ import {
   type ResultEnvelope,
   type Verdict,
 } from "../contracts.ts";
+import { censusCeiling } from "./collation-census.ts";
 import { capFor, peakTier } from "./resolution-surface.ts";
 
 /** What the adjudicator returns; `facts_hash` makes it replayable. */
@@ -300,6 +309,34 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
     );
   }
   let verdict = verdictBeforeCap;
+
+  /**
+   * THE STRUCTURAL CENSUS (SRD-REVIEW-CONSOLE §6.8, D8) — a ceiling, never an
+   * assignment, and deliberately not spelled as acceptance.
+   *
+   * §6.8's three rules, evaluated in `collation-census.ts` where they sit beside
+   * the counting that produces them. What lands here is a maximum, so ORDER
+   * AMONG THE CAPS DOES NOT MATTER and the guard is what makes that true:
+   * `rank(verdict) > rank(ceiling)` can only ever lower, so a verdict the
+   * ISC-150 or ISC-243 blocks below have already pinned to `unknown` (rank -1)
+   * is untouched, and a census can never excuse a diff the harness cap caught.
+   *
+   * WHAT IT DOES NOT DO, said here because the block reads like the acceptance
+   * block above and is nothing like it. `acceptance` holds exit codes THE
+   * HARVESTER produced in a fresh clone the worker never touched. `collation`
+   * holds counts read out of a file the worker WROTE. The census bounds the
+   * shape of that claim — a finding has to quote a file and a line, and say
+   * which reviewers raised it — and verifies none of its content. §6.8: *"calling
+   * it acceptance would be claiming an independence it does not possess."* It is
+   * therefore capable of only two answers, `failed` and `partial`; `success` is
+   * not in its range at all, so no route exists by which a worker's own document
+   * certifies the worker's own work.
+   */
+  const census = censusCeiling(facts.collation, claimed?.status);
+  if (census !== null) {
+    reasons.push(census.reason);
+    if (rank(verdict) > rank(census.ceiling)) verdict = census.ceiling;
+  }
 
   // ISC-150, applied LAST: a diff touching the harness surface makes every
   // positive result self-certified. Anything above `blocked` collapses to
