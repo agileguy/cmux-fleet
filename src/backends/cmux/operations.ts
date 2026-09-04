@@ -62,8 +62,11 @@ import {
   DEVELOPMENT_WORKSPACE,
   OPERATIONS_TOP_FRACTION,
   OPERATIONS_WORKSPACE,
+  REVIEW_TOP_FRACTION,
+  REVIEW_WORKSPACE,
   developmentPanes,
   operationsPanes,
+  reviewPanes,
   type OperationsPane,
   type OperationsPlanOptions,
 } from "./operations-plan.ts";
@@ -104,6 +107,22 @@ export const DEVELOPMENT_SPEC: WorkspaceSpec = {
   name: DEVELOPMENT_WORKSPACE,
   panes: developmentPanes,
   topFraction: DEVELOPMENT_TOP_FRACTION,
+};
+
+/**
+ * The multi-model review console: a collator top-left, three reviewers around
+ * it, each reviewer on a different vendor's model.
+ *
+ * The THIRD value in this file rather than a third builder, which is the point
+ * {@link WorkspaceSpec} was written to make: adding a console is a value here,
+ * so the BUILD-FIRST-CLOSE-SECOND order in `ensureWorkspace` — a measured
+ * lesson that cost a destroyed console once — is stated in exactly one place
+ * and cannot be got backwards a third time.
+ */
+export const REVIEW_SPEC: WorkspaceSpec = {
+  name: REVIEW_WORKSPACE,
+  panes: reviewPanes,
+  topFraction: REVIEW_TOP_FRACTION,
 };
 
 /**
@@ -583,4 +602,13 @@ export async function ensureDevelopment(
   recreate = false,
 ): Promise<EnsureResult> {
   return ensureWorkspace(client, DEVELOPMENT_SPEC, opts, recreate);
+}
+
+/** {@link ensureWorkspace} for the four-agent multi-model review console. */
+export async function ensureReview(
+  client: CmuxClient,
+  opts: OperationsPlanOptions,
+  recreate = false,
+): Promise<EnsureResult> {
+  return ensureWorkspace(client, REVIEW_SPEC, opts, recreate);
 }

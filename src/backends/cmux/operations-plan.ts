@@ -590,7 +590,7 @@ export const DEFAULT_DEVELOPMENT_WORKERS: readonly string[] = [
 export const DEVELOPMENT_TOP_FRACTION: number | null = null;
 
 /** The largest 2x2 there is. A fifth pane has nowhere in this shape to go. */
-const DEVELOPMENT_MAX_PANES = 4;
+const SQUARE_MAX_PANES = 4;
 
 /**
  * The development console's panes, in creation order.
@@ -618,18 +618,43 @@ const DEVELOPMENT_MAX_PANES = 4;
  * third row would produce a console that does not match its own docblock.
  */
 export function developmentPanes(opts: OperationsPlanOptions): OperationsPane[] {
+  return agentSquarePanes(opts, DEFAULT_DEVELOPMENT_WORKERS, "development");
+}
+
+/**
+ * A 2x2 of attended agent panes — the shape BOTH `development` and `review`
+ * are, built once.
+ *
+ * Extracted when the second such console arrived, and the extraction is not
+ * tidiness. The split TABLE below is the part that breaks: a 2x2 cannot be
+ * built from "always split the previous pane", pane 4 has to name pane 2 as its
+ * anchor, and `operationsPanes` already learned that lesson separately at its
+ * git pane. A copied table is a second place to get that backwards, and the two
+ * copies would be identical on the day they were written and only diverge
+ * afterwards — which is exactly the drift the Dockerfile's `toolchain-full`
+ * stage was carrying when it was folded into its siblings.
+ *
+ * `label` is the console's name and appears ONLY in the refusals, because a
+ * refusal that does not say which console refused sends the operator to check
+ * the wrong `--workers` flag.
+ */
+export function agentSquarePanes(
+  opts: OperationsPlanOptions,
+  defaultWorkers: readonly string[],
+  label: string,
+): OperationsPane[] {
   const repoRoot = opts.repoRoot;
-  const workers = opts.workers ?? DEFAULT_DEVELOPMENT_WORKERS;
+  const workers = opts.workers ?? defaultWorkers;
   const backend = opts.backend ?? "headless";
   const configPath = opts.configPath ?? `${repoRoot}/fleet.yaml`;
 
   if (workers.length === 0) {
-    throw new Error("development: refusing an empty --workers set — name at least one worker");
+    throw new Error(`${label}: refusing an empty --workers set — name at least one worker`);
   }
-  if (workers.length > DEVELOPMENT_MAX_PANES) {
+  if (workers.length > SQUARE_MAX_PANES) {
     throw new Error(
-      `development: refusing ${workers.length} workers — the console is a 2x2 and holds ` +
-        `at most ${DEVELOPMENT_MAX_PANES}`,
+      `${label}: refusing ${workers.length} workers — the console is a 2x2 and holds ` +
+        `at most ${SQUARE_MAX_PANES}`,
     );
   }
   for (const w of workers) assertPlainValue("worker id", w);
@@ -647,12 +672,13 @@ export function developmentPanes(opts: OperationsPlanOptions): OperationsPane[] 
   ];
 
   return workers.map((worker, i) => ({
-    // TITLED BY WORKER ID, not by role, and this console is why the two
-    // consoles differ on it. `operations` holds one worker per role and can
-    // call a pane `observer`; this one holds TWO engineers, so a role title
-    // would print `engineer` on both and leave the operator guessing which
-    // container a pane belongs to. The id is also what `dispatch --worker`
-    // takes, so the title is the argument.
+    // TITLED BY WORKER ID, not by role, and these consoles are why they differ
+    // from `operations` on it. `operations` holds one worker per role and can
+    // call a pane `observer`; `development` holds TWO engineers and `review`
+    // holds THREE reviewers, so a role title would print the same word on
+    // several panes and leave the operator guessing which container a pane
+    // belongs to. The id is also what `dispatch --worker` takes, so the title
+    // is the argument.
     title: worker,
     command: `${envPreamble()} ${agentPaneCommand({
       repoRoot,
@@ -725,3 +751,83 @@ export function monitorPaneCommand(repoRoot: string, pollSeconds: number): strin
 }
 
 
+
+// ---------------------------------------------------------------------------
+// The `review` console — a collator and three reviewers (SRD-REVIEW-CONSOLE)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `review` workspace's `--name`, and its idempotency key.
+ *
+ * Exact-matched on `custom_title` for the reason {@link OPERATIONS_WORKSPACE}
+ * records. Three consoles now share one builder and must never adopt each
+ * other, which exact matching on three distinct names gives for free.
+ */
+export const REVIEW_WORKSPACE = "review";
+
+/**
+ * The four workers the review console stands up, in PANE ORDER.
+ *
+ * ```
+ * +---------------+---------------+
+ * |     col-1     |   rev-arch-1  |
+ * +---------------+---------------+
+ * |   rev-ctx-1   |   rev-lang-1  |
+ * +---------------+---------------+
+ * ```
+ *
+ * THE COLLATOR IS PANE 1, and that placement is the contract rather than a
+ * preference: pane 1 consumes the workspace's initial surface and is where the
+ * operator lands. This console is driven by talking to the collator — it writes
+ * the three briefs and reads the three reports back — so the seat the keyboard
+ * arrives in is the one seat a person actually types into.
+ *
+ * THE THREE REVIEWERS RUN THREE DIFFERENT VENDORS, which is the whole product
+ * of the console and not a detail of it. `rev-arch-1` is on `deepseek-v4-pro`,
+ * `rev-ctx-1` on `qwen3.5:397b`, `rev-lang-1` on `kimi-k3`; the assignment and
+ * its measurements are argued in `fleet.yaml`. Three seats on ONE model would
+ * be one reviewer with three transcripts, and a shared training blind spot
+ * would be invisible by construction — so a `--workers` set that collapses them
+ * onto one model is a real loss even though nothing here can detect it.
+ *
+ * ALL FOUR ARE ATTENDED, as in `development`: four keyboards, therefore four
+ * runs. `status --all` reports them together and `--recreate` tears them down.
+ *
+ * THE COST, stated plainly and differently from `development`'s: these four are
+ * HOSTED. They do not queue behind the operator's own oMLX, so opening this
+ * console does not slow the local fleet — it spends money instead, against
+ * `OLLAMA_API_KEY`, and four attended panes generating at once on three of the
+ * largest models in the catalogue is not a console to leave open idly.
+ */
+export const DEFAULT_REVIEW_WORKERS: readonly string[] = [
+  "col-1",
+  "rev-arch-1",
+  "rev-ctx-1",
+  "rev-lang-1",
+];
+
+/**
+ * The review console's panes are EQUAL, and `null` says so.
+ *
+ * Same reasoning as {@link DEVELOPMENT_TOP_FRACTION}, and the stated
+ * requirement here is stronger: this console was asked for as "four equally
+ * sized panes in a square". `new-split` halves, so two columns each split once
+ * are already four quarters, and `null` skips the resize rather than asking for
+ * a fraction of `1/2` and relying on the sub-pixel guard to make it a no-op.
+ *
+ * There is also nothing to favour. The collator has three reports to show and
+ * each reviewer has one; that is not a difference in HEIGHT, it is a difference
+ * in how often you scroll.
+ */
+export const REVIEW_TOP_FRACTION: number | null = null;
+
+/**
+ * The review console's panes, in creation order.
+ *
+ * The same 2x2 as {@link developmentPanes} and built by the same function —
+ * see {@link agentSquarePanes} for why the split table is shared rather than
+ * copied. Only the default worker set and the name in a refusal differ.
+ */
+export function reviewPanes(opts: OperationsPlanOptions): OperationsPane[] {
+  return agentSquarePanes(opts, DEFAULT_REVIEW_WORKERS, "review");
+}

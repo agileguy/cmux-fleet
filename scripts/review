@@ -1,0 +1,297 @@
+#!/usr/bin/env bun
+/**
+ * `scripts/review` — open the standing four-pane multi-model review console.
+ *
+ *   ./scripts/review                                # col-1, rev-arch-1, rev-ctx-1, rev-lang-1
+ *   ./scripts/review --dry-run                      # print the plan, touch nothing
+ *   ./scripts/review --restart rev-ctx-1            # respawn one reviewer
+ *   ./scripts/review --restart col-1 --task t.json  # fresh collator, then dispatch
+ *
+ * Four EQUAL panes in a square. The collator takes pane 1 — the seat the
+ * keyboard lands in — and the three reviewers sit around it:
+ *
+ * ```
+ * +---------------+---------------+
+ * |     col-1     |   rev-arch-1  |
+ * +---------------+---------------+
+ * |   rev-ctx-1   |   rev-lang-1  |
+ * +---------------+---------------+
+ * ```
+ *
+ * ## What makes this different from `scripts/development`
+ *
+ * Not the shape — that is identical, and `agentSquarePanes` builds both from
+ * one split table so the 2x2 cannot be got backwards in only one of them.
+ *
+ * The difference is WHO IS IN THE SEATS. Each reviewer runs a DIFFERENT
+ * vendor's model, and that is the console's entire product: three seats on one
+ * model is one reviewer with three transcripts, and a shared training blind
+ * spot is then invisible by construction. `rev-arch-1` reads for architecture
+ * and security on `deepseek-v4-pro`, `rev-ctx-1` reads wide for cross-file
+ * contract coverage on `qwen3.5:397b`, `rev-lang-1` reads TypeScript closely on
+ * `kimi-k3`. The collator writes their briefs and collates their three reports;
+ * it does not review.
+ *
+ * The second difference is the BILL. All four are hosted, so unlike the local
+ * seats they do not queue behind oMLX — they spend against `OLLAMA_API_KEY`
+ * instead. This console costs money to leave open in a way `development` does
+ * not, and it sends the code it reads to three third parties. `roles/collator.md`
+ * carries the matching refusal for Broadcom and AppNeta remotes.
+ *
+ * Running it twice is safe and is the expected way to get back to the console:
+ * a `review` workspace that already exists is selected, not rebuilt. See
+ * `src/backends/cmux/operations.ts` for why rebuilding would be destruction.
+ *
+ * Only I/O lives here. The decisions are in `src/backends/cmux/operations-plan.ts`
+ * and `src/backends/cmux/operations.ts`, where `test/unit/review-plan.test.ts`
+ * re-checks them on every run.
+ */
+
+import { dirname, resolve } from "node:path";
+
+import { CmuxClient } from "../src/backends/cmux/client.ts";
+import { loadConfig, resolveWorker } from "../src/config/load.ts";
+import { EXIT } from "../src/contracts.ts";
+import {
+  DEFAULT_REVIEW_WORKERS,
+  REVIEW_WORKSPACE,
+  reviewPanes,
+} from "../src/backends/cmux/operations-plan.ts";
+import {
+  REVIEW_SPEC,
+  cmuxReachable,
+  ensureReview,
+  restartConsolePane,
+} from "../src/backends/cmux/operations.ts";
+import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
+import { runsHoldingAny } from "../src/run/status-runs.ts";
+
+const USAGE = `Usage: scripts/review [options]
+
+  --workers <ids>   comma-separated pifleet workers, in pane order
+                    (default: ${DEFAULT_REVIEW_WORKERS.join(",")}; at most 4)
+  --backend <kind>  pifleet backend (default: headless)
+  --config <path>   fleet.yaml (default: <repo>/fleet.yaml)
+  --dry-run         print the pane plan and exit without touching cmux
+  --recreate        close an existing review workspace and rebuild it
+  --restart <id>    respawn ONE worker's pane, leaving the others running
+  --task <path>     with --restart: recreate the worker, then dispatch this
+                    task to the run it comes back in. Waits for any task it
+                    is already holding to finish; never recreates over work.
+  -h, --help        this message
+`;
+
+function flag(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(name);
+  if (i === -1) return undefined;
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith("--")) {
+    throw new Error(`${name} needs a value`);
+  }
+  return v;
+}
+
+async function main(argv: string[]): Promise<number> {
+  if (argv.includes("-h") || argv.includes("--help")) {
+    process.stdout.write(USAGE);
+    return EXIT.SUCCESS;
+  }
+
+  // `scripts/` sits directly under the repository root.
+  const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+  const watchDir = process.cwd();
+
+  const workersFlag = flag(argv, "--workers");
+
+  const opts = {
+    repoRoot,
+    watchDir,
+    ...(workersFlag === undefined
+      ? {}
+      : {
+          workers: workersFlag
+            .split(",")
+            .map((w) => w.trim())
+            .filter((w) => w !== ""),
+        }),
+    ...(flag(argv, "--backend") === undefined ? {} : { backend: flag(argv, "--backend")! }),
+    ...(flag(argv, "--config") === undefined ? {} : { configPath: flag(argv, "--config")! }),
+  };
+
+  /**
+   * Which of these workers want Pi's own interface — READ FROM THE CONFIG, for
+   * the reason `scripts/development` records: assuming it would put
+   * `--attach-here` on a worker that resolves to `rpc`, and `up` correctly
+   * refuses that, so one edit in `fleet.yaml` would turn a pane into a refusal
+   * naming a flag the operator never typed.
+   */
+  let tuiWorkers: string[] = [];
+  try {
+    const loaded = await loadConfig(opts.configPath ?? `${repoRoot}/fleet.yaml`);
+    const set = opts.workers ?? DEFAULT_REVIEW_WORKERS;
+    tuiWorkers = set.filter((w) => resolveWorker(loaded, w).paneMode === "tui");
+  } catch (err) {
+    process.stderr.write(
+      `review: could not read pane_mode from the config ` +
+        `(${err instanceof Error ? err.message : String(err)}); the panes will tail their logs\n`,
+    );
+  }
+
+  // Built before the cmux probe on purpose: a bad `--workers` is an argv
+  // mistake, and diagnosing it must not depend on whether the GUI is running.
+  const panes = reviewPanes({ ...opts, tuiWorkers });
+
+  if (argv.includes("--dry-run")) {
+    process.stdout.write(`workspace: ${REVIEW_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
+    for (const [i, p] of panes.entries()) {
+      process.stdout.write(`pane ${i + 1} (${p.title}):\n  ${p.command}\n\n`);
+    }
+    return EXIT.SUCCESS;
+  }
+
+  /*
+   * `--recreate` stops the runs the OLD panes created, before the new ones make
+   * more — four runs here, as in `development`, so without it every rebuild
+   * strands four unattached containers and the stale run directories make
+   * `logs --worker` resolve "the most recent run" to whichever still exists.
+   *
+   * Only runs holding one of THIS console's workers are stopped; the other two
+   * consoles' runs are somebody else's and must survive a review rebuild.
+   */
+  if (argv.includes("--recreate")) {
+    const mine = new Set(opts.workers ?? DEFAULT_REVIEW_WORKERS);
+    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
+    for (const runId of runsHoldingAny(json, mine)) {
+      process.stderr.write(`review: stopping run ${runId} before rebuilding\n`);
+      // Best effort. A run that cannot be stopped is worth a line, not a
+      // refusal to open the console the operator asked for.
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
+  }
+
+  const client = new CmuxClient();
+  if (!(await cmuxReachable(client))) {
+    process.stderr.write(
+      "review: no cmux is listening on ~/.local/state/cmux/cmux.sock.\n" +
+        "Start the cmux app, then run this again.\n",
+    );
+    return EXIT.BACKEND_UNAVAILABLE;
+  }
+
+  /*
+   * `--restart <worker>` — one pane, and nothing else touched.
+   *
+   * ORDER IS THE WHOLE OF IT: stop the run, THEN respawn the pane. Respawning
+   * first kills the pane's shell, and the supervisor it launched — which owns a
+   * detached container — is signalled by the dying shell rather than told to
+   * quiesce, leaving a container that no run refers to.
+   */
+  const restartFlag = flag(argv, "--restart");
+  if (restartFlag !== undefined) {
+    const taskFlag = flag(argv, "--task");
+    const restartPane = async (): Promise<string> => {
+      const r = await restartConsolePane(client, REVIEW_SPEC, { ...opts, tuiWorkers }, restartFlag);
+      return r.surfaceId;
+    };
+
+    /*
+     * `--task` makes this RECREATE-THEN-DISPATCH. A `pane_mode: tui` worker
+     * keeps its session across epochs, and a model handed "a task was staged
+     * for you" with the previous task still in its transcript can answer from
+     * that instead of opening the new envelope. That matters more here than
+     * anywhere: a reviewer's previous task IS a review, so a stale answer is a
+     * plausible-looking review of the wrong change.
+     *
+     * NOTHING is stopped until the worker is holding no task, staged ones
+     * included; the waiting, the refusal and the ordering are in
+     * `src/run/fresh-dispatch.ts` where they are unit-tested.
+     */
+    if (taskFlag !== undefined) {
+      const r = await recreateThenDispatch(
+        {
+          status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          down: async (runId) => {
+            process.stderr.write(`review: stopping run ${runId}\n`);
+            await runOutput(repoRoot, ["down", "--run", runId]);
+          },
+          restartPane: async () => {
+            process.stderr.write(`review: respawning the ${restartFlag} pane\n`);
+            await restartPane();
+          },
+          dispatch: (runId) =>
+            runOutput(repoRoot, [
+              "dispatch",
+              "--worker",
+              restartFlag,
+              "--run",
+              runId,
+              "--task",
+              taskFlag,
+              "--json",
+            ]),
+          sleep: (ms) => Bun.sleep(ms),
+          now: () => Date.now(),
+        },
+        { worker: restartFlag },
+      );
+      process.stdout.write(
+        `review: recreated ${restartFlag} into run ${r.runId} ` +
+          `(waited ${Math.round(r.settleWaitMs / 1000)}s for it to go idle, ` +
+          `stopped ${r.stopped.length === 0 ? "nothing" : r.stopped.join(", ")}) ` +
+          `and dispatched ${taskFlag}\n${r.dispatched}`,
+      );
+      return EXIT.SUCCESS;
+    }
+
+    const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
+    for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
+      process.stderr.write(`review: stopping run ${runId} before restarting ${restartFlag}\n`);
+      await runOutput(repoRoot, ["down", "--run", runId]);
+    }
+    const surfaceId = await restartPane();
+    process.stdout.write(
+      `review: respawned the ${restartFlag} pane (surface ${surfaceId}); ` +
+        `the other panes were not touched\n`,
+    );
+    return EXIT.SUCCESS;
+  }
+
+  const recreate = argv.includes("--recreate");
+  const result = await ensureReview(client, { ...opts, tuiWorkers }, recreate);
+  process.stdout.write(
+    result.created
+      ? `review: ${recreate ? "rebuilt" : "created"} workspace ${result.workspaceId} ` +
+        `with ${panes.length} panes\n`
+      : `review: workspace ${result.workspaceId} is already in place — selected it, ` +
+        `changed nothing (use --recreate to rebuild its panes)\n`,
+  );
+  return EXIT.SUCCESS;
+}
+
+/**
+ * Run a `pifleet` subcommand and return its stdout, swallowing failure.
+ *
+ * `stderr: "ignore"` is what makes stdout a clean JSON document for
+ * `runsHoldingAny` — `status` writes its warnings to the other stream.
+ */
+async function runOutput(repoRoot: string, args: readonly string[]): Promise<string> {
+  try {
+    const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out;
+  } catch {
+    return "";
+  }
+}
+
+try {
+  process.exit(await main(process.argv.slice(2)));
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`${msg.startsWith("review:") ? msg : `review: ${msg}`}\n`);
+  process.exit(EXIT.USAGE);
+}
