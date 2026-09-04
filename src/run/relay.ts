@@ -314,6 +314,99 @@ export function planInlineBudget(
   return granted;
 }
 
+/**
+ * WHAT BECAME OF A LENS' RESULT ENVELOPE — and the distinction exists because
+ * the console once attributed a serialisation failure to a reviewer.
+ *
+ * ## The run that made this a type
+ *
+ * `rev-lang-1` wrote a genuine 3906-byte review into its result envelope. Its
+ * seat is regex correctness, so the review quoted a regex into a JSON string —
+ * `[\w\\-_]+`. `\w` is not a valid JSON escape, so the envelope did not parse,
+ * the harvest answered `unknown`, and this module wrote *"it settled `unknown`
+ * and produced no report"* into the collation brief. The collation then recorded
+ * `{"reported": false, "note": "the lens settled 'unknown' and produced no
+ * report"}` and the result was `partial`.
+ *
+ * **"Produced no report" was false.** The report existed, at a path, at a size a
+ * person could have opened. Every word of the record was about the REVIEWER and
+ * every part of the failure was in the TRANSPORT, so the one instruction an
+ * operator needed — *re-run this lens, and meanwhile go read the file* — was the
+ * one the console had made unavailable.
+ *
+ * **It is structural rather than unlucky.** The language seat is the seat whose
+ * job is quoting code into a JSON string, so it is the seat most likely to put
+ * an invalid escape in one. Naming only that instance would leave the next one
+ * to be discovered the same way.
+ *
+ * ## Why three states and not a boolean
+ *
+ * `absent` and `unreadable` are DIFFERENT INSTRUCTIONS, which is the whole test
+ * for whether a distinction is worth a type. `absent` means the reviewer
+ * produced nothing and the lens is written off. `unreadable` means a review
+ * exists on disk, a human can go and read it, and the lens should be re-run
+ * rather than written off. A boolean `reported` collapses them, and prose in a
+ * `note` field carries the difference only for as long as nobody rewrites the
+ * sentence.
+ *
+ * `present` is the third rather than an implied default so the union is
+ * exhaustive and a `switch` over it is checked. It says the envelope parsed —
+ * which is not the same as the task having succeeded, and the note below is
+ * careful about that.
+ *
+ * ## THE SEAM, AND WHOSE IT IS
+ *
+ * **This module does not classify. It reads a classification the harvester
+ * makes**, through `RelayHarvestView` and out through `RelayHarvest`, and it is
+ * adapted at exactly one expression in `consoleTransport.harvest` so that
+ * reconciling this shape with the harvester's own is a rename rather than a
+ * rewrite. Nothing here opens an envelope, and nothing here decides what
+ * "unreadable" means — a relay that re-derived that judgement would be a second
+ * answer to a question `harvest/outbox.ts` already spends its header on.
+ */
+export type RelayEnvelopeState =
+  | { readonly kind: "present" }
+  /** The harvest looked for an envelope and there was none. */
+  | { readonly kind: "absent" }
+  /**
+   * An envelope EXISTS and could not be read.
+   *
+   * No field is decorative: the path is what a person opens, the size is what
+   * tells them there is something in it worth opening, and the code and detail
+   * are what tell them whether to re-run the lens or fix the reader. A shape
+   * carrying only a reason string would be prose with a type annotation, and the
+   * note built from it would be as unfalsifiable as the one this replaces.
+   */
+  | ({ readonly kind: "unreadable" } & RelayUnreadableEnvelope);
+
+/**
+ * THE HARVESTER'S OWN DESCRIPTION OF AN UNREADABLE ENVELOPE, spelled
+ * STRUCTURALLY so `harvest/outbox.ts`'s `UnreadableEnvelope` satisfies it.
+ *
+ * **The field names are that type's, deliberately.** They could have been
+ * translated at the adapter; they are not, because a translation is a second
+ * vocabulary for one fact and the day the two drift the console reports a
+ * `code` that no longer means what this module thinks it means. Spelling them
+ * identically makes the adapter a spread and makes any change to the
+ * harvester's shape a COMPILE error here rather than a silent mismatch.
+ *
+ * **And structural rather than an import**, which is this module's standing rule
+ * — `RelayTaskRecordView` and `RelayHarvestView` are structural for the same
+ * reason. `relay.ts` is reached BY the CLI through a dynamic import; a static
+ * type dependency on `src/harvest/` would put the harvester in the graph of a
+ * module that only ever needs its shape.
+ */
+export interface RelayUnreadableEnvelope {
+  /** HOST path of the file. Absolute, and openable by a PERSON — not by the collator. */
+  readonly path: string;
+  /** Bytes handed to the parser. Legitimately `0`; never a proxy for existence. */
+  readonly bytes: number;
+  /** Syntax or contract, as a value rather than as a sentence. */
+  readonly code: string;
+  /** The parser's or validator's own complaint. Never this module's paraphrase. */
+  readonly detail: string;
+}
+
 export interface RelayHarvest {
   /**
    * The harvester's verdict — `harvestTask(...).harvest.verdict`.
@@ -344,6 +437,22 @@ export interface RelayHarvest {
    * be filled in without being meant. The production adapter always supplies it.
    */
   readonly inlined?: readonly InlinedArtifact[];
+  /**
+   * What became of this task's result envelope, when the transport looked.
+   *
+   * **Optional for `inlined`'s reason, and the consequence of that is stated
+   * rather than left to be discovered.** A transport that never inspects an
+   * envelope is legitimate, and requiring the field would make every hand-built
+   * transport in the suite carry a value to say nothing. What must NOT follow is
+   * that silence is read as evidence: `undefined` here means *nobody looked*,
+   * and the note built from it says only what is true from the collator's side —
+   * that no report reached it. The claim *"produced no report"* is reserved for
+   * `absent`, which is the state where somebody did look.
+   *
+   * That is the difference between this optionality and the defect it closes.
+   * The live console asserted the strong claim from exactly this state.
+   */
+  readonly envelope?: RelayEnvelopeState;
 }
 
 /**
@@ -424,6 +533,22 @@ export interface RelayChild {
    * built from these children.
    */
   readonly inlined: readonly InlinedArtifact[];
+  /**
+   * What became of this lens' result envelope, or `null` when no harvest ran.
+   *
+   * **`null` is a fourth state and is not `absent`.** A seat the request never
+   * named, a dispatch that was refused and a harvest that threw are all cases
+   * where nothing ever looked for an envelope — so they support no claim about
+   * one, and folding them into `absent` would manufacture the same evidence the
+   * defect above manufactured, at a different seam. Their notes are about
+   * dispatch and stay about dispatch.
+   *
+   * Carried as a FIELD and not left only in `note` for the reason
+   * `InlinedArtifact.truncated` is a field: the collation brief has to name the
+   * unreadable lenses on their own line, and a brief that had to match English
+   * to find them would be pinning a sentence rather than a fact.
+   */
+  readonly envelope: RelayEnvelopeState | null;
   /** Why this lens is missing, in a form the collation brief can print. */
   readonly note: string;
 }
@@ -686,6 +811,7 @@ async function fanOut<R>(
         succeeded: false,
         issued: false,
         inlined: [],
+        envelope: null,
         note: "the request never named this reviewer, so the lens was not applied",
       };
     }
@@ -701,6 +827,7 @@ async function fanOut<R>(
         // an operator can correlate the refusal; it is not evidence of a dispatch.
         issued: false,
         inlined: [],
+        envelope: null,
         note: dispatchNote,
       };
     }
@@ -714,9 +841,11 @@ async function fanOut<R>(
         succeeded: false,
         issued: true,
         inlined: [],
+        envelope: null,
         note: "it was dispatched but could not be harvested",
       };
     }
+    const envelope = harvested.envelope ?? null;
     return {
       worker: seat.worker,
       aspect: seat.aspect,
@@ -725,10 +854,9 @@ async function fanOut<R>(
       succeeded: harvested.verdict === "success",
       issued: true,
       inlined: harvested.inlined ?? [],
+      envelope,
       note:
-        harvested.verdict === "success"
-          ? ""
-          : `it settled \`${harvested.verdict}\` and produced no report`,
+        harvested.verdict === "success" ? "" : missingLensNote(harvested.verdict, envelope),
     };
   });
 
@@ -828,6 +956,62 @@ async function fanOut<R>(
 }
 
 /**
+ * WHY A HARVESTED LENS IS MISSING — one sentence, and each arm claims only what
+ * its state supports.
+ *
+ * This function is the fix. The sentence it replaces was
+ * `it settled \`${verdict}\` and produced no report`, emitted for every
+ * non-success harvest, and it made two assertions the console was in no position
+ * to make. *"Produced no report"* is a claim about the REVIEWER, and the
+ * envelope is the only thing that can support it. *"It settled"* reads as the
+ * reviewer having reached a conclusion, when `unknown` is the harvester saying
+ * it could not tell.
+ *
+ * ## The arms, and what each is allowed to say
+ *
+ * - **`unreadable`** — the strong specific claim, and the only one that names a
+ *   file. It says a report EXISTS, gives the three facts needed to act on it,
+ *   and puts the failure where it happened. It deliberately does not use the
+ *   word "produced", which is the word the false version turned on.
+ * - **`absent`** — keeps *"produced no report"*, because here it is a FACT:
+ *   something looked for an envelope and there was none. Weakening this arm too
+ *   would be the opposite over-correction, leaving a console that can no longer
+ *   say the true strong thing about the case where it is true.
+ * - **`present`** — the envelope parsed and the task still did not succeed. The
+ *   reviewer reported; `fanOut` publishes a reply only for a lens that
+ *   SUCCEEDED, so the report exists and did not travel. Saying "produced no
+ *   report" here would be the original defect in its second-most-likely form.
+ * - **`null`** — nothing looked, so nothing is claimed about the reviewer at
+ *   all. Only the collator's own position is stated, which is the one thing
+ *   that is true from here regardless.
+ *
+ * The verdict is quoted in every arm because it is the harvester's own word and
+ * an operator correlating a lens against `report` needs it. What changed is that
+ * it is no longer the SOURCE of the claim about the report.
+ */
+function missingLensNote(verdict: Verdict, envelope: RelayEnvelopeState | null): string {
+  if (envelope === null) {
+    return `it settled \`${verdict}\` and no report reached the collator`;
+  }
+  switch (envelope.kind) {
+    case "unreadable":
+      return (
+        `it settled \`${verdict}\` and its report WAS WRITTEN AND COULD NOT BE READ: ` +
+        `${envelope.path} is ${envelope.bytes} bytes and did not parse ` +
+        `(${envelope.code}: ${envelope.detail}). This is a transport failure, not a reviewer ` +
+        `that found nothing — the review exists on disk and no report reached the collator`
+      );
+    case "absent":
+      return `it settled \`${verdict}\` and produced no report — no result envelope exists for it`;
+    case "present":
+      return (
+        `it settled \`${verdict}\`; its result envelope was readable, and no report reached the ` +
+        `collator because a reply is published only for a lens that succeeded`
+      );
+  }
+}
+
+/**
  * The collation brief — and the missing-lens clause is the load-bearing part.
  *
  * §6.6: *"The collator must be told in its brief which aspects are missing,
@@ -857,9 +1041,20 @@ function collationBrief(
 
   lines.push(`Collate the reviews dispatched from task ${parent}.`);
   lines.push("");
+  /**
+   * `a report you can read`, and the three words are the sentence's correction.
+   *
+   * *"N produced a report; M did not"* asserts of the M that they produced
+   * nothing, which is the same false claim the per-lens note carried and is
+   * false in exactly the same case: a lens whose envelope would not parse
+   * produced a report and did not produce one you can read. Qualifying the
+   * SURVIVORS' clause makes the missing clause true by subtraction, without the
+   * summary having to know which kind of missing each one is — the per-lens
+   * lines below carry that.
+   */
   lines.push(
-    `This console has ${children.length} review lenses. ${survived.length} produced a report; ` +
-      `${missing.length} did not.`,
+    `This console has ${children.length} review lenses. ${survived.length} produced a report ` +
+      `you can read; ${missing.length} did not.`,
   );
   lines.push("");
   lines.push("REPORTS — read each of these files. They are the only reports that exist:");
@@ -879,6 +1074,40 @@ function collationBrief(
         `conclusion that implies ${missing.length === 1 ? "that lens was" : "those lenses were"} ` +
         `applied, and say in your findings which lenses each one rests on.`,
     );
+
+    /**
+     * ── THE UNREADABLE LENSES, NAMED SEPARATELY FROM THE ABSENT ONES ────────
+     *
+     * The `MISSING ASPECT` line above already carries the path, the size and
+     * the parse error, so this block is not repeating the facts. It carries the
+     * INSTRUCTION, which is what differs: an absent lens is written off, and an
+     * unreadable one is a review that exists and should be re-run. A collator
+     * told only "these lenses are missing" treats both the same way, and the
+     * whole point of the distinction is that it should not.
+     *
+     * **Conditional on there BEING one, for the reason the truncation section
+     * one function down had to learn.** An unconditional block emits no per-lens
+     * lines when nothing was unreadable, so every positive assertion still
+     * passes while every brief warns about a hazard it does not have — and a
+     * warning that appears on every brief is one a reader learns to skip.
+     *
+     * **It does NOT tell the collator to mark the lens `reported: true`.** The
+     * collator has not read the review; `reported` is about what reached the
+     * collator, and a lens credited here could then be named in `raised_by`,
+     * which is the 3/3 fabrication §6.8 exists to make impossible. What changes
+     * is the stated REASON, not the row.
+     */
+    const unreadableLenses = missing.filter((c) => c.envelope?.kind === "unreadable");
+    for (const c of unreadableLenses) {
+      lines.push("");
+      lines.push(
+        `UNREADABLE ENVELOPE: ${c.aspect} (${c.worker}) reviewed the change and its report did ` +
+          `not reach you. Record it as "reported": false — you have not read it — with the ` +
+          `reason above in its note. Do NOT record it as a lens that found nothing or was not ` +
+          `applied: it was applied. Say in your prose report that this lens' review exists and ` +
+          `was not readable, so that a person can open the file and re-run the lens.`,
+      );
+    }
   }
 
   /**
@@ -985,6 +1214,34 @@ export interface RelayHarvestView {
      */
     readonly artifacts?: readonly { readonly path: string; readonly bytes: number }[];
   };
+  /**
+   * `TaskHarvest.unreadableEnvelope` — the harvester's own field, by its own
+   * name, read in exactly one expression.
+   *
+   * ## The seam, and the ONE THING IT STILL CANNOT SAY
+   *
+   * `harvest/outbox.ts` distinguishes four outcomes for a result envelope:
+   * `missing`, `unreadable`, `refused` and `ok`. This bundle field surfaces
+   * exactly one of them structurally, so **`null` here means "not unreadable"
+   * and conflates an ABSENT envelope with a PRESENT one.**
+   *
+   * That is why the adapter maps `null` to `undefined` and NOT to
+   * `{kind: "absent"}`. An absent envelope supports the strong claim *"produced
+   * no report"*; a present one does not, and from `null` alone this module
+   * cannot tell which it is holding. Manufacturing `absent` from it would be the
+   * original defect committed a second time, one seam further down — asserting
+   * something about a reviewer that the data does not support. So the console
+   * says only what it can: no report reached the collator.
+   *
+   * **The remedy is one more bit from the harvester, not a guess here.** The
+   * `absent` arm of `RelayEnvelopeState` exists, is exercised by the core's own
+   * probes, and starts carrying production traffic the day this bundle can say
+   * that an envelope was looked for and was not there.
+   *
+   * Optional so `TaskHarvest` satisfies this interface both before and after
+   * that field lands; see `RelayHarvest.envelope` for what silence means.
+   */
+  readonly unreadableEnvelope?: RelayUnreadableEnvelope | null;
 }
 
 /**
@@ -1483,6 +1740,24 @@ export function consoleTransport(
          */
         reply: { ...bundle, inlined_artifacts: inlined },
         inlined,
+        /**
+         * THE ONE ADAPTER POINT — see `RelayHarvestView.unreadableEnvelope`.
+         *
+         * A spread and a tag, and nothing else: the harvester's four fields are
+         * carried UNTOUCHED, because a relay that re-derived, widened or
+         * paraphrased the classification would be a second answer to a question
+         * `harvest/outbox.ts` owns. If that type changes shape, this line stops
+         * compiling — which is the property the structural spelling buys.
+         *
+         * `null` becomes `undefined`, NOT `absent`. The field says only whether
+         * the envelope was unreadable, so `null` is "absent or present" and this
+         * module declines to pick one. That is the whole discipline the defect
+         * being fixed here was a failure of.
+         */
+        envelope:
+          bundle.unreadableEnvelope != null
+            ? { kind: "unreadable", ...bundle.unreadableEnvelope }
+            : undefined,
       };
     },
 

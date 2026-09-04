@@ -79,7 +79,10 @@ import {
   resolveConsoleRuns,
   type InlinedArtifact,
   type RelayEffects,
+  type RelayUnreadableEnvelope,
 } from "../../src/run/relay.ts";
+import type { UnreadableEnvelope } from "../../src/harvest/outbox.ts";
+import type { TaskHarvest } from "../../src/harvest/index.ts";
 import { renderOutcome } from "../../src/cli/commands/relay.ts";
 import {
   DISPATCH_REQUEST_SCHEMA,
@@ -645,6 +648,106 @@ describe("harvest", () => {
     // And the thing a digest cannot carry.
     const reply = got.reply as { inlined_artifacts: InlinedArtifact[] };
     expect(reply.inlined_artifacts[0]?.text).toBe("the review.");
+  });
+
+  /**
+   * THE SINGLE ADAPTER POINT, probed on both sides of its one branch.
+   *
+   * `RelayHarvestView.unreadableEnvelope` is `harvest/index.ts`'s own field by
+   * its own name, and this is the only expression in `relay.ts` that reads it.
+   * Everything the collation brief says about a lens whose review could not be
+   * read flows through here, so a change that dropped the field would leave
+   * every core probe green — they inject `RelayHarvest.envelope` directly — and
+   * the live console silent again.
+   *
+   * ## WHAT THESE TWO CAN SEE
+   *
+   * That the harvester's four fields arrive intact and tagged, and that a
+   * `null` becomes `undefined` rather than `absent`.
+   *
+   * ## WHAT THEY CANNOT SEE
+   *
+   * Whether the harvester's classification is RIGHT — `harvest-outbox-contract`
+   * grades that. And they cannot see the real `\w` failure: the bundle here is
+   * a literal, so a parser that stopped reporting invalid escapes would not
+   * redden either one.
+   */
+  test("an unreadable envelope reaches the join with every field intact", async () => {
+    const { fx } = effects({
+      async harvestTask() {
+        return {
+          harvest: { verdict: "unknown" as Verdict },
+          unreadableEnvelope: {
+            path: "/runs/r/outbox/rev-lang-1/T1-lang/result.json",
+            bytes: 3906,
+            code: "not_json",
+            detail: "Invalid escape character w in JSON at position 1487",
+          },
+        };
+      },
+    });
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+
+    // Tagged, and otherwise VERBATIM. A paraphrase here would be a second
+    // vocabulary for one fact, which is what the structural spelling refuses.
+    expect(got.envelope).toEqual({
+      kind: "unreadable",
+      path: "/runs/r/outbox/rev-lang-1/T1-lang/result.json",
+      bytes: 3906,
+      code: "not_json",
+      detail: "Invalid escape character w in JSON at position 1487",
+    });
+  });
+
+  /**
+   * THE SEAM ITSELF, checked by the COMPILER rather than by a value.
+   *
+   * `relay.ts` spells `RelayUnreadableEnvelope` structurally instead of
+   * importing the harvester's type — its standing rule, so that a module the CLI
+   * reaches by dynamic import does not pull `src/harvest/` into its graph. The
+   * cost of a structural spelling is that the two can DRIFT: rename a field in
+   * `harvest/outbox.ts` and the adapter would quietly start carrying
+   * `undefined`, the brief would lose the path or the size, and every test in
+   * this file would stay green because they all build the bundle by hand.
+   *
+   * These two assignments are what stops that. They are erased at runtime and do
+   * nothing at all when they hold; when they stop holding, `tsc` names the field
+   * that moved. That is the entire "reconciling is a rename, not a rewrite"
+   * claim, made checkable.
+   *
+   * The direction is deliberate: the harvester's type must satisfy the relay's,
+   * not the other way round. The relay is the reader and may legitimately want
+   * less — `code` is widened to `string` here so a new
+   * `UnreadableEnvelopeCode` does not redden a module that only prints it.
+   */
+  test("the harvester's unreadable-envelope type still satisfies the relay's", () => {
+    const _shape: RelayUnreadableEnvelope = null as unknown as UnreadableEnvelope;
+    const _bundle: { readonly unreadableEnvelope?: RelayUnreadableEnvelope | null } =
+      null as unknown as TaskHarvest;
+    // The assertions above are the test. This keeps the runtime honest about
+    // there being nothing to run, rather than leaving an empty test body.
+    expect(typeof _shape).toBe("object");
+    expect(typeof _bundle).toBe("object");
+  });
+
+  test("`null` is not evidence of an absent envelope", async () => {
+    /**
+     * THE ASYMMETRY. `unreadableEnvelope` surfaces ONE of the harvester's four
+     * outcomes, so `null` means "absent or present" — and mapping it to
+     * `{kind: "absent"}` would let the console say *"produced no report"* about
+     * a reviewer that may well have produced one. That is the defect this whole
+     * change exists to remove, committed one seam lower down, and it would be
+     * invisible: every brief would read as more informative than before.
+     */
+    const { fx } = effects({
+      async harvestTask() {
+        return { harvest: { verdict: "failed" as Verdict }, unreadableEnvelope: null };
+      },
+    });
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+
+    expect(got.envelope).toBeUndefined();
+    expect(got.envelope).not.toEqual({ kind: "absent" });
   });
 });
 

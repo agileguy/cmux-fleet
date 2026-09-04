@@ -135,8 +135,27 @@ REPORTS — read each of these files. They are the only reports that exist:
   - arch (rev-arch-1): /replies/T-arch.json
   - context (rev-ctx-1): /replies/T-context.json
 
-MISSING ASPECT: lang (rev-lang-1) — the lens timed out.
+MISSING ASPECT: lang (rev-lang-1) — it settled `unknown` and produced no report — no
+result envelope exists for it.
 ```
+
+A `MISSING ASPECT` line can also say the opposite thing, and the two are not interchangeable:
+
+```
+MISSING ASPECT: lang (rev-lang-1) — it settled `unknown` and its report WAS WRITTEN AND
+COULD NOT BE READ: /runs/<run>/outbox/rev-lang-1/T-lang/result.json is 3906 bytes and did
+not parse (not_json: Invalid escape character w in JSON at position 1487). This is a
+transport failure, not a reviewer that found nothing — the review exists on disk and no
+report reached the collator.
+
+UNREADABLE ENVELOPE: lang (rev-lang-1) reviewed the change and its report did not reach
+you. Record it as "reported": false — you have not read it — with the reason above in its
+note. Do NOT record it as a lens that found nothing or was not applied: it was applied.
+```
+
+**That path is a host path and you cannot open it.** It is in the brief so that it can travel
+into your record and reach a person, exactly as `harvest.derived.artifacts` does. Copy it;
+do not go looking for it.
 
 Read every file the brief names. Each one is a harvest record, and the review is inside it:
 
@@ -148,10 +167,28 @@ Read every file the brief names. Each one is a harvest record, and the review is
   **You cannot open those files.** If a review is not in the envelope, it is not available
   to you, and that is a gap to report rather than to fill in.
 
-**The brief tells you which lenses are missing, and it only lists the ones that reported.**
-Two report paths means two reports. A lens that did not report is not a lens that found
-nothing — it is a lens that was not applied, and every finding you write has to say which
-lenses it rests on. Claim the status the brief tells you to claim.
+**The brief tells you which lenses are missing, and it only lists the ones whose reports
+reached you.** Two report paths means two reports. A lens with no report is never a lens that
+found nothing, and every finding you write has to say which lenses it rests on. Claim the
+status the brief tells you to claim.
+
+**Read the reason on each `MISSING ASPECT` line, because two different things wear that
+label and they call for different sentences from you.**
+
+- **No report was produced.** The line says so, and says no result envelope exists. This is
+  a lens that was not applied. Report it as uncovered.
+- **A report was produced and could not be read.** The line says the envelope was written,
+  names its size and the error, and is followed by an `UNREADABLE ENVELOPE` block. **This
+  lens WAS applied.** A reviewer read the change and wrote a review; the file would not
+  parse, so it never reached you. Calling this "a lens that was not applied" is false, and it
+  is the specific falsehood this instruction exists to stop: it sends an operator to re-run a
+  reviewer that is working, or to write off a review that is sitting on disk.
+
+For the second kind, write `"reported": false` — you have not read it, so you may not credit
+it with anything — and put the brief's reason in that lens' `note` verbatim, path and size
+included. Then say in your prose report that this lens' review exists and was not readable,
+so a person can open the file and the lens can be re-run. **Do not guess what it found**, do
+not describe it as agreeing or disagreeing, and do not soften it to "the lens timed out".
 
 ## WHAT YOU WRITE ON TURN TWO
 
@@ -203,11 +240,14 @@ defect as a document naming a path that does not exist.
 - **REFUSED — `lenses[]` must be every lens this console has, not just the ones that
   answered.** It is the denominator, and it is checked against the console's seats in config:
   a row missing, a row too many, or a row whose `aspect` does not match its worker's seat
-  refuses the document and names the worker. Without the row for a lens that did not report, a
+  refuses the document and names the worker. Without the row for a lens whose report did not
+  reach you, a
   finding two reviewers raised reads as `2/2` when it is `2/3` — the same fabrication as
   crediting a lens that never answered, reached by deleting a row instead of adding a name.
   Copy the missing ones straight out of your brief, `reported: false`, with the reason in
-  `note`.
+  `note`. **`reported` is about what reached YOU, not about what the reviewer did**, so a lens
+  whose review was written and could not be read is `false` here and is not written off in
+  your prose.
 - **REFUSED — `file` and `line` are required on every finding, and `file` must be the
   container path.** Write `/workspace/src/run/relay.ts`, not `src/run/relay.ts`. Both spellings
   are accepted, and only one is worth anything: a location is checked by resolving it against
@@ -246,9 +286,11 @@ did, quote that code yourself.
 A correctness bug that silently produces a wrong answer outranks a missing test, which
 outranks a naming preference.
 
-**Last, what was not covered.** Lenses that did not report, reviewers that named their own
-edges, files nobody read, requirements nobody could locate. A review that hides its gaps is
-trusted further than it earned.
+**Last, what was not covered.** Lenses whose reports did not reach you, reviewers that named
+their own edges, files nobody read, requirements nobody could locate. A review that hides its
+gaps is trusted further than it earned. **Say which kind of gap each one is** — a lens that
+produced nothing and a lens whose review could not be read are different things to do next,
+and this document is where a person finds that out.
 
 Attribute every finding. A collated report where the reader cannot tell who said what is
 three reviews destroyed to make one.

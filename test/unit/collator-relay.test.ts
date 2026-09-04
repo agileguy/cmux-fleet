@@ -81,6 +81,7 @@ import {
   relayFanOut,
   type AspectSeat,
   type RelayDispatch,
+  type RelayEnvelopeState,
   type RelayHarvest,
   type RelayOutcome,
   type RelayTaskRef,
@@ -192,6 +193,15 @@ function barrier(n: number, ms: number) {
 interface FakeOptions {
   /** Verdict per child task id; anything unnamed settles `success`. */
   readonly verdicts?: Readonly<Record<string, RelayHarvest["verdict"]>>;
+  /**
+   * What the harvest found of each child's RESULT ENVELOPE.
+   *
+   * Unnamed children report nothing at all — `undefined` — which is the shape a
+   * transport that does not inspect envelopes has, and is deliberately NOT the
+   * same fixture as one that looked and found none. See
+   * `envelopeStates` below for why that third state has to exist here.
+   */
+  readonly envelopes?: Readonly<Record<string, RelayEnvelopeState>>;
   /** Child task ids whose dispatch call rejects. */
   readonly dispatchFails?: readonly string[];
   /** Hold every dispatch until this many are inside it at once. */
@@ -262,6 +272,7 @@ class FakeTransport implements RelayTransport<Run> {
     return {
       verdict: this.opts.verdicts?.[t.taskId] ?? "success",
       reply: { task: t.taskId, finding: FakeTransport.marker(t.taskId) },
+      envelope: this.opts.envelopes?.[t.taskId],
     };
   }
 
@@ -639,6 +650,260 @@ describe("the join and the lattice (T2, §6.6)", () => {
     // `awaitSettled` on it would poll for a task record that cannot appear.
     expect(t.first("settled:T-lang")).toBe(-1);
     expect(t.first("harvest:T-lang")).toBe(-1);
+  });
+});
+
+/**
+ * A LENS THAT COULD NOT BE READ IS NOT A LENS THAT PRODUCED NOTHING.
+ *
+ * ## The run this is written from
+ *
+ * `rev-lang-1` wrote a genuine 3906-byte review into its result envelope. Its
+ * seat is regex correctness, so the review quoted a regex into a JSON string —
+ * `[\w\\-_]+`. `\w` is not a valid JSON escape, so the envelope does not parse.
+ * The console then said, in three places, that the reviewer *"settled `unknown`
+ * and produced no report"*, and the collation recorded
+ * `{"reported": false, "note": "the lens settled 'unknown' and produced no report"}`.
+ *
+ * Every word of that is about the REVIEWER and the failure was in the
+ * TRANSPORT. An operator reading `partial` learns that a lens found nothing,
+ * when what is true is that a review exists on disk and nothing here could open
+ * it — a different instruction entirely, because the second one can be read by a
+ * person and is worth re-running.
+ *
+ * **The seat that quotes code is the seat most likely to put a regex in a JSON
+ * string**, so this is structural rather than unlucky, and it will recur.
+ *
+ * ## WHAT THESE PROBES CAN SEE
+ *
+ * - That the brief's wording for an ABSENT envelope and an UNREADABLE one
+ *   DIFFER, and differ in the direction that matters: only the unreadable one
+ *   claims a file exists, and only the absent one claims nothing was produced.
+ * - That the unreadable line carries the three things a person needs to act —
+ *   a path, a size and a nameable parse error — rather than prose about them.
+ * - That the discriminator is the ENVELOPE and not the verdict. Both fixtures
+ *   below settle `unknown`, so an implementation that branched on the verdict
+ *   scores zero here rather than passing by coincidence.
+ * - That the unreadable instruction block is ABSENT when no envelope was
+ *   unreadable, so a warning printed on every brief cannot pass for a warning
+ *   printed on the right one.
+ *
+ * ## WHAT THESE PROBES CANNOT SEE
+ *
+ * - **Whether the harvester's absent/unreadable classification is CORRECT.**
+ *   That lives behind `RelayHarvest.envelope` and is the other engineer's; here
+ *   it is a fixture value. A harvester that reported every absent envelope as
+ *   unreadable would make every assertion below pass and the console lie again.
+ * - **Whether the collator obeys the brief.** These read the bytes dispatched,
+ *   not what a model does with them. `collator-role.test.ts` grades the
+ *   document that tells it, and nothing grades the model.
+ * - **The real `\w` failure end to end.** No JSON is parsed here; the parse
+ *   error is a string in a fixture. The coincidence this is written against is
+ *   the FIXTURE kind, not the parser kind.
+ */
+describe("an unreadable envelope is a transport failure, not a silent reviewer", () => {
+  const LANG_ENVELOPE = "/outbox/T-lang/result.json";
+  const PARSE_DETAIL = "Invalid escape character w in JSON at position 1487";
+
+  /**
+   * The asymmetric fixture, and the whole point of this block.
+   *
+   * Two lenses go missing with the SAME verdict and DIFFERENT envelope states.
+   * The recurring defect on this branch is a fixture in which the two states
+   * being distinguished coincide — and every cheaper fixture here does exactly
+   * that. Giving the absent lens `failed` and the unreadable one `unknown`
+   * would let an implementation that read only the verdict pass. Giving both
+   * the same envelope state would let one that read neither pass. Only this
+   * pairing makes the envelope the sole thing that differs.
+   */
+  const twoMissing = () =>
+    new FakeTransport({
+      verdicts: { "T-context": "unknown", "T-lang": "unknown" },
+      envelopes: {
+        "T-context": { kind: "absent" },
+        "T-lang": {
+          kind: "unreadable",
+          path: LANG_ENVELOPE,
+          bytes: 3906,
+          code: "not_json",
+          detail: PARSE_DETAIL,
+        },
+      },
+    });
+
+  function briefOf(o: RelayOutcome): string {
+    return collated(o).collation.brief;
+  }
+
+  test("the unreadable lens is named with its file, its size and the parse error", async () => {
+    const brief = briefOf(await run(ALL_THREE(), twoMissing()));
+
+    // Still a MISSING ASPECT line: from the collator's side the lens IS
+    // missing, and §6.6's rule is that every missing aspect is named. A second
+    // prefix would let a collator scanning for this one skip a real absence.
+    expect(brief).toContain("MISSING ASPECT: lang");
+    // The three facts a person can act on. Each is asserted separately so a
+    // regression that drops one is not masked by the other two.
+    expect(brief).toContain(LANG_ENVELOPE);
+    expect(brief).toContain("3906");
+    expect(brief).toContain(PARSE_DETAIL);
+  });
+
+  test("the unreadable lens is NOT described as having produced nothing", async () => {
+    const brief = briefOf(await run(ALL_THREE(), twoMissing()));
+    const langLine = brief.split("\n").find((l) => l.startsWith("MISSING ASPECT: lang"));
+
+    expect(langLine).toBeDefined();
+    // The exact sentence the live console shipped, and the reason this file
+    // exists. A `toContain` over the whole brief would be satisfied by the
+    // ABSENT lens' own line, so this is scoped to the one line under test.
+    expect(langLine).not.toContain("produced no report");
+  });
+
+  test("the summary counts reports the collator CAN READ, not reports produced", async () => {
+    const brief = briefOf(await run(ALL_THREE(), twoMissing()));
+
+    // *"N produced a report; M did not"* asserts of the M that they produced
+    // nothing — the same false claim as the per-lens note, in the one sentence
+    // a reader skims. Qualifying the survivors' clause makes the missing clause
+    // true by subtraction without the summary having to know which kind of
+    // missing each one is.
+    expect(brief).toContain("1 produced a report you can read; 2 did not");
+  });
+
+  test("a readable envelope that did not succeed is not a lens that produced nothing", async () => {
+    /**
+     * The arm production cannot reach YET, and the reason it is probed anyway.
+     *
+     * `fanOut` publishes a reply only for a lens that SUCCEEDED, so a lens with
+     * a perfectly readable envelope and a `failed` verdict has a report that
+     * exists and did not travel. *"Produced no report"* is false there too —
+     * the same defect in its second-most-likely form. The production adapter
+     * cannot emit `present` today (see `RelayHarvestView.unreadableEnvelope`),
+     * so this probe grades the core's vocabulary rather than a live path, and
+     * is what stops that vocabulary rotting before the seam widens.
+     */
+    const t = new FakeTransport({
+      verdicts: { "T-lang": "failed" },
+      envelopes: { "T-lang": { kind: "present" } },
+    });
+    const lang = collated(await run(ALL_THREE(), t)).children.find((c) => c.aspect === "lang");
+
+    expect(lang?.note).not.toContain("produced no report");
+    expect(lang?.note).toContain("no report reached the collator");
+  });
+
+  test("the absent lens does NOT borrow the unreadable wording", async () => {
+    const brief = briefOf(await run(ALL_THREE(), twoMissing()));
+    const ctxLine = brief.split("\n").find((l) => l.startsWith("MISSING ASPECT: context"));
+
+    expect(ctxLine).toBeDefined();
+    // THE ASYMMETRY. An implementation that emits the unreadable sentence for
+    // every missing lens passes every assertion in the test above and fails
+    // here — which is the only reason that test is worth running.
+    expect(ctxLine).not.toContain(LANG_ENVELOPE);
+    expect(ctxLine).not.toContain("3906");
+    expect(ctxLine).not.toContain(PARSE_DETAIL);
+    // ...and it still says the strong true thing, because for a lens the
+    // harvest looked for and did not find, "produced no report" is a FACT and
+    // weakening it everywhere would be the opposite over-correction.
+    expect(ctxLine).toContain("produced no report");
+  });
+
+  test("the two lines differ, and the verdict cannot be what told them apart", async () => {
+    const out = collated(await run(ALL_THREE(), twoMissing()));
+    const lang = out.children.find((c) => c.aspect === "lang");
+    const ctx = out.children.find((c) => c.aspect === "context");
+
+    // Same verdict, different note. If these verdicts ever diverge in this
+    // fixture the whole block stops proving anything, so it is asserted rather
+    // than assumed.
+    expect(lang?.verdict).toBe("unknown");
+    expect(ctx?.verdict).toBe("unknown");
+    expect(lang?.note).not.toBe(ctx?.note);
+    // The state is carried on the child rather than only rendered into prose,
+    // so the brief is not the only reader that can tell them apart.
+    expect(lang?.envelope).toEqual({
+      kind: "unreadable",
+      path: LANG_ENVELOPE,
+      bytes: 3906,
+      code: "not_json",
+      detail: PARSE_DETAIL,
+    });
+    expect(ctx?.envelope).toEqual({ kind: "absent" });
+  });
+
+  test("the collator is told an unreadable lens is worth re-running, once", async () => {
+    const brief = briefOf(await run(ALL_THREE(), twoMissing()));
+
+    expect(brief).toContain("UNREADABLE ENVELOPE");
+    // Named once per unreadable lens and not once per missing lens: the ABSENT
+    // one must not appear in the block that says a file can be opened by hand.
+    expect(brief.match(/UNREADABLE ENVELOPE/g)).toHaveLength(1);
+    /**
+     * The three clauses the block exists for, pinned as PHRASES rather than as
+     * a sentence.
+     *
+     * A block that is present and says nothing useful passes the two assertions
+     * above, and a battery proved it: truncating the instruction to its first
+     * clause left every positive green. These are the semantics — the lens was
+     * applied, the row still says `false`, a person should go and read it — and
+     * they are matched short so the prose around them stays free to be rewritten.
+     */
+    expect(brief).toContain("it was applied");
+    expect(brief).toContain('"reported": false');
+    expect(brief).toContain("re-run the lens");
+  });
+
+  test("no unreadable envelope means no unreadable block at all", async () => {
+    // The guard the truncation section already needed: an unconditional block
+    // emits no per-lens lines when nothing was unreadable, so every assertion
+    // above still passes while every brief warns about a hazard it does not
+    // have. A warning on every brief is one a reader learns to skip.
+    const t = new FakeTransport({
+      verdicts: { "T-lang": "failed" },
+      envelopes: { "T-lang": { kind: "absent" } },
+    });
+    const brief = briefOf(await run(ALL_THREE(), t));
+
+    expect(brief).toContain("MISSING ASPECT: lang");
+    expect(brief).not.toContain("UNREADABLE ENVELOPE");
+  });
+
+  test("a transport that says nothing about envelopes claims nothing about them", async () => {
+    /**
+     * The THIRD state, and it is not the same as `absent`.
+     *
+     * `RelayHarvest.envelope` is optional because the core must not require a
+     * transport to inspect envelopes — the same argument `inlined` already
+     * won. What must not follow is that silence gets read as evidence: a
+     * transport that never looked cannot support "produced no report", which
+     * is precisely the claim the live console made from exactly this state.
+     */
+    const t = new FakeTransport({ verdicts: { "T-lang": "unknown" } });
+    const out = collated(await run(ALL_THREE(), t));
+    const lang = out.children.find((c) => c.aspect === "lang");
+
+    expect(lang?.envelope).toBeNull();
+    expect(lang?.note).not.toContain("produced no report");
+    // It still says something useful about what the COLLATOR has, which is the
+    // one thing that is true from here regardless of what the reviewer did.
+    expect(lang?.note).toContain("no report reached");
+  });
+
+  test("a lens that was never dispatched keeps its own reason", async () => {
+    // Guards the over-correction: a seat the request never named, and a
+    // dispatch that was refused, are not envelope facts and must not be
+    // re-described as ones. Their notes predate this change and stay.
+    const t = new FakeTransport({ dispatchFails: ["T-lang"] });
+    const out = collated(await run(okRequest([{ worker: ARCH }, { worker: LANG }]), t));
+
+    expect(out.children.find((c) => c.aspect === "context")?.envelope).toBeNull();
+    expect(out.children.find((c) => c.aspect === "context")?.note).toContain(
+      "never named this reviewer",
+    );
+    expect(out.children.find((c) => c.aspect === "lang")?.envelope).toBeNull();
+    expect(briefOf(out)).not.toContain("UNREADABLE ENVELOPE");
   });
 });
 

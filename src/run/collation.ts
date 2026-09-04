@@ -306,12 +306,59 @@ export const CollationLensSchema = z
     aspect: idField("aspect"),
     /** The reviewer that held it. Fixed in config; never chosen here (D11). */
     worker: workerId,
-    /** Whether a report for this lens existed to read. */
+    /**
+     * WHETHER A REPORT FOR THIS LENS REACHED THE COLLATOR.
+     *
+     * **It is about the READER, not about the reviewer, and the difference has
+     * been observed to matter.** `rev-lang-1` once wrote a 3906-byte review into
+     * a result envelope that quoted a regex — `[\w\\-_]+` — into a JSON string.
+     * `\w` is not a valid JSON escape, the envelope did not parse, and the
+     * record said the lens *"produced no report"*. The report existed. What was
+     * true is the thing this field states: nothing reached the collator.
+     *
+     * `false` is STILL CORRECT in that case and that is the point of spelling
+     * the field this way. The collator has not read the review, so it may not
+     * credit the lens in `raised_by` — the attribution rules below stand
+     * unchanged, and a lens marked `true` on the strength of a review nobody
+     * read is exactly the 3/3 fabrication §6.8 exists to make impossible. What
+     * was wrong was never the boolean. It was the reason given for it.
+     */
     reported: z.boolean(),
     /**
-     * Why a lens is missing, when one is. Free text and optional, because the
-     * collation brief states the reason and copying it forward is worth more
-     * than inventing a taxonomy for it.
+     * Why no report reached the collator, when none did. Free text, optional,
+     * and copied out of the brief rather than classified here.
+     *
+     * ## Why this is still prose, now that there is a real taxonomy upstream
+     *
+     * `relay.ts` now distinguishes an ABSENT envelope from an UNREADABLE one —
+     * a genuine machine-readable difference, carried as `RelayEnvelopeState`,
+     * and the obvious next move is a matching enum on this row. It is
+     * deliberately not taken, for three reasons that are about THIS document
+     * rather than about taxonomies in general.
+     *
+     * **1. This row is written by a model, and the relay's is written by code.**
+     * `RelayEnvelopeState` is a classification made by the thing that did the
+     * reading; a field here would be the collator's *re-*classification of a
+     * sentence it was handed. A model that mis-files one produces a confidently
+     * wrong structured claim, which is strictly worse than prose — a reader
+     * discounts an odd sentence and trusts an enum. The brief already states the
+     * reason; copying it forward preserves it, and classifying it can only lose.
+     *
+     * **2. Nothing downstream would read it.** `collation-census.ts` grades
+     * findings against the lens table and consults `lensCoverage`, which counts
+     * `reported`; no consumer branches on WHY a lens is missing. A field that
+     * nothing reads is a field that drifts, and it would drift in a document
+     * whose other fields are load-bearing.
+     *
+     * **3. The lens table is the coverage DENOMINATOR and its rules are checked
+     * as set equality against config in both directions.** Every addition here
+     * is weight on the one structure a review's arithmetic rests on. An enum
+     * that buys no reader is not worth that weight.
+     *
+     * **What was actually wrong is fixed where it was wrong.** The false
+     * sentence was authored in `relay.ts` and copied faithfully; the remedy is
+     * that the brief now says what happened. This field's job is to carry it
+     * without editorialising, and it already does that.
      */
     note: z.string().max(MAX_COLLATION_STATEMENT).optional(),
   })
@@ -577,9 +624,12 @@ export const CollationSchema = z
             code: "custom",
             path: ["findings", i, "raised_by"],
             message:
-              `"${w}" is credited with this finding and its lens did not report. A missing ` +
-              `reviewer is not a reviewer that agreed: this is how a two-lens review records ` +
-              `3/3, which is the exact reading §6.8 exists to make impossible.`,
+              `"${w}" is credited with this finding and no report from its lens reached you. A ` +
+              `lens you could not read is not a lens that agreed — whether it wrote nothing or ` +
+              `wrote something that would not parse, you have not read it — and crediting it is ` +
+              `how a two-lens review records 3/3, the exact reading §6.8 exists to make ` +
+              `impossible. If its review exists and was unreadable, say so in your prose report ` +
+              `and in this lens' note; do not move the finding into this list.`,
           });
         }
       }
@@ -604,8 +654,9 @@ export const CollationSchema = z
             code: "custom",
             path: ["findings", i, "disputed_by"],
             message:
-              `"${w}" is recorded as disputing this finding and its lens did not report — a ` +
-              `lens that produced nothing took no position`,
+              `"${w}" is recorded as disputing this finding and no report from its lens reached ` +
+              `you — a position you have not read is not a position you may record. That holds ` +
+              `whether the lens produced nothing or produced a report that could not be read.`,
           });
         }
       }
@@ -828,8 +879,9 @@ function lensTableProblem(collation: Collation, seats: readonly AspectSeat[]): s
         `table is §6.8's DENOMINATOR, so dropping a row that did not report turns a ` +
         `${declared.size}/${expected.size} review into a clean ${declared.size}/${declared.size} ` +
         `— the same 3/3 fabrication the attribution rules refuse, reached by deletion instead ` +
-        `of by credit. A lens that produced nothing belongs in the table with ` +
-        `"reported": false and the reason from your brief.`
+        `of by credit. A lens whose report did not reach you belongs in the table with ` +
+        `"reported": false and the reason from your brief, whether it wrote nothing or wrote ` +
+        `something that could not be read.`
       );
     }
     if (got !== aspect) {
@@ -857,7 +909,14 @@ function lensTableProblem(collation: Collation, seats: readonly AspectSeat[]): s
 export interface LensCoverage {
   /** Every lens the console has — §6.8's denominator. */
   readonly total: number;
-  /** How many produced a report to read. */
+  /**
+   * How many produced a report THE COLLATOR READ.
+   *
+   * Not "how many reviewed the change". A lens whose result envelope would not
+   * parse reviewed it and is counted here as missing, correctly — coverage is
+   * what the collation rests on, and it rests on what was read. Why a lens is
+   * missing is in its `note`; this number deliberately does not distinguish.
+   */
   readonly reported: number;
   /** The ASPECTS that did not, named, because a count cannot say which. */
   readonly missing: readonly string[];
