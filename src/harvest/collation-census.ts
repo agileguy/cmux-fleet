@@ -93,9 +93,10 @@
 
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import type { CollationCensus } from "../contracts.ts";
+import type { CollationCensus, Verdict } from "../contracts.ts";
 import {
   COLLATION_ARTIFACT_NAME,
+  collationCeiling,
   lensCoverage,
   type Collation,
   type CollationRead,
@@ -279,6 +280,53 @@ export function censusFromRead(
     case "ok":
       return censusCollation(read.collation, containerWorkdir);
   }
+}
+
+/**
+ * §6.8's THIRD RULE, GATED ON ISC-94 — the wrapper `harvestTask` calls instead
+ * of reaching `collationCeiling` directly.
+ *
+ * ## Why this exists rather than a `??` at the call site
+ *
+ * The call site used to spell it `collationCeiling(taskId, claimed?.status ??
+ * "unknown", read)`, and that expression is load-bearing in a way nothing could
+ * test: it is the only thing stopping a MISSING collation from clamping a task
+ * with NO RESULT ENVELOPE. **Measured**: a `-collate` task with a worktree, one
+ * passing harvester-run acceptance command and no envelope grades `success`
+ * unmutated and `partial` with the guard removed — a document the worker never
+ * wrote pulling down *"the one piece of evidence in this function a fabricating
+ * worker cannot author"*.
+ *
+ * ISC-94 is explicit that a missing envelope is a NO-OP AND NEVER A DOWNGRADE,
+ * and `adjudicate` honours it by making `unknown` the lattice identity. A rule
+ * whose antecedent is "the task claims success" has no antecedent at all when
+ * there is no claim, so it must decline — not decline *by arithmetic*, which is
+ * what the `??` was doing, but by saying so.
+ *
+ * It does not bite in the SHIPPED config, and that is not a defence. The
+ * collator is `shared-ro`, so no worktree, so the acceptance exam never runs, so
+ * the verdict never exceeds the claim — a property of `fleet.yaml`, which is
+ * mutable, reached by a guard nobody can see. `isCollationTaskId` also matches
+ * any operator task named `*-collate`, which is a second door into the same
+ * room.
+ */
+export function collationCeilingFor(
+  taskId: string,
+  claimed: { status: string } | null,
+  read: CollationRead,
+): { status: Verdict; reason: string } | null {
+  /**
+   * NO CLAIM, NO CEILING. The whole of ISC-94, in the one place it can be read
+   * and tested. Returning `null` rather than a `{status, reason: null}` shape so
+   * a caller cannot accidentally act on it.
+   */
+  if (claimed === null) return null;
+  const ceiling = collationCeiling(taskId, claimed.status as Verdict, read);
+  // NARROWED at the boundary: `CollationCeiling.reason` is nullable because that
+  // type also spells "no opinion", and this wrapper has already turned that into
+  // `null`. Returning the wide type would make every caller re-check a field
+  // this one has decided.
+  return ceiling.reason === null ? null : { status: ceiling.status, reason: ceiling.reason };
 }
 
 /** What the census allows, and why — `null` when it has no opinion. */

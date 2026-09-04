@@ -51,6 +51,7 @@ import { adjudicate } from "../../src/harvest/adjudicate.ts";
 import {
   censusCeiling,
   censusFromRead,
+  collationCeilingFor,
   findingLocationProblem,
 } from "../../src/harvest/collation-census.ts";
 import { readCollation, type CollationRead } from "../../src/run/collation.ts";
@@ -98,7 +99,7 @@ function docText(over: Record<string, unknown> = {}): string {
 
 /** The census of a document, through the real reader. Throws on a bad fixture. */
 function census(over: Record<string, unknown> = {}): CollationCensus {
-  const read: CollationRead = readCollation(docText(over));
+  const read: CollationRead = readCollation(docText(over), { taskId: COLLATE });
   if (read.kind !== "ok") {
     throw new Error(
       `fixture did not parse (${read.kind}${read.kind === "refused" ? `: ${read.reason}` : ""})`,
@@ -271,6 +272,27 @@ describe("rule 1 — a finding resolves inside the container workdir, or it is n
     });
   }
 
+  /**
+   * Y3: the empty path and the containment arm BOTH refuse `""`, so a row
+   * asserting only `typeof problem === "string"` cannot tell them apart — the
+   * degenerate shape this file's own header says every fixture avoids. Asserting
+   * the SENTENCE separates them: deleting the empty-path guard leaves the
+   * containment message, which does not name an empty path.
+   */
+  test("an empty path is refused AS an empty path, not as a containment failure", () => {
+    expect(findingLocationProblem("", 1, WORKDIR)).toBe("finding carries an empty file path");
+  });
+
+  /**
+   * Y3: every other fixture's line is a whole number, so `!Number.isInteger(line)`
+   * was never exercised — `line: 12.5` counted as located. The function is
+   * exported and has callers beyond `censusCollation`, so the bound is its own.
+   */
+  test("a fractional line number is not a quotable line", () => {
+    expect(findingLocationProblem("/workspace/src/a.ts", 12.5, WORKDIR)).toContain("1-based");
+    expect(findingLocationProblem("/workspace/src/a.ts", Number.NaN, WORKDIR)).toContain("1-based");
+  });
+
   test("a workdir other than /workspace is respected", () => {
     // The check is against the ENVELOPE's container_workdir, not a constant.
     expect(findingLocationProblem("/srv/code/a.ts", 1, "/srv/code")).toBeNull();
@@ -298,6 +320,7 @@ describe("rule 1 — a finding resolves inside the container workdir, or it is n
           { statement: "elsewhere", file: "/etc/passwd", line: 1, raised_by: ["rev-ctx-1"] },
         ],
       }),
+      { taskId: COLLATE },
     );
     expect(read.kind).toBe("ok");
     const c = censusFromRead(read, WORKDIR)!;
@@ -318,6 +341,7 @@ describe("rule 1 — a finding resolves inside the container workdir, or it is n
           },
         ],
       }),
+      { taskId: COLLATE },
     );
     expect(read.kind).toBe("refused");
     // And the refusal is recorded as a census rather than dropped, so "nobody
@@ -379,8 +403,27 @@ describe("the ceiling — the location rule, and what it must never do", () => {
     expect(censusCeiling(census({ findings: [], finding_count: 0 }), "success")).toBeNull();
   });
 
+  /**
+   * Y3: `censusRefused`'s published fields were asserted only for `readable` and
+   * `refusal`, so `declared: null` — the field that says "this document never
+   * told us a count" — could become `0`, which is a DIFFERENT claim: a collation
+   * that declared zero findings.
+   */
+  test("a refused census publishes no counts at all, and declares nothing", () => {
+    const c = censusFromRead(readCollation("{", { taskId: COLLATE }), WORKDIR)!;
+    expect(c.readable).toBe(false);
+    expect(c.declared).toBeNull();
+    expect(c.counted).toBe(0);
+    expect(c.located).toBe(0);
+    expect(c.lenses_total).toBe(0);
+    expect(c.lenses_reported).toBe(0);
+    expect(c.lenses_missing).toEqual([]);
+    expect(c.agreement).toEqual([]);
+    expect(c.defects.length).toBe(1);
+  });
+
   test("a refused document is not this ceiling's business either", () => {
-    const c = censusFromRead(readCollation("{"), WORKDIR)!;
+    const c = censusFromRead(readCollation("{", { taskId: COLLATE }), WORKDIR)!;
     expect(c.readable).toBe(false);
     expect(censusCeiling(c, "success")).toBeNull();
   });
@@ -537,5 +580,62 @@ describe("adjudication — the census caps a review's verdict and cannot lift on
     const adj = adjudicate(reviewFacts(), envelope("success"));
     expect(adj.verdict).toBe("success");
     expect(adj.reasons.join(" ")).not.toContain("collation");
+  });
+});
+
+/**
+ * ISC-94's GUARD ON §6.8's THIRD RULE — Y1.
+ *
+ * `collationCeilingFor` exists because the guard used to be `claimed?.status ??
+ * "unknown"` at a call site, which no test could reach: separating it needs a
+ * task whose verdict EXCEEDS `partial` with no envelope, and that means green
+ * harvester-run acceptance, which means a worktree and an exam. The measurement
+ * that found it did exactly that and produced `success` unmutated against
+ * `partial` with the guard gone.
+ *
+ * A missing envelope must be a no-op and never a downgrade, and the one thing it
+ * must never pull down is the acceptance evidence a fabricating worker cannot
+ * author. Here the rule is a function, so the guard is one assertion.
+ */
+describe("ISC-94 — a task with no envelope has no claim for §6.8's third rule to refuse", () => {
+  const MISSING: CollationRead = { kind: "missing" };
+
+  test("no envelope means no ceiling, whatever the artifact says", () => {
+    expect(collationCeilingFor(COLLATE, null, MISSING)).toBeNull();
+    expect(
+      collationCeilingFor(COLLATE, null, readCollation("{", { taskId: COLLATE })),
+    ).toBeNull();
+    expect(
+      collationCeilingFor(COLLATE, null, readCollation(docText({ findings: [], finding_count: 0 }), { taskId: COLLATE })),
+    ).toBeNull();
+  });
+
+  test("a claim of success with no collation IS refused — the guard is not a mute", () => {
+    // The other half of the conjunction. Without this, deleting the rule
+    // entirely would pass the assertion above.
+    const c = collationCeilingFor(COLLATE, { status: "success" }, MISSING);
+    expect(c?.status).toBe("partial");
+    expect(c?.reason).toContain("collation.json");
+  });
+
+  test("a claim that is not success is left alone", () => {
+    for (const status of ["partial", "blocked", "failed"]) {
+      expect(collationCeilingFor(COLLATE, { status }, MISSING)).toBeNull();
+    }
+  });
+
+  test("a task that is not a collation is left alone even claiming success", () => {
+    // `isCollationTaskId` is the guard that stops this capping every success in
+    // the fleet, since every other task is also missing a collation.
+    expect(collationCeilingFor("T-1", { status: "success" }, MISSING)).toBeNull();
+    expect(collationCeilingFor("build-thing", { status: "success" }, MISSING)).toBeNull();
+  });
+
+  test("no opinion is spelled `null`, never a ceiling with a null reason", () => {
+    // The narrowing this wrapper performs: a caller must not have to re-check a
+    // field it has already decided.
+    const c = collationCeilingFor(COLLATE, { status: "success" }, MISSING);
+    expect(c).not.toBeNull();
+    expect(typeof c!.reason).toBe("string");
   });
 });

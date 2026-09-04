@@ -33,7 +33,6 @@ import {
   type TaskEnvelope,
   type Verdict,
 } from "../contracts.ts";
-import { collationCeiling } from "../run/collation.ts";
 import { workerOutboxDir, workerPaths, taskRecordPath, type RunPaths } from "../run/paths.ts";
 import { readTaskRecord, readWorkerLaunch, readWorkerState } from "../run/state.ts";
 import { worktreeContentHash } from "../run/treehash.ts";
@@ -47,6 +46,7 @@ import {
 } from "./outbox.ts";
 import { dispatchedTaskIds, unexplainedOutboxDirs } from "./layout.ts";
 import { resolveWorkerNeedles } from "./needles.ts";
+import { collationCeilingFor } from "./collation-census.ts";
 import { reconcileArtifactClaims } from "./reconcile.ts";
 
 export interface HarvestOptions {
@@ -803,16 +803,8 @@ export async function harvestTask(
      * intended: `rank("unknown")` is -1, so a harvest ISC-154 or ISC-151 already
      * refused to grade is untouched, and nothing this reads can raise a verdict.
      */
-    const collationCap = collationCeiling(
-      taskId,
-      // No envelope is `unknown`, which is NOT `success`, so the rule declines —
-      // deliberately. A task whose worker wrote nothing is graded on the
-      // harvester's own evidence, and a document the worker wrote must not pull
-      // that down. `collationCeiling`'s header makes the same argument.
-      claimed?.status ?? "unknown",
-      reconciled.collationRead,
-    );
-    if (collationCap.reason !== null && rank(verdict) > rank(collationCap.status)) {
+    const collationCap = collationCeilingFor(taskId, claimed, reconciled.collationRead);
+    if (collationCap !== null && rank(verdict) > rank(collationCap.status)) {
       verdict = collationCap.status;
       reasons.push(collationCap.reason);
     }

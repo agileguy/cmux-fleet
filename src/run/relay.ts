@@ -1782,18 +1782,45 @@ export async function consoleRunResolution(
    * does not, and it is strictly the weaker answer: the script knows which four
    * runs it created, and the scan can only infer from what is on disk.
    */
+  /**
+   * A PIN IS A HINT THAT DECAYS, not a decision cached for a process lifetime.
+   *
+   * It used to short-circuit the scan outright, and the consequence is worse
+   * than it looks. `PIFLEET_RELAY_RUNS` is fixed at spawn, so a pinned run that
+   * later dies — `--restart` on a reviewer, a supervisor that fell over, a
+   * `down` on one seat — was resolved to a corpse on every subsequent pass. The
+   * fan-out fails closed there (nothing lands, nothing is journalled, the pass
+   * retries), so no review is lost, but **it never converges**: the pin cannot
+   * be re-derived without restarting the process, and the operator's remedy is
+   * to re-run a script that finds a live relay and leaves it alone.
+   *
+   * The scan it bypassed re-evaluates liveness every pass and therefore
+   * converges by construction. So the pin now keeps only the job it was
+   * introduced for — telling two consoles apart, which the scan cannot do — and
+   * gives up any worker it names that is not live, letting the scan answer for
+   * that one instead. `status-runs.ts` argues pins must be computed from live
+   * workers; that argument is about the moment of computation and does not
+   * survive being cached, which is what this closes.
+   */
   const pinned = relayRunPins(src.pinnedRuns());
   if (pinned !== null) {
     const runs = new Map<string, RunPaths>();
+    const decayed: string[] = [];
     for (const worker of workers) {
       if (worker === input.sender) {
         runs.set(worker, input.run);
         continue;
       }
       const runId = pinned.get(worker);
-      if (runId !== undefined) runs.set(worker, src.runPathsFor(runId, root));
+      if (runId === undefined) continue;
+      const run = src.runPathsFor(runId, root);
+      if (await src.isLiveWorker(run, worker)) runs.set(worker, run);
+      else decayed.push(worker);
     }
-    return { runs, ambiguous: new Map<string, readonly string[]>() };
+    // Every pinned worker still answers: the pin is whole and the scan is not
+    // needed. Any decay and the scan runs, so a seat that came back in a new run
+    // is found rather than waited for forever.
+    if (decayed.length === 0) return { runs, ambiguous: new Map<string, readonly string[]>() };
   }
 
   return resolveConsoleRuns({

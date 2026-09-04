@@ -60,10 +60,12 @@
  * silently actorless again.
  */
 
+import { open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
-import { processStartTime } from "../safety/procstart.ts";
+import { isPinnedIdentity, processStartTime } from "../safety/procstart.ts";
+import { writeJsonAtomic } from "../util/jsonl.ts";
 import { runsRoot } from "./paths.ts";
 
 /**
@@ -88,10 +90,26 @@ export const RelayRecordSchema = z.object({
   pid: z.number().int().positive(),
   /** A `processStartTime` token. The half that survives a recycled pid. */
   started: z.string(),
-  /** The run this relay was pointed at — the collator's, under D4. */
+  /**
+   * The run this relay was pointed at — the collator's, under D4.
+   *
+   * **This field is what makes "a relay is already running" a COMPARISON.**
+   * Without it the manager can only ask whether *a* relay exists, which answers
+   * yes for one serving a console that was closed an hour ago. The documented
+   * workflow reaches that in three steps: run the script, close the `review`
+   * workspace by hand, run it again — four new runs, and an actor polling the
+   * first console's inbox that the script reports as healthy.
+   */
   run_id: z.string(),
   /** The `PIFLEET_RELAY_RUNS` value it was launched with, or `null`. */
   pinned: z.string().nullable().default(null),
+  /**
+   * The console's worker set, so a relay started for a DIFFERENT `--workers` set
+   * is not adopted as this one's. `run_id` alone would miss it: two consoles can
+   * share a collator run id only by accident, but one operator running
+   * `--workers` variants would produce relays that differ in nothing else.
+   */
+  workers: z.array(z.string()).default([]),
   started_at: z.string(),
   log_path: z.string(),
 });
@@ -105,10 +123,36 @@ export type RelayRecord = z.infer<typeof RelayRecordSchema>;
  * possibly because it crashed on its first pass — and an operator who sees the
  * distinction knows to read the log. `absent` says nothing ever started.
  */
+/**
+ * What a record on disk means right now — FOUR verdicts, not three, and the
+ * fourth is the one this repository already learned to need.
+ *
+ * `stale` and `unverifiable` are different facts and only one of them licenses a
+ * signal. `contracts.ts` states the rule for the registry's identical field:
+ * *"Empty string means 'not recorded' … `isPinnedIdentity("")` is false, so
+ * `down` refuses exactly as it does for an absent registry entry. Fail-closed is
+ * preserved."* `procstart.ts` exists to make the discrimination possible at all,
+ * and its `IdentityReadError` is a MEASURED case — a `ps` signal-killed under
+ * memory pressure reports `exitCode: null` with both pipes silent, which is
+ * indistinguishable from an absent process on every channel except that one.
+ *
+ * Collapsing either into `stale` is the destructive direction: the caller
+ * deletes the record of, and stops signalling, a process that is still running —
+ * *"a background process nobody can name"*, which is the exact state this record
+ * exists to prevent.
+ */
 export type RelayStatus =
   | { kind: "absent" }
+  /** The recorded process is gone. The only verdict that licenses replacing it. */
   | { kind: "stale"; record: RelayRecord }
+  /** A record we cannot parse at all. Never signalled, never deleted. */
   | { kind: "unreadable"; reason: string }
+  /**
+   * A record whose identity cannot be COMPARED — an unpinned `started`, or a
+   * `ps` that could not be read. The process may well be alive; the caller must
+   * neither adopt it as this console's nor tear it down.
+   */
+  | { kind: "unverifiable"; record: RelayRecord; reason: string }
   | { kind: "live"; record: RelayRecord };
 
 /**
@@ -117,6 +161,8 @@ export type RelayStatus =
  * `identityAlive`'s comparison, inlined rather than imported, so this module
  * does not pull in `registry.ts` — which reaches the run enumerator, the worker
  * state reader and the verbgate collector to answer a question about one pid.
+ * The inlining is also what lets the `unverifiable` arm exist here: `identityAlive`
+ * returns a boolean and has nowhere to put the third answer.
  */
 export async function readRelayStatus(path: string): Promise<RelayStatus> {
   let raw: unknown;
@@ -135,16 +181,134 @@ export async function readRelayStatus(path: string): Promise<RelayStatus> {
     };
   }
   const record = parsed.data;
+
+  /**
+   * THE CAPTURE-FAILED SENTINEL, RECOGNISED. `startRelay` persists `""` when
+   * `processStartTime` returns null or throws, and an empty string matches no
+   * real start time — so comparing it would report a live relay as stale, delete
+   * its record, and leave it polling runs the operator is about to tear down.
+   * `isPinnedIdentity` is the repository's own test for "is this value
+   * comparable at all", and it is false for `""` and for anything written before
+   * the format was pinned.
+   */
+  if (!isPinnedIdentity(record.started)) {
+    return {
+      kind: "unverifiable",
+      record,
+      reason:
+        `the record for pid ${record.pid} carries no comparable start time ` +
+        `(${record.started === "" ? "capture failed when it was written" : "an unpinned format"}), ` +
+        `so whether that process is this relay cannot be established`,
+    };
+  }
+
   let started: string | null;
   try {
     started = await processStartTime(record.pid);
-  } catch {
-    // `ps` could not be read. Treated as UNREADABLE and not as stale: the
-    // caller must not kill or replace a process it could not identify.
-    return { kind: "unreadable", reason: `could not read the identity of pid ${record.pid}` };
+  } catch (err) {
+    // `ps` could not be read — a MEASURED case, not a hypothetical. Never
+    // `stale`: the caller must not kill or replace a process it could not
+    // identify, which is `down.ts`'s posture for the same read.
+    return {
+      kind: "unverifiable",
+      record,
+      reason: `the identity of pid ${record.pid} could not be read (${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    };
   }
   if (started === null || started !== record.started) return { kind: "stale", record };
   return { kind: "live", record };
+}
+
+/**
+ * Write the record so a reader never sees half of one.
+ *
+ * `writeJsonAtomic`, because every other durable control-plane record in this
+ * repository goes through it and the failure mode here is the worst kind of
+ * sticky: a torn write leaves `readRelayStatus` answering `unreadable` forever,
+ * and `unreadable` is — correctly — the one verdict that refuses to signal or
+ * delete anything. The console would be permanently actorless until a human
+ * deleted a file, and the refusal that made it so would be right at every step.
+ */
+export async function writeRelayRecord(path: string, record: RelayRecord): Promise<void> {
+  await writeJsonAtomic(path, RelayRecordSchema.parse(record));
+}
+
+/**
+ * THE SUPERVISION §6.5 ASSUMED AND NOBODY BUILT.
+ *
+ * §6.5's table gives *"dies with the console"* as a reason to prefer a process
+ * started by `scripts/review`, and nothing implemented it — the relay outlived
+ * every console it was ever started for. §9 Q4 asks what supervises the actor
+ * and names the consequence precisely: it decides *"whether `pifleet down`
+ * remains authoritative about what is running"*.
+ *
+ * **The objection that matters is not the one §6.5 wrote down.** It worried
+ * about the actor dying mid-fan-out, and the journal answers that: nothing is
+ * recorded until the children are dispatched, so a killed relay re-dispatches
+ * rather than losing a review. The live failure is the opposite one — an actor
+ * that does NOT die. A relay left polling a console that is gone reports nothing
+ * for an empty pass, forever, and a manager that asks only "is a relay running"
+ * calls it healthy. That is §6.4's own failure shape reached through the
+ * mechanism built to close it.
+ *
+ * So the actor watches the console it was started for and exits when it is gone.
+ * `pifleet down` becomes authoritative within `tolerance` passes without `down`
+ * knowing this process exists, which is the property that makes a host-side
+ * actor honest rather than merely convenient.
+ *
+ * ## Why a run of consecutive observations rather than the first `false`
+ *
+ * Liveness is read from the worker's state file and a `ps`, and both can fail
+ * transiently — a truncated read during a supervisor's own write, a `ps` under
+ * load. Exiting on the first negative would make the actor's lifetime depend on
+ * a race it has no stake in. A RUN of them cannot be transient: the supervisor
+ * is gone and is not coming back under the same run id.
+ *
+ * The count is deliberately small. Every pass the relay spends attached to a
+ * dead console is a pass in which a request written into a live console's outbox
+ * is not read, and the operator's remedy — re-running the script — is blocked by
+ * a relay that still looks alive.
+ */
+export const RELAY_ABANDON_PASSES = 5;
+
+/**
+ * The watch, as a state machine with no I/O so the policy is testable without a
+ * fleet. The caller supplies the observation; this decides what it means.
+ */
+export class ConsoleWatch {
+  private consecutiveGone = 0;
+
+  constructor(private readonly tolerance: number = RELAY_ABANDON_PASSES) {}
+
+  /** How many consecutive negative observations have been made. */
+  get streak(): number {
+    return this.consecutiveGone;
+  }
+
+  /**
+   * Feed one observation. Returns a reason to STOP, or `null` to keep polling.
+   *
+   * A single positive observation resets the streak completely: a console that
+   * answered once is a console that exists, and carrying a partial count forward
+   * would let a run of unrelated transient failures accumulate into an exit.
+   */
+  observe(collatorIsLive: boolean, opts: { worker: string; runId: string }): string | null {
+    if (collatorIsLive) {
+      this.consecutiveGone = 0;
+      return null;
+    }
+    this.consecutiveGone += 1;
+    if (this.consecutiveGone < this.tolerance) return null;
+    return (
+      `${opts.worker} has not been live in run ${opts.runId} for ${this.consecutiveGone} ` +
+      `consecutive passes, so the console this relay was started for is gone. Exiting rather ` +
+      `than polling an inbox that can never answer: a relay attached to a dead console reports ` +
+      `nothing forever and makes the next \`scripts/review\` believe an actor is already ` +
+      `serving the new one (SRD-REVIEW-CONSOLE §6.5, §9 Q4)`
+    );
+  }
 }
 
 /**
@@ -173,6 +337,63 @@ export function consoleRelayArgv(cliEntry: string, runId: string): string[] {
  * stale is how an unrelated shell dies. The identity check above is what makes
  * even the single signal safe, and it is the caller's job to have made it.
  */
+/**
+ * Does a live relay serve THIS console?
+ *
+ * Exported and pure so the comparison is pinned without a fleet, and separate
+ * from `readRelayStatus` because the two answer different questions: that one
+ * asks whether the recorded process is running, this one asks whether it is
+ * OURS. Conflating them is exactly the defect this pair replaces — a manager
+ * that returned early on "running" never reached the run it should have compared
+ * against, so the check compared nothing.
+ */
+export function servesConsole(
+  record: RelayRecord,
+  console_: { runId: string; workers: readonly string[] },
+): boolean {
+  if (record.run_id !== console_.runId) return false;
+  // Order-insensitive: `--workers` is a list the operator types and the pane
+  // plan is what fixes the order, not this record.
+  const a = [...record.workers].sort().join("");
+  const b = [...console_.workers].sort().join("");
+  return a === b;
+}
+
+/**
+ * Take the exclusive right to start a relay, or report who holds it.
+ *
+ * `wx` is `O_CREAT|O_EXCL`, which is atomic on every filesystem this runs on —
+ * two `scripts/review` invocations racing cannot both succeed, and the loser is
+ * told rather than silently spawning a second actor. Without it the sequence is
+ * read, decide, spawn, write with nothing between the read and the write, and
+ * two consoles opened in quick succession leave two relays polling one run.
+ *
+ * The lock is a SEPARATE file from the record on purpose. The record is durable
+ * state describing a process that should outlive this script; the lock describes
+ * a critical section inside it, and a crash mid-section must not leave a stale
+ * record behind. The caller releases it in a `finally`.
+ */
+export async function acquireRelayLock(path: string): Promise<{ release: () => Promise<void> } | null> {
+  try {
+    const handle = await open(path, "wx");
+    await handle.writeFile(`${process.pid}\n`);
+    return {
+      release: async () => {
+        await handle.close().catch(() => {});
+        await (await import("node:fs/promises")).rm(path, { force: true }).catch(() => {});
+      },
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
+    throw err;
+  }
+}
+
+/** Where the start lock lives. Beside the record, and removed with it. */
+export function relayLockPath(env: Record<string, string | undefined> = process.env): string {
+  return join(dirname(runsRoot(env)), "review-relay.lock");
+}
+
 export function signalRelay(pid: number): "signalled" | "gone" | "refused" {
   try {
     process.kill(pid, "SIGTERM");

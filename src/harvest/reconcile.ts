@@ -869,7 +869,7 @@ export async function reconcileArtifactClaims(
            */
           if (!collationSeen) {
             collationSeen = true;
-            collationRead = readCollation(outcome.retained.toString("utf8"));
+            collationRead = readCollation(outcome.retained.toString("utf8"), { taskId: loc.taskId });
             if (collationRead.kind === "refused") {
               discrepancies.push(
                 `collation ${safeForReport(f.path)} was refused (${collationRead.code}): ` +

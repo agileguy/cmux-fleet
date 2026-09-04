@@ -70,7 +70,7 @@
  */
 
 import { closeSync, openSync } from "node:fs";
-import { rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { CmuxClient } from "../src/backends/cmux/client.ts";
@@ -88,12 +88,15 @@ import {
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
 import {
-  RelayRecordSchema,
+  acquireRelayLock,
   consoleRelayArgv,
   readRelayStatus,
+  relayLockPath,
   relayLogPath,
   relayRecordPath,
+  servesConsole,
   signalRelay,
+  writeRelayRecord,
 } from "../src/run/console-relay.ts";
 import { REVIEW_CONSOLE_ROSTER } from "../src/run/dispatch-request.ts";
 import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
@@ -423,29 +426,20 @@ async function stopRelay(why: string): Promise<void> {
  * and therefore converges as the console comes up.
  */
 async function startRelay(repoRoot: string, workers: readonly string[]): Promise<void> {
-  const path = relayRecordPath();
-  const existing = await readRelayStatus(path);
-  if (existing.kind === "live") {
-    process.stdout.write(
-      `review: the relay is already running (pid ${existing.record.pid}, run ` +
-        `${existing.record.run_id}); its output is in ${existing.record.log_path}\n`,
-    );
-    return;
-  }
-  if (existing.kind === "unreadable") {
-    process.stderr.write(
-      `review: the relay record at ${path} could not be read (${existing.reason}), so no relay ` +
-        `was started — the console has no actor. Remove that file once you know what the pid in ` +
-        `it belongs to.\n`,
-    );
-    return;
-  }
-
   /**
-   * WHICH worker is the collator comes from the ROSTER, not from pane order.
-   * `relayPass` reads ONE run's inbox and only a collator's inbox can hold a
-   * dispatch request, so pointing the relay anywhere else produces a process
-   * that reports nothing forever and looks like one with no work to do.
+   * THE CONSOLE IS RESOLVED FIRST, AND THE ORDER IS THE WHOLE FIX.
+   *
+   * This function used to read the record, return early on `live`, and only then
+   * compute the run it should have been pointing at. So "a live relay is left
+   * alone" compared nothing: it asked whether *a* relay was running, never
+   * whether it was running against *this* console. The documented workflow
+   * reaches the failure in three steps — run the script, close the `review`
+   * workspace by hand to get the screen back, run it again. Four new runs, and
+   * the script prints "the relay is already running (pid N, run r-1)" about a
+   * process polling an inbox nothing will ever write to again.
+   *
+   * Resolving the console first makes the comparison possible at all, and
+   * `servesConsole` is what performs it.
    */
   const collator = workers.find((w) => REVIEW_CONSOLE_ROSTER.collators.includes(w));
   if (collator === undefined) {
@@ -459,12 +453,63 @@ async function startRelay(repoRoot: string, workers: readonly string[]): Promise
 
   const map = consoleRunPins(await runOutput(repoRoot, ["status", "--all", "--json"]), workers);
   const runId = map.pins.get(collator);
+
+  const path = relayRecordPath();
+  const existing = await readRelayStatus(path);
+
+  /**
+   * A record we cannot parse, or whose identity we cannot compare, is left
+   * exactly where it is and nothing is signalled. `unverifiable` is the arm the
+   * capture-failed sentinel and a signal-killed `ps` land in, and both describe
+   * a process that may well be alive — replacing it would leave a second actor
+   * running with no record naming it, which is the state the record exists to
+   * prevent.
+   */
+  if (existing.kind === "unreadable" || existing.kind === "unverifiable") {
+    process.stderr.write(
+      `review: the relay record at ${path} cannot be trusted (${existing.reason}), so no relay ` +
+        `was started and nothing was signalled — the console has no actor this script will admit ` +
+        `to. Find out what pid ${
+          existing.kind === "unverifiable" ? existing.record.pid : "in that file"
+        } belongs to, then remove the file.\n`,
+    );
+    return;
+  }
+
+  if (existing.kind === "live") {
+    if (runId !== undefined && servesConsole(existing.record, { runId, workers })) {
+      process.stdout.write(
+        `review: the relay is already running (pid ${existing.record.pid}, run ` +
+          `${existing.record.run_id}); its output is in ${existing.record.log_path}\n`,
+      );
+      return;
+    }
+    if (runId === undefined) {
+      /*
+       * We cannot see this console's collator yet, so we cannot say the running
+       * relay is the wrong one. Left alone deliberately: killing it on a guess
+       * would tear down the actor of a console that IS up while this one is
+       * still coming up.
+       */
+      process.stdout.write(
+        `review: a relay is running for run ${existing.record.run_id}, and this console's ` +
+          `collator is not live yet, so it was left alone. Run ./scripts/review again once the ` +
+          `panes have come up and it will be replaced if it is serving a different console.\n`,
+      );
+      return;
+    }
+    process.stderr.write(
+      `review: the running relay (pid ${existing.record.pid}) serves run ` +
+        `${existing.record.run_id}, not this console's ${runId} — stopping it\n`,
+    );
+    await stopRelay("because it serves a different console");
+  }
+
   if (runId === undefined) {
-    const why =
-      map.ambiguous.has(collator)
-        ? `${collator} is held by ${(map.ambiguous.get(collator) ?? []).join(", ")}, so which run ` +
-          `is this console's is not decidable from the outside`
-        : `no live run holds ${collator} yet`;
+    const why = map.ambiguous.has(collator)
+      ? `${collator} is held by ${(map.ambiguous.get(collator) ?? []).join(", ")}, so which run ` +
+        `is this console's is not decidable from the outside`
+      : `no live run holds ${collator} yet`;
     process.stdout.write(
       `review: the relay was NOT started — ${why}. The console has four workers and nothing that ` +
         `turns a collator's dispatch request into reviews until it is. Run ./scripts/review again ` +
@@ -473,58 +518,87 @@ async function startRelay(repoRoot: string, workers: readonly string[]): Promise
     return;
   }
 
-  const pinned = relayRunPinValue(map, workers);
-  const logPath = relayLogPath();
-  // Appended to, never truncated: the log is the only place a refusal a detached
-  // process printed can be read afterwards, and a restart must not erase the
-  // reason the previous relay stopped.
-  const fd = openSync(logPath, "a");
-  let proc: Bun.Subprocess;
-  try {
-    proc = Bun.spawn(consoleRelayArgv(`${repoRoot}/src/cli/index.ts`, runId), {
-      cwd: repoRoot,
-      env: pinned === null ? process.env : { ...process.env, PIFLEET_RELAY_RUNS: pinned },
-      stdin: "ignore",
-      stdout: fd,
-      stderr: fd,
-    });
-  } finally {
-    closeSync(fd);
-  }
-  // Detached from this script's lifetime: the console outlives the command that
-  // opened it, and so must its actor.
-  proc.unref();
-
   /**
-   * The identity is captured AFTER the spawn and from the OS, never invented.
-   * A record carrying a pid and a `started` this process made up would compare
-   * unequal to itself on the next run and every relay would look stale.
+   * ONE STARTER AT A TIME. `wx` is atomic, so two invocations racing cannot both
+   * spawn — the loser is told rather than silently adding a second actor to a
+   * console that can only account for one.
    */
-  let started: string;
-  try {
-    started = (await processStartTime(proc.pid)) ?? "";
-  } catch {
-    started = "";
+  const lock = await acquireRelayLock(relayLockPath());
+  if (lock === null) {
+    process.stderr.write(
+      `review: another ./scripts/review is starting the relay right now ` +
+        `(${relayLockPath()} is held), so this one did not\n`,
+    );
+    return;
   }
-  await writeFile(
-    path,
-    `${JSON.stringify(
-      RelayRecordSchema.parse({
-        schema: "pifleet.consolerelay/v1",
-        pid: proc.pid,
-        started,
-        run_id: runId,
-        pinned,
-        started_at: new Date().toISOString(),
-        log_path: logPath,
-      }),
-    )}\n`,
-  );
-  process.stdout.write(
-    `review: started the relay (pid ${proc.pid}) polling run ${runId}` +
-      `${pinned === null ? " with no worker pin — it will scan for the reviewers' runs" : ` pinned to ${pinned}`}\n` +
-      `review: its output is in ${logPath}; stop it with ./scripts/review --relay-stop\n`,
-  );
+
+  try {
+    const pinned = relayRunPinValue(map, workers);
+    const logPath = relayLogPath();
+    // Appended to, never truncated: the log is the only place a refusal a
+    // detached process printed can be read afterwards, and a restart must not
+    // erase the reason the previous relay stopped.
+    const fd = openSync(logPath, "a");
+    let proc: Bun.Subprocess;
+    try {
+      proc = Bun.spawn(consoleRelayArgv(`${repoRoot}/src/cli/index.ts`, runId), {
+        cwd: repoRoot,
+        env: pinned === null ? process.env : { ...process.env, PIFLEET_RELAY_RUNS: pinned },
+        stdin: "ignore",
+        stdout: fd,
+        stderr: fd,
+        /**
+         * A NEW SESSION, not merely an unreferenced child. `proc.unref()`
+         * releases Bun's event loop and does nothing to the OS: the child stays
+         * in this script's process group, so a SIGINT to the terminal that
+         * launched the console — or closing it — takes the actor with it.
+         * `detached` is what makes the actor outlive the command that started
+         * it, which is the half of §6.5's "dies with the console" that is
+         * supposed to be under the CONSOLE's control and not the terminal's.
+         */
+        detached: true,
+      });
+    } finally {
+      closeSync(fd);
+    }
+    proc.unref();
+
+    /**
+     * The identity is captured AFTER the spawn and from the OS, never invented.
+     * `""` means capture failed, and `readRelayStatus` recognises it as
+     * `unverifiable` rather than comparing it — see `isPinnedIdentity`.
+     */
+    let started: string;
+    try {
+      started = (await processStartTime(proc.pid)) ?? "";
+    } catch {
+      started = "";
+    }
+    await writeRelayRecord(path, {
+      schema: "pifleet.consolerelay/v1",
+      pid: proc.pid,
+      started,
+      run_id: runId,
+      pinned,
+      workers: [...workers],
+      started_at: new Date().toISOString(),
+      log_path: logPath,
+    });
+    process.stdout.write(
+      `review: started the relay (pid ${proc.pid}) polling run ${runId}` +
+        `${pinned === null ? " with no worker pin — it will scan for the reviewers' runs" : ` pinned to ${pinned}`}\n` +
+        `review: its output is in ${logPath}; it exits on its own when this console goes away, ` +
+        `and ./scripts/review --relay-stop stops it now\n`,
+    );
+    if (started === "") {
+      process.stderr.write(
+        `review: the relay's start time could not be captured, so its record cannot be compared ` +
+          `later — the next run of this script will refuse to touch it and name pid ${proc.pid}\n`,
+      );
+    }
+  } finally {
+    await lock.release();
+  }
 }
 
 /**

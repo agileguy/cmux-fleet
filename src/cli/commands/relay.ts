@@ -3,14 +3,33 @@
  *
  * §6.5 offers three homes for the thing that turns a collator's
  * `dispatch-request.json` into real dispatches, and calls the choice BLOCKING.
- * It is settled in favour of the second: **a restartable host-side process whose
- * state is derived entirely from the run tree.** That answer also answers the
- * objection §6.5 raises against it — *"a fifth process with no pane, no
- * supervision, and no story for what happens when it dies mid-fan-out"* —
- * because a process that derives its state from the run tree needs no
- * supervision beyond being started again. **Idempotency IS the supervision
- * story**, and it lives in `run/relay-journal.ts` rather than here. This file is
- * deliberately the thin half.
+ * It is settled in favour of the second: **a host-side process started by
+ * `scripts/review`, which watches the console it serves and exits when that
+ * console is gone.**
+ *
+ * ## THE SUPERVISION STORY, AND THE ONE THIS FILE USED TO TELL
+ *
+ * It used to say *"Idempotency IS the supervision story"* — that a process
+ * deriving its state from the run tree needs no supervision beyond being started
+ * again. **That answered the wrong objection.** §6.5 worried about an actor
+ * dying mid-fan-out, and the journal does answer that: nothing is recorded until
+ * the children are dispatched, so a killed relay re-dispatches rather than losing
+ * a review.
+ *
+ * The failure that actually occurred is the opposite one — an actor that does
+ * NOT die. A relay left polling a console whose runs are gone reports nothing for
+ * an empty pass, forever, and a manager asking only *"is a relay running"* calls
+ * it healthy and starts none for the console that has no actor. That is §6.4's
+ * own failure shape reached through the idempotency mechanism built to close it.
+ *
+ * So the owner settled §9 Q4 as SUPERVISION rather than restartability, and it
+ * is two halves in two files. Here: the loop watches its collator through
+ * `ConsoleWatch` and exits when the console is gone, which is what makes
+ * `pifleet down` authoritative over a process it has never heard of. In
+ * `scripts/review`: the record names the console it serves, so *"already
+ * running"* is a comparison rather than a head-count. Idempotency is still true
+ * and still lives in `run/relay-journal.ts`; it is no longer asked to be the
+ * whole story.
  *
  * ## What a pass does, and what it refuses to do
  *
@@ -81,8 +100,19 @@ import {
   type DispatchRequest,
   readDispatchRequest,
 } from "../../run/dispatch-request.ts";
+import { ConsoleWatch } from "../../run/console-relay.ts";
 import { classifyRequest, recordDispatch } from "../../run/relay-journal.ts";
 import { consoleFanOut } from "../../run/relay.ts";
+/*
+ * A SECOND STATEMENT from the same module, deliberately.
+ * `collator-relay-adapter.test.ts` pins the exact text
+ * `import { consoleFanOut } from "../../run/relay.ts"` — the agreement between
+ * this file and the adapter is spelled in two places that cannot see each other,
+ * and that pin is what turns a rename into a red test instead of a console that
+ * polls forever and dispatches nothing. Widening the existing statement would
+ * have broken the pin while changing nothing it is about.
+ */
+import { productionRunSources } from "../../run/relay.ts";
 import { LedgerWriter } from "../../run/ledger.ts";
 import {
   inboxTaskPath,
@@ -691,9 +721,42 @@ export function register(program: Command): void {
        * asking a question, and swallowing the answer would make the exit code
        * lie. The resilience belongs to the daemon shape, not to the verb.
        */
+      /**
+       * THE WATCH — §6.5's *"dies with the console"*, which was a claim in a
+       * table and is now a loop condition (§9 Q4).
+       *
+       * The relay exits when the collator it was started for stops being live.
+       * That is what makes `pifleet down` authoritative over a process it has
+       * never heard of: down kills the supervisor, the worker stops answering,
+       * and the actor reaps itself within `RELAY_ABANDON_PASSES` passes.
+       *
+       * `isLiveWorker` is the SAME predicate the fan-out's own run scan uses, so
+       * "this console is gone" means here exactly what it means there. The
+       * alternative — checking whether the run DIRECTORY exists — is the
+       * predicate `productionRunSources` documents as not liveness at all:
+       * *"`pifleet down` removes containers and leaves directories"*, so it
+       * would answer `true` forever and the watch would never fire.
+       */
+      const watch = new ConsoleWatch();
+      const collator =
+        REVIEW_CONSOLE_ROSTER.collators.find((c) => existsSync(workerPaths(run, c).dir)) ??
+        REVIEW_CONSOLE_ROSTER.collators[0]!;
+
       for (;;) {
         try {
           emit(await relayPass({ run, fanOut, cache, ledger }));
+          const live = await productionRunSources.isLiveWorker(run, collator);
+          const abandon = watch.observe(live, { worker: collator, runId: run.runId });
+          if (abandon !== null) {
+            process.stderr.write(`pifleet relay: ${abandon}\n`);
+            await ledger
+              .append("relay_console_gone", {
+                worker: collator,
+                detail: { run_id: run.runId, passes: watch.streak },
+              })
+              .catch(() => {});
+            return;
+          }
         } catch (err) {
           // stderr, not stdout: `--json` consumers parse stdout line by line and
           // a diagnostic in that stream is a parse error at the caller.

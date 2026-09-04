@@ -389,3 +389,107 @@ describe("harvestTask applies §6.8's rules (the three wires)", () => {
     cliBudget(1),
   );
 });
+
+/**
+ * A CEILING IS NOT AN ASSIGNMENT — Y2, and it needs a REPOSITORY to show it.
+ *
+ * `collationCeiling` only ever returns `partial` or the claim itself, and every
+ * fixture above has the verdict at or below `partial` already, so a maximum and
+ * an assignment agree on all of them. The separating case needs a verdict BELOW
+ * `partial` while the rule is firing, and ISC-93 supplies it: a repository task
+ * claiming `success` over an empty diff grades `failed`.
+ *
+ * With the cap, `failed` stands. With an assignment, a `-collate` task's MISSING
+ * collation would raise it to `partial` — a document the worker never wrote
+ * promoting a verdict the diff already refused, which is A2's defect one module
+ * over.
+ *
+ * The repository is real and tiny: `git init`, one commit, and `base_ref` set to
+ * that commit, so `base..HEAD` is empty by construction. No container, no
+ * acceptance exam, no network.
+ */
+describe("the collation ceiling cannot RAISE a verdict the diff already failed", () => {
+  async function git(cwd: string, ...args: string[]): Promise<void> {
+    const p = Bun.spawn(["git", ...args], {
+      cwd,
+      stdout: "ignore",
+      stderr: "ignore",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@e",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@e",
+      },
+    });
+    await p.exited;
+  }
+
+  test(
+    "a -collate repository task with an empty diff and no collation stays failed",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "pifleet-collation-clamp-"));
+      try {
+        const work = join(root, "work");
+        await mkdir(work, { recursive: true });
+        await git(work, "init", "-q", "-b", "main");
+        await writeFile(join(work, "a.txt"), "one\n");
+        await git(work, "add", "-A");
+        await git(work, "commit", "-qm", "base");
+        const head = (
+          await new Response(
+            Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: work, stdout: "pipe" }).stdout,
+          ).text()
+        ).trim();
+
+        const run = runPaths(RUN_ID, join(root, "runs"));
+        await mkdir(run.inboxDir, { recursive: true });
+        await writeFile(
+          join(run.inboxDir, `${COLLATE_TASK}.json`),
+          JSON.stringify({
+            acceptance: [],
+            schema: "pifleet.task/v1",
+            task_id: COLLATE_TASK,
+            run_id: RUN_ID,
+            epoch: 1,
+            attempt: 1,
+            worker: WORKER,
+            dispatched_at: new Date().toISOString(),
+            title: COLLATE_TASK,
+            brief: "clamp fixture",
+            repo: work,
+            host_workdir: work,
+            container_workdir: "/workspace",
+            branch: "main",
+            // base === HEAD, so `base..HEAD` is empty and ISC-93 applies.
+            base_ref: head,
+            outbox: `/outbox/${COLLATE_TASK}`,
+            deadline_s: 1500,
+          }),
+        );
+        const taskOutbox = join(workerOutboxDir(run.root, WORKER), COLLATE_TASK);
+        await mkdir(join(taskOutbox, "files"), { recursive: true });
+        await writeFile(
+          join(taskOutbox, "result.json"),
+          JSON.stringify({
+            schema: "pifleet.result/v1",
+            task_id: COLLATE_TASK,
+            epoch: 1,
+            worker: WORKER,
+            status: "success",
+            summary: "collated",
+          }),
+        );
+
+        const { harvest } = await harvestTask(run, COLLATE_TASK);
+        // THE CONTROL: the fixture must really reach ISC-93, or the assertion
+        // below is about a verdict that was never `failed` to begin with.
+        expect(harvest.reasons.join(" ")).toContain("ISC-93");
+        expect(harvest.verdict).toBe("failed");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    cliBudget(3),
+  );
+});

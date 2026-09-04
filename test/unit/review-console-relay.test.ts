@@ -34,11 +34,16 @@ import { join } from "node:path";
 
 import { adoptionRefusal } from "../../src/backends/cmux/operations.ts";
 import {
+  ConsoleWatch,
+  RELAY_ABANDON_PASSES,
   RelayRecordSchema,
+  acquireRelayLock,
   consoleRelayArgv,
   readRelayStatus,
   relayLogPath,
   relayRecordPath,
+  servesConsole,
+  writeRelayRecord,
 } from "../../src/run/console-relay.ts";
 import { consoleRunPins, relayRunPinValue } from "../../src/run/status-runs.ts";
 
@@ -240,7 +245,9 @@ describe("the relay record — what makes 'start it again' idempotent (§6.5)", 
         RelayRecordSchema.parse({
           schema: "pifleet.consolerelay/v1",
           pid: process.pid,
-          started: "not-the-start-time-of-this-process",
+          // PINNED but wrong: `isPinnedIdentity` accepts the format, so only the
+          // start-time comparison can separate this from a live relay.
+          started: "utc1 Thu Jan  1 00:00:00 2000",
           run_id: "r-1",
           pinned: null,
           started_at: new Date().toISOString(),
@@ -324,5 +331,170 @@ describe("§6.10 — the console does not adopt a workspace it did not create", 
 
   test("an empty workspace is refused, and says so rather than listing nothing", () => {
     expect(adoptionRefusal("review", [], PLANNED)).toContain("no panes");
+  });
+});
+
+/**
+ * THE SUPERVISION — §6.5's *"dies with the console"*, and the identity that
+ * makes "already running" a question worth asking (§9 Q4).
+ *
+ * The failure these cover is not the one §6.5 wrote down. It worried about an
+ * actor dying mid-fan-out, which the journal already answers. The live one is
+ * an actor that does NOT die: a relay left polling a console that is gone,
+ * which a manager asking only "is a relay running" reports as healthy — §6.4's
+ * own failure shape, reached through the mechanism built to close it.
+ */
+describe("the watch — the actor's lifetime is bounded by its console's", () => {
+  const AT = { worker: "col-1", runId: "r-1" };
+
+  test("a live console is never abandoned, however long it runs", () => {
+    const w = new ConsoleWatch(3);
+    for (let i = 0; i < 50; i += 1) expect(w.observe(true, AT)).toBeNull();
+    expect(w.streak).toBe(0);
+  });
+
+  test("it exits only after a RUN of negatives, never on the first", () => {
+    const w = new ConsoleWatch(3);
+    expect(w.observe(false, AT)).toBeNull();
+    expect(w.observe(false, AT)).toBeNull();
+    const reason = w.observe(false, AT);
+    expect(reason).toContain("3 consecutive passes");
+    expect(reason).toContain("r-1");
+  });
+
+  /**
+   * THE SEPARATING CASE for "a run, not a count". Liveness is read from a state
+   * file and a `ps`, both of which fail transiently; a tolerance that summed
+   * isolated failures would end the actor on a race it has no stake in.
+   */
+  test("one positive observation resets the streak completely", () => {
+    const w = new ConsoleWatch(3);
+    w.observe(false, AT);
+    w.observe(false, AT);
+    expect(w.observe(true, AT)).toBeNull();
+    expect(w.streak).toBe(0);
+    expect(w.observe(false, AT)).toBeNull();
+    expect(w.observe(false, AT)).toBeNull();
+    expect(w.observe(false, AT)).not.toBeNull();
+  });
+
+  test("the shipped tolerance is small enough to matter and large enough to be a run", () => {
+    // Every pass spent attached to a dead console is a pass in which a live
+    // console's request goes unread, and the operator's remedy is blocked by a
+    // relay that still looks alive.
+    expect(RELAY_ABANDON_PASSES).toBeGreaterThan(1);
+    expect(RELAY_ABANDON_PASSES).toBeLessThanOrEqual(10);
+    const w = new ConsoleWatch();
+    for (let i = 1; i < RELAY_ABANDON_PASSES; i += 1) expect(w.observe(false, AT)).toBeNull();
+    expect(w.observe(false, AT)).not.toBeNull();
+  });
+});
+
+describe("identity — whether a running relay is THIS console's", () => {
+  const REC = {
+    schema: "pifleet.consolerelay/v1" as const,
+    pid: 1,
+    started: "utc1 x",
+    run_id: "r-1",
+    pinned: null,
+    workers: [...WORKERS],
+    started_at: "2026-09-04T00:00:00.000Z",
+    log_path: "/tmp/x.log",
+  };
+
+  test("the same run and the same workers is this console", () => {
+    expect(servesConsole(REC, { runId: "r-1", workers: WORKERS })).toBe(true);
+    // Order is the pane plan's business, not the record's.
+    expect(servesConsole(REC, { runId: "r-1", workers: [...WORKERS].reverse() })).toBe(true);
+  });
+
+  /**
+   * THE MEASURED FAILURE. Run the script, close the `review` workspace by hand,
+   * run it again: four new runs, and a relay polling the first console's inbox.
+   * Without this comparison the manager answers "already running" and the new
+   * console has no actor at all.
+   */
+  test("a different run is NOT this console, however healthy the process", () => {
+    expect(servesConsole(REC, { runId: "r-5", workers: WORKERS })).toBe(false);
+  });
+
+  test("a different worker set is not this console either", () => {
+    expect(servesConsole(REC, { runId: "r-1", workers: ["col-1", "rev-arch-1"] })).toBe(false);
+  });
+});
+
+describe("the record is durable, comparable, and singly held", () => {
+  test("a torn write cannot be observed — the record is written atomically", async () => {
+    const env = await tempRunsDir();
+    const path = relayRecordPath(env);
+    await writeRelayRecord(path, {
+      schema: "pifleet.consolerelay/v1",
+      pid: process.pid,
+      started: "utc1 whatever",
+      run_id: "r-1",
+      pinned: null,
+      workers: [...WORKERS],
+      started_at: new Date().toISOString(),
+      log_path: relayLogPath(env),
+    });
+    // Round-trips through the schema, which a half-written file cannot.
+    const status = await readRelayStatus(path);
+    expect(status.kind).toBe("stale");
+  });
+
+  /**
+   * L2: the capture-failed sentinel. `""` matches no real start time, so
+   * comparing it reported a LIVE relay as stale — after which `--recreate`
+   * deletes its record and tears down the runs it is polling, leaving exactly
+   * the unnameable background process the record exists to prevent.
+   *
+   * ASYMMETRIC: the pid is this process and is genuinely alive, so only the
+   * `isPinnedIdentity` discrimination can produce the right answer.
+   */
+  test("an unpinned start time is UNVERIFIABLE, never stale", async () => {
+    const env = await tempRunsDir();
+    const path = relayRecordPath(env);
+    await writeRelayRecord(path, {
+      schema: "pifleet.consolerelay/v1",
+      pid: process.pid,
+      started: "",
+      run_id: "r-1",
+      pinned: null,
+      workers: [...WORKERS],
+      started_at: new Date().toISOString(),
+      log_path: relayLogPath(env),
+    });
+    const status = await readRelayStatus(path);
+    expect(status.kind).toBe("unverifiable");
+    if (status.kind === "unverifiable") expect(status.reason).toContain("capture failed");
+  });
+
+  test("a legacy unpinned format is unverifiable too, not adopted", async () => {
+    const env = await tempRunsDir();
+    const path = relayRecordPath(env);
+    await writeRelayRecord(path, {
+      schema: "pifleet.consolerelay/v1",
+      pid: process.pid,
+      started: "Thu 20 Aug 2026 10:00:00",
+      run_id: "r-1",
+      pinned: null,
+      workers: [...WORKERS],
+      started_at: new Date().toISOString(),
+      log_path: relayLogPath(env),
+    });
+    expect((await readRelayStatus(path)).kind).toBe("unverifiable");
+  });
+
+  test("only one starter at a time, and the loser is told", async () => {
+    const env = await tempRunsDir();
+    const lockPath = join(env["PIFLEET_RUNS_DIR"]!, "..", "lock");
+    const first = await acquireRelayLock(lockPath);
+    expect(first).not.toBeNull();
+    expect(await acquireRelayLock(lockPath)).toBeNull();
+    await first!.release();
+    // Released, so the next invocation may proceed.
+    const third = await acquireRelayLock(lockPath);
+    expect(third).not.toBeNull();
+    await third!.release();
   });
 });

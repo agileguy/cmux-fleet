@@ -40,6 +40,7 @@ const HARVEST = `${W}/src/harvest/index.ts`;
 const STATUS = `${W}/src/run/status-runs.ts`;
 const OPS = `${W}/src/backends/cmux/operations.ts`;
 const COLLATION = `${W}/src/run/collation.ts`;
+const CONSOLE = `${W}/src/run/console-relay.ts`;
 
 const TESTFILES = [
   "test/unit/collation-census.test.ts",
@@ -54,7 +55,7 @@ const TESTFILES = [
  * the failure mode that silently reverts a fix and reports every mutation green.
  */
 const PRISTINE: Record<string, string> = Object.fromEntries(
-  [CENSUS, ADJ, HARVEST, STATUS, OPS, COLLATION].map((p) => [p, readFileSync(p, "utf8")]),
+  [CENSUS, ADJ, HARVEST, STATUS, OPS, COLLATION, CONSOLE].map((p) => [p, readFileSync(p, "utf8")]),
 );
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const TIMEOUT_MS = 60_000;
@@ -96,6 +97,38 @@ const MUTATIONS: M[] = [
     file: CENSUS,
     find: '  if (rel === "") return false; // the workdir itself is not a file to quote',
     replace: '  if (rel === "") return true;',
+    expect: "red",
+  },
+  {
+    id: "C3b",
+    what: "CONTAINMENT: the absolute-`rel` arm is removed (dead on POSIX)",
+    file: CENSUS,
+    find: "  if (isAbsolute(rel)) return false;",
+    replace: "  if (false) return false;",
+    expect: "green",
+  },
+  {
+    id: "C10",
+    what: "EMPTY PATH: the empty-path refusal is removed",
+    file: CENSUS,
+    find: '  if (file === "") return "finding carries an empty file path";',
+    replace: "  if (false) return null;",
+    expect: "red",
+  },
+  {
+    id: "C11",
+    what: "LINE: a fractional line number is accepted",
+    file: CENSUS,
+    find: "  if (!Number.isInteger(line) || line < 1) {",
+    replace: "  if (line < 1) {",
+    expect: "red",
+  },
+  {
+    id: "C12",
+    what: "REFUSED CENSUS: `declared` becomes 0, claiming a count the document never gave",
+    file: CENSUS,
+    find: "    declared: null,",
+    replace: "    declared: 0,",
     expect: "red",
   },
   {
@@ -225,25 +258,42 @@ const MUTATIONS: M[] = [
     id: "H3",
     what: "WIRING: `collationCeiling` is never applied (§6.8 rule 3 goes dark)",
     file: HARVEST,
-    find: "    if (collationCap.reason !== null && rank(verdict) > rank(collationCap.status)) {",
+    find: "    if (collationCap !== null && rank(verdict) > rank(collationCap.status)) {",
     replace: "    if (false) {",
     expect: "red",
   },
   {
     id: "H4",
-    what: "WIRING: a missing envelope is passed to the ceiling as a claim of success",
-    file: HARVEST,
-    find: "      claimed?.status ?? \"unknown\",",
-    replace: '      "success",',
-    expect: "green",
+    what: "ISC-94: a task with NO ENVELOPE is given a claim of success",
+    file: CENSUS,
+    find: "  if (claimed === null) return null;",
+    replace: '  if (claimed === null) claimed = { status: "success" };',
+    expect: "red",
+  },
+  {
+    id: "H4b",
+    what: "ISC-94: the guard is inverted, so only envelope-less tasks are graded",
+    file: CENSUS,
+    find: "  if (claimed === null) return null;",
+    replace: "  if (claimed !== null) return null;",
+    expect: "red",
   },
   {
     id: "H5",
     what: "WIRING: the collation ceiling becomes an assignment rather than a cap",
     file: HARVEST,
-    find: "    if (collationCap.reason !== null && rank(verdict) > rank(collationCap.status)) {",
-    replace: "    if (collationCap.reason !== null) {",
-    expect: "green",
+    find: "    if (collationCap !== null && rank(verdict) > rank(collationCap.status)) {",
+    replace: "    if (collationCap !== null) {",
+    expect: "red",
+  },
+  {
+    id: "H6",
+    what: "WIRING: the ISC-94 wrapper is bypassed for the raw ceiling",
+    file: HARVEST,
+    find: "    const collationCap = collationCeilingFor(taskId, claimed, reconciled.collationRead);",
+    replace:
+      "    const collationCap = collationCeilingFor(taskId, claimed ?? { status: \"success\" }, reconciled.collationRead);",
+    expect: "red",
   },
   // ── S: the worker→run map the script hands the relay (§6.5). ─────────────
   {
@@ -303,13 +353,78 @@ const MUTATIONS: M[] = [
     replace: '[...xs].map((t) => t ?? " untitled").sort().join("");',
     expect: "red",
   },
+  // ── W: the supervision (§6.5's "dies with the console", §9 Q4). ──────────
+  {
+    id: "W1",
+    what: "WATCH: a console that is gone is never abandoned",
+    file: CONSOLE,
+    find: "    if (this.consecutiveGone < this.tolerance) return null;",
+    replace: "    if (true) return null;",
+    expect: "red",
+  },
+  {
+    id: "W2",
+    what: "WATCH: the actor exits on the FIRST transient negative observation",
+    file: CONSOLE,
+    find: "    if (this.consecutiveGone < this.tolerance) return null;",
+    replace: "    if (this.consecutiveGone < 1) return null;",
+    expect: "red",
+  },
+  {
+    id: "W3",
+    what: "WATCH: a positive observation no longer resets the streak",
+    file: CONSOLE,
+    find: "    if (collatorIsLive) {\n      this.consecutiveGone = 0;\n      return null;\n    }",
+    replace: "    if (collatorIsLive) {\n      return null;\n    }",
+    expect: "red",
+  },
+  {
+    id: "W4",
+    what: "IDENTITY: a relay serving another console is adopted as this one's",
+    file: CONSOLE,
+    find: "  if (record.run_id !== console_.runId) return false;",
+    replace: "  if (false) return false;",
+    expect: "red",
+  },
+  {
+    id: "W5",
+    what: "IDENTITY: the worker set is not compared",
+    file: CONSOLE,
+    find: "  return a === b;",
+    replace: "  return true;",
+    expect: "red",
+  },
+  {
+    id: "W6",
+    what: "IDENTITY: the capture-failed sentinel is compared rather than recognised",
+    file: CONSOLE,
+    find: "  if (!isPinnedIdentity(record.started)) {",
+    replace: "  if (false) {",
+    expect: "red",
+  },
+  {
+    id: "W7",
+    what: "IDENTITY: an unreadable `ps` is reported as a dead relay",
+    file: CONSOLE,
+    find: "    return {\n      kind: \"unverifiable\",\n      record,\n      reason: `the identity of pid ${record.pid} could not be read (${",
+    replace: "    return {\n      kind: \"stale\" as \"unverifiable\",\n      record,\n      reason: `the identity of pid ${record.pid} could not be read (${",
+    expect: "green",
+  },
+  {
+    id: "W8",
+    what: "LOCK: two invocations may both start a relay",
+    file: CONSOLE,
+    find: '    const handle = await open(path, "wx");',
+    replace: '    const handle = await open(path, "w");',
+    expect: "red",
+  },
   // ── I: ISC-468, the pin this change broke once. ──────────────────────────
   {
     id: "I1",
     what: "ISC-468: the collation contract reaches the actor again, dragging in the CLI",
     file: COLLATION,
-    find: 'import { collationTaskId, isCollationTaskId } from "./task-ids.ts";',
-    replace: 'import { collationTaskId, isCollationTaskId } from "./relay.ts";',
+    find: '} from "./task-ids.ts";',
+    replace: '} from "./relay.ts";',
     expect: "red",
   },
   // ── Negative controls. ───────────────────────────────────────────────────
