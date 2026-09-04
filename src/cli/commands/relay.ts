@@ -136,7 +136,23 @@ export interface RelayFanOutInput {
  * nothing can be looked up by.
  */
 export type RelayFanOutResult =
-  | { kind: "dispatched"; children: readonly string[] }
+  | {
+      kind: "dispatched";
+      children: readonly string[];
+      /**
+       * Present ONLY when the fan-out completed but its last hop did not — the
+       * reviews ran, the replies were published, and the collation could not be
+       * delivered (`relay.ts`'s `collation_failed`).
+       *
+       * **Optional rather than always-present, and the absence is load-bearing.**
+       * A completed pass and a failed collation carry the same `kind` and the
+       * same children, because in both cases the same three reviews really were
+       * dispatched and must never be dispatched again. This field is the only
+       * thing that separates them, so a value here has to mean something went
+       * wrong — which it cannot if it is also populated on the happy path.
+       */
+      reason?: string;
+    }
   | { kind: "not_dispatched"; reason: string };
 
 /**
@@ -372,7 +388,16 @@ export async function relayPass(opts: {
       continue;
     }
     await recordDispatch(opts.run.root, worker, taskId, read.request, result.children);
-    outcomes.push({ worker, task_id: taskId, kind: "dispatched", children: result.children });
+    // The reason rides along when there is one. It never changes whether the
+    // journal is written — the children happened either way — it changes only
+    // whether anybody is told the collation did not.
+    outcomes.push({
+      worker,
+      task_id: taskId,
+      kind: "dispatched",
+      children: result.children,
+      ...(result.reason === undefined ? {} : { reason: result.reason }),
+    });
   }
 
   return { run_id: opts.run.runId, tasks_seen: taskIds.length, outcomes };
@@ -453,11 +478,22 @@ async function loadFanOut(): Promise<RelayFanOut> {
  */
 const DEFAULT_POLL_S = 2;
 
-/** One line per outcome, for the operator who is watching rather than parsing. */
-function renderOutcome(o: RelayPassOutcome): string {
+/**
+ * One line per outcome, for the operator who is watching rather than parsing.
+ *
+ * **Exported for the unit suite**, on `classifyWorker`'s precedent one directory
+ * over — "pure classification, exported so the unit suite can pin the boundary
+ * ... without a filesystem". The boundary worth pinning here is narrow and easy
+ * to lose: a `dispatched` row that carries a reason must PRINT it. The reason
+ * exists precisely so a failed collation is not silent, and a renderer that
+ * dropped it would restore the silence one layer below the fix.
+ */
+export function renderOutcome(o: RelayPassOutcome): string {
   switch (o.kind) {
-    case "dispatched":
-      return `${o.worker} ${o.task_id}: dispatched ${o.children?.length ?? 0} children (${(o.children ?? []).join(", ")})`;
+    case "dispatched": {
+      const line = `${o.worker} ${o.task_id}: dispatched ${o.children?.length ?? 0} children (${(o.children ?? []).join(", ")})`;
+      return o.reason === undefined ? line : `${line} — ${o.reason}`;
+    }
     case "already_done":
       return `${o.worker} ${o.task_id}: already dispatched, unchanged`;
     default:

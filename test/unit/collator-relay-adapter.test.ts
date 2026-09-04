@@ -71,9 +71,11 @@ import {
   consoleFanOut,
   consoleTransport,
   makeConsoleFanOut,
+  relayFanOut,
   resolveConsoleRuns,
   type RelayEffects,
 } from "../../src/run/relay.ts";
+import { renderOutcome } from "../../src/cli/commands/relay.ts";
 import {
   DISPATCH_REQUEST_SCHEMA,
   type DispatchRequest,
@@ -798,5 +800,195 @@ describe("the fan-out adapter's result mapping", () => {
     // The lenses that DID report are not announced as missing — the negative is
     // the half that makes the assertion mean anything.
     expect(collation!.brief).not.toContain("MISSING ASPECT: arch");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. The collation that does not land — §6.6's last unhandled outcome.
+// ---------------------------------------------------------------------------
+
+/**
+ * **The work happened. The record must say so.**
+ *
+ * By the time the collation is dispatched, three reviews have run and three
+ * replies are on disk at 0444 in a directory the collator can read. If that
+ * last dispatch throws and the pass throws with it, `relayPass` declines to
+ * journal — and the next tick re-reads the same request, re-dispatches three
+ * reviews and re-publishes three replies, forever. That is the unbounded repeat
+ * the journal exists to prevent, arriving through the one dispatch the fan-out
+ * did not guard.
+ *
+ * So the outcome is a THIRD arm rather than a throw and rather than a silent
+ * success: the children are journalled because the children genuinely happened,
+ * and the failed collation is named so nobody has to infer it from a gap.
+ *
+ * **These cases live in this file rather than in `collator-relay.test.ts`, and
+ * the reason is a lane boundary rather than a judgement.** That file owns the
+ * pure core and would be the natural home; this change was scoped to the
+ * adapter's files plus `fanOut` itself, so the coverage is written where the
+ * scope allowed. A later reader consolidating the two should move them.
+ */
+describe("a collation that does not land", () => {
+  /** Reviewers succeed; the collator refuses. The natural shape of this failure. */
+  function collatorRefuses(): { fx: RelayEffects; rec: Recorder } {
+    return effects({
+      async sendTask(_run, worker, d) {
+        if (worker === "col-1") {
+          throw new Error(`terminal for ${worker} is gone; ${d.taskId} cannot be triggered`);
+        }
+        return { accepted: true, via: "staged", reason: null, error: null, epoch: 1 };
+      },
+    });
+  }
+
+  test("the core answers `collation_failed`, never `collated`", async () => {
+    const { fx } = collatorRefuses();
+    const outcome = await relayFanOut<RunPaths>({
+      request: request(),
+      sender: "col-1",
+      runs: CONSOLE_RUNS,
+      transport: consoleTransport("col-1", fx),
+    });
+    expect(outcome.kind).toBe("collation_failed");
+  });
+
+  test("it carries the children, the missing seats and the collation it could not send", async () => {
+    const { fx } = collatorRefuses();
+    const outcome = await relayFanOut<RunPaths>({
+      request: request(),
+      sender: "col-1",
+      runs: CONSOLE_RUNS,
+      transport: consoleTransport("col-1", fx),
+    });
+    if (outcome.kind !== "collation_failed") throw new Error("unreachable");
+    expect(outcome.children.map((c) => c.taskId).sort()).toEqual([
+      "T1-arch",
+      "T1-context",
+      "T1-lang",
+    ]);
+    // Every lens reported, so nothing is missing — the collation failing is a
+    // fact about the HOST's last hop, not about any reviewer.
+    expect(outcome.missing).toEqual([]);
+    expect(outcome.collation.taskId).toBe("T1-collate");
+    expect(outcome.reason).toContain("T1-collate");
+  });
+
+  test("the replies stay published — they are what the collator will read on retry", async () => {
+    const { fx, rec } = collatorRefuses();
+    await relayFanOut<RunPaths>({
+      request: request(),
+      sender: "col-1",
+      runs: CONSOLE_RUNS,
+      transport: consoleTransport("col-1", fx),
+    });
+    expect(rec.replies.map((r) => r.child).sort()).toEqual([
+      "T1-arch",
+      "T1-context",
+      "T1-lang",
+    ]);
+  });
+
+  /**
+   * THE JOURNALLING DECISION, which is the whole point of the arm.
+   *
+   * `dispatched` and not `not_dispatched`: three reviews were issued and must
+   * never be issued again for this request.
+   */
+  test("the adapter maps it to `dispatched`, so the three reviews are journalled", async () => {
+    const { fx } = collatorRefuses();
+    const got = await makeConsoleFanOut({
+      resolveRuns: async () => CONSOLE_RUNS,
+      transport: (sender) => consoleTransport(sender, fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+
+    expect(got.kind).toBe("dispatched");
+    if (got.kind !== "dispatched") throw new Error("unreachable");
+    expect([...got.children].sort()).toEqual(["T1-arch", "T1-context", "T1-lang"]);
+  });
+
+  /**
+   * **THE DISCRIMINATOR, AND IT IS DELIBERATELY NOT THE CHILDREN.**
+   *
+   * A clean pass and a failed collation both end with `kind: "dispatched"` and
+   * both carry the same three child ids — so an assertion resting on either of
+   * those cannot tell them apart, and a mutation collapsing the two arms would
+   * survive. `reason` is the field that separates them: PRESENT and naming the
+   * collation when the last hop failed, ABSENT when it did not.
+   *
+   * The pair is asserted together, in one test, because the negative is the half
+   * that does the work. A `reason` that were always populated would satisfy the
+   * first assertion and communicate nothing.
+   */
+  test("`reason` is present ONLY on the failure — the clean pass has none", async () => {
+    const failed = await makeConsoleFanOut({
+      resolveRuns: async () => CONSOLE_RUNS,
+      transport: (sender) => consoleTransport(sender, collatorRefuses().fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+
+    const clean = await makeConsoleFanOut({
+      resolveRuns: async () => CONSOLE_RUNS,
+      transport: (sender) => consoleTransport(sender, effects().fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+
+    if (failed.kind !== "dispatched" || clean.kind !== "dispatched") {
+      throw new Error("both arms must be `dispatched` — that is the premise being tested");
+    }
+    // Identical on children. Different on reason. That asymmetry IS the arm.
+    expect([...failed.children].sort()).toEqual([...clean.children].sort());
+    expect(failed.reason).toBeDefined();
+    expect(failed.reason).toContain("T1-collate");
+    expect(clean.reason).toBeUndefined();
+  });
+
+  /**
+   * A `not_collated` fan-out — zero survivors — must NOT acquire a reason. It
+   * dispatched no collation because there was nothing to collate, which is
+   * §6.6 working rather than a last hop that failed, and conflating the two
+   * would make the reason field mean two different things.
+   */
+  test("a zero-survivor pass is not a collation failure and carries no reason", async () => {
+    const { fx } = effects({
+      async harvestTask() {
+        return { harvest: { verdict: "timed_out" as Verdict } };
+      },
+    });
+    const got = await makeConsoleFanOut({
+      resolveRuns: async () => CONSOLE_RUNS,
+      transport: (sender) => consoleTransport(sender, fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+    if (got.kind !== "dispatched") throw new Error("unreachable");
+    expect(got.reason).toBeUndefined();
+  });
+
+  /**
+   * The operator has to SEE it. A reason carried in the result and dropped by
+   * the renderer is a reason that surfaces nowhere, which is the outcome this
+   * arm was built to avoid.
+   *
+   * `renderOutcome` is exported for this, on the precedent `classifyWorker`
+   * sets one file over — "pure classification, exported so the unit suite can
+   * pin the boundary ... without a filesystem".
+   */
+  test("the operator's line names the failed collation", () => {
+    const line = renderOutcome({
+      worker: "col-1",
+      task_id: "T1",
+      kind: "dispatched",
+      children: ["T1-arch", "T1-context", "T1-lang"],
+      reason: "the collation T1-collate did not land: terminal is gone",
+    });
+    expect(line).toContain("T1-collate");
+    expect(line).toContain("3 children");
+  });
+
+  test("a clean dispatched line stays clean", () => {
+    const line = renderOutcome({
+      worker: "col-1",
+      task_id: "T1",
+      kind: "dispatched",
+      children: ["T1-arch"],
+    });
+    expect(line).toContain("1 children");
+    expect(line).not.toContain("did not land");
   });
 });

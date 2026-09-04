@@ -421,6 +421,39 @@ export type RelayOutcome =
       children: readonly RelayChild[];
       /** The seats that produced no review. Empty exactly when `claim` is `success`. */
       missing: readonly AspectSeat[];
+    }
+  /**
+   * Everything happened EXCEPT the last hop: the reviews ran, the replies are on
+   * disk, and the collation could not be delivered.
+   *
+   * **A third arm rather than a throw, and the journal is the whole argument.**
+   * A throw propagates through `relayPass`, which deliberately does not journal
+   * on a throw — correct for a fan-out that aborted early, and exactly wrong
+   * here, because by this point three reviews have been dispatched and three
+   * `0444` replies published. The next tick would re-read the same request and
+   * do it all again, every tick, forever. That is the unbounded repeat the
+   * journal exists to prevent, reached through the one dispatch the fan-out did
+   * not guard.
+   *
+   * **And a third arm rather than folding into `collated`**, because the two are
+   * different facts and only one of them needs an operator. `collated` means the
+   * collator holds a brief; this means it does not, and that the reports are
+   * sitting in its `/replies` mount with nothing telling it to read them. A
+   * reader that could not tell those apart would see a console that reviewed
+   * everything and concluded nothing, with no row anywhere saying why.
+   *
+   * `missing` is carried unchanged and is usually EMPTY here — every lens can
+   * have reported perfectly. The failure is the host's last hop, not any
+   * reviewer's, and the shape says so.
+   */
+  | {
+      kind: "collation_failed";
+      /** The dispatch that did not land, so a caller need not parse the reason. */
+      collation: RelayDispatch;
+      claim: "success" | "partial";
+      children: readonly RelayChild[];
+      missing: readonly AspectSeat[];
+      reason: string;
     };
 
 export interface RelayInput<R> {
@@ -691,7 +724,27 @@ async function fanOut<R>(
   // do, and this is the host completing an exchange it started. The collator
   // cannot cause it — it can only cause the fan-out that leads here, once, which
   // is what `isCollationTaskId` above bounds.
-  await transport.dispatch(collatorRun, collation);
+  //
+  // CAUGHT, and `collation_failed` explains why at length. The short form: a
+  // throw from here discards the record of three reviews that actually ran, and
+  // the next pass runs them again.
+  try {
+    await transport.dispatch(collatorRun, collation);
+  } catch (err) {
+    return {
+      kind: "collation_failed",
+      collation,
+      claim,
+      children,
+      missing: missingSeats,
+      reason:
+        `every lens was dispatched and ${survived.length} reply/replies were published, but the ` +
+        `collation "${collation.taskId}" could not be delivered to "${sender}": ` +
+        `${err instanceof Error ? err.message : String(err)}. The reviews are NOT re-run — the ` +
+        `children are journalled because they happened — so the reports stand in the collator's ` +
+        `/replies mount with nothing yet telling it to read them.`,
+    };
+  }
 
   return { kind: "collated", collation, claim, children, missing: missingSeats };
 }
@@ -1183,6 +1236,23 @@ function toFanOutResult(outcome: RelayOutcome): RelayFanOutResult {
    * follow-up rather than something the request bought.
    */
   const children = outcome.children.map((c) => c.taskId).filter((id): id is string => id !== null);
+  /**
+   * `collation_failed` is `dispatched` PLUS a reason, and both halves matter.
+   *
+   * `dispatched` is what journals the three children, which is the point of the
+   * arm. The reason is what stops that being a silent success: a pass whose last
+   * hop failed and a pass that completed are otherwise identical rows — same
+   * kind, same children — so without this field the distinction exists in the
+   * core and dies at the boundary.
+   *
+   * `not_collated` deliberately does NOT get one. Zero survivors means there was
+   * nothing to collate, which is §6.6 working; attaching a reason there would
+   * make the field mean "something went wrong" in one case and "nothing needed
+   * doing" in the other, and a field with two meanings is read as neither.
+   */
+  if (outcome.kind === "collation_failed") {
+    return { kind: "dispatched", children, reason: outcome.reason };
+  }
   return { kind: "dispatched", children };
 }
 
