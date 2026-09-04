@@ -11,18 +11,31 @@
  *   "atomic write" advice recommends, and against a bind mount it swaps the file
  *   the HOST sees while the container keeps reading the old inode for the life
  *   of the container — with both sides believing the reply changed.
- * - **The verbgate refuses to run when a reply file is writable.** *"Probe:
- *   chmod one and assert exit 78 — the existing loop, one path wider."*
+ * - **The verbgate refuses to run when the reply plane is writable.** SRD §10
+ *   words this as *"chmod one and assert exit 78 — the existing loop, one path
+ *   wider"*, and the wording outran the mechanism. What the gate can actually
+ *   observe is measured at `docker/verbgate`'s integrity loop: a writable reply
+ *   DIRECTORY, which is the entire observable of a dropped `:ro`. A writable
+ *   reply FILE beneath a closed directory is not reachable from any mode this
+ *   module writes, so the block at the bottom asserts that LIMIT rather than
+ *   asserting past it.
  *
  * ## Why the gate is EXECUTED here rather than grepped
  *
  * `dispatch-policy.test.ts` pins the loop's SHAPE — every declared surface is a
- * looped path — and that probe cannot see the failure this one exists for.
- * `/replies` is a DIRECTORY where the other three surfaces are files, so a loop
- * that named `"${replies_dir}"` as a fourth literal would satisfy every
- * structural assertion in the repository while passing cleanly with every reply
- * inside it at 0644. Only running the gate against a writable reply tells the
- * two apart, so that is what the block at the bottom does.
+ * looped path — and a shape probe cannot tell a loop that CHECKS `/replies` from
+ * one that merely mentions it. Running the real gate against a writable reply
+ * directory is what tells those apart.
+ *
+ * THE REFUSAL'S TEXT IS ASSERTED, NOT ONLY ITS EXIT CODE, and that is a repair
+ * rather than a flourish. This block previously read the integer alone, and the
+ * integer could not see its own defect: with the sandbox ROOT left at mkdtemp's
+ * 0700, `dirname` of the replies directory was writable, so a gate naming
+ * `/replies` and a gate naming one reply INSIDE it both exited 78 — for two
+ * different reasons, one of which was the harness. The gate names the offending
+ * path in its own refusal, so the probe reads that instead. The sandbox below
+ * nests every gated surface under a 0555 intermediate that plays the container's
+ * read-only `/`, which is what removes the harness from the answer.
  *
  * The gate's paths are CONSTANTS, deliberately (`docker/verbgate`'s header: *"a
  * control the subject can reconfigure is not a control"*), so a host-side probe
@@ -138,16 +151,93 @@ describe("a reply file", () => {
     expect(await mode(file)).toBe(0o444);
   });
 
+  /**
+   * THE ENOENT DISCRIMINATION, probed where it actually lives.
+   *
+   * This test used to plant a DIRECTORY at the reply path and describe it as
+   * "chmod succeeds, writeFile fails EISDIR" — which is an accurate account of
+   * that fixture and a probe of the wrong statement. `chmod` on a directory
+   * SUCCEEDS, so the rejection came from `writeFile`, which is OUTSIDE the try
+   * block the test claimed to be exercising. Deleting the ENOENT discrimination
+   * from `writeReply` entirely left the file at 25 pass / 0 fail.
+   *
+   * A chmod that fails for a reason OTHER than absence needs the chmod itself to
+   * fail. An existing reply under a parent with no execute bit does it: path
+   * resolution needs `x` on every directory component, the owner class is
+   * checked first and has none, so `chmod` returns EACCES rather than ENOENT.
+   * Measured on this platform before being relied on.
+   *
+   * THE ASSERTION IS ON `syscall`, NOT ON `code`, AND THAT IS THE WHOLE PROBE.
+   * Measured: a writer that widened its catch to `void err` swallows the chmod,
+   * falls through to `writeFile`, and fails there — with the SAME `EACCES`, on
+   * the SAME path, because the missing execute bit denies both calls. Asserting
+   * the code left that mutant alive at 94 pass / 0 fail. The two are
+   * distinguishable only by which call raised:
+   *
+   *     chmod  -> code=EACCES  syscall=chmod
+   *     write  -> code=EACCES  syscall=open
+   *
+   * So `syscall === "chmod"` is the assertion, and it says exactly what the test
+   * name claims: the error propagated FROM THE CHMOD, rather than the chmod
+   * being swallowed and something later failing to look similar.
+   */
   test("propagates a chmod failure that is NOT the file simply being absent", async () => {
-    // A directory where the reply goes: chmod succeeds, writeFile fails EISDIR.
-    // What is asserted is that the writer does not swallow it — a reply that
-    // could not be written must be loud, because the collator's brief is about
-    // to name a path with nothing behind it.
     const dir = await scratch();
     await createRepliesDir(dir);
+    const file = await writeReply(dir, "T-arch", { real: true });
+    // Read and write, but NO execute: the reply is now unreachable by name to
+    // its own owner, and `chmod` on it is EACCES.
+    await chmod(dir, 0o644);
+
+    const err = await writeReply(dir, "T-arch", { x: 1 }).catch((e: unknown) => e);
+    // Restore before asserting, so a failed expectation cannot leave the
+    // directory untraversable for the rest of the file.
     await chmod(dir, 0o755);
-    await mkdir(replyHostPath(dir, "T-arch"));
-    await expect(writeReply(dir, "T-arch", { x: 1 })).rejects.toThrow();
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as NodeJS.ErrnoException).code).toBe("EACCES");
+    expect((err as NodeJS.ErrnoException).syscall).toBe("chmod");
+    // And the reply it could not reopen is untouched — still 0444, still the
+    // payload the last successful write left.
+    expect(await mode(file)).toBe(0o444);
+    expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ real: true });
+  });
+
+  /**
+   * THE WIDEN/NARROW WINDOW.
+   *
+   * `writeReply` widens to 0644, calls `writeFile` — whose default `w` flag is
+   * `O_TRUNC` — and narrows back to 0444. A failure BETWEEN those two used to
+   * leave the reply writable and truncated, permanently, with no further write
+   * scheduled to repair it. That is the exact state this module's docblock spends
+   * a paragraph explaining costs a whole worker: the collator can author the
+   * evidence it is about to quote, and the verbgate answers a writable reply
+   * plane by refusing every gated verb the worker attempts.
+   *
+   * A directory planted at the reply path is the deterministic way to fail the
+   * write between two chmods that both succeed — measured: `chmod` on it returns
+   * 0 and leaves mode 0644, `writeFile` on it returns EISDIR. EISDIR is not the
+   * interesting part and nothing here asserts it is the only way in; ENOSPC and
+   * EIO reach the same window through a filesystem this test cannot arrange.
+   *
+   * THE MODE IS THE ASSERTION. `rejects.toThrow()` passes with or without the
+   * repair, which is why the old version of this fixture could sit in the file
+   * without ever noticing the missing restore.
+   */
+  test("narrows the reply back to 0444 even when the write itself fails", async () => {
+    const dir = await scratch();
+    await createRepliesDir(dir);
+    const at = replyHostPath(dir, "T-arch");
+    await mkdir(at);
+    await chmod(at, 0o444);
+
+    const err = await writeReply(dir, "T-arch", { x: 1 }).catch((e: unknown) => e);
+
+    // The write's own error propagates — not a chmod's, which would tell the
+    // caller the wrong thing about what went wrong.
+    expect((err as NodeJS.ErrnoException).code).toBe("EISDIR");
+    // And the widen was undone. Without the restore this reads 0o644.
+    expect(await mode(at)).toBe(0o444);
   });
 
   /**
@@ -194,9 +284,31 @@ describe("the reply directory", () => {
    * container-side one, and confusing the two is how a `-v` loses three
    * characters without anybody noticing.
    */
-  test("is traversable, owner-writable, and closed to everyone else", async () => {
+  /**
+   * THE DIRECTORY IS PRE-CREATED AT 0700, and that is what makes this a probe of
+   * the CODE rather than of the runner's umask.
+   *
+   * `mkdir` under the umask 022 that every developer shell and `ubuntu-latest`
+   * hands out already yields 0755, so a test that only called `createRepliesDir`
+   * and asserted 0755 could not see `makeWorkerAccessible(dir, false)` being
+   * deleted from it: measured at 75 pass / 0 fail with the chmod removed. The
+   * same mutant fails 6 under `umask 077`, which is the tell — the assertion was
+   * reading the ambient umask, and CI shares the blind spot rather than covering
+   * it.
+   *
+   * Pinning it with a 0700 pre-create rather than by setting a umask inside the
+   * test keeps the suite umask-INDEPENDENT: it now passes under either umask and
+   * fails under either one if the chmod goes away, instead of trading one
+   * environmental dependency for its opposite.
+   */
+  test("is repaired to traversable, owner-writable, and closed to everyone else", async () => {
     const dir = join(await scratch(), "replies");
+    await mkdir(dir, { recursive: true });
+    await chmod(dir, 0o700);
+    expect(await mode(dir)).toBe(0o700);
+
     await createRepliesDir(dir);
+
     expect((await stat(dir)).isDirectory()).toBe(true);
     expect(await mode(dir)).toBe(0o755);
     // Group and other: read and traverse, never write. The owner bit is
@@ -206,8 +318,14 @@ describe("the reply directory", () => {
   });
 
   test("is idempotent, so a re-materialized worker does not fail on an existing directory", async () => {
+    // Same 0700 pre-create for the same reason, and here it also makes the
+    // SECOND call the thing under test: a `createRepliesDir` whose chmod ran
+    // only on a freshly created directory would leave this at 0700.
     const dir = join(await scratch(), "replies");
+    await mkdir(dir, { recursive: true });
+    await chmod(dir, 0o700);
     await createRepliesDir(dir);
+    await chmod(dir, 0o700);
     await createRepliesDir(dir);
     expect(await mode(dir)).toBe(0o755);
   });
@@ -289,11 +407,17 @@ describe("a child task id has to be a filename", () => {
  */
 async function sandboxGate(sandbox: string): Promise<string> {
   const source = await readFile(join(REPO_ROOT, "docker", "verbgate"), "utf8");
+  const root = join(sandbox, "root");
   const swaps: [string, string][] = [
-    ['"/policy/cloud-allow"', `"${join(sandbox, "policy", "cloud-allow")}"`],
-    ['"/policy/task"', `"${join(sandbox, "policy", "task")}"`],
-    ['"/policy/dispatch"', `"${join(sandbox, "policy", "dispatch")}"`],
-    [`"${REPLIES_MOUNT}"`, `"${join(sandbox, "replies")}"`],
+    ['"/policy/cloud-allow"', `"${join(root, "policy", "cloud-allow")}"`],
+    ['"/policy/task"', `"${join(root, "policy", "task")}"`],
+    ['"/policy/dispatch"', `"${join(root, "policy", "dispatch")}"`],
+    [`"${REPLIES_MOUNT}"`, `"${join(root, "replies")}"`],
+    // The ledger stays OUTSIDE `root/`, because `/outbox` is writable in
+    // production and `root/` is standing in for the read-only container root.
+    // A ledger under it cannot be appended to, and the gate's own refusal path
+    // writes a row before it exits 78 — so putting it there turns every probe
+    // below into a test of a gate that could not log.
     ['"/outbox/ledger/verbgate.jsonl"', `"${join(sandbox, "ledger.jsonl")}"`],
   ];
   let text = source;
@@ -339,23 +463,47 @@ async function sandboxGate(sandbox: string): Promise<string> {
  *
  * The FILES keep the 0444 `writeReply` gave them, un-emulated, because that is
  * the mode production actually depends on: the macOS Docker VM squashes
- * bind-mount ownership to the container user, so a 0644 reply reads as
+ * bind-mount FILE ownership to the container user, so a 0644 reply reads as
  * owner-writable INSIDE the container and only `:ro` stands between that and a
- * fleet-wide refusal. The probes below flip exactly that bit.
+ * fleet-wide refusal.
+ *
+ * EVERY GATED SURFACE NESTS UNDER `root/`, WHICH IS CLOSED TO 0555, and that
+ * intermediate is the fix for a real defect rather than tidiness. The gate's
+ * integrity check is `[ -w "$path" ] || [ -w "$(dirname "$path")" ]`, so the
+ * PARENT of each surface is part of the answer. Production's parents are `/` and
+ * `/policy` inside a container the worker cannot write; a flat sandbox's parent
+ * was `mkdtemp`'s 0700, owned by the test process and therefore writable — which
+ * made the second arm fire for the harness's own reason and returned 78 no
+ * matter what the loop actually named. `root/` plays the container's read-only
+ * `/`. The ledger deliberately stays outside it: `/outbox` IS writable in
+ * production, and a gate that cannot append its row cannot reach its exit.
  */
-async function gateSandbox(): Promise<{ dir: string; gate: string; replies: string }> {
+async function gateSandbox(): Promise<{
+  dir: string;
+  gate: string;
+  replies: string;
+  policy: string;
+}> {
   const dir = await scratch("verbgate-replies-");
-  await mkdir(join(dir, "policy"), { recursive: true });
+  const root = join(dir, "root");
+  await mkdir(join(root, "policy"), { recursive: true });
   for (const [name, body] of [
     ["cloud-allow", ""],
     ["task", "T-collate\n3\n"],
     ["dispatch", '{"schema":"pifleet.dispatch/v1","staged":false}\n'],
   ] as const) {
-    const p = join(dir, "policy", name);
+    const p = join(root, "policy", name);
     await writeFile(p, body);
     await chmod(p, 0o444);
   }
-  const replies = join(dir, "replies");
+  const replies = join(root, "replies");
+  // Pre-created at 0700 so the 0755 asserted next is `createRepliesDir`'s chmod
+  // and not the ambient umask — the same pin the reply-directory block uses, and
+  // for the same measured reason. Under umask 022 a bare `mkdir` already gives
+  // 0755, so without this the assertion is satisfied by a `createRepliesDir`
+  // with no chmod in it at all.
+  await mkdir(replies, { recursive: true });
+  await chmod(replies, 0o700);
   await createRepliesDir(replies);
   // 0755 on the host is what `createRepliesDir` sets and what production keeps —
   // the actor writes into this directory. Asserted here so the emulation below
@@ -365,19 +513,27 @@ async function gateSandbox(): Promise<{ dir: string; gate: string; replies: stri
   await writeReply(replies, "T-context", { status: "success" });
   await writeReply(replies, "T-lang", { status: "partial" });
   const gate = await sandboxGate(dir);
-  await chmod(join(dir, "policy"), 0o555);
+  await chmod(join(root, "policy"), 0o555);
   await chmod(replies, 0o555);
-  return { dir, gate, replies };
+  // LAST, and it must be last: closing `root/` first would deny the writes above.
+  await chmod(root, 0o555);
+  return { dir, gate, replies, policy: join(root, "policy", "cloud-allow") };
 }
 
-/** Run the sandboxed gate on a mutating verb and return its exit code. */
-async function runGate(gate: string): Promise<number> {
+/**
+ * Run the sandboxed gate on a mutating verb.
+ *
+ * STDERR IS RETURNED, not read and dropped. The gate names the offending path in
+ * its own refusal, and the exit code alone cannot say WHICH surface fired —
+ * which is how a harness artefact previously passed for the property under test.
+ */
+async function runGate(gate: string): Promise<{ code: number; stderr: string }> {
   const p = Bun.spawn(["/bin/sh", gate, "delete", "deployment", "web"], {
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [code] = await Promise.all([p.exited, new Response(p.stderr).text()]);
-  return code;
+  const [code, stderr] = await Promise.all([p.exited, new Response(p.stderr).text()]);
+  return { code, stderr };
 }
 
 /**
@@ -396,84 +552,170 @@ describe("the verbgate holds a reply to the same integrity bar as a policy file"
    * that missed, a loop that refuses on any path it cannot stat — satisfies the
    * next test perfectly. This one is what makes that refusal DISCRIMINATION.
    */
-  test("passes the integrity loop when every reply is 0444", async () => {
+  test("passes the integrity loop when the reply plane is closed", async () => {
     const { gate } = await gateSandbox();
-    expect(await runGate(gate)).toBe(REFUSED);
+    const { code, stderr } = await runGate(gate);
+    expect(stderr).not.toContain("refusing every verb");
+    expect(code).toBe(REFUSED);
   });
 
   /**
-   * THE HEADLINE PROBE (SRD §10): *"chmod one and assert exit 78"*.
+   * THE HEADLINE PROBE (SRD §10), stated as what the gate can actually observe.
    *
    * WHAT WOULD BREAK IF THIS WERE REMOVED: the reply plane's `:ro` is one
-   * character in one `-v`, and dropping it has no other symptom — the macOS
-   * Docker VM squashes bind-mount ownership to the container user, so the host's
-   * 0444 reads as owner-owned INSIDE the container and the mode says nothing.
-   * The gate's refusal is what turns a silently-writable evidence file into a
-   * worker that cannot run a single gated verb.
+   * character in one `-v`, and dropping it has no other symptom. Under the macOS
+   * VM a read-write bind mount answers `access(W_OK)` TRUE on the mount point
+   * whatever its mode and ownership say, so the host's careful 0755 buys nothing
+   * inside the container and the mount flag is the whole control. This refusal is
+   * what turns a silently-writable evidence plane into a worker that cannot run a
+   * single gated verb — loud, at the first verb, instead of silent forever.
    *
-   * ONE file, not the directory: `dispatch-policy.test.ts` already pins that the
-   * replies surface is a member of the loop, and a loop naming the DIRECTORY
-   * alone would satisfy that probe while passing here at 0644. This is the
-   * assertion that separates the two.
+   * THE PATH IS ASSERTED, NOT ONLY THE CODE, and the negative half is the
+   * load-bearing one. 78 says "some gated surface is writable"; it does not say
+   * which, and this file previously shipped a probe whose 78 came from the
+   * sandbox root rather than from anything the loop named. Requiring the message
+   * to name the replies directory AND not the policy file is what makes this
+   * discrimination: delete `"${replies_dir}"` from the loop and the gate exits 77
+   * with no message at all.
    */
-  test("refuses every verb with 78 when ONE reply file is writable", async () => {
-    const { gate, replies } = await gateSandbox();
-    await chmod(replyHostPath(replies, "T-context"), 0o644);
-    expect(await runGate(gate)).toBe(POLICY_WRITABLE);
-  });
-
-  test("refuses when the replies DIRECTORY is writable, even with no replies in it", async () => {
-    // The other arm of the same `||`: an empty directory expands the glob to a
-    // literal whose dirname is the directory, so the check does not disappear
-    // when there is nothing to check. A worker that could create a reply is a
-    // worker that could author one.
-    const { dir, gate, replies } = await gateSandbox();
+  test("refuses every verb with 78 when the reply DIRECTORY is writable", async () => {
+    const { dir, gate, replies, policy } = await gateSandbox();
     await chmod(replies, 0o755);
-    for (const id of ["T-arch", "T-context", "T-lang"]) {
-      await chmod(replyHostPath(replies, id), 0o644);
-      await rm(replyHostPath(replies, id));
-    }
-    await chmod(replies, 0o777);
-    expect(await runGate(gate)).toBe(POLICY_WRITABLE);
+
+    const { code, stderr } = await runGate(gate);
+    expect(code).toBe(POLICY_WRITABLE);
+    expect(stderr).toContain(replies);
+    // Not some other surface, and not the harness: the three policy files are
+    // still 0444 under a 0555 parent, so naming one of them would mean the
+    // sandbox leaked rather than that the loop worked.
+    expect(stderr).not.toContain(policy);
     expect((await readFile(join(dir, "ledger.jsonl"), "utf8")).includes("policy_writable")).toBe(
       true,
     );
   });
 
-  test("stays inert for a fleet with no replies mount at all", async () => {
-    // Every fleet that is not a review console. An absent `/replies` fails both
-    // arms of the test and the loop passes — so a gate shipped ahead of the
-    // actor refuses nothing it did not already refuse.
+  /**
+   * THE SAME LOOP, ONE OF THE OTHER THREE SURFACES — the control that says the
+   * message names whichever path actually fired rather than a fixed string.
+   *
+   * Without this, `toContain(replies)` above is satisfied by a gate that prints
+   * the replies path unconditionally, which is exactly the class of bug the
+   * whole "assert the path, not the code" repair exists to catch.
+   */
+  test("the refusal names the surface that is writable, whichever one it is", async () => {
+    const { gate, replies, policy } = await gateSandbox();
+    await chmod(policy, 0o644);
+
+    const { code, stderr } = await runGate(gate);
+    expect(code).toBe(POLICY_WRITABLE);
+    expect(stderr).toContain(policy);
+    expect(stderr).not.toContain(`${replies} `);
+  });
+
+  /**
+   * THE MEASURED LIMIT, asserted rather than assumed — and it is a tripwire.
+   *
+   * SRD §10 asks for *"chmod one and assert exit 78"*, and an earlier version of
+   * this loop iterated `"${replies_dir}"/*` to try to deliver exactly that. It
+   * could not: measured inside the real worker image at uid 10001, with the only
+   * modes this codebase writes (`createRepliesDir` 0755, `makeWorkerReadable`
+   * 0444 or 0644), there is no mount configuration in which a reply FILE is
+   * writable and its DIRECTORY is not. Under `:ro` both are EROFS; on a dropped
+   * `:ro` under macOS the directory answers TRUE first; on Linux neither answers
+   * TRUE, and that row is coherent because host ownership passes through there,
+   * so the worker never gained write to catch. `docker/verbgate`'s loop carries
+   * the full table.
+   *
+   * So this asserts 77 — the gate does NOT refuse — for a writable reply beneath
+   * a closed directory. Asserting a limit is worth a test here because the glob
+   * is the obvious thing to reach for a second time: re-add it and this row goes
+   * red, and whoever re-added it has to produce the reachable configuration that
+   * was missing the first time.
+   */
+  test("a writable reply FILE under a closed directory is NOT what the gate detects", async () => {
     const { gate, replies } = await gateSandbox();
+    await chmod(replies, 0o755);
+    await chmod(replyHostPath(replies, "T-context"), 0o644);
+    // The directory closed again: only the FILE is writable now.
+    await chmod(replies, 0o555);
+
+    const { code, stderr } = await runGate(gate);
+    expect(code).toBe(REFUSED);
+    expect(stderr).not.toContain("refusing every verb");
+  });
+
+  test("stays inert for a fleet with no replies mount at all", async () => {
+    // Every fleet that is not a review console. An absent `/replies` fails the
+    // direct arm, and its `dirname` is the container's read-only root, which
+    // fails the second — so a gate shipped ahead of the actor refuses nothing it
+    // did not already refuse.
+    const { dir, gate, replies } = await gateSandbox();
+    await chmod(join(dir, "root"), 0o755);
     await chmod(replies, 0o755);
     for (const id of ["T-arch", "T-context", "T-lang"]) {
       await chmod(replyHostPath(replies, id), 0o644);
       await rm(replyHostPath(replies, id));
     }
     await rm(replies, { recursive: true });
-    expect(await runGate(gate)).toBe(REFUSED);
+    await chmod(join(dir, "root"), 0o555);
+
+    const { code } = await runGate(gate);
+    expect(code).toBe(REFUSED);
   });
 
-  test("the loop reaches the replies directory through a glob, not as a bare path", async () => {
-    // The structural companion to the behavioural probes above, and the reason
-    // it is worth a line: `"${replies_dir}"` as a fourth literal satisfies
-    // `dispatch-policy.test.ts`'s set-equality exactly, so that probe cannot see
-    // the difference between checking the directory and checking what is in it.
+  test("the reply plane is checked directly, with no glob and no parent arm", async () => {
+    /*
+     * The structural companion to the behavioural probes above, and it pins BOTH
+     * halves of a reversal.
+     *
+     * `"${replies_dir}"/*` was shipped first, on the argument that a bare
+     * directory check "passes with every reply inside it at 0644" — a state
+     * measured to be unreachable from any mode this codebase writes. The glob's
+     * cost was real: a `set +f` window in a script whose header explains why
+     * globbing is off everywhere else, one `dirname` fork per reply file on the
+     * refusal path of every gated verb in every fleet, and dotfiles unchecked.
+     *
+     * The SECOND half is why this asserts the absence of a parent arm rather
+     * than membership of the loop. Moving `"${replies_dir}"` into the file loop
+     * gives it `[ -w "$(dirname "/replies")" ]`, which is `[ -w / ]` — true for
+     * root, and `docker/Dockerfile` runs these shims as root in its smoke-test
+     * layer, before its `USER 10001:10001` line. That variant exits 78 on every
+     * verb and fails the image build. It was not caught by reasoning; the build
+     * failed. This assertion is what stops it being rediscovered that way twice.
+     */
     const gate = await readFile(join(REPO_ROOT, "docker", "verbgate"), "utf8");
-    const loop = gate.match(/^for policy_path in (.+); do$/m);
+    // Comments stripped before the NEGATIVE assertions. This file's own prose
+    // names both rejected spellings in order to explain why they were rejected,
+    // and a probe that searched the whole text would be red for the explanation
+    // rather than for the code — which would teach the next reader to delete the
+    // explanation.
+    const code = gate
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+
+    const loop = code.match(/^for policy_path in (.+); do$/m);
     expect(loop, "the integrity loop was not found — this probe has rotted").not.toBeNull();
-    expect(loop![1]).toContain('"${replies_dir}"/*');
+    // The FILE surfaces, and the reply plane is not among them.
+    expect(loop![1]).not.toContain("replies_dir");
+
+    // Checked on its own, directly, with no glob suffix and no parent arm.
+    expect(code).toMatch(/^if \[ -w "\$\{replies_dir\}" \]; then$/m);
+    expect(code).not.toContain('"${replies_dir}"/');
+    expect(code).not.toContain('dirname "${replies_dir}"');
   });
 
-  test("globbing is turned back off inside the loop, not after it", async () => {
+  test("globbing stays off for the whole script, with no window anywhere", async () => {
     // `set -f` guards verb classification against an argv token of `*`
-    // re-expanding against the CWD (the shim's own header records the attack: a
+    // re-expanding against the CWD — the shim's own header records the attack: a
     // file named `describe` dropped beside the worker turns a `delete` into a
-    // read). The glob above needs it off for exactly one word expansion, so the
-    // restore belongs INSIDE the body — after `done` would leave it off for the
-    // whole refusal path, including `log_ledger`'s handling of raw argv.
+    // read. With the glob gone there is no longer any reason to reopen that
+    // window, so the assertion is the strong one: `set -f` once at the top and
+    // `set +f` nowhere at all. That is strictly easier to check, and to keep
+    // true, than "the restore is inside the loop body rather than after it".
     const gate = await readFile(join(REPO_ROOT, "docker", "verbgate"), "utf8");
-    expect(gate).toMatch(/set \+f\nfor policy_path in .+; do\n {2}set -f\n/);
+    expect(gate).toMatch(/^set -f$/m);
+    expect(gate).not.toMatch(/^\s*set \+f\b/m);
   });
 });
 

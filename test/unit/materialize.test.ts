@@ -181,12 +181,27 @@ describe("the outbox", () => {
  * Docker invented — owned and moded by the daemon rather than by
  * `makeWorkerAccessible`, which is the one thing the reply plane's integrity
  * depends on.
+ *
+ * THE MODE ASSERTIONS PRE-CREATE THE DIRECTORY AT 0700 FIRST, and without that
+ * they measure the ambient umask instead of the code. `mkdir` under the umask 022
+ * that a developer shell and `ubuntu-latest` both hand out already produces 0755,
+ * so deleting `makeWorkerAccessible(dir, false)` from `createRepliesDir` left the
+ * suite at 75 pass / 0 fail; the same mutant fails 6 under `umask 077`. CI shares
+ * the blind spot rather than covering it. Pinning with a 0700 pre-create keeps
+ * the assertion umask-INDEPENDENT — it holds under either umask, and fails under
+ * either one when the chmod goes away.
  */
 describe("the reply plane", () => {
-  test("is a directory the worker can traverse and only its owner can write", async () => {
+  test("is repaired to a directory the worker can traverse and only its owner can write", async () => {
     const f = await fixture();
-    await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
     const dir = workerRepliesDir(f.run.root, "eng-1");
+    // Established at 0700 BEFORE materialize, so what is asserted below is
+    // `createRepliesDir`'s chmod and not `mkdir`'s inherited default.
+    await mkdir(dir, { recursive: true });
+    await chmod(dir, 0o700);
+    expect(await mode(dir)).toBe(0o700);
+
+    await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
 
     expect((await stat(dir)).isDirectory()).toBe(true);
     /*
@@ -195,8 +210,8 @@ describe("the reply plane", () => {
      * traverse in and read a reply, the owner write bit lets the host actor
      * deliver one, and nobody else gets either. A copy-pasted
      * `makeWorkerAccessible(dir, true)` here would publish the console's evidence
-     * to every account on the box and — through the verbgate's
-     * `[ -w "$(dirname …)" ]` arm — cost the worker every gated verb it
+     * to every account on the box and — through the verbgate integrity loop's
+     * `[ -w "${policy_path}" ]` arm — cost the worker every gated verb it
      * attempts, nowhere near its cause.
      */
     expect(await mode(dir)).toBe(0o755);
@@ -213,15 +228,22 @@ describe("the reply plane", () => {
     expect((await stat(workerRepliesDir(f.run.root, "quiet-1"))).isDirectory()).toBe(true);
   });
 
-  test("materializing the same worker twice leaves the directory at 0755", async () => {
+  test("materializing the same worker twice repairs the directory to 0755", async () => {
     // Idempotence is a property this module claims everywhere else, and the
     // cloud-policy block records what happens when a second pass meets a mode
     // the first pass set. `mkdir(…, {recursive:true})` on an existing 0755
     // directory must not throw, and the chmod must not drift.
+    //
+    // The 0700 BETWEEN the two passes is what makes the second pass the thing
+    // under test: a `createRepliesDir` that chmodded only a directory it had
+    // just created would leave this at 0700, and under umask 022 a version with
+    // no chmod at all would sail through without it.
     const f = await fixture();
+    const dir = workerRepliesDir(f.run.root, "eng-1");
     await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
+    await chmod(dir, 0o700);
     await materializeWorkerInputs(f.loaded, f.run, ["eng-1"]);
-    expect(await mode(workerRepliesDir(f.run.root, "eng-1"))).toBe(0o755);
+    expect(await mode(dir)).toBe(0o755);
   });
 });
 

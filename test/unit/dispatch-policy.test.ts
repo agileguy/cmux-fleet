@@ -289,9 +289,36 @@ describe("the gate holds the drop to the same integrity bar as the other two", (
     const declared = [
       ...gate.matchAll(/^(\w+)="(\/(?:policy\/[A-Za-z0-9._-]+|replies))"$/gm),
     ].map((m) => m[1]!);
-    const loop = gate.match(/^for policy_path in (.+); do$/m);
-    expect(loop, "the integrity loop was not found — the probe has rotted").not.toBeNull();
-    const covered = [...loop![1]!.matchAll(/\$\{(\w+)\}/g)].map((m) => m[1]!);
+
+    /*
+     * THE WHOLE INTEGRITY SECTION, not one `for` line, and the widening is
+     * forced by a real asymmetry rather than by convenience.
+     *
+     * The three FILE surfaces are checked directly AND through their parent,
+     * because a writable `/policy` replaces a 0444 `cloud-allow` wholesale. The
+     * reply plane is a DIRECTORY: its own write bit already carries that, and
+     * giving it the parent arm asks `[ -w / ]`, which is TRUE for root — the uid
+     * `docker/Dockerfile`'s smoke-test layer runs these shims as, before its
+     * `USER 10001:10001` line. Putting it in the loop failed the image build.
+     * So it is checked beside the loop, and a probe that reads only the loop
+     * line would now report the reply plane as uncovered when it is not.
+     *
+     * COMMENTS ARE STRIPPED FIRST. This section explains itself at length and
+     * names every surface in prose; without the strip, a surface DECLARED and
+     * then discussed but never tested would count as covered, which is the exact
+     * failure the probe exists to catch.
+     */
+    const section = gate.match(
+      /^# --- policy integrity -+$\n([\s\S]*?)^# --- collect leading non-flag tokens/m,
+    );
+    expect(section, "the integrity section was not found — the probe has rotted").not.toBeNull();
+    const code = section![1]!
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    const covered = [...new Set([...code.matchAll(/\$\{(\w+)\}/g)].map((m) => m[1]!))].filter((n) =>
+      declared.includes(n),
+    );
 
     // CONTROL: four today — allow, task, drop, and the reply plane
     // (SRD-REVIEW-CONSOLE D6). The equality below is the assertion; this line

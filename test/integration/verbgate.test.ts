@@ -9,8 +9,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { makeDaemonScratch, makeWorkerAccessible } from "../../src/container/mounts.ts";
+import { makeDaemonScratch, makeWorkerAccessible, WORKER_UID } from "../../src/container/mounts.ts";
 import { runPaths, workerOutboxDir, workerVerbgateLedger } from "../../src/run/paths.ts";
+import { createRepliesDir } from "../../src/run/replies.ts";
 import { readCollectedVerbgate, VerbgateCollector } from "../../src/run/verbgate-collect.ts";
 import { cliBudget, containerBudget } from "../support/budget.ts";
 
@@ -770,7 +771,7 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
  * claim `render.ts` makes when it appends the flag.
  *
  * The gap runs the wrong way on this platform, which is why it is worth closing
- * rather than assuming. The VM squashes bind-mount file ownership to the
+ * rather than assuming. The VM squashes bind-mount FILE ownership to the
  * container user, so a reply the host wrote 0444 appears inside the container
  * OWNED BY uid 10001 — and an owner may chmod. The MODE protects nothing here.
  * `:ro` is the only thing left, and the row below that mounts a 0644 reply
@@ -783,21 +784,71 @@ describe.skipIf(!DOCKER)("worker image toolchain", () => {
  * rows still passed on the empty mount and only the anti-vacuity check and the
  * 78 row went red. Without the first test this block would report a property it
  * never observed.
+ *
+ * ## Two corrections, and the second is why the rows are worded as they are
+ *
+ * **The fixture used production's mode only by accident, and got it wrong.** The
+ * helper below opened the directory to 0777 (`makeWorkerAccessible(dir, true)`),
+ * where `createRepliesDir` gives 0755. 0777 grants "other" write, so on LINUX —
+ * where a bind mount passes host ownership through untouched and uid 10001 is
+ * "other" — the dropped-`:ro` row went 78 on a permission production never
+ * grants. It called the production mode by calling `createRepliesDir` now, which
+ * is what these rows must be measured against or they are measuring the harness.
+ *
+ * **With the real mode, the 78 outcome is PLATFORM-SPECIFIC, and asserting it
+ * unconditionally would be false on CI.** Measured at uid 10001 with a 0755
+ * directory bind-mounted read-write: macOS answers `access(W_OK)` TRUE on the
+ * mount point regardless of its mode and root ownership, because the VM's shared
+ * filesystem answers rather than ordinary DAC; Linux answers false, because uid
+ * 10001 is "other" against a 0755 directory the runner owns.
+ *
+ * That is not a hole in the gate, and the rows do not paper over it — it is
+ * coherent, and stating it is what makes them honest. On Linux a dropped `:ro`
+ * does not GRANT the worker write in the first place, so there is nothing for
+ * the gate to catch. The invariant that holds on both is therefore the one the
+ * rows assert: **a reply plane the worker can actually write is a reply plane
+ * that costs it every gated verb.** Each row measures the worker's real write
+ * capability in the container and asserts the exit code that must accompany it,
+ * so neither platform gets a hard-coded answer and a daemon whose behaviour
+ * changed would fail here rather than silently invert the claim.
  */
 describe.skipIf(!DOCKER)("the reply plane is held read-only by the mount, not by the mode", () => {
   /** The gate's own codes: 77 = verb declined, 78 = a gated surface is writable. */
   const REFUSED = 77;
   const POLICY_WRITABLE = 78;
 
-  /** A `/replies` holding one reply at `mode`, shaped the way the actor leaves it. */
+  /**
+   * A `/replies` holding one reply at `mode`, shaped the way the actor leaves it.
+   *
+   * `createRepliesDir` and NOT `makeWorkerAccessible(dir, true)`: the production
+   * directory is 0755, and the 0777 this used to set is the difference between
+   * probing the shipped surface and probing a wider one that happens to make the
+   * assertions convenient. See the block header.
+   */
   async function replies(mode: number): Promise<string> {
     const dir = await makeDaemonScratch("verbgate-replies");
     scratches.push(dir);
-    await makeWorkerAccessible(dir, true);
+    await createRepliesDir(dir);
     const file = join(dir, "T-arch.json");
     await writeFile(file, `${JSON.stringify({ status: "success" }, null, 2)}\n`);
     await chmod(file, mode);
     return dir;
+  }
+
+  /**
+   * Whether the WORKER can actually write the reply plane, measured by trying it
+   * inside the container as uid 10001 rather than by reasoning about modes.
+   *
+   * This is the antecedent of every conditional row below, and measuring it
+   * beats deriving it from `process.platform`: a platform check encodes today's
+   * belief about Docker, while this reads what the daemon in front of us does.
+   */
+  async function workerCanWriteReplies(dir: string): Promise<boolean> {
+    const out = await inImage(
+      `if touch /replies/forged.json 2>/dev/null; then echo CAN_WRITE; else echo READ_ONLY; fi`,
+      ["-v", `${dir}:/replies`],
+    );
+    return out.includes("CAN_WRITE");
   }
 
   /**
@@ -834,21 +885,87 @@ describe.skipIf(!DOCKER)("the reply plane is held read-only by the mount, not by
     expect(await gateExit(["-v", `${dir}:/replies:ro`])).toBe(REFUSED);
   }, containerBudget(1));
 
-  test("a DROPPED :ro costs the whole worker — every verb refused with 78", async () => {
-    const dir = await replies(0o644);
-    expect(await gateExit(["-v", `${dir}:/replies`])).toBe(POLICY_WRITABLE);
-  }, containerBudget(1));
+  /**
+   * THE ROW THE PLANE'S `:ro` EXISTS FOR, stated as the invariant that holds on
+   * both platforms rather than as one platform's answer.
+   *
+   * A writable reply plane is a collator authoring the evidence it is about to
+   * quote, so it must cost the worker every gated verb. Where a dropped `:ro`
+   * does NOT make the plane writable — Linux, where host ownership passes
+   * through and uid 10001 is "other" against a 0755 directory — there is nothing
+   * to catch and 77 is the correct answer, not a miss.
+   *
+   * Both branches assert. Neither is a skip, and the antecedent is measured in
+   * the same container shape the gate then runs in, so a daemon that changed its
+   * behaviour flips which branch runs instead of quietly falsifying the claim.
+   */
+  test("a reply plane the worker can write costs it every verb; one it cannot, does not", async () => {
+    // HALF ONE — the production directory mode with `:ro` dropped. Whether that
+    // is writable to uid 10001 is the platform-dependent half: the macOS VM
+    // answers W_OK true on a read-write mount point regardless of its mode and
+    // root ownership, Linux answers false because host ownership passes through.
+    // So the writability is MEASURED and the exit code asserted against it.
+    const dropped = await replies(0o644);
+    const writable = await workerCanWriteReplies(dropped);
+    expect(await gateExit(["-v", `${dropped}:/replies`])).toBe(
+      writable ? POLICY_WRITABLE : REFUSED,
+    );
+
+    // HALF TWO — the same read-write mount over a directory closed to 0555,
+    // which the worker cannot write on EITHER platform. Measured: on this VM a
+    // 0555 host directory bind-mounted read-write reads `[ -w ] -> false` and
+    // `touch` fails, where the 0755 above reads true.
+    //
+    // This half exists so the "cannot write, therefore 77" branch RUNS
+    // everywhere instead of only on Linux. Without it each platform exercises
+    // one branch and neither exercises both, which is how the row this replaces
+    // came to assert 78 unconditionally and would have gone red on CI.
+    const closed = await replies(0o444);
+    await chmod(closed, 0o555);
+    try {
+      expect(await workerCanWriteReplies(closed)).toBe(false);
+      expect(await gateExit(["-v", `${closed}:/replies`])).toBe(REFUSED);
+    } finally {
+      // Reopened for `afterEach`: `rm -rf` cannot unlink through a 0555 parent,
+      // and a cleanup failure would be reported against whichever test ran next.
+      await chmod(closed, 0o755);
+    }
+  }, containerBudget(4));
 
   test("a fleet with no reply plane at all is unaffected by the new loop entry", async () => {
     expect(await gateExit([])).toBe(REFUSED);
   }, containerBudget(1));
 
-  test("a 0444 reply is owner-writable in the container, so the mode is not the control", async () => {
-    // The platform fact the four rows above rest on, asserted rather than
-    // commented: a Docker release that stopped squashing ownership would show
-    // up here instead of silently making them tautological.
+  test("on a read-write plane the mode is never the control — ownership or :ro is", async () => {
+    /*
+     * The platform fact the rows above rest on, asserted rather than commented,
+     * and asserted as a DISJUNCTION because the two platforms reach it by
+     * different routes and hard-coding either one breaks the other's CI:
+     *
+     *   macOS — the VM squashes bind-mount FILE ownership to the container user,
+     *   so the worker OWNS a reply the host wrote 0444, and an owner may chmod.
+     *   The mode is decorative and `:ro` is the entire control.
+     *
+     *   Linux — host ownership passes through, the worker is "other", and 0444
+     *   denies it. That is OWNERSHIP doing the work, still not the mode, and
+     *   still not something a dropped `:ro` would have taken away.
+     *
+     * Either way the conclusion the block's header depends on holds: nothing
+     * here is protected by the 0444 itself. A Docker release that stopped
+     * squashing would move this from the first branch to the second rather than
+     * making the surrounding rows silently tautological.
+     */
     const dir = await replies(0o444);
-    const owner = await inImage("stat -c '%u' /replies/T-arch.json", ["-v", `${dir}:/replies`]);
-    expect(owner.trim()).toBe("10001");
+    const out = await inImage(
+      `stat -c '%u' /replies/T-arch.json; ` +
+        `if chmod 0644 /replies/T-arch.json 2>/dev/null; then echo CHMOD_OK; else echo CHMOD_DENIED; fi`,
+      ["-v", `${dir}:/replies`],
+    );
+    const [owner, chmodResult] = out.trim().split("\n");
+    if (owner === String(WORKER_UID)) {
+      expect(chmodResult).toBe("CHMOD_OK");
+    } else {
+      expect(chmodResult).toBe("CHMOD_DENIED");
+    }
   }, containerBudget(1));
 });

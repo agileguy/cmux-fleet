@@ -179,17 +179,29 @@ export function replyHostPath(dir: string, childTaskId: string): string {
  * bit lets uid 10001 traverse in and read a reply, the OWNER write bit is what
  * lets the host actor deliver one, and group and other get neither. A
  * world-writable replies directory would publish the console's evidence to every
- * account on the host and — through the verbgate's `[ -w "$(dirname …)" ]` arm —
- * cost the worker every gated verb it attempts.
+ * account on the host and — through the verbgate's `[ -w "${policy_path}" ]`
+ * arm — cost the worker every gated verb it attempts.
  *
  * WHAT STOPS THE WORKER WRITING IT IS `:ro`, NOT THIS MODE, and the distinction
- * is worth keeping straight because it is where a reader will guess wrong. The
- * macOS Docker VM squashes bind-mount ownership to the container user, so inside
- * the container uid 10001 reads as the OWNER of this 0755 directory and the mode
- * says nothing at all. `access(W_OK)` returns EROFS on a read-only mount
- * regardless of mode or ownership, which is what makes `[ -w /replies ]` false —
- * so the verbgate's directory arm is a tripwire on the mount flag rather than a
- * second opinion about the mode.
+ * is worth keeping straight because it is where a reader will guess wrong — the
+ * usual guess being that the macOS VM squashes ownership here the way it does
+ * for a bind-mounted FILE. It does not, and the measured behaviour is stranger
+ * and reaches the same conclusion by a different route. MEASURED 2026-09-04,
+ * uid 10001 inside the worker image, this directory bind-mounted READ-WRITE:
+ *
+ *     /replies              mode=755 owner=0:0        [ -w ] -> TRUE
+ *     /replies/T-arch.json  mode=444 owner=10001:10001 [ -w ] -> false
+ *     /replies/T-ctx.json   mode=644 owner=10001:10001 [ -w ] -> TRUE
+ *
+ * The mount POINT keeps root ownership and this 0755 mode — under which uid
+ * 10001 is "other" and should have no write at all — and `access(W_OK)` answers
+ * TRUE regardless, because the VM's shared filesystem answers it rather than
+ * ordinary DAC. The FILES are the ones squashed to the container user. So the
+ * mode genuinely says nothing about what the worker may do here, just not for
+ * the reason a reader expects. Re-mounted `:ro` every one of those goes false —
+ * `access(W_OK)` returns EROFS regardless of mode or ownership — which is what
+ * makes the verbgate's check on this directory a tripwire on the MOUNT FLAG
+ * rather than a second opinion about the mode.
  */
 export async function createRepliesDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true });
@@ -222,8 +234,25 @@ export async function createRepliesDir(dir: string): Promise<void> {
  *    is widened for the write and restored immediately. On POSIX the owner of a
  *    0444 file cannot open it for writing either, so this is not ceremony: skip
  *    the widen and a re-delivered reply fails.
- * 3. **Truncate in place, then restore 0444.** Never rename; see the module
- *    docblock.
+ * 3. **Truncate in place, then restore 0444 — even when the write throws.**
+ *    Never rename; see the module docblock.
+ *
+ * Step 3's "even when the write throws" is the part that was missing and is not
+ * decoration. Between the widen and the narrow the file is 0644 AND `writeFile`
+ * has already truncated it (the default `w` flag is `O_TRUNC`), so an ENOSPC or
+ * an EIO in that window used to leave a reply that is empty, writable, and
+ * permanent — which is precisely the state this module spends its docblock
+ * explaining is worth a whole worker: the collator can now author the evidence
+ * it is about to quote, and the verbgate answers a writable reply plane by
+ * refusing every gated verb.
+ *
+ * The restore is a `catch` + rethrow rather than a bare `finally`, and the
+ * difference is which error the caller ends up holding. A `finally` that chmods
+ * unconditionally throws ENOENT of its own when the write failed because the
+ * file was never created at all — masking the write's cause with a message about
+ * a chmod. So: on the happy path the narrow is unguarded and any failure is
+ * loud, exactly as before; on the failure path the narrow is best-effort and the
+ * WRITE's error is what propagates, because that is the actionable one.
  *
  * Returns the host path written, so a caller that has to log or correlate does
  * not re-derive it.
@@ -268,7 +297,16 @@ export async function writeReply(
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-  await writeFile(file, `${body}\n`);
+
+  try {
+    await writeFile(file, `${body}\n`);
+  } catch (writeErr) {
+    // The window this closes: the file is 0644 and already truncated. Narrow it
+    // back before propagating, and swallow only the NARROWING's own failure —
+    // never the write's, which is the error that says what actually happened.
+    await makeWorkerReadable(file, false).catch(() => {});
+    throw writeErr;
+  }
   await makeWorkerReadable(file, false);
   return file;
 }
