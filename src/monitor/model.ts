@@ -176,6 +176,45 @@ export interface WorkerRow {
    * enclosing region carries.
    */
   readonly fence: FenceView | null;
+  /**
+   * WHICH WORKSPACE `up` BROUGHT THIS WORKER UP IN — `presentation.json`'s
+   * `workspace_ref`, carried verbatim.
+   *
+   * ## Why the record and not cmux
+   *
+   * The obvious source is cmux itself: enumerate workspaces, list their panes,
+   * map pane back to worker. **That source is wrong here, and the reason is
+   * this project's own operating rule** — *"the consoles are not the fleet.
+   * Workers survive a closed cmux window; `status --all` is the truth, a
+   * visible pane is not."* A worker whose window the operator closed an hour
+   * ago is still running, still holding an epoch, and still the row most worth
+   * finding; cmux no longer knows it exists. Grouping by what cmux can see
+   * would drop exactly those workers, at exactly the moment the monitor earns
+   * its keep.
+   *
+   * `presentation.json` is written once by `up` (`cli/commands/up.ts:2224`) and
+   * is IMMUTABLE thereafter (§2.7). It is a fact on disk, so a closed window, a
+   * quit cmux and an uninstalled cmux are all the same to it. It also costs
+   * nothing: `read/worker.ts` already parses that file for the activity
+   * ladder, so this field adds no read, no subprocess, and no import — which
+   * keeps ISC-469's pin at one spawning module rather than making the viewer
+   * shell out to a second tool.
+   *
+   * ## `null` is a real population, not a defensive branch
+   *
+   * MEASURED across the operator's own 226 run directories on 2026-09-04: of
+   * 183 `presentation.json` records, **81 carry `workspace_ref: null`** — a
+   * headless run, a record written before the field existed, or a
+   * presentation that could not be read at all. `null` means *no workspace was
+   * ever recorded for this worker*, which is a positive fact about the record
+   * and NOT a claim that the worker is detached, dead or unreachable.
+   *
+   * It is never defaulted. There is no permissive value to fall back to, and a
+   * worker filed under a console it was never in is worse than one filed under
+   * none — the same argument {@link DispatchVia} makes for refusing to default
+   * to `"rpc"`.
+   */
+  readonly workspace: string | null;
 }
 
 /** One live run and the workers under it. */

@@ -160,6 +160,18 @@ describe("ISC-499: the refusal surface and the fence are row properties", () => 
     await makeWorker(run, "w-1");
 
     const { row, evidence } = expectOk(await readWorkerRow(run, "w-1"));
+    /*
+     * `workspace` added 2026-09-04, deliberately, and it belongs in exactly
+     * this assertion for exactly this test's reason.
+     *
+     * View 1 groups workers by the workspace `up` recorded for them, and the
+     * argument for putting it on the ROW is the one this test already makes
+     * about `via` and `fence`: a grouping is a property of the row, so a field
+     * carried only in view 2's payload would leave view 1 with a set of rows
+     * none of which knows where it belongs. The value comes from
+     * `presentation.json`'s `workspace_ref` through `deriveWorkspace`, which is
+     * the single definition both the walk and the fast refresh call.
+     */
     expect(Object.keys(row).sort()).toEqual([
       "containerPresent",
       "fence",
@@ -169,6 +181,7 @@ describe("ISC-499: the refusal surface and the fence are row properties", () => 
       "transcriptAgeMs",
       "via",
       "workerId",
+      "workspace",
     ]);
     // And the derived answers are NOT duplicated into the evidence bundle,
     // which would give the fast path a second place to read them from.

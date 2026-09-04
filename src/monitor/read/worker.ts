@@ -329,6 +329,7 @@ export async function readWorkerRow(
         taskId: state.task_id,
         via: deriveVia(launch, launchUnreadable, presentation),
         fence,
+        workspace: deriveWorkspace(presentation),
       },
       evidence: { state, presentation, attended, launch, launchUnreadable, notes },
     },
@@ -429,6 +430,16 @@ export async function refreshWorkerRow(
          */
         via: deriveVia(prior.launch, prior.launchUnreadable, prior.presentation),
         fence,
+        /*
+         * RE-DERIVED from the carried presentation, exactly as `via` above is,
+         * and the failure it avoids is worse than `via`'s because it is
+         * INVISIBLE IN A ONE-SHOT RENDER. This path runs on the 500 ms clock;
+         * a refresh that dropped the workspace would draw a correctly grouped
+         * frame for half a second after `up` and then collapse the entire
+         * fleet into `no workspace recorded` — a regression an operator sees
+         * in a live pane and no `--once` test ever reaches.
+         */
+        workspace: deriveWorkspace(prior.presentation),
       },
       // Fresh state and fence, CARRIED satellites. See the header.
       evidence: { ...prior, state },
@@ -560,6 +571,40 @@ export function deriveVia(
   if (presentation.adopted_terminal) return "staged";
   if (presentation.backend === "headless" || presentation.surface_ref === null) return null;
   return "pane";
+}
+
+/**
+ * WHICH WORKSPACE THIS WORKER WAS BROUGHT UP IN, out of the record `up` wrote.
+ *
+ * ## A one-line function, and it exists for the same reason {@link deriveVia}
+ * ## does
+ *
+ * Two call sites need this answer — the slow walk ({@link readWorkerRow}) and
+ * the fast refresh ({@link refreshWorkerRow}) — and `refreshWorkerRow`'s own
+ * note states the rule they are both held to: an answer re-derived from the
+ * carried documents cannot drift from one derived on the walk, whereas a value
+ * copied off the previous row is "a second place the answer could come from,
+ * which is the shape that goes stale silently when the first one is fixed".
+ * One expression in this repository turns a presentation record into a
+ * workspace, and it is this one.
+ *
+ * ## `null` is the answer to three different questions and that is deliberate
+ *
+ * The record was never written, the record could not be read, or the record
+ * says `workspace_ref: null` because the run had no workspace. All three mean
+ * *nothing on disk names a workspace for this worker*, which is the only claim
+ * the display layer is entitled to make. **They are NOT distinguished here and
+ * must not be**: the three differ in why pifleet has no answer, not in what is
+ * true of the worker, and a view that split them would invite an operator to
+ * read a missing file as a fact about a running agent.
+ *
+ * What is emphatically not done is defaulting. `model.ts` argues it for
+ * `DispatchVia` and the argument transfers unchanged: a worker filed under a
+ * console it was never in is worse than one filed under none, because the
+ * first is confidently wrong and the second is merely unknown.
+ */
+export function deriveWorkspace(presentation: Presentation | null): string | null {
+  return presentation?.workspace_ref ?? null;
 }
 
 /**

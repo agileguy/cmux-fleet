@@ -526,6 +526,207 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
 }
 
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * GROUPING BY WORKSPACE
+ *
+ * The owner's request was "break the workers down by workspace, with the
+ * workspace name in bold yellow". The heading is three lines of JSX. Everything
+ * argued below is about the half that can silently lose a worker.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The heading for workers whose record names no workspace.
+ *
+ * ## The wording is a claim about the RECORD, and it has to be
+ *
+ * `detached` was the obvious word and it is false: a headless run was never
+ * attached to anything, so calling it detached invents a history. `no console`
+ * is a claim about the world this monitor cannot check — cmux may well have a
+ * console open that pifleet simply never recorded. What is true, and all that
+ * is true, is that nothing on disk names a workspace for these workers.
+ *
+ * **Naming it honestly matters more here than it looks**, because this group is
+ * where a worker lands when the evidence is missing, and an operator who reads
+ * the heading as a verdict about the WORKER will draw exactly the wrong
+ * conclusion: these agents may be perfectly healthy, holding epochs, mid-task.
+ * The heading says what pifleet knows, not what the fleet is doing — the row's
+ * own cells already say that.
+ *
+ * MEASURED: 81 of 183 `presentation.json` records on the operator's disk sit
+ * here (2026-09-04). This is a populated group, not a fallback.
+ */
+export const NO_WORKSPACE = "no workspace recorded";
+
+/**
+ * One group's heading line.
+ *
+ * The word `workspace` is carried in the TEXT rather than left to the colour,
+ * and that is the same rule the severity bullet follows: the plain frame is the
+ * one a pipe, a grep or a diff reads, and it has no yellow to carry meaning. A
+ * bare ref on its own line would be indistinguishable from a run id there.
+ *
+ * The ref is printed WHOLE and left to truncate. It needs no rung on §6.5's
+ * ladder because it is not a cell: `chrome.tsx` states the rule — full-width
+ * lines "truncate or wrap on their own and do not have to fit BESIDE
+ * anything", which is why they are excluded from every floor. Adding a tier for
+ * it would make the ladder longer and buy the row not one character.
+ */
+export function workspaceHeading(workspace: string | null): string {
+  return workspace === null ? NO_WORKSPACE : `workspace ${workspace}`;
+}
+
+/**
+ * How the heading is painted — extracted as a function of the palette for the
+ * reason `monitor-row-colour.test.ts` gives at length: whether an SGR escape
+ * reaches a frame depends on chalk's level, computed from the real
+ * `process.stdout`, so an assertion on escapes "would pass vacuously exactly
+ * where it is run". The DECISION is what can be pinned, so the decision is what
+ * is exported.
+ *
+ * `bold` is gated on `p.on` rather than always true, like every other bold in
+ * these views: the plain frame must differ from the painted one in escapes and
+ * nothing else.
+ */
+export function workspaceHeadingStyle(p: Palette): {
+  readonly color: string | undefined;
+  readonly bold: boolean;
+} {
+  return { color: p.workspace, bold: p.on };
+}
+
+/** One workspace and the runs whose workers belong to it. */
+export interface WorkspaceGroup {
+  /** `null` for workers whose record names no workspace. See {@link NO_WORKSPACE}. */
+  readonly workspace: string | null;
+  readonly runs: readonly RunRow[];
+}
+
+/**
+ * Partition the runs by their workers' workspace — **a PARTITION, and the word
+ * is load-bearing.**
+ *
+ * ## What must be true, stated as the failure it prevents
+ *
+ * Every worker in appears exactly once out. Not "most workers", not "every
+ * worker cmux still knows about" — every worker, because the situation this
+ * monitor exists for is the one where something has gone wrong and a console
+ * window is gone, and a grouping that hid a live worker then would be worse
+ * than no grouping at all. `monitor-workspace.test.ts` asserts it as a
+ * conservation law over the rendered frame rather than as a spot-check,
+ * because the worker that gets dropped is the one nobody thought to name.
+ *
+ * ## Why per-WORKER and not per-run, though every real run is uniform
+ *
+ * MEASURED on the operator's disk 2026-09-04: all 179 runs holding presentation
+ * records have a single `workspace_ref` across their workers; zero are mixed.
+ * Taking the run's workspace from its first worker would therefore be correct
+ * on every run this machine has ever produced — and would be a latent lie,
+ * filing workers under a console they were never in the first time a run
+ * spanned two. Splitting the run costs a duplicated block header and cannot be
+ * wrong. **The header counts what its block LISTS**, so a split run reads `2
+ * workers` under one heading and `1 worker` under another rather than claiming
+ * three in both places.
+ *
+ * ## A workerless run is not nothing
+ *
+ * It has no worker to take a workspace from, so a loop driven purely by workers
+ * would drop the run entirely — taking with it the only line that says the run
+ * exists. It goes to the `null` group, which is where "nothing names a
+ * workspace for this" already means what it needs to mean.
+ *
+ * ## NO SORT. Not of groups, not of runs, not of workers
+ *
+ * The file header forbids it and gives the reason: §6.2 needs a stable
+ * `(run, worker)` selection for a later action key, and "a design whose rows
+ * are recomputed and re-sorted on every tick has no selection to attach an
+ * action to". So groups appear in order of first appearance — a function of the
+ * model's own order and nothing else — and runs and workers keep theirs. That
+ * includes NOT sinking the `null` group to the bottom, which looks like tidying
+ * and is a sort: it would also bury the group an operator most often wants.
+ *
+ * `Map` carries the ordering rather than an array of pairs, because a `Map`
+ * preserves insertion order by specification and a `find` over pairs would be
+ * the same behaviour written in a way a reader has to verify.
+ */
+export function groupByWorkspace(runs: readonly RunRow[]): readonly WorkspaceGroup[] {
+  const groups = new Map<string | null, RunRow[]>();
+  const push = (workspace: string | null, run: RunRow): void => {
+    const existing = groups.get(workspace);
+    if (existing === undefined) groups.set(workspace, [run]);
+    else existing.push(run);
+  };
+
+  for (const run of runs) {
+    if (run.workers.length === 0) {
+      // See the header: a run with nothing under it still has a heading worth
+      // printing, and no worker to say where it belongs.
+      push(null, run);
+      continue;
+    }
+    /*
+     * A second `Map`, per run, for the same ordering reason as the outer one —
+     * the run's slices come out in the order its workers named their
+     * workspaces, so a run split across two groups keeps its workers in the
+     * model's order inside each.
+     */
+    const slices = new Map<string | null, WorkerRow[]>();
+    for (const worker of run.workers) {
+      /*
+       * `?? null` NORMALISES `undefined` ONTO `null`, and it is not defensive
+       * clutter — it was put here by a test failure worth recording.
+       *
+       * `WorkerRow.workspace` is `string | null` and required, so the compiler
+       * names every construction site that omits it; four fixtures were caught
+       * that way. But a row reaching this function with `workspace: undefined`
+       * — a hand-built model, a JSON round-trip, an `as FleetModel` cast —
+       * would key a group of its own and print the heading `workspace
+       * undefined`, which is `phaseCell("")`'s failure exactly: a rendering
+       * indistinguishable from one that broke.
+       *
+       * The `??` is a normalisation and not a default. `undefined` and `null`
+       * denote the IDENTICAL fact here — nothing names a workspace for this
+       * worker — so mapping them to one key invents nothing; it is the same
+       * `?? null` `deriveWorkspace` performs at the read boundary, applied at
+       * the other boundary where an untyped value can enter.
+       */
+      const workspace = worker.workspace ?? null;
+      const existing = slices.get(workspace);
+      if (existing === undefined) slices.set(workspace, [worker]);
+      else existing.push(worker);
+    }
+    for (const [workspace, workers] of slices) push(workspace, { ...run, workers });
+  }
+
+  return [...groups].map(([workspace, grouped]) => ({ workspace, runs: grouped }));
+}
+
+/** One workspace's heading and the run blocks beneath it. */
+function WorkspaceBlock({ group, plan }: { group: WorkspaceGroup; plan: LayoutPlan }) {
+  const p = usePalette();
+  const style = workspaceHeadingStyle(p);
+  return (
+    <Box flexDirection="column">
+      {/*
+       * COLUMN 0, where the region heading also sits, with the run blocks at 2
+       * and the worker rows at 4 — a three-level indent that reads as a tree.
+       *
+       * Deliberately NOT indented with the run blocks pushed to 4. Doing it
+       * that way would have moved every existing run header one tier right and
+       * aligned it with the worker text, which changes lines the pinned frame
+       * in `monitor-render.test.ts` guards for no gain. As it is, grouping ADDS
+       * lines and moves none — the diff on that fixture is purely insertions,
+       * which is what makes it reviewable.
+       */}
+      <Text wrap="truncate-end" color={style.color} bold={style.bold}>
+        {workspaceHeading(group.workspace)}
+      </Text>
+      {group.runs.map((run) => (
+        <RunBlock key={`${group.workspace ?? ""}/${run.runId}`} run={run} plan={plan} />
+      ))}
+    </Box>
+  );
+}
+
 /**
  * The whole frame.
  *
@@ -565,8 +766,16 @@ export function Fleet({ model }: { model: FleetModel }) {
         )}
         failed={model.runs.status === "failed"}
       />
+      {/*
+       * Grouped by workspace, and the grouping is a PARTITION — see
+       * `groupByWorkspace`. A failed `runs` region still renders nothing, which
+       * is ISC-478 unchanged: an empty run list groups into no groups, so the
+       * reason on the header line remains the whole of what is known.
+       */}
       {model.runs.status === "ok"
-        ? model.runs.value.map((run) => <RunBlock key={run.runId} run={run} plan={plan} />)
+        ? groupByWorkspace(model.runs.value).map((group) => (
+            <WorkspaceBlock key={group.workspace ?? NO_WORKSPACE} group={group} plan={plan} />
+          ))
         : null}
       <Rule width={model.columns} />
       <ContainersRegion model={model} />

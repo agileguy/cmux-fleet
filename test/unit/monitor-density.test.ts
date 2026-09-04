@@ -110,6 +110,7 @@ const row = (over: Partial<WorkerRow> = {}): WorkerRow => ({
   taskId: null,
   via: "rpc",
   fence: null,
+  workspace: null,
   ...over,
 });
 

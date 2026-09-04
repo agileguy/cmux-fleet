@@ -104,6 +104,23 @@ export interface Palette {
    * bullet the thing that carries severity.
    */
   readonly busy: string | undefined;
+  /**
+   * The workspace group heading.
+   *
+   * **ITS OWN ENTRY THOUGH IT IS THE SAME YELLOW AS {@link warn}, and the
+   * duplication is the point rather than an oversight.** This palette's stated
+   * discipline is that "the assignment is by SEVERITY and not by category":
+   * `warn` means *has never spoken, needs a look*. A workspace heading is not a
+   * finding and must never be read as one — but it is structure the eye should
+   * be able to land on without reading, which is what the owner asked for.
+   *
+   * Two names for one colour costs a line here and buys the ability to change
+   * either without changing the other. Had the heading reused `warn`, a later
+   * decision to make warnings orange would silently repaint every group
+   * heading, and a reader looking at the frame could not tell which of the two
+   * meanings a yellow line carried.
+   */
+  readonly workspace: string | undefined;
 }
 
 export const PLAIN: Palette = {
@@ -115,6 +132,7 @@ export const PLAIN: Palette = {
   live: undefined,
   quiet: undefined,
   busy: undefined,
+  workspace: undefined,
 };
 
 /**
@@ -141,6 +159,7 @@ export const COLOUR: Palette = {
   live: "green",
   quiet: "white",
   busy: "blue",
+  workspace: "yellow",
 };
 
 const PaletteContext = createContext<Palette>(PLAIN);

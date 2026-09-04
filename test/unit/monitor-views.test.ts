@@ -62,6 +62,7 @@ const worker: WorkerRow = {
   taskId: "t-17",
   via: "rpc",
   fence: null,
+  workspace: null,
 };
 
 const RUNS: readonly RunRow[] = [{ runId: RUN_A, workers: [worker] }];

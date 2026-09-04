@@ -94,6 +94,14 @@ const base: WorkerRow = {
    */
   via: "rpc",
   fence: null,
+  /*
+   * NO WORKSPACE, which is the majority shape on the operator's own disk — 81
+   * of 183 `presentation.json` records carry `workspace_ref: null` (measured
+   * 2026-09-04). Keeping the base fixture here means the pinned frame below
+   * exercises the group that a workspace-aware view is most likely to drop,
+   * rather than the one it is most likely to get right.
+   */
+  workspace: null,
 };
 
 const worker = (over: Partial<WorkerRow>): WorkerRow => ({ ...base, ...over });
@@ -645,11 +653,36 @@ describe("the frame, pinned", () => {
    * Five lines left the frame and nothing else moved with them, which is what
    * makes it a removal rather than a redesign.
    */
+  /*
+   * UPDATED 2026-09-04, deliberately. ONE LINE WAS ADDED AND NONE MOVED.
+   *
+   *   + "no workspace recorded"
+   *     "  run 2026-09-02T14-43-27Z-3906 — 4 workers"
+   *
+   * View 1 now groups its workers by the workspace `up` recorded for them
+   * (`presentation.json`'s `workspace_ref`), with the workspace as a heading
+   * above its group. Every fixture worker here carries `workspace: null` — the
+   * majority shape on the operator's disk, 81 of 183 records — so they form one
+   * group and it is the DETACHED one, which is the group a workspace-aware view
+   * is most likely to drop.
+   *
+   * **The insertion is the whole diff, and that was a design constraint rather
+   * than luck.** The heading sits at column 0 alongside the region heading,
+   * leaving the run blocks at 2 and the worker rows at 4. Indenting the runs to
+   * 4 to make room would have moved every run header in this fixture and
+   * aligned it with the worker text — a change to lines this test exists to
+   * guard, bought for nothing. What is asserted below is therefore still every
+   * column position, width and glyph this frame had yesterday.
+   *
+   * WHAT DID NOT CHANGE: the indent, the bullet, the id and activity widths,
+   * the run headers, the rules, and the containers region.
+   */
   test("a two-run fleet renders exactly these lines", () => {
     const RULE = "-".repeat(100);
     expect(renderFleet({ ...healthy, columns: 100 })).toEqual([
       RULE,
       "fleet — as of 2s — 2 live runs",
+      "no workspace recorded",
       "  run 2026-09-02T14-43-27Z-3906 — 4 workers",
       "  * eng-1   not measured (rpc)  Running   Up    task t-17",
       "  * eng-2   no transcript       Idle      Up    no task",
