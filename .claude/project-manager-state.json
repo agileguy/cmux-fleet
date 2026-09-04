@@ -191,5 +191,31 @@
     "ci": "probe-guard total=146 expected=146 rc=0; clean-checkout unit suite 3545 pass / 6 skip / 0 fail",
     "commits_on_branch": 22,
     "findings_closed": 16
+  },
+  "phase_3_status": {
+    "items_done": [
+      "roles/collator.md protocol rewrite - landed across cc3f1ce/0d3a46c/371dc08/3dc4559/73abe07",
+      "console wiring - scripts/review starts the relay actor (cc3f1ce) with ConsoleWatch supervision (1492ae4)",
+      "D8 structural grading - weak verdict per owner; shape + consensus counts, no acceptance command",
+      "reporting - collation.json + review.md, both produced live"
+    ],
+    "proved_live": "Three end-to-end runs of rally-cli efe2777 with a byte-identical brief: run 1 produced no fan-out at all, run 2 was 1/3 partial, run 3 was 3/3 with two cross-vendor consensus findings and one recorded contradiction.",
+    "carried_gaps": [
+      "G2: a relative `file` on a finding is still counted as located; needs CollationCensus in contracts.ts",
+      "L6: `detached: true` fixed in code, never probed - no live fleet in the engineer's worktree",
+      "H6: kept as a measured no-op; closing it needs green harvester-run acceptance",
+      "test/mutation/collation-contract.battery.ts has 5 stale anchors, deliberately NOT in the ENFORCED tier",
+      "Q4's failure probe: kill the actor mid-fan-out; do children settle, is /replies partial, does a re-run replay or re-dispatch",
+      "Q6 open by choice: coverage vs verdict axis for a two-of-three review"
+    ],
+    "defects_found_live_and_unfixed": [
+      "Wedged seat: abort leaves phase:busy with a FRESH heartbeat while the container is gone from `docker ps -a`. The unused discriminator is already in the status record - heartbeat_at current vs transcript_activity.last_growth_at stale.",
+      "Re-delivery: workers reported 'this is a re-delivery of the same task I already completed' and rev-arch-1 reached 3.5M cumulative input, which is what drove the auto-compaction. The relay has an already_done ledger guard, so the cause is NOT established - suspect the tui auto-trigger rather than the fan-out.",
+      "rev-lang-1's configured angle is TypeScript/JavaScript (roles/review/typescript-language.md) while the integration target is Python. The collator steered around it in the brief; config still says TS."
+    ],
+    "pr_prerequisites_done": [
+      "fleet.yaml is gitignored, so both new config fields are documented in the TRACKED fleet.example.yaml instead",
+      "SRD section 9 updated: Q1, Q8, Q9, Q10 answered; Q4 marked built-but-unprobed"
+    ]
   }
 }

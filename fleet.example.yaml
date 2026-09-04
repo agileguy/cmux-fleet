@@ -48,6 +48,22 @@ run:
   repo: ~/repos/paisley
   isolation: worktree        # worktree | shared-ro | none
   branch_prefix: fleet
+  # UNSET, and it must stay unset in this file. `sensitive-repo.ts` refuses to
+  # start a run whose repository's `origin` is under `github.gwd.broadcom.net`,
+  # `github.com/appneta/` or `github.com/dan-elliott-appneta/` while ANY worker
+  # resolves to a `hosted: true` provider — before any clone or container.
+  #
+  # To send such a repository anyway, echo its remote back here, exactly:
+  #   hosted_repo_consent: https://github.com/your-org/your-repo.git
+  #
+  # A URL and not a boolean, because the launch directory overrides `run.repo`:
+  # one `fleet.yaml` sends whichever repository you `cd` into, so a blanket yes
+  # written for a repository you thought about would cover every one you did
+  # not. An echoed URL cannot transfer, and a wrong echo refuses and prints both.
+  #
+  # It lives in the gitignored `fleet.yaml`, never here — a consent committed to
+  # a shared example is a consent nobody chose.
+  # hosted_repo_consent: <the exact remote you mean to send>
   max_concurrent: 2          # bounded by oMLX throughput, not pane count (§5.9)
   # The F39 RUNTIME detector (§5.9 detector 2). A worker completing this many
   # consecutive turns with ZERO tool calls is failed `no_tool_calls` rather than
@@ -129,6 +145,31 @@ llm:                         # ALWAYS self-hosted oMLX, never a provider — see
     - Qwen3.5-35B-A3B-8bit
     - GLM-4.5-Air-MLX-4bit
   require_native_tool_calls: true   # `up` probes each model — see §5.9
+  #
+  # PER-MODEL CONTEXT WINDOWS live on a PROVIDER block, so they appear under
+  # `llm.providers.<name>.context_windows` rather than out here. Without them the
+  # Pi agent registers every model at its own default of 128,000 — which for a
+  # while meant two 1,048,576-token models on this fleet ran at 12% of capacity,
+  # auto-compacted, and in one case could not resume at all.
+  #
+  # The value is the PROVIDER's, not yours. Read it from the endpoint:
+  #   curl -s https://<host>/api/show -H "Authorization: Bearer $KEY" \
+  #     -d '{"model":"<id>"}' | jq '.model_info | to_entries[]
+  #       | select(.key | endswith(".context_length"))'
+  #
+  #   providers:
+  #     vendor:
+  #       hosted: true
+  #       base_url: https://vendor.example/v1
+  #       api_key_env: VENDOR_API_KEY
+  #       models_allowlist: [big-model]
+  #       context_windows:
+  #         big-model: 1048576
+  #
+  # A model with no entry keeps the agent's default, which is deliberate: too
+  # small wastes the model, and too large makes the provider reject whole
+  # requests once the history passes the real limit. Say nothing rather than
+  # guess.
 
 cloud:
   adc: true                  # inherit the launching Claude instance's Google identity
