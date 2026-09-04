@@ -45,17 +45,23 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { DEFAULT_REVIEW_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
 import { workerOutboxDir } from "../../src/run/paths.ts";
 import {
+  ConsoleRosterError,
   DISPATCH_REQUEST_FILE,
   DISPATCH_REQUEST_SCHEMA,
+  DispatchIdError,
+  MAX_DISPATCH_ID_CHARS,
   MAX_DISPATCH_REQUEST_BYTES,
+  MAX_DISPATCH_REQUEST_ITEMS,
+  MAX_DISPATCH_TEXT,
   REVIEW_CONSOLE_ROSTER,
   type ConsoleRoster,
   type DispatchRequestContext,
+  type DispatchRequestRead,
   dispatchRequestPath,
   parseDispatchRequest,
   readDispatchRequest,
@@ -83,6 +89,33 @@ const TWO_COLLATORS: ConsoleRoster = {
   collators: ["col-1", "col-2"],
   reviewers: REVIEW_CONSOLE_ROSTER.reviewers,
 };
+
+/**
+ * A console with as many reviewers as `requests[]` can legally hold.
+ *
+ * Two tests need a document that is at the SHAPE limits and clean in every other
+ * respect, and the shipping roster's three reviewers cannot express one: an
+ * eight- or nine-entry array against three legal targets is refused for the
+ * roster before its length or its size is ever the reason. Asymmetry is the
+ * suite's rule (see the header) and this fixture is what buys it back.
+ */
+const MAX_ROSTER: ConsoleRoster = {
+  collators: ["col-1"],
+  reviewers: Array.from({ length: MAX_DISPATCH_REQUEST_ITEMS }, (_, i) => `rev-max-${i + 1}`),
+};
+
+/**
+ * The most expensive single UTF-16 code unit a JSON document can carry.
+ *
+ * Spelled `String.fromCharCode` rather than as an escape in source because this
+ * value is the entire point of the byte-cap arithmetic and a reader must not
+ * have to trust that an invisible character in a string literal survived a copy,
+ * an editor, or a patch. U+0001 has no shorthand escape, so `JSON.stringify`
+ * emits its six-character form — the worst case the cap is computed against, and
+ * strictly worse than any UTF-8 encoding (3 bytes/unit at most, 2 for an astral
+ * pair).
+ */
+const WORST_CASE_UNIT = String.fromCharCode(1);
 
 interface Item {
   worker: string;
@@ -662,6 +695,88 @@ describe("the file is untrusted input and is read like one", () => {
     expect(read.kind).toBe("refused");
     if (read.kind !== "refused") return;
     expect(read.code).toBe("not_a_regular_file");
+    // The link TARGET is a valid request, so a reader that followed it would
+    // return `ok` and this assertion is what separates the two. That asymmetry
+    // is what makes the fixture a test of O_NOFOLLOW rather than of the
+    // refusal's spelling: drop the flag and the file parses, validates, and
+    // dispatches.
+    expect(read.reason.toLowerCase()).toContain("symlink");
+  });
+
+  /**
+   * A FIFO, refused rather than waited on — and the budget is the assertion.
+   *
+   * This is the arm that CANNOT be tested by asserting a refusal alone, because
+   * its failure is not a wrong answer, it is no answer. Without `O_NONBLOCK` the
+   * `open` waits for a writer that never comes, holding a libuv threadpool slot;
+   * the default pool is four, so four of these stop the actor dispatching AND
+   * harvesting with no error, no log line and no timeout anywhere in the path. A
+   * test that simply awaited the read would hang the whole suite instead of
+   * failing it — a red that never arrives is not a red.
+   *
+   * So the read races a budget and the budget losing is the pass. If it wins,
+   * the pending `open` is unblocked by opening the write end (a blocked reader
+   * makes that return immediately) so the leaked promise settles and the runner
+   * can exit, and only then does the test fail — loudly, and saying why.
+   *
+   * It also pins `!st.isFile()`, which is a separate rule: `O_NONBLOCK` gets the
+   * FIFO PAST the open by design, so the fstat on the descriptor is the only
+   * thing that refuses it. Remove that check and the read returns EAGAIN and the
+   * code becomes `unreadable`, not `not_a_regular_file`.
+   */
+  test("refuses a FIFO instead of wedging the actor on it", async () => {
+    const root = await runRoot();
+    const dir = join(workerOutboxDir(root, "col-1"), PARENT);
+    await mkdir(dir, { recursive: true });
+    const fifo = join(dir, DISPATCH_REQUEST_FILE);
+    expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+
+    const BUDGET_MS = 5_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const budget = new Promise<"wedged">((resolve) => {
+      timer = setTimeout(() => resolve("wedged"), BUDGET_MS);
+    });
+    const outcome: DispatchRequestRead | "wedged" = await Promise.race([
+      readDispatchRequest({ runRoot: root, ...CTX }),
+      budget,
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+
+    if (outcome === "wedged") {
+      Bun.spawnSync(["sh", "-c", 'exec 3> "$1"; exec 3>&-', "sh", fifo]);
+      throw new Error(
+        `readDispatchRequest did not return within ${BUDGET_MS}ms on a FIFO. The open is ` +
+          `blocking for a writer, which in the actor holds a libuv threadpool slot forever — ` +
+          `four of these and the console silently stops dispatching and harvesting.`,
+      );
+    }
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind !== "refused") return;
+    expect(outcome.code).toBe("not_a_regular_file");
+  });
+
+  /**
+   * A DIRECTORY named `dispatch-request.json`, which is the deterministic half
+   * of the same rule.
+   *
+   * The FIFO test above pins `!st.isFile()` too, but it pins it through a race
+   * and a subprocess. This one needs neither and cannot flake: `open` on a
+   * directory succeeds on both platforms this fleet runs on, so the fstat is the
+   * only thing between it and a read that fails with EISDIR under the wrong
+   * refusal code. A worker owns this directory and `mkdir` is not a privileged
+   * operation, so it is also the cheapest hostile shape to actually create.
+   */
+  test("refuses a directory standing where the request should be", async () => {
+    const root = await runRoot();
+    await mkdir(join(workerOutboxDir(root, "col-1"), PARENT, DISPATCH_REQUEST_FILE), {
+      recursive: true,
+    });
+
+    const read = await readDispatchRequest({ runRoot: root, ...CTX });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("not_a_regular_file");
   });
 
   /**
@@ -672,9 +787,13 @@ describe("the file is untrusted input and is read like one", () => {
    * authored by a container, which is what makes it reachable rather than
    * theoretical.
    *
-   * The fixture is one byte over the cap so it also pins the boundary: a cap
-   * tested with a wildly oversized file passes against `>=` and against a cap
-   * an order of magnitude off.
+   * **This fixture does NOT pin the boundary, and the comment that said it did
+   * was wrong in the direction that matters.** `cap + 1` is refused by `>` and
+   * by `>=` alike, so it is silent about which one is written — and `>=` is the
+   * bug that costs something, because it refuses a document of exactly the legal
+   * size as `too_large`. Mutating the comparison left this test green. The
+   * boundary is pinned by its pair below; this one pins only that an oversized
+   * file is refused at all, which is still worth having and is all it ever did.
    */
   test("refuses an oversized request from the stat, before reading it", async () => {
     const root = await runRoot();
@@ -691,6 +810,37 @@ describe("the file is untrusted input and is read like one", () => {
     if (read.kind !== "refused") return;
     expect(read.code).toBe("too_large");
     expect(read.reason).toContain(String(MAX_DISPATCH_REQUEST_BYTES));
+  });
+
+  /**
+   * EXACTLY the cap, and it is the pair to the test above rather than a
+   * variation on it.
+   *
+   * A cap is two claims — everything above it is refused, and nothing at or
+   * below it is — and the suite only ever asserted the first. `>` and `>=` are
+   * one character apart and produce identical behaviour on every fixture except
+   * this one, so mutating `>` to `>=` was invisible: 27 tests passed while a
+   * legally-sized document was refused as `too_large`. That failure is the
+   * expensive kind, because the refusal names a limit the document does not
+   * exceed, and the remedy it suggests is raising the cap.
+   *
+   * The assertion is `not_json` rather than merely "not too_large", and the
+   * extra precision is doing work: it proves the guard let the file through AND
+   * that all 4,194,304 bytes were read and handed to the parser, so the fixture
+   * covers the read path at full extent as well as the comparison.
+   */
+  test("accepts a file of exactly the cap, so > cannot silently become >=", async () => {
+    const root = await runRoot();
+    const dir = join(workerOutboxDir(root, "col-1"), PARENT);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, DISPATCH_REQUEST_FILE), "x".repeat(MAX_DISPATCH_REQUEST_BYTES));
+
+    const read = await readDispatchRequest({ runRoot: root, ...CTX });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).not.toBe("too_large");
+    expect(read.code).toBe("not_json");
   });
 
   /**
@@ -718,5 +868,407 @@ describe("the file is untrusted input and is read like one", () => {
     expect(read.kind).toBe("refused");
     if (read.kind !== "refused") return;
     expect(read.code).toBe("worker_not_in_console");
+  });
+});
+
+describe("a document that VALIDATES is a document that READS", () => {
+  /**
+   * The byte cap's whole defence, executed instead of asserted.
+   *
+   * `MAX_DISPATCH_REQUEST_BYTES` is only defensible while it sits above every
+   * schema-legal document — a cap that can refuse a legal file is a bug that
+   * presents as a policy, and the operator who meets it is told a limit that the
+   * document does not exceed. The module used to claim that property in prose
+   * and the claim was FALSE: the bounds multiplied out to 6.00 MiB against a
+   * 4.00 MiB cap, so the maximal legal request was refused `too_large` — the
+   * exact outcome the comment said "would read as a bug and be argued away".
+   *
+   * The old arithmetic was wrong twice. It counted UTF-16 code units and
+   * compared them to a byte cap, and it said "even before JSON escaping" as
+   * though escaping made a document smaller. Escaping is the dominant term: a
+   * code unit costs at most 3 bytes as raw UTF-8 and 6 as an escape, so the
+   * worst case is 6x the bound and it is reached by ordinary control characters.
+   *
+   * This test cannot be satisfied by prose. It builds the largest document the
+   * schema will accept — every entry the array holds, every text field filled to
+   * its bound with the most expensive character there is — measures it, and puts
+   * it through the real reader. Any future edit to any of the three constants
+   * either keeps the invariant or turns this red.
+   */
+  test("accepts the largest document the schema can express", async () => {
+    const filler = WORST_CASE_UNIT.repeat(MAX_DISPATCH_TEXT);
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: PARENT,
+      requests: MAX_ROSTER.reviewers.map((worker) => ({ worker, title: filler, brief: filler })),
+    });
+
+    // The fixture has to be genuinely large or it proves nothing — a maximal
+    // document that came out at a few KiB would pass against any cap at all.
+    const bytes = Buffer.byteLength(body, "utf8");
+    expect(bytes).toBeGreaterThan(3 * 1024 * 1024);
+    expect(bytes).toBeLessThanOrEqual(MAX_DISPATCH_REQUEST_BYTES);
+
+    const root = await runRoot();
+    await stage(root, "col-1", PARENT, body);
+    const read = await readDispatchRequest({ runRoot: root, ...CTX, roster: MAX_ROSTER });
+
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+    // Round-trip at full extent, which is a second thing worth pinning: the
+    // reader fills a fixed `cap + 1` buffer through the descriptor, and a read
+    // that returned short would truncate a legal document into a JSON syntax
+    // error naming a problem the document does not have.
+    expect(read.request.requests).toHaveLength(MAX_DISPATCH_REQUEST_ITEMS);
+    expect(read.request.requests[0]!.brief.length).toBe(MAX_DISPATCH_TEXT);
+    expect(read.request.requests.at(-1)!.title.length).toBe(MAX_DISPATCH_TEXT);
+  });
+});
+
+describe("an id becomes a path only after it is held to a grammar", () => {
+  /**
+   * THE FINDING, as a fixture: a forged sender reaching a file outside its own
+   * outbox.
+   *
+   * `sender` is trusted for exactly one reason — a container can write only its
+   * own outbox, so the DIRECTORY a request is found in is an identity that
+   * cannot be forged. That argument is about a path, and it was never enforced
+   * on the value the path was built from. `join` resolves `..`; it does not
+   * refuse it. So `sender: ".."` addressed `<run>/<task>/dispatch-request.json`
+   * — out of the outbox subtree entirely, in the run directory that also holds
+   * `control-auth.json` — and the host opened whatever was there.
+   *
+   * The fixture plants a real, entirely valid request at the escaped location,
+   * so a reader without the grammar OPENS AND READS A FILE OUTSIDE THE MOUNT.
+   * The assertion is on the CODE and that is the whole of its sensitivity:
+   * `sender_not_collator` still fires afterwards, so a test asserting only
+   * "refused" stays green while the host reads an arbitrary file every tick.
+   * `unspellable_id` is reachable only before the path exists.
+   */
+  test("refuses a sender that would escape the outbox, before opening anything", async () => {
+    const root = await runRoot();
+    const escaped = join(root, PARENT);
+    await mkdir(escaped, { recursive: true });
+    await writeFile(join(escaped, DISPATCH_REQUEST_FILE), valid());
+    // The location the traversal actually reaches, so the test fails if the
+    // fixture stops being the trap it claims to be.
+    expect(dirname(dirname(workerOutboxDir(root, "col-1")))).toBe(root);
+
+    const read = await readDispatchRequest({ runRoot: root, ...CTX, sender: ".." });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("unspellable_id");
+    expect(read.reason).toContain("sender");
+  });
+
+  /**
+   * The same hole through `taskId`, which is the half a reader is likelier to
+   * think is safe because the host creates task directories.
+   *
+   * It creates them from ids that arrive in envelopes, and `TaskEnvelopeSchema`
+   * bounds a task id's LENGTH and nothing else — the same gap `replies.ts:124-142`
+   * closes on the return half of this exchange, quoting the same reasoning. A
+   * valid request is planted where `".."` lands so the escape is real rather
+   * than notional.
+   */
+  test("refuses a taskId that would escape the worker's outbox", async () => {
+    const root = await runRoot();
+    const escaped = dirname(workerOutboxDir(root, "col-1"));
+    await mkdir(escaped, { recursive: true });
+    await writeFile(join(escaped, DISPATCH_REQUEST_FILE), valid());
+
+    const read = await readDispatchRequest({ runRoot: root, ...CTX, taskId: ".." });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("unspellable_id");
+    expect(read.reason).toContain("taskId");
+  });
+
+  /**
+   * The builder refuses on its own, so a caller that never goes through
+   * `readDispatchRequest` cannot obtain an escaped path either.
+   *
+   * `dispatchRequestPath(runRoot, sender, "../../../../../../etc")` returned
+   * `/etc/dispatch-request.json`. Verified, and it is exported, and §6.5's relay
+   * actor — which does not exist yet — is its second caller. A path builder that
+   * can silently produce a path outside the subtree it is named for is a hole in
+   * every caller including the ones nobody has written, so the refusal belongs
+   * in the builder rather than in each caller's memory of it.
+   */
+  test("refuses to build a path at all from an id that cannot be spelled", () => {
+    expect(() => dispatchRequestPath("/runs/R-1", "col-1", "../../../../../../etc")).toThrow(
+      DispatchIdError,
+    );
+    expect(() => dispatchRequestPath("/runs/R-1", "../..", PARENT)).toThrow(DispatchIdError);
+    // The legal case still builds, so the guard cannot be satisfied by refusing
+    // everything — the same role the suite's positive control plays.
+    expect(dispatchRequestPath("/runs/R-1", "col-1", PARENT)).toBe(
+      join(workerOutboxDir("/runs/R-1", "col-1"), PARENT, DISPATCH_REQUEST_FILE),
+    );
+  });
+
+  /**
+   * `parent_task_id` is a field a CONTAINER writes, and it was
+   * `z.string().max(MAX_SHORT)` — a length and nothing else, which accepts
+   * `"../../control-auth.json"` exactly as `TaskEnvelopeSchema.task_id` does.
+   *
+   * The equality check against the directory makes this unreachable today, which
+   * is precisely why it needs its own test: the field's safety was a property of
+   * two other checks standing where they stand, and a bound that holds only
+   * transitively lapses silently the day one of them moves.
+   */
+  test("refuses a parent_task_id that is a traversal rather than an id", () => {
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: "../../control-auth.json",
+      requests: [item("rev-arch-1")],
+    });
+
+    const read = parseDispatchRequest(body, CTX);
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    // `schema` is the assertion that carries the sensitivity, and the ordering
+    // is why. The schema pass runs BEFORE the identity binding, so with the
+    // grammar in place the field is refused for being a traversal. Delete the
+    // regex and the document falls through to `parent_task_mismatch` — still
+    // refused, so a test asserting only `kind` would stay green while the field
+    // that reaches a host path stopped being checked.
+    expect(read.code).toBe("schema");
+    expect(read.reason).toContain("parent_task_id");
+  });
+
+  /**
+   * The grammar half above and the LENGTH half here are two rules, and only a
+   * fixture that is legal under one can pin the other. This id is entirely
+   * ordinary characters — it satisfies `SESSION_ID_RE` completely — so the
+   * only thing that can refuse it is the bound.
+   */
+  test("refuses a parent_task_id longer than an id may be", () => {
+    const long = "a".repeat(MAX_DISPATCH_ID_CHARS + 1);
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: long,
+      requests: [item("rev-arch-1")],
+    });
+
+    const read = parseDispatchRequest(body, CTX);
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("schema");
+    expect(read.reason).toContain("parent_task_id");
+  });
+});
+
+describe("the shape bounds are bounds, not decoration", () => {
+  /**
+   * `MAX_DISPATCH_REQUEST_ITEMS` carries seventeen lines of justification in the
+   * module and had no test — the constant was exported and never imported here,
+   * so deleting `.max(...)` outright left the suite entirely green.
+   *
+   * The bound exists to stop the loop BEFORE the roster is consulted, which is
+   * also what makes it awkward to test honestly: against the shipping roster a
+   * nine-entry array is refused for its targets whatever its length. So the
+   * fixture runs on a roster with nine legal, distinct reviewers, leaving the
+   * COUNT as the only thing wrong with it.
+   */
+  test("refuses more entries than requests[] may hold", () => {
+    const roomy: ConsoleRoster = {
+      collators: ["col-1"],
+      reviewers: Array.from(
+        { length: MAX_DISPATCH_REQUEST_ITEMS + 1 },
+        (_, i) => `rev-many-${i + 1}`,
+      ),
+    };
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: PARENT,
+      requests: roomy.reviewers.map((w) => item(w)),
+    });
+
+    const read = parseDispatchRequest(body, { ...CTX, roster: roomy });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("schema");
+    expect(read.reason).toContain(String(MAX_DISPATCH_REQUEST_ITEMS));
+  });
+
+  /**
+   * `title` and `brief` are the only unbounded-alphabet fields in the document,
+   * which makes them the only two that can drive its SIZE — so these bounds are
+   * not tidiness, they are the term `MAX_DISPATCH_REQUEST_BYTES`'s headroom is
+   * computed from. Delete either and the maximal-document test above becomes
+   * unsatisfiable rather than merely wrong, which is the right coupling: the two
+   * rules are one argument and they fail together.
+   *
+   * Each fixture is over the bound in exactly one field, so neither can pass on
+   * the other's account.
+   */
+  for (const field of ["title", "brief"] as const) {
+    test(`refuses a ${field} longer than the byte-cap arithmetic allows`, () => {
+      const body = JSON.stringify({
+        schema: DISPATCH_REQUEST_SCHEMA,
+        parent_task_id: PARENT,
+        requests: [item("rev-arch-1", { [field]: "a".repeat(MAX_DISPATCH_TEXT + 1) })],
+      });
+
+      const read = parseDispatchRequest(body, CTX);
+
+      expect(read.kind).toBe("refused");
+      if (read.kind !== "refused") return;
+      expect(read.code).toBe("schema");
+      expect(read.reason).toContain(field);
+    });
+  }
+
+  /**
+   * And the boundary in the other direction, for the reason the byte cap needed
+   * one: a bound tested only from above is silent about `>` versus `>=`, and the
+   * off-by-one refuses a legal document.
+   */
+  test("accepts a title and brief of exactly the bound", () => {
+    const at = "a".repeat(MAX_DISPATCH_TEXT);
+    const body = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: PARENT,
+      requests: [{ worker: "rev-arch-1", title: at, brief: at }],
+    });
+
+    expect(parseDispatchRequest(body, CTX).kind).toBe("ok");
+  });
+});
+
+describe("the roster is checked before it is trusted", () => {
+  /**
+   * THE FINDING: a roster that reads as obviously correct and disables both of
+   * this module's semantic guarantees.
+   *
+   * `roster` was a bare required parameter, so the author of §6.5's relay actor
+   * has to answer "who may ask, and who may be asked?" — and the natural way to
+   * answer it from inside a polling loop is to build it from what the loop
+   * already has:
+   *
+   *     roster: { collators: [senderFromDirectory], reviewers: allWorkers }
+   *
+   * Every word of that reads right. It makes `checkSender` a TAUTOLOGY — the
+   * roster was built from the sender, so every sender is a collator, including
+   * `rev-arch-1` — and it admits `eng-1` as a target, which is the reach-outside-
+   * the-console failure this whole module exists to prevent. Neither check
+   * misbehaves; both run, both pass, and both mean nothing.
+   *
+   * Disjointness is what makes that roster unconstructible, and it has to throw
+   * rather than refuse: a roster is a host argument, identical on every tick for
+   * the life of the run, so a console with a broken one must not dispatch at all
+   * rather than log a refusal the loop then continues around.
+   */
+  test("refuses a roster in which a worker is both a collator and a reviewer", () => {
+    const tautology: ConsoleRoster = {
+      collators: ["col-1"],
+      reviewers: ["col-1", "rev-arch-1", "eng-1"],
+    };
+
+    expect(() => parseDispatchRequest(valid(), { ...CTX, roster: tautology })).toThrow(
+      ConsoleRosterError,
+    );
+  });
+
+  /**
+   * The degenerate halves. `collators: []` refuses every dispatch and
+   * `reviewers: []` refuses every target — in both cases a console that comes up
+   * with four healthy panes and silently does nothing, which is the failure mode
+   * this file's prose keeps naming as the expensive one because its symptom is
+   * an ABSENCE.
+   */
+  test("refuses a roster with an empty half", () => {
+    expect(() =>
+      parseDispatchRequest(valid(), { ...CTX, roster: { collators: [], reviewers: ["rev-arch-1"] } }),
+    ).toThrow(ConsoleRosterError);
+    expect(() =>
+      parseDispatchRequest(valid(), { ...CTX, roster: { collators: ["col-1"], reviewers: [] } }),
+    ).toThrow(ConsoleRosterError);
+  });
+
+  /**
+   * Case, and the asymmetry `paths.ts:710-741` argues from.
+   *
+   * Every comparison in this module is exact, and it should stay exact: folding
+   * `checkSender` would make `Col-1` MATCH the collator `col-1` and admit a
+   * sender that is not the collator — a false green manufactured by the fix.
+   * The real hazard is one level up. `sender` is trustworthy only because a
+   * container can write only its own outbox, and on a case-insensitive
+   * filesystem — APFS by default, which is what this fleet develops on —
+   * `outbox/col-1` and `outbox/Col-1` are ONE directory. `config/schema.ts`
+   * dedupes worker ids case-SENSITIVELY, so both ids are legal in one fleet, and
+   * two workers sharing an outbox is the module's entire premise failing: the
+   * reviewer writes the file, the actor polls the collator, finds it, and every
+   * check in this file correctly passes.
+   *
+   * That is undetectable once the file is on disk, and detectable exactly once —
+   * here, while the ids are still two strings. Unconditional on every platform,
+   * for the fourth of paths.ts's reasons: a `process.platform` branch would make
+   * this test skip on Linux CI and leave the behaviour evidenced only by a run on
+   * a maintainer's laptop.
+   */
+  test("refuses a roster holding two ids that differ only in case", () => {
+    const twins: ConsoleRoster = {
+      collators: ["col-1"],
+      reviewers: ["Col-1", "rev-arch-1"],
+    };
+
+    expect(() => parseDispatchRequest(valid(), { ...CTX, roster: twins })).toThrow(
+      ConsoleRosterError,
+    );
+    // Exact-case comparison is UNCHANGED and this is the half that says so: on
+    // the shipping roster, `Col-1` is simply a sender the console has never
+    // heard of. A fold applied to the comparison instead of to the roster would
+    // turn this into an accepted dispatch.
+    const read = parseDispatchRequest(valid(), { ...CTX, sender: "Col-1" });
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("sender_not_collator");
+  });
+
+  /**
+   * The default, which is the other half of the repair.
+   *
+   * A required parameter with exactly one correct answer is an invitation to
+   * COMPUTE that answer, and computing it is how the tautology above arrives. So
+   * omitting `roster` yields the console that ships — asserted in both
+   * directions, because a default that refused everything would satisfy the
+   * negative test alone and would also be a console that can never dispatch.
+   */
+  test("defaults to the shipping console when no roster is supplied", () => {
+    const accepted = parseDispatchRequest(valid(), { sender: "col-1", taskId: PARENT });
+    expect(accepted.kind).toBe("ok");
+
+    const refused = parseDispatchRequest(
+      JSON.stringify({
+        schema: DISPATCH_REQUEST_SCHEMA,
+        parent_task_id: PARENT,
+        requests: [item("eng-1")],
+      }),
+      { sender: "col-1", taskId: PARENT },
+    );
+    expect(refused.kind).toBe("refused");
+    if (refused.kind !== "refused") return;
+    expect(refused.code).toBe("worker_not_in_console");
+  });
+
+  /**
+   * The default reaches the DISK path too. `readDispatchRequest` is the function
+   * the actor actually calls, and a default wired into only the parser would
+   * leave the caller that matters with the old required-parameter hazard.
+   */
+  test("defaults on the disk path as well as the parse path", async () => {
+    const root = await runRoot();
+    await stage(root, "col-1", PARENT, valid());
+
+    const read = await readDispatchRequest({ runRoot: root, sender: "col-1", taskId: PARENT });
+
+    expect(read.kind).toBe("ok");
   });
 });

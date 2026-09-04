@@ -28,10 +28,33 @@
  * *"The result envelope is untrusted input"* — so the request inherits that
  * posture instead of inventing one.
  *
- * The inheritance is not a figure of speech. `readDispatchRequest` performs the
- * same three steps in the same order as `readOutboxEnvelope`, for the same
- * reasons, and the moment it stops doing so is the moment this file stops being
- * covered by the argument that covers `result.json`.
+ * The inheritance is not a figure of speech. `readDispatchRequest` refuses the
+ * same things `readOutboxEnvelope` refuses, for the same reasons, and the moment
+ * it stops doing so is the moment this file stops being covered by the argument
+ * that covers `result.json`.
+ *
+ * **Inheriting the LIST of refusals is not the same as inheriting the
+ * MECHANISM, and this module learned that the expensive way.** It first spelled
+ * the three checks as `lstat(path)` followed by `readFile(path)` — the same
+ * three questions in the same order, asked of the same NAME twice. In a
+ * directory the worker owns, a name is not a thing: every answer the `lstat`
+ * gave was about an inode the `readFile` was free not to open. All three were
+ * defeated in review by swapping the path in between — the size cap buffered
+ * 64 MiB against a cap that "passed", the FIFO guard let `readFile` block
+ * forever with no timeout (four of those exhaust libuv's default threadpool and
+ * the actor stops dispatching AND harvesting, silently), and the symlink guard
+ * let `readFile` return `<run>/control-auth.json`, the one file `paths.ts`
+ * says a worker must never read.
+ *
+ * So the path is resolved EXACTLY ONCE, by an `open` whose flags are themselves
+ * two of the checks, and the type and size questions are then asked of the FILE
+ * DESCRIPTOR. `harvest/outbox.ts:409-433` had already reached the fd half of
+ * this and said why — *"The stat is advisory — a worker can append between the
+ * lstat and the read"* — and that paragraph is the one this file failed to
+ * inherit. `outbox.ts`'s own `collectOutboxFiles` had reached the rest of it:
+ * VALIDATE THEN HOLD, `O_NOFOLLOW` so a swap to a symlink is an `ELOOP` at open
+ * rather than a followed link, `O_NONBLOCK` so a swap to a FIFO cannot wedge
+ * the open.
  *
  * ## The sender is the DIRECTORY, and that is the load-bearing idea
  *
@@ -86,11 +109,12 @@
  * would break exactly that, silently, in the direction of a reviewer being
  * briefed on a document subtly unlike the one the collator wrote.
  */
-import { lstat, readFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 
-import { MAX_SHORT, MAX_TEXT, workerId } from "../contracts.ts";
+import { EXIT, SESSION_ID_RE, workerId } from "../contracts.ts";
 import { workerOutboxDir } from "./paths.ts";
 
 /** The wire tag, so a reader can refuse a shape it does not know. */
@@ -128,7 +152,72 @@ export const DISPATCH_REQUEST_FILE = "dispatch-request.json";
 export const MAX_DISPATCH_REQUEST_ITEMS = 8;
 
 /**
- * Hard byte cap, enforced from `lstat` BEFORE the read.
+ * The longest `title` or `brief` an entry may carry, in UTF-16 CODE UNITS.
+ *
+ * **Not `MAX_TEXT` (64 KiB), and the difference is arithmetic rather than
+ * taste.** The byte cap below is only defensible while a document that
+ * VALIDATES is a document that READS — a cap that refuses a schema-legal file
+ * is a bug that reads as a policy and gets argued away rather than fixed. At
+ * `MAX_TEXT` that property was FALSE, and measurably so: a fully schema-legal
+ * document came to 6.00 MiB against a 4.00 MiB cap and was refused
+ * `too_large`.
+ *
+ * The arithmetic, because the previous version of this comment got it wrong in
+ * both directions and the specific wrongness is worth keeping:
+ *
+ *  - These bounds count UTF-16 CODE UNITS (`z.string().max` is `value.length`),
+ *    not bytes. "1 MiB of legal text" was a count of code units being compared
+ *    against a cap measured in bytes.
+ *  - JSON escaping makes a file LARGER, never smaller, so "sits above any
+ *    schema-legal document even before JSON escaping" had the inequality
+ *    backwards. Escaping is not a rounding error here, it is the DOMINANT term:
+ *    a code unit costs at most 3 UTF-8 bytes raw (2 for an astral pair, which
+ *    spends two units on one character), but every C0 control character and
+ *    every lone surrogate escapes to a six-character "backslash-u-XXXX" form
+ *    and therefore costs 6. So the multiplier that matters is 6, and it comes
+ *    from the encoding of the FILE rather than from the encoding of the text.
+ *
+ * At 32 KiB the dominant term is exact and checkable by hand:
+ *
+ *     MAX_DISPATCH_REQUEST_ITEMS x 2 fields x MAX_DISPATCH_TEXT x 6 bytes
+ *       = 8 x 2 x 32,768 x 6 = 3,145,728 bytes = 3.00 MiB
+ *
+ * Everything else in the document is held to `SESSION_ID_RE`, which is ASCII
+ * that never escapes: eight `worker` ids and one `parent_task_id` at 64
+ * characters each, the schema tag, and the punctuation — together under 1 KiB.
+ * So the worst schema-legal document is under 3.01 MiB against a 4.00 MiB cap,
+ * with a full MiB of headroom. `dispatch-request.test.ts` builds that exact
+ * document — every text field filled to the bound with the control character
+ * U+0001, which is the worst case above — measures it on disk, and asserts it
+ * is ACCEPTED. The invariant is executed rather than asserted, which is the
+ * whole of the repair: the previous claim was true-looking prose that no test
+ * could have contradicted, and it was false.
+ *
+ * **Lowering this rather than raising the cap was the choice, and the cap's own
+ * argument is why.** The 4 MiB below is deliberately the same number as
+ * `MAX_ENVELOPE_BYTES`, and the sameness IS the argument (see below); raising
+ * it to clear 6 MiB would spend that argument to buy the host the right to
+ * buffer twice as much hostile input, in exchange for briefs no reviewer will
+ * ever write. 32 KiB of brief is roughly 8,000 words of instruction for a task
+ * whose whole content is "read this and report", and it stays comfortably
+ * inside `MAX_DISPATCH_POLICY_BYTES` (256 KiB) — the model-facing bound this
+ * value has to compose with, at the drop where a truncation would actually
+ * cost something.
+ */
+export const MAX_DISPATCH_TEXT = 32 * 1024;
+
+/**
+ * The longest any id may be — `SESSION_ID_RE`'s companion bound.
+ *
+ * 64 to match `workerId` in `contracts.ts` and `replyFileName` in `replies.ts`,
+ * which is the same number for the same reason: these are names that become
+ * path SEGMENTS on the host.
+ */
+export const MAX_DISPATCH_ID_CHARS = 64;
+
+/**
+ * Hard byte cap, enforced from `fstat` on the open fd BEFORE the read, and
+ * again from the read itself.
  *
  * **Deliberately the same number as `harvest/outbox.ts`'s `MAX_ENVELOPE_BYTES`
  * (4 MiB), and the sameness is the argument.** Both files arrive in the same
@@ -144,13 +233,23 @@ export const MAX_DISPATCH_REQUEST_ITEMS = 8;
  * window, and a brief it silently truncates produces a worker that confidently
  * does half a task. The reader of THIS file is the host. The model-facing bound
  * is still enforced, but at the right place and on the right field — `brief` is
- * capped at `MAX_TEXT` (64 KiB), comfortably inside what the drop can stage, so
- * a request that validates here always stages there.
+ * capped at `MAX_DISPATCH_TEXT` (32 KiB), comfortably inside what the drop can
+ * stage, so a request that validates here always stages there.
  *
- * The two bounds compose to something worth stating: `MAX_DISPATCH_REQUEST_ITEMS
- * x 2 x MAX_TEXT` is 1 MiB of legal text, so the byte cap sits above any
- * schema-legal document even before JSON escaping, and a cap that refused a
- * schema-legal file would read as a bug and be argued away.
+ * **The invariant that makes this cap defensible: a document that VALIDATES is
+ * a document that READS.** The arithmetic is worked in full on
+ * `MAX_DISPATCH_TEXT` above and comes to 3.00 MiB of worst-case escaped text
+ * against this 4.00 MiB — so no schema-legal file is ever refused here. That
+ * matters beyond tidiness. A cap that CAN refuse a legal document is a bug that
+ * presents as a policy: the operator sees a refusal that names a limit, believes
+ * the limit, and the remedy discussed is raising the cap rather than fixing the
+ * bounds that overflowed it.
+ *
+ * This is the one property in this file that cannot be checked by reading it,
+ * because it is a claim about two constants and an encoding rather than about
+ * any line of code — so it is checked by a test that builds the maximal legal
+ * document and asserts it through `readDispatchRequest`. Changing either bound
+ * without that test going red is not possible, which is the point.
  */
 export const MAX_DISPATCH_REQUEST_BYTES = 4 * 1024 * 1024;
 
@@ -194,6 +293,191 @@ export const REVIEW_CONSOLE_ROSTER: ConsoleRoster = {
   collators: ["col-1"],
   reviewers: ["rev-arch-1", "rev-ctx-1", "rev-lang-1"],
 };
+
+/**
+ * A roster under which the checks below would not mean what they say.
+ *
+ * **THROWN, not refused, and the asymmetry with everything else in this file is
+ * deliberate.** Every other failure here is a document a container wrote, which
+ * is untrusted input, expected, and answered with a value. A roster is a HOST
+ * argument written by the author of the actor — it is the same on every tick for
+ * the life of the run, so it is either wrong from the first poll or never — and a
+ * console whose roster is malformed must not dispatch AT ALL. Answering with a
+ * refusal would put a programming error into the same channel as a worker's
+ * mistake and let the loop keep running around it; the promise `parseDispatchRequest`
+ * makes is that it never throws on the DOCUMENT, and that promise is untouched.
+ */
+export class ConsoleRosterError extends Error {
+  readonly exitCode = EXIT.USAGE;
+  constructor(problem: string) {
+    super(
+      `the dispatch roster is not usable: ${problem}. A console roster must name at least one ` +
+        `collator and at least one reviewer, and no worker may hold both roles — the two halves ` +
+        `answer different questions ("may this worker ask?" and "is this target inside the ` +
+        `console?") and a worker in both makes the first question answer itself`,
+    );
+    this.name = "ConsoleRosterError";
+  }
+}
+
+/**
+ * The roster checks, and each one closes a hole that reads as obviously correct.
+ *
+ * **Disjointness is the important one.** `checkSender` asks whether the sender is
+ * in `collators` and `checkRoster` asks whether the target is in `reviewers`;
+ * neither can tell that it has been handed a roster where those are the same
+ * people. An actor author writing
+ *
+ *     roster: { collators: [senderFromDirectory], reviewers: allWorkers }
+ *
+ * has written something that reads correct — the sender IS the collator, the
+ * reviewers ARE the workers — and has made `checkSender` a tautology (every
+ * sender is trivially a collator, because the roster was built from the sender)
+ * while admitting `eng-1` as a target. Both of this module's semantic guarantees
+ * are gone and no test of either would notice, because the checks still run and
+ * still pass. Disjointness is what makes that roster unconstructible.
+ *
+ * **Non-emptiness** is the degenerate half of the same thing: `collators: []`
+ * refuses every dispatch (a console that silently does nothing) and
+ * `reviewers: []` does the same one rule later. Neither is a roster anyone means.
+ *
+ * ## Case, and why the fold is here rather than on the comparisons
+ *
+ * `paths.ts:710-741` argues that its case fold must be UNCONDITIONAL because a
+ * false GREEN hands a worker `control-auth.json`. That argument applies to this
+ * module, and the obvious reading of it — fold the comparisons — is the wrong
+ * one, which is worth writing down because it is where a reader will start.
+ *
+ * Folding `checkSender` would make `Col-1` match the collator `col-1` and ADMIT
+ * a sender that is not the collator: a false green, manufactured by the fix.
+ * Folding the target check would accept `Rev-Arch-1` and hand the actor an id
+ * matching no worker. Exact comparison is correct in both directions, and the
+ * false RED it can produce ("that id is not in the set") is a refusal an
+ * operator acts on in one move.
+ *
+ * The real hazard is one level up, and it is the one paths.ts is actually about.
+ * `sender` is trustworthy ONLY because a container can write only its own
+ * outbox, so the DIRECTORY is an identity that cannot be forged. On a
+ * case-insensitive filesystem — APFS by default, which is what this fleet
+ * develops on — `<run>/outbox/col-1` and `<run>/outbox/Col-1` are ONE directory,
+ * and `config/schema.ts:1396-1405` dedupes worker ids case-SENSITIVELY, so both
+ * ids are legal in one fleet. Two workers sharing one outbox is the premise of
+ * the whole module failing: `Col-1` writes the file, the actor polls `col-1`,
+ * finds it, and `checkSender` correctly answers that `col-1` is a collator.
+ * Every check in this file passes and a reviewer has dispatched.
+ *
+ * No comparison in this file can detect that, because by the time the file is
+ * read the two identities have already merged on disk. It is detectable exactly
+ * once, HERE, at the boundary where the ids are still two strings — so a roster
+ * holding a case-twin pair is refused outright rather than served. Unconditional,
+ * on every platform, for paths.ts's reason 4: a `process.platform` branch would
+ * make the test for this skip on Linux CI and leave the behaviour evidenced only
+ * by a run on a maintainer's laptop.
+ *
+ * **What this does NOT buy, stated so the silence is not read as coverage.** It
+ * bounds the ids in THIS roster. A case-twin pair elsewhere in the fleet is a
+ * real bug and is `config/schema.ts`'s to find; it is out of reach from here and
+ * is not claimed.
+ */
+function assertRoster(roster: ConsoleRoster): void {
+  if (roster.collators.length === 0) throw new ConsoleRosterError("it names no collators");
+  if (roster.reviewers.length === 0) throw new ConsoleRosterError("it names no reviewers");
+
+  const fold = new Map<string, string>();
+  for (const id of [...roster.collators, ...roster.reviewers]) {
+    const key = id.toLowerCase();
+    const first = fold.get(key);
+    if (first === undefined) {
+      fold.set(key, id);
+      continue;
+    }
+    if (first === id) {
+      throw new ConsoleRosterError(
+        `"${id}" appears twice — as a collator and as a reviewer, or twice in one half`,
+      );
+    }
+    throw new ConsoleRosterError(
+      `"${first}" and "${id}" differ only in case. A worker's outbox directory IS its identity ` +
+        `here, and on a case-insensitive filesystem those two ids name ONE directory — so a ` +
+        `request written by either would be read as having come from the other`,
+    );
+  }
+}
+
+/**
+ * The roster to judge against, defaulting to the console that ships.
+ *
+ * **The default is the fix, not a convenience.** `roster` was a bare required
+ * parameter, so every caller had to answer a question — "who may ask, and who may
+ * be asked?" — that has exactly one right answer today, and the plausible wrong
+ * answers are the ones above that disable both checks while looking correct. A
+ * required parameter with one correct value is an invitation to compute it, and
+ * `assertRoster` exists because computing it is how the tautology arrives.
+ *
+ * It stays a PARAMETER because D7 is a rule about roles rather than about
+ * `col-1`, and the two-collator console has to be expressible in a test before it
+ * is expressible in config (see `ConsoleRoster`). Optional, not absent.
+ */
+function resolveRoster(ctx: DispatchRequestContext): ConsoleRoster {
+  const roster = ctx.roster ?? REVIEW_CONSOLE_ROSTER;
+  assertRoster(roster);
+  return roster;
+}
+
+/**
+ * An id that cannot be a path segment, refused before it becomes one.
+ *
+ * `EXIT.USAGE` and not `EXIT.INTERNAL`, on the grade `ReplyNameError` carries and
+ * for its reason: reaching this means a caller built a location out of something
+ * that is not a worker id or a task id, which is an operator- or author-side
+ * mistake with an operator-side remedy. Reporting it as an internal fault tells a
+ * machine caller that pifleet broke, which an orchestrator answers by retrying
+ * the identical input forever.
+ */
+export class DispatchIdError extends Error {
+  readonly exitCode = EXIT.USAGE;
+  constructor(
+    readonly field: string,
+    readonly value: string,
+  ) {
+    super(
+      `${field} ${JSON.stringify(value)} cannot name a path segment — a dispatch request lives ` +
+        `at <run>/outbox/<worker>/<task-id>/${DISPATCH_REQUEST_FILE}, so both ids must be 1-` +
+        `${MAX_DISPATCH_ID_CHARS} characters of letters, digits, ".", "_" or "-", beginning and ` +
+        `ending alphanumeric`,
+    );
+    this.name = "DispatchIdError";
+  }
+}
+
+/**
+ * The grammar every id here must satisfy BEFORE it is joined into a host path.
+ *
+ * **`SESSION_ID_RE` is imported rather than re-spelled, and that is a decision
+ * about this file's failure mode rather than about brevity.** It is the grammar
+ * `materialize.ts`'s `assertContained` already applies to every operator-typed
+ * name that becomes a host path, that `config/schema.ts` applies to every worker
+ * key, and that `replies.ts` applies to the child task ids on the RETURN half of
+ * this same exchange. A local copy would be a fourth spelling of one security
+ * grammar, and this module's own header opens by quoting `paths.ts` on what that
+ * costs: a duplicated invariant holds until one copy is reasonably improved. The
+ * import is from `contracts.ts`, where the constant lives — not from `replies.ts`,
+ * which merely uses it.
+ *
+ * **The helper below, unlike the grammar, IS a duplicate, and it should not stay
+ * one.** `replies.ts:143-148` performs the identical two-part test on the
+ * identical constants. Both belong in `paths.ts` beside `dispatchRequestPath`,
+ * as one exported predicate, the moment both branches have landed; they are
+ * apart today only because the two files are being edited concurrently.
+ *
+ * The character-class test is root-independent, so it is exact for `.` and `..`
+ * — which a containment predicate answers "no, it did not escape" for, because
+ * the resolved path IS the directory. `assertContained` recorded that
+ * measurement; this reuses its conclusion rather than re-deriving it.
+ */
+function spellableId(value: string): boolean {
+  return value.length > 0 && value.length <= MAX_DISPATCH_ID_CHARS && SESSION_ID_RE.test(value);
+}
 
 /**
  * Refused, and declared here rather than left to `.strict()` so the refusal can
@@ -244,8 +528,27 @@ export const DispatchRequestItemSchema = z
      * enforces.
      */
     worker: workerId,
-    title: z.string().max(MAX_TEXT),
-    brief: z.string().max(MAX_TEXT),
+    /**
+     * `title` and `brief` are the only unbounded-alphabet fields in the
+     * document, so they are the only two that can drive the file's SIZE — every
+     * other field is held to `SESSION_ID_RE`, which is ASCII that never escapes.
+     * The bound is therefore not a tidiness limit; it is the term the byte cap's
+     * headroom argument is computed from, and the error says so, because the
+     * next reader to raise it needs to know it is not free.
+     */
+    title: z.string().max(MAX_DISPATCH_TEXT, {
+      error:
+        `title is longer than ${MAX_DISPATCH_TEXT} characters. This bound and ` +
+        `MAX_DISPATCH_REQUEST_BYTES are one argument, not two: the byte cap is only defensible ` +
+        `while every schema-legal document fits under it, and raising this without redoing that ` +
+        `arithmetic makes a legal request refusable as "too_large".`,
+    }),
+    brief: z.string().max(MAX_DISPATCH_TEXT, {
+      error:
+        `brief is longer than ${MAX_DISPATCH_TEXT} characters. The same arithmetic as title — ` +
+        `and this is also the field the /policy/dispatch drop has to stage under ` +
+        `MAX_DISPATCH_POLICY_BYTES, so a request that validates here always stages there.`,
+    }),
     model: notReachable(
       'a request may not name "model" (SRD-REVIEW-CONSOLE D11, §6.9). The model is pinned to ' +
         "the aspect in fleet.yaml and validated against models_allowlist at `up`, an hour before " +
@@ -288,7 +591,40 @@ export const DispatchRequestSchema = z
         `inferred from the shape, because pifleet.task/v1 also carries a worker, a title and a ` +
         `brief and is close enough that a reader could hand one over by mistake.`,
     }),
-    parent_task_id: z.string().max(MAX_SHORT),
+    /**
+     * **A GRAMMAR, not a length.** This was `z.string().max(MAX_SHORT)` — a
+     * bound and nothing else — which accepts `"../../control-auth.json"`, and
+     * the value on this path was written by a container. `replies.ts:124-142`
+     * closes exactly this hole on the RETURN half of the same exchange and its
+     * prose transfers without amendment: the id becomes a `join` that becomes a
+     * `writeFile` on the host, in a run directory that also holds the
+     * control-socket secret, and a name that cannot be spelled cannot escape.
+     *
+     * **This is deliberately redundant with the equality check below and must
+     * stay so.** `parent_task_id` has to equal `ctx.taskId`, which `checkIds`
+     * has already held to this same grammar — so today nothing can reach a path
+     * through this field. That is a property of two OTHER checks standing where
+     * they currently stand, not of this field, and a bound that holds only
+     * transitively is a bound that lapses the day one of them moves. The field
+     * is a document field, so it is judged by the pass that judges document
+     * fields, on its own.
+     */
+    parent_task_id: z
+      .string()
+      .max(MAX_DISPATCH_ID_CHARS, {
+        error:
+          `parent_task_id is longer than ${MAX_DISPATCH_ID_CHARS} characters. It names a ` +
+          `DIRECTORY the host created under a worker's outbox, so it is bounded like the path ` +
+          `segment it is rather than like free text.`,
+      })
+      .regex(SESSION_ID_RE, {
+        error:
+          `parent_task_id is not a task id. It must be letters, digits, ".", "_" or "-", ` +
+          `beginning and ending alphanumeric — the grammar every other name that becomes a host ` +
+          `path is held to. A length bound alone accepts "../../control-auth.json", which is a ` +
+          `traversal written by a container into a run directory that also holds the ` +
+          `control-socket secret.`,
+      }),
     requests: z
       .array(DispatchRequestItemSchema)
       .min(1, {
@@ -328,6 +664,7 @@ export type DispatchRefusal =
   | "not_a_regular_file"
   | "too_large"
   | "unreadable"
+  | "unspellable_id"
   | "sender_not_collator"
   | "not_json"
   | "schema"
@@ -368,7 +705,13 @@ export interface DispatchRequestContext {
   sender: string;
   /** The task directory the file sat in; the parent id in the body must match. */
   taskId: string;
-  roster: ConsoleRoster;
+  /**
+   * Who may ask and who may be asked. **Optional, defaulting to
+   * `REVIEW_CONSOLE_ROSTER`** — see `resolveRoster` for why the default is the
+   * repair rather than a convenience, and `assertRoster` for what a supplied
+   * roster is held to.
+   */
+  roster?: ConsoleRoster;
 }
 
 /** A request still on disk. */
@@ -391,9 +734,56 @@ export interface DispatchRequestLocation extends DispatchRequestContext {
  * there when the relay actor (§6.5) becomes its second caller.** It is here
  * only because `paths.ts` is being edited concurrently for the `/replies`
  * mount; the module boundary, not the placement, is what matters today.
+ *
+ * **It THROWS on an id it cannot spell, and a bare `join` is why it has to.**
+ * `join` is not a containment predicate — it is string arithmetic that resolves
+ * `..` cheerfully — so this function returned `/etc/dispatch-request.json` for
+ * `taskId = "../../../../../../etc"` and did it without a word. Measured, not
+ * hypothesised. A path builder that can silently produce a path outside the
+ * subtree it names is a hole wherever it is called, including from callers that
+ * do not exist yet, so the refusal belongs in the builder rather than in each
+ * caller's memory of it. `readDispatchRequest` never reaches the throw because
+ * it holds the same ids to the same grammar first and answers with a REFUSAL —
+ * the contract that it does not throw on a poll is untouched.
  */
 export function dispatchRequestPath(runRoot: string, sender: string, taskId: string): string {
+  if (!spellableId(sender)) throw new DispatchIdError("worker id", sender);
+  if (!spellableId(taskId)) throw new DispatchIdError("task id", taskId);
   return join(workerOutboxDir(runRoot, sender), taskId, DISPATCH_REQUEST_FILE);
+}
+
+/**
+ * The two ids that become a host path, held to a grammar before either is used.
+ *
+ * **One function, two call sites, for `checkSender`'s reason** — and this one is
+ * the more important of the two, because `parseDispatchRequest` never builds a
+ * path and could therefore look exempt. It is not: `ctx.taskId` is what
+ * `parent_task_id` is checked AGAINST, so a caller that read the bytes itself
+ * and passed a traversal as `taskId` would have the body's traversal accepted as
+ * matching. The rule has to hold wherever the context does.
+ *
+ * Refused rather than thrown, unlike `dispatchRequestPath`: on this path the
+ * caller is the polling actor, and a value is what a polling actor can act on.
+ */
+function checkIds(ctx: DispatchRequestContext): DispatchRequestRead | null {
+  for (const [field, value] of [
+    ["sender", ctx.sender],
+    ["taskId", ctx.taskId],
+  ] as const) {
+    if (spellableId(value)) continue;
+    return {
+      kind: "refused",
+      code: "unspellable_id",
+      reason:
+        `${field} ${JSON.stringify(value)} is not a legal id and no path was built from it. ` +
+        `Both halves of a request's location become path SEGMENTS under <run>/outbox, and ` +
+        `\`join\` resolves ".." rather than refusing it — so an unchecked id here reads a file ` +
+        `of the caller's choosing out of the run directory, which is where control-auth.json ` +
+        `lives. The grammar is 1-${MAX_DISPATCH_ID_CHARS} characters of letters, digits, ".", ` +
+        `"_" or "-", beginning and ending alphanumeric.`,
+    };
+  }
+  return null;
 }
 
 /**
@@ -411,15 +801,15 @@ export function dispatchRequestPath(runRoot: string, sender: string, taskId: str
  * Spelling it twice was the alternative and is the hazard `paths.ts` opens with:
  * a duplicated invariant holds until one copy is reasonably improved.
  */
-function checkSender(ctx: DispatchRequestContext): DispatchRequestRead | null {
-  if (ctx.roster.collators.includes(ctx.sender)) return null;
+function checkSender(sender: string, roster: ConsoleRoster): DispatchRequestRead | null {
+  if (roster.collators.includes(sender)) return null;
   return {
     kind: "refused",
     code: "sender_not_collator",
     reason:
-      `a ${DISPATCH_REQUEST_FILE} was found in "${ctx.sender}"'s outbox, and only a collator ` +
+      `a ${DISPATCH_REQUEST_FILE} was found in "${sender}"'s outbox, and only a collator ` +
       `may request a dispatch (SRD-REVIEW-CONSOLE §6.10). The collators on this console are ` +
-      `${ctx.roster.collators.join(", ")}. The sender is not a field in the document — it is ` +
+      `${roster.collators.join(", ")}. The sender is not a field in the document — it is ` +
       `the directory the document was found in, because a container can write only its own ` +
       `outbox — so this is a worker that genuinely attempted a dispatch it may not make.`,
   };
@@ -450,7 +840,8 @@ function schemaReason(error: z.ZodError): string {
  */
 function checkRoster(
   request: DispatchRequest,
-  ctx: DispatchRequestContext,
+  sender: string,
+  roster: ConsoleRoster,
 ): DispatchRequestRead | null {
   const seen = new Set<string>();
 
@@ -459,9 +850,9 @@ function checkRoster(
     const at = `request ${index + 1}`;
     const target = entry.worker;
 
-    if (ctx.roster.collators.includes(target)) {
+    if (roster.collators.includes(target)) {
       const arm =
-        target === ctx.sender
+        target === sender
           ? `names "${target}", which is ITSELF — a collator dispatching its own follow-up work ` +
             `is a loop whose only bound is the collator's own judgement, which is model output`
           : `names "${target}", which is another collator — nesting a fan-out inside a fan-out ` +
@@ -471,17 +862,17 @@ function checkRoster(
         code: "collator_target",
         reason:
           `${at} ${arm} (SRD-REVIEW-CONSOLE D7, §6.10). A collator may dispatch only to this ` +
-          `console's reviewers: ${ctx.roster.reviewers.join(", ")}.`,
+          `console's reviewers: ${roster.reviewers.join(", ")}.`,
       };
     }
 
-    if (!ctx.roster.reviewers.includes(target)) {
+    if (!roster.reviewers.includes(target)) {
       return {
         kind: "refused",
         code: "worker_not_in_console",
         reason:
           `${at} names worker "${target}", which is not one of this console's reviewers ` +
-          `(${ctx.roster.reviewers.join(", ")}) — SRD-REVIEW-CONSOLE D7, §6.10. A worker outside ` +
+          `(${roster.reviewers.join(", ")}) — SRD-REVIEW-CONSOLE D7, §6.10. A worker outside ` +
           `the console has a real socket and a real run, so a dispatch to it would SUCCEED and ` +
           `leave its only trace in a run nobody is watching.`,
       };
@@ -513,7 +904,11 @@ function checkRoster(
  *
  * The order is the contract, not an implementation detail:
  *
- *   0. **Sender** — before the document is even parsed. A non-collator's
+ *   0. **Ids** — before anything else, because `ctx.taskId` is what the body's
+ *      `parent_task_id` is checked AGAINST. A caller that read the bytes itself
+ *      and passed a traversal as `taskId` would have the body's matching
+ *      traversal accepted as agreeing with it.
+ *   0b. **Sender** — before the document is even parsed. A non-collator's
  *      request is refused whatever it says, so nothing is learned by reading
  *      it first and a hostile document goes through one less parser.
  *   1. **Parse** — before any field is dereferenced.
@@ -527,7 +922,12 @@ function checkRoster(
  *   4. **Roster** — the rules that need to know who is asking and who exists.
  */
 export function parseDispatchRequest(body: string, ctx: DispatchRequestContext): DispatchRequestRead {
-  const wrongSender = checkSender(ctx);
+  const roster = resolveRoster(ctx);
+
+  const badId = checkIds(ctx);
+  if (badId !== null) return badId;
+
+  const wrongSender = checkSender(ctx.sender, roster);
   if (wrongSender !== null) return wrongSender;
 
   let raw: unknown;
@@ -559,7 +959,7 @@ export function parseDispatchRequest(body: string, ctx: DispatchRequestContext):
     };
   }
 
-  const refused = checkRoster(request, ctx);
+  const refused = checkRoster(request, ctx.sender, roster);
   if (refused !== null) return refused;
 
   return { kind: "ok", request };
@@ -568,13 +968,49 @@ export function parseDispatchRequest(body: string, ctx: DispatchRequestContext):
 /**
  * Read and validate `<outbox>/<task-id>/dispatch-request.json`.
  *
- * The first four steps mirror `readOutboxEnvelope` deliberately — a symlinked
- * or non-regular file refused from `lstat`, a size refused from the stat before
- * a byte is buffered — because this file arrives from the same directory, from
- * the same author, under the same §12.5 posture. The primitive is identical:
- * the worker owns this directory, so `dispatch-request.json -> ~/.env` is read
- * by a host process and lands in a refusal message, a log line, and from there
- * in an operator's terminal.
+ * **The path is resolved EXACTLY ONCE and every question is then asked of the
+ * descriptor.** This is the correction described in the module header, and the
+ * reason it is worth this much prose is that the version it replaces looked
+ * right: `lstat` the file, check three things, `readFile` the file. Three
+ * correct checks, in the correct order, against the correct constants — and all
+ * three were no-ops, because a check and a use that each resolve the same NAME
+ * are two operations on two possibly-different inodes, in a directory whose
+ * contents the adversary controls. There is no ordering of name-based checks
+ * that fixes this; the fix is to stop asking twice.
+ *
+ * So the `open` below is the only resolution, and its FLAGS carry two of the
+ * three checks into the one operation that cannot be raced:
+ *
+ *  - **`O_NOFOLLOW`** — the final component is not followed. A swap to a symlink
+ *    is `ELOOP` (`EMLINK` on some BSDs) at open rather than a link the host
+ *    cheerfully reads. This is the arm that returned `<run>/control-auth.json`,
+ *    the per-run control-socket secret, into a refusal message and from there
+ *    into an operator's terminal — `paths.ts:676-682` is explicit that a worker
+ *    must never read that file.
+ *  - **`O_NONBLOCK`** — a FIFO opens instead of blocking. Without it the open
+ *    waits for a writer that never comes, holding a libuv threadpool slot
+ *    forever; the default pool is FOUR, so four of these stop the actor
+ *    dispatching AND harvesting, with no error, no timeout and no log line. It
+ *    is the quietest failure available in this file.
+ *
+ * The type and size questions are then answered by `fstat` ON THE DESCRIPTOR,
+ * so "is a regular file" and "is under the cap" are statements about the bytes
+ * that are actually read rather than about whatever the name meant a moment
+ * ago. A FIFO — which `O_NONBLOCK` lets through the open by design — is caught
+ * here, which is why the type check must be an `fstat` and not merely an open
+ * flag.
+ *
+ * **THE HONESTY PARAGRAPH — what this does NOT pin.** The size is checked
+ * twice: once from the `fstat` and once from the bytes actually read. Neither
+ * is INDEPENDENTLY pinned by a test, and that is stated rather than left to be
+ * discovered. Disabling BOTH fails the suite, so the cap itself is held.
+ * Disabling only one does not, because separating them needs the file to change
+ * size between the `fstat` and the read, and forcing that ordering needs a hook
+ * this module does not have. `harvest/outbox.ts:421-426` records the identical
+ * gap for the identical reason; this is the same note, not a weaker one. What
+ * IS directly pinned is every arm that can be built out of a real filesystem
+ * object: a real symlink, a real FIFO, a real directory, and a file of exactly
+ * the cap.
  *
  * **The sender check runs after the file is known to exist and before its
  * content is read, and both halves of that are chosen.**
@@ -583,7 +1019,9 @@ export function parseDispatchRequest(body: string, ctx: DispatchRequestContext):
  * must be `missing` and silent. If the sender were checked first, every tick
  * would emit a refusal for every non-collator in the console, and the one
  * refusal that means something — a reviewer that actually attempted a dispatch
- * — would be indistinguishable from the noise it was buried in.
+ * — would be indistinguishable from the noise it was buried in. The `open` is
+ * what answers existence now, so the check sits after it; opening is not
+ * reading, and the descriptor is closed on that refusal like any other.
  *
  * Before the content, because the sender is a property of the LOCATION and is
  * known before a byte is read. A non-collator's request is refused whatever it
@@ -594,62 +1032,121 @@ export function parseDispatchRequest(body: string, ctx: DispatchRequestContext):
 export async function readDispatchRequest(
   loc: DispatchRequestLocation,
 ): Promise<DispatchRequestRead> {
+  const roster = resolveRoster(loc);
+
+  // BEFORE the path is built, not after. `dispatchRequestPath` throws on an
+  // unspellable id and this function does not throw, so the grammar has to be
+  // satisfied here — and it has to be satisfied before `join` gets the chance
+  // to resolve a `..` into a real path outside the outbox.
+  const badId = checkIds(loc);
+  if (badId !== null) return badId;
+
   const file = dispatchRequestPath(loc.runRoot, loc.sender, loc.taskId);
 
-  let st;
+  let fh: Awaited<ReturnType<typeof open>>;
   try {
-    st = await lstat(file);
+    fh = await open(
+      file,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { kind: "missing" };
+    if (code === "ELOOP" || code === "EMLINK") {
+      return {
+        kind: "refused",
+        code: "not_a_regular_file",
+        reason:
+          `${DISPATCH_REQUEST_FILE} is a symlink and was not followed. The worker owns this ` +
+          `directory, so a link is a request to have the host read a file of the worker's ` +
+          `choosing and quote it back in a refusal. O_NOFOLLOW makes that an error at open ` +
+          `rather than a check the worker can invalidate before the read.`,
+      };
+    }
+    if (code === "ENOTDIR") {
+      return {
+        kind: "refused",
+        code: "not_a_regular_file",
+        reason:
+          `${DISPATCH_REQUEST_FILE} could not be opened because a component of its path is not ` +
+          `a directory. The task directory is created by the host; a worker that has replaced ` +
+          `it with a file has restructured its own outbox.`,
+      };
+    }
     return {
       kind: "refused",
       code: "unreadable",
-      reason: `${DISPATCH_REQUEST_FILE} could not be stat'd: ${String(err)}`,
+      reason: `${DISPATCH_REQUEST_FILE} could not be opened: ${String(err)}`,
     };
   }
 
-  if (st.isSymbolicLink()) {
-    return {
-      kind: "refused",
-      code: "not_a_regular_file",
-      reason:
-        `${DISPATCH_REQUEST_FILE} is a symlink and was not followed. The worker owns this ` +
-        `directory, so a link is a request to have the host read a file of the worker's ` +
-        `choosing and quote it back in a refusal.`,
-    };
-  }
-  if (!st.isFile()) {
-    return {
-      kind: "refused",
-      code: "not_a_regular_file",
-      reason: `${DISPATCH_REQUEST_FILE} is not a regular file (a FIFO would wedge the reader on open)`,
-    };
-  }
-  if (st.size > MAX_DISPATCH_REQUEST_BYTES) {
-    return {
-      kind: "refused",
-      code: "too_large",
-      reason:
-        `${DISPATCH_REQUEST_FILE} is ${st.size} bytes; the cap is ${MAX_DISPATCH_REQUEST_BYTES}. ` +
-        `The schema's own bounds would reject this only after JSON.parse had materialised the ` +
-        `whole document, which is the OOM the cap exists to prevent — in the one host process ` +
-        `that performs every dispatch in this console.`,
-    };
-  }
-
-  const wrongSender = checkSender(loc);
-  if (wrongSender !== null) return wrongSender;
-
-  let body: string;
   try {
-    body = await readFile(file, "utf8");
+    // fstat on the DESCRIPTOR. Every property below is therefore a property of
+    // the bytes this function goes on to read, which is the whole difference
+    // between this and a second `lstat` on the name.
+    const st = await fh.stat();
+
+    if (!st.isFile()) {
+      return {
+        kind: "refused",
+        code: "not_a_regular_file",
+        reason:
+          `${DISPATCH_REQUEST_FILE} is not a regular file. A FIFO reaches here rather than ` +
+          `wedging the open only because O_NONBLOCK was set; a directory and a device reach ` +
+          `here too, and none of the three holds a document.`,
+      };
+    }
+    if (st.size > MAX_DISPATCH_REQUEST_BYTES) {
+      return {
+        kind: "refused",
+        code: "too_large",
+        reason:
+          `${DISPATCH_REQUEST_FILE} is ${st.size} bytes; the cap is ${MAX_DISPATCH_REQUEST_BYTES}. ` +
+          `The schema's own bounds would reject this only after JSON.parse had materialised the ` +
+          `whole document, which is the OOM the cap exists to prevent — in the one host process ` +
+          `that performs every dispatch in this console.`,
+      };
+    }
+
+    const wrongSender = checkSender(loc.sender, roster);
+    if (wrongSender !== null) return wrongSender;
+
+    // `allocUnsafe`, not `alloc`: every byte is either overwritten by the read
+    // or excluded by `subarray(0, total)`, so zero-filling 4 MiB for a document
+    // that is almost always a few hundred bytes buys nothing.
+    //
+    // `cap + 1` is the point of the buffer. The fstat above is ADVISORY — the
+    // worker can append between the fstat and the read — so the read re-enforces
+    // the bound structurally: the buffer cannot grow, and filling it proves the
+    // file outgrew the cap. The loop is here because a single `read` may return
+    // short, and a short read would silently truncate a legal document into a
+    // JSON syntax error that names the wrong problem.
+    const buf = Buffer.allocUnsafe(MAX_DISPATCH_REQUEST_BYTES + 1);
+    let total = 0;
+    while (total < buf.length) {
+      const { bytesRead } = await fh.read(buf, total, buf.length - total, total);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > MAX_DISPATCH_REQUEST_BYTES) {
+      return {
+        kind: "refused",
+        code: "too_large",
+        reason:
+          `${DISPATCH_REQUEST_FILE} exceeded ${MAX_DISPATCH_REQUEST_BYTES} bytes during the read. ` +
+          `The size the fstat reported is advisory — the worker owns this directory and can ` +
+          `append after it — so the read enforces the cap a second time, from the bytes.`,
+      };
+    }
+
+    return parseDispatchRequest(buf.subarray(0, total).toString("utf8"), loc);
   } catch (err) {
     return {
       kind: "refused",
       code: "unreadable",
       reason: `${DISPATCH_REQUEST_FILE} could not be read: ${String(err)}`,
     };
+  } finally {
+    await fh.close().catch(() => {});
   }
-
-  return parseDispatchRequest(body, loc);
 }
