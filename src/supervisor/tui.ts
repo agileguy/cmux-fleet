@@ -233,6 +233,55 @@ export async function discoverSessionPath(
  */
 export const TUI_QUIET_MS = 2_000;
 
+/**
+ * How long the transcript must be quiet after an assistant message that
+ * stopped on `error`, which is longer than `TUI_QUIET_MS` because an `error`
+ * stop is a state Pi RETRIES OUT OF rather than a state it ends in.
+ *
+ * MEASURED, on run `2026-09-04T00-26-46Z-1002`. A tester was dispatched to run
+ * this repository's unit suite. Its provider dropped three turns in a row —
+ * assistant entries at 00:28:41.460, 00:28:46.197 and 00:28:49.670, each
+ * carrying a `thinking` part and NOTHING else, no tool call and no text. Pi
+ * retried through all three. The worker went on to run the suite, write its
+ * result envelope at 00:28:58 and finish cleanly at 00:28:59.568 with
+ * `stopReason: "stop"`.
+ *
+ * The supervisor settled it `failed` at 00:28:43.537.
+ *
+ * The gap between the first error entry and the next entry was 3.271s, so a
+ * 2s window expired inside it and `verdictForStopReason("error")` was applied
+ * to a worker that was still working. Everything downstream then read a run
+ * that had not happened: harvest ran 15 seconds before the envelope existed
+ * and reported "no result envelope; grading on derived facts alone" about a
+ * file that was about to be written, and `wait` exited 7.
+ *
+ * This is the same defect shape as `wait`'s false `staged_untriggered` — a
+ * terminal verdict declared from a state the worker is about to leave — and it
+ * takes the same repair: not a better guess about the state, but enough time
+ * for the state to disprove itself. Growth already resets the clock, so any
+ * retry that produces a single entry clears the reading entirely.
+ *
+ * Thirty seconds because the observed retry storm spanned 8s and a provider
+ * backing off exponentially can exceed that; the cost is paid ONLY by a task
+ * that really did end on an error, where 28 extra seconds of latency is worth
+ * less than one falsely-failed run. A turn that ends any other way is still
+ * settled on the 2s window.
+ */
+export const TUI_ERROR_GRACE_MS = 30_000;
+
+/**
+ * How long THIS reading must stay quiet before it is believed.
+ *
+ * A function rather than a ternary at the call site so that the rule is
+ * testable without standing a supervisor up, in the same way
+ * `verdictForStopReason` is. The two are a pair and are meant to be read
+ * together: this one decides WHEN a stop reason is believed, that one decides
+ * what it MEANS once it is.
+ */
+export function quietWindowMsFor(stopReason: string | null): number {
+  return stopReason === "error" ? TUI_ERROR_GRACE_MS : TUI_QUIET_MS;
+}
+
 /** How often a `tui` supervisor polls the transcript for new entries. */
 export const TUI_POLL_MS = 500;
 

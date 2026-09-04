@@ -30,11 +30,13 @@ import { readFileSync } from "node:fs";
 
 import {
   TUI_POLL_MS,
+  TUI_ERROR_GRACE_MS,
   TUI_QUIET_MS,
   classifyTuiTurn,
   detachedDockerArgv,
   discoverSessionPath,
   sessionFileSuffix,
+  quietWindowMsFor,
   verdictForStopReason,
 } from "../../src/supervisor/tui.ts";
 import type { TreeEntry } from "../../src/harvest/transcript.ts";
@@ -361,6 +363,59 @@ describe("verdictForStopReason", () => {
   });
 });
 
+/**
+ * An `error` stop is the one reading that gets a longer window, because it is
+ * the one reading the worker can leave on its own.
+ *
+ * WHAT WAS BROKEN, on run `2026-09-04T00-26-46Z-1002`. A tester's provider
+ * dropped three turns in a row — assistant entries carrying a `thinking` part
+ * and nothing else, no tool call, no text. Pi retried through all of them and
+ * the worker finished cleanly 18 seconds later, having run the suite and
+ * written its envelope. The supervisor settled it `failed` at 00:28:43.537,
+ * inside a 3.271s gap between the first error entry and the next one, because
+ * the 2s window expired in it. Harvest then ran 15 seconds before the envelope
+ * existed and reported "no result envelope"; `wait` exited 7.
+ *
+ * `quietWindowMsFor` is the repair, and the shape of it matters: not a better
+ * guess at whether the error was fatal — nothing in the transcript can say —
+ * but enough time for the worker to disprove it. Growth already resets the
+ * clock, so one retry entry is enough.
+ *
+ * CONTROL ARMS. "the error window is longer" is also satisfied by making EVERY
+ * window 30s, which would charge every clean task 28 extra seconds of latency;
+ * the second test pins the other branch. And "there is a window at all" is
+ * satisfied by any positive number, so the third measures it against the gap
+ * that actually caused the settle rather than against nothing.
+ */
+describe("an error stop is retried out of, not ended on", () => {
+  test("an error stop waits on the long grace", () => {
+    expect(quietWindowMsFor("error")).toBe(TUI_ERROR_GRACE_MS);
+  });
+
+  test("every other stop reason still settles on the short window", () => {
+    for (const r of ["stop", "endTurn", "aborted", "length", "toolUse", null]) {
+      expect(quietWindowMsFor(r)).toBe(TUI_QUIET_MS);
+    }
+  });
+
+  test("the grace outlasts the gap that produced the false failure", () => {
+    // 3.271s: 00:28:41.460 -> 00:28:44.731 on the run above. A grace that did
+    // not clear this by a wide margin would settle the same run the same way
+    // on a slightly slower retry.
+    expect(TUI_ERROR_GRACE_MS).toBeGreaterThan(3_271 * 5);
+    expect(TUI_ERROR_GRACE_MS).toBeGreaterThan(TUI_QUIET_MS);
+  });
+
+  test("the verdict an error stop eventually gets is unchanged", () => {
+    // The window says WHEN it is believed. What it means, once the worker has
+    // had its chance and stayed quiet, is still a failure.
+    expect(verdictForStopReason("error")).toEqual({
+      verdict: "failed",
+      reason: "transcript_stop_error",
+    });
+  });
+});
+
 describe("the polling constants", () => {
   /**
    * The quiet window must be several polls wide or it is not a window at all:
@@ -596,7 +651,7 @@ describe("the supervisor branches on pane_mode", () => {
    */
   test("the quiet window is a Stopwatch, not a wall-clock subtraction", () => {
     expect(SUPERVISOR).toMatch(/tuiQuiet\s*=\s*new Stopwatch\(\)/);
-    expect(SUPERVISOR).toMatch(/tuiQuiet\.elapsedMs\(\)\s*<\s*TUI_QUIET_MS/);
+    expect(SUPERVISOR).toMatch(/tuiQuiet\.elapsedMs\(\)\s*<\s*quietNeededMs/);
   });
 
   /**
