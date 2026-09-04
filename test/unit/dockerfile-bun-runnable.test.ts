@@ -77,11 +77,21 @@ export function stubbedBunInstalls(dockerfile: string): string[] {
 const DOCKERFILE = readFileSync(dockerfilePath(), "utf8");
 
 describe("bun on PATH is a runner, not a stub", () => {
-  test("the Dockerfile installs bun in more than one stage", () => {
-    // If this drops to zero the sweep below is vacuous: it would pass on a
-    // Dockerfile that had stopped installing bun at all, which is not the same
-    // claim. `toolchain-node` and `toolchain-full` both carry it today.
-    expect(bunInstalls(DOCKERFILE).length).toBeGreaterThanOrEqual(2);
+  test("the Dockerfile installs bun exactly once", () => {
+    /*
+     * This guard used to require TWO installs, because `toolchain-node` and
+     * `toolchain-full` each carried their own copy. That duplication is gone:
+     * every language toolchain now builds on `toolchain-node`, so bun is
+     * installed once and inherited, and `dockerfile-toolchain-graph.test.ts`
+     * is what checks the inheritance.
+     *
+     * The count still matters, for the reason it always did — at zero the
+     * sweep below is vacuous, passing on a Dockerfile that had stopped
+     * installing bun at all. It is now pinned from BOTH sides: a second copy
+     * reappearing is the drift that made the bun-postinstall fix have to be
+     * written twice, and this is where that would be noticed.
+     */
+    expect(bunInstalls(DOCKERFILE).length).toBe(1);
   });
 
   test("every bun install runs bun's postinstall", () => {

@@ -117,7 +117,32 @@ FROM base AS toolchain-node
 # name and the default stays in force for every other package.
 RUN npm install -g --ignore-scripts bun@1.3.12 \
  && node "$(npm root -g)/bun/install.js"
-FROM base AS toolchain-python
+# TYPECHECKER AND LINTER, on PATH without a project install.
+#
+# A cloned checkout carries no `node_modules` — it is gitignored — so `tsc` and
+# `eslint` are absent in a fresh clone until its dependencies are installed,
+# and a worker asked to "typecheck this" would have to install the world first
+# or report a missing binary. Global copies make the quick answer available;
+# a project that vendors its own still wins, because `npx`/`bun x` resolve the
+# local one ahead of the global.
+#
+# `--ignore-scripts` stays in force: unlike bun's stub package, neither of these
+# needs a postinstall to be usable.
+RUN npm install -g --ignore-scripts typescript eslint
+# --- every language toolchain includes node (2026-09-04) ---
+#
+# The chain is `base -> node -> <language>`, so `python` means "python AND
+# node" and every language added later inherits the same rule by building on
+# `toolchain-node` rather than on `base`.
+#
+# The reason is that node here is not a language choice, it is the harness. The
+# base image IS `node:24-bookworm-slim`, so `node` itself was always present —
+# what `toolchain-node` adds is `bun`, and bun is what runs this repository's
+# own suite and a great many projects' tooling. Measured: switching the tester
+# from `node` to `python` gave it pytest and silently took away its ability to
+# run any bun project at all, including cmux-fleet's. A toolchain that removes
+# a capability to add one makes the choice a trade rather than an addition.
+FROM toolchain-node AS toolchain-python
 # `python3-pip` alongside `uv`, and the reason is not redundancy.
 #
 # A cloned project's own instructions say `pip install -r requirements.txt`, and
@@ -136,22 +161,74 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv python3-pip \
  && rm -rf /var/lib/apt/lists/* \
  && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
-FROM base AS toolchain-go
-RUN apt-get update && apt-get install -y --no-install-recommends golang-go \
- && rm -rf /var/lib/apt/lists/*
-FROM base AS toolchain-full
-# `--ignore-scripts` is this image's supply-chain default, but bun's npm package
-# is only a stub: its postinstall is what fetches the ~100MB platform binary that
-# `bin/bun.exe` points at. Skip it and `bun` is still on PATH, but answers every
-# invocation with "Bun's postinstall script was not run" — so a tester asked to
-# run a Bun project's suite has no runner at all. Run that one known script by
-# name and the default stays in force for every other package.
-RUN npm install -g --ignore-scripts bun@1.3.12 \
- && node "$(npm root -g)/bun/install.js" \
- && apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip golang-go \
- && rm -rf /var/lib/apt/lists/* \
- && curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+# LINTER AND TYPECHECKER for python, installed as TOOLS rather than as packages.
+#
+# `uv tool install` gives each its own isolated environment and drops only the
+# entry points into `UV_TOOL_BIN_DIR`. That matters here because the system
+# interpreter is PEP 668 externally-managed: `pip install ruff` into it is
+# refused, and forcing past that with `--break-system-packages` would put
+# pifleet's tooling in the same site-packages a cloned project's dependencies
+# land in, where a version conflict makes the linter a project's problem.
+#
+# `/usr/local/bin` because that is on every worker's PATH; uv's default is a
+# per-user directory under a `$HOME` that is read-only at runtime.
+# BOTH directories, and the second one is the whole of the bug it fixes.
+#
+# `UV_TOOL_BIN_DIR` alone put the entry points in `/usr/local/bin` as symlinks
+# INTO `/root/.local/share/uv/tools/...`. The build succeeded, the links were
+# there, and `ruff --version` still reported command-not-found for uid 10001 —
+# root's home is 0700, so the worker cannot traverse to the target. A dangling
+# permission is worse than a missing tool: `command -v ruff` finds it.
+#
+# `UV_TOOL_DIR` moves the environments somewhere every uid can read, and the
+# chmod is explicit rather than trusted to umask.
+ENV UV_TOOL_DIR=/opt/uv-tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin
+RUN uv tool install ruff \
+ && uv tool install mypy \
+ && chmod -R a+rX /opt/uv-tools
+# UPSTREAM GO, NOT DEBIAN'S. Bookworm ships go1.19.8 (2023), which is past end
+# of life and cannot build most current Go code — including its own linter:
+#
+#   honnef.co/go/tools/lintcmd/cmd.go:11:2:
+#     package go/version is not in GOROOT (/usr/lib/go-1.19/src/go/version)
+#   golang.org/x/tools/go/packages/external.go:16:2:
+#     package slices is not in GOROOT
+#
+# `slices` and `go/version` are 1.21 standard library. A toolchain whose
+# compiler predates the language most projects now write is not a Go toolchain,
+# so the apt package is skipped entirely rather than supplemented.
+#
+# `TARGETARCH` is re-declared because ARGs do not cross stage boundaries, and
+# Go's own naming (`amd64`, `arm64`) matches Docker's, so it is used verbatim.
+FROM toolchain-node AS toolchain-go
+ARG TARGETARCH
+ARG GO_VERSION=1.24.7
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" \
+      -o /tmp/go.tgz \
+ && tar -C /usr/local -xzf /tmp/go.tgz \
+ && rm /tmp/go.tgz \
+ && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+ && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+# `go vet` and `gofmt` ship inside the toolchain, so the gap is a real linter.
+# GOBIN puts it on the worker's PATH; GOPATH/GOCACHE are set to a world-readable
+# place because a worker running as uid 10001 cannot use root's default and Go
+# fails hard rather than degrading when its cache is unwritable.
+ENV GOPATH=/opt/go GOCACHE=/opt/go/cache
+RUN GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@2025.1.1 \
+ && chmod -R a+rX /opt/go
+FROM toolchain-python AS toolchain-full
+ARG TARGETARCH
+ARG GO_VERSION=1.24.7
+ENV GOPATH=/opt/go GOCACHE=/opt/go/cache
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" \
+      -o /tmp/go.tgz \
+ && tar -C /usr/local -xzf /tmp/go.tgz \
+ && rm /tmp/go.tgz \
+ && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+ && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+ && GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@2025.1.1 \
+ && chmod -R a+rX /opt/go
 FROM toolchain-${TOOLCHAIN} AS final
 
 ARG PI_VERSION
