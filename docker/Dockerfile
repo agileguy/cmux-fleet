@@ -37,8 +37,16 @@ ARG TARGETARCH              # arm64 on this machine (Colima/aarch64)
 # either — `systemBinaryNames: ["fd", "fdfind"]`. Providing BOTH names means
 # the fix does not depend on Pi continuing to know Debian's rename, and a
 # worker's own `fd ...` command line works the way its muscle memory expects.
+# `procps` is pifleet's OWN dependency, not a convenience for the agent.
+# `safety/procstart.ts` and `safety/procgroup.ts` both shell out to `ps` — it is
+# how a run decides whether a pid is alive before it stops, reaps or prunes
+# anything. `procstart.ts` already anticipates its absence in so many words
+# ("a minimal container image with no procps"); what nobody noticed is that the
+# worker image WAS that container. Without it every liveness read raises
+# `IdentityReadError`, which wears `EXIT.BACKEND_UNAVAILABLE` — so the failure
+# arrives as exit 3 from an unrelated command rather than as a missing binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates git ripgrep fd-find jq curl less tini gnupg \
+      bash ca-certificates git ripgrep fd-find jq curl less tini gnupg procps \
  && rm -rf /var/lib/apt/lists/* \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd
 
