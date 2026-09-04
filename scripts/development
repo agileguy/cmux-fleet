@@ -140,7 +140,9 @@ async function main(argv: string[]): Promise<number> {
 
   // Built before the cmux probe on purpose: a bad `--workers` is an argv
   // mistake, and diagnosing it must not depend on whether the GUI is running.
-  const panes = developmentPanes({ ...opts, tuiWorkers });
+  // See `scripts/operations`: the preview must print the command that will
+   // actually run, and the live path folds the title in at `planPanes`.
+   const panes = developmentPanes({ ...opts, tuiWorkers, workspaceName: DEVELOPMENT_SPEC.name });
 
   if (argv.includes("--dry-run")) {
     process.stdout.write(`workspace: ${DEVELOPMENT_WORKSPACE}\ncwd:       ${watchDir}\n\n`);

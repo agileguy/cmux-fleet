@@ -204,6 +204,40 @@ export interface OperationsPlanOptions {
    * that quietly does the wrong thing.
    */
   readonly tuiWorkers?: readonly string[];
+  /**
+   * The TITLE of the workspace these panes will live in — `operations`,
+   * `development`, `review`.
+   *
+   * ## Why the plan carries it at all
+   *
+   * It reaches `up --workspace-name` and ends up in each worker's
+   * `presentation.json`, which is what lets the monitor head a group with
+   * `workspace review` instead of `workspace EC23CD87-CF25-46F6-8262-…`.
+   *
+   * **`up` cannot discover this and must not go looking.** It runs inside a
+   * pane whose environment carries `CMUX_WORKSPACE_ID` and no title — probed
+   * against the installed cmux 0.64.x, the binary exports
+   * `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID` and `CMUX_PANE_ID` and nothing
+   * else of the sort. The name lives behind `cmux workspace list`, and ISC-137
+   * confines that call to this directory while `up --attach-here` needs no
+   * cmux socket at all today.
+   *
+   * The console DOES know it, because the console is what asked cmux to create
+   * or match that title. So it travels from here — one hop, no lookup, nothing
+   * that can make a cosmetic label fail a run.
+   *
+   * ## Injected from `WorkspaceSpec.name`, not passed by hand
+   *
+   * `operations.ts` folds `spec.name` in at the single site that calls
+   * `spec.panes`, so the title the panes advertise is by construction the title
+   * `workspace create --name` used and `findWorkspace` matches on. A caller
+   * that supplied its own would be a second spelling of one fact.
+   *
+   * `undefined` is ordinary and safe: the flag is simply omitted and the
+   * monitor falls back to the workspace ref, which is what every record
+   * written before this existed already does.
+   */
+  readonly workspaceName?: string;
   /** Git pane refresh interval. */
   readonly gitPollSeconds?: number;
 }
@@ -286,8 +320,10 @@ export function agentPaneCommand(args: {
   readonly configPath: string;
   /** Whether this worker resolves to `pane_mode: tui` and wants Pi's own UI. */
   readonly attach: boolean;
+  /** The workspace title, for `--workspace-name`. See {@link OperationsPlanOptions.workspaceName}. */
+  readonly workspaceName?: string | undefined;
 }): string {
-  const { repoRoot, worker, backend, configPath, attach } = args;
+  const { repoRoot, worker, backend, configPath, attach, workspaceName } = args;
   const up = pifleetCommand(repoRoot, [
     "up",
     "--workers",
@@ -300,6 +336,27 @@ export function agentPaneCommand(args: {
     // line `up`'s report is worth reading; in a standing pane it is a banner
     // carried above the agent for the life of the console.
     ...(attach ? ["--attach-here", "--attach-clear"] : []),
+    /*
+     * `--workspace-name` RIDES WITH `--attach-here` AND NEVER ALONE, and the
+     * gate is on `attach` rather than merely on the name being present.
+     *
+     * A non-attached pane's `up` creates its own workspace (or runs headless
+     * with none) and NAMES IT ITSELF — `presentedWorkspace` treats pifleet's
+     * own name as authoritative there and ignores the flag outright. Emitting
+     * it anyway would put a flag in the argv that the receiver is documented to
+     * discard, which reads to anyone debugging a pane as though the console
+     * were asking for something it is not getting.
+     *
+     * The emptiness check is the same one `up` applies on the other side. Two
+     * guards for one fact is deliberate here: this one keeps a meaningless flag
+     * out of the command an operator reads in `--dry-run`, and `up`'s keeps a
+     * meaningless value out of the record on disk. Neither makes the other
+     * redundant, because the argv and the record are read by different people
+     * at different times.
+     */
+    ...(attach && workspaceName !== undefined && workspaceName !== ""
+      ? ["--workspace-name", workspaceName]
+      : []),
   ]);
   // `clear` first, for the LOGIN SHELL's own banner — "Last login: …" and "You
   // have mail." come from the shell cmux spawns, before any of this runs, so
@@ -362,7 +419,14 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
    * path, `up --attach-here`, is unambiguous: it attaches the run it just made.
    */
   const ladder = (worker: string): string =>
-    agentPaneCommand({ repoRoot, worker, backend, configPath, attach: tuiWorkers.has(worker) });
+    agentPaneCommand({
+      repoRoot,
+      worker,
+      backend,
+      configPath,
+      attach: tuiWorkers.has(worker),
+      workspaceName: opts.workspaceName,
+    });
 
   /*
    * The SECOND agent pane. `workers[1]` when there is one — the console shows
@@ -686,6 +750,7 @@ export function agentSquarePanes(
       backend,
       configPath,
       attach: tuiWorkers.has(worker),
+      workspaceName: opts.workspaceName,
     })}`,
     ...(i === 0 ? { split: null } : shape[i - 1]!),
   }));

@@ -95,6 +95,25 @@ export interface WorkspaceSpec {
   readonly topFraction: number | null;
 }
 
+/**
+ * A spec's panes, WITH THE WORKSPACE TITLE FOLDED IN.
+ *
+ * The one place `spec.panes` is reached, so the title the panes advertise to
+ * `up --workspace-name` is by construction the title `workspace create --name`
+ * used and `findWorkspace` matches on (`spec.name`, both). A caller passing its
+ * own `workspaceName` would be a second spelling of one fact, and the two would
+ * be identical the day they were written and only diverge afterwards — the same
+ * drift `agentSquarePanes` was extracted to prevent.
+ *
+ * It is a function rather than a spread at each call site because there are two
+ * call sites — `restartConsolePane` and `createWorkspace` — and one of them
+ * forgetting the fold is a console whose restarted pane silently stops naming
+ * its workspace while every other pane still does.
+ */
+function planPanes(spec: WorkspaceSpec, opts: OperationsPlanOptions): OperationsPane[] {
+  return spec.panes({ ...opts, workspaceName: spec.name });
+}
+
 /** The day-to-day console: one agent pair on top, status and git below. */
 export const OPERATIONS_SPEC: WorkspaceSpec = {
   name: OPERATIONS_WORKSPACE,
@@ -246,7 +265,7 @@ export async function restartConsolePane(
         `open the console first`,
     );
   }
-  const plan = spec.panes(opts);
+  const plan = planPanes(spec, opts);
   const planned = plan.find((p) => p.title === title);
   if (planned === undefined) {
     throw new Error(
@@ -314,7 +333,7 @@ export async function createWorkspace(
   spec: WorkspaceSpec,
   opts: OperationsPlanOptions,
 ): Promise<EnsureResult> {
-  const panes = spec.panes(opts);
+  const panes = planPanes(spec, opts);
 
   // `--cwd` is the INVOCATION directory: panes 2 and 3 are about where the
   // operator is working, not about where this repository happens to live.

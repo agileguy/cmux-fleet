@@ -128,7 +128,18 @@ async function main(argv: string[]): Promise<number> {
   // Built before the cmux probe on purpose: a bad `--workers` or `--poll` is
   // an argv mistake, and diagnosing it must not depend on whether the GUI
   // happens to be running.
-  const panes = operationsPanes({ ...opts, tuiWorkers });
+  /*
+   * `workspaceName: OPERATIONS_SPEC.name` so `--dry-run` prints the command
+   * that will ACTUALLY run. The live path folds the title in at `planPanes`
+   * (`operations.ts`); this call bypasses that, so without it the preview would
+   * omit `--workspace-name` and quietly disagree with the pane it previews —
+   * which is the one thing a dry run must not do.
+   *
+   * Taken from the SPEC rather than from the `OPERATIONS_WORKSPACE` constant
+   * directly: `spec.name` is what `workspace create --name` uses and what
+   * `planPanes` folds in, so this reads the same field the live path does.
+   */
+  const panes = operationsPanes({ ...opts, tuiWorkers, workspaceName: OPERATIONS_SPEC.name });
 
   if (argv.includes("--dry-run")) {
     process.stdout.write(`workspace: ${OPERATIONS_WORKSPACE}\ncwd:       ${watchDir}\n\n`);
