@@ -68,6 +68,18 @@
  * the only thing left standing between a reply and the worker that is graded
  * against it.
  *
+ * ## What this module deliberately does NOT decide — and what the actor decided
+ *
+ * **Both questions below are now ANSWERED, in `run/relay.ts`, and the answers
+ * are recorded here rather than left for a reader to discover.** The reply's
+ * schema is the harvest bundle plus `inlined_artifacts[]`, and the byte cap the
+ * paragraph below asks about is two caps: `MAX_REPLY_ARTIFACT_BYTES` (64 KiB per
+ * artifact) and `MAX_REPLY_INLINE_BYTES` (256 KiB per reply, which is
+ * `MAX_DISPATCH_POLICY_BYTES`'s number because this is the return leg of that
+ * exchange). The reservation was correct and is left standing below, because the
+ * REASON it was reserved is what makes the answer legitimate: the payload
+ * belongs to the actor, and the actor is where it was decided.
+ *
  * ## What this module deliberately does NOT decide
  *
  * The reply's SCHEMA, and whether the drop needs a byte cap the way

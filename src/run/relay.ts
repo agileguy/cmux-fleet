@@ -80,7 +80,9 @@
  * repeat bound is a property of HISTORY and cannot be had without it.
  */
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { existsSync } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { runsRoot as runsRootEager, runPaths as runPathsEager } from "./paths.ts";
 
 import { SESSION_ID_RE, type Verdict } from "../contracts.ts";
@@ -194,6 +196,124 @@ export interface RelayDispatch extends RelayTaskRef {
 }
 
 /** What a settled child turned out to be. */
+/**
+ * THE PER-ARTIFACT CAP — the most any one artifact may contribute to a reply.
+ *
+ * 64 KiB, and the number is derived rather than picked. `MAX_DISPATCH_TEXT` is
+ * 32 KiB: the largest `brief` a collator may send a reviewer. A review should be
+ * able to say more than the request that asked for it, and twice is the smallest
+ * ratio that is obviously "more" rather than "the same order". It is also a
+ * QUARTER of the reply budget below, which is what guarantees that no single
+ * artifact can starve the others: four artifacts always fit at full size, and
+ * the fifth onward compete under an allocation that is fair by construction.
+ *
+ * For scale: 64 KiB of markdown is roughly a 10,000-word review. A reviewer
+ * whose honest review exceeds that has written something no collator was going
+ * to read in one pass anyway — and it is not silently cut. It arrives truncated,
+ * with the omission NAMED in the collation brief, which is the difference
+ * between a review the collator knows is partial and one it believes is whole.
+ */
+export const MAX_REPLY_ARTIFACT_BYTES = 64 * 1024;
+
+/**
+ * THE PER-REPLY CAP — the most all artifacts together may contribute.
+ *
+ * 256 KiB, and it is `MAX_DISPATCH_POLICY_BYTES` deliberately. That constant
+ * bounds `/policy/dispatch`, the drop a worker RECEIVES, on the argument that
+ * *"a reader that discovers the size has already paid for it"*. This is the
+ * return leg of the same exchange, read by the same kind of reader, so it takes
+ * the same number: one bound for both directions is one thing to remember and
+ * one thing to change.
+ *
+ * `replies.ts` records this decision as OWED — *"whether the drop needs a byte
+ * cap the way `/policy/dispatch` does"* — and reserves it, with the schema, for
+ * the actor. This is the actor, and this is the answer.
+ *
+ * **Both caps, not either.** A per-artifact cap alone bounds nothing: fifty
+ * artifacts at 64 KiB is a 3 MiB reply. A per-reply cap alone lets one artifact
+ * consume the whole budget and starve every other — and which one wins would
+ * then depend on the order the filesystem happened to enumerate them, so which
+ * half of a review survives would be decided by `readdir`. That is the class of
+ * defect this branch has spent its time removing, and it must not be introduced
+ * by the fix for a different one.
+ */
+export const MAX_REPLY_INLINE_BYTES = 256 * 1024;
+
+/** One artifact's contents, as far as the budget allowed. */
+export interface InlinedArtifact {
+  /** The artifact's host path, as the harvest recorded it. */
+  readonly path: string;
+  /** Its size on disk. */
+  readonly bytes: number;
+  /** How many bytes actually reached the reply. */
+  readonly included_bytes: number;
+  /**
+   * Whether anything was cut. `included_bytes < bytes`.
+   *
+   * A FIELD and not something a reader infers by comparing two numbers, because
+   * the collation brief has to name truncated artifacts the way §6.6 names a
+   * missing lens, and a brief that had to do arithmetic to find them would be
+   * one refactor away from not doing it.
+   */
+  readonly truncated: boolean;
+  /** Why nothing could be read at all, or `null`. Distinct from truncation. */
+  readonly unreadable: string | null;
+  /** The contents, up to `included_bytes`. */
+  readonly text: string;
+}
+
+/**
+ * Split a byte budget across artifacts so that ENUMERATION ORDER CANNOT DECIDE
+ * WHICH REVIEW SURVIVES.
+ *
+ * The obvious implementation — walk the list, give each what it wants until the
+ * budget is gone — is first-come-first-served, and the "first" is whatever order
+ * the artifact list happens to arrive in. Under it a reviewer that writes a
+ * large log before its review loses the review, and a reviewer that writes them
+ * the other way round keeps it. The console's output would depend on a
+ * filesystem detail, and it would look correct every time.
+ *
+ * This is max-min fair allocation instead. Sort by WANT ascending, and give each
+ * artifact in turn the lesser of what it wants and an equal share of what is
+ * left; anything an under-budget artifact does not use flows to the ones that
+ * do. Small artifacts are always satisfied in full, large ones divide the
+ * remainder evenly, and the result depends only on the SET of sizes — reordering
+ * the input cannot change any artifact's allocation.
+ *
+ * Returns a budget per artifact, index-aligned with `sizes`.
+ */
+export function planInlineBudget(
+  sizes: readonly number[],
+  opts: { perArtifact?: number; total?: number } = {},
+): number[] {
+  const perArtifact = opts.perArtifact ?? MAX_REPLY_ARTIFACT_BYTES;
+  const total = opts.total ?? MAX_REPLY_INLINE_BYTES;
+  const granted = new Array<number>(sizes.length).fill(0);
+  if (sizes.length === 0) return granted;
+
+  // What each artifact would take if nothing else existed.
+  const want = sizes.map((n) => Math.max(0, Math.min(n, perArtifact)));
+
+  /**
+   * Ascending by want, ties broken by INDEX so the order is total and stable.
+   * The tie-break matters: two artifacts of identical size must not swap
+   * allocations between runs, or a re-harvest of the same task would produce a
+   * different reply and the digest that names it would stop meaning anything.
+   */
+  const order = want
+    .map((w, i) => ({ w, i }))
+    .sort((a, b) => (a.w === b.w ? a.i - b.i : a.w - b.w));
+
+  let remaining = total;
+  order.forEach((entry, seen) => {
+    const share = Math.floor(remaining / (order.length - seen));
+    const give = Math.min(entry.w, share);
+    granted[entry.i] = give;
+    remaining -= give;
+  });
+  return granted;
+}
+
 export interface RelayHarvest {
   /**
    * The harvester's verdict — `harvestTask(...).harvest.verdict`.
@@ -207,6 +327,23 @@ export interface RelayHarvest {
   readonly verdict: Verdict;
   /** The bytes published to `/replies/<child>.json` for the collator to read. */
   readonly reply: unknown;
+  /**
+   * What was inlined, and what was cut.
+   *
+   * Carried OUT of the harvest rather than left inside the reply payload,
+   * because the collation brief has to name a truncation and the brief is built
+   * from `RelayChild`, not from the reply bytes. A brief that had to re-open the
+   * reply to discover an omission would be reading the very document whose
+   * completeness is in question.
+   *
+   * **Optional, because the CORE must not require inlining.** `RelayTransport`
+   * is a seam over four host effects and a transport that publishes a reply
+   * without reading artifacts is legitimate — the fan-out's arithmetic does not
+   * depend on it. Requiring the field would make every hand-built transport in
+   * the suite carry an empty array to say nothing, which is how a field comes to
+   * be filled in without being meant. The production adapter always supplies it.
+   */
+  readonly inlined?: readonly InlinedArtifact[];
 }
 
 /**
@@ -279,6 +416,14 @@ export interface RelayChild {
    * dispatches", and this is the field that makes that sentence true.
    */
   readonly issued: boolean;
+  /**
+   * What this lens' artifacts contributed, and what was cut.
+   *
+   * Empty for a lens that never reported. Carried here because the collation
+   * brief names a truncation the way it names a missing lens, and the brief is
+   * built from these children.
+   */
+  readonly inlined: readonly InlinedArtifact[];
   /** Why this lens is missing, in a form the collation brief can print. */
   readonly note: string;
 }
@@ -540,6 +685,7 @@ async function fanOut<R>(
         verdict: "unknown",
         succeeded: false,
         issued: false,
+        inlined: [],
         note: "the request never named this reviewer, so the lens was not applied",
       };
     }
@@ -554,6 +700,7 @@ async function fanOut<R>(
         // PLANNED but never issued — see `RelayChild.issued`. The id is kept so
         // an operator can correlate the refusal; it is not evidence of a dispatch.
         issued: false,
+        inlined: [],
         note: dispatchNote,
       };
     }
@@ -566,6 +713,7 @@ async function fanOut<R>(
         verdict: "unknown",
         succeeded: false,
         issued: true,
+        inlined: [],
         note: "it was dispatched but could not be harvested",
       };
     }
@@ -576,6 +724,7 @@ async function fanOut<R>(
       verdict: harvested.verdict,
       succeeded: harvested.verdict === "success",
       issued: true,
+      inlined: harvested.inlined ?? [],
       note:
         harvested.verdict === "success"
           ? ""
@@ -732,6 +881,56 @@ function collationBrief(
     );
   }
 
+  /**
+   * ── TRUNCATION IS NAMED, exactly the way a MISSING LENS is ────────────────
+   *
+   * §6.6's argument for naming a missing aspect transfers word for word: *"a
+   * collator that does not know it is missing a lens will write a confident
+   * three-lens conclusion from two — and `report` has no way to detect that."*
+   * A collator that does not know a review was CUT writes a confident whole
+   * conclusion from a partial document, and nothing downstream can detect that
+   * either. It is the worse of the two, because a truncated review reads as a
+   * complete review that found less — there is no gap in it to notice.
+   *
+   * So the cut is a line of its own, per artifact, with both byte counts. Prose
+   * that trailed off, or a footer saying "some content was truncated", would
+   * satisfy a reader skimming for honesty and tell the collator nothing it can
+   * act on. An UNREADABLE artifact is listed separately: the file existed and
+   * its bytes did not arrive at all, which is a different fact from a file that
+   * arrived short, and folding the two would make the count meaningless.
+   *
+   * Only SURVIVING lenses are considered. A lens that never reported is already
+   * a `MISSING ASPECT` line, and listing its artifacts as truncated as well
+   * would name one absence twice.
+   */
+  const cut = survived.flatMap((c) =>
+    c.inlined.filter((a) => a.truncated).map((a) => ({ aspect: c.aspect, a })),
+  );
+  const unreadable = survived.flatMap((c) =>
+    c.inlined.filter((a) => a.unreadable !== null).map((a) => ({ aspect: c.aspect, a })),
+  );
+
+  if (cut.length > 0 || unreadable.length > 0) {
+    lines.push("");
+    for (const { aspect, a } of cut) {
+      lines.push(
+        `TRUNCATED: ${aspect}'s artifact ${a.path} is ${a.bytes} bytes and only the first ` +
+          `${a.included_bytes} reached you. You are reading a PART of that document.`,
+      );
+    }
+    for (const { aspect, a } of unreadable) {
+      lines.push(
+        `UNREADABLE: ${aspect}'s artifact ${a.path} (${a.bytes} bytes) could not be read — ` +
+          `${a.unreadable}. None of it reached you.`,
+      );
+    }
+    lines.push("");
+    lines.push(
+      `Do not present a conclusion drawn from a truncated or unreadable artifact as though you ` +
+        `had the whole of it. Say which findings rest on a partial document.`,
+    );
+  }
+
   lines.push("");
   lines.push(`Write your result envelope with status: ${JSON.stringify(claim)}.`);
   return lines.join("\n");
@@ -777,7 +976,15 @@ export interface RelayTaskRecordView {
 
 /** A harvest bundle, likewise — `TaskHarvest` satisfies it. */
 export interface RelayHarvestView {
-  readonly harvest: { readonly verdict: Verdict };
+  readonly harvest: {
+    readonly verdict: Verdict;
+    /**
+     * `HarvestedArtifactSchema` narrowed to what the budget needs: a host path
+     * and a size. Optional because a task may produce no file artifacts at all,
+     * which is a kind of task rather than a degraded harvest.
+     */
+    readonly artifacts?: readonly { readonly path: string; readonly bytes: number }[];
+  };
 }
 
 /**
@@ -853,6 +1060,22 @@ export interface RelayEffects {
   ): Promise<RelayTaskRecordView | null>;
   /** `harvestTask(run, taskId)` — harvest/index.ts. */
   harvestTask(run: RunPaths, taskId: string): Promise<RelayHarvestView>;
+  /**
+   * Read up to `maxBytes` of one artifact, or explain why not.
+   *
+   * An EFFECT rather than a `readFile` inline, for the reason every other effect
+   * here is one: the path came out of a document, the file lives in a directory
+   * the WORKER owns, and deciding whether it may be opened is exactly the
+   * judgement `harvest/outbox.ts` spends its header on. Keeping it behind the
+   * seam means the budget arithmetic above is testable with three numbers and
+   * the containment check has one home.
+   */
+  readArtifact(
+    run: RunPaths,
+    worker: string,
+    hostPath: string,
+    maxBytes: number,
+  ): Promise<{ text: string; unreadable: string | null }>;
   /** `writeReply(workerRepliesDir(run.root, collator), childTaskId, reply)`. */
   writeReply(run: RunPaths, collator: string, childTaskId: string, reply: unknown): Promise<void>;
   /** Milliseconds. Injected so the deadline below needs no wall clock to test. */
@@ -1201,6 +1424,39 @@ export function consoleTransport(
 
     async harvest(run: RunPaths, task: RelayTaskRef): Promise<RelayHarvest> {
       const bundle = await effects.harvestTask(run, task.taskId);
+
+      /**
+       * ── INLINE THE ARTIFACTS, because a digest is not a document ──────────
+       *
+       * `HarvestedArtifactSchema` is `{path, bytes, sha256}` — no contents — and
+       * the reviewer's `/outbox` is worker-scoped, so a review filed at
+       * `/outbox/<task>/files/review.md` is a document NOTHING in this console
+       * can open. The reply carried the digest of a file the reader cannot
+       * reach, every status stayed green, and the findings evaporated.
+       *
+       * A digest is what you carry when the thing itself is somewhere the reader
+       * can get to. Here it is not, so the thing itself travels.
+       */
+      const artifacts = bundle.harvest.artifacts ?? [];
+      const budgets = planInlineBudget(artifacts.map((a: { bytes: number }) => a.bytes));
+      const inlined: InlinedArtifact[] = [];
+      for (const [i, a] of artifacts.entries()) {
+        const budget = budgets[i] ?? 0;
+        const read =
+          budget === 0
+            ? { text: "", unreadable: null }
+            : await effects.readArtifact(run, task.worker, a.path, budget);
+        const included = read.unreadable === null ? Buffer.byteLength(read.text, "utf8") : 0;
+        inlined.push({
+          path: a.path,
+          bytes: a.bytes,
+          included_bytes: included,
+          truncated: read.unreadable === null && included < a.bytes,
+          unreadable: read.unreadable,
+          text: read.text,
+        });
+      }
+
       return {
         /**
          * VERBATIM. `timed_out` and `aborted` are supervisor verdicts and are
@@ -1218,7 +1474,15 @@ export function consoleTransport(
          * whole contents in one gulp" and names "a nested harvest record" as
          * the thing it is formatting — this is that record.
          */
-        reply: bundle,
+        /**
+         * The bundle PLUS the contents. `writeReply` takes `unknown`, so this is
+         * a payload change and nothing else — no new mount, nothing added to
+         * `assertNoRunDirMount`, the verbgate's integrity loop or the §5.5 mount
+         * table. That is the whole argument for Take A over a second channel,
+         * and it is why the reply schema stays the actor's to decide.
+         */
+        reply: { ...bundle, inlined_artifacts: inlined },
+        inlined,
       };
     },
 
@@ -1693,6 +1957,48 @@ export const productionRelayEffects: RelayEffects = {
   async harvestTask(run, taskId) {
     const m = await loadEffectModules();
     return m.harvest.harvestTask(run, taskId);
+  },
+  /**
+   * One artifact's bytes, bounded, with containment re-checked HERE.
+   *
+   * `harvest/outbox.ts` already validated these files when it scanned them, and
+   * it did so holding descriptors open precisely because a path validated and
+   * then re-opened is a different file from a path validated and held. This read
+   * happens after that scan has closed, so the guarantee does not carry, and the
+   * check is made again rather than assumed: the path came out of a document,
+   * and the directory it names is one the WORKER owns.
+   *
+   * Three refusals, each closing a way the bytes could be someone else's:
+   * outside the worker's own outbox, a symlink, or not a regular file. A FIFO is
+   * the one that matters most — `open` on it blocks forever, which would wedge
+   * the actor exactly the way the unbounded join would have, and `harvest`'s own
+   * header names it as the reason that module opens with `O_NONBLOCK`.
+   *
+   * A refusal is a VALUE, never a throw: an artifact that cannot be read costs
+   * its own contents and is named in the brief, and must not cost the lens or
+   * the fan-out.
+   */
+  async readArtifact(run, worker, hostPath, maxBytes) {
+    const m = await loadEffectModules();
+    const root = m.paths.workerOutboxDir(run.root, worker);
+    if (!m.paths.isPathUnder(hostPath, root)) {
+      return { text: "", unreadable: `it is not inside ${worker}'s outbox` };
+    }
+    let handle: Awaited<ReturnType<typeof import("node:fs/promises").open>> | null = null;
+    try {
+      const st = await lstat(hostPath);
+      if (st.isSymbolicLink()) return { text: "", unreadable: "it is a symlink" };
+      if (!st.isFile()) return { text: "", unreadable: "it is not a regular file" };
+      // O_NONBLOCK so a FIFO answers instead of blocking the actor forever.
+      handle = await open(hostPath, constants.O_RDONLY | constants.O_NONBLOCK);
+      const buf = Buffer.alloc(maxBytes);
+      const { bytesRead } = await handle.read(buf, 0, maxBytes, 0);
+      return { text: buf.subarray(0, bytesRead).toString("utf8"), unreadable: null };
+    } catch (err) {
+      return { text: "", unreadable: err instanceof Error ? err.message : String(err) };
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
   },
   async writeReply(run, collator, childTaskId, reply) {
     const m = await loadEffectModules();

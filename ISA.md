@@ -2255,20 +2255,38 @@ the root-cause classification; this table is the index.
   second only by asking what CROSSES a boundary, field by field, and the tell is a schema with a
   digest where a body should be — a digest is what you carry when the thing itself is somewhere
   the reader can reach, and here it is not.
-  **criterion now, and it is a MITIGATION rather than a fix.** `roles/reviewer.md` instructs the
-  reviewer to put its whole review in `notes`; `roles/collator.md` instructs the collator to
-  repeat that in every brief. Two prompts on purpose, because nothing reddens when a review is
-  unreadable, and both are instructions to a model rather than guarantees. **The label is itself
-  asserted** (RV4) so the workaround cannot quietly become the design. The real fix is a change to
-  the actor's reply payload and is not this phase: **A** — inline each artifact's text into the
-  reply under a byte cap — or **B** — a contents channel of its own. `src/run/collation.ts`'s
-  header recommends **A** and says why: B reverses D6, which rejected exactly a directory the
-  collator enumerates; A needs no new mount, so it costs nothing in `assertNoRunDirMount`, the
-  verbgate's integrity loop or the mount table; `replies.ts` already reserves the payload decision
-  for the actor, so A fills a hole rather than opening one; and A's byte cap is a decision that
-  module already records as owed. A's cost is stated with it — the reply grows by every artifact,
-  so A is only correct WITH the cap, and a truncation has to arrive in the collation brief as a
-  named missing thing the way §6.6 already names a missing lens.
+  **criterion now — TAKE A SHIPPED, and the mitigation was kept beside it.** `relay.ts`'s
+  `harvest` inlines every artifact's contents into the reply as `inlined_artifacts[]`, beside the
+  digest that names it, under two caps the actor owns: `MAX_REPLY_ARTIFACT_BYTES` (64 KiB, twice
+  `MAX_DISPATCH_TEXT` — a review may say more than the brief that asked for it, and a quarter of
+  the reply budget so four artifacts always fit whole) and `MAX_REPLY_INLINE_BYTES` (256 KiB,
+  `MAX_DISPATCH_POLICY_BYTES`'s number, because this is the return leg of that same exchange).
+  A over B for the reasons already recorded: B reverses D6, which rejected exactly a directory the
+  collator enumerates; A needs no new mount, so nothing changed in `assertNoRunDirMount`, the
+  verbgate's integrity loop or the mount table; `replies.ts` reserved the payload decision for the
+  actor, so A filled a hole rather than opening one; and A's cap answered a question that module
+  already recorded as owed.
+  **A's cost is paid rather than hidden, and that is the load-bearing half.** A cap means
+  truncation, and a truncated review is worse than an absent one because it reads as a complete
+  review that found less — there is no gap in it to notice. So a cut reaches the collator as a
+  NAMED thing, `TRUNCATED: <aspect>'s artifact <path> is N bytes and only the first M reached
+  you`, the way §6.6 names a missing lens; an artifact that could not be read at all is named
+  separately as `UNREADABLE`, because "arrived short" and "did not arrive" are different facts and
+  one count over both would mean neither. The budget is split by **max-min fair allocation**, not
+  first-come-first-served: small artifacts are satisfied in full and large ones divide the
+  remainder, so which half of a review survives contention cannot depend on the order the
+  filesystem enumerated the files — the defect class this branch spent its time removing, which
+  the obvious greedy walk would have reintroduced through the fix for a different one.
+  **The two prompts stay** — `roles/reviewer.md` and `roles/collator.md` — no longer as the only
+  thing holding the console up but as the second defence for a failure that shows no red, and
+  because `notes` is the one channel with no cap on it. The probes that asserted the workaround
+  LABEL were rewritten rather than kept green: they now assert the cap, its consequence, and that
+  the design note records the gap as closed. A test still demanding the document call the plane
+  broken would have forced the docs to describe a defect the code no longer has.
+  **learned (second time):** closing a silent-channel defect is two changes, not one. The channel,
+  and the naming of what the channel now drops — because a bound without a named overflow converts
+  a loud absence into a quiet incompleteness, which is strictly harder to detect than the bug it
+  replaced.
 
 - **TENSION, recorded rather than resolved: §6.8's required `file:line` has no room for a
   finding that is about the whole design.** `CollationFindingSchema` makes `file` and `line`

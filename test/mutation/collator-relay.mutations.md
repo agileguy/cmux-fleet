@@ -27,6 +27,10 @@ the reds. Both halves are here.
 
 | # | Mutation | Catches |
 |---|---|---|
+| I1 | Artifact contents not attached to the reply | The reply carries a digest of a file the collator cannot open — the original reply-plane gap, restored. |
+| I2–I3 | Per-artifact cap ignored / per-reply total ignored | A 10 MB log makes a reply no model can read. |
+| I4–I5 | First-come-first-served allocation / sorted descending | Which half of a review survives contention decided by `readdir` order (I4), or 300 bytes of budget wasted and the largest document losing them (I5). |
+| I6–I9 | Cut not marked / brief stops naming cuts / brief names them unconditionally / unreadable folded into truncated | A truncated review reading as a complete one — worse than an absent review, because there is no gap in it to notice. I8 is the negative half: a warning on every brief is one a reader learns to skip. |
 | B1 | Seat's request entry chosen POSITIONALLY (`requests[i]`) rather than by worker | A collator ordering `[lang, ctx, arch]` delivers the **lang brief to `rev-arch-1`** under id `T-arch`. Ids, aspects and counts all stay correct. D11's influence-by-order claim. |
 | B3 | Run candidates no longer newest-first | Ambiguity refusals report the least likely run first. |
 | B4 | A dead run is a candidate again | The host-wide scan returns; a crashed console's corpse holds the seat. |
@@ -67,6 +71,7 @@ Declared, not counted. These are real gaps.
 | # | Mutation | Why nothing reaches it |
 |---|---|---|
 | S6 | `deliveryPlane` reports a non-adopted tui pane as `staged` | `productionRelayEffects.deliveryPlane` is never called by a unit test — the seam is injected. Covered only by the end-to-end harness. |
+| I10 | An artifact outside the worker's outbox is read anyway | `productionRelayEffects.readArtifact` is injected too, so the containment re-check, the symlink refusal and the `O_NONBLOCK` FIFO guard are asserted by construction rather than by mutation. This is the same class as S6 and the same fix: an integration-shaped test over a real run tree. |
 | B6 | The collator's run taken from `PIFLEET_RELAY_RUNS` instead of its own run | No test pins that a pin for the sender is ignored. |
 | B8 | The `collation_failed` reason never appended to the ledger | `relayPass`'s `ledger` is optional and the unit fixtures pass none, so the append is unreachable from `test/unit`. |
 
@@ -74,6 +79,24 @@ The honest summary: the ledger append (D3's durability half) and the production
 `deliveryPlane` and pin-precedence branches are asserted by construction and by
 the harness, not by mutation. Closing them means a `relayPass` fixture with a
 `LedgerWriter` over a temp run dir, which is an integration-shaped test.
+
+## Two fixtures the battery caught in the round that added them
+
+Worth recording because both looked correct and neither was:
+
+- **I5** — the starvation fixture was `[10, 100_000]`, where the equal share
+  exceeds the per-artifact cap either way, so ascending and descending give the
+  same answer and sorting DESCENDING survived. Max-min fairness only differs
+  from its reverse when small claims are numerous enough that satisfying them
+  first RELEASES budget. Rebuilt as `[10, 10, 10, 900]` against a total of 440.
+- **I8** — the "a whole review produces no truncation line" test asserted the
+  absence of the per-artifact lines but not of the GUIDANCE line, so an
+  unconditional section passed it while telling every collator its documents
+  might be partial.
+
+Both are the same shape as the degenerate fixtures this table already records:
+an assertion that cannot distinguish the implementation from its plausible
+wrong twin.
 
 ## The end-to-end harness
 

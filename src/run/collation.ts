@@ -66,66 +66,52 @@
  * containment, disagree by a corner case, and the document is refused by the
  * half with the worse test.
  *
- * ## THE GAP THIS CONTRACT CANNOT CLOSE — the reply plane starves it
+ * ## THE GAP THIS CONTRACT COULD NOT CLOSE — CLOSED, and how to tell
  *
  * **Read this before concluding that a thin collation is a bad collator.** The
- * schema below can insist a finding carries a location and a reader. It cannot
- * make the reviewer's findings reach the collator at all, and today they very
- * nearly do not.
+ * schema below can insist a finding carries a location and a reader. It could
+ * not make the reviewer's findings reach the collator at all, and for a while
+ * they very nearly did not.
  *
- * The measurement, not the suspicion. `relay.ts`'s `harvest` publishes the whole
+ * The measurement that found it. `relay.ts`'s `harvest` published the whole
  * `TaskHarvest` bundle as the reply; that bundle's artifact list is
  * `HarvestedArtifactSchema`, which is `{path, bytes, sha256}` — **no contents**.
  * The reviewer's own `/outbox` is worker-scoped (`render.ts`,
- * `-v <run>/outbox/<worker>:/outbox`), so the collator cannot open it either. A
- * reviewer that files its review at `/outbox/<task-id>/files/review.md` and
- * writes a two-line `summary` beside it has therefore written a document
- * **nothing in this console can read**, and every status stays green while the
- * findings evaporate. That is the same silent-success shape the old
- * `roles/collator.md` had, one document over.
+ * `-v <run>/outbox/<worker>:/outbox`), so the collator could not open it either.
+ * A reviewer that filed its review at `/outbox/<task-id>/files/review.md` and
+ * wrote a two-line `summary` beside it had written a document **nothing in this
+ * console could read**, with every status green while the findings evaporated.
+ * The tell was a schema with a DIGEST where a body should be: a digest is what
+ * you carry when the thing itself is somewhere the reader can reach.
  *
- * The only channel that actually carries prose to the collator is the reviewer's
- * result envelope — `summary`, `notes`, `blockers` — and
- * `skills/pifleet-worker/SKILL.md` tells every worker to *"keep the result
- * envelope itself small"*.
+ * **Take A shipped.** `relay.ts`'s `harvest` now inlines each artifact's
+ * contents into the reply beside the digest that names it —
+ * `reply.inlined_artifacts[]` — under two caps it owns:
+ * `MAX_REPLY_ARTIFACT_BYTES` (64 KiB) and `MAX_REPLY_INLINE_BYTES` (256 KiB,
+ * `MAX_DISPATCH_POLICY_BYTES`'s number, because this is the return leg of that
+ * same exchange). No new mount, so nothing changed in `assertNoRunDirMount`, the
+ * verbgate's policy-integrity loop, or the §5.5 mount table — which is the whole
+ * argument for A over B, given D6 had already rejected B's shape (a directory
+ * the collator enumerates) on the grounds that a listing re-introduces the
+ * discoverability the outbox contract denies in the other direction.
  *
- * **What is in place is a MITIGATION and must not be read as a fix.**
- * `roles/reviewer.md` instructs the reviewer to put its whole review in `notes`,
- * and `roles/collator.md` instructs the collator to repeat that instruction in
- * every brief it writes. Two prompts, deliberately, because the failure is
- * invisible: nothing goes red when a review is unreadable. Both are instructions
- * to a model, and neither is a guarantee.
+ * **The cap's cost is paid, not hidden.** A cap means truncation, and a
+ * truncated review is worse than an absent one because it reads as a complete
+ * review that found less — there is no gap in it to notice. So a cut arrives in
+ * the collation brief as a NAMED thing, `TRUNCATED: <aspect>'s artifact <path>
+ * is N bytes and only the first M reached you`, exactly the way §6.6 names a
+ * missing lens, and an artifact that could not be read at all is named
+ * separately as `UNREADABLE` because "arrived short" and "did not arrive" are
+ * different facts. The budget is split by max-min fair allocation rather than
+ * first-come-first-served, so which review survives contention cannot depend on
+ * the order the filesystem enumerated the files.
  *
- * ## The two real fixes, and which one to take
- *
- * Both are changes to the ACTOR (§6.5) and to the reply payload, neither of which
- * is decided yet — `replies.ts`'s own header records that the reply's schema
- * "belongs to the actor" and that §9 Q4 leaves the actor's home BLOCKING.
- *
- * - **A — inline the artifact contents into the reply.** The actor already reads
- *   the outbox to harvest, and `writeReply` takes `unknown`, so this is a payload
- *   change and nothing else: attach each `artifacts[]` entry's text under a byte
- *   cap, beside the digest that already names it.
- * - **B — give the reply a contents channel of its own**, a second mount or a
- *   `/replies/<child-task-id>/` directory the collator lists.
- *
- * **Take A.** Four reasons, in descending order of force. D6 rejected exactly B's
- * shape — a directory the collator enumerates — on the argument that a listing
- * re-introduces the discoverability the outbox contract denies in the other
- * direction, and B would reverse that decision to solve a payload problem. A
- * needs no new mount, so it costs nothing in `assertNoRunDirMount`, nothing in
- * `docker/verbgate`'s policy-integrity loop, and nothing in the mount table; B
- * costs a line in each. `replies.ts` already reserves the payload decision for
- * the actor, so A fills a hole the module left open rather than opening a new
- * one. And the byte cap A needs is a decision that module already records as
- * owed — *"whether the drop needs a byte cap the way `/policy/dispatch` does"* —
- * so A closes two open questions with one number instead of adding a third.
- *
- * **A's cost, stated rather than buried:** the reply grows by the size of every
- * artifact, so a reviewer that writes a 10 MB log makes a reply no model can
- * read. A is only correct WITH the cap, and a cap means truncation — which has
- * to arrive in the collation brief as a named missing thing, the way §6.6
- * already names a missing lens, rather than as prose that quietly stops.
+ * **The prompt-level mitigations STAY, and are no longer the only thing
+ * holding this up.** `roles/reviewer.md` still asks for the review in `notes`
+ * and `roles/collator.md` still has the collator repeat it. Belt and braces is
+ * right for a failure whose whole character is that nothing goes red: the
+ * channel is fixed, and a reviewer that writes into `notes` anyway loses
+ * nothing.
  *
  * ## The finding COUNT is authored AND derived, and that is the point
  *
@@ -141,8 +127,16 @@
  */
 import { z } from "zod";
 
-import { MAX_ITEMS, SESSION_ID_RE, type Verdict, workerId } from "../contracts.ts";
-import { collationTaskId, isCollationTaskId } from "./task-ids.ts";
+import { MAX_ITEMS, SESSION_ID_RE, type Verdict, rank, workerId } from "../contracts.ts";
+import {
+  type AspectSeat,
+  COLLATION_ASPECT,
+  MAX_RELAY_TASK_ID_CHARS,
+  REVIEW_CONSOLE_ASPECTS,
+  collationTaskId,
+  isCollationTaskId,
+  spellable,
+} from "./task-ids.ts";
 
 /** The wire tag, so a reader can refuse a shape it does not know. */
 export const COLLATION_SCHEMA = "pifleet.collation/v1";
@@ -166,6 +160,19 @@ export const COLLATION_SCHEMA = "pifleet.collation/v1";
  * `TICKET_OPS_ARTIFACT_NAME` already sits. One convention, not two.
  */
 export const COLLATION_ARTIFACT_NAME = "collation.json";
+
+/**
+ * The human-readable half, beside the structural one.
+ *
+ * A CONSTANT for `COLLATION_ARTIFACT_NAME`'s reason and one more that only
+ * applies to this file: `roles/collator.md` and `roles/reviewer.md` both name
+ * this path, and the probe that grades their paths builds its allowlist FROM
+ * THE CODE. A name that exists only in prose cannot be checked by construction
+ * — only against a list someone typed twice, which is the shape of guard that
+ * goes stale silently. Spelling it here is what lets the documents' claim about
+ * it be verified rather than trusted.
+ */
+export const COLLATION_REPORT_NAME = "review.md";
 
 /**
  * The longest a `statement` may be, in UTF-16 code units.
@@ -237,6 +244,17 @@ export function collationArtifactPath(taskId: string): string {
   return `/outbox/${taskId}/files/${COLLATION_ARTIFACT_NAME}`;
 }
 
+/** `/outbox/<task-id>/files/review.md` — the prose half's container path. */
+export function collationReportPath(taskId: string): string {
+  if (!spellable(taskId)) {
+    throw new Error(
+      `task id ${JSON.stringify(taskId)} cannot name a path segment, so no report path was ` +
+        `built from it`,
+    );
+  }
+  return `/outbox/${taskId}/files/${COLLATION_REPORT_NAME}`;
+}
+
 /**
  * Written as an escape rather than as a literal, so the character survives
  * copy-paste, review and every tool between here and the repository. A literal
@@ -244,11 +262,6 @@ export function collationArtifactPath(taskId: string): string {
  * character whose whole job is to be refused.
  */
 const NUL = String.fromCharCode(0);
-
-/** The grammar every id here is held to before it can become a path segment. */
-function spellable(id: string): boolean {
-  return id.length > 0 && id.length <= 64 && SESSION_ID_RE.test(id);
-}
 
 /**
  * Refused, and declared rather than left to `.strict()` so the refusal can say
@@ -261,7 +274,11 @@ const notHere = (message: string) => z.never({ error: message }).optional();
 const idField = (label: string) =>
   z
     .string()
-    .max(64, { error: `${label} is longer than 64 characters — it names a path segment` })
+    .max(MAX_RELAY_TASK_ID_CHARS, {
+      error:
+        `${label} is longer than ${MAX_RELAY_TASK_ID_CHARS} characters — it names a path ` +
+        `segment`,
+    })
     .regex(SESSION_ID_RE, {
       error:
         `${label} is not a task id. It must be letters, digits, ".", "_" or "-", beginning and ` +
@@ -603,12 +620,54 @@ export type Collation = z.infer<typeof CollationSchema>;
  * and `reason` is the explanation, so a caller telling two refusals apart is
  * pinning a rule rather than a sentence.
  *
- * `task_id_mismatch` is separate from `schema` because the two are different
- * facts about different people. A schema failure is a malformed document; an id
- * mismatch is a WELL-FORMED collation filed against the wrong review, and the
- * reason has to name both ids for anyone to act on it.
+ * The three id/roster codes are separate from `schema` and from each other
+ * because they are different facts about different people, and only one of them
+ * is visible from inside the document:
+ *
+ * - `derived_id_mismatch` — the document contradicts ITSELF: `task_id` is not the
+ *   collation id its own `parent_task_id` derives. A collator bug.
+ * - `filed_under_wrong_task` — the document is internally CONSISTENT and is in the
+ *   wrong outbox. Only the caller's structural `taskId` can see this, and it is
+ *   the misfiling that breaks D5's link: a document claiming to be `T-9-collate`
+ *   while sitting in `T-1-collate`'s outbox passes every intra-document test that
+ *   could ever be written.
+ * - `lens_table_wrong` — the declared readers are not this console's readers, in
+ *   either direction. §6.8 rule 2's denominator, checked against config.
  */
-export type CollationRefusal = "too_large" | "not_json" | "schema" | "task_id_mismatch";
+export type CollationRefusal =
+  | "too_large"
+  | "not_json"
+  | "schema"
+  | "derived_id_mismatch"
+  | "filed_under_wrong_task"
+  | "lens_table_wrong";
+
+/**
+ * What the HOST knows about the artifact it is holding, which the document must
+ * not be able to contradict.
+ *
+ * **This is `DispatchRequestContext`'s shape and its argument, on the return half
+ * of the same exchange.** That type carries `sender` and `taskId` "here rather
+ * than in the document because the document must never be able to say who wrote
+ * it", and `dispatch-request.ts` binds the declared `parent_task_id` to the
+ * directory the file was found in. A collation had no such binding: every id
+ * check was intra-document, and a document cannot be its own witness about which
+ * review it belongs to.
+ */
+export interface CollationContext {
+  /**
+   * The task whose outbox held the artifact. **Structural, never a claim** — the
+   * grader knows it because it walked there.
+   */
+  taskId: string;
+  /**
+   * The console's seats. **Optional, defaulting to `REVIEW_CONSOLE_ASPECTS`**, for
+   * `resolveAspects`' reason: a required argument with exactly one right answer
+   * is an invitation to compute it, and the plausible computation — derive the
+   * seats from the document — is the capability this check exists to deny.
+   */
+  aspects?: readonly AspectSeat[];
+}
 
 /**
  * The three outcomes, shaped like `DispatchRequestRead` and for its reasons.
@@ -639,11 +698,18 @@ function firstIssue(err: z.ZodError): string {
  * judges what it found, and passing `null` rather than requiring the caller to
  * construct a `{kind: "missing"}` keeps one entry point for every case.
  *
+ * **`ctx` is REQUIRED and is not a convenience.** Every id check in the first
+ * version of this function was intra-document, so a collation declaring
+ * `T-9-collate`/`T-9` while sitting in `T-1-collate`'s outbox was internally
+ * consistent, parsed, and would have been published as T-1's collation record.
+ * An optional context would have left every existing caller holding the hole and
+ * called it backward compatibility.
+ *
  * **It never throws.** The grader runs over worker-authored files in a poll, and
  * a reader that throws on a hostile document is a reader that takes the grader
  * down with it (ISC-216's shape, one directory over).
  */
-export function readCollation(bytes: string | null): CollationRead {
+export function readCollation(bytes: string | null, ctx: CollationContext): CollationRead {
   if (bytes === null) return { kind: "missing" };
   /*
    * Measured in BYTES rather than code units, because the cap is about what the
@@ -683,11 +749,31 @@ export function readCollation(bytes: string | null): CollationRead {
    * intra-document — both ids are in the file — so it needs nothing from the
    * caller and cannot be forgotten by one.
    */
+  /*
+   * STRUCTURAL FIRST, and the ordering is the point rather than tidiness.
+   * `ctx.taskId` is where the grader WALKED; `collation.task_id` is what the
+   * document CLAIMS. Checking the document against itself first would report a
+   * self-consistency success on a document that is about another review
+   * entirely, so the world wins and is consulted first — which also means the
+   * reason an operator reads names the actual fault.
+   */
+  if (collation.task_id !== ctx.taskId) {
+    return {
+      kind: "refused",
+      code: "filed_under_wrong_task",
+      reason:
+        `the collation claims task_id ${JSON.stringify(collation.task_id)} and was found in ` +
+        `${JSON.stringify(ctx.taskId)}'s outbox. A document cannot be its own witness about ` +
+        `which review it belongs to: this one is internally consistent and is about a ` +
+        `different task, which is the misfiling that breaks the only link D5 leaves between a ` +
+        `review request and its collation.`,
+    };
+  }
   const expected = collationTaskId(collation.parent_task_id);
   if (collation.task_id !== expected) {
     return {
       kind: "refused",
-      code: "task_id_mismatch",
+      code: "derived_id_mismatch",
       reason:
         `the collation claims task_id ${JSON.stringify(collation.task_id)} against parent ` +
         `${JSON.stringify(collation.parent_task_id)}, whose collation is ` +
@@ -696,7 +782,75 @@ export function readCollation(bytes: string | null): CollationRead {
         `filed under the wrong one breaks the only link D5 leaves.`,
     };
   }
+  /*
+   * THE DENOMINATOR, against config — §6.8 rule 2, which the schema alone cannot
+   * enforce because the roster is not in the document.
+   *
+   * The hole this closes is the exact mirror of one the schema DOES close, and
+   * the pair is why leaving it open was wrong rather than merely incomplete.
+   * `superRefine` refuses a finding credited to a lens marked `reported: false`,
+   * on the argument that it "is how a two-lens review records 3/3". **Deleting
+   * the row achieves the identical reading and was permitted**: a collator that
+   * omits the lens which did not report ships `{total: 2, reported: 2,
+   * missing: []}` — a clean 2/2 over a three-lens console — and one row was
+   * legal, so 1/1 was reachable. Inflating the numerator was refused while
+   * shrinking the denominator was not.
+   */
+  const seats = ctx.aspects ?? REVIEW_CONSOLE_ASPECTS;
+  const wrong = lensTableProblem(collation, seats);
+  if (wrong !== null) return { kind: "refused", code: "lens_table_wrong", reason: wrong };
+
   return { kind: "ok", collation };
+}
+
+/**
+ * Why the declared lens table is not this console's, or `null` when it is.
+ *
+ * Checked as a SET EQUALITY in both directions rather than as a subset. A missing
+ * row is the fabrication above; an extra row is a reader that does not exist,
+ * padding the denominator so a 1/3 reads as diligence. The aspect is checked
+ * against its seat's too, because the aspect is the word the record uses to name
+ * a lens that is missing, and a renamed row reports the wrong lens absent.
+ *
+ * Separate from `readCollation` so the rule can be read and mutated on its own,
+ * and each reason names the specific worker: the remedy differs by direction — a
+ * missing row is copied out of the collation brief, an extra one is deleted.
+ */
+function lensTableProblem(collation: Collation, seats: readonly AspectSeat[]): string | null {
+  const expected = new Map(seats.map((s) => [s.worker, s.aspect]));
+  const declared = new Map(collation.lenses.map((l) => [l.worker, l.aspect]));
+
+  for (const [worker, aspect] of expected) {
+    const got = declared.get(worker);
+    if (got === undefined) {
+      return (
+        `the lens table omits "${worker}" (${aspect}), which is a seat on this console. The ` +
+        `table is §6.8's DENOMINATOR, so dropping a row that did not report turns a ` +
+        `${declared.size}/${expected.size} review into a clean ${declared.size}/${declared.size} ` +
+        `— the same 3/3 fabrication the attribution rules refuse, reached by deletion instead ` +
+        `of by credit. A lens that produced nothing belongs in the table with ` +
+        `"reported": false and the reason from your brief.`
+      );
+    }
+    if (got !== aspect) {
+      return (
+        `the lens table gives "${worker}" the aspect ${JSON.stringify(got)} and its seat is ` +
+        `${JSON.stringify(aspect)}. Aspects are assigned by config (D11), and the aspect is the ` +
+        `word the record uses to name a missing lens — so a renamed one reports the wrong lens ` +
+        `absent.`
+      );
+    }
+  }
+  for (const worker of declared.keys()) {
+    if (!expected.has(worker)) {
+      return (
+        `the lens table names "${worker}", which is not a seat on this console. An extra row ` +
+        `pads the denominator, so a finding one reader raised is recorded as 1/${declared.size} ` +
+        `where it is 1/${expected.size}.`
+      );
+    }
+  }
+  return null;
 }
 
 /** How many lenses spoke, and which did not. */

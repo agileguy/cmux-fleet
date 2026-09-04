@@ -60,6 +60,87 @@ interface M {
 }
 
 const MUTATIONS: M[] = [
+  // ── Reply plane: inlining, the caps, and the naming of what they cut. ────
+  {
+    id: "I1",
+    what: "INLINE: the artifact contents are not attached (the reply is a digest again)",
+    file: CORE,
+    find: "        reply: { ...bundle, inlined_artifacts: inlined },",
+    replace: "        reply: bundle,",
+    expect: "red",
+  },
+  {
+    id: "I2",
+    what: "CAP: the per-artifact cap is ignored, one artifact takes the whole budget",
+    file: CORE,
+    find: "  const want = sizes.map((n) => Math.max(0, Math.min(n, perArtifact)));",
+    replace: "  const want = sizes.map((n) => Math.max(0, n));",
+    expect: "red",
+  },
+  {
+    id: "I3",
+    what: "CAP: the per-reply total is ignored",
+    file: CORE,
+    find: "    const share = Math.floor(remaining / (order.length - seen));",
+    replace: "    const share = Number.MAX_SAFE_INTEGER;",
+    expect: "red",
+  },
+  {
+    id: "I4",
+    what: "FAIRNESS: first-come-first-served — enumeration order decides who survives",
+    file: CORE,
+    find: "  const order = want\n    .map((w, i) => ({ w, i }))\n    .sort((a, b) => (a.w === b.w ? a.i - b.i : a.w - b.w));",
+    replace: "  const order = want.map((w, i) => ({ w, i }));",
+    expect: "red",
+  },
+  {
+    id: "I5",
+    what: "FAIRNESS: sorted by want DESCENDING — large artifacts starve small ones",
+    file: CORE,
+    find: "    .sort((a, b) => (a.w === b.w ? a.i - b.i : a.w - b.w));",
+    replace: "    .sort((a, b) => (a.w === b.w ? a.i - b.i : b.w - a.w));",
+    expect: "red",
+  },
+  {
+    id: "I6",
+    what: "TRUNCATION: the cut is not marked on the artifact",
+    file: CORE,
+    find: "          truncated: read.unreadable === null && included < a.bytes,",
+    replace: "          truncated: false,",
+    expect: "red",
+  },
+  {
+    id: "I7",
+    what: "TRUNCATION: the brief stops naming cut artifacts",
+    file: CORE,
+    find: "  if (cut.length > 0 || unreadable.length > 0) {",
+    replace: "  if (false) {",
+    expect: "red",
+  },
+  {
+    id: "I8",
+    what: "TRUNCATION: every brief carries a truncation warning, so the naming means nothing",
+    file: CORE,
+    find: "  if (cut.length > 0 || unreadable.length > 0) {",
+    replace: "  if (true) {",
+    expect: "red",
+  },
+  {
+    id: "I9",
+    what: "TRUNCATION: unreadable is folded into truncated, so the counts stop meaning anything",
+    file: CORE,
+    find: "    c.inlined.filter((a) => a.truncated).map((a) => ({ aspect: c.aspect, a })),",
+    replace: "    c.inlined.filter((a) => a.truncated || a.unreadable !== null).map((a) => ({ aspect: c.aspect, a })),",
+    expect: "red",
+  },
+  {
+    id: "I10",
+    what: "CONTAINMENT: an artifact outside the worker's outbox is read anyway",
+    file: CORE,
+    find: "    if (!m.paths.isPathUnder(hostPath, root)) {",
+    replace: "    if (false) {",
+    expect: "green",
+  },
   // ── T1: brief-to-lens binding. The mutation the reviewer demonstrated. ───
   {
     id: "B1",

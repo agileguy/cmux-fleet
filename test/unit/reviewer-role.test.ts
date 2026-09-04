@@ -74,9 +74,24 @@ describe("the whole review reaches the collator, and both ends say so", () => {
     ).toBe(true);
   });
 
-  test("the reviewer is told WHY — the artifact's contents do not cross", () => {
+  /**
+   * **Rewritten when the plane was fixed, and the old assertion deleted rather
+   * than kept green.** It required the document to say the contents "do not
+   * cross", which stopped being true: `relay.ts` inlines each artifact under
+   * `MAX_REPLY_ARTIFACT_BYTES` / `MAX_REPLY_INLINE_BYTES`. A probe that still
+   * demanded that sentence would have forced the document to keep describing a
+   * defect the code no longer has — coverage in appearance, misinformation in
+   * fact.
+   *
+   * What must still be true is the part that did not change: there IS a bound,
+   * and the reviewer is told what it costs.
+   */
+  test("the reviewer is told the copy is CAPPED, and what happens past the cap", () => {
     const block = REVIEWER.slice(REVIEWER.indexOf("PUT YOUR WHOLE REVIEW"));
-    expect(block).toContain("not the contents");
+    expect(block).toContain("64 KiB");
+    expect(block).toContain("256 KiB");
+    // The consequence, not just the number.
+    expect(block).toContain("cut off");
     expect(block).toContain("/outbox/<task-id>/files/review.md");
   });
 
@@ -100,21 +115,34 @@ describe("the whole review reaches the collator, and both ends say so", () => {
    * mitigation that gets counted as a fix, and the next person to read the
    * reply plane concludes the gap was closed.
    */
-  test("the mitigation is labelled as a mitigation, not as the design", () => {
-    expect(REVIEWER).toContain("This is a workaround");
-    const src = readFileSync(`${ROOT}src/run/collation.ts`, "utf8");
-    expect(src).toContain("THE GAP THIS CONTRACT CANNOT CLOSE");
-    expect(src).toContain("must not be read as a fix");
+  /**
+   * The mitigation SURVIVES the fix, and the document must say why rather than
+   * reading as a leftover. Belt and braces is the deliberate posture for a
+   * failure whose whole character is that nothing goes red.
+   */
+  test("the notes instruction stays, and is justified rather than orphaned", () => {
+    expect(REVIEWER).toContain("This instruction stays anyway");
+    expect(REVIEWER).toContain("two defences rather than one");
   });
 
-  test("the design note names both candidate fixes and picks one", () => {
+  /**
+   * The design note now records a CLOSED gap. Asserting the closure — not just
+   * that a note exists — is what stops the code and the note drifting apart in
+   * the direction that matters: a doc still describing the defect after the fix
+   * sends the next reader to re-solve a solved problem.
+   */
+  test("the design note records the gap as closed, and how", () => {
     const src = readFileSync(`${ROOT}src/run/collation.ts`, "utf8");
-    const note = src.slice(src.indexOf("THE GAP THIS CONTRACT CANNOT CLOSE"));
-    expect(note).toContain("A — inline the artifact contents");
-    expect(note).toContain("B — give the reply a contents channel");
-    expect(note).toContain("Take A.");
-    // The cost of the recommendation, not just the recommendation.
-    expect(note).toContain("A's cost");
+    expect(src).toContain("THE GAP THIS CONTRACT COULD NOT CLOSE — CLOSED");
+    const note = src.slice(src.indexOf("THE GAP THIS CONTRACT COULD NOT CLOSE"));
+    // The decision, its shape, and the cost it carries.
+    expect(note).toContain("Take A shipped");
+    expect(note).toContain("inlined_artifacts");
+    expect(note).toContain("MAX_REPLY_ARTIFACT_BYTES");
+    expect(note).toContain("TRUNCATED");
+    // And that B was considered and why it lost — deleting that would leave the
+    // next reader to re-litigate a decision D6 already made.
+    expect(note).toContain("D6 had already rejected B's shape");
   });
 });
 

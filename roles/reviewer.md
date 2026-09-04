@@ -32,18 +32,23 @@ guess at is one it will get wrong or drop.
 **Not in a separate file. This is the instruction most likely to be ignored and the one
 whose failure is invisible.**
 
-On a review console your report is read by a collator in another container, and what reaches
-it is your result envelope plus a LIST of anything else you wrote — path, size and checksum,
-and **not the contents**. Your `/outbox` is yours alone; nothing else can open it. So a review
-you file at `/outbox/<task-id>/files/review.md` with a two-line `summary` beside it is a
-review the collator physically cannot read, and every status involved stays green while your
-findings evaporate. Put the findings, the reasoning and the locations in `notes`. Write the
-long-form file too if it helps a person later, but never *instead*.
+On a review console your report is read by a collator in another container. Your `/outbox` is
+yours alone and nothing else can open it, so the collator never sees your files directly —
+the host copies them across for you. It copies them **under a size cap**: 64 KiB per file and
+256 KiB in total. A file over that arrives cut off, and the collator is told which file was
+cut and by how much, so a long review does not silently become a short one.
 
-**This is a workaround, and it is written here so it is not mistaken for the design.** The
-right fix is in the reply plane, not in your discipline, and until it lands this paragraph is
-the only thing standing between the console and three unreadable reviews. If your brief also
-tells you to do this, that is deliberate: belt and braces, because the failure is silent.
+Put the findings, the reasoning and the locations in `notes`. Write the long-form file at
+`/outbox/<task-id>/files/review.md` too if it helps a person later — it will now reach the
+collator as well — but `notes` is what you can count on arriving whole, because only the
+copied files are capped.
+
+**Why both.** The reply plane used to carry only a path, a size and a checksum for your files,
+never their contents, and a review filed as `review.md` with a two-line `summary` beside it was
+a document nothing in the console could read — with every status green while the findings
+evaporated. That is fixed. This instruction stays anyway, because a failure that shows no red
+deserves two defences rather than one, and because `notes` is the only channel with no cap on
+it at all. If your brief also tells you this, that is deliberate.
 
 Report as the `pifleet-worker` skill describes, with `status: success` when the change is
 sound and `blocked` when you could not complete the review. Write the envelope last: one you

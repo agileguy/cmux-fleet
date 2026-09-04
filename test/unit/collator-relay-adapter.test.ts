@@ -72,8 +72,12 @@ import {
   consoleTransport,
   consoleRunResolution,
   makeConsoleFanOut,
+  MAX_REPLY_ARTIFACT_BYTES,
+  MAX_REPLY_INLINE_BYTES,
+  planInlineBudget,
   relayFanOut,
   resolveConsoleRuns,
+  type InlinedArtifact,
   type RelayEffects,
 } from "../../src/run/relay.ts";
 import { renderOutcome } from "../../src/cli/commands/relay.ts";
@@ -227,6 +231,11 @@ function effects(
     },
     async readTaskRecord() {
       return { verdict: "success" as Verdict };
+    },
+    /** No artifacts by default: inlining is opt-in per case, so a fixture that
+     * does not care about it cannot accidentally depend on it. */
+    async readArtifact() {
+      return { text: "", unreadable: null };
     },
     async harvestTask(_run, taskId) {
       rec.harvested.push(taskId);
@@ -613,15 +622,29 @@ describe("harvest", () => {
     });
   }
 
-  test("the reply is the whole harvest bundle, not just its verdict", async () => {
-    const bundle = { harvest: { verdict: "success" as Verdict }, facts: { n: 1 }, harvestStatus: "ok" };
+  test("the reply carries the whole harvest bundle AND the artifact contents", async () => {
+    const bundle = {
+      harvest: {
+        verdict: "success" as Verdict,
+        artifacts: [{ path: "/runs/r/outbox/rev-arch-1/T1-arch/files/review.md", bytes: 11 }],
+      },
+      facts: { n: 1 },
+      harvestStatus: "ok",
+    };
     const { fx } = effects({
       async harvestTask() {
         return bundle;
       },
+      async readArtifact() {
+        return { text: "the review.", unreadable: null };
+      },
     });
     const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
-    expect(got.reply).toEqual(bundle);
+    // Every field of the bundle survives — the digest, the facts, the status.
+    expect(got.reply).toMatchObject(bundle);
+    // And the thing a digest cannot carry.
+    const reply = got.reply as { inlined_artifacts: InlinedArtifact[] };
+    expect(reply.inlined_artifacts[0]?.text).toBe("the review.");
   });
 });
 
@@ -1566,5 +1589,243 @@ describe("what the operator is told, and what outlives the telling", () => {
     });
     expect(line).toContain("T1-collate");
     expect(line).toContain("3 children");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15. The reply carries the review, and says so when it does not.
+// ---------------------------------------------------------------------------
+
+/**
+ * **A digest is what you carry when the thing itself is somewhere the reader
+ * can reach.** `HarvestedArtifactSchema` is `{path, bytes, sha256}`, and the
+ * reviewer's `/outbox` is worker-scoped — so a review filed at
+ * `/outbox/<task>/files/review.md` was a document nothing in this console could
+ * open, while every status stayed green. The contents now travel.
+ */
+describe("inlining artifact contents", () => {
+  const ref = { worker: "rev-arch-1", taskId: "T1-arch" };
+
+  function withArtifacts(
+    sizes: readonly number[],
+    read?: RelayEffects["readArtifact"],
+  ): { fx: RelayEffects; paths: string[] } {
+    const paths = sizes.map((_, i) => `/runs/r/outbox/rev-arch-1/T1-arch/files/a${i}.md`);
+    const { fx } = effects({
+      async harvestTask() {
+        return {
+          harvest: {
+            verdict: "success" as Verdict,
+            artifacts: sizes.map((bytes, i) => ({ path: paths[i]!, bytes })),
+          },
+        };
+      },
+      readArtifact:
+        read ??
+        (async (_run, _worker, hostPath, maxBytes) => {
+          const i = paths.indexOf(hostPath);
+          return { text: "x".repeat(Math.min(sizes[i] ?? 0, maxBytes)), unreadable: null };
+        }),
+    });
+    return { fx, paths };
+  }
+
+  test("a small review arrives whole and is not marked truncated", async () => {
+    const { fx } = withArtifacts([120]);
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+    expect(got.inlined?.[0]?.included_bytes).toBe(120);
+    expect(got.inlined?.[0]?.truncated).toBe(false);
+  });
+
+  test("an oversized artifact is cut at the per-artifact cap and MARKED", async () => {
+    const { fx } = withArtifacts([MAX_REPLY_ARTIFACT_BYTES * 2]);
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+    expect(got.inlined?.[0]?.included_bytes).toBe(MAX_REPLY_ARTIFACT_BYTES);
+    expect(got.inlined?.[0]?.truncated).toBe(true);
+  });
+
+  test("an unreadable artifact is distinct from a truncated one", async () => {
+    const { fx } = withArtifacts([500], async () => ({
+      text: "",
+      unreadable: "it is a symlink",
+    }));
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+    expect(got.inlined?.[0]?.unreadable).toBe("it is a symlink");
+    // NOT truncated: nothing arrived at all, which is a different fact.
+    expect(got.inlined?.[0]?.truncated).toBe(false);
+    expect(got.inlined?.[0]?.included_bytes).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 16. Which review survives must not depend on enumeration order.
+// ---------------------------------------------------------------------------
+
+describe("planInlineBudget — fair, and order-independent", () => {
+  const total = 1000;
+  const per = 400;
+
+  test("everything fits when the budget is not contended", () => {
+    expect(planInlineBudget([100, 200], { perArtifact: per, total })).toEqual([100, 200]);
+  });
+
+  test("no artifact exceeds the per-artifact cap", () => {
+    const got = planInlineBudget([9999, 9999], { perArtifact: per, total });
+    expect(got).toEqual([400, 400]);
+  });
+
+  test("the total is never exceeded", () => {
+    const got = planInlineBudget([500, 500, 500, 500], { perArtifact: per, total });
+    expect(got.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(total);
+  });
+
+  /**
+   * **THE PROPERTY THE WHOLE ALLOCATOR EXISTS FOR.**
+   *
+   * First-come-first-served would give the first artifact everything it asked
+   * for and starve the rest — so which half of a review survived would depend on
+   * the order `readdir` happened to return. Reversing the input must change
+   * nothing but the order of the answers.
+   */
+  test("reversing the artifact order changes no artifact's allocation", () => {
+    const sizes = [50, 900, 120, 700];
+    const forward = planInlineBudget(sizes, { perArtifact: per, total });
+    const backward = planInlineBudget([...sizes].reverse(), { perArtifact: per, total });
+    expect([...backward].reverse()).toEqual(forward);
+  });
+
+  /**
+   * A big artifact must not consume the budget a small one needed. Max-min
+   * fairness: the small ones are satisfied in full, the large ones divide what
+   * is left — which is the opposite of what a greedy walk does.
+   */
+  /**
+   * **This fixture was rebuilt because the battery caught it.**
+   *
+   * It was `[10, 100_000]`, which cannot distinguish ascending from descending:
+   * at two artifacts the equal share (500) exceeds the per-artifact cap (400)
+   * either way, so both orders give the same answer and sorting DESCENDING
+   * survived. Max-min fairness only differs from its reverse when the small
+   * claims are numerous enough that satisfying them first RELEASES budget the
+   * large one can then use.
+   *
+   * Three tiny artifacts and one large one, with a total too small to satisfy
+   * everyone: ascending settles the three for 30 and hands the remaining 410 to
+   * the large one, which takes its cap of 400. Descending hands the large one
+   * only its equal share of 110 and then discovers the small ones needed 30
+   * between them — 300 bytes of review budget wasted, and the largest document
+   * is the one that loses them.
+   */
+  test("satisfying small artifacts first RELEASES budget to the large one", () => {
+    const got = planInlineBudget([10, 10, 10, 900], { perArtifact: per, total: 440 });
+    expect(got.slice(0, 3)).toEqual([10, 10, 10]);
+    // 400 (its cap), not 110 (an equal quarter of 440).
+    expect(got[3]).toBe(400);
+  });
+
+  test("equal sizes get equal shares, and ties are stable", () => {
+    expect(planInlineBudget([600, 600, 600], { perArtifact: per, total })).toEqual([333, 333, 334]);
+  });
+
+  test("no artifacts is not a special case", () => {
+    expect(planInlineBudget([], { perArtifact: per, total })).toEqual([]);
+  });
+
+  /** The shipped numbers, pinned so a change is deliberate. */
+  test("the caps are the reply plane's stated numbers", () => {
+    expect(MAX_REPLY_ARTIFACT_BYTES).toBe(64 * 1024);
+    expect(MAX_REPLY_INLINE_BYTES).toBe(256 * 1024);
+    // A quarter of the reply budget: four artifacts always fit at full size.
+    expect(MAX_REPLY_ARTIFACT_BYTES * 4).toBe(MAX_REPLY_INLINE_BYTES);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 17. A truncation reaches the collator as a NAMED missing thing.
+// ---------------------------------------------------------------------------
+
+/**
+ * **The half of Take A that makes the cap safe.**
+ *
+ * §6.6 names a missing lens because *"a collator that does not know it is
+ * missing a lens will write a confident three-lens conclusion from two"*. A
+ * truncated review is worse: there is no gap in it to notice, so it reads as a
+ * complete review that found less. A cap without this is a downgrade, not a fix.
+ */
+describe("truncation in the collation brief", () => {
+  async function briefFor(read: RelayEffects["readArtifact"], bytes: number): Promise<string> {
+    const path = "/runs/r/outbox/rev-arch-1/T1-arch/files/review.md";
+    const sent: Array<{ worker: string; brief: string }> = [];
+    const { fx } = effects({
+      async sendTask(_run, worker, d) {
+        sent.push({ worker, brief: d.brief });
+        return { accepted: true, via: "staged", reason: null, error: null, epoch: 1 };
+      },
+      async harvestTask(_run, taskId) {
+        return {
+          harvest: {
+            verdict: "success" as Verdict,
+            // Only the arch lens has an artifact, so the brief's lines are
+            // attributable to one aspect rather than to "some reviewer".
+            artifacts: taskId === "T1-arch" ? [{ path, bytes }] : [],
+          },
+        };
+      },
+      readArtifact: read,
+    });
+    await makeConsoleFanOut({
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
+      transport: (sender) => consoleTransport(sender, fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: request() });
+    return sent.find((x) => x.worker === "col-1")?.brief ?? "";
+  }
+
+  test("a cut artifact is named, with both byte counts", async () => {
+    const brief = await briefFor(
+      async (_r, _w, _p, max) => ({ text: "x".repeat(max), unreadable: null }),
+      MAX_REPLY_ARTIFACT_BYTES * 3,
+    );
+    expect(brief).toContain("TRUNCATED: arch's artifact");
+    expect(brief).toContain("review.md");
+    // Both numbers, so the collator can see HOW partial the document is.
+    expect(brief).toContain(String(MAX_REPLY_ARTIFACT_BYTES * 3));
+    expect(brief).toContain(String(MAX_REPLY_ARTIFACT_BYTES));
+    expect(brief).toContain("You are reading a PART of that document");
+  });
+
+  test("an unreadable artifact is named SEPARATELY from a truncated one", async () => {
+    const brief = await briefFor(async () => ({ text: "", unreadable: "it is a symlink" }), 900);
+    expect(brief).toContain("UNREADABLE: arch's artifact");
+    expect(brief).toContain("it is a symlink");
+    expect(brief).toContain("None of it reached you");
+    // Not conflated: nothing arrived, which is not the same as arriving short.
+    expect(brief).not.toContain("TRUNCATED:");
+  });
+
+  /**
+   * THE NEGATIVE HALF, and it is the one that makes the positives mean
+   * something. A brief that carried a truncation warning unconditionally would
+   * satisfy every assertion above and tell the collator nothing.
+   */
+  test("a whole review produces NO truncation line at all", async () => {
+    const brief = await briefFor(
+      async (_r, _w, _p, max) => ({ text: "x".repeat(Math.min(50, max)), unreadable: null }),
+      50,
+    );
+    expect(brief).not.toContain("TRUNCATED:");
+    expect(brief).not.toContain("UNREADABLE:");
+    expect(brief).not.toContain("You are reading a PART");
+    /**
+     * The GUIDANCE line too, and the battery is why.
+     *
+     * An unconditional section (`if (true)`) emits no per-artifact lines when
+     * nothing was cut — so every assertion above passed while the brief still
+     * told the collator its documents might be partial. A warning that appears
+     * on every brief is one a reader learns to skip, which is exactly how the
+     * named truncation stops being worth naming.
+     */
+    expect(brief).not.toContain("Do not present a conclusion drawn from a truncated");
+    // The brief is otherwise intact.
+    expect(brief).toContain("3 produced a report");
   });
 });
