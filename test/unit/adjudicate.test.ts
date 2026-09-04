@@ -152,6 +152,75 @@ const CASES: Case[] = [
     want: "failed",
     wantReason: "ISC-93",
   },
+  // The refusal has to name its own remedy. An operator reading "claims
+  // success with an empty diff" on a task that was NEVER going to change a
+  // file has no way from that sentence to the thing that would make it
+  // gradable, and the measured outcome was three re-runs of a task that had
+  // already passed.
+  {
+    name: "ISC-93's refusal names acceptance commands as the remedy",
+    facts: facts({ files_changed: [], commits: [], diff_bytes: 0, acceptance: [] }),
+    claimed: claim("success", { files_changed: [], commits: [] }),
+    want: "failed",
+    wantReason: "give it acceptance commands",
+  },
+  /*
+   * THE NO-DIFF TASK. An empty diff is the normal shape of a task whose
+   * product is information — run this suite, review this branch — and
+   * `contracts.ts`'s lattice docstring already said such a task "must not be
+   * downgraded". ISC-93 downgraded every one of them anyway.
+   *
+   * Measured: a tester ran rally-cli's suite to `1120 passed`, changed nothing
+   * because nothing needed changing, and was graded `failed` for fabricating.
+   *
+   * What makes this safe rather than a hole in ISC-93 is WHOSE evidence it is.
+   * `facts.acceptance` is the harvester's own re-run, in a fresh clone, in a
+   * container the worker never touched — the one input here a fabricating
+   * worker cannot author.
+   */
+  {
+    name: "an empty diff with harness-verified green acceptance is success, not fabrication",
+    facts: facts({
+      files_changed: [],
+      commits: [],
+      diff_bytes: 0,
+      acceptance: [run("passed", { cmd: "pytest -q" })],
+    }),
+    claimed: claim("success", { files_changed: [], commits: [] }),
+    want: "success",
+    wantReason: "task whose product is not a change",
+  },
+  // The control, and the reason the exemption is keyed on the harvester's
+  // result rather than on the diff being empty: an empty diff whose acceptance
+  // FAILED is the fabrication ISC-93 was written for, and must still fail.
+  {
+    name: "an empty diff whose acceptance failed is still failed",
+    facts: facts({
+      files_changed: [],
+      commits: [],
+      diff_bytes: 0,
+      acceptance: [run("failed", { cmd: "pytest -q" })],
+    }),
+    claimed: claim("success", { files_changed: [], commits: [] }),
+    want: "failed",
+    wantReason: "acceptance failed in the fresh clone",
+  },
+  // And the third arm: acceptance that TIMED OUT proves nothing either way, so
+  // the empty diff is unexplained and ISC-93 still applies. Without this the
+  // exemption could be written as "acceptance.verdict !== 'failed'" and pass
+  // every other case here.
+  {
+    name: "an empty diff whose acceptance was inconclusive is still failed",
+    facts: facts({
+      files_changed: [],
+      commits: [],
+      diff_bytes: 0,
+      acceptance: [run("timed_out", { cmd: "pytest -q" })],
+    }),
+    claimed: claim("success", { files_changed: [], commits: [] }),
+    want: "failed",
+    wantReason: "ISC-93",
+  },
   // ISC-92 — fails if the over-claim comparison is removed or compares the
   // envelope against itself rather than against the derived diff.
   {

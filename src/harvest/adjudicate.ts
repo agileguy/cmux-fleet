@@ -197,10 +197,51 @@ export function adjudicate(facts: DerivedFacts, claimed: ResultEnvelope | null):
       }
     }
 
-    // ISC-93 / SRD §7.2: "success" describing no work at all is `failed`.
+    /**
+     * ISC-93 / SRD §7.2: "success" describing no work at all is `failed`.
+     *
+     * UNLESS the harvester's own acceptance run says otherwise. An empty diff
+     * is not evidence of idleness — it is the NORMAL shape of a task whose
+     * deliverable is information rather than a change: run this suite, review
+     * this branch, find out whether X reproduces. `contracts.ts`'s lattice
+     * docstring already names the case ("a task with a clean diff and green
+     * acceptance commands must not be downgraded"); this check did not honour
+     * it, and graded every one of them `failed`.
+     *
+     * Measured 2026-09-04: a tester ran rally-cli's suite to
+     * `.venv/bin/pytest -q -> exit 0, 1120 passed`, reported success, changed
+     * nothing because nothing needed changing, and was graded `failed` for
+     * fabricating. The transcript corroborated the run completely.
+     *
+     * `acceptance.verdict === "success"` is not the worker's word for it.
+     * `facts.acceptance` holds the exit codes of the commands THE HARVESTER
+     * re-ran, in a fresh clone, in a container the worker never touched — the
+     * one piece of evidence in this function a fabricating worker cannot
+     * author. Where it exists and is green, it settles the question that the
+     * empty diff only raises.
+     *
+     * With no acceptance commands there is still nothing to weigh, and the
+     * verdict stays `failed` rather than softening to `unknown`: ISC-93 exists
+     * because a worker with no `bun` on PATH reported `bun test -> exit 0, 27
+     * pass`, and softening it would have let that through. What changes is the
+     * REASON, which now names the remedy — an information-shaped task is
+     * gradable exactly when it carries acceptance commands, and silently
+     * failing one whose operator did not know that is its own defect.
+     */
     if (claimed.status === "success" && emptyDiff) {
-      derived = "failed";
-      reasons.push("envelope claims success with an empty diff and no commits (ISC-93)");
+      if (acceptance.verdict === "success") {
+        reasons.push(
+          "empty diff, but the acceptance commands passed when the harvester re-ran them " +
+            "in a fresh clone: this is a task whose product is not a change (ISC-93 not applied)",
+        );
+      } else {
+        derived = "failed";
+        reasons.push(
+          "envelope claims success with an empty diff and no commits (ISC-93). If this task " +
+            "was not meant to change files, give it acceptance commands — the harvester " +
+            "re-runs those itself and they are what makes a no-diff task gradable",
+        );
+      }
     }
   }
 
