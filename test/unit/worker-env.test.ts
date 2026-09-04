@@ -127,6 +127,62 @@ describe("ISC-298: git's ownership guard is disarmed for /workspace", () => {
   });
 });
 
+describe("a package manager has somewhere writable to cache", () => {
+  /**
+   * The read-only root's second casualty, after git's ownership guard above.
+   *
+   * npm's default cache is `$HOME/.npm` and bun's is `$HOME/.bun`. `$HOME` is
+   * `/home/pi`, which lives on the read-only root (SRD §5.6), so an install in
+   * a fresh worktree fails before it fetches anything:
+   *
+   *   mkdir: cannot create directory '/home/pi/.npm': Read-only file system
+   *
+   * MEASURED on a tester worker asked to run this repository's own unit suite.
+   * The agent recovered by passing `--cache ./npm-cache`, which is why this is
+   * worth fixing rather than leaving: the workaround works, costs the worker a
+   * chunk of its turn, and drops an untracked directory INSIDE `/workspace`,
+   * where it lands in the diff the harvest grades.
+   *
+   * Asserted on the env plan, like every other var here — a container probe
+   * would need a Docker daemon and would prove the same string.
+   */
+  test("npm and bun caches point at the writable tmpfs", async () => {
+    const loaded = await load(baseDoc());
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "w1"), {});
+    // `/tmp` is the tmpfs `render.ts` mounts rw for every worker. Anywhere
+    // under `$HOME` is the bug this replaces, and `/workspace` is the
+    // workaround it replaces — that one is writable but ends up in the diff.
+    expect(plan.vars["npm_config_cache"]).toBe("/tmp/.npm");
+    expect(plan.vars["BUN_INSTALL_CACHE_DIR"]).toBe("/tmp/.bun-cache");
+    expect(plan.vars["XDG_CACHE_HOME"]).toBe("/tmp/.cache");
+  });
+
+  /**
+   * NOT gated on `isolation`, unlike the git block above, and the contrast is
+   * the point.
+   *
+   * That block configures a repository and correctly says nothing when there
+   * is none. This one states where `$HOME`-bound caches go, and `$HOME` is
+   * read-only whether or not a workspace is mounted — a role with
+   * `isolation: none` still runs tools that want a cache directory.
+   */
+  test("a worker with no workspace gets them too", async () => {
+    const loaded = await load(
+      baseDoc({
+        roles: { eng: {}, cloudy: { cloud_access: true }, obs: { isolation: "none" } },
+        workers: [
+          { id: "w1", role: "eng" },
+          { id: "wc", role: "cloudy" },
+          { id: "wo", role: "obs" },
+        ],
+      }),
+    );
+    const plan = buildWorkerEnv(loaded, resolveWorker(loaded, "wo"), {});
+    expect(plan.vars["GIT_CONFIG_COUNT"]).toBeUndefined();
+    expect(plan.vars["npm_config_cache"]).toBe("/tmp/.npm");
+  });
+});
+
 describe("the --env-file contract with docker/entrypoint.sh", () => {
   /**
    * The `PIFLEET_LLM_*` names the entrypoint reads — DERIVED FROM THE SCRIPT,

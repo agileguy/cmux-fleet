@@ -739,6 +739,39 @@ export function buildWorkerEnv(
   }
 
   /*
+   * WHERE A PACKAGE MANAGER MAY WRITE ITS CACHE — the same read-only-root
+   * problem as the block above, in the tool that hits it hardest.
+   *
+   * npm's default cache is `$HOME/.npm` and bun's is `$HOME/.bun`. `$HOME` is
+   * `/home/pi` on the read-only root (SRD §5.6), so the first thing either
+   * does on a fresh worktree is fail:
+   *
+   *   mkdir: cannot create directory '/home/pi/.npm': Read-only file system
+   *
+   * MEASURED on a tester worker asked to run this repository's own unit
+   * suite. It is not a fatal error — the agent improvised `npm install --cache
+   * ./npm-cache` and the install went through — and that is the argument for
+   * fixing it rather than leaving it. A worker that has to invent a workaround
+   * before it can start spends its turn on the harness instead of the task,
+   * and the workaround it invents lands INSIDE `/workspace`, where it becomes
+   * an untracked directory in the diff the harvest grades.
+   *
+   * `/tmp` because it is the writable tmpfs every worker already has
+   * (`config/render.ts` mounts it `rw,noexec,nosuid,size=256m`). `noexec` costs
+   * nothing here: a package cache stores archives, and anything that needs to
+   * execute is unpacked into `/workspace/node_modules`, which is a bind mount
+   * and not this tmpfs.
+   *
+   * Set for EVERY worker, not gated on `isolation` like the git block above.
+   * That block configures a repository and correctly says nothing when there
+   * is none; this one states where `$HOME`-bound caches go, and `$HOME` is
+   * read-only whether or not a workspace is mounted.
+   */
+  vars["npm_config_cache"] = "/tmp/.npm";
+  vars["BUN_INSTALL_CACHE_DIR"] = "/tmp/.bun-cache";
+  vars["XDG_CACHE_HOME"] = "/tmp/.cache";
+
+  /*
    * Class 1 (SRD §12.4), delivered as a FILE under D8 — the rule kept, the
    * delivery changed.
    *
