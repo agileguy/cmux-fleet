@@ -2065,6 +2065,109 @@ the root-cause classification; this table is the index.
   fixed by adding relay-script to the list: `ci.yml:29` is a bare `bun test test/integration`, so it
   already runs ungated in the fast job, and `:1060`'s reasoning holds.
 
+- **conjectured:** `roles/collator.md` described the console the fleet actually has. It is mounted,
+  it is CI-built, it is the document ISC-364's audit found to be the CURRENT class of documentation,
+  and it had been read and edited alongside every phase of this branch.
+  **refuted by:** grepping the two paths it instructs. It told the collator to write its fan-out to
+  `/outbox/fanout.json` and to read three reports from `/outbox/reports/rev-<aspect>-1.md`, and
+  `grep -rn "outbox/fanout.json\|/outbox/reports" src/ test/ scripts/ Docs/ skills/` returns
+  **nothing at all** — no writer, no reader, no test, no design note. The mechanism that exists is
+  `/outbox/<task-id>/dispatch-request.json` (`dispatch-request.ts`) and `/replies/<child>.json`
+  (`replies.ts`), and both landed on this branch, in commits whose messages are about the request
+  plane, without the document that tells the only worker in the console how to use it being opened.
+  A collator following it writes a file no poller reads, reports `partial`, is never dispatched
+  again, and every layer downstream records a healthy console that reviewed nothing.
+  **learned:** ISC-364's finding was that documentation currency tracks PROXIMITY TO EXECUTING CODE,
+  and that is true of the files it measured and false as a general rule — what it actually tracks is
+  proximity to a TEST. `skills/pifleet-worker/SKILL.md` is current because
+  `worker-docs-currency.test.ts` names it in a two-element array and compares its container paths
+  against the renderer's mounts; `roles/collator.md` is mounted in exactly the same way, is read by
+  a model in exactly the same way, and was wrong for the whole of Phase 2 because nothing compared
+  it to anything. The generalisable tell is the ARRAY: a currency probe with a hard-coded list of
+  documents is a probe whose coverage is decided by whoever last edited the list, and the document
+  most likely to be missing from it is the newest one — which is also the one whose mechanism is
+  still moving. The same shape as the `TOTAL_EXPECTED: "158"` entry above: a derivation that
+  re-reads its own conclusion instead of the thing it describes.
+  **criterion now:** `test/unit/collator-role.test.ts` compares the document to the code rather than
+  to a reader's memory of it — the wire tags against `DISPATCH_REQUEST_SCHEMA` and
+  `COLLATION_SCHEMA`, the file names against `DISPATCH_REQUEST_FILE` and `COLLATION_ARTIFACT_NAME`,
+  the derived ids against `REVIEW_CONSOLE_ASPECTS` and `COLLATION_ASPECT`, the worker ids against
+  `REVIEW_CONSOLE_ROSTER`, and **both worked JSON examples parsed through the real schemas** rather
+  than eyeballed. The last of those is the part that generalises: an example is the fragment of a
+  prompt a model copies most literally, so an example the schema refuses teaches the exact shape the
+  fleet rejects, and there is no reason for a document with a fenced example to be checked more
+  weakly than the parser that will judge its output.
+
+- **conjectured:** a self-declared `finding_count` beside `findings[]` is a second source of truth
+  for one fact and should be refused. The only new failure it can catch — a truncated document — is
+  already caught by JSON, because a truncated array does not parse; what it newly ADMITS is a
+  collator claiming seven findings while listing none, which is the fabrication shape the contract
+  exists to bound. §6.8 says the artifact must "carry a finding count", and the array carries one.
+  **refuted by:** `harvest/collation-census.ts`, written in parallel against the same §6.8 and
+  landing in the same working tree, which records `declared` and `counted` as separate fields
+  precisely so that *"a document that says '4 findings' over a list of two is a visible disagreement
+  rather than a number nobody re-added"*. The disagreement is the signal, and it is one neither
+  number carries alone: a model that writes a prose report with four findings and a JSON list with
+  two has truncated ITSELF, which is a failure JSON cannot see because the document it produced is
+  perfectly well-formed. The original argument was sound about trust and wrong about what the field
+  is FOR — it read `finding_count` as a claim to be believed rather than as a measurement to be
+  compared.
+  **learned:** the test of a redundant field is not "can it lie" but "is the lie legible". A second
+  spelling that is silently preferred over the first is a hazard; a second spelling that is recorded
+  BESIDE the first and never trusted over it is an instrument. The distinction survives only if the
+  authority is written down and asserted — so `collationCeiling` counts the array, and the battery's
+  C22 mutates it to count the declared number and reddens. Two engineers reading one paragraph of an
+  SRD reached opposite designs from the same sentence, and the reconciliation was cheap only because
+  the census's header had written down the three fields it could not do without instead of assuming
+  the other half would guess them.
+  **criterion now:** `finding_count` is required, bounded by `MAX_ITEMS` rather than by the array's
+  own cap so a collator that honestly found more than the list can hold can still say so, and NOT
+  cross-checked — C21 mutates the contract to refuse a disagreement and reddens, because refusing it
+  would delete the evidence the census was built to record.
+
+- **conjectured:** a ceiling function that takes the document and the claimed status cannot be
+  misused, because §6.8's rule is stated over exactly those two things and the function refuses to
+  raise a verdict by construction.
+  **refuted by:** writing the `missing` arm. Every task in the fleet is missing a collation artifact,
+  so `collationCeiling(claimed, read)` handed a build task's `success` claim and a `{kind: "missing"}`
+  returns `partial` — and the caller asking would have been RIGHT to think it had asked a sensible
+  question, because there genuinely is no artifact. The specific caller that would be wrong is the
+  one this design creates: §6.6 makes a review TWO tasks, the fan-out `T` settles `success` the
+  moment it has issued the request and correctly has no collation, and both halves run on the same
+  worker and are graded by the same code. "Apply this only to the second one" was a rule that had to
+  hold in the caller's head on every future edit.
+  **learned:** a guard whose failure mode is CATASTROPHIC AND SILENT belongs inside the function
+  rather than in its docblock, and the tell that one is needed is a default-shaped input — `missing`,
+  `null`, `unknown` — that every non-participant supplies for free. The fix is not defensive
+  programming: `isCollationTaskId` already existed as the fleet's answer to "is this the collation
+  half?", used by `dispatch-request.ts` as T5's depth bound, so the guard is an import and the
+  function became unmisusable rather than merely documented as not-to-be-misused.
+  **criterion now:** the task id is the first parameter and the first check. The asymmetric pair is
+  asserted — `collationCeiling("T", "success", missing)` is untouched and
+  `collationCeiling("T-collate", "success", missing)` caps — which is the pair a fixture using only
+  `T-collate` would have hidden completely, and C27 mutates the guard away and reddens.
+
+- **conjectured:** the four probes the battery reported GREEN against a mutation expected RED were
+  four gaps in the tests.
+  **refuted by:** reading each one. Three were the SAME defect wearing three faces — a probe pinned
+  to a refusal rather than to a REASON, in a place where two rules can refuse the same document.
+  `raised_by: ["rev-sec-1"]` trips both "not a lens" and "did not report", so deleting the first left
+  the second catching it with a different sentence; `lenses: []` trips both `min(1)` and "no lens
+  reported"; a renamed `verified` key falls from its named refusal to `.strict()`'s generic
+  "unrecognized key: verified", which still contains the word the probe was looking for. The fourth
+  was scope: `T-collate` appears in the worked example as well as in the instruction, so an
+  assertion over the whole document survived the instruction being deleted.
+  **learned:** where two rules can refuse one document, the CODE is the assertion surface and the
+  prose is the explanation — `DispatchRefusal`'s division, which this contract inherited for
+  `readCollation` and did not apply to the schema's `superRefine`, where the issue message is the
+  only discriminator there is. So the rule is narrower than "assert messages": assert the message
+  exactly where two rules overlap, and leave it alone where only one can fire (NO2 mutates the
+  `not_json` wording and stays green, correctly). And an assertion over a whole document is scoped to
+  nothing: `indexOf` the section first.
+  **criterion now:** the four probes name their rule's own sentence or their section, and the battery
+  re-runs at 61 mutations, 0 unexpected, from a measured green baseline — which the battery now
+  refuses to run without, because a suite that is already red reports every mutation as caught.
+
 ## Verification
 
 *(Evidence per ISC, appended as each criterion passes.)*
