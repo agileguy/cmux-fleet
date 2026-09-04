@@ -424,9 +424,39 @@ describe("the composed pane id round-trips and rejects what would corrupt it", (
     expect(() => composePaneId("pane", "surface", "")).toThrow(CmuxParseError);
   });
 
-  test.each(["", "only-one", "a b c d", " b c", "a  c", "a b ", " b", "a "])(
+  /**
+   * A ONE-part id is a bare surface, and this test used to assert the
+   * opposite.
+   *
+   * `"only-one"` sat in the refusal list below and pinned the defect in
+   * place: `up --attach-here` adopts `CMUX_SURFACE_ENV`, which cmux sets to a
+   * surface UUID alone, so every console built that way produced exactly this
+   * shape — and `sendText`, which wants only a surface, threw on the parse
+   * before it could type. That is why no staged dispatch to a `tui` worker
+   * ever auto-triggered on such a console. Measured 2026-09-04 in run
+   * `2026-09-04T02-28-00Z-e07e`.
+   */
+  test("a bare surface id splits, with a null paneId and workspaceId", () => {
+    expect(splitPaneId("surface-uuid")).toEqual({
+      paneId: null,
+      surfaceId: "surface-uuid",
+      workspaceId: null,
+    });
+  });
+
+  test("composePaneId's output still round-trips, so widening did not blur the 3-part form", () => {
+    // The widening must not make a full id parse as something looser.
+    expect(splitPaneId(composePaneId("p", "s", "w"))).toEqual({
+      paneId: "p",
+      surfaceId: "s",
+      workspaceId: "w",
+    });
+  });
+
+  test.each(["", "a b c d", " b c", "a  c", "a b ", " b", "a ", " "])(
     "splitPaneId refuses %j",
     (bad) => {
+      // Empty and over-long are still refused; only the 1-part case moved.
       expect(() => splitPaneId(bad)).toThrow(CmuxParseError);
     },
   );

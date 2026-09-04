@@ -52,18 +52,58 @@ export function composePaneId(paneId: string, surfaceId: string, workspaceId: st
 }
 
 /**
- * `workspaceId` is `null` for a pane id composed by a pifleet build that
- * predates the `--workspace` fix (a 2-field `"<pane> <surface>"` string) —
- * such an id can persist across process boundaries in `presentation.json`
- * (`pifleet.presentation/v1`, written by `up`, read back later by `attach`/
- * `tui`), so a binary upgrade mid-run must not turn a stale-but-nameable
- * condition into an opaque parse failure. `paneId`/`surfaceId` alone are
- * still enough for every verb except `respawn-pane`/`rename-tab`.
+ * Split a composed pane id into as much as it actually carries.
+ *
+ * THREE ARITIES ARE LEGAL, because three different producers write this field
+ * and each knows a different amount:
+ *
+ * | fields | producer | reaches |
+ * |---|---|---|
+ * | `<pane> <surface> <workspace>` | `createPane` | every verb |
+ * | `<pane> <surface>` | a pifleet build predating the `--workspace` fix, persisted in `presentation.json` | all but `respawn-pane`/`rename-tab` |
+ * | `<surface>` | `up --attach-here`, out of `CMUX_SURFACE_ENV` | `send`, `send-key`, `read-screen` |
+ *
+ * Missing fields are reported as `null` rather than fabricated, so the verb
+ * that needs one can refuse BY NAME at its own call site — `attachViewer` for
+ * a null workspace, `focus` for a null pane. That disposition is the point:
+ * an opaque parse failure two layers down is what made the 1-field case
+ * silently break every staged dispatch to a `tui` worker, since `sendText`
+ * wanted only the surface the string already was.
  */
-export function splitPaneId(composed: string): { paneId: string; surfaceId: string; workspaceId: string | null } {
+export function splitPaneId(composed: string): {
+  paneId: string | null;
+  surfaceId: string;
+  workspaceId: string | null;
+} {
   const parts = composed.split(" ");
-  if ((parts.length !== 2 && parts.length !== 3) || parts.some((p) => p === "")) {
+  if (parts.length < 1 || parts.length > 3 || parts.some((p) => p === "")) {
     throw new CmuxParseError("composed pane id", composed);
+  }
+  /*
+   * ONE FIELD IS A BARE SURFACE ID, and refusing it was the defect.
+   *
+   * `up --attach-here` adopts the surface out of `CMUX_SURFACE_ENV`
+   * (`attended/adopt.ts`), which cmux sets to a surface UUID and nothing else.
+   * That value reached here and was rejected as an unparseable "composed pane
+   * id" — so on every console built with `--attach-here`, `sendText` threw
+   * before it could type, and EVERY staged dispatch to a `tui` worker
+   * deferred its trigger. Measured 2026-09-04, run
+   * `2026-09-04T02-28-00Z-e07e`:
+   *
+   *   CmuxParseError: cmux: could not parse composed pane id:
+   *   5C9D22AC-543A-4B1A-A2E6-6555573DB407
+   *
+   * That id is the worker's surface, and `sendText` wanted only the surface.
+   * The parser was demanding fields its caller was about to discard.
+   *
+   * So the arity says which verbs are reachable, and the verbs that are not
+   * refuse BY NAME at their own call site rather than here — the same
+   * disposition the 2-field legacy case already gets. One field is enough for
+   * `send`, `send-key` and `read-screen`; `focus-pane` additionally needs the
+   * pane, and `respawn-pane`/`rename-tab` additionally need the workspace.
+   */
+  if (parts.length === 1) {
+    return { paneId: null, surfaceId: parts[0]!, workspaceId: null };
   }
   return { paneId: parts[0]!, surfaceId: parts[1]!, workspaceId: parts[2] ?? null };
 }

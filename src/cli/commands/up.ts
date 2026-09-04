@@ -39,7 +39,12 @@ import { writeJsonAtomic } from "../../util/jsonl.ts";
 import { resolveBackendWithFallback } from "../../backends/tmux/fallback.ts";
 import { isBackendKind, loadBackend } from "../../backends/registry.ts";
 import type { PaneRef } from "../../backends/types.ts";
-import { makeWorkerAccessible } from "../../container/mounts.ts";
+import {
+  WORKER_SCRATCH_DIR,
+  cloneSourceMount,
+  makeWorkerAccessible,
+  resolveCloneSource,
+} from "../../container/mounts.ts";
 import { assertBindMountsVisible } from "../../container/mount-preflight.ts";
 import { assertImagesReady, requiredImages } from "../../container/image.ts";
 import { renderAllWorkers } from "../../config/render.ts";
@@ -1947,6 +1952,32 @@ export function register(program: Command): void {
               "Pi double and NO containers are started; unset it to launch containers\n",
           );
         }
+      /*
+         * The working directory workers may clone FROM, decided ONCE here.
+         *
+         * `up`'s cwd is the directory the operator started the console in — the
+         * console scripts pass it to cmux as `--cwd`, so each agent pane's `up`
+         * inherits it. When that is a git working directory OTHER than
+         * `run.repo`, it is exposed read-only and a worker can clone it into its
+         * writable scratch.
+         *
+         * Not `run.repo`: that already arrives as the worker's own `/workspace`
+         * worktree, and mounting it a second time under another name would give
+         * the same repository two identities in one container — one harvested,
+         * one not.
+         *
+         * Resolved in `up` rather than in `render` because `render` is the dry
+         * preview and must describe the run that WILL happen, not the directory
+         * the preview was typed in (ISC-188).
+         */
+        const cloneSource = await resolveCloneSource(loadedConfig, process.cwd());
+        if (cloneSource !== null) {
+          process.stderr.write(
+            `pifleet: workers may clone ${cloneSource} from ` +
+              `${cloneSourceMount(cloneSource)} (read-only) into ${WORKER_SCRATCH_DIR}\n`,
+          );
+        }
+
         const materialized = await materializeWorkerInputs(loadedConfig, run, workers, async (m) => {
           await ledger.append("worker_inputs_materialized", {
             worker: m.workerId,
@@ -1963,7 +1994,7 @@ export function register(program: Command): void {
               kubeconfig_source: m.kubeconfigSource,
             },
           });
-        }, { writeLaunchRecord: !useDouble });
+        }, { writeLaunchRecord: !useDouble, cloneSource });
 
         /**
          * EVERY BIND-MOUNT SOURCE THIS RUN WILL USE IS ONE THE RUNTIME CAN SEE

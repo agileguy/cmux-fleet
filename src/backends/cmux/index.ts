@@ -293,6 +293,24 @@ export class CmuxBackend implements FleetBackend {
   /** `pifleet attach --worker <id>` lands here (ISC-130). */
   async focus(p: PaneRef): Promise<void> {
     const { paneId } = splitPaneId(this.requirePaneId(p));
+    if (paneId === null) {
+      /*
+       * A bare surface id — this worker was attached with `up --attach-here`,
+       * which records the surface cmux handed it and never learns the pane
+       * around it. `focus-pane` addresses a PANE, so there is nothing to pass.
+       *
+       * Named here rather than made to work, because the honest repair is the
+       * operator's: the surface is already on screen in the console that
+       * launched it. Guessing a pane from the surface would mean a workspace
+       * scan whose wrong answer focuses somebody else's pane, and a wrong
+       * focus looks deliberate.
+       */
+      throw new Error(
+        "cmux: this worker was attached with `up --attach-here`, which records its surface " +
+          "but not the pane around it, so there is no pane for `attach` to focus — its pane " +
+          "is the one it was started in.",
+      );
+    }
     await this.client.runOk(focusPaneArgv(paneId));
   }
 

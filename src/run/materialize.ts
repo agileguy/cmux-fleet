@@ -719,6 +719,11 @@ export async function materializeWorkerInputs(
      * what stops `down` reaping a name that never existed.
      */
     writeLaunchRecord?: boolean;
+    /**
+     * Host git working directory exposed read-only for workers to clone from.
+     * Threaded straight to `renderWorker`; see `RenderOptions.cloneSource`.
+     */
+    cloneSource?: string | null;
   } = {},
 ): Promise<MaterializedWorker[]> {
   const sourceRoot = skillsSourceRoot();
@@ -738,7 +743,10 @@ export async function materializeWorkerInputs(
 
   for (const w of workers) {
     const workerId = w.id;
-    const rendered = await renderWorker(loaded, workerId, { runId: run.runId });
+    const rendered = await renderWorker(loaded, workerId, {
+      runId: run.runId,
+      cloneSource: opts.cloneSource ?? null,
+    });
     /**
      * `render` resolves its own run dir from `runsRoot()` and so does `up`, so
      * these agree in every real invocation. Compared anyway because if they

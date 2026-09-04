@@ -230,6 +230,39 @@ export const DockerSchema = z
     cpus: z.number().positive().default(2),
     pids_limit: z.number().int().positive().default(512),
     read_only_root: z.boolean().default(true),
+    /**
+     * Size of the writable scratch at `WORKER_SCRATCH_DIR`, where a worker
+     * clones repositories that are not its own workspace.
+     *
+     * IT IS A tmpfs, therefore RAM. `docker.memory` (4g by default) is the
+     * container's limit and a tmpfs counts against it, so a scratch sized at
+     * or above `memory` converts "the clone was too big" into an OOM kill of
+     * the whole worker. 2g under a 4g default leaves the agent room to run
+     * what it cloned.
+     *
+     * It does NOT survive the container. A worker that clones here and is
+     * recreated has lost the clone — which is the intent: only `/workspace`
+     * is durable, and only what reaches a branch there is harvested.
+     */
+    scratch_size: z.string().regex(/^\d+[kmg]?$/i).default("2g"),
+    /**
+     * May the scratch execute?
+     *
+     * `true` by default, and this is a REAL WEAKENING stated plainly rather
+     * than buried: `/tmp` is mounted `noexec` specifically to block "download
+     * a binary and run it", and a writable exec-capable mount hands that back.
+     * The default is `true` anyway because the scratch exists so an agent can
+     * run a cloned project's TESTS, and a test suite executes things — its
+     * runner from `node_modules/.bin`, a compiled binary, a `./configure`. A
+     * scratch you cannot execute in serves the tidier half of the purpose and
+     * not the half that was asked for.
+     *
+     * `nosuid`/`nodev` are NOT configurable and ride on both settings: they
+     * cost a worker nothing it legitimately needs.
+     *
+     * Set `false` for a fleet whose workers only ever read other repositories.
+     */
+    scratch_exec: z.boolean().default(true),
     /** Extra OS packages appended as a final image layer (SRD §5.3). */
     apt_packages: z.array(shortStr).max(64).default([]),
   })

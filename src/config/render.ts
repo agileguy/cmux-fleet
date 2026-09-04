@@ -32,7 +32,7 @@
 
 import { join } from "node:path";
 import { imageTag } from "../container/image.ts";
-import { WORKER_UID } from "../container/mounts.ts";
+import { WORKER_SCRATCH_DIR, WORKER_UID, cloneSourceMount } from "../container/mounts.ts";
 import { assertNoHostGcloudMount, gcloudConfigTmpfsArgv } from "../security/adc.ts";
 import {
   assertNoRunDirMount,
@@ -96,6 +96,30 @@ export interface RenderedWorker {
 export interface RenderOptions {
   /** Names the run-dir and container; `render` is dry so there is no real run yet. */
   runId?: string;
+  /**
+   * A host git working directory to expose READ-ONLY, for the worker to clone
+   * from into its writable scratch. `null`/absent mounts nothing.
+   *
+   * CLONE FROM HERE, NOT FROM A REMOTE. A worker asked to test a project it
+   * does not have reaches for `git clone https://github.com/…`, and on this
+   * fleet that fails twice over: `egress.allow` is an allowlist and
+   * `github.com` is not on it, and the fetched copy would be the REMOTE's
+   * state rather than the working directory the operator is actually sitting
+   * in — no local branch, no unpushed commit, none of the change under test.
+   * A read-only bind of the working directory answers both: no egress, and the
+   * worker's clone starts from what the operator can see.
+   *
+   * Read-only, and a CLONE rather than direct use, because those are two
+   * different protections. `:ro` stops a worker writing the operator's
+   * repository; cloning is what still gives it a checkout it can branch,
+   * build and dirty — in the scratch, where losing it costs nothing.
+   *
+   * PASSED IN, never sensed here. `render` is the dry preview of what `up`
+   * will run, so a `process.cwd()` read inside this module would make the
+   * preview depend on where the preview was typed rather than on where the
+   * run will start (ISC-188 is the same rule for run paths).
+   */
+  cloneSource?: string | null;
 }
 
 /**
@@ -232,6 +256,8 @@ export function buildDockerArgv(
     image: string;
     piFlags: string[];
     hasBriefing: boolean;
+    /** See {@link RenderOptions.cloneSource}. */
+    cloneSource?: string | null;
   },
 ): string[] {
   // `loaded.config.run` is deliberately NOT destructured here, and no local is
@@ -309,6 +335,53 @@ export function buildDockerArgv(
     "--tmpfs",
     `/run:rw,noexec,nosuid,size=1m,uid=${WORKER_UID},gid=${WORKER_UID}`,
   );
+  /*
+   * The writable clone location, identical for every role (ISC — see
+   * `WORKER_SCRATCH_DIR` for why this path and not another).
+   *
+   * Without it a worker asked to test any repository that is not its own
+   * workspace fails at `git clone`, because `--read-only` above covers all of
+   * `/home/pi` and the `/tmp` tmpfs is `noexec`. Measured 2026-09-04: `tst-1`
+   * reported `blocked` with `fatal: could not create leading directories of
+   * '/home/pi/repos/rally-cli': Read-only file system`.
+   *
+   * `exec` IS THE POINT AND IT IS A WEAKENING. `/tmp` is `noexec` to stop
+   * "download a binary and run it"; a mount that is writable and executable
+   * gives that back within this directory. It is here because running a
+   * cloned project's tests means executing its runner, and `docker.scratch_exec`
+   * exists so a fleet that does not need that can say so. `nosuid` and `nodev`
+   * are unconditional on both branches — nothing legitimate here needs either,
+   * and `nodev` in particular closes the device-node route that would make the
+   * exec permission far more than it looks.
+   *
+   * `uid`/`gid` for the same measured reason the `/run` tmpfs above carries
+   * them: without them the tmpfs mounts root-owned 0755 and the worker cannot
+   * write, with no symptom but a failure at first use.
+   */
+  argv.push(
+    "--tmpfs",
+    `${WORKER_SCRATCH_DIR}:rw,${docker.scratch_exec ? "exec" : "noexec"},nosuid,nodev,` +
+      `size=${docker.scratch_size},uid=${WORKER_UID},gid=${WORKER_UID}`,
+  );
+  /*
+   * The working directory to clone FROM, read-only.
+   *
+   * `:ro` is the whole protection on the operator's side and it is not
+   * belt-and-braces: this is the one mount in the table that points at a
+   * directory pifleet did not create, so `makeWorkerAccessible`'s rule — never
+   * widen permissions on a user's repository — means the container must take
+   * it exactly as it is and be unable to write it.
+   */
+  if (opts.cloneSource != null && opts.cloneSource !== "") {
+    /*
+     * No assert here: the whole argv goes through `assertNoRunDirMount` at the
+     * end of this function, so a clone source pointed at the run directory is
+     * caught by the guard that already covers every other bind — rather than
+     * by a second, weaker copy of it that could drift.
+     */
+    const src = expandPath(opts.cloneSource, loaded.dir);
+    argv.push("-v", `${src}:${cloneSourceMount(src)}:ro`);
+  }
   // The image's baked CLOUDSDK_CONFIG is an ordinary directory on the root
   // filesystem, so `--read-only` above made it unwritable and every gcloud
   // call in a worker crashed with `[Errno 30] Read-only file system` — with a
@@ -570,6 +643,7 @@ export async function renderWorker(
       image,
       piFlags: pi.slice(1),
       hasBriefing,
+      cloneSource: options.cloneSource ?? null,
     }),
     `docker argv for ${w.id}`,
   );

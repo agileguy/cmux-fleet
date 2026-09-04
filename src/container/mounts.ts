@@ -42,7 +42,8 @@
 
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { realExec, type Exec } from "./run.ts";
 
 /**
@@ -60,6 +61,63 @@ export function daemonScratchRoot(
 
 /** The uid the worker image runs as. Must track `USER` in `docker/Dockerfile`. */
 export const WORKER_UID = 10001;
+
+/** `HOME` inside the worker image. Must track `ENV HOME` in `docker/Dockerfile`. */
+export const WORKER_HOME = "/home/pi";
+
+/**
+ * The one writable place a worker may clone OTHER repositories into.
+ *
+ * `~/repos` inside the container, chosen because it is where an agent already
+ * reaches. Measured 2026-09-04: `tst-1`, asked to run the tests of a project
+ * at `~/repos/rally-cli`, ran
+ *
+ *   git clone https://github.com/…/rally-cli.git ~/repos/rally-cli
+ *   fatal: could not create leading directories of
+ *   '/home/pi/repos/rally-cli': Read-only file system
+ *
+ * — the right instinct into a read-only root. Putting the scratch where the
+ * agent already tried means the capability needs no prompt engineering to be
+ * discovered, and it mirrors the operator's own host layout.
+ *
+ * NOT under `/workspace`. That is the run's git worktree, and harvest derives
+ * its authoritative facts from that tree's branch and diff (SRD §7.3); an
+ * unrelated clone inside it would show up as the worker's own changes, which
+ * is the difference between "cloned a dependency" and "committed a vendored
+ * copy of somebody else's repository".
+ *
+ * SAME FOR EVERY ROLE, by construction rather than by convention — it is a
+ * `docker:` setting, not a role field, so a tester, an engineer and a reviewer
+ * cannot drift apart on where a checkout lives or on whether they have one.
+ */
+export const WORKER_SCRATCH_DIR = `${WORKER_HOME}/repos`;
+
+/**
+ * Where a host git working directory is exposed, read-only, to be cloned FROM.
+ *
+ * Separate from {@link WORKER_SCRATCH_DIR} on purpose, and the separation is
+ * the design rather than tidiness: `/repos-src/<name>` is the operator's real
+ * repository and must never be written, `~/repos/<name>` is the worker's own
+ * clone and is meant to be dirtied. One path that was both would make "read
+ * the project" and "build the project" the same permission.
+ */
+export const WORKER_CLONE_SRC_ROOT = "/repos-src";
+
+/**
+ * Container path a host working directory at `hostPath` is mounted at.
+ *
+ * The BASENAME only — the host's absolute path is not reproduced inside the
+ * container. `/Users/someone/repos/rally-cli` becoming
+ * `/repos-src/rally-cli` keeps the operator's directory layout, and their
+ * username, out of a container an agent can read.
+ */
+export function cloneSourceMount(hostPath: string): string {
+  const base = hostPath.replace(/\/+$/, "").split("/").pop() ?? "";
+  if (base === "" || base === "." || base === "..") {
+    throw new Error(`pifleet: cannot expose ${hostPath} — it has no usable directory name`);
+  }
+  return `${WORKER_CLONE_SRC_ROOT}/${base}`;
+}
 
 /**
  * Open a host directory's permissions so the worker uid can use it.
@@ -272,4 +330,34 @@ export async function probeWriteThrough(
   } finally {
     await rm(host, { recursive: true, force: true });
   }
+}
+
+/**
+ * Should `dir` be exposed to workers as a clone source?
+ *
+ * `null` — expose nothing — in three cases, each for its own reason:
+ *
+ *  - `dir` is not a git working directory. The point is to clone a repository,
+ *    and mounting an arbitrary directory an operator happened to be standing
+ *    in would put unrelated files in front of an agent with no one having
+ *    decided to.
+ *  - `dir` IS `run.repo`. That repository already reaches the worker as its
+ *    `/workspace` worktree; a second mount under another name would give one
+ *    repository two identities in the container, one harvested and one not.
+ *  - `dir` is inside `run.repo`. Same repository, subdirectory spelling.
+ *
+ * A worktree or submodule has `.git` as a FILE rather than a directory, so the
+ * check is for existence and not for a directory — a linked worktree is a
+ * working directory and refusing it would be arbitrary.
+ */
+export async function resolveCloneSource(
+  loaded: { config: { run: { repo: string } }; dir: string },
+  cwd: string,
+): Promise<string | null> {
+  const { expandPath } = await import("../config/load.ts");
+  const here = resolve(cwd);
+  const repo = resolve(expandPath(loaded.config.run.repo, loaded.dir));
+  if (here === repo || here.startsWith(`${repo}/`)) return null;
+  if (!existsSync(join(here, ".git"))) return null;
+  return here;
 }

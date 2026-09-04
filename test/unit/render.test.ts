@@ -1850,6 +1850,12 @@ describe("pane_mode is binding on the launch argv (SRD §3.5)", () => {
       "/tmp:rw,noexec,nosuid,size=256m",
       "--tmpfs",
       "/run:rw,noexec,nosuid,size=1m,uid=10001,gid=10001",
+      // The writable clone scratch, identical for every role. `exec` is
+      // deliberate and is the one mount in this table that has it — see
+      // `docker.scratch_exec`. No `-v` for a clone SOURCE here: this render
+      // passes no `cloneSource`, and its absence must mount nothing.
+      "--tmpfs",
+      "/home/pi/repos:rw,exec,nosuid,nodev,size=2g,uid=10001,gid=10001",
       "--tmpfs",
       "/home/pi/.config/gcloud:rw,noexec,nosuid,size=16m,uid=10001,gid=10001",
       "--pids-limit",
