@@ -953,10 +953,34 @@ export interface CollationCeiling {
  * `isCollationTaskId` is already the fleet's answer to "is this the collation
  * half?" — `dispatch-request.ts` uses it as T5's depth bound — so the guard is
  * imported rather than restated, and the function cannot be misapplied instead
- * of merely being documented as not-to-be. It carries that predicate's known
- * cost unchanged: an operator task genuinely named `something-collate` is
- * treated as a collation. That is a false RED that names its rule, which is the
- * correct side to err on when the false GREEN is a review graded on nothing.
+ * of merely being documented as not-to-be.
+ *
+ * ## The guard is a NAMING CONVENTION and is unreliable in BOTH directions
+ *
+ * Both are worth stating, because the first was disclosed and the second was
+ * not, and the second is the one that costs something.
+ *
+ * **False RED.** An ordinary task an operator named `weekly-collate` claiming
+ * `success` is capped at `partial`, with a reason about a `collation.json` it was
+ * never going to write. That is the correct side to err on — but the operator had
+ * no hint that a RENAME fixes it, so the `missing` reason below now says so
+ * outright. A refusal that names its rule and not its remedy is one the reader
+ * argues with instead of acting on.
+ *
+ * **False GREEN, and this one is not merely a cost.** A collation task whose id
+ * does not end `-collate` is censused normally and this rule never fires, so zero
+ * findings with a claim of `success` is recorded `success`. It is unreachable
+ * through `relayFanOut`, which derives every id — and reachable through
+ * `pifleet dispatch`, where the operator types the id, which is precisely what
+ * someone debugging this console does first.
+ *
+ * **What would close it, and it is not available here.** The fact that separates
+ * a collation from a task NAMED like one is the WORKER'S ROLE, not its task id.
+ * `role === "collator"` is on the launch record, and §6.10 already has the actor
+ * refuse "a request from a worker whose role is not `collator`" on exactly that
+ * fact. A grader that passed the role in could drop this predicate entirely.
+ * Until one does, this is a convention with a known false green, written down
+ * rather than left to be discovered.
  *
  * ## What it deliberately does NOT do, so the gap is named rather than found
  *
@@ -983,7 +1007,9 @@ export function collationCeiling(
         reason:
           `the task claims success and wrote no ${COLLATION_ARTIFACT_NAME}, so there is no ` +
           `finding count, no location and no attribution to read — a review recorded as a ` +
-          `clean pass on nothing but its own say-so`,
+          `clean pass on nothing but its own say-so. If this task is not a review at all, its ` +
+          `id ending "-${COLLATION_ASPECT}" is the only reason this rule fired: rename the ` +
+          `task and it will not.`,
       };
     case "refused":
       return {
@@ -1004,4 +1030,101 @@ export function collationCeiling(
       }
       return { status: "success", reason: null };
   }
+}
+
+/**
+ * Apply §6.8's cap to a verdict that has ALREADY been derived — the "may only
+ * ever lower" property, as code rather than as an argument.
+ *
+ * ## Why this exists as a function instead of a sentence
+ *
+ * `collationCeiling` answers "what is the most this claim may be worth". Turning
+ * that into a verdict needs one more step — combining it with whatever the rest
+ * of the harvest concluded — and that step is where the property lives. Written
+ * at the call site it is a `rank` comparison inside a conditional: correct today
+ * and invisible to every probe. The review of this branch found exactly that. A
+ * task whose `ticket-ops.json` fails validation clamps to `failed`, and the only
+ * thing stopping its own zero-finding collation from RESCUING it to `partial` is
+ * that `rank("failed") < rank("partial")`. Delete the comparison and a review
+ * rescues itself with a document it wrote. Nothing was red.
+ *
+ * So the comparison moves in here, where it has a name and a probe, and callers
+ * get a function that cannot raise instead of a rule they must re-derive.
+ *
+ * ## The ORDERING is part of the contract and is the easy thing to get wrong
+ *
+ * `current` must be the verdict AFTER the worker's claim and the derived facts
+ * have been combined, not before. Applied first, the cap lands on the derived
+ * verdict alone and the claim is combined afterwards — and a claim of `success`
+ * against a derived `unknown` yields `success` outright, because `unknown` is the
+ * lattice identity. The cap would have been silently skipped. Cap last.
+ *
+ * ## What each verdict class does here
+ *
+ * - `success` — the only value the cap can move, and it moves to `partial`.
+ * - `partial`, `blocked`, `failed` — at or below the cap already; returned
+ *   unchanged, which is the property stated positively.
+ * - `aborted`, `timed_out` — supervisor verdicts, which `adjudicate` says win
+ *   outright. A task the supervisor killed is not made more accurate by an
+ *   observation about its paperwork.
+ * - `unknown` — the lattice IDENTITY, not its bottom. Unchanged, per ISC-94: a
+ *   missing envelope must not clamp, and answering `partial` here would be
+ *   SUPPLYING a verdict to a task that has none.
+ */
+export function capCollationVerdict(
+  current: Verdict,
+  taskId: string,
+  claimed: Verdict,
+  read: CollationRead,
+): CollationCeiling {
+  const ceiling = collationCeiling(taskId, claimed, read);
+  if (ceiling.reason === null) return { status: current, reason: null };
+  const a = rank(current);
+  const b = rank(ceiling.status);
+  /*
+   * OUTSIDE THE LATTICE MEANS UNTOUCHED, and the two ways to be outside it are
+   * different facts that happen to want the same answer. `rank` returns -1 for
+   * `unknown` (the identity — nothing to lower) and for `aborted`/`timed_out`
+   * (terminal supervisor verdicts — not ours to lower). One test covers all
+   * three, and the docblock is where the distinction is kept: a reader who
+   * thought this line was only about `unknown` would "fix" it by special-casing
+   * and would clamp a killed task.
+   */
+  if (a < 0 || b < 0) return { status: current, reason: null };
+  if (b >= a) return { status: current, reason: null };
+  return { status: ceiling.status, reason: ceiling.reason };
+}
+
+/**
+ * Which arm of the census's location check a finding's `file` will take.
+ *
+ * **This is the mechanism for the fix this module did NOT take, offered so that
+ * fix costs one import rather than one re-derivation.**
+ *
+ * §6.8 rule (a) asks for a location that "resolves inside `/workspace`", and
+ * `findingLocationProblem` answers it with
+ * `resolve(isAbsolute(c) ? c : join(root, c))`. Those are two different tests
+ * wearing one name. An ABSOLUTE path can fail — `/etc/passwd` and
+ * `/workspaceX/a.ts` both land outside the root. A RELATIVE one cannot: it is
+ * joined onto the root, so the prose sentence "the error handling could be
+ * tightened" resolves inside `/workspace` and is counted as located. The census
+ * then publishes `located` beside `counted` with no qualifier, and
+ * `located: 14 / counted: 14` reads as fourteen verified locations when an
+ * unknown number of them were never tested at all.
+ *
+ * **Two fixes were available and only one is in this module's gift.** The role
+ * files now instruct `/workspace/...` in both places, which raises the floor — an
+ * instructed collator produces locations that are actually checked — and does NOT
+ * close the hole, because a relative path is still accepted and still counted.
+ * What closes it is publishing `located` SPLIT BY ARM, and that is a change to
+ * `CollationCensus` in `contracts.ts` and to the census itself. So the predicate
+ * lives here, where the rule it encodes lives, and the census can adopt it in one
+ * line instead of spelling `isAbsolute` a second time and drifting.
+ *
+ * Deliberately not a refusal. Refusing the relative spelling would discard a
+ * whole collation over a convention a model got wrong — the legal-document
+ * refusal `findingPath`'s docblock already argues against.
+ */
+export function findingLocationArm(file: string): "workdir_absolute" | "relative" {
+  return file.startsWith("/") ? "workdir_absolute" : "relative";
 }

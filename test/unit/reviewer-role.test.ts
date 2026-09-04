@@ -41,11 +41,17 @@
  * again.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import { REPLIES_MOUNT } from "../../src/run/replies.ts";
+import {
+  ROOT,
+  exampleConfig,
+  grantedTools,
+  ungroundedCapabilityClaims,
+  unknownPaths,
+} from "../support/role-docs.ts";
 
-const ROOT = new URL("../../", import.meta.url).pathname;
 const REVIEWER = readFileSync(`${ROOT}roles/reviewer.md`, "utf8");
 const COLLATOR = readFileSync(`${ROOT}roles/collator.md`, "utf8");
 const ASPECTS = ["architecture-security", "cross-file-contracts", "typescript-language"].map(
@@ -93,6 +99,15 @@ describe("the whole review reaches the collator, and both ends say so", () => {
     // The consequence, not just the number.
     expect(block).toContain("cut off");
     expect(block).toContain("/outbox/<task-id>/files/review.md");
+    /*
+     * And WHY `notes` is still the channel to prefer now that files do arrive:
+     * only the copied files are capped. Without this the instruction survives as
+     * a rule with no reason, which is the first thing a model under budget
+     * pressure drops. Added because a battery removed the sentence and nothing
+     * reddened.
+     */
+    // Matched on the clause the wrap does not split.
+    expect(block).toContain("only the copied files are capped");
   });
 
   /**
@@ -143,22 +158,101 @@ describe("the whole review reaches the collator, and both ends say so", () => {
     // And that B was considered and why it lost — deleting that would leave the
     // next reader to re-litigate a decision D6 already made.
     expect(note).toContain("D6 had already rejected B's shape");
+    /*
+     * The COST of the cap, not just the cap. A recommendation whose price is not
+     * written down cannot be weighed by the next person deciding whether to
+     * raise the limit, and a truncated review is worse than an absent one
+     * because it reads as a complete review that found less.
+     */
+    expect(note).toContain("cost is paid, not hidden");
+  });
+});
+
+/**
+ * The grant, member by member, and the two halves independently pinned.
+ *
+ * A probe that only noticed "the tools list changed" would be satisfied by
+ * adding `write` OR by adding `bash`, which would make the battery's bash-refusal
+ * mutation stop meaning what its name says. So each member is asserted on its
+ * own: `write` present because the role could not write `result.json` without it
+ * and the console could not function, `bash` and `edit` absent because §12.1's
+ * argument is about a shell and `edit` buys nothing against a `:ro` checkout.
+ *
+ * **Read from `fleet.example.yaml`, which is TRACKED.** `fleet.yaml` is
+ * gitignored and `ci.yml` is checkout → `bun install` → `bun test test/unit` with
+ * no step that creates it, so a probe reading it unconditionally is red on every
+ * clean checkout — the defect `review-plan.test.ts` documents thirteen tests'
+ * worth of, and which this file shipped with. The live file gets its own gated
+ * probe below.
+ */
+describe("the reviewer's grant is what the document says it is", () => {
+  const EXAMPLE = exampleConfig();
+
+  test("write IS granted — the role could not report without it", () => {
+    expect(grantedTools(EXAMPLE, "reviewer")).toContain("write");
+  });
+
+  test("bash is NOT granted", () => {
+    expect(grantedTools(EXAMPLE, "reviewer")).not.toContain("bash");
+  });
+
+  test("edit is NOT granted", () => {
+    expect(grantedTools(EXAMPLE, "reviewer")).not.toContain("edit");
+  });
+
+  test("the grant is exactly the five tools the document enumerates", () => {
+    expect([...grantedTools(EXAMPLE, "reviewer")].sort()).toEqual([
+      "find",
+      "grep",
+      "ls",
+      "read",
+      "write",
+    ]);
+  });
+
+  /**
+   * The document's own sentence against the grant, both ways: a tool it claims
+   * and does not have costs an epoch to discover, and a tool it has and does not
+   * mention is a capability the model will not use.
+   */
+  test("the document's opening tool sentence matches the grant", () => {
+    const first = REVIEWER.split("\n")[0]!;
+    for (const t of grantedTools(EXAMPLE, "reviewer")) {
+      expect(first, `the opening line does not mention the granted tool "${t}"`).toContain(t);
+    }
+    expect(first).toContain("no bash");
+    expect(first).toContain("no edit");
+  });
+
+  test("the document bounds the write to the outbox", () => {
+    expect(REVIEWER).toContain("The write is for `/outbox` alone");
+  });
+
+  /**
+   * The LIVE config, GATED. It is what the console actually runs from, so a
+   * divergence matters — and it cannot be a hard dependency, for the reason in
+   * this block's header.
+   */
+  describe.skipIf(!existsSync(`${ROOT}fleet.yaml`))("the operator's own fleet.yaml agrees", () => {
+    test("the live reviewer grant matches the example's", () => {
+      const LIVE = readFileSync(`${ROOT}fleet.yaml`, "utf8");
+      expect([...grantedTools(LIVE, "reviewer")].sort()).toEqual(
+        [...grantedTools(EXAMPLE, "reviewer")].sort(),
+      );
+    });
   });
 });
 
 describe("the reviewer is not told to use capabilities it does not have", () => {
   /**
-   * `tools: [read, grep, find, ls]` — read out of the config rather than
-   * restated, so widening the grant is what retires this probe rather than a
-   * reader deciding it has.
+   * Derived from the grant rather than hard-coded: these need a SHELL and the
+   * reviewer has none. The premise is asserted first, so granting `bash` retires
+   * the rule loudly instead of leaving it failing for a reason nobody reads.
    */
-  test("the reviewer role still has no bash in fleet.yaml", () => {
-    const fleet = readFileSync(`${ROOT}fleet.yaml`, "utf8");
-    const block = fleet.slice(fleet.indexOf("\n  reviewer:"), fleet.indexOf("\n  collator:"));
-    expect(block, "the reviewer block moved — the probe has rotted").toContain("tools:");
-    const tools = /tools:\s*\[([^\]]*)\]/.exec(block)?.[1] ?? "";
-    expect(tools).not.toContain("bash");
-    expect(tools).toContain("read");
+  const SHELL_WORDS = ["diff", "git", "tsc", "npm"];
+
+  test("the premise holds — the reviewer still has no bash", () => {
+    expect(grantedTools(exampleConfig(), "reviewer")).not.toContain("bash");
   });
 
   test("the document says plainly that there is no diff", () => {
@@ -166,34 +260,54 @@ describe("the reviewer is not told to use capabilities it does not have", () => 
   });
 
   /**
-   * ASYMMETRIC against the probe above. Saying "there is no diff" once while
-   * still instructing the reviewer to review one would satisfy it, and the
-   * briefing would contradict itself inside a single prompt.
+   * THE CLASS, not the instances — and the version this replaces could not catch
+   * a new mistake.
+   *
+   * It was a three-string denylist whose first two entries were verbatim the
+   * battery's own replacement strings for RV7 and RV9, so the probe and the
+   * mutation had been written to each other. A fresh false claim — *"Start from
+   * the diff and work outwards"* — passed it. The rule now is that a sentence may
+   * name a shell-only capability ONLY where it denies having it, which catches
+   * any wording rather than four.
+   *
+   * Its limit, stated so the table can repeat it: this is a rule about
+   * SENTENCES. A false capability claim expressed without any of these words —
+   * asserting a capability by describing its effect — still passes.
    */
-  test("ASYMMETRIC: no document in the briefing still instructs reviewing THE diff", () => {
+  test("no sentence in the briefing instructs a shell-only capability", () => {
     const offenders: string[] = [];
     for (const [name, text] of REVIEWER_BRIEFING) {
-      for (const bad of ["Review the diff", "Read past the diff", "the diff touches"]) {
-        if (text.includes(bad)) offenders.push(`${name}: ${bad}`);
+      for (const v of ungroundedCapabilityClaims(text, SHELL_WORDS)) {
+        offenders.push(`${name} — ${v}`);
       }
     }
     expect(
       offenders,
-      `the reviewer's briefing instructs work on a diff it is never given: ${offenders.join(", ")}`,
+      `the briefing instructs work the reviewer cannot do:\n  ${offenders.join("\n  ")}`,
     ).toEqual([]);
   });
 
-  test("no document in the briefing points the reviewer at the task envelope", () => {
+  test("no sentence points the reviewer at the task envelope", () => {
     const offenders: string[] = [];
     for (const [name, text] of REVIEWER_BRIEFING) {
-      if (text.includes("task envelope states") || text.includes("task envelope says")) {
-        offenders.push(name);
+      for (const v of ungroundedCapabilityClaims(text, ["task envelope"])) {
+        offenders.push(`${name} — ${v}`);
       }
     }
     expect(
       offenders,
-      `these tell the reviewer to read a document it never receives: ${offenders.join(", ")}`,
+      `the briefing points at a document the reviewer never receives:\n  ${offenders.join("\n  ")}`,
     ).toEqual([]);
+  });
+
+  /**
+   * CONTROL for both. A rule matching nothing reports no offenders just as
+   * happily, so it is run against the exact sentence the review used to
+   * demonstrate the hole and must find it.
+   */
+  test("CONTROL: the negation rule catches a FRESH false claim", () => {
+    const poisoned = `${REVIEWER}\n\nStart from the diff and work outwards.\n`;
+    expect(ungroundedCapabilityClaims(poisoned, SHELL_WORDS).join(" ")).toContain("work outwards");
   });
 
   /**
@@ -213,43 +327,35 @@ describe("the reviewer is not told to use capabilities it does not have", () => 
   });
 });
 
-describe("the reviewer document names only paths this worker has", () => {
+describe("the reviewer document names only paths that exist", () => {
   /**
-   * `isolation: shared-ro`, `tools: [read, grep, find, ls]`. `/replies` is
-   * mounted for every worker but is the COLLATOR's channel and nothing points a
-   * reviewer at it, so it is deliberately absent from this set — a reviewer told
-   * to read a sibling's reply would be reading another reviewer's report before
-   * writing its own, which is the sequential fan-out §6.6 forbids.
+   * BY CONSTRUCTION, and the first-segment version this replaces was the defect.
+   *
+   * That version classified only a path's LEADING segment against a set of mount
+   * roots, so `/policy/envelope.json` — a path that has never existed — passed,
+   * because `/policy` is a mount. The allowlist in `test/support/role-docs.ts` is
+   * derived from the builders and constants that produce these paths, so an
+   * invented one fails whatever it is called and without anyone predicting it.
    */
-  const MOUNTS = new Set(["/workspace", "/outbox", "/policy", "/skills", "/sessions"]);
-  const ORDINARY = new Set(["/tmp", "/run", "/etc", "/usr", "/var", "/home", "/dev", "/proc"]);
-
-  test("every backticked top-level path is a mount or an ordinary container dir", () => {
+  test("every backticked path is one the code produces", () => {
     const offenders: string[] = [];
-    let examined = 0;
     for (const [name, text] of REVIEWER_BRIEFING) {
-      // The class admits `<` and `>`: every interesting path in these documents
-      // carries a placeholder, and a class without them ends the match early and
-      // examines nothing — the decorative failure ISC-364's own probe had.
-      for (const m of text.matchAll(/`(\/[a-zA-Z0-9<][a-zA-Z0-9/._<>-]*)`/g)) {
-        examined += 1;
-        const top = `/${m[1]!.split("/")[1]!}`;
-        if (ORDINARY.has(top) || MOUNTS.has(top)) continue;
-        offenders.push(`${name}: ${m[1]!}`);
-      }
+      for (const path of unknownPaths(text)) offenders.push(`${name}: ${path}`);
     }
-    expect(examined, "the path extractor examined nothing — the regex has rotted")
-      .toBeGreaterThanOrEqual(2);
     expect(
       offenders,
-      `the reviewer's briefing names paths it does not have: ${offenders.join(", ")}`,
+      `the briefing names paths nothing in the code produces: ${offenders.join(", ")}`,
     ).toEqual([]);
   });
 
-  /** CONTROL: an extractor matching nothing would satisfy the probe above. */
+  /** CONTROL, and it is the exact string the review used to show the hole. */
+  test("CONTROL: a fresh invented path under a real mount is caught", () => {
+    const poisoned = `${REVIEWER}\n\nThe task envelope is at \`/policy/envelope.json\`.\n`;
+    expect(unknownPaths(poisoned)).toContain("/policy/envelope.json");
+  });
+
   test("CONTROL: the extractor reaches the outbox path the instruction turns on", () => {
-    const cited = [...REVIEWER.matchAll(/`(\/[a-zA-Z0-9<][a-zA-Z0-9/._<>-]*)`/g)].map((m) => m[1]!);
-    expect(cited).toContain("/outbox/<task-id>/files/review.md");
+    expect(REVIEWER).toContain("`/outbox/<task-id>/files/review.md`");
   });
 
   test("no reviewer document points at the reply mount", () => {
@@ -262,18 +368,23 @@ describe("the reviewer document names only paths this worker has", () => {
 });
 
 describe("the location a reviewer quotes is the one a collation can carry", () => {
-  test("the reviewer is told to give the path repo-relative and the line bare", () => {
+  /**
+   * `/workspace/...`, not repo-relative. The census resolves a relative path by
+   * JOINING it onto the workdir, so any string at all — a prose sentence
+   * included — lands "inside" and is counted as located. The absolute form is the
+   * only one that can fail when it is wrong, which is the only one worth
+   * checking, and `findingLocationArm` in `collation.ts` is the predicate that
+   * lets the census publish the two arms apart.
+   */
+  test("the reviewer is told to quote the container path", () => {
     const block = REVIEWER.slice(REVIEWER.indexOf("Quote file and line"));
-    expect(block).toContain("repo-relative");
+    expect(block).toContain("/workspace/");
+    expect(block).toContain("not** the repo-relative form");
     expect(block).toContain("bare number");
   });
 
-  /**
-   * Both ends again. The collator's document tells it to split `src/foo.ts:12`
-   * because a reviewer may still hand one over; the reviewer's tells it not to.
-   * Removing either leaves a location the collation drops.
-   */
-  test("the collator is still told what to do with a `path:line` it is handed", () => {
+  test("both ends agree on the spelling", () => {
+    expect(COLLATOR).toContain("container path");
     expect(COLLATOR).toContain("src/foo.ts:12");
   });
 });

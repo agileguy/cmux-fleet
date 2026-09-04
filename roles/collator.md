@@ -118,7 +118,11 @@ is read by the harvester, and neither can do the other's job.
 ### `/outbox/<task-id>/files/collation.json` — the structural record
 
 Shown for the collation of a review request `T`, so `task_id` is `T-collate` and
-`parent_task_id` is `T`. Both are in your brief; do not invent either.
+`parent_task_id` is `T`. **They arrive by different routes and neither is yours to invent.**
+`task_id` is the `task_id:` line of the fenced `## This task` block in your prompt — the id of
+the task you are executing right now. `parent_task_id` is the review request your brief names
+in its first line. If the two do not stand in the relation above, say so and claim `blocked`
+rather than reconciling them yourself.
 
 ```json
 {
@@ -134,13 +138,13 @@ Shown for the collation of a review request `T`, so `task_id` is `T-collate` and
   "findings": [
     {
       "statement": "allocate() reads and writes the epoch without holding the latch.",
-      "file": "src/rpc/epoch.ts",
+      "file": "/workspace/src/rpc/epoch.ts",
       "line": 183,
       "raised_by": ["rev-arch-1", "rev-ctx-1"]
     },
     {
       "statement": "The retry is claimed safe because the write is idempotent; it is not.",
-      "file": "src/run/relay.ts",
+      "file": "/workspace/src/run/relay.ts",
       "line": 800,
       "raised_by": ["rev-arch-1"],
       "disputed_by": ["rev-ctx-1"]
@@ -149,30 +153,41 @@ Shown for the collation of a review request `T`, so `task_id` is `T-collate` and
 }
 ```
 
-Field rules, each of which is checked and each of which refuses the whole document:
+Field rules. **Most refuse the whole document; one is recorded rather than enforced, and
+each says which** — a rule list that claims uniform enforcement it does not have is the same
+defect as a document naming a path that does not exist.
 
-- **`lenses[]` is every lens this console has, not just the ones that answered.** It is the
-  denominator. Without the row for a lens that did not report, a finding two reviewers
-  raised reads as `2/2` when it is `2/3`, and nothing downstream can tell the difference.
+- **REFUSED — `lenses[]` must be every lens this console has, not just the ones that
+  answered.** It is the denominator, and it is checked against the console's seats in config:
+  a row missing, a row too many, or a row whose `aspect` does not match its worker's seat
+  refuses the document and names the worker. Without the row for a lens that did not report, a
+  finding two reviewers raised reads as `2/2` when it is `2/3` — the same fabrication as
+  crediting a lens that never answered, reached by deleting a row instead of adding a name.
   Copy the missing ones straight out of your brief, `reported: false`, with the reason in
   `note`.
-- **`file` and `line` are required on every finding.** A statement with no location cannot
-  be acted on and cannot be checked. Repo-relative — `src/run/relay.ts` — is the spelling to
-  prefer; a reviewer's `/workspace/...` quote is accepted too. If a reviewer gave you
-  `src/foo.ts:12`, split it: the number belongs in `line`.
-- **An observation with no location does not go in this file.** "The whole approach is
+- **REFUSED — `file` and `line` are required on every finding, and `file` must be the
+  container path.** Write `/workspace/src/run/relay.ts`, not `src/run/relay.ts`. Both spellings
+  are accepted, and only one is worth anything: a location is checked by resolving it against
+  the container's workdir, and a relative string is JOINED onto that workdir, so any string at
+  all lands "inside" and the check proves nothing. `/workspace/...` is the only spelling that
+  can fail when it is wrong. Your reviewers are told the same thing; if one still hands you
+  `src/foo.ts:12`, split it and make it absolute — the number belongs in `line`.
+- **NOT REFUSABLE, and the one rule only you can keep — an observation with no location does
+  not go in this file.** "The whole approach is
   wrong" is a real thing to say and it belongs in the prose report, where an argument can be
   made. Do not manufacture a line number to get one in here.
-- **`raised_by` may only name lenses that reported.** Crediting a lens that produced nothing
+- **REFUSED — `raised_by` may only name lenses that reported.** Crediting a lens that produced nothing
   is how a two-lens review comes to record `3/3`, and a document that does it is refused.
   The same rule applies to `disputed_by`, and no lens may appear in both on one finding.
-- **`disputed_by` is for real contradictions.** Where two reviewers read the same code and
+- **REFUSED where it names a non-reporting lens; otherwise yours to get right —
+  `disputed_by` is for real contradictions.** Where two reviewers read the same code and
   reached opposite conclusions, that is one finding with a raiser and a disputer — never two
   findings, and never one finding they both "raised". Recording a contradiction as agreement
   is the worst thing you can do to this record.
-- **`finding_count` is your own count.** `findings[]` is what gets counted downstream; this
-  number is kept beside it so that if the two disagree, someone can see that they do.
-  Make them agree.
+- **RECORDED, NOT REFUSED — `finding_count` is your own count.** `findings[]` is what gets counted downstream; this
+  number is kept beside it so that if the two disagree, someone can see that they do. **A
+  disagreement is deliberately not refused** — refusing it would delete the evidence — so this
+  is a rule nothing will stop you breaking. Make them agree.
 
 ### `/outbox/<task-id>/files/review.md` — the document a person reads
 

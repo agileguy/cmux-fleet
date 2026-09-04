@@ -2313,6 +2313,136 @@ the root-cause classification; this table is the index.
   applying. Revisit with §9 Q6, which is the same question about a different axis: whether a
   datum belongs beside the verdict or folded into it.
 
+- **DECISION, and a capability widening that wants its own record: the `reviewer` role is
+  granted `write`, outbox-only.** `config/schema.ts` makes `{write, edit, bash}` the writer set,
+  and `reviewer` was the only role in `fleet.yaml` holding none of them. Nothing host-side writes
+  `result.json` — `harvest/outbox.ts` only reads it — so **the role could not write its envelope
+  at all**: `outbox.kind` is `missing`, `claimed` is null, `hasWorktree` is false so
+  `deriveRepoVerdict` returns `unknown`, all three lenses are missing, `relay.ts` answers
+  `not_collated`, **no `T-collate` is ever dispatched and no collation is ever graded** — while
+  the fan-out task settles `success` and `pifleet report` shows the review green. The console
+  could not have worked, and every prompt-level mitigation built on writing `notes` had never
+  been executable.
+  **What was granted and what deliberately was not.** `[read, write, grep, find, ls]`, matching
+  `collator`. **No `edit`**: it is for changing files that already exist, and the only files a
+  reviewer can see besides its own outbox are the operator's checkout at `/workspace`, mounted
+  `:ro` — so the grant would buy no capability and widen the writer set for nothing. **No
+  `bash`**, unchanged.
+  **The argument that distinguishes them, because §12.1 is what this could have been read as
+  reopening.** §12.1's case is about a SHELL: a shell is what turns a read-only reviewer into a
+  worker that can `cd /`, reach a socket, or `git push`. Write-to-outbox buys none of that.
+  `/outbox` is a worker-scoped bind mount holding only what that worker produced, nothing reads
+  it but the harvester, and it is already the untrusted-content boundary — which is how every
+  other worker in this fleet reports. `observer` carries `write` on exactly this justification
+  and so does `collator`. **The owner chose this over re-arguing §12.1 first**, and this entry is
+  what makes that choice reviewable later.
+  **What it costs, stated rather than implied.** Three hosted 397B-class workers on a third-party
+  vendor gain a writer tool. The exposure that changes is what they can PUT in their own outbox,
+  which the harvester already treats as untrusted input and schema-validates; the exposure that
+  does not change is what leaves the machine, which was already the whole repository under §5.9.
+  **criterion now:** the grant is asserted member by member against `fleet.example.yaml` — the
+  TRACKED config, so CI grades it — with `write` present, `bash` and `edit` absent as three
+  separate probes, and the live `fleet.yaml` checked for divergence behind an `existsSync` gate.
+  The battery pins the halves independently (RV15 adds `bash`, RV16 removes `write`) so neither
+  can stand in for the other.
+
+- **conjectured:** a probe that refuses the sentences which were wrong protects against the class
+  of error they came from. Nine probes across two role files were written that way, each pinned to
+  the exact prose a battery mutation had replaced.
+  **refuted by:** a review that wrote three FRESH false claims and watched all three pass.
+  `/outbox/reports-v2/<child-task-id>.json` passed because the path guard classified only a path's
+  FIRST SEGMENT and `/outbox` is a mount; `/policy/envelope.json` passed the same way; and
+  *"Start from the diff and work outwards"* passed because the diff guard was a three-string
+  denylist **whose first two entries were verbatim the battery's own replacement strings for RV7
+  and RV9.** The reviewer's phrase for that is the one worth keeping: the probe and the mutation
+  had been written to each other.
+  **learned:** a mutation battery and a denylist probe can be mutually satisfying and jointly
+  worthless. The battery proves the probe catches the mutation; the probe was written FROM the
+  mutation; and the pair says nothing about anything else. The tell is textual and cheap to look
+  for — if a probe's expected strings appear verbatim in the battery beside it, the probe is a
+  memory of one edit rather than a rule. The repair is to ask what the CLASS is and whether it can
+  be checked positively: "the document asserts something false about the runtime" becomes "every
+  path it names must be one the code produces", which is decidable and catches spellings nobody
+  predicted.
+  **criterion now:** paths are checked BY CONSTRUCTION against an allowlist derived from the
+  builders and constants that produce them (`test/support/role-docs.ts`), so an invented path
+  fails whatever it is called. Capability claims are checked by a SENTENCE-LEVEL NEGATION RULE — a
+  shell-only word may appear only in a sentence that denies having the thing — which catches any
+  wording rather than four. **Both limits are written into the table rather than glossed**: the
+  path rule sees everything; the negation rule cannot see a false claim expressed without those
+  words, and tone and advice are not checked at all, which U8/U9 measure rather than describe.
+
+- **conjectured:** blocking the INFLATION of a consensus count blocks the fabrication. The
+  collation schema refuses a finding credited to a lens marked `reported: false`, with the reason
+  spelled out — *"this is how a two-lens review records 3/3, which is the exact reading §6.8 exists
+  to make impossible."*
+  **refuted by:** a review pointing at the other direction. **Deleting the lens's ROW achieves the
+  identical reading and was permitted.** A collator writing only its two reporting rows produces
+  `{total: 2, reported: 2, missing: []}` — a clean 2/2 — and one row was legal, so 1/1 was
+  reachable. Every intra-document rule passed: the lenses were unique, at least one reported, and
+  every attribution named a lens that did.
+  **learned:** a numerator rule is not a denominator rule, and a schema that holds a ratio's top
+  half is not holding the ratio. The general form is that **a document cannot be its own witness
+  about the size of the world it describes** — and the same sentence covers the second hole the
+  same review found, where every id check was intra-document, so a collation declaring
+  `T-9-collate`/`T-9` while sitting in `T-1-collate`'s outbox was internally perfect and was
+  published as T-1's record. `dispatch-request.ts` had already solved exactly this on the OUTBOUND
+  half by binding the declared parent to the directory the file was found in; the return half
+  simply had not inherited it. When one half of a two-way exchange has a structural binding and the
+  other does not, that is the first place to look.
+  **criterion now:** `readCollation` takes a REQUIRED `CollationContext` carrying the task the
+  grader walked to and, optionally, the console's seats. The lens table is checked as a SET
+  EQUALITY against config in both directions, the task id is checked structurally BEFORE the
+  derivation (a document failing both reports the misfiling, which is the fault an operator acts
+  on), and the ordering has a fixture because the battery proved it was unasserted by reordering
+  the checks and staying green.
+
+- **conjectured:** "the collation cap may only ever lower a verdict" was a property of the design,
+  established by the lattice.
+  **refuted by:** a review finding it established by a `rank` comparison inside a conditional at a
+  call site, with no probe on it. A task clamped to `failed` by a malformed `ticket-ops.json` is
+  stopped from being RESCUED to `partial` by its own zero-finding collation only because
+  `rank("failed") < rank("partial")`. Delete the comparison and **a review rescues itself with a
+  document it wrote** — the exact independence failure the whole instrument is built to avoid —
+  and nothing was red.
+  **learned:** a property that lives in a comparison rather than in a name has no probe, because
+  there is nothing to call. Moving it into a function is not refactoring for tidiness; it is what
+  makes the property assertable at all. Two things fell out of doing it that the argument had not
+  reached: the ORDERING is part of the contract (the cap must be applied to the ALREADY-COMBINED
+  verdict, because a claim of `success` against a derived `unknown` yields `success` outright and
+  the cap would be silently skipped), and the no-op arm is load-bearing (when §6.8's rule is
+  silent the ceiling returns the CLAIM, which without an early return is applied as a cap — the
+  function doing `adjudicate`'s job a second time). The battery found the second; no argument had.
+  **criterion now:** `capCollationVerdict`, with an EXHAUSTIVE probe over all seven verdicts ×
+  seven claims × four read states asserting no combination raises, plus the H5 fixture at this
+  layer. One filed mutation came back a measured no-op and is recorded as one: `rank` returns `-1`
+  for `unknown`, `aborted` and `timed_out`, so `b >= a` already protects all three and the explicit
+  out-of-lattice guard can never be what saves them. It is kept anyway, because without it the
+  code's correctness rests on a `-1` coincidence rather than on the three verdict classes the
+  docblock names.
+
+- **conjectured:** this branch had paid for its hermeticity lesson. A changelog entry above
+  records `review-plan.test.ts` taking thirteen tests down on every clean checkout by reading the
+  gitignored `fleet.yaml`, and records the fix — `existsSync` plus `describe.skipIf`.
+  **refuted by:** `test/unit/reviewer-role.test.ts`, added ONE COMMIT after that fix, reading
+  `fleet.yaml` unconditionally inside a test. `ci.yml` is checkout → `bun install` →
+  `bun test test/unit`, with no step that creates it. Reproduced on a clean worktree: `ENOENT`,
+  `181 pass, 1 fail`. It was the only test under `test/` reading that file.
+  **learned:** writing the lesson down is not the same as being able to apply it, and the gap
+  between them is that a lesson recorded as a NARRATIVE about one file does not fire when a
+  different file makes the same mistake. What would have fired is a rule — "no test reads
+  `fleet.yaml` outside a gate" — and the cheap version of that rule is the grep the review ran.
+  The second-order cost is the one worth remembering: RV15 was the only mutation in either table
+  checking a role document's capability claim against the actual grant, and in CI it could not
+  execute at all, so the table's claim that the check ran "against the grant" held only on a
+  machine that happened to have the operator's config.
+  **criterion now:** the grading arm reads `fleet.example.yaml`, which is tracked and always
+  present, and the live file is a separate `describe.skipIf(existsSync)` probe asserting the two
+  agree. Verified by running the three role suites in a worktree with no `fleet.yaml` present —
+  147 pass, 0 fail — which is CI's condition rather than an argument about it. The capability
+  mutations moved to the tracked config for the same reason: a mutation in a gitignored file
+  proves nothing about a clean checkout.
+
 ## Verification
 
 *(Evidence per ISC, appended as each criterion passes.)*

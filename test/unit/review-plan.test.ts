@@ -232,20 +232,36 @@ describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors",
     expect(angles.size).toBe(reviewers.length);
   });
 
-  it("gives the collator write but never bash", () => {
+  it("gives every review seat write, and none of them bash or edit", () => {
     /*
-     * One tool more than a reviewer and one short of dispatch. The write is for
-     * `/outbox` — the fan-out plan and the collated report. Bash is what a
-     * worker would need to reach a sibling's control socket, and §12.1's
-     * argument for withholding it from a reviewer applies unchanged to the
-     * worker that briefs them.
+     * REWRITTEN 2026-09-04, and the old assertion is recorded rather than
+     * quietly relaxed. It required every reviewer to hold no `write`, which was
+     * true of the config and made the console unable to function: nothing
+     * host-side writes `result.json` (`harvest/outbox.ts` only reads it), so a
+     * reviewer with no writer tool could not report at all — every lens missing,
+     * `relay.ts` answering `not_collated`, no collation ever dispatched, and the
+     * fan-out task settling `success` with the review showing green. The owner
+     * granted `write`, outbox-only, on the collator's precedent.
+     *
+     * The line §12.1 actually draws is BASH, not writing: a shell is what turns a
+     * read-only reviewer into a worker that can `cd /`, reach a socket or
+     * `git push`. Write-to-outbox is how every other worker in this fleet
+     * reports, into a worker-scoped mount that is already the untrusted-content
+     * boundary. `edit` stays withheld because it would buy nothing — the only
+     * files a reviewer sees besides its outbox are the `:ro` checkout.
+     *
+     * So the three members are asserted SEPARATELY. A single "the tools changed"
+     * check would be satisfied by adding `bash`, which is the one thing this
+     * block exists to refuse.
      */
     const col = resolveWorker(loaded(), "col-1");
     expect(col.tools).toContain("write");
     expect(col.tools).not.toContain("bash");
     for (const id of reviewers) {
-      expect(resolveWorker(loaded(), id).tools, `${id} must stay read-only`).not.toContain("bash");
-      expect(resolveWorker(loaded(), id).tools, `${id} must stay read-only`).not.toContain("write");
+      const tools = resolveWorker(loaded(), id).tools;
+      expect(tools, `${id} cannot write its result envelope`).toContain("write");
+      expect(tools, `${id} must never hold a shell`).not.toContain("bash");
+      expect(tools, `${id} has a read-only checkout; edit buys nothing`).not.toContain("edit");
     }
   });
 

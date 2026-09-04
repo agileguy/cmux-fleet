@@ -59,6 +59,11 @@ import {
   collationTaskId,
 } from "../../src/run/relay.ts";
 import { REPLIES_MOUNT, replyMountPath } from "../../src/run/replies.ts";
+import {
+  ARTIFACT_NAMES,
+  citedPaths,
+  unknownPaths,
+} from "../support/role-docs.ts";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const ROLE = readFileSync(`${ROOT}roles/collator.md`, "utf8");
@@ -103,59 +108,46 @@ describe("the mechanism the document describes is the one that exists", () => {
   });
 });
 
-describe("the document names only paths this worker has", () => {
+describe("the collator document names only paths that exist", () => {
   /**
-   * The collator's mounts, and the reason each is here rather than derived from
-   * `render.ts` the way `worker-docs-currency.test.ts` derives them.
+   * BY CONSTRUCTION, and the first-segment version this replaces was the defect.
    *
-   * That test's extractor reads `argv.push("-v", ...)` out of the renderer,
-   * which gives every mount ANY role can receive. The collator is
-   * `isolation: shared-ro` with `tools: [read, write, grep, find, ls]`, so the
-   * interesting failure here is the opposite one: a path that IS a mount for
-   * some other role and is not one for this worker. Deriving would accept
-   * exactly that. Two of the three are pinned to constants so the derivation is
-   * only lost where there is no constant to pin to.
+   * That version classified only a path's leading segment against a set of mount
+   * roots, so `/outbox/reports-v2/<child-task-id>.json` — a path that has never
+   * existed — passed, because `/outbox` is a mount. The historical
+   * `/outbox/reports/` defect was caught only by the literal denylist below it.
+   * A denylist of past mistakes cannot catch a future one; the allowlist in
+   * `test/support/role-docs.ts` is derived from the builders and constants that
+   * produce these paths, so an invented one fails whatever it is called.
    */
-  const MOUNTS = new Set([REPLIES_MOUNT, "/outbox", "/workspace"]);
-  const ORDINARY = new Set(["/tmp", "/run", "/etc", "/usr", "/var", "/home", "/dev", "/proc"]);
-
-  test("every backticked top-level path is a mount or an ordinary container dir", () => {
-    const offenders: string[] = [];
-    let examined = 0;
-    /*
-     * The character class admits `<` and `>` deliberately. Every interesting
-     * path in this document carries a placeholder —
-     * `/outbox/<task-id>/dispatch-request.json` is the one the whole fan-out
-     * turns on — and the first version of the equivalent probe in
-     * `worker-docs-currency.test.ts` was DECORATIVE because a `<` ended the
-     * match before the closing backtick, so none of them was ever examined.
-     */
-    for (const m of ROLE.matchAll(/`(\/[a-zA-Z0-9<][a-zA-Z0-9/._<>-]*)`/g)) {
-      const cited = m[1]!;
-      examined += 1;
-      const top = `/${cited.split("/")[1]!}`;
-      if (ORDINARY.has(top) || MOUNTS.has(top)) continue;
-      offenders.push(cited);
-    }
-    // CONTROL: the failure this replaces was an extractor that examined almost
-    // nothing while reporting no offenders.
-    expect(examined, "the path extractor examined almost nothing — the regex has rotted")
-      .toBeGreaterThanOrEqual(5);
+  test("every backticked path is one the code produces", () => {
     expect(
-      offenders,
-      `roles/collator.md names paths the collator does not have: ${offenders.join(", ")}`,
+      unknownPaths(ROLE),
+      `roles/collator.md names paths nothing in the code produces: ${unknownPaths(ROLE).join(", ")}`,
     ).toEqual([]);
   });
 
   /**
-   * ASYMMETRIC control for the probe above. If the extractor matched nothing —
-   * the decorative failure it was written against — this would pass just as
-   * happily, so the specific path the whole second turn depends on is asserted
-   * by name.
+   * CONTROL, and it is the exact string the review used to demonstrate the hole.
+   * A rule that matched nothing would report no offenders just as happily.
    */
+  test("CONTROL: a fresh invented path under a real mount is caught", () => {
+    const poisoned = `${ROLE}\n\nThe reports live at \`/outbox/reports-v2/<child-task-id>.json\`.\n`;
+    expect(unknownPaths(poisoned)).toContain("/outbox/reports-v2/<child-task-id>.json");
+  });
+
   test("CONTROL: the extractor really does reach the reply mount", () => {
-    const cited = [...ROLE.matchAll(/`(\/[a-zA-Z0-9<][a-zA-Z0-9/._<>-]*)`/g)].map((m) => m[1]!);
-    expect(cited).toContain(`${REPLIES_MOUNT}/<child-task-id>.json`);
+    expect(citedPaths(ROLE)).toContain(`${REPLIES_MOUNT}/<child-task-id>.json`);
+  });
+
+  /**
+   * The two artifact names the document tells the collator to write, checked
+   * against the constants rather than against each other. A name that exists
+   * only in prose cannot be verified; both are now spelled in `collation.ts`.
+   */
+  test("both artifact names come from the code", () => {
+    expect(ROLE).toContain(`/outbox/<task-id>/files/${ARTIFACT_NAMES.structural}`);
+    expect(ROLE).toContain(`/outbox/<task-id>/files/${ARTIFACT_NAMES.prose}`);
   });
 });
 

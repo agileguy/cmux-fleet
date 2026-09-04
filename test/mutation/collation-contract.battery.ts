@@ -47,7 +47,13 @@ const ROLE = `${W}/roles/collator.md`;
  */
 const REVIEWER = `${W}/roles/reviewer.md`;
 const XFILE = `${W}/roles/review/cross-file-contracts.md`;
-/** Not tracked by git; copied into the worktree and restored like the rest. */
+/**
+ * The TRACKED config, which is the one CI grades against and therefore the one a
+ * capability probe must be mutated in. `fleet.yaml` is gitignored, so a mutation
+ * there proves nothing about a clean checkout.
+ */
+const EXAMPLE = `${W}/fleet.example.yaml`;
+/** The operator's own, copied in and restored like the rest. */
 const FLEET = `${W}/fleet.yaml`;
 const TESTFILES = [
   "test/unit/collation.test.ts",
@@ -66,6 +72,7 @@ const PRISTINE: Record<string, string> = {
   [REVIEWER]: readFileSync(REVIEWER, "utf8"),
   [XFILE]: readFileSync(XFILE, "utf8"),
   [FLEET]: readFileSync(FLEET, "utf8"),
+  [EXAMPLE]: readFileSync(EXAMPLE, "utf8"),
 };
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const TIMEOUT_MS = 30_000;
@@ -374,8 +381,8 @@ const MUTATIONS: M[] = [
     id: "C35",
     what: "PATH: the artifact path drops its spellability guard",
     file: SRC,
-    find: "  if (!spellable(taskId)) {",
-    replace: "  if (false) {",
+    find: "  if (!spellable(taskId)) {\n    throw new Error(\n      `task id ${JSON.stringify(taskId)} cannot name a path segment, so no collation path was `",
+    replace: "  if (false) {\n    throw new Error(\n      `task id ${JSON.stringify(taskId)} cannot name a path segment, so no collation path was `",
     expect: "red",
   },
   {
@@ -486,10 +493,10 @@ const MUTATIONS: M[] = [
   },
   {
     id: "RV2",
-    what: "REVIEWER: the WHY is dropped — the instruction becomes a preference",
+    what: "REVIEWER: the reason to still prefer `notes` is dropped",
     file: REVIEWER,
-    find: "path, size and checksum,\nand **not the contents**.",
-    replace: "path, size and checksum.",
+    find: "`notes` is what you can count on arriving\nwhole, because only the copied files are capped.",
+    replace: "Use whichever you prefer.",
     expect: "red",
   },
   {
@@ -502,26 +509,26 @@ const MUTATIONS: M[] = [
   },
   {
     id: "RV4",
-    what: "REVIEWER: the mitigation stops being labelled a mitigation",
+    what: "REVIEWER: the surviving mitigation stops being justified and reads as a leftover",
     file: REVIEWER,
-    find: "**This is a workaround, and it is written here so it is not mistaken for the design.**",
-    replace: "**This is how the console works.**",
+    find: "This instruction stays anyway",
+    replace: "This instruction is legacy",
     expect: "red",
   },
   {
     id: "RV5",
-    what: "REVIEWER: the design note stops naming a recommendation",
+    what: "REVIEWER: the design note stops naming which fix was taken",
     file: SRC,
-    find: " * **Take A.**",
-    replace: " * **Either would do.**",
+    find: " * **Take A shipped.**",
+    replace: " * **Something shipped.**",
     expect: "red",
   },
   {
     id: "RV6",
-    what: "REVIEWER: the design note drops the recommendation's cost",
+    what: "REVIEWER: the design note drops the cap's cost",
     file: SRC,
-    find: " * **A's cost, stated rather than buried:**",
-    replace: " * **A is free:**",
+    find: " * **The cap's cost is paid, not hidden.**",
+    replace: " * **The cap is free.**",
     expect: "red",
   },
   {
@@ -574,15 +581,15 @@ const MUTATIONS: M[] = [
     id: "RV12",
     what: "REVIEWER: a reviewer is pointed at a sibling's reply (the sequential fan-out)",
     file: REVIEWER,
-    find: "**Quote file and line.**",
-    replace: "Read `/replies/<child-task-id>.json` for what the others found. **Quote file and line.**",
+    find: "**Quote file and line, and quote the file as `/workspace/...`.**",
+    replace: "Read `/replies/<child-task-id>.json` for what the others found. **Quote file and line, and quote the file as `/workspace/...`.**",
     expect: "red",
   },
   {
     id: "RV13",
-    what: "REVIEWER: the location's spelling guidance is dropped",
+    what: "REVIEWER: the container-path spelling guidance is dropped",
     file: REVIEWER,
-    find: "Give the path\nrepo-relative and the line as a bare number",
+    find: "Write the path the way the container sees it —\n`/workspace/src/rpc/epoch.ts`, line 183 — **not** the repo-relative form",
     replace: "Give the location",
     expect: "red",
   },
@@ -590,16 +597,173 @@ const MUTATIONS: M[] = [
     id: "RV14",
     what: "REVIEWER: the collator loses its instruction for a `path:line` it is handed",
     file: ROLE,
-    find: "If a reviewer gave you\n  `src/foo.ts:12`, split it: the number belongs in `line`.",
+    find: "`src/foo.ts:12`, split it and make it absolute — the number belongs in `line`.",
     replace: "Split any suffix off the path.",
     expect: "red",
   },
   {
     id: "RV15",
-    what: "REVIEWER: bash is granted to the reviewer role in config",
+    what: "GRANT: bash is granted to the reviewer in the TRACKED config",
+    file: EXAMPLE,
+    find: "    tools: [read, write, grep, find, ls]",
+    replace: "    tools: [read, write, grep, find, ls, bash]",
+    expect: "red",
+  },
+  // ── G1: the denominator, checked against config. ─────────────────────────
+  {
+    id: "G1",
+    what: "DENOMINATOR: a lens row may be OMITTED — a 2/3 review records a clean 2/2",
+    file: SRC,
+    find: "    if (got === undefined) {",
+    replace: "    if (false) {",
+    expect: "red",
+  },
+  {
+    id: "G2",
+    what: "DENOMINATOR: an extra row may pad the table with a reader that does not exist",
+    file: SRC,
+    find: "    if (!expected.has(worker)) {",
+    replace: "    if (false) {",
+    expect: "red",
+  },
+  {
+    id: "G3",
+    what: "DENOMINATOR: a row may carry another lens's aspect",
+    file: SRC,
+    find: "    if (got !== aspect) {",
+    replace: "    if (false) {",
+    expect: "red",
+  },
+  {
+    id: "G4",
+    what: "DENOMINATOR: the table is checked as a SUBSET rather than as a set equality",
+    file: SRC,
+    find: "  for (const worker of declared.keys()) {",
+    replace: "  for (const worker of [] as string[]) {",
+    expect: "red",
+  },
+  // ── G5: the structural binding, and its ordering. ────────────────────────
+  {
+    id: "G5",
+    what: "BINDING: the document is trusted about which task it belongs to",
+    file: SRC,
+    find: "  if (collation.task_id !== ctx.taskId) {",
+    replace: "  if (false) {",
+    expect: "red",
+  },
+  {
+    id: "G6",
+    what: "BINDING: the seats come from the DOCUMENT rather than from config",
+    file: SRC,
+    find: "  const seats = ctx.aspects ?? REVIEW_CONSOLE_ASPECTS;",
+    replace: "  const seats = collation.lenses.map((l) => ({ worker: l.worker, aspect: l.aspect }));",
+    expect: "red",
+  },
+  {
+    id: "G7",
+    what: "BINDING: the derivation check is put where the structural one belongs",
+    file: SRC,
+    find: "  if (collation.task_id !== ctx.taskId) {",
+    replace: "  if (collation.task_id !== collationTaskId(collation.parent_task_id)) {",
+    expect: "red",
+  },
+  // ── X3/X4: the survivors a review found. ─────────────────────────────────
+  {
+    id: "P2",
+    what: "CAP: the byte cap counts UTF-16 units, admitting 2x the bytes",
+    file: SRC,
+    find: '  if (Buffer.byteLength(bytes, "utf8") > MAX_COLLATION_BYTES) {',
+    replace: "  if (bytes.length > MAX_COLLATION_BYTES) {",
+    expect: "red",
+  },
+  {
+    id: "P3",
+    what: "DISPUTE: the not-a-lens arm is removed, so the refusal names the wrong rule",
+    file: SRC,
+    find: '        if (!seenWorkers.has(w)) {\n          ctx.addIssue({\n            code: "custom",\n            path: ["findings", i, "disputed_by"],',
+    replace: '        if (false) {\n          ctx.addIssue({\n            code: "custom",\n            path: ["findings", i, "disputed_by"],',
+    expect: "red",
+  },
+  {
+    id: "P4",
+    what: "ID BOUND: a task id may be 6400 characters at the schema",
+    file: SRC,
+    find: "    .max(MAX_RELAY_TASK_ID_CHARS, {",
+    replace: "    .max(6400, {",
+    expect: "red",
+  },
+  // ── H5: the cap may only ever lower. ─────────────────────────────────────
+  {
+    id: "H5",
+    what: "LOWER-ONLY: the rank comparison is dropped — a failed review rescues itself",
+    file: SRC,
+    find: "  if (b >= a) return { status: current, reason: null };",
+    replace: "  if (false) return { status: current, reason: null };",
+    expect: "red",
+  },
+  {
+    id: "H6",
+    what: "NO-OP: the explicit out-of-lattice guard, which `b >= a` already covers",
+    file: SRC,
+    find: "  if (a < 0 || b < 0) return { status: current, reason: null };",
+    replace: "  if (b < 0) return { status: current, reason: null };",
+    expect: "green",
+  },
+  {
+    id: "H7",
+    what: "LOWER-ONLY: the cap ignores the ceiling's no-op arm and always applies",
+    file: SRC,
+    find: "  if (ceiling.reason === null) return { status: current, reason: null };",
+    replace: "  if (false) return { status: current, reason: null };",
+    expect: "red",
+  },
+  {
+    id: "H8",
+    what: "LOCATION ARM: a relative path is reported as the arm that can fail",
+    file: SRC,
+    find: '  return file.startsWith("/") ? "workdir_absolute" : "relative";',
+    replace: '  return "workdir_absolute";',
+    expect: "red",
+  },
+  // ── The grant, and the two halves independently pinned. ──────────────────
+  {
+    id: "RV16",
+    what: "GRANT: `write` is removed from the TRACKED config — the role cannot report",
+    file: EXAMPLE,
+    find: "    tools: [read, write, grep, find, ls]",
+    replace: "    tools: [read, grep, find, ls]",
+    expect: "red",
+  },
+  {
+    id: "RV17",
+    what: "GRANT: the live config diverges from the tracked one",
     file: FLEET,
-    find: "    tools: [read, grep, find, ls]        # NO bash — see §12.1",
-    replace: "    tools: [read, grep, find, ls, bash]  # NO bash — see §12.1",
+    find: "    tools: [read, write, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    replace: "    tools: [read, grep, find, ls]\n    skills: [pifleet-worker]\n    append_system_prompt_file: ./roles/reviewer.md",
+    expect: "red",
+  },
+  {
+    id: "RV18",
+    what: "PATHS: a fresh invented path under a real mount (the first-segment hole)",
+    file: REVIEWER,
+    find: "**Rank by consequence.**",
+    replace: "The task envelope is at `/policy/envelope.json`.\n\n**Rank by consequence.**",
+    expect: "red",
+  },
+  {
+    id: "RV19",
+    what: "CAPABILITY: a fresh false claim in wording no denylist held",
+    file: REVIEWER,
+    find: "**Give the failing case.**",
+    replace: "Start from the diff and work outwards. **Give the failing case.**",
+    expect: "red",
+  },
+  {
+    id: "RV20",
+    what: "PATHS: an invented path in the COLLATOR document, likewise",
+    file: ROLE,
+    find: "## WHAT YOU WRITE ON TURN TWO",
+    replace: "The reports also live at `/outbox/reports-v2/<child-task-id>.json`.\n\n## WHAT YOU WRITE ON TURN TWO",
     expect: "red",
   },
   // ── Negative controls: must stay green or the battery reddens on anything. ─
@@ -680,14 +844,6 @@ const MUTATIONS: M[] = [
     file: SRC,
     find: "      .max(MAX_COLLATION_LENSES),",
     replace: "      .max(9999),",
-    expect: "green",
-  },
-  {
-    id: "U4",
-    what: "UNCOVERED: a task id may be 6400 characters",
-    file: SRC,
-    find: "    .max(64, { error: `${label} is longer than 64 characters — it names a path segment` })",
-    replace: "    .max(6400, { error: `${label} is longer than 64 characters — it names a path segment` })",
     expect: "green",
   },
   {

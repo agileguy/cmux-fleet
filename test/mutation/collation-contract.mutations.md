@@ -26,15 +26,41 @@ ending in `/cmux-fleet`. **It measures the unmutated baseline first and refuses
 to run if it is not green** — a battery whose suite is already red reports every
 mutation as caught, which is the most flattering possible failure.
 
-Run of 2026-09-04: **BASELINE pass, 76 mutations, 0 unexpected, ALL FILES
-RESTORED OK.** Restore additionally verified out of band by `shasum -a 256`
-against the live checkout and `git diff --stat`.
+Run of 2026-09-04: **BASELINE pass, 94 mutations, 0 unexpected, ALL FILES
+RESTORED OK.** Restore additionally verified out of band by `shasum -a 256` over
+all six mutable files against the live checkout, and by `git diff --stat`.
 
-`fleet.yaml` is in the mutable set (RV15) and is gitignored, so it is copied into
-the worktree and restored like the rest. Mutating config is what lets a probe
-assert a CAPABILITY rather than restate one: RV15 grants the reviewer `bash` and
-the reviewer-role suite reddens, so "this document does not tell the reviewer to
-use tools it lacks" is checked against the grant instead of against a comment.
+**Anchor rot is now caught in CI without running this.** `test/unit/mutation-anchors.test.ts`
+reads every `find:` anchor in every battery from `HEAD` and asserts each occurs
+exactly once in the file it names. The expensive half stays manual; the cheap
+half — "is this battery still about the code" — runs on every push. That closes
+the standing objection that a battery nobody runs is a table nobody can trust,
+and it is what caught eight stale anchors in this file after the role documents
+were rewritten under it.
+
+**What each probe checks BY CONSTRUCTION and what it checks by rule**, because a
+table that overstates this is the same defect as a document that overstates a
+path:
+
+| Property | How it is checked | What it cannot see |
+|---|---|---|
+| Container paths in role documents | **By construction** — allowlist derived from the builders and constants that produce them (`test/support/role-docs.ts`) | Nothing, for paths. An invented path fails whatever it is called. |
+| Shell-only capability claims | **By a sentence-level negation rule** — the word may appear only where the sentence denies having it | A false claim expressed without those words, e.g. asserting a capability by describing its effect |
+| The reviewer's tool grant | **By construction**, member by member, against `fleet.example.yaml` | Nothing for the tracked config; the live `fleet.yaml` is a separate gated probe |
+| Wire tags and file names | **By construction**, against the schema constants | — |
+| Tone, judgement, review advice | **Not checked**, deliberately — see U8/U9 | Everything |
+
+**Both configs are in the mutable set, and which one is which matters.**
+`fleet.example.yaml` is TRACKED and is what CI grades against, so the capability
+mutations (RV15, RV16) target it; `fleet.yaml` is gitignored, copied into the
+worktree, and carries only the divergence probe (RV17). A mutation in the
+gitignored file would prove nothing about a clean checkout, which is the same
+mistake as reading it in a test.
+
+**The bash refusal and the write grant are pinned independently**, because a probe
+that merely noticed "the tools list changed" would be satisfied by either and
+RV15 would stop meaning what its name says. RV15 adds `bash`; RV16 removes
+`write`; both redden, from different assertions.
 
 ## The role documents are source
 
@@ -146,6 +172,34 @@ survive half of it being deleted.
 | RV14 | The collator loses its instruction for a `path:line` it is handed | The other end of RV13: reviewers will still write `src/foo.ts:12`, and the collator has to split it rather than paste it into `file`. |
 | RV15 | `bash` is granted to the reviewer in `fleet.yaml` | The capability claim is checked against the GRANT. A role that gains bash makes "there is no diff" false, and the document would say it anyway. |
 
+### The denominator, the binding, and the survivors a review found
+
+Added after a grading-honesty review and a test-integrity review. Each row is a
+hole that was open at the previous run of this table, so the "0 unexpected" above
+was true and incomplete — a battery measures what someone thought to mutate.
+
+| # | Mutation | Catches |
+|---|---|---|
+| G1 | A lens row may be OMITTED | **The fabrication the previous rules missed.** Crediting a lens marked `reported: false` was refused; DELETING its row achieved the identical reading and was legal. Two reporting rows over a three-lens console ship `{total: 2, reported: 2, missing: []}` — a clean 2/2 — and one row was legal, so 1/1 was reachable. |
+| G2 | An extra row may pad the table | The other direction: a reader that does not exist, turning a 1/3 into a 1/4 that reads as diligence. |
+| G3 | A row may carry another lens's aspect | The aspect is the word the record uses to name a missing lens, so a renamed row reports the wrong lens absent. |
+| G4 | The table is checked as a SUBSET rather than a set equality | The extra-row arm removed wholesale. |
+| G5 | The document is trusted about which task it belongs to | **A document cannot be its own witness.** A collation declaring `T-9-collate`/`T-9` while sitting in `T-1-collate`'s outbox is internally consistent, parses, and was published as T-1's record — the exact misfiling that breaks the only link D5 leaves. |
+| G6 | The seats come from the DOCUMENT rather than from config | D11 inverted: the collator defines the console it is graded against. |
+| G7 | The derivation check is put where the structural one belongs | The documented ordering, which was unasserted until a fixture failing BOTH checks existed. The battery proved it by reordering and staying green. |
+| P2 | The byte cap counts UTF-16 units | Admits up to 2× `MAX_COLLATION_BYTES` of astral text into the host process that grades it. The module's docblock stated the property and the only fixture was ASCII, where the two measures agree. |
+| P3 | `disputed_by`'s not-a-lens arm is removed | The document is still refused — by the wrong arm, with the wrong reason. Its `raised_by` twin was already message-pinned; this is C38's standard applied to the twin that lacked it. |
+| P4 | A task id may be 6400 characters at the schema | 64 is the length at which an id stops being a legal path segment. **The second site is gone rather than tested twice**: `spellable` and `MAX_RELAY_TASK_ID_CHARS` are now imported from `task-ids.ts`, so there is one bound to mutate. |
+| H5 | The rank comparison is dropped from `capCollationVerdict` | **A failed review rescues itself.** A task clamped to `failed` by a malformed `ticket-ops.json` is lifted to `partial` by its own zero-finding collation. This is the "may only ever lower" property that the whole instrument rests on, and it was proved by argument until this row existed. |
+| H7 | The cap ignores the ceiling's no-op arm | When §6.8's rule is silent the ceiling returns the CLAIM, which would then be applied as a cap — the function doing `adjudicate`'s job a second time. Found by the battery; the fixture did not exist. |
+| H8 | A relative path is reported as the arm that can fail | `findingLocationArm` is the predicate the census needs to publish `located` split by arm; inverting it makes every location look checked. |
+| RV15 | `bash` granted in the TRACKED config | The capability claim, checked against the grant. |
+| RV16 | `write` removed from the TRACKED config | **The defect the owner's decision repaired.** Without it the reviewer cannot write `result.json`, every lens reports nothing, no collation is dispatched, and the fan-out task settles `success` with the review showing green. |
+| RV17 | The live config diverges from the tracked one | The console runs from `fleet.yaml`; CI grades `fleet.example.yaml`. A silent divergence is a console that behaves unlike the thing under test. |
+| RV18 | A fresh invented path under a real mount, in the reviewer document | **The first-segment hole.** `/policy/envelope.json` passed the old guard because `/policy` is a mount. |
+| RV19 | A fresh false capability claim in unseen wording | *"Start from the diff and work outwards."* The denylist it replaces held RV7's and RV9's own replacement strings — the probe and the mutation had been written to each other. |
+| RV20 | The same invented-path attack against the collator document | `/outbox/reports-v2/...`, which `/outbox` being a mount used to admit. |
+
 ## Greens — and which kind of green each one is
 
 Two different things look identical in a battery and must not be conflated.
@@ -163,6 +217,7 @@ Two different things look identical in a battery and must not be conflated.
 |---|---|---|
 | NO1 | `findings.length < 1` instead of `=== 0` | A non-negative array length makes the two predicates identical. |
 | NO2 | The `not_json` refusal's wording changes | The refusal's CODE is the assertion surface and its prose is the explanation — `DispatchRefusal`'s division, taken unchanged. A probe that pinned this sentence would be pinning the part that gets rewritten. Contrast C38, where the prose IS the property. |
+| H6 | `capCollationVerdict`'s explicit out-of-lattice guard removed | **Filed as a red and measured as a no-op, which is the useful outcome.** `rank` returns `-1` for `unknown`, `aborted` and `timed_out`, so the `b >= a` comparison already returns the current verdict for all three — the explicit `a < 0` test can never be the thing that saves them. The guard is KEPT anyway: without it the code's correctness depends on a `-1` coincidence rather than on the three verdict classes the docblock names, and a reader who thought that line was only about `unknown` would special-case it and clamp a killed task. |
 
 ### Uncovered regions — the mutation changes behaviour and NOTHING catches it
 
@@ -177,17 +232,26 @@ Declared, not counted. These are real gaps.
 | U5 | `statement` loses its length bound | No fixture carries a 4 KiB statement. |
 | U6 | A refusal loses the field-path prefix that says WHERE | `readCollation`'s `schema` refusal is asserted for `code` and for a reason longer than ten characters, never for naming the field. |
 | U7 | `disputed_by` loses its cap | Same shape as U2/U3. |
+| U10 | The historical "why both" paragraph in `roles/reviewer.md` | Deliberately unpinned. It explains a defect that is now FIXED, and a probe demanding it would freeze the document's account of its own past — the failure `371dc08` corrected when it deleted probes requiring the docs to say the contents "do not cross". What IS pinned is the current justification (RV4) and the current reason to prefer `notes` (RV2). |
 | U8 | The whole `Give the failing case` instruction is deleted | **The reviewer role's JUDGEMENT content, and this is a boundary rather than an oversight.** These probes hold a document's CLAIMS ABOUT THE SYSTEM — its paths, its capabilities, its wire tags — because those are decidable against code. Whether "give the failing case" is good reviewing advice is not, and a probe pinning that sentence would be pinning a preference. |
 | U9 | The ranking instruction is inverted (a naming preference outranks a correctness bug) | Same boundary, and the sharper illustration: this is unambiguously WORSE advice and nothing catches it, because nothing can. It is here so the line is measured rather than described. |
 
-**The honest summary.** Every LENGTH and COUNT bound in this contract is
-unasserted; every RULE is asserted. That is a coherent gap rather than a random
+**The honest summary, corrected.** The previous run of this table said "every
+LENGTH and COUNT bound is unasserted; every RULE is asserted", and a review showed
+the second half was false in three places — the byte cap's UNITS (P2), the
+`disputed_by` arm's REASON (P3), and the id bound's second site (P4), which U4
+declared at one site while prescribing a fixture that would have left the other
+open. All three now redden, and the id bound has one site rather than two. What
+remains true is the shape of the gap: the surviving unasserted items are LENGTH
+bounds only. That is a coherent gap rather than a random
 one — the bounds are byte-budget hygiene taken from
 `MAX_DISPATCH_REQUEST_BYTES`' arithmetic, and none of them is load-bearing for a
-property §6.8 states. **U4 is the one worth closing**, because 64 is not hygiene:
-it is the length at which a task id stops being a legal path segment, and
-`replies.ts` and `dispatch-request.ts` each spell the same 64 for the same
-reason. Closing it is one fixture with a 65-character id.
+property §6.8 states. **U4 is closed and is now P4.** 64 is not hygiene — it is
+the length at which a task id stops being a legal path segment — and the fix was
+not the fixture U4 prescribed. A 65-character fixture through the schema would
+have left `spellable`'s own `<= 64` untouched, which a review found as a second
+undeclared survivor. `spellable` and `MAX_RELAY_TASK_ID_CHARS` are now imported
+from `task-ids.ts`, so the duplicate is gone rather than tested twice.
 
 U8 and U9 are a different kind of gap and should NOT be closed. They mark where
 a document stops making checkable claims and starts giving advice, and a suite
@@ -216,10 +280,20 @@ it cannot do without. That reconciliation is one import away and is not made
 here; until it is, two schemas describe one wire format, which is the condition
 both files' headers warn about.
 
-**Whether a review ever reaches the collator.** RV1–RV4 assert that two documents
-carry the instruction and that it is labelled a mitigation. They cannot assert
-that a model FOLLOWS it. The guard is two prompts, the failure is silent, and the
-real fix is a change to the actor's reply payload that `src/run/collation.ts`'s
-header specifies and recommends. **Until that lands, this is the console's
-largest unmeasured risk**, and it is a prompt-adherence risk rather than a code
-one — which is precisely the class no probe in this repository can close.
+**Whether a review ever reaches the collator.** This was the console's largest
+unmeasured risk at the previous run and **it is now closed in code**: `371dc08`
+inlines each artifact's contents into the reply under 64 KiB / 256 KiB caps, with
+contention resolved by max-min fair allocation so that which half of a review
+survives is not a property of `readdir` order, and with `TRUNCATED` and
+`UNREADABLE` named separately in the brief because "arrived short" and "did not
+arrive" are different facts. RV1–RV4 now assert the surviving PROMPT-level
+belt-and-braces and its justification — `notes` remains the only uncapped channel
+— rather than a mitigation holding the feature up on its own.
+
+**Whether a model FOLLOWS any instruction in either document.** Unchanged and
+unclosable here. Every probe in this table reads text; none dispatches a worker.
+
+**Whether the reviewer can act on the write it was just granted.** The grant is
+asserted in config and the document is asserted against the grant, and no probe
+runs a container. `config validate` accepts it and the console has never been
+started with it.

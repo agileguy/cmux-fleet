@@ -30,13 +30,18 @@
  */
 import { describe, expect, test } from "bun:test";
 
+import { type Verdict, rank } from "../../src/contracts.ts";
+
 import {
   COLLATION_ARTIFACT_NAME,
   COLLATION_SCHEMA,
   CollationSchema,
   MAX_COLLATION_BYTES,
   collationArtifactPath,
+  capCollationVerdict,
   collationCeiling,
+  collationReportPath,
+  findingLocationArm,
   lensCoverage,
   readCollation,
   reportedReviewers,
@@ -45,6 +50,16 @@ import {
 // ---------------------------------------------------------------------------
 // Fixtures. Built by function so no test can mutate another's document.
 // ---------------------------------------------------------------------------
+
+/**
+ * What the HOST knows: the task whose outbox held the artifact.
+ *
+ * Every fixture below is filed under `T-collate`, so a probe that only ever used
+ * this context could not tell the structural check from the derivation check.
+ * The two are separated deliberately in "the two halves of one request stay
+ * linked" below.
+ */
+const HOST = { taskId: "T-collate" } as const;
 
 /** An escape rather than a literal: a NUL in source is invisible in a diff. */
 const NUL = String.fromCharCode(0);
@@ -360,6 +375,7 @@ describe("the finding count is authored and derived, and the pair may disagree",
   test("the ceiling counts the LIST, not the claim", () => {
     const declaredButEmpty = readCollation(
       JSON.stringify(threeReported({ findings: [], finding_count: 4 })),
+      HOST,
     );
     expect(collationCeiling("T-collate", "success", declaredButEmpty).status).toBe("partial");
   });
@@ -568,13 +584,58 @@ describe("the two halves of one request stay linked (D5)", () => {
     expect(parseOk(threeReported()).parent_task_id).toBe("T");
   });
 
-  test("a task id that is not the parent's collation id is refused", () => {
-    const r = readCollation(JSON.stringify(threeReported({ task_id: "T-arch" })));
-    expect(r.kind).toBe("refused");
-    if (r.kind === "refused") {
-      expect(r.code).toBe("task_id_mismatch");
-      expect(r.reason).toContain("T-collate");
-    }
+  /**
+   * ASYMMETRIC PAIR, and the whole point of taking a context.
+   *
+   * Both documents are refused; only one of them could have been refused by the
+   * old intra-document check. Separating them is what proves the structural
+   * binding exists rather than being implied by the derivation.
+   */
+  test("ASYMMETRIC: an internally CONSISTENT collation in the wrong outbox is refused", () => {
+    // Perfectly self-consistent: T-9 derives T-9-collate. It is simply not
+    // this task's collation, and no check inside the file could ever say so.
+    const r = readCollation(
+      JSON.stringify(threeReported({ task_id: "T-9-collate", parent_task_id: "T-9" })),
+      HOST,
+    );
+    expect(r.kind === "refused" && r.code).toBe("filed_under_wrong_task");
+    if (r.kind === "refused") expect(r.reason).toContain("T-collate");
+  });
+
+  test("ASYMMETRIC: a task id its own parent does not derive is refused separately", () => {
+    // Right outbox, wrong parent — the collator got its own lineage wrong.
+    const r = readCollation(
+      JSON.stringify(threeReported({ task_id: "T-collate", parent_task_id: "Q" })),
+      HOST,
+    );
+    expect(r.kind === "refused" && r.code).toBe("derived_id_mismatch");
+    if (r.kind === "refused") expect(r.reason).toContain("Q-collate");
+  });
+
+  /**
+   * The ORDERING, and it needs a document that fails BOTH.
+   *
+   * Every fixture above trips exactly one check, so either order produces the
+   * same answer for all of them and the documented "structural first" was
+   * unasserted — the battery proved it by reordering the checks and staying
+   * green. `T-arch` filed in `T-collate`'s outbox with parent `T` is in the
+   * wrong outbox AND is not the collation `T` derives; the fault an operator
+   * must act on is the misfiling, so that is the code that must win.
+   */
+  test("ASYMMETRIC: a document failing BOTH id checks reports the structural one", () => {
+    const r = readCollation(
+      JSON.stringify(threeReported({ task_id: "T-arch", parent_task_id: "T" })),
+      HOST,
+    );
+    expect(r.kind === "refused" && r.code).toBe("filed_under_wrong_task");
+  });
+
+  test("CONTROL: the same document in its own outbox is accepted", () => {
+    const r = readCollation(
+      JSON.stringify(threeReported({ task_id: "T-9-collate", parent_task_id: "T-9" })),
+      { taskId: "T-9-collate" },
+    );
+    expect(r.kind).toBe("ok");
   });
 
   test("an id that cannot be a path segment is refused", () => {
@@ -584,32 +645,32 @@ describe("the two halves of one request stay linked (D5)", () => {
 
 describe("readCollation answers with a value rather than throwing", () => {
   test("an absent artifact is `missing`, which is not a refusal", () => {
-    expect(readCollation(null).kind).toBe("missing");
+    expect(readCollation(null, HOST).kind).toBe("missing");
   });
 
   test("bytes that are not JSON are refused as `not_json`", () => {
-    const r = readCollation("{not json");
+    const r = readCollation("{not json", HOST);
     expect(r.kind === "refused" && r.code).toBe("not_json");
   });
 
   test("a JSON scalar is refused as `schema`, not as `not_json`", () => {
-    const r = readCollation("42");
+    const r = readCollation("42", HOST);
     expect(r.kind === "refused" && r.code).toBe("schema");
   });
 
   test("an oversize document is refused before it is parsed", () => {
-    const r = readCollation(`"${"x".repeat(MAX_COLLATION_BYTES)}"`);
+    const r = readCollation(`"${"x".repeat(MAX_COLLATION_BYTES)}"`, HOST);
     expect(r.kind === "refused" && r.code).toBe("too_large");
   });
 
   test("a well-formed document round-trips", () => {
-    const r = readCollation(JSON.stringify(threeReported()));
+    const r = readCollation(JSON.stringify(threeReported()), HOST);
     expect(r.kind).toBe("ok");
     if (r.kind === "ok") expect(r.collation.findings).toHaveLength(1);
   });
 
   test("a schema violation is refused as `schema` and the reason survives", () => {
-    const r = readCollation(JSON.stringify(threeReported({ lenses: [] })));
+    const r = readCollation(JSON.stringify(threeReported({ lenses: [] })), HOST);
     expect(r.kind === "refused" && r.code).toBe("schema");
     if (r.kind === "refused") expect(r.reason.length).toBeGreaterThan(10);
   });
@@ -672,8 +733,8 @@ describe("coverage is a datum beside the verdict, not folded into it (§9 Q6)", 
  * from the other side.
  */
 describe("zero findings with a claim of success is partial (§6.8)", () => {
-  const ok = readCollation(JSON.stringify(threeReported()));
-  const empty = readCollation(JSON.stringify(threeReported({ findings: [] })));
+  const ok = readCollation(JSON.stringify(threeReported()), HOST);
+  const empty = readCollation(JSON.stringify(threeReported({ findings: [] })), HOST);
   /** The collation half of a review — the only task this instrument judges. */
   const C = "T-collate";
 
@@ -688,11 +749,11 @@ describe("zero findings with a claim of success is partial (§6.8)", () => {
   });
 
   test("a missing collation does not let a success claim stand either", () => {
-    expect(collationCeiling(C, "success", readCollation(null)).status).toBe("partial");
+    expect(collationCeiling(C, "success", readCollation(null, HOST)).status).toBe("partial");
   });
 
   test("a collation that does not parse does not let a success claim stand", () => {
-    expect(collationCeiling(C, "success", readCollation("{nope")).status).toBe("partial");
+    expect(collationCeiling(C, "success", readCollation("{nope", HOST)).status).toBe("partial");
   });
 
   /**
@@ -710,7 +771,7 @@ describe("zero findings with a claim of success is partial (§6.8)", () => {
   });
 
   test("ASYMMETRIC: a claim of blocked with a missing collation stays blocked", () => {
-    expect(collationCeiling(C, "blocked", readCollation(null)).status).toBe("blocked");
+    expect(collationCeiling(C, "blocked", readCollation(null, HOST)).status).toBe("blocked");
   });
 
   test("an unknown claim is left alone — a missing envelope must not clamp (ISC-94)", () => {
@@ -729,27 +790,35 @@ describe("zero findings with a claim of success is partial (§6.8)", () => {
    * asked the wrong question.
    */
   test("ASYMMETRIC: the FAN-OUT task's success claim is untouched", () => {
-    expect(collationCeiling("T", "success", readCollation(null))).toEqual({
+    expect(collationCeiling("T", "success", readCollation(null, HOST))).toEqual({
       status: "success",
       reason: null,
     });
   });
 
   test("ASYMMETRIC: an unrelated task's success claim is untouched", () => {
-    expect(collationCeiling("T-arch", "success", readCollation(null)).status).toBe("success");
-    expect(collationCeiling("build-42", "success", readCollation(null)).status).toBe("success");
+    expect(collationCeiling("T-arch", "success", readCollation(null, HOST)).status).toBe("success");
+    expect(collationCeiling("build-42", "success", readCollation(null, HOST)).status).toBe("success");
   });
 
   test("CONTROL: the same missing read DOES cap the collation task", () => {
-    expect(collationCeiling(C, "success", readCollation(null)).status).toBe("partial");
+    expect(collationCeiling(C, "success", readCollation(null, HOST)).status).toBe("partial");
   });
 
+  /**
+   * **Rewritten — the first version could not fail.** It asserted
+   * `expect([claimed, "partial"]).toContain(out)`, which ACCEPTS `partial` for a
+   * claim of `failed` or `blocked` — where `partial` is ABOVE the claim, the
+   * exact thing the test is named for. The lattice has to be consulted, not the
+   * two values that happened to be in scope.
+   */
   test("the ceiling never returns a status above the claim", () => {
     for (const claimed of ["success", "partial", "blocked", "failed", "unknown"] as const) {
-      for (const read of [ok, empty, readCollation(null), readCollation("{")]) {
+      for (const read of [ok, empty, readCollation(null, HOST), readCollation("{", HOST)]) {
         for (const id of [C, "T", "anything-collate"]) {
           const out = collationCeiling(id, claimed, read).status;
-          expect([claimed, "partial"]).toContain(out);
+          if (out === claimed) continue;
+          expect(rank(out), `${claimed} -> ${out} is a RAISE`).toBeLessThan(rank(claimed));
         }
       }
     }
@@ -765,5 +834,237 @@ describe("the artifact's name is spelled once", () => {
 
   test("an id that cannot be a path segment throws rather than joining", () => {
     expect(() => collationArtifactPath("../../etc")).toThrow();
+  });
+});
+
+/**
+ * §6.8 rule 2's DENOMINATOR, checked against config — the hole a review found.
+ *
+ * The schema refuses a finding credited to a lens marked `reported: false`.
+ * Deleting that lens's ROW achieves the identical reading and was permitted, so
+ * every probe here is about the table's completeness rather than its contents.
+ */
+describe("the lens table must be this console's lens table", () => {
+  test("the shipping roster is accepted", () => {
+    expect(readCollation(JSON.stringify(threeReported()), HOST).kind).toBe("ok");
+  });
+
+  /**
+   * THE FABRICATION. Two reporting rows, no third — `{total: 2, reported: 2,
+   * missing: []}`, a clean 2/2 over a three-lens console. Every intra-document
+   * rule passes: the lenses are unique, at least one reported, and every
+   * attribution names a lens that did.
+   */
+  test("ASYMMETRIC: dropping the lens that did not report is refused", () => {
+    const doc = twoReported();
+    doc["lenses"] = (doc["lenses"] as unknown[]).slice(0, 2);
+    const r = readCollation(JSON.stringify(doc), HOST);
+    expect(r.kind === "refused" && r.code).toBe("lens_table_wrong");
+    if (r.kind === "refused") {
+      expect(r.reason).toContain("rev-lang-1");
+      expect(r.reason).toContain("DENOMINATOR");
+    }
+  });
+
+  test("CONTROL: the same document WITH the row is accepted", () => {
+    expect(readCollation(JSON.stringify(twoReported()), HOST).kind).toBe("ok");
+  });
+
+  test("a single-row table — the 1/1 the old rules allowed — is refused", () => {
+    const doc = threeReported({
+      lenses: [ARCH],
+      findings: [{ statement: "s", file: "/workspace/a.ts", line: 1, raised_by: ["rev-arch-1"] }],
+    });
+    expect(readCollation(JSON.stringify(doc), HOST).kind === "refused").toBe(true);
+  });
+
+  /** The other direction: a reader that does not exist, padding the denominator. */
+  test("an extra row naming a worker outside the console is refused", () => {
+    const doc = threeReported({
+      lenses: [ARCH, CTX, LANG, { aspect: "sec", worker: "rev-sec-1", reported: true }],
+    });
+    const r = readCollation(JSON.stringify(doc), HOST);
+    expect(r.kind === "refused" && r.code).toBe("lens_table_wrong");
+    if (r.kind === "refused") expect(r.reason).toContain("rev-sec-1");
+  });
+
+  test("a row whose aspect is not its seat's is refused", () => {
+    const doc = threeReported({ lenses: [ARCH, CTX, { ...LANG, aspect: "security" }] });
+    const r = readCollation(JSON.stringify(doc), HOST);
+    expect(r.kind === "refused" && r.code).toBe("lens_table_wrong");
+    if (r.kind === "refused") expect(r.reason).toContain("security");
+  });
+
+  /**
+   * The seats are a PARAMETER, so a console with a different roster is
+   * expressible before it exists — `resolveAspects`' posture. Asserted because a
+   * hard-coded roster would make this rule untestable against anything but the
+   * shipping three, and untestable rules are the ones that get deleted.
+   */
+  test("a caller may supply its own seats", () => {
+    const doc = threeReported({
+      lenses: [{ aspect: "solo", worker: "rev-solo-1", reported: true }],
+      findings: [{ statement: "s", file: "/workspace/a.ts", line: 1, raised_by: ["rev-solo-1"] }],
+    });
+    const r = readCollation(JSON.stringify(doc), {
+      taskId: "T-collate",
+      aspects: [{ worker: "rev-solo-1", aspect: "solo" }],
+    });
+    expect(r.kind).toBe("ok");
+  });
+});
+
+/**
+ * The byte cap is about BYTES, and only an astral fixture can say so.
+ *
+ * The original probe used `"x".repeat(...)`, where UTF-16 units and UTF-8 bytes
+ * agree — so `Buffer.byteLength(bytes, "utf8")` and `bytes.length` were
+ * indistinguishable and the mutant that swapped them survived. The module's own
+ * docblock states the property; nothing executed it. Each character below is 2
+ * code units and 4 bytes, so this document is under the cap by `.length` and
+ * over it by weight.
+ */
+describe("the byte cap counts bytes, not code units", () => {
+  const astral = "\u{1F600}".repeat(Math.floor(MAX_COLLATION_BYTES / 3));
+
+  test("the fixture is the asymmetric one — under by units, over by bytes", () => {
+    expect(astral.length).toBeLessThan(MAX_COLLATION_BYTES);
+    expect(Buffer.byteLength(astral, "utf8")).toBeGreaterThan(MAX_COLLATION_BYTES);
+  });
+
+  test("it is refused as too_large", () => {
+    const r = readCollation(`"${astral}"`, HOST);
+    expect(r.kind === "refused" && r.code).toBe("too_large");
+  });
+});
+
+/**
+ * `disputed_by`'s non-lens arm, message-pinned — its `raised_by` twin already
+ * was, and a review found the asymmetry. Both arms refuse the same document with
+ * different reasons, so only the message tells them apart.
+ */
+describe("a dispute by a worker outside the table names the right rule", () => {
+  test("the refusal says it is not a lens, not that it did not report", () => {
+    const m = why(
+      threeReported({
+        findings: [
+          {
+            statement: "s",
+            file: "/workspace/a.ts",
+            line: 1,
+            raised_by: ["rev-arch-1"],
+            disputed_by: ["rev-sec-1"],
+          },
+        ],
+      }),
+    );
+    expect(m).toContain("rev-sec-1");
+    expect(m).toContain("is not a lens of this console");
+  });
+});
+
+/**
+ * "May only ever lower", executed rather than argued.
+ *
+ * The review found the property proved by a `rank` comparison at a call site no
+ * probe could reach: a task clamped to `failed` by a malformed `ticket-ops.json`
+ * is stopped from being RESCUED to `partial` by its own zero-finding collation
+ * only because `rank("failed") < rank("partial")`. The comparison now lives in
+ * `capCollationVerdict`, and this is its probe.
+ */
+describe("the collation cap can only ever lower a verdict", () => {
+  const CID = "T-collate";
+  const empty = readCollation(JSON.stringify(threeReported({ findings: [] })), HOST);
+  const okRead = readCollation(JSON.stringify(threeReported()), HOST);
+  const ALL: readonly Verdict[] = [
+    "success",
+    "partial",
+    "blocked",
+    "failed",
+    "aborted",
+    "timed_out",
+    "unknown",
+  ];
+
+  test("EXHAUSTIVE: no combination raises a verdict", () => {
+    for (const current of ALL) {
+      for (const claimed of ALL) {
+        for (const read of [okRead, empty, readCollation(null, HOST), readCollation("{", HOST)]) {
+          const out = capCollationVerdict(current, CID, claimed, read).status;
+          if (out === current) continue;
+          expect(rank(out), `${current} -> ${out} is a RAISE`).toBeLessThan(rank(current));
+        }
+      }
+    }
+  });
+
+  /** The H5 fixture at this layer: a failed task must not rescue itself. */
+  test("a task already at `failed` is not lifted to `partial` by its own collation", () => {
+    expect(capCollationVerdict("failed", CID, "success", empty).status).toBe("failed");
+  });
+
+  test("blocked is likewise untouched", () => {
+    expect(capCollationVerdict("blocked", CID, "success", empty).status).toBe("blocked");
+  });
+
+  /** CONTROL: the cap does still bite, or every test above is vacuous. */
+  test("CONTROL: success IS lowered to partial", () => {
+    const c = capCollationVerdict("success", CID, "success", empty);
+    expect(c.status).toBe("partial");
+    expect(c.reason).toContain("zero findings");
+  });
+
+  test("a supervisor verdict is not ours to lower", () => {
+    expect(capCollationVerdict("timed_out", CID, "success", empty).status).toBe("timed_out");
+    expect(capCollationVerdict("aborted", CID, "success", empty).status).toBe("aborted");
+  });
+
+  test("unknown is the identity, not the bottom (ISC-94)", () => {
+    expect(capCollationVerdict("unknown", CID, "success", empty).status).toBe("unknown");
+  });
+
+  /**
+   * THE NO-OP ARM IS LOAD-BEARING, and the battery is how that was discovered.
+   *
+   * When §6.8's rule does not fire, `collationCeiling` returns the CLAIM with a
+   * null reason. Without the early return, that claim flows into the rank
+   * comparison and is applied as a cap — so a task already combined to `success`
+   * would be dragged back down to a `failed` claim that `adjudicate` has already
+   * accounted for. This function's job is §6.8's rule and nothing else; combining
+   * the claim is the caller's, and doing it twice is not conservative, it is
+   * wrong.
+   */
+  test("ASYMMETRIC: the cap does not re-apply the CLAIM when its own rule is silent", () => {
+    const c = capCollationVerdict("success", CID, "failed", okRead);
+    expect(c.status).toBe("success");
+    expect(c.reason).toBeNull();
+  });
+});
+
+describe("the location arm the census will take is readable from here", () => {
+  test("an absolute path is the arm that can fail", () => {
+    expect(findingLocationArm("/workspace/src/a.ts")).toBe("workdir_absolute");
+  });
+
+  /** The arm a prose sentence takes, which is why the instruction says absolute. */
+  test("ASYMMETRIC: a relative string — including a sentence — is the arm that cannot", () => {
+    expect(findingLocationArm("src/a.ts")).toBe("relative");
+    expect(findingLocationArm("the error handling could be tightened")).toBe("relative");
+  });
+});
+
+describe("the prose report's path is spelled once", () => {
+  test("it is built from the constant", () => {
+    expect(collationReportPath("T-collate")).toBe("/outbox/T-collate/files/review.md");
+  });
+
+  test("an unspellable id throws rather than joining", () => {
+    expect(() => collationReportPath("../../etc")).toThrow();
+  });
+
+  /** X4: one id bound, imported. A 65-character id fails at the schema too. */
+  test("an over-long task id is refused by the schema, not just by the builder", () => {
+    expect(() => collationReportPath("a".repeat(65))).toThrow();
+    expect(why(threeReported({ parent_task_id: "a".repeat(65) }))).not.toBe("");
   });
 });
