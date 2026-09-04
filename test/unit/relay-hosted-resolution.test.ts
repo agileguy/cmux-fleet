@@ -33,7 +33,6 @@
  * a name every host answers from `/etc/hosts` with no network at all.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { realExec } from "../../src/container/run.ts";
 import {
   chooseUpstreamAddress,
@@ -51,8 +50,6 @@ import {
 } from "../../src/security/relay.ts";
 import { egressRelayReadyDetail } from "../../src/cli/commands/up.ts";
 import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
-
-announceMissingHostDeps();
 
 /**
  * A network name no fleet uses, per process.
@@ -450,6 +447,25 @@ describe("ISC-426: the literal is what reaches the container's env", () => {
     const exec = async (argv: string[]) => {
       calls.push(argv);
       if (isMountProbe(argv)) return answerMountProbe(argv);
+      // The uplink preflight. `ensureUplinkNetwork` used to take no `exec` and
+      // ask the real daemon, so this call never reached the fake and these
+      // tests passed on a `pifleet-egress-uplink` bridge left behind by real
+      // fleet runs on the developer's machine. Non-internal because that is
+      // what `ensureUplinkNetwork` requires.
+      if (argv[1] === "network" && argv[2] === "inspect") {
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              Name: argv[3],
+              Id: "uplink0",
+              Internal: false,
+              IPAM: { Config: [{ Gateway: "172.30.0.1" }] },
+            },
+          ]),
+          stderr: "",
+        };
+      }
       if (argv[1] === "inspect") {
         inspects += 1;
         if (inspects === 1) return { code: 1, stdout: "[]", stderr: "No such object" };
@@ -480,7 +496,7 @@ describe("ISC-426: the literal is what reaches the container's env", () => {
    * re-derived its own target. This reads the value out of the argv the daemon
    * would actually be handed.
    */
-  test.if(hostHas("docker"))("PIFLEET_RELAY_TARGETS carries the literal and not the name", async () => {
+  test("PIFLEET_RELAY_TARGETS carries the literal and not the name", async () => {
     const { lookup } = fakeResolver(answersOllama);
     const plan = await egressBridgePlan(fleet(), NET, ["ollama-cloud"], lookup);
     const { calls, exec } = daemon();
@@ -519,7 +535,7 @@ describe("ISC-426: the literal is what reaches the container's env", () => {
     expect(connect!.join(" ")).toContain("ollama.com");
   });
 
-  test.if(hostHas("docker"))("a hosted upstream on the Docker-host alias still gets --add-host", async () => {
+  test("a hosted upstream on the Docker-host alias still gets --add-host", async () => {
     const cfg = fleet();
     cfg.llm.providers!["ollama-cloud"]!.relay_upstream = `${RELAY_DEFAULT_DIAL_HOST}:443`;
     const plan = await egressBridgePlan(cfg, NET, ["ollama-cloud"], forbiddenResolver);

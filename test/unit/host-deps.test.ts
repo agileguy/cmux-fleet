@@ -3,7 +3,8 @@
  *
  * `host-deps.ts` exists because `bun test test/unit` was green on every machine
  * it had ever run on and failed 55 tests the first time a container worker ran
- * it. Twenty-two of those survive as capability-gated tests. A gate is a way to
+ * it. Eleven of those survive as capability-gated tests; the rest were real
+ * defects in the image and in a leaked `exec` seam. A gate is a way to
  * stop a test failing, which makes it also a way to stop a test RUNNING, so the
  * probes need their own guard: a `hasExecutable` that returned `false` for
  * everything would skip all twenty-two, on CI included, and go green.
@@ -58,7 +59,7 @@ describe("the probes answer about this machine, not about a flag", () => {
       // print a skip nobody can act on.
       expect(c.needed.length).toBeGreaterThan(20);
     }
-    expect(caps.map((c) => c.name).sort()).toEqual(["docker", "exec-tmpdir", "host-home"]);
+    expect(caps.map((c) => c.name).sort()).toEqual(["exec-tmpdir", "host-home"]);
   });
 
   test("hostHas refuses a name it does not know", () => {

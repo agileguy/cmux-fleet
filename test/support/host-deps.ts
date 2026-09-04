@@ -14,10 +14,17 @@
  * MEASURED. Dispatching this repository's own unit suite to a container worker
  * returned `3091 pass, 55 fail` — on an unmodified checkout that was green
  * everywhere it had ever been run. Thirty-three of those were a genuine image
- * defect (`procps`, now fixed and pinned by `dockerfile-runtime-deps.test.ts`).
- * The remaining twenty-two are this module's subject: unit tests that need a
- * container runtime, an executable temp directory, or a `$HOME` that is not the
- * worker image's own.
+ * defect (`procps`, now fixed and pinned by `dockerfile-runtime-deps.test.ts`)
+ * and eleven were a leaked seam (`ensureUplinkNetwork` took no `exec`, so tests
+ * holding a fake daemon spawned the real docker binary; closed in
+ * `security/network.ts`). The eleven left are this module's subject: unit tests
+ * that need an executable temp directory or a real writable `$HOME`.
+ *
+ * `docker` is deliberately NOT a capability here. It was, for as long as those
+ * eleven relay tests needed the binary — and gating them was the wrong repair,
+ * because they were never meant to touch it. A capability nobody gates on is
+ * the same unexamined claim a stale coverage exemption is, so it goes when its
+ * last user does.
  *
  * ## Why capability PROBES rather than an opt-in flag
  *
@@ -131,11 +138,6 @@ export interface HostCapability {
 /** Every capability `test/unit` depends on, evaluated once. */
 export function hostCapabilities(): readonly HostCapability[] {
   return [
-    {
-      name: "docker",
-      present: hasExecutable("docker"),
-      needed: "a `docker` CLI on PATH; these tests shell out to inspect networks and relays",
-    },
     {
       name: "exec-tmpdir",
       present: hasExecutableTmpdir(),

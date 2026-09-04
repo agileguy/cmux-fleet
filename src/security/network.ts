@@ -29,6 +29,7 @@
 // implementation rather than a second copy of the regex.
 import { assertDockerName, assertNetworkName } from "./docker-names.ts";
 import { ensureGatewayBlocked } from "./gateway-block.ts";
+import type { Exec } from "../container/run.ts";
 
 export { assertDockerName, assertNetworkName };
 
@@ -124,7 +125,35 @@ function gatewayFrom(ipam: unknown): string | null {
   return null;
 }
 
-async function docker(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+/**
+ * Run a docker argv, through the caller's `exec` when it supplied one.
+ *
+ * THE SEAM THIS ADDS, and the bug that made it necessary. `ensureEgressRelay`
+ * takes an injectable `Exec` and its tests drive it with a fake daemon,
+ * asserting on the exact argv sequence they record. But it called
+ * `ensureUplinkNetwork(uplink)`, which took no `exec` and reached this function
+ * — so eleven tests written to be hermetic spawned the REAL docker binary
+ * halfway through, and passed only because the developer's machine had one.
+ *
+ * Discovered by running the suite in a worker container, where they failed with
+ * `Executable not found in $PATH: "docker"` from a stack that starts in a test
+ * holding a fake. The gap was invisible from inside the tests: everything they
+ * assert on is recorded by the fake, and the leak happens somewhere they never
+ * look.
+ *
+ * `exec` is OPTIONAL so no caller outside `relay.ts` changes, and the default
+ * is the same `Bun.spawn` as before. A timeout (`code: null`) is reported as a
+ * non-zero exit: every call site here tests `code !== 0`, and a killed process
+ * is not a successful one.
+ */
+async function docker(
+  args: string[],
+  exec?: Exec,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  if (exec !== undefined) {
+    const r = await exec(["docker", ...args]);
+    return { code: r.code ?? 1, stdout: r.stdout, stderr: r.stderr };
+  }
   const p = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr] = await Promise.all([
     new Response(p.stdout).text(),
@@ -143,8 +172,11 @@ async function docker(args: string[]): Promise<{ code: number; stdout: string; s
  * "network missing" would send `ensure` into a create it cannot complete, and
  * would let `doctor` report a decidable fact it never actually decided.
  */
-export async function inspectEgressNetwork(name: string): Promise<EgressNetworkStatus> {
-  const r = await docker(networkInspectArgv(name));
+export async function inspectEgressNetwork(
+  name: string,
+  exec?: Exec,
+): Promise<EgressNetworkStatus> {
+  const r = await docker(networkInspectArgv(name), exec);
   if (r.code !== 0) {
     if (/no such network|not found/i.test(r.stderr)) {
       return { name, exists: false, internal: false, id: null, gateway: null };
@@ -163,8 +195,11 @@ export async function inspectEgressNetwork(name: string): Promise<EgressNetworkS
  * daemon reports it. Trusting our own argv instead of the daemon's answer is
  * how a flag silently dropped by a proxy/context wrapper goes unnoticed.
  */
-export async function ensureEgressNetwork(name: string): Promise<EgressNetworkStatus> {
-  const before = await inspectEgressNetwork(name);
+export async function ensureEgressNetwork(
+  name: string,
+  exec?: Exec,
+): Promise<EgressNetworkStatus> {
+  const before = await inspectEgressNetwork(name, exec);
   if (before.exists) {
     if (!before.internal) {
       throw new Error(
@@ -176,7 +211,7 @@ export async function ensureEgressNetwork(name: string): Promise<EgressNetworkSt
     await containGateway(before);
     return before;
   }
-  const created = await docker(networkCreateArgv(name));
+  const created = await docker(networkCreateArgv(name), exec);
   /*
    * THE CREATE'S EXIT STATUS IS NOT THE QUESTION — the daemon's answer is.
    *
@@ -209,7 +244,7 @@ export async function ensureEgressNetwork(name: string): Promise<EgressNetworkSt
    * exactly as `before.internal` refuses an adopted one above. The only
    * behaviour that changed is that losing a race is no longer fatal.
    */
-  const after = await inspectEgressNetwork(name);
+  const after = await inspectEgressNetwork(name, exec);
   if (!after.exists) {
     throw new Error(`egress: 'docker network create ${name}' failed: ${created.stderr.trim()}`);
   }
@@ -267,8 +302,11 @@ async function containGateway(status: EgressNetworkStatus): Promise<void> {
  * adoption would report a working relay that can reach nothing, which is
  * worse than a loud refusal at `up`.
  */
-export async function ensureUplinkNetwork(name: string): Promise<EgressNetworkStatus> {
-  const before = await inspectEgressNetwork(name);
+export async function ensureUplinkNetwork(
+  name: string,
+  exec?: Exec,
+): Promise<EgressNetworkStatus> {
+  const before = await inspectEgressNetwork(name, exec);
   if (before.exists) {
     if (before.internal) {
       throw new Error(
@@ -280,12 +318,12 @@ export async function ensureUplinkNetwork(name: string): Promise<EgressNetworkSt
     return before;
   }
   assertNetworkName(name);
-  const created = await docker(["network", "create", name]);
+  const created = await docker(["network", "create", name], exec);
   // Same race, same resolution — see `ensureEgressNetwork`. This is the one
   // that actually fired: the uplink is created immediately after the worker
   // bridge, so it is the second of the two windows a concurrent `up` hits and
   // the first whose loser has nothing else to blame.
-  const after = await inspectEgressNetwork(name);
+  const after = await inspectEgressNetwork(name, exec);
   if (!after.exists) {
     throw new Error(`egress: 'docker network create ${name}' failed: ${created.stderr.trim()}`);
   }

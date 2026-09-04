@@ -24,7 +24,6 @@
  * two listeners, which is the decision §6.3 records as rejected.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { stringify } from "yaml";
 import { realExec } from "../../src/container/run.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
@@ -53,8 +52,6 @@ import {
 import { assertDockerName } from "../../src/security/docker-names.ts";
 import { EXIT, isExitCoded } from "../../src/contracts.ts";
 import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
-
-announceMissingHostDeps();
 
 const NET = "pifleet-egress";
 
@@ -1016,6 +1013,25 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
     const exec = async (argv: string[]) => {
       calls.push(argv);
       if (isMountProbe(argv)) return answerMountProbe(argv);
+      // The uplink preflight. `ensureUplinkNetwork` used to take no `exec` and
+      // ask the real daemon, so this call never reached the fake and these
+      // tests passed on a `pifleet-egress-uplink` bridge left behind by real
+      // fleet runs on the developer's machine. Non-internal because that is
+      // what `ensureUplinkNetwork` requires.
+      if (argv[1] === "network" && argv[2] === "inspect") {
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              Name: argv[3],
+              Id: "uplink0",
+              Internal: false,
+              IPAM: { Config: [{ Gateway: "172.30.0.1" }] },
+            },
+          ]),
+          stderr: "",
+        };
+      }
       if (argv[1] === "inspect") {
         inspects += 1;
         // First inspect: nothing there, so the CREATE path runs and its
@@ -1064,7 +1080,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * by any constant that happens to match it — which is exactly how `"omlx"`
    * survived.
    */
-  test.if(hostHas("docker"))("each provider's relay is stamped with its own name", async () => {
+  test("each provider's relay is stamped with its own name", async () => {
     for (const provider of ["ollama-cloud", "spare-vendor"]) {
       const { calls, exec } = daemon();
       const status = await ensureBridgeRelay(await planFor(provider), exec);
@@ -1083,7 +1099,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * The host and port were always right — this pins that the fix did not trade
    * one derivation for another that gets the name right and the address wrong.
    */
-  test.if(hostHas("docker"))("the stamped target still carries this provider's own upstream", async () => {
+  test("the stamped target still carries this provider's own upstream", async () => {
     const { calls, exec } = daemon();
     await ensureBridgeRelay(await planFor("ollama-cloud"), exec);
     const stamped = stampedTargets(calls);
@@ -1103,7 +1119,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * fix a label. `egressBridgePlan` chooses `omlxRelayTarget` for a flat fleet
    * for exactly this reason, and this is the test that says so.
    */
-  test.if(hostHas("docker"))("a flat fleet's relay is still stamped omlx, byte for byte", async () => {
+  test("a flat fleet's relay is still stamped omlx, byte for byte", async () => {
     const flat: FleetRelayConfigView = {
       llm: { base_url: "http://omlx.pifleet.internal:8000/v1", relay_upstream: null },
       egress: { google_hosts: [], allow: [] },
@@ -1127,7 +1143,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * so there is nothing for `up` to omit, and this test is what fails if
    * someone unwinds it back to a two-argument call.
    */
-  test.if(hostHas("docker"))("calling the relay WITHOUT the plan's target is what reintroduces omlx", async () => {
+  test("calling the relay WITHOUT the plan's target is what reintroduces omlx", async () => {
     const bridge = await planFor("ollama-cloud");
     const viaSeam = daemon();
     await ensureBridgeRelay(bridge, viaSeam.exec);
