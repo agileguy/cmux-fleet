@@ -21,6 +21,21 @@
  * before writing it, and the repository facts stand on their own. A REFUSED
  * envelope is different — something was there and it was wrong — and the two
  * cases are distinct variants so the caller cannot conflate them.
+ *
+ * THERE IS A THIRD CASE, and leaving it inside the second cost a live review a
+ * whole lens. `rev-lang-1` was asked to review regex correctness, quoted
+ * `[\w\\-_]+` into its `summary`, and wrote a 3906-byte review that
+ * `JSON.parse` refused at line 16 column 248. Every layer below then behaved
+ * correctly and the sum was a lie: the harvest could not parse it, the verdict
+ * settled `unknown`, and the collation brief reported the lens as having
+ * "produced no report". The reviewer produced a report. Nobody could read it.
+ *
+ * So UNREADABLE is its own variant carrying its own facts — the path, the byte
+ * count, and the parser's complaint — because "the worker never reported" and
+ * "the worker reported something unreadable" are different facts with different
+ * fixes, and a system that cannot say the second will keep saying the first.
+ * The boundary is drawn at the bytes: refusals raised before a byte is read and
+ * refusals raised after a clean parse stay `refused`.
  */
 
 import { constants, type Dirent } from "node:fs";
@@ -87,10 +102,132 @@ export interface OutboxLocation {
   hostWorkdir: string | null;
 }
 
+/**
+ * Which half of "the bytes were in hand and are not an envelope" this is.
+ *
+ * Spelled to match `run/dispatch-request.ts`'s `DispatchRefusal`, which already
+ * draws this exact line for the sibling file in the same directory. Two codes
+ * rather than one because the operator's NEXT ACTION differs and nothing else
+ * recovers it:
+ *
+ *   - `not_json` — the bytes are not JSON at all. No field is readable, no
+ *     validator ever ran, and the cause is almost always the writer escaping
+ *     something badly. The `rev-lang-1` defect is this one: a reviewer asked
+ *     about regex correctness quoted `[\w\\-_]+` into a JSON string.
+ *   - `schema` — the bytes ARE valid JSON and are not a legal result envelope.
+ *     The document is structurally readable, the validator can NAME the field
+ *     that is wrong, and the cause is a contract mismatch rather than an
+ *     encoding bug.
+ *
+ * They stay under ONE `kind`, which is the part that matters to a consumer: the
+ * coarse fact — *the worker reported, and its report could not be read* — is
+ * identical, so a caller that ignores `code` entirely is still correct. That
+ * asymmetry is why this is one kind with two codes rather than two kinds.
+ */
+export type UnreadableEnvelopeCode = "not_json" | "schema";
+
+/**
+ * An envelope that EXISTS and could not be turned into one — enough to act on.
+ *
+ * ## Why this is a value and not a sentence
+ *
+ * The state it replaces was a `refused` carrying prose. A consumer that had to
+ * tell "this did not parse" from "this named a path outside the outbox" by
+ * matching substrings of English would be pinning a sentence rather than a
+ * rule, and the sentence is the part that gets rewritten —
+ * `DispatchRefusal`'s docblock makes the same argument for the same reason.
+ *
+ * ## Every field is here because the live defect needed it
+ *
+ * `rev-lang-1` wrote 3906 bytes of genuine review whose bad escape sat 250
+ * characters into line 16, and the collation brief said it *"produced no
+ * report"*. Recovering from that needs the file (`path`), the fact that it is
+ * not empty (`bytes`), and what was actually wrong with it (`detail`) —
+ * "unreadable" on its own is a shrug an operator cannot act on.
+ *
+ * ## `bytes` is what was PARSED, not what was stat'd
+ *
+ * The two can differ: a worker may append between the `lstat` and the read.
+ * Reporting the stat size would be claiming a size for bytes that were never
+ * handed to the parser, and the failure being described is the parser's. So
+ * this is `bytesRead`. It is legitimately 0 — an empty file exists and holds
+ * nothing — which is why no caller may infer existence from it.
+ *
+ * `detail` is swept through `safeForReport` AT CONSTRUCTION, so every consumer
+ * gets a sanitised string without having to remember to sanitise one. It can
+ * carry worker-controlled text: the oversized-array count names a key the
+ * worker chose.
+ */
+export interface UnreadableEnvelope {
+  /** HOST path of the file. Absolute, and openable — this is how it is found. */
+  readonly path: string;
+  /** Bytes handed to the parser. Legitimately 0; never a proxy for existence. */
+  readonly bytes: number;
+  /** Syntax or contract — see `UnreadableEnvelopeCode`. */
+  readonly code: UnreadableEnvelopeCode;
+  /** The parser's or validator's own complaint, sanitised for report. */
+  readonly detail: string;
+}
+
+/**
+ * ## `missing` and `unreadable` are separate variants, and that is the point
+ *
+ * They were not, and a live review lost a lens to the difference. A reviewer's
+ * unparseable envelope made the harvest settle `unknown`, which made the
+ * collation brief say the lens *"produced no report"* — when it had produced
+ * 3906 bytes of one. "The worker never reported" and "the worker reported
+ * something I could not read" are different facts about different failures with
+ * different fixes, and a type that cannot express both will keep reporting the
+ * first when it means the second.
+ *
+ * `refused` remains its own variant and keeps everything that is NOT a
+ * readability failure: refusals raised BEFORE any byte is read (a symlinked,
+ * oversized, or unopenable file) and refusals raised AFTER a clean parse and a
+ * clean validation (a foreign task id, a stale epoch, a path escaping the
+ * outbox). Those are not documents that could not be read — they are documents
+ * that were read, or deliberately not opened, and rejected for what they are.
+ * Describing a traversal attempt as a formatting problem would be a downgrade.
+ */
 export type OutboxRead =
   | { kind: "missing" }
+  | { kind: "unreadable"; unreadable: UnreadableEnvelope }
   | { kind: "refused"; reason: string }
   | { kind: "ok"; envelope: ResultEnvelope };
+
+/**
+ * The one-line rendering, HERE rather than at each consumer.
+ *
+ * The facts and the sentence that states them belong together: a consumer
+ * re-deriving this would be free to drop `bytes` or `path`, which are the two
+ * fields that make the finding actionable rather than merely alarming. The
+ * phrasing deliberately asserts that the worker DID report — that is the fact
+ * the live run got backwards.
+ */
+export function describeUnreadableEnvelope(u: UnreadableEnvelope): string {
+  const what =
+    u.code === "not_json" ? "is not valid JSON" : "is not a legal result envelope";
+  return (
+    `result envelope ${u.path} exists and ${what}: ${u.detail}. ` +
+    `It holds ${u.bytes} bytes, so the worker DID write an account of its work — ` +
+    `that account could not be read, and nothing here parsed or salvaged it.`
+  );
+}
+
+/** Build the variant, sweeping the detail once at the only place it is made. */
+function unreadable(
+  path: string,
+  bytes: number,
+  code: UnreadableEnvelopeCode,
+  detail: string,
+): OutboxRead {
+  return {
+    kind: "unreadable",
+    // The path is swept for control characters but NOT truncated at the default
+    // 256: it is the string an operator opens, and a truncated path is a path
+    // that cannot be found, which defeats the field.
+    unreadable: { path: safeForReport(path, 4096), bytes, code, detail: safeForReport(detail, 512) },
+  };
+}
 
 /**
  * One validated artifact, HELD OPEN (ISC-246, as restated).
@@ -403,6 +540,11 @@ export async function readResultEnvelope(loc: OutboxLocation): Promise<OutboxRea
   // the bound: seeing cap+1 bytes proves the file outgrew the cap, and the
   // buffer never grows past it.
   let text: string;
+  // Carried out of the read block because every `unreadable` answer below
+  // reports it, and it is the count that was actually PARSED — see
+  // `UnreadableEnvelope`. Zero is a legal value and means an empty file, never
+  // an absent one.
+  let bytes = 0;
   // The `open` belongs INSIDE the guard. It used to sit outside it, so a
   // file that lstat'd cleanly but could not be opened — mode 000, or an
   // EACCES/ENFILE race in the window after the lstat — threw straight out of
@@ -435,6 +577,7 @@ export async function readResultEnvelope(loc: OutboxLocation): Promise<OutboxRea
         reason: `result.json exceeded ${MAX_ENVELOPE_BYTES} bytes during read (ISC-122)`,
       };
     }
+    bytes = bytesRead;
     text = buf.subarray(0, bytesRead).toString("utf8");
   } catch (err) {
     return { kind: "refused", reason: `result.json could not be read: ${String(err)}` };
@@ -446,7 +589,19 @@ export async function readResultEnvelope(loc: OutboxLocation): Promise<OutboxRea
   try {
     raw = JSON.parse(text);
   } catch (err) {
-    return { kind: "refused", reason: `result.json is not valid JSON: ${String(err)}` };
+    /*
+     * THE `rev-lang-1` LINE. This used to be a `refused` carrying prose, and
+     * the prose was dropped at the first boundary it crossed — so a reviewer
+     * that wrote a real review was reported as having written nothing.
+     *
+     * `text` is deliberately NOT attached and NOT re-parsed leniently. An
+     * envelope that did not parse is not a parsed envelope, and regexing a
+     * `summary` out of it would put worker-authored prose into an operator's
+     * report under the harvester's own authority — the §7.2 fabrication this
+     * whole module is arranged to refuse. The bytes stay on disk; `path` is how
+     * a human reaches them.
+     */
+    return unreadable(path, bytes, "not_json", `${String(err)}`);
   }
 
   /**
@@ -471,10 +626,19 @@ export async function readResultEnvelope(loc: OutboxLocation): Promise<OutboxRea
   if (typeof raw === "object" && raw !== null) {
     for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
       if (Array.isArray(value) && value.length > MAX_ITEMS) {
-        return {
-          kind: "refused",
-          reason: `result.json field ${key} has ${value.length} entries; cap is ${MAX_ITEMS} (ISC-122)`,
-        };
+        // `schema`, not a refusal of its own: this check exists ONLY because
+        // `.max(MAX_ITEMS)` inside the schema is too expensive to reach (see
+        // the block comment above). It is the schema's bound, hoisted for cost,
+        // so it answers with the schema's code — otherwise the same violation
+        // would be classified two different ways depending on array length.
+        //
+        // `key` is worker-chosen text; `unreadable` sweeps it.
+        return unreadable(
+          path,
+          bytes,
+          "schema",
+          `field ${key} has ${value.length} entries; cap is ${MAX_ITEMS} (ISC-122)`,
+        );
       }
     }
   }
@@ -484,7 +648,14 @@ export async function readResultEnvelope(loc: OutboxLocation): Promise<OutboxRea
   // had exactly zero of its fields read.
   const parsed = ResultEnvelopeSchema.safeParse(raw);
   if (!parsed.success) {
-    return { kind: "refused", reason: `schema violation: ${parsed.error.issues[0]?.message ?? "invalid"}` };
+    // Readable JSON, unreadable AS AN ENVELOPE. Same `kind` as the syntax
+    // failure — the worker reported and its report cannot be used either way —
+    // and a different `code`, because the fix is a different one: here the
+    // validator can name the offending field, and there is nothing to fix about
+    // the encoding.
+    const issue = parsed.error.issues[0];
+    const where = issue !== undefined && issue.path.length > 0 ? ` at ${issue.path.join(".")}` : "";
+    return unreadable(path, bytes, "schema", `${issue?.message ?? "invalid"}${where}`);
   }
   const env = parsed.data;
 

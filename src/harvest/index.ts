@@ -38,11 +38,13 @@ import { readTaskRecord, readWorkerLaunch, readWorkerState } from "../run/state.
 import { worktreeContentHash } from "../run/treehash.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
+  describeUnreadableEnvelope,
   readResultEnvelope,
   safeForReport,
   withOutboxScan,
   type OutboxLocation,
   type OutboxRead,
+  type UnreadableEnvelope,
 } from "./outbox.ts";
 import { dispatchedTaskIds, unexplainedOutboxDirs } from "./layout.ts";
 import { resolveWorkerNeedles } from "./needles.ts";
@@ -140,6 +142,36 @@ export interface TaskHarvest {
   /** The replayable fact bundle (ISC-153); E3 fields sit at schema defaults. */
   facts: DerivedFacts;
   harvestStatus: HarvestStatus;
+  /**
+   * The worker's envelope EXISTED and could not be read — or `null`.
+   *
+   * ## Why it is here and not inside `harvest`
+   *
+   * `harvest` validates against `HarvestSchema`, a versioned wire contract
+   * (`pifleet.artifacts/v1`) whose consumers parse it. This is a fact about the
+   * HARVEST rather than about the task — the same orthogonality `harvestStatus`
+   * has, and it sits beside it for the same reason: `harvestStatus` says
+   * whether the harvest is trustworthy, and this says whether the worker's own
+   * account of its work could be read at all.
+   *
+   * ## Null means two very different things, and the discrepancy tells them apart
+   *
+   * `null` covers both "the envelope parsed fine" and "there was no envelope".
+   * That is deliberate — this field's job is to carry the facts of the
+   * UNREADABLE case, which is the one that had nowhere to live. A consumer
+   * distinguishing absent from present reads `harvest.discrepancies`, where the
+   * absent case has had its own finding since ISC-347.
+   *
+   * ## What consumes it
+   *
+   * The rendered form is already in `harvest.discrepancies`, so `pifleet
+   * artifacts` and `pifleet report` show it with no further change. The
+   * STRUCTURED form is here for the relay and the collator, which must stop
+   * describing a lens in this state as one that "produced no report" — and
+   * which cannot be asked to recover the facts by substring-matching English
+   * out of a discrepancy line.
+   */
+  unreadableEnvelope: UnreadableEnvelope | null;
 }
 
 /**
@@ -193,6 +225,10 @@ function unavailableHarvest(taskId: string, reason: string): TaskHarvest {
     }),
     facts,
     harvestStatus: "unavailable",
+    // Nothing was read, so nothing can be said about readability. `null` here
+    // is the honest answer and not a default: this harvest never reached an
+    // outbox.
+    unreadableEnvelope: null,
   };
 }
 
@@ -266,9 +302,46 @@ export async function harvestTask(
     hostWorkdir: hasWorktree ? envelope.host_workdir : null,
   };
   const outbox: OutboxRead = await readResultEnvelope(loc);
+  /** Set only by the `unreadable` branch; published on `TaskHarvest`. */
+  let unreadableEnvelope: UnreadableEnvelope | null = null;
   if (outbox.kind === "refused") {
-    reasons.push(`result envelope refused: ${outbox.reason}`);
-    discrepancies.push(`result envelope refused: ${outbox.reason}`);
+    reasons.push(`result envelope refused: ${safeForReport(outbox.reason, 512)}`);
+    discrepancies.push(`result envelope refused: ${safeForReport(outbox.reason, 512)}`);
+  } else if (outbox.kind === "unreadable") {
+    /**
+     * THE STATEMENT THAT WAS MISSING (the `rev-lang-1` defect).
+     *
+     * `rev-lang-1` wrote a 3906-byte review whose `summary` quoted the regex
+     * `[\w\\-_]+`. `\w` is not a legal JSON escape, so the envelope would not
+     * parse — and the parse failure was recorded NOWHERE. The verdict settled
+     * `unknown`, the collation brief said the lens "produced no report", and
+     * the collation recorded `reported: false`. A reviewer that wrote a review
+     * was filed as one that wrote nothing.
+     *
+     * A DISCREPANCY, not merely a reason, for ISC-347's reason exactly:
+     * `reasons` is where the harvest explains HOW it graded and reads as
+     * procedural, while `discrepancies` is the channel §8.4 publishes for
+     * things that DISAGREE with the contract and is the one an operator scans.
+     * The absent case learned this; this case is the same lesson one step over.
+     *
+     * NO CLAMP, also for ISC-94's reason. An unparseable envelope says nothing
+     * about whether the WORK succeeded — the diff is still there and still
+     * speaks for it, and a reviewer whose review will not serialize may have
+     * reviewed perfectly. Lowering the verdict here would convert an encoding
+     * bug in the writer into a judgement about work this evidence never
+     * measured. The defect was never a missing verdict; it was a missing
+     * STATEMENT.
+     *
+     * The HOST path, unlike the missing case's container spelling. The missing
+     * case names `/outbox/<task>/result.json` because that is the path the
+     * worker was given and the only string it could be compared against — there
+     * is no file to open. Here there IS one, and the operator's next action is
+     * to open it, so the finding names where it actually is.
+     */
+    unreadableEnvelope = outbox.unreadable;
+    const line = describeUnreadableEnvelope(outbox.unreadable);
+    reasons.push(line);
+    discrepancies.push(line);
   } else if (outbox.kind === "missing") {
     // Not a failure (ISC-94): the repo facts stand on their own.
     reasons.push("no result envelope; verdict rests on derived facts alone");
@@ -817,7 +890,17 @@ export async function harvestTask(
     }
 
     // --- Harvest trustworthiness (§8.4), orthogonal to the verdict.
-    const envelopeDegraded = outbox.kind === "refused" || scan.refused.length > 0;
+    //
+    // `unreadable` counts, and naming it here is not a formality. Splitting it
+    // out of `refused` would otherwise have QUIETLY UPGRADED this line: an
+    // envelope that failed to parse used to be `refused` and made the harvest
+    // `partial`, and a two-state test would have gone on passing while every
+    // `rev-lang-1` came back `complete` — the harvest declaring itself
+    // trustworthy on the precise ground that it could not read the worker's
+    // account. Degradation is what `harvestStatus` is for, and an unreadable
+    // envelope degrades the harvest exactly as much as a refused one did.
+    const envelopeDegraded =
+      outbox.kind === "refused" || outbox.kind === "unreadable" || scan.refused.length > 0;
     const harvestStatus: HarvestStatus =
       !git.ok && outbox.kind !== "ok"
         ? "unavailable"
@@ -888,7 +971,7 @@ export async function harvestTask(
     // The returned facts are the ones the verdict was actually reached from —
     // harness surface included. Returning `git.facts` here would hand callers a
     // bundle whose hash does not match the `facts_hash` beside it.
-    return { harvest, facts: factsWithHarness, harvestStatus };
+    return { harvest, facts: factsWithHarness, harvestStatus, unreadableEnvelope };
   });
 }
 

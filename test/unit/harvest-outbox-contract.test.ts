@@ -69,7 +69,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -146,6 +146,16 @@ interface TaskShape {
   files: Record<string, string>;
   /** Omit the whole `result.json`, as the live worker did. */
   noEnvelope?: boolean;
+  /**
+   * Write these exact bytes as `result.json` instead of the well-formed one.
+   *
+   * RAW BYTES on purpose. Everything else in this scaffold goes through a
+   * production schema and a production writer, and that is the right default —
+   * but the case under test is a worker whose envelope IS NOT VALID JSON, and
+   * there is no writer that can produce one. `JSON.stringify` cannot express
+   * it; only bytes can.
+   */
+  envelopeBody?: string;
 }
 
 interface Fixture {
@@ -236,7 +246,9 @@ async function scaffold(opts: {
       await mkdir(join(dest, ".."), { recursive: true });
       await writeFile(dest, body);
     }
-    if (shape.noEnvelope !== true) {
+    if (shape.envelopeBody !== undefined) {
+      await writeFile(join(taskOutbox, "result.json"), shape.envelopeBody);
+    } else if (shape.noEnvelope !== true) {
       await writeFile(
         join(taskOutbox, "result.json"),
         JSON.stringify({
@@ -831,5 +843,217 @@ describe("ISC-348: a ticket-ops.md with no ticket-ops.json says what did not run
       }
     },
     cliBudget(3),
+  );
+});
+
+/**
+ * AN ENVELOPE THAT EXISTS AND CANNOT BE READ IS NOT A MISSING ENVELOPE.
+ *
+ * ## The measured failure
+ *
+ * `rev-lang-1`, one of three lenses on a live review, was asked about regex
+ * correctness and quoted a regex — `[\w\\-_]+` — into its `summary`. `\w` is
+ * not a legal JSON escape. Its 3906-byte review would not parse, the harvest
+ * settled `unknown`, and the collation brief said *"MISSING ASPECT: lang
+ * (rev-lang-1) — it settled `unknown` and produced no report"*. The collation
+ * recorded `reported: false`.
+ *
+ * Nothing anywhere logged the parse failure. The relay log mentions it zero
+ * times. The record therefore states, as fact, that a reviewer produced
+ * nothing — and a reviewer that produces nothing is a reviewer you re-run,
+ * while a reviewer whose output will not parse is a bug you fix.
+ *
+ * ## WHY THIS BLOCK IS IN THIS FILE
+ *
+ * It drives `harvestTask` — the function `pifleet artifacts` and `pifleet
+ * report` call — and asserts on the `Harvest` it emits, for the reason this
+ * file's header already gives: a green unit suite over a value nothing renders
+ * is this repo's recurring shape, and `harvest-outbox.test.ts` can only prove
+ * that `readResultEnvelope` RETURNS the right thing. Deleting the wiring turns
+ * this file red rather than leaving that one green.
+ *
+ * ## WHAT THESE PROBES CAN SEE, AND WHAT THEY CANNOT
+ *
+ * CAN SEE: that the harvest publishes a discrepancy an operator reads; that
+ * the discrepancy names the file, its size and the parser's complaint; that
+ * `TaskHarvest` carries the structured value a downstream consumer can render;
+ * and — the load-bearing one — that this is a DIFFERENT finding from the
+ * absent-envelope finding, asserted from one run holding both.
+ *
+ * CANNOT SEE: whether the relay or the collator renders any of it. Those live
+ * behind `RelayHarvest`, which today carries `verdict` and `reply` and nothing
+ * else — that boundary is where the refusal was being dropped, and closing it
+ * is a separate change in `src/run/`. What this file pins is that the fact now
+ * EXISTS on `TaskHarvest` for that change to carry; it does not pin that
+ * anything carries it yet. Stated rather than implied, because a probe here
+ * passing must not be mistaken for the collation brief being fixed.
+ */
+describe("a result envelope that exists and cannot be parsed is not a missing one", () => {
+  /** The live artifact, verbatim, read from disk rather than retyped. */
+  const REAL_ARTIFACT = join(
+    import.meta.dir,
+    "../fixtures/envelopes/rev-lang-1-unparseable-result.json",
+  );
+
+  /** Findings about an envelope that was there and could not be read. */
+  function unreadableFindings(discrepancies: readonly string[]): string[] {
+    return discrepancies.filter((d) => d.includes("could not be read"));
+  }
+
+  test(
+    "the unreadable envelope is a discrepancy naming the file, its size and the error",
+    async () => {
+      const body = await readFile(REAL_ARTIFACT, "utf8");
+      const f = await scaffold({ tasks: { [TASK_A]: { files: {}, envelopeBody: body } } });
+      try {
+        const t = await harvestTask(f.run, TASK_A);
+
+        const found = unreadableFindings(t.harvest.discrepancies);
+        expect(found).toHaveLength(1);
+        /*
+         * The three facts that make it actionable. The size is asserted against
+         * the fixture's real length, so a finding that reported 0 — or that
+         * reported the size of something else — fails.
+         *
+         * BYTES, NOT CHARACTERS, and the fixture proves the difference matters:
+         * the real artifact is 3900 UTF-16 code units and 3906 UTF-8 bytes,
+         * because a live review contains non-ASCII text. `.length` here was the
+         * first version of this assertion and it failed against a CORRECT
+         * implementation — which is the useful direction for a fixture to fail
+         * in. An operator comparing the finding against `ls -l` needs bytes.
+         */
+        expect(Buffer.byteLength(body, "utf8")).toBe(3906);
+        expect(found[0]).toContain("3906");
+        expect(found[0]).toContain("Invalid escape character w");
+        expect(found[0]).toContain(join(workerOutboxDir(f.run.root, WORKER), TASK_A, "result.json"));
+
+        // And the structured value a downstream consumer renders, which is the
+        // half a discrepancy string cannot serve: substring-matching English is
+        // pinning a sentence rather than a rule.
+        expect(t.unreadableEnvelope).not.toBeNull();
+        expect(t.unreadableEnvelope?.code).toBe("not_json");
+        expect(t.unreadableEnvelope?.bytes).toBe(3906);
+
+        // NO SALVAGE, asserted on the whole published harvest: the review text
+        // is in the bytes on disk and must not appear in anything the harvester
+        // says it derived.
+        expect(t.harvest.claimed).toBeNull();
+        expect(JSON.stringify(t.harvest)).not.toContain("Language-semantics review");
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(3),
+  );
+
+  /**
+   * THE ASYMMETRIC PROBE, and the only one that can fail for the right reason.
+   *
+   * Both tasks are dispatched, both harvest, and both end up without a usable
+   * envelope — so every "not success" or "has a discrepancy" assertion passes
+   * for BOTH against an implementation that never distinguished them. What
+   * cannot pass is the two producing the SAME finding: this asserts each task
+   * gets exactly one envelope finding, that they are not the same string, and
+   * that only one of the two carries a structured value.
+   *
+   * Run as ONE fixture holding both tasks rather than two fixtures, because
+   * split across two tests each half is satisfiable by a constant.
+   */
+  test(
+    "absent and unreadable produce different findings in the same run",
+    async () => {
+      const body = await readFile(REAL_ARTIFACT, "utf8");
+      const f = await scaffold({
+        tasks: {
+          [TASK_A]: { files: {}, noEnvelope: true },
+          [TASK_B]: { files: {}, envelopeBody: body },
+        },
+      });
+      try {
+        const absent = await harvestTask(f.run, TASK_A);
+        const unread = await harvestTask(f.run, TASK_B);
+
+        // The absent task keeps the finding ISC-347 established, unchanged.
+        expect(envelopeFindings(absent.harvest.discrepancies)).toHaveLength(1);
+        expect(unreadableFindings(absent.harvest.discrepancies)).toHaveLength(0);
+        expect(absent.unreadableEnvelope).toBeNull();
+
+        // The unreadable task gets its own, and must NOT be described as having
+        // no envelope — that is the exact sentence the live run printed.
+        expect(unreadableFindings(unread.harvest.discrepancies)).toHaveLength(1);
+        expect(envelopeFindings(unread.harvest.discrepancies)).toHaveLength(0);
+        expect(unread.unreadableEnvelope).not.toBeNull();
+
+        const a = envelopeFindings(absent.harvest.discrepancies)[0]!;
+        const u = unreadableFindings(unread.harvest.discrepancies)[0]!;
+        expect(a).not.toBe(u);
+        // The one an operator must be able to tell apart at a glance.
+        expect(u).toContain("DID write");
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(6),
+  );
+
+  /**
+   * THE HARVEST STILL CALLS ITSELF DEGRADED.
+   *
+   * This probe exists because splitting `unreadable` out of `refused` could
+   * QUIETLY UPGRADE `harvestStatus`. That field's input was
+   * `outbox.kind === "refused"`, so the moment a parse failure stopped being
+   * `refused` it stopped degrading the harvest — and every `rev-lang-1` would
+   * have come back `complete`: the harvester declaring itself trustworthy on
+   * the exact ground that it could not read the worker's account of its work.
+   *
+   * Nothing else in this file would have caught it. Every other probe here
+   * asserts on `discrepancies`, which stayed correct throughout. Written down
+   * because a refactor that moves this state again will face the same trap.
+   */
+  test(
+    "an unreadable envelope leaves the harvest degraded, not complete",
+    async () => {
+      const body = await readFile(REAL_ARTIFACT, "utf8");
+      const f = await scaffold({ tasks: { [TASK_A]: { files: {}, envelopeBody: body } } });
+      try {
+        const t = await harvestTask(f.run, TASK_A);
+        expect(t.harvestStatus).not.toBe("complete");
+      } finally {
+        await f.cleanup();
+      }
+    },
+    cliBudget(3),
+  );
+
+  /**
+   * IT DOES NOT CLAMP THE VERDICT, for ISC-94's reason exactly.
+   *
+   * Tempting and wrong. An unreadable envelope says nothing about whether the
+   * WORK succeeded — the diff is still there and still speaks for it, and a
+   * reviewer whose review will not parse may have reviewed perfectly. Clamping
+   * here would convert a formatting bug in the writer into a failed verdict on
+   * evidence that measures nothing about the work, which is the same mistake
+   * ISC-94 refuses for the missing case. The defect was never a missing
+   * verdict; it was a missing STATEMENT.
+   *
+   * Asserted against the CONTROL verdict for this fixture rather than against a
+   * literal, so it stays a statement about non-interference.
+   */
+  test(
+    "an unreadable envelope states the problem without lowering the verdict",
+    async () => {
+      const body = await readFile(REAL_ARTIFACT, "utf8");
+      const good = await scaffold({ tasks: { [TASK_A]: { files: {}, noEnvelope: true } } });
+      const bad = await scaffold({ tasks: { [TASK_A]: { files: {}, envelopeBody: body } } });
+      try {
+        const baseline = await harvestTask(good.run, TASK_A);
+        const t = await harvestTask(bad.run, TASK_A);
+        expect(t.harvest.verdict).toBe(baseline.harvest.verdict);
+      } finally {
+        await good.cleanup();
+        await bad.cleanup();
+      }
+    },
+    cliBudget(6),
   );
 });
