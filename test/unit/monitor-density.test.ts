@@ -132,16 +132,6 @@ const DETAIL: WorkerDetail = {
 const model = (over: Partial<FleetModel> = {}): FleetModel => ({
   runs: ok([{ runId: RUN, workers: [row()] }], NOW - 1_000),
   containers: ok(["c1"], NOW - 1_000),
-  git: ok(
-    {
-      branchLine: "## main",
-      statusLines: [],
-      commitLines: [],
-      watchDir: "/repo",
-      commitsExpanded: false,
-    },
-    NOW - 1_000,
-  ),
   now: NOW,
   columns: 140,
   view: { kind: "fleet" },
@@ -173,9 +163,9 @@ describe("ISC-495 (Q9): the density figure, measured rather than asserted", () =
     expect(frame).toMatch(/[*●]/); // severity
     expect(frame).toContain("wrote"); // activity state + age
     expect(frame).toContain("42s ago");
-    expect(frame).toContain("phase idle");
+    expect(frame).toContain("Idle");
     expect(frame).toContain("no task");
-    expect(frame).toContain("container up");
+    expect(frame).toContain("Up");
   });
 
   /**
@@ -206,7 +196,7 @@ describe("ISC-495 (Q9): the density figure, measured rather than asserted", () =
     ).join("\n");
 
     // 1. Container presence — the docker join (§6.7). `status` never shells out.
-    expect(fleet).toContain("container up");
+    expect(fleet).toContain("Up");
     expect(STATUS_SRC).not.toContain("docker");
 
     // 2. Per-region staleness (§6.4). The incumbent prints no age for its own read.
@@ -264,7 +254,7 @@ describe("ISC-495 (Q9): the density figure, measured rather than asserted", () =
       ).join("\n");
       // The phase is `idle` in every one of them — which is the whole point:
       // the incumbent's only discriminator is constant across all five.
-      expect(frame).toContain("phase idle");
+      expect(frame).toContain("Idle");
       return frame;
     });
 

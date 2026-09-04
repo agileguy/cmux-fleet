@@ -194,7 +194,6 @@ export interface FleetModel {
   readonly runs: Region<readonly RunRow[]>;
   /** Container names `docker ps` reported, on the slow clock only (D7). */
   readonly containers: Region<readonly string[]>;
-  readonly git: Region<GitStrip>;
   /** Epoch millis the frame is being rendered at; the only paint-time value. */
   readonly now: number;
   /** Terminal width the frame must fit (D14, ISC-484, ISC-485). */
@@ -230,24 +229,6 @@ export interface FleetModel {
   readonly report: Region<readonly string[]>;
 }
 
-/**
- * The git strip's content (§6.8, D12, ISC-486).
- *
- * All five properties the incumbent had are carried. **Which half is shown by
- * default was REVERSED by the owner on 2026-09-02 (Q8): status first, commits
- * behind `[c]`** — dirty paths change and a commit list on an idle branch does
- * not. `commitsExpanded` is the view state that decides which; both halves are
- * always present in the model, so expanding costs no read.
- */
-export interface GitStrip {
-  /** `git status --short --branch`'s first line. The `--branch` flag is the point. */
-  readonly branchLine: string;
-  readonly statusLines: readonly string[];
-  readonly commitLines: readonly string[];
-  /** `watchDir` — the repository being watched, which need not be this one. */
-  readonly watchDir: string;
-  readonly commitsExpanded: boolean;
-}
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Views 2-4 and the selection model (§6.2, D8, §5.3).

@@ -95,6 +95,15 @@ export interface Palette {
   readonly warn: string | undefined;
   readonly live: string | undefined;
   readonly quiet: string | undefined;
+  /**
+   * The phase cell's `Busy`. Deliberately NOT `live` (green).
+   *
+   * The row already says "something is happening" once, in the bullet. A
+   * second green on the same row would make the two look like one fact stated
+   * twice; blue makes the phase readable as its own column while leaving the
+   * bullet the thing that carries severity.
+   */
+  readonly busy: string | undefined;
 }
 
 export const PLAIN: Palette = {
@@ -105,6 +114,7 @@ export const PLAIN: Palette = {
   warn: undefined,
   live: undefined,
   quiet: undefined,
+  busy: undefined,
 };
 
 /**
@@ -130,6 +140,7 @@ export const COLOUR: Palette = {
   warn: "yellow",
   live: "green",
   quiet: "white",
+  busy: "blue",
 };
 
 const PaletteContext = createContext<Palette>(PLAIN);

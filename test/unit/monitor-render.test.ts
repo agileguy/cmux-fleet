@@ -44,9 +44,10 @@
 import { describe, expect, test } from "bun:test";
 
 import { failed, never, ok } from "../../src/monitor/model.ts";
-import type { FleetModel, GitStrip, RunRow, WorkerRow } from "../../src/monitor/model.ts";
+import type { FleetModel, RunRow, WorkerRow } from "../../src/monitor/model.ts";
 import { renderFleet } from "../../src/monitor/render.ts";
 import { FLOOR_COLUMNS, planColumns } from "../../src/monitor/views/fleet.tsx";
+import { workerContainerName } from "../../src/run/paths.ts";
 
 const NOW = Date.parse("2026-09-02T14:00:00.000Z");
 const RUN_A = "2026-09-02T14-43-27Z-3906";
@@ -147,19 +148,30 @@ const RUNS: readonly RunRow[] = [
   { runId: RUN_B, workers: [engNeverGrew, revGone] },
 ];
 
-const GIT: GitStrip = {
-  branchLine: "## fleet-monitor...origin/fleet-monitor [ahead 2]",
-  statusLines: [" M src/monitor/render.ts", "?? src/monitor/views/fleet.tsx"],
-  commitLines: ["a1b2c3d monitor: the render seam", "d4e5f6a monitor: the activity ladder"],
-  watchDir: "/Users/op/repos/cmux-fleet",
-  commitsExpanded: false,
-};
-
 /** A whole fleet, every region healthy. Departures spread over this the same way. */
 const healthy: FleetModel = {
   runs: ok(RUNS, NOW - 2_000),
-  containers: ok(["pifleet-3906-eng-1", "pifleet-3906-eng-2"], NOW - 12_000),
-  git: ok(GIT, NOW - 5_000),
+  /*
+   * REAL container names, built by the production `workerContainerName`.
+   *
+   * These were `pifleet-3906-eng-1` — the run's SUFFIX, not its id. Nothing
+   * read them until the containers region began listing the containers no
+   * worker row accounts for, at which point the abbreviation made two workers
+   * render as non-workers. A fixture that no assertion depends on drifts from
+   * the thing it stands for, and this is what that costs when one arrives.
+   *
+   * `pifleet-egress-relay-pifleet-egress` is the third: a genuine non-worker,
+   * so the region has something true to show and the filter is proved to keep
+   * as well as to drop.
+   */
+  containers: ok(
+    [
+      workerContainerName(RUN_A, "eng-1"),
+      workerContainerName(RUN_A, "eng-2"),
+      "pifleet-egress-relay-pifleet-egress",
+    ],
+    NOW - 12_000,
+  ),
   now: NOW,
   columns: 120,
   /*
@@ -240,7 +252,7 @@ describe("ISC-483: the first frame answers both questions for every live worker"
           ACTIVITY_RENDERINGS.some((r) => row.includes(r)) || /wrote \d+[smh] ago/.test(row);
         // Reported as an object so a failure names the worker and the row,
         // rather than printing `false` and leaving the reader to hunt.
-        expect({ worker: w.workerId, hasActivity, hasPhase: row.includes(`phase ${w.phase}`) }).toEqual(
+        expect({ worker: w.workerId, hasActivity, hasPhase: row.includes(w.phase[0]!.toUpperCase() + w.phase.slice(1)) }).toEqual(
           { worker: w.workerId, hasActivity: true, hasPhase: true },
         );
       }
@@ -259,7 +271,7 @@ describe("ISC-483: the first frame answers both questions for every live worker"
   test("phase sits beside activity and never replaces it", () => {
     const row = rowFor(renderFleet(healthy), "eng-4");
     expect(row).toContain("wrote 4s ago");
-    expect(row).toContain("phase idle");
+    expect(row).toContain("Idle");
   });
 
   /** The seam's return type, asserted rather than assumed. */
@@ -340,7 +352,7 @@ describe("ISC-480: the five activity states survive to the frame", () => {
    * contradiction between two sources and each column owns one of them.
    */
   test("an absent container is a named finding on the row, not a blank", () => {
-    expect(one(revGone)).toContain("no container");
+    expect(one(revGone)).toContain("Down");
   });
 
   /**
@@ -351,8 +363,9 @@ describe("ISC-480: the five activity states survive to the frame", () => {
    */
   test("an unchecked container does not render as an absent one", () => {
     const row = one(worker({ workerId: "eng-9", containerPresent: null }));
-    expect(row).toContain("container not checked");
-    expect(row).not.toContain("no container");
+    // The dash is the third state, and it is NOT `Down` — see `containerCell`.
+    expect(row).toContain("—");
+    expect(row).not.toContain("Down");
   });
 
   /**
@@ -430,14 +443,6 @@ describe("ISC-478: a failed region's reason renders in place of its content", ()
     expect(joined).toContain("wrote 4s ago");
   });
 
-  test("a failed git read names the reason in place of the branch line", () => {
-    const joined = renderFleet({
-      ...healthy,
-      git: failed("not a git repository: /Users/op/repos/cmux-fleet", NOW - 9_000),
-    }).join("\n");
-    expect(joined).toContain("refresh failed: not a git repository");
-    expect(joined).not.toContain("fleet-monitor...origin/fleet-monitor");
-  });
 });
 
 /**
@@ -485,11 +490,10 @@ describe("ISC-479: never-read renders differently from read-and-empty", () => {
  * `now`, and watch each age move independently.
  */
 describe("ISC-477: every region shows an age derived from its own read", () => {
-  test("three regions read at three times show three different ages", () => {
+  test("two regions read at two times show two different ages", () => {
     const first = renderFleet(healthy);
     expect(headingFor(first, "fleet")).toContain("as of 2s");
     expect(first.find((l) => l.startsWith("containers"))).toContain("as of 12s");
-    expect(first.find((l) => l.startsWith("git"))).toContain("as of 5s");
   });
 
   test("advancing only `now` ages every region, with the frozen model unchanged", () => {
@@ -499,7 +503,6 @@ describe("ISC-477: every region shows an age derived from its own read", () => {
     const later = renderFleet({ ...healthy, now: NOW + 60_000 });
     expect(headingFor(later, "fleet")).toContain("as of 1m");
     expect(later.find((l) => l.startsWith("containers"))).toContain("as of 1m");
-    expect(later.find((l) => l.startsWith("git"))).toContain("as of 1m");
   });
 
   test("the age coarsens the way `ago` does, and never reads as a bug", () => {
@@ -533,44 +536,57 @@ describe("ISC-477: every region shows an age derived from its own read", () => {
 });
 
 /**
- * D12/Q8 at the display layer: the git strip keeps all four elements, and the
- * owner's 2026-09-02 reversal decides which half costs a keypress — status
- * first, commits behind `[c]`, because dirty paths change and a commit list on
- * an idle branch does not.
+ * The task column: last, whole, and legible.
  *
- * The half that is not shown is rendered as a COUNT rather than dropped. A
- * silently absent commit list is the dead-field shape `contracts.ts:86-118`
- * records; a count says the data is there and names the key that shows it.
+ * A task id is the one value on a fleet row an operator must read EXACTLY —
+ * it is what they type into `wait`, `artifacts` and `unstage`. In a fixed
+ * 12-wide cell between `phase` and `container` it truncated every id this
+ * fleet actually issues (`task T-rall…` for `T-rally-accept`), which is not a
+ * shorter answer but no answer.
  */
-describe("ISC-486 (display half): the git strip keeps what the incumbent showed", () => {
-  test("status first by default, with the commit count behind the key", () => {
-    const joined = renderFleet(healthy).join("\n");
-    expect(joined).toContain("## fleet-monitor...origin/fleet-monitor [ahead 2]");
-    expect(joined).toContain(" M src/monitor/render.ts");
-    expect(joined).toContain("[c] 2 commits");
-    expect(joined).not.toContain("a1b2c3d");
-  });
-
-  test("expanding swaps the halves rather than dropping one", () => {
-    const joined = renderFleet({
+describe("the task column", () => {
+  /** `healthy`, with one worker holding a realistically long task id. */
+  function withLongTask(taskId: string): FleetModel {
+    const [runA, ...rest] = RUNS;
+    const [first, ...others] = runA!.workers;
+    return {
       ...healthy,
-      git: ok({ ...GIT, commitsExpanded: true }, NOW - 5_000),
-    }).join("\n");
-    expect(joined).toContain("a1b2c3d monitor: the render seam");
-    expect(joined).toContain("[c] 2 changed paths");
-    expect(joined).not.toContain(" M src/monitor/render.ts");
+      runs: ok(
+        [{ runId: runA!.runId, workers: [{ ...first!, taskId }, ...others] }, ...rest],
+        NOW - 2_000,
+      ),
+    };
+  }
+
+  test("a long task id survives whole", () => {
+    const id = "T-rally-accept-with-a-long-name";
+    const row = rowFor(renderFleet(withLongTask(id)), "eng-1");
+    expect(row).toContain(`task ${id}`);
+    // Non-vacuous: the old 12-wide cell produced this prefix and stopped.
+    expect(row).not.toContain("task T-rall…");
   });
 
-  test("the watched directory is named, because it need not be this one", () => {
-    expect(renderFleet(healthy).join("\n")).toContain("/Users/op/repos/cmux-fleet");
+  test("it is rendered AFTER the container column, not before it", () => {
+    /*
+     * Order is what makes the width free. Every column left of here is fixed
+     * so two frames of the same fleet line up character by character; a
+     * variable-width cell in the middle would shift everything to its right
+     * as tasks came and went.
+     */
+    const row = rowFor(renderFleet(healthy), "eng-1");
+    expect(row.indexOf("task t-17")).toBeGreaterThan(row.indexOf("Up"));
   });
 
-  test("a clean tree says so rather than rendering an empty region", () => {
-    const joined = renderFleet({
-      ...healthy,
-      git: ok({ ...GIT, statusLines: [] }, NOW - 5_000),
-    }).join("\n");
-    expect(joined).toContain("clean");
+  test("a worker holding nothing still says so, and still last", () => {
+    const row = rowFor(renderFleet(healthy), "eng-2");
+    expect(row.indexOf("no task")).toBeGreaterThan(row.indexOf("Up"));
+  });
+
+  test("the id is not truncated by the pane either, at a width that fits it", () => {
+    // Guards against "last" being implemented as a fixed cell that merely moved.
+    const id = "T-a-task-id-that-is-quite-long-indeed";
+    const row = rowFor(renderFleet({ ...withLongTask(id), columns: 160 }), "eng-1");
+    expect(row).toContain(id);
   });
 });
 
@@ -591,26 +607,60 @@ describe("ISC-486 (display half): the git strip keeps what the incumbent showed"
  * was measured false.
  */
 describe("the frame, pinned", () => {
+  /*
+   * UPDATED 2026-09-04, deliberately, and here is the diff that was read.
+   *
+   * The task column moved from between `phase` and `container` to the END of
+   * the row, and stopped being a fixed 12-wide `Cell`:
+   *
+   *   -  * eng-1  not measured (rpc)  phase running  task t-17   container up
+   *   +  * eng-1  not measured (rpc)  phase running  container up         task t-17
+   *
+   * At 12 wide it truncated every task id this fleet actually issues —
+   * `task T-rall…` for `T-rally-accept` — and a task id is the value an
+   * operator must read EXACTLY, because it is what they type into `wait`,
+   * `artifacts` and `unstage`. Last is the only position where widening it
+   * does not move the columns to its right as tasks come and go.
+   *
+   * What did NOT change then: the indent, the bullet, the id and activity
+   * widths, the run headers and the rules.
+   *
+   * UPDATED A FOURTH TIME the same day: the containers region stopped being a
+   * bare count and now lists the containers no worker row accounts for. Two of
+   * this fixture's three are `eng-1` and `eng-2`, already on the frame with
+   * their own `Up` cells, so the only line worth adding is the relay — which
+   * is the point: the count's real content was always the containers the rows
+   * do NOT explain, stated as arithmetic the reader had to do.
+   *
+   * UPDATED A THIRD TIME the same day: `phase idle` became `Idle` and
+   * `container up` became `Up`. In both, the first word was a column heading
+   * repeated on every value and the state was the half a reader wanted; the
+   * columns shrank 18 -> 10 and 21 -> 6, and that width went to the task id.
+   * `rev-1` is the row worth reading — `Down` where the others say `Up`, which
+   * is the finding the old 21-wide `no container` buried mid-sentence.
+   *
+   * UPDATED AGAIN the same day: the git strip and the rule above it are gone.
+   * The operator's call — a `git status` of the invocation directory polled
+   * beside a fleet table was answering a question nobody asked on this screen.
+   * Five lines left the frame and nothing else moved with them, which is what
+   * makes it a removal rather than a redesign.
+   */
   test("a two-run fleet renders exactly these lines", () => {
     const RULE = "-".repeat(100);
     expect(renderFleet({ ...healthy, columns: 100 })).toEqual([
       RULE,
       "fleet — as of 2s — 2 live runs",
       "  run 2026-09-02T14-43-27Z-3906 — 4 workers",
-      "  * eng-1   not measured (rpc)  phase running     task t-17   container up",
-      "  * eng-2   no transcript       phase idle        no task     container up",
-      "  * eng-3   wrote 11m ago       phase idle        task t-18   container up",
-      "  * eng-4   wrote 4s ago        phase idle        task t-19   container up",
+      "  * eng-1   not measured (rpc)  Running   Up    task t-17",
+      "  * eng-2   no transcript       Idle      Up    no task",
+      "  * eng-3   wrote 11m ago       Idle      Up    task t-18",
+      "  * eng-4   wrote 4s ago        Idle      Up    task t-19",
       "  run 2026-09-02T09-11-02Z-1180 — 2 workers",
-      "  * eng-5   no writes yet       phase idle        no task     container up",
-      "  * rev-1   container gone      phase running     task t-9    no container",
+      "  * eng-5   no writes yet       Idle      Up    no task",
+      "  * rev-1   container gone      Running   Down  task t-9",
       RULE,
-      "containers — as of 12s — 2 seen",
-      RULE,
-      "git — as of 5s — ## fleet-monitor...origin/fleet-monitor [ahead 2] — /Users/op/repos/cmux-fleet",
-      "   M src/monitor/render.ts",
-      "  ?? src/monitor/views/fleet.tsx",
-      "  [c] 2 commits",
+      "containers — as of 12s — 3 seen, 1 not a worker",
+      "    Up    pifleet-egress-relay-pifleet-egress",
     ]);
   });
 
@@ -714,22 +764,50 @@ describe("ISC-484: the ladder degrades in a stated order, never at Ink's discret
   });
 
   test("the columns actually leave the frame in that order", () => {
-    const wide = rowFor(renderFleet({ ...healthy, columns: 120 }), "eng-3");
+    /*
+     * The widths are DERIVED from `planColumns`, not remembered.
+     *
+     * This test used to name 120 / 80 / 66 / 40 and match the words `phase`
+     * and `container`. Both halves rotted on 2026-09-04 in the same edit: the
+     * cells became `Idle` and `Up`, so the markers were gone, and dropping
+     * their repeated-heading prefixes shrank the columns (18 -> 10, 21 -> 6),
+     * so the breakpoints moved. Remembered numbers and remembered strings fail
+     * together, and neither failure tells you the ORDER is still right — which
+     * is the only thing ISC-484 claims.
+     *
+     * `planColumns` is exported for exactly this, as its own docblock says.
+     */
+    const widthFor = (want: (p: ReturnType<typeof planColumns>) => boolean): number => {
+      for (let c = FLOOR_COLUMNS; c <= 300; c += 1) if (want(planColumns(c))) return c;
+      throw new Error("no width in [floor, 300] satisfies the predicate");
+    };
+
+    const all = widthFor((pl) => pl.showTask && pl.showContainer && pl.showPhase);
+    const wide = rowFor(renderFleet({ ...healthy, columns: all }), "eng-3");
     expect(wide).toContain("task t-18");
-    expect(wide).toContain("container");
-    expect(wide).toContain("phase");
+    expect(wide).toContain("Up");
+    expect(wide).toContain("Idle");
 
-    const noTask = rowFor(renderFleet({ ...healthy, columns: 80 }), "eng-3");
+    const noTaskAt = widthFor((pl) => !pl.showTask && pl.showContainer && pl.showPhase);
+    const noTask = rowFor(renderFleet({ ...healthy, columns: noTaskAt }), "eng-3");
     expect(noTask).not.toContain("task t-18");
-    expect(noTask).toContain("container");
+    expect(noTask).toContain("Up");
 
-    const noContainer = rowFor(renderFleet({ ...healthy, columns: 66 }), "eng-3");
-    expect(noContainer).not.toContain("container");
-    expect(noContainer).toContain("phase");
+    const noContainerAt = widthFor((pl) => !pl.showContainer && pl.showPhase);
+    const noContainer = rowFor(renderFleet({ ...healthy, columns: noContainerAt }), "eng-3");
+    expect(noContainer).not.toContain("Up");
+    expect(noContainer).toContain("Idle");
 
-    const bare = rowFor(renderFleet({ ...healthy, columns: 40 }), "eng-3");
-    expect(bare).not.toContain("phase");
+    const bare = rowFor(renderFleet({ ...healthy, columns: FLOOR_COLUMNS }), "eng-3");
+    expect(planColumns(FLOOR_COLUMNS).showPhase).toBe(false);
+    expect(bare).not.toContain("Idle");
     expect(bare).toContain("wrote 11m ago");
+
+    // The ORDER itself, which is the claim: each tier is strictly narrower
+    // than the one it survives. Without this the four probes above could all
+    // pass on a ladder that dropped things in any sequence.
+    expect(noTaskAt).toBeLessThan(all);
+    expect(noContainerAt).toBeLessThan(noTaskAt);
   });
 
   /** The run id shortens to its suffix, which is the label `status` already uses. */

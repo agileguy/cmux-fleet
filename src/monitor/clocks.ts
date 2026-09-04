@@ -88,9 +88,8 @@
  */
 
 import { monotonicMs } from "../util/clock.ts";
-import { failed, never, ok, type GitStrip, type Region } from "./model.ts";
+import { failed, never, ok, type Region } from "./model.ts";
 import { readDockerContainers, type DockerPsRun } from "./read/docker.ts";
-import { readGit } from "./read/git.ts";
 import { readRuns, type PartialRunRow } from "./read/runs.ts";
 import { refreshWorkerRow, type WorkerRead } from "./read/worker.ts";
 import { runIdsAscending, runPaths, runsRoot } from "../run/paths.ts";
@@ -170,7 +169,8 @@ export const MEASURED_MS = Object.freeze({
    *
    * Measured on a WARM repository, and the number is honest only for one. A
    * `status` on a cold index, a tree on a network mount, or a repository
-   * mid-`gc` is unbounded, which is why `read/git.ts` carries its own 5 s kill
+   * mid-`gc` is unbounded. That cost left this scheduler entirely on
+   * 2026-09-04 with the git strip.
    * rather than trusting this figure to hold. The duty-cycle guard plans for
    * the measured cost; the timeout is what plans for its absence.
    */
@@ -241,7 +241,6 @@ export const MEASURED_MS = Object.freeze({
    * instead of moving nothing at all.
    */
   REFRESH_WORKERS_100: 13.8,
-  READ_GIT: 36,
 });
 
 /**
@@ -796,8 +795,6 @@ export interface FleetSourceOptions {
    * caller closes over `snapshot()` — see {@link containerNameSet}.
    */
   readonly containers?: () => ReadonlySet<string> | null;
-  /** Repository the git strip watches. Defaults to the process's cwd. */
-  readonly watchDir?: string;
   /**
    * The last walk's runs, for the fast per-worker refresh. A getter, on
    * {@link FleetSourceOptions.containers}' reasoning — the fleet this reads is
@@ -826,7 +823,6 @@ export interface FleetSourceOptions {
 export function fleetSources(opts?: FleetSourceOptions) {
   const root = opts?.root ?? runsRoot();
   const containers = opts?.containers ?? (() => null);
-  const watchDir = opts?.watchDir ?? process.cwd();
   const knownRuns = opts?.knownRuns ?? ((): readonly PartialRunRow[] => []);
 
   return {
@@ -865,23 +861,6 @@ export function fleetSources(opts?: FleetSourceOptions) {
     },
 
     /**
-     * The git strip, on MEDIUM.
-     *
-     * Arithmetic admits it anywhere — 36 ms is 7.2% of the fast clock, just
-     * under the budget — so this placement is a judgement and is argued rather
-     * than derived. Fast is wrong because the strip's content is a working
-     * tree an operator is editing by hand: at 500 ms it would repaint on every
-     * keystroke that touches a file, and the conditional redraw would stop
-     * suppressing anything. Slow is wrong because 30 s is long enough for an
-     * operator to stage a file, look at the pane, and not believe it. Medium is
-     * the rate at which the answer changes.
-     *
-     * It is also the one source here whose cost is measured on a WARM
-     * repository and has no upper bound on a cold one. `read/git.ts`'s 5 s kill
-     * is what keeps that from becoming a stalled clock; it is not covered by
-     * the guard, which can only plan for costs that were measurable.
-     */
-    /**
      * §6.3's fast clock, and the gap the scheduler shipped without.
      *
      * It re-reads `state.json` for the workers THE LAST WALK FOUND — not a
@@ -905,12 +884,6 @@ export function fleetSources(opts?: FleetSourceOptions) {
         root,
         containers: containers(),
       }),
-    },
-
-    git: {
-      clock: "medium",
-      measuredCostMs: MEASURED_MS.READ_GIT,
-      read: (): Promise<GitStrip> => unwrapRegion(readGit({ watchDir })),
     },
 
     /**

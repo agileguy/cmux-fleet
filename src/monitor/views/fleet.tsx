@@ -51,7 +51,8 @@
 
 import { Box, Text } from "ink";
 
-import type { FleetModel, GitStrip, Region, RunRow, WorkerRow } from "../model.ts";
+import type { FleetModel, Region, RunRow, WorkerRow } from "../model.ts";
+import { workerContainerName } from "../../run/paths.ts";
 import {
   Bullet,
   Cell,
@@ -78,10 +79,22 @@ import type { Palette } from "./chrome.tsx";
  */
 const ID_COL = 8;
 const ACTIVITY_COL = 20;
-const PHASE_COL = 18;
+/**
+ * Widest `phaseCell` output is `Starting` (8), plus the gap to the next column.
+ *
+ * It was 18, sized for the dropped `phase ` prefix. The width the prefix gave
+ * back goes to the task id at the end of the row.
+ */
+const PHASE_COL = 10;
 const TASK_COL = 12;
-/** Widest `containerCell` output — `container not checked`. */
-const CONTAINER_COL = 21;
+/**
+ * Widest `containerCell` output is `Down` (4), plus the gap to the next column.
+ *
+ * It was 21, sized for `container not checked`. Shortening the values shortens
+ * the column, and the width the row gives back goes to the task id at the end
+ * of it — which is the column that was actually running out of room.
+ */
+const CONTAINER_COL = 6;
 
 /**
  * The narrowest pane this monitor will draw on, DERIVED rather than probed.
@@ -223,15 +236,193 @@ function activityColour(activity: WorkerRow["activity"], p: Palette): string | u
   }
 }
 
-function containerCell(present: boolean | null): string {
-  if (present === null) return "container not checked";
-  return present ? "container up" : "no container";
+/**
+ * The row's severity: `busy` is live, everything else is dim — and the
+ * transcript-write ladder does not get a vote.
+ *
+ * WHY NOT THE LADDER. `activity` measures TRANSCRIPT WRITES, which is a proxy
+ * for "is anything happening" that is wrong in both directions, and both were
+ * measured on the same worker within two minutes on 2026-09-04:
+ *
+ *   tst-1  wrote 1m ago   phase busy   -> `quiet`  -> white, same as four idle
+ *                                          workers, while running a 1120-test
+ *                                          suite. The one row worth finding was
+ *                                          styled to disappear.
+ *   tst-1  wrote 19s ago  phase idle   -> `active` -> green, having finished.
+ *                                          Nothing was happening.
+ *
+ * A long tool call writes nothing while doing the most work of the run, and a
+ * worker's last write lands just as it stops. `phase` is what `state.json`
+ * actually says about whether an epoch is being held, and it is what the
+ * colour should answer with, because the colour is what the eye reaches first.
+ *
+ * The activity CELL still reports the ladder in text, which is the right place
+ * for a proxy: readable when wanted, not shouting when not.
+ *
+ * WHAT BUSY DOES NOT OUTRANK, AND WHAT IDLE DOES NOT HIDE. `container-gone`
+ * and `no-transcript` are findings rather than states, and neither phase makes
+ * them less true — a worker whose container has vanished while `state.json`
+ * still says busy is exactly the row that must not be painted green, and one
+ * that never produced a transcript is worth flagging whether or not it happens
+ * to be holding an epoch. Those two keep their own severity.
+ */
+export function rowColour(row: WorkerRow, p: Palette): string | undefined {
+  if (row.activity === "container-gone" || row.activity === "no-transcript") {
+    return activityColour(row.activity, p);
+  }
+  return row.phase === "busy" ? p.live : p.dim;
+}
+
+/**
+ * The container column: `Up`, `Down`, or a dash.
+ *
+ * It read `container up` / `no container` / `container not checked` in a
+ * 21-wide column. The word `container` was the heading of a column whose every
+ * value repeated it, so nineteen of those characters said nothing the position
+ * did not already say — and the state, which is the whole point, was the last
+ * word rather than the first.
+ *
+ * `Up` and `Down` are bold green and bold red at the call site, which is where
+ * the eye should be able to stop.
+ *
+ * **The dash is the third state and it is not `Down`.** `null` means the slow
+ * clock has never completed (`activity.ts:99-107`) — an absence of fact, not a
+ * negative. Every worker is `null` for the first half-cycle after `up`, so
+ * rendering it as a bold red `Down` would put the monitor's most actionable
+ * finding on every row at startup, and teach the operator to ignore it by the
+ * second morning. It is dim and wordless because there is nothing to report
+ * yet.
+ */
+/**
+ * The phase column: `Idle`, `Busy`, and whatever else `state.json` says.
+ *
+ * It read `phase idle` in an 18-wide column. As with `container`, the word
+ * `phase` was a heading repeated on every value, and the value was the half a
+ * reader actually wanted.
+ *
+ * The string is CAPITALISED rather than mapped, so a phase this view has never
+ * heard of (`settling`, `stalled`, `dead`, or one added later) still renders
+ * as itself. A `switch` with a default would have to choose between inventing
+ * a label and rendering nothing; neither is better than the word the
+ * supervisor actually wrote.
+ */
+export function phaseCell(phase: string): string {
+  return phase === "" ? "—" : phase[0]!.toUpperCase() + phase.slice(1);
+}
+
+export function containerCell(present: boolean | null): string {
+  if (present === null) return "—";
+  return present ? "Up" : "Down";
+}
+
+/** Colour for the container cell. Bold green up, bold red down, dim unknown. */
+export function containerColour(present: boolean | null, p: Palette): string | undefined {
+  if (present === null) return p.dim;
+  return present ? p.live : p.alarm;
+}
+
+/**
+ * Containers `docker ps` reported that no worker row accounts for.
+ *
+ * The count was the whole region: `containers — as of 3s — 9 seen`. Six of
+ * those nine are the workers listed directly above it, each with its own `Up`
+ * cell — so the number's only real content was the OTHER three, and it stated
+ * them by arithmetic the reader had to do.
+ *
+ * The other three are the egress relays. They are the fleet's network, every
+ * worker's outbound traffic goes through one, and a worker whose relay has
+ * died is a worker that fails at its first `curl` with nothing on this screen
+ * to explain it. They were the least visible containers in the design and are
+ * the ones an operator cannot diagnose around.
+ *
+ * DERIVED, never a second list. `workerContainerName` is the single definition
+ * of a worker container's name and the same function `up` names them with, so
+ * a rename cannot leave this filter matching the old shape and quietly
+ * promoting every worker into this section.
+ */
+export function unclaimedContainers(model: FleetModel): readonly string[] {
+  if (model.containers.status !== "ok") return [];
+  /*
+   * A FAILED runs region lists NOTHING, and the guard belongs here rather than
+   * at the call site.
+   *
+   * With no worker rows every container is unclaimed, so the arithmetic answer
+   * is "all of them" under a heading that says `not a worker` — a lie told by
+   * a region already reporting a failure one line up. Keeping this in the
+   * component would make it a property of one caller instead of a property of
+   * the answer, and the next caller would get the lie.
+   */
+  if (model.runs.status !== "ok") return [];
+  const claimed = new Set<string>();
+  for (const run of model.runs.value) {
+    for (const w of run.workers) claimed.add(workerContainerName(run.runId, w.workerId));
+  }
+  return model.containers.value.filter((n) => !claimed.has(n));
+}
+
+/**
+ * The containers region: the count, then the ones no worker row explains.
+ *
+ * A failed `runs` region yields an empty list — see `unclaimedContainers`,
+ * which owns that rule — so the heading's own failure marker is left to say
+ * what happened.
+ */
+function ContainersRegion({ model }: { model: FleetModel }) {
+  const p = usePalette();
+  const others = unclaimedContainers(model);
+  return (
+    <Box flexDirection="column">
+      <RegionHeading
+        text={regionLine("containers", model.containers, model.now, (names) =>
+          names.length === 0
+            ? "none running"
+            : `${names.length} seen, ${others.length} not a worker`,
+        )}
+        failed={model.containers.status === "failed"}
+      />
+      {others.map((name) => (
+        /*
+         * STATE FIRST, NAME LAST AND UNBOUNDED — the same shape the task id
+         * needed, for the same reason.
+         *
+         * These rows do not align with the worker rows above and should not:
+         * they have no activity, no phase and no task, and padding them into
+         * those columns would invite the reader to compare cells that mean
+         * nothing here. What they have is a name and a state.
+         *
+         * The name goes last because these names share long prefixes —
+         * `pifleet-egress-relay-pifleet-egress`, `…-ollama-cloud`, `…-omlx` —
+         * so a fixed column truncates all three to the identical string
+         * `pifleet-egress-relay-piflee…`. Three rows that cannot be told apart
+         * are worse than the count they replaced.
+         */
+        <Box key={name}>
+          {/*
+           * A PLAIN INDENT, not a `Bullet`.
+           *
+           * The bullet is the worker-row marker: `monitor-render.test.ts`
+           * counts worker rows by it precisely because it is "on every worker
+           * row and on nothing else", which is how that test proves a failed
+           * runs region renders no rows rather than proving the rows never
+           * existed. Putting one here would have quietly made that count 8
+           * instead of 6 and cost the test its subject.
+           *
+           * Nothing is lost: the bullet carries severity, and severity here is
+           * already the bold green `Up` beside it.
+           */}
+          <Text>{"    "}</Text>
+          <Cell width={CONTAINER_COL} color={p.live} bold={p.on}>Up</Cell>
+          <Text wrap="truncate-end" bold={p.on}>{name}</Text>
+        </Box>
+      ))}
+    </Box>
+  );
 }
 
 /** One worker: activity, phase, task, container — §6.2's row, minus what the model does not carry. */
 function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
   const p = usePalette();
-  const severity = activityColour(row.activity, p);
+  const severity = rowColour(row, p);
   /*
    * The BULLET is the only glyph added to the row, and it earns its column by
    * carrying the severity where the eye lands first. It is a plain `*` when
@@ -246,20 +437,58 @@ function WorkerLine({ row, plan }: { row: WorkerRow; plan: LayoutPlan }) {
       <Cell width={ID_COL} bold={p.on}>{row.workerId}</Cell>
       <Cell width={ACTIVITY_COL} color={severity}>{activityCell(row)}</Cell>
       {plan.showPhase ? (
-        <Cell width={PHASE_COL} dimColor={p.on}>{`phase ${row.phase}`}</Cell>
-      ) : null}
-      {plan.showTask ? (
-        <Cell width={TASK_COL} dimColor={p.on}>
-          {row.taskId === null ? "no task" : `task ${row.taskId}`}
+        <Cell
+          width={PHASE_COL}
+          color={row.phase === "busy" ? p.busy : undefined}
+          bold={p.on && row.phase === "busy"}
+          dimColor={p.on && row.phase !== "busy"}
+        >
+          {phaseCell(row.phase)}
         </Cell>
       ) : null}
       {plan.showContainer ? (
-        <Text
-          wrap="truncate-end"
-          color={row.containerPresent === false ? p.alarm : undefined}
-          dimColor={p.on && row.containerPresent !== false}
+        <Cell
+          width={CONTAINER_COL}
+          color={containerColour(row.containerPresent, p)}
+          bold={p.on && row.containerPresent !== null}
+          dimColor={p.on && row.containerPresent === null}
         >
           {containerCell(row.containerPresent)}
+        </Cell>
+      ) : null}
+      {/*
+       * TASK IS LAST, AND THAT IS WHAT MAKES IT WHOLE.
+       *
+       * It used to sit between phase and container in a 12-wide `Cell`, which
+       * truncated every real id this fleet issues — `task T-rall…` for
+       * `T-rally-accept`. A task id is the one value on the row an operator
+       * has to read EXACTLY, because it is what they type into `wait`,
+       * `artifacts` and `unstage`; a truncated one is not a shorter answer,
+       * it is no answer.
+       *
+       * Last is the only position where widening it costs nothing. Every
+       * earlier column is fixed so that two frames of the same fleet line up
+       * character by character, and a variable-width cell in the middle would
+       * move everything to its right as tasks came and went. At the end it
+       * takes whatever the pane has left and truncates only when even that
+       * runs out.
+       *
+       * Position is not precedence: task is rendered last and still DROPPED
+       * first (`planColumns`), because on this fleet it is the column most
+       * often empty. The two orders answer different questions.
+       *
+       * Bold white when a task is actually held, dim otherwise. The row's
+       * bullet already says whether work is happening; this says what the work
+       * IS, and `no task` is the one value nobody needs to read quickly.
+       */}
+      {plan.showTask ? (
+        <Text
+          wrap="truncate-end"
+          bold={p.on && row.taskId !== null}
+          color={row.taskId === null ? undefined : p.quiet}
+          dimColor={p.on && row.taskId === null}
+        >
+          {row.taskId === null ? "no task" : `task ${row.taskId}`}
         </Text>
       ) : null}
     </Box>
@@ -296,53 +525,6 @@ function RunBlock({ run, plan }: { run: RunRow; plan: LayoutPlan }) {
   );
 }
 
-/**
- * The git strip (§6.8, D12), with Q8's reversal applied: **status first, commits
- * behind `[c]`** — decided by the owner 2026-09-02 against the SRD's own first
- * proposal, because dirty paths change and a commit list on an idle branch does
- * not.
- *
- * The half that is not shown is rendered as a COUNT rather than dropped. D12
- * refuses to drop anything the incumbent showed, and a silently absent commit
- * list is the dead-field shape `contracts.ts:86-118` records — the reader cannot
- * tell an empty list from one behind a key they have never heard of. A count and
- * the key that reveals it costs one line and says both.
- *
- * `clean` for an empty status is the same distinction one level down: a strip
- * that rendered nothing would be indistinguishable from one that failed to read.
- */
-function GitStripView({ region, now }: { region: Region<GitStrip>; now: number }) {
-  const p = usePalette();
-  const head = regionLine(
-    "git",
-    region,
-    now,
-    (g) => `${g.branchLine} — ${g.watchDir}`,
-  );
-  if (region.status !== "ok") {
-    return <RegionHeading text={head} failed={region.status === "failed"} />;
-  }
-  const g = region.value;
-  const shown = g.commitsExpanded ? g.commitLines : g.statusLines;
-  const hidden = g.commitsExpanded
-    ? `${g.statusLines.length} changed path${g.statusLines.length === 1 ? "" : "s"}`
-    : `${g.commitLines.length} commit${g.commitLines.length === 1 ? "" : "s"}`;
-  return (
-    <Box flexDirection="column">
-      <RegionHeading text={head} failed={false} />
-      {shown.length === 0 ? (
-        <Text color={p.live}>{`  ${g.commitsExpanded ? "no commits" : "clean"}`}</Text>
-      ) : (
-        shown.map((line) => (
-          <Text key={line} wrap="truncate-end" color={g.commitsExpanded ? p.dim : p.warn}>
-            {`  ${line}`}
-          </Text>
-        ))
-      )}
-      <Text dimColor={p.on}>{`  [c] ${hidden}`}</Text>
-    </Box>
-  );
-}
 
 /**
  * The whole frame.
@@ -387,14 +569,7 @@ export function Fleet({ model }: { model: FleetModel }) {
         ? model.runs.value.map((run) => <RunBlock key={run.runId} run={run} plan={plan} />)
         : null}
       <Rule width={model.columns} />
-      <RegionHeading
-        text={regionLine("containers", model.containers, model.now, (names) =>
-          names.length === 0 ? "none running" : `${names.length} seen`,
-        )}
-        failed={model.containers.status === "failed"}
-      />
-      <Rule width={model.columns} />
-      <GitStripView region={model.git} now={model.now} />
+      <ContainersRegion model={model} />
     </Box>
   );
 }

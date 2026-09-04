@@ -868,7 +868,6 @@ describe("ISC-502: an unentered view performs no read", () => {
     const { root } = await enterable("compose");
     const model = await composeFleet({
       root,
-      watchDir: root,
       columns: 120,
       // No `docker ps`: the container region is supplied, so this composes
       // with no subprocess at all.
@@ -918,7 +917,6 @@ describe("ISC-502: an unentered view performs no read", () => {
     const { root, run } = await enterable("leave");
     const base = await composeFleet({
       root,
-      watchDir: root,
       columns: 120,
       containers: { status: "never" },
     });
@@ -936,7 +934,7 @@ describe("ISC-502: an unentered view performs no read", () => {
     // …and the fleet regions came through untouched. Entering and leaving a
     // view must not re-walk the run tree.
     expect(left.runs).toBe(base.runs);
-    expect(left.git).toBe(base.git);
+    expect(left.containers).toBe(base.containers);
   });
 
   /**
@@ -959,10 +957,9 @@ describe("ISC-502: an unentered view performs no read", () => {
     }
     // The source map is PINNED, so a fourth source cannot arrive unnoticed.
     const root = await makeRoot("sources");
-    const sources = fleetSources({ root, watchDir: root, dockerRun: async () => ({ code: 0, stdout: "", stderr: "" }) });
+    const sources = fleetSources({ root, dockerRun: async () => ({ code: 0, stdout: "", stderr: "" }) });
     expect(Object.keys(sources).sort()).toEqual([
       "containers",
-      "git",
       "runNames",
       "runs",
       "workers",

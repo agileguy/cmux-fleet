@@ -348,17 +348,24 @@ describe("ISC-506: views 2-4 add no writer and no new subprocess argv", () => {
    * fail against a correct design.
    *
    * So the subject is `monitor/**`, which is the code this criterion is about
-   * and the code an edit to these views would touch. Two modules spawn today and
-   * both were already pinned: `read/docker.ts` byte-for-byte by ISC-469, and
-   * `read/git.ts` on its argv builders by ISC-493. **The list is pinned rather
-   * than counted**, so a third arriving names itself instead of moving a number.
+   * and the code an edit to these views would touch. ONE module spawns today:
+   * `read/docker.ts`, pinned byte-for-byte by ISC-469. **The list is pinned
+   * rather than counted**, so a second arriving names itself instead of moving
+   * a number.
+   *
+   * It was two until 2026-09-04. Removing the monitor's git region took
+   * `read/git.ts` out of the import closure entirely — the monitor no longer
+   * shells out to git at all, which is a strictly stronger version of the
+   * property this test exists to state. The module still exists for the
+   * operations console's `git-watch` pane; it is simply not reachable from
+   * here any more.
    */
-  test("only the two already-pinned monitor modules spawn anything", () => {
+  test("only the one pinned monitor module spawns anything", () => {
     const spawning = [...CLOSURE]
       .filter((rel) => rel.startsWith("monitor/") && existsSync(join(SRC, rel)))
       .filter((rel) => stripComments(readFileSync(join(SRC, rel), "utf8")).includes("Bun.spawn"))
       .sort();
-    expect(spawning).toEqual(["monitor/read/docker.ts", "monitor/read/git.ts"]);
+    expect(spawning).toEqual(["monitor/read/docker.ts"]);
   });
 
   /**
@@ -567,7 +574,6 @@ describe("ISC-473: no verdict is produced outside view 4", () => {
     try {
       const sources = fleetSources({
         root: join(base, "runs"),
-        watchDir: base,
         dockerRun: async () => ({ code: 0, stdout: "", stderr: "" }),
       });
 

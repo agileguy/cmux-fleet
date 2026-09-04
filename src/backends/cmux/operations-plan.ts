@@ -475,7 +475,7 @@ export function operationsPanes(opts: OperationsPlanOptions): OperationsPane[] {
        * governs — how quickly the pane reflects a change — is the same, which
        * is why it keeps the name instead of being retired.
        */
-      command: `${monitorPaneCommand(repoRoot, watchDir, poll)}; exec $SHELL -i`,
+      command: `${monitorPaneCommand(repoRoot, poll)}; exec $SHELL -i`,
       /*
        * DOWN off the OBSERVER, and SECOND in creation order — which is what
        * makes it span the WHOLE bottom rather than a column of it.
@@ -709,18 +709,19 @@ export function envPreamble(): string {
  * bare invocation fails with `command not found` in a pane that looks correctly
  * configured — the same failure shape as `watch(1)`, from a different cause.
  */
-export function monitorPaneCommand(
-  repoRoot: string,
-  watchDir: string,
-  pollSeconds: number,
-): string {
-  return pifleetCommand(repoRoot, [
-    "monitor",
-    "--repo",
-    watchDir,
-    "--poll",
-    String(pollSeconds),
-  ]);
+export function monitorPaneCommand(repoRoot: string, pollSeconds: number): string {
+  /*
+   * `--repo` is GONE, with the monitor's git region (2026-09-04).
+   *
+   * It existed for one consumer: `git -C <watchDir>` inside the strip that
+   * reported the invocation directory's `git status` beside the fleet table.
+   * With the region removed nothing downstream reads it, and a flag that is
+   * accepted and ignored is worse than one that is absent — it tells an
+   * operator the pane is watching a directory it is not.
+   *
+   * `--poll` keeps its name and its meaning: the repaint interval.
+   */
+  return pifleetCommand(repoRoot, ["monitor", "--poll", String(pollSeconds)]);
 }
 
 
