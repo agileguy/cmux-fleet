@@ -70,6 +70,7 @@ import {
   REVIEW_CONSOLE_ASPECTS,
   consoleFanOut,
   consoleTransport,
+  consoleRunResolution,
   makeConsoleFanOut,
   relayFanOut,
   resolveConsoleRuns,
@@ -79,6 +80,7 @@ import { renderOutcome } from "../../src/cli/commands/relay.ts";
 import {
   DISPATCH_REQUEST_SCHEMA,
   REVIEW_CONSOLE_ROSTER,
+  parseDispatchRequest,
   type DispatchRequest,
 } from "../../src/run/dispatch-request.ts";
 
@@ -105,20 +107,58 @@ const CTX_RUN = fakeRun("run-ctx");
 const LANG_RUN = fakeRun("run-lang");
 
 /** Every seat named, so nothing below is silently a "seat not requested" path. */
-function request(parent = "T1"): DispatchRequest {
-  return {
+/**
+ * A request built THROUGH `parseDispatchRequest`, never cast into shape.
+ *
+ * The `as DispatchRequest` cast this replaces is the fixture the sibling file
+ * argues against at length: a hand-built document does not meet the schema, so
+ * it cannot rot when the schema changes. It would keep every case here green
+ * through a field rename, a new required field, or a tightened grammar — while
+ * the console refused every real request on disk.
+ *
+ * `briefs` lets a case make each lens' brief DISTINGUISHABLE, which is what the
+ * order-influence test below needs and what nothing previously supplied.
+ */
+function request(
+  opts: { parent?: string; workers?: readonly string[]; briefs?: (w: string) => string } = {},
+): DispatchRequest {
+  const parent = opts.parent ?? "T1";
+  const workers = opts.workers ?? REVIEW_CONSOLE_ASPECTS.map((s) => s.worker);
+  const doc = {
     schema: DISPATCH_REQUEST_SCHEMA,
     parent_task_id: parent,
-    requests: REVIEW_CONSOLE_ASPECTS.map((s) => ({
-      worker: s.worker,
-      title: `review ${s.aspect}`,
-      brief: `look at ${s.aspect}`,
+    requests: workers.map((w) => ({
+      worker: w,
+      title: `review by ${w}`,
+      brief: opts.briefs === undefined ? `look at ${w}` : opts.briefs(w),
     })),
-  } as DispatchRequest;
+  };
+  // Through the REAL validator, with the same structural identity the poll
+  // supplies: the sender is the outbox owner and the task id is the directory.
+  const parsed = parseDispatchRequest(JSON.stringify(doc), {
+    sender: "col-1",
+    taskId: parent,
+  });
+  if (parsed.kind !== "ok") {
+    throw new Error(`fixture is not a valid dispatch request: ${JSON.stringify(parsed)}`);
+  }
+  return parsed.request;
 }
 
 interface Recorder {
-  readonly sent: Array<{ run: string; worker: string; taskId: string; title: string; brief: string }>;
+  readonly sent: Array<{
+    run: string;
+    worker: string;
+    taskId: string;
+    title: string;
+    brief: string;
+    /**
+     * The plane the dispatch actually travelled. Captured because this file's
+     * header claims `via` is what tells staged from rpc apart — and until now
+     * NO assertion anywhere read it, so the claim was prose.
+     */
+    via: string;
+  }>;
   readonly replies: Array<{ run: string; collator: string; child: string; reply: unknown }>;
   readonly harvested: string[];
   readonly slept: number[];
@@ -160,16 +200,18 @@ function effects(
      * `via: "rpc"` here would be a console nobody is going to run.
      */
     async sendTask(run, worker, d) {
+      const via = ALL_PANES_TUI.has(worker) ? "staged" : "rpc";
       rec.sent.push({
         run: run.runId,
         worker,
         taskId: d.taskId,
         title: d.title,
         brief: d.brief,
+        via,
       });
       return {
         accepted: true,
-        via: ALL_PANES_TUI.has(worker) ? "staged" : "rpc",
+        via,
         reason: null,
         error: null,
         epoch: 7,
@@ -228,7 +270,12 @@ describe("the export the poll loop resolves", () => {
 
   test("the CLI still looks it up under exactly that name", async () => {
     const source = await Bun.file("src/cli/commands/relay.ts").text();
-    expect(source).toContain('const FAN_OUT_EXPORT = "consoleFanOut"');
+    // The CLI now imports the binding rather than looking it up by name in a
+    // dynamic module bag, so the agreement is a COMPILE error if it breaks.
+    // Asserted structurally because the old dynamic guard is deleted and a
+    // reader needs to see that the replacement is deliberate.
+    expect(source).toContain('import { consoleFanOut } from "../../run/relay.ts"');
+    expect(source).not.toContain("FAN_OUT_EXPORT");
   });
 });
 
@@ -266,7 +313,16 @@ describe("dispatch, over THE dispatch path", () => {
     // rev-arch-1 is tui in the shipped console, so the fixture stages it.
     await consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
     expect(rec.sent).toEqual([
-      { run: "run-arch", worker: "rev-arch-1", taskId: "T1-arch", title: "t", brief: "b" },
+      {
+        run: "run-arch",
+        worker: "rev-arch-1",
+        taskId: "T1-arch",
+        title: "t",
+        brief: "b",
+        // READ, not merely captured: the shipped console stages, and a fixture
+        // that answered "rpc" here would be a console nobody runs.
+        via: "staged",
+      },
     ]);
   });
 
@@ -783,15 +839,35 @@ describe("the fan-out adapter's result mapping", () => {
     expect(rec.sent).toHaveLength(0);
   });
 
-  test("an unspellable parent answers `not_dispatched`, never a throw", async () => {
-    const { fx } = effects();
+  /**
+   * **The fixture changed because the old one could not happen.**
+   *
+   * It used to pass `parent_task_id: "../escape"`, cast into shape. Building
+   * fixtures through `parseDispatchRequest` showed why that was wrong: the
+   * parser REFUSES that id on its grammar, so no such request can reach the
+   * fan-out through the real path, and the case was pinning a state the system
+   * cannot enter — coverage in appearance only.
+   *
+   * A 60-character parent reaches the SAME guard legitimately. It is a legal id
+   * to the parser (the bound is 64), and `T-context` derives 68, which
+   * `derive()` refuses rather than truncating — because two parents differing
+   * only past the cut would derive one child id and the second fan-out would
+   * replay the first's task instead of running.
+   */
+  test("a legal parent whose derived child id overflows answers `not_dispatched`", async () => {
+    const { fx, rec } = effects();
+    const parent = "p".repeat(60);
     const got = await fanOutWith(fx)({
       run: COL_RUN,
       sender: "col-1",
-      taskId: "../escape",
-      request: request("../escape"),
+      taskId: parent,
+      request: request({ parent }),
     });
     expect(got.kind).toBe("not_dispatched");
+    if (got.kind !== "not_dispatched") throw new Error("unreachable");
+    expect(got.reason).toContain("64");
+    // Refused before anything was issued.
+    expect(rec.sent).toHaveLength(0);
   });
 
   /**
@@ -1240,5 +1316,255 @@ describe("the roster and the aspect table agree", () => {
     for (const c of REVIEW_CONSOLE_ROSTER.collators) {
       expect(REVIEW_CONSOLE_ASPECTS.some((s) => s.worker === c)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. The collator cannot choose which BRIEF reaches which LENS.
+// ---------------------------------------------------------------------------
+
+/**
+ * **D11's claim, finally tested on the axis that matters.**
+ *
+ * `relay.ts` walks the aspect TABLE and consults the request only to ask
+ * whether a seat was named — `request.requests.find(r => r.worker === seat.worker)`.
+ * Its docblock says walking `request.requests` instead "would let the collator
+ * choose the order lenses are reported in, and one refactor later, which lenses
+ * exist." The suite proved neither half, because every fixture made the two
+ * implementations agree:
+ *
+ * - a request already in TABLE ORDER makes worker-matching and positional
+ *   matching identical by construction;
+ * - a reversed request was asserted only on derived task IDS and aspect ORDER,
+ *   both of which are table-driven and therefore unchanged by a positional
+ *   lookup;
+ * - the one byte-identity check on a brief used a ONE-ENTRY request, where
+ *   position 0 and the matching worker are the same entry.
+ *
+ * So this mutation survived every test in the repository:
+ *
+ *     for (const [i, seat] of seats.entries()) { const entry = request.requests[i];
+ *
+ * Under it a collator ordering its request `[lang, ctx, arch]` has the LANG
+ * brief delivered to `rev-arch-1` under task id `T-arch` — the arch lens
+ * reporting on a brief the collator aimed at a different reviewer, with every
+ * id, every aspect name and every count still correct.
+ *
+ * Three properties are needed to separate the implementations and no fixture
+ * had all three: a STRICT SUBSET of seats, one that EXCLUDES THE FIRST SEAT,
+ * and briefs that are DISTINGUISHABLE PER WORKER. With `[lang, ctx]` requested,
+ * table order walks `arch, context, lang`; positional matching would hand seat
+ * `arch` the entry at index 0, which is `lang`'s.
+ */
+describe("brief-to-lens binding is table-driven, not positional", () => {
+  /** Each brief names its intended reader, so a mis-delivery is legible. */
+  const briefs = (w: string) => `read the diff as ${w}`;
+
+  test("a subset EXCLUDING the first seat delivers each brief to its own worker", async () => {
+    const { fx, rec } = effects();
+    // Deliberately NOT table order, and deliberately missing `rev-arch-1` —
+    // the first seat. Under positional matching, seat `arch` would take
+    // requests[0], which belongs to rev-lang-1.
+    const req = request({ workers: ["rev-lang-1", "rev-ctx-1"], briefs });
+
+    await makeConsoleFanOut({
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
+      transport: (sender) => consoleTransport(sender, fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: req });
+
+    const delivered = new Map(rec.sent.map((x) => [x.worker, x.brief]));
+    // THE ASSERTION THAT WAS MISSING: which brief arrived at which lens.
+    expect(delivered.get("rev-lang-1")).toBe("read the diff as rev-lang-1");
+    expect(delivered.get("rev-ctx-1")).toBe("read the diff as rev-ctx-1");
+    // The unrequested seat is not dispatched at all — and crucially never
+    // receives another worker's brief.
+    expect(delivered.has("rev-arch-1")).toBe(false);
+  });
+
+  test("the task id and the brief agree — `T1-lang` carries the lang brief", async () => {
+    const { fx, rec } = effects();
+    const req = request({ workers: ["rev-lang-1", "rev-ctx-1"], briefs });
+
+    await makeConsoleFanOut({
+      resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
+      transport: (sender) => consoleTransport(sender, fx),
+    })({ run: COL_RUN, sender: "col-1", taskId: "T1", request: req });
+
+    const byTask = new Map(rec.sent.map((x) => [x.taskId, x.brief]));
+    // A positional implementation keeps the ids right and the briefs wrong,
+    // which is exactly why asserting ids alone could never catch it.
+    expect(byTask.get("T1-lang")).toBe("read the diff as rev-lang-1");
+    expect(byTask.get("T1-context")).toBe("read the diff as rev-ctx-1");
+  });
+
+  test("reversing the request changes no brief's destination", async () => {
+    const forward = effects();
+    const reversed = effects();
+    const seats = ["rev-arch-1", "rev-ctx-1", "rev-lang-1"];
+
+    const run = async (fx: RelayEffects, workers: readonly string[]) =>
+      makeConsoleFanOut({
+        resolveRuns: async () => ({ runs: CONSOLE_RUNS, ambiguous: new Map() }),
+        transport: (sender) => consoleTransport(sender, fx),
+      })({
+        run: COL_RUN,
+        sender: "col-1",
+        taskId: "T1",
+        request: request({ workers, briefs }),
+      });
+
+    await run(forward.fx, seats);
+    await run(reversed.fx, [...seats].reverse());
+
+    const pairs = (r: Recorder) =>
+      r.sent
+        .filter((x) => x.worker !== "col-1")
+        .map((x) => `${x.worker}|${x.taskId}|${x.brief}`)
+        .sort();
+    expect(pairs(reversed.rec)).toEqual(pairs(forward.rec));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. Where the production run map comes from — the producer half.
+// ---------------------------------------------------------------------------
+
+/**
+ * `consoleRunResolution` is the closure that used to live inside
+ * `consoleFanOut` and was executed by NOTHING. The only case touching
+ * `consoleFanOut` asserts `typeof === "function"`, which constructs it and never
+ * calls it — so the runs root, the listing, the newest-first ordering and the
+ * liveness probe all looked covered by association with `resolveConsoleRuns`,
+ * a different function that takes those very things as parameters.
+ */
+describe("consoleRunResolution — the candidate set, not just the decision", () => {
+  function sources(over: Partial<import("../../src/run/relay.ts").ConsoleRunSources> = {}) {
+    const base = {
+      runsRoot: () => "/runs",
+      // ASCENDING, as `runIdsAscending` returns them. The reversal is the
+      // behaviour under test, so the fixture must supply the un-reversed order.
+      listRunIds: async () => ["r-old", "r-new"],
+      runPathsFor: (id: string) => fakeRun(id),
+      /**
+       * Live everywhere EXCEPT the collator's own run — otherwise
+       * `resolveConsoleRuns` answers from `collatorRun` before the scan runs,
+       * and the candidate ordering under test is never reached. The same shape
+       * of mistake the newest-wins fixture had to fix earlier.
+       */
+      isLiveWorker: async (run: RunPaths) => run.runId !== "run-col",
+      pinnedRuns: () => undefined,
+    };
+    return { ...base, ...over } as import("../../src/run/relay.ts").ConsoleRunSources;
+  }
+  const input = {
+    run: COL_RUN,
+    sender: "col-1",
+    taskId: "T1",
+    request: request(),
+  };
+
+  /**
+   * NEWEST FIRST, asserted rather than asserted-in-prose.
+   *
+   * Ordering no longer decides RESOLUTION — ambiguity is refused, and one match
+   * is one match in any order. What it decides is the order of the reported
+   * ids, so the operator reading "held by X, Y" sees the run they most likely
+   * just started first. Dropping the `reverse()` reddens here, which is the
+   * point: a line whose only remaining job is reporting still has a job.
+   */
+  test("candidates are ordered newest-first", async () => {
+    const { runs, ambiguous } = await consoleRunResolution(input, sources());
+    expect(runs.has("rev-arch-1")).toBe(false);
+    expect(ambiguous.get("rev-arch-1")).toEqual(["r-new", "r-old"]);
+  });
+
+  test("a dead run is not a candidate at all", async () => {
+    const { runs } = await consoleRunResolution(
+      input,
+      sources({ isLiveWorker: async (run: RunPaths) => run.runId === "r-new" }),
+    );
+    // Exactly one LIVE holder, so it resolves rather than refusing.
+    expect(runs.get("rev-arch-1")?.runId).toBe("r-new");
+  });
+
+  test("an explicit pin bypasses the scan entirely", async () => {
+    let listed = 0;
+    const { runs, ambiguous } = await consoleRunResolution(
+      input,
+      sources({
+        pinnedRuns: () => "rev-arch-1=r-pin,rev-ctx-1=r-pin2",
+        listRunIds: async () => {
+          listed += 1;
+          return [];
+        },
+      }),
+    );
+    expect(listed).toBe(0);
+    expect(runs.get("rev-arch-1")?.runId).toBe("r-pin");
+    expect(runs.get("rev-ctx-1")?.runId).toBe("r-pin2");
+    // The collator is always its own run, never pinned from the environment.
+    expect(runs.get("col-1")).toBe(COL_RUN);
+    expect(ambiguous.size).toBe(0);
+  });
+
+  test("the workers asked for are the sender plus every seat", async () => {
+    const asked: string[] = [];
+    await consoleRunResolution(
+      input,
+      sources({
+        isLiveWorker: async (_run: RunPaths, w: string) => {
+          asked.push(w);
+          return false;
+        },
+      }),
+    );
+    for (const seat of REVIEW_CONSOLE_ASPECTS) expect(asked).toContain(seat.worker);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 14. The operator-facing stream, and the durable record behind it.
+// ---------------------------------------------------------------------------
+
+describe("what the operator is told, and what outlives the telling", () => {
+  /**
+   * D2: the churn that buried the signal.
+   *
+   * `relayPass` reports every journalled request on every pass, so a settled
+   * console printed N lines every `DEFAULT_POLL_S` seconds forever — defeating
+   * this module's own rule that `missing` is not an outcome so "the one row
+   * that means something" is not buried. It is also how a `collation_failed`
+   * reason, printed once, scrolls out of reach in seconds.
+   */
+  test("`already_done` renders as a single line, not a stream", () => {
+    const line = renderOutcome({
+      worker: "col-1",
+      task_id: "T1",
+      kind: "already_done",
+      children: ["T1-arch"],
+    });
+    expect(line).toContain("already dispatched, unchanged");
+  });
+
+  /**
+   * D3: the reason has to outlive the line that printed it.
+   *
+   * A `dispatched` outcome carrying a reason is the one row an operator must be
+   * able to find AFTER the fact — the next tick says `already_done, unchanged`
+   * and three 0444 replies sit in the collator's mount with nothing telling it
+   * to read them. `relayPass` appends it to the ledger; this pins that the
+   * outcome still carries it out to the caller, which is what the command
+   * appends FROM.
+   */
+  test("a dispatched outcome carrying a reason still surfaces it", () => {
+    const line = renderOutcome({
+      worker: "col-1",
+      task_id: "T1",
+      kind: "dispatched",
+      children: ["T1-arch", "T1-context", "T1-lang"],
+      reason: 'the collation "T1-collate" could not be delivered',
+    });
+    expect(line).toContain("T1-collate");
+    expect(line).toContain("3 children");
   });
 });

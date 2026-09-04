@@ -81,6 +81,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { runsRoot as runsRootEager, runPaths as runPathsEager } from "./paths.ts";
 
 import { SESSION_ID_RE, type Verdict } from "../contracts.ts";
 import { replyMountPath } from "./replies.ts";
@@ -1600,6 +1601,89 @@ export function makeConsoleFanOut(deps: {
 }
 
 /**
+ * Where the production map comes from, as four injected reads.
+ *
+ * **Extracted from `consoleFanOut`'s closure because that closure was
+ * unexecuted by every test in the suite.** The only case touching
+ * `consoleFanOut` asserts `typeof === "function"`, which CONSTRUCTS the closure
+ * and never calls it — so `runsRoot()`, the run listing, the newest-first
+ * ordering and the liveness probe were all unreachable from a unit test while
+ * looking covered by association with `resolveConsoleRuns`, which is a
+ * different function taking those same things as parameters.
+ *
+ * That is the producer half of the scan hazard: `resolveConsoleRuns` was well
+ * tested on the CONSUMER side (given these candidates, what does it decide) and
+ * the side that decides what the candidates ARE had no test at all.
+ */
+export interface ConsoleRunSources {
+  runsRoot(): string;
+  /** Run ids, OLDEST first — `runIdsAscending`'s order, reversed below. */
+  listRunIds(root: string): Promise<readonly string[]>;
+  runPathsFor(runId: string, root: string): RunPaths;
+  /** Is this worker LIVE in this run — a supervisor actually holding the seat. */
+  isLiveWorker(run: RunPaths, worker: string): Promise<boolean>;
+  /** `PIFLEET_RELAY_RUNS`, or undefined. */
+  pinnedRuns(): string | undefined;
+}
+
+/**
+ * The console's worker→run map, from the host.
+ *
+ * **Newest first, and what that is FOR has changed — so the comment has
+ * changed with it.** It used to be the tiebreak: the newest run holding an id
+ * won, which is how an unrelated fleet captured a seat. Ambiguity is now
+ * REFUSED, so ordering decides nothing about resolution — a worker resolves
+ * only when exactly one live run holds it, and one is one in any order.
+ *
+ * It is kept because it orders the REFUSAL: the operator reading "held by X, Y"
+ * sees the most recently started run first, which is almost always the one they
+ * just brought up and were thinking of. That is a real property and it is
+ * asserted rather than asserted-in-prose — `collator-relay-adapter.test.ts`
+ * pins the order of the reported ids, so deleting the `reverse()` reddens.
+ */
+export async function consoleRunResolution(
+  input: RelayFanOutInput,
+  src: ConsoleRunSources,
+): Promise<ConsoleRunMap> {
+  const root = src.runsRoot();
+  const workers = [input.sender, ...REVIEW_CONSOLE_ASPECTS.map((s) => s.worker)];
+
+  /**
+   * AN EXPLICIT MAP WINS, and it is the shape the SRD actually asked for.
+   *
+   * §6.5's preferred home is "a new `pifleet relay --console review` process,
+   * started by `scripts/review`" whose merit is that it "holds the worker→run
+   * map THE SCRIPT ALREADY COMPUTES". The scan below exists because that flag
+   * does not, and it is strictly the weaker answer: the script knows which four
+   * runs it created, and the scan can only infer from what is on disk.
+   */
+  const pinned = relayRunPins(src.pinnedRuns());
+  if (pinned !== null) {
+    const runs = new Map<string, RunPaths>();
+    for (const worker of workers) {
+      if (worker === input.sender) {
+        runs.set(worker, input.run);
+        continue;
+      }
+      const runId = pinned.get(worker);
+      if (runId !== undefined) runs.set(worker, src.runPathsFor(runId, root));
+    }
+    return { runs, ambiguous: new Map<string, readonly string[]>() };
+  }
+
+  return resolveConsoleRuns({
+    collator: input.sender,
+    collatorRun: input.run,
+    workers,
+    listRuns: async () => {
+      const ids = [...(await src.listRunIds(root))].reverse();
+      return ids.map((id) => src.runPathsFor(id, root));
+    },
+    hasWorker: (run, worker) => src.isLiveWorker(run, worker),
+  });
+}
+
+/**
  * `PIFLEET_RELAY_RUNS` — `worker=runId` pairs, comma separated, or `null` when
  * unset.
  *
@@ -1814,78 +1898,49 @@ export const productionRelayEffects: RelayEffects = {
  * journal tells apart. Every decision is one file up or one file down; none of
  * them is here.
  */
+/**
+ * The real reads. Every path in the console is derived HERE and nowhere else.
+ *
+ * `isLiveWorker` is a LIVE worker, not merely a directory that once existed.
+ * `existsSync(workerPaths(run, worker).dir)` was the predicate and it is why the
+ * scan could capture a stranger: `pifleet down` removes containers and leaves
+ * directories, so every run this operator has ever started answered `true` for
+ * every worker it ever materialised, and the candidate set was "every run on the
+ * host". Liveness narrows it to runs with a supervisor actually holding the
+ * seat. It does NOT make the answer unique — two live consoles still collide —
+ * which is what the ambiguity refusal is for; the two together are the fix and
+ * either alone is not.
+ */
+export const productionRunSources: ConsoleRunSources = {
+  runsRoot: () => {
+    // Synchronous by contract, so the lazily-loaded module cannot be used here.
+    // `runsRoot` reads one env var and joins a path; duplicating that would be a
+    // second definition of where runs live, so it is imported eagerly instead —
+    // `paths.ts` pulls in nothing heavy, which is why it is the one exception.
+    return runsRootEager();
+  },
+  listRunIds: async (root) => {
+    const m = await loadEffectModules();
+    return m.paths.runIdsAscending(root);
+  },
+  runPathsFor: (runId, root) => runPathsEager(runId, root),
+  isLiveWorker: async (run, worker) => {
+    const m = await loadEffectModules();
+    const wp = m.paths.workerPaths(run, worker);
+    if (!existsSync(wp.dir)) return false;
+    try {
+      const state = await m.state.readWorkerState(wp);
+      if (state === null || state.phase === "dead") return false;
+      return (await m.registry.processStartTime(state.pid)) !== null;
+    } catch {
+      return false;
+    }
+  },
+  pinnedRuns: () => process.env["PIFLEET_RELAY_RUNS"],
+};
+
 export const consoleFanOut: (input: RelayFanOutInput) => Promise<RelayFanOutResult> =
   makeConsoleFanOut({
-    async resolveRuns(input) {
-      const m = await loadEffectModules();
-      const root = m.paths.runsRoot();
-      const workers = [input.sender, ...REVIEW_CONSOLE_ASPECTS.map((s) => s.worker)];
-
-      /**
-       * AN EXPLICIT MAP WINS, and it is the shape the SRD actually asked for.
-       *
-       * §6.5's preferred home is "a new `pifleet relay --console review` process,
-       * started by `scripts/review`" whose merit is that it "holds the worker→run
-       * map THE SCRIPT ALREADY COMPUTES". The scan below exists because that flag
-       * does not, and it is strictly the weaker answer: the script knows which
-       * four runs it created, and the scan can only guess from what is on disk.
-       * `PIFLEET_RELAY_RUNS` is that map, spelled as `worker=runId` pairs, and it
-       * makes the guess unnecessary rather than safer.
-       */
-      const pinned = relayRunPins(process.env["PIFLEET_RELAY_RUNS"]);
-      if (pinned !== null) {
-        const runs = new Map<string, RunPaths>();
-        for (const worker of workers) {
-          const runId = worker === input.sender ? input.run.runId : pinned.get(worker);
-          if (runId === undefined) continue;
-          runs.set(worker, worker === input.sender ? input.run : m.paths.runPaths(runId, root));
-        }
-        return { runs, ambiguous: new Map<string, readonly string[]>() };
-      }
-
-      return resolveConsoleRuns({
-        collator: input.sender,
-        collatorRun: input.run,
-        // The sender plus every seat on the console. Seats the request did not
-        // name cost one probe each and buy a map that does not depend on which
-        // lenses this particular request happened to ask for.
-        workers,
-        listRuns: async () => {
-          const ids = await m.paths.runIdsAscending(root);
-          return ids.reverse().map((id) => m.paths.runPaths(id, root));
-        },
-        /**
-         * A LIVE worker, not merely a directory that once existed.
-         *
-         * `existsSync(workerPaths(run, worker).dir)` was the predicate and it is
-         * the reason the scan could capture a stranger: `pifleet down` removes
-         * containers and leaves directories, so every run this operator has ever
-         * started still answers `true` for every worker it ever materialised.
-         * The candidate set was therefore "every run on the host", and with the
-         * newest-wins tiebreak that was "whichever fleet came up most recently".
-         *
-         * Liveness narrows it to runs with a supervisor actually holding the
-         * seat, which is the only kind that could serve a dispatch anyway. It
-         * does NOT make the answer unique — two live consoles still collide —
-         * and that is what the ambiguity refusal above is for. The two together
-         * are the fix; either alone is not.
-         *
-         * A worker whose supervisor has not written `state.json` yet reads as
-         * not-live and the fan-out retries, which is correct for a console still
-         * coming up.
-         */
-        hasWorker: async (run, worker) => {
-          const wp = m.paths.workerPaths(run, worker);
-          if (!existsSync(wp.dir)) return false;
-          try {
-            const state = await m.state.readWorkerState(wp);
-            if (state === null || state.phase === "dead") return false;
-            return (await m.registry.processStartTime(state.pid)) !== null;
-          } catch {
-            return false;
-          }
-        },
-      });
-    },
+    resolveRuns: (input) => consoleRunResolution(input, productionRunSources),
     transport: (collator) => consoleTransport(collator, productionRelayEffects),
   });

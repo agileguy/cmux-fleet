@@ -82,6 +82,8 @@ import {
   readDispatchRequest,
 } from "../../run/dispatch-request.ts";
 import { classifyRequest, recordDispatch } from "../../run/relay-journal.ts";
+import { consoleFanOut } from "../../run/relay.ts";
+import { LedgerWriter } from "../../run/ledger.ts";
 import {
   inboxTaskPath,
   runIdsAscending,
@@ -311,6 +313,13 @@ export async function relayPass(opts: {
   fanOut: RelayFanOut;
   roster?: ConsoleRoster;
   cache?: InboxWorkerCache;
+  /**
+   * Optional so the unit suite can drive a pass without a run directory to
+   * write into. The command always supplies one; a pass without it still
+   * journals and still reports, and only loses the durable copy of a reason it
+   * has already returned to its caller.
+   */
+  ledger?: LedgerWriter;
 }): Promise<RelayPassResult> {
   const roster = opts.roster ?? REVIEW_CONSOLE_ROSTER;
   const cache = opts.cache ?? new Map<string, string | null>();
@@ -334,6 +343,23 @@ export async function relayPass(opts: {
    * Still bounded by the ROSTER, so this is not a scan of every worker in the
    * fleet: a task dispatched to `eng-1` is not this console's business, and its
    * outbox is not read.
+   *
+   * ## `sender_not_collator` is UNREACHABLE here today, and the widening stays
+   *
+   * Under D4 this pass reads ONE run's inbox, and it is the collator's — so the
+   * only senders it can enumerate are the workers that run holds, which in the
+   * shipped four-run console is the collator alone. A reviewer's outbox lives in
+   * a different run that this pass never opens, so `checkSender`'s refusal
+   * cannot fire from here no matter what a reviewer writes.
+   *
+   * **The widening is kept anyway, because narrowing it would be a silent
+   * no-op.** Filtering to collators would make the refusal dead in a second,
+   * less visible way and would delete the evidence path for the day this
+   * changes. And the honest fix is not in this loop: making a reviewer's request
+   * observable means enumerating the OTHER runs' outboxes, which is the same
+   * worker→run scoping problem the fan-out solves with `PIFLEET_RELAY_RUNS`, and
+   * it should be solved once — when `--console` lands (§6.5) — rather than twice
+   * in two shapes. Stated here rather than left as an apparent oversight.
    */
   const onConsole = new Set([...roster.collators, ...roster.reviewers]);
 
@@ -396,6 +422,38 @@ export async function relayPass(opts: {
       continue;
     }
     await recordDispatch(opts.run.root, worker, taskId, read.request, result.children);
+    /**
+     * D3: THE REASON IS MADE DURABLE, because printing it once is not recording
+     * it.
+     *
+     * `RelayJournalEntry` has no reason field, and the staged refusal that
+     * produces one throws before `sendTaskEnvelope` reaches its own ledger
+     * append — so after the pass that printed this line, NOTHING in the run tree
+     * said the collation never landed. The next tick answers `already_done,
+     * unchanged`, three 0444 replies sit in the collator's mount with nothing
+     * telling it to read them, and no row anywhere says why. That is precisely
+     * the state `collation_failed`'s docblock says a reader must never be left
+     * in, and the arm was only half-delivering on it.
+     *
+     * The LEDGER and not the journal, deliberately. The journal answers one
+     * question — has parent T been fanned out — and `relay-journal.ts` argues
+     * that its narrowness is what makes it trustworthy; widening its schema to
+     * carry prose would give it a second job. The ledger is already the durable
+     * per-run channel for "something happened that an operator will want later"
+     * (`stage_trigger_deferred` is the same shape, appended by the same failure
+     * one layer down), and it is written to a run-dir path nothing mounts.
+     *
+     * Appended AFTER `recordDispatch` for the ordering reason that governs this
+     * whole file: the journal is what stops the reviews being re-run, so it goes
+     * first and a failure to write the ledger row cannot cost the fan-out.
+     */
+    if (result.reason !== undefined) {
+      await opts.ledger?.append("relay_collation_failed", {
+        worker,
+        task_id: taskId,
+        detail: { children: [...result.children], reason: result.reason },
+      });
+    }
     // The reason rides along when there is one. It never changes whether the
     // journal is written — the children happened either way — it changes only
     // whether anybody is told the collation did not.
@@ -412,68 +470,35 @@ export async function relayPass(opts: {
 }
 
 /**
- * The name the fan-out ADAPTER is expected under, in `src/run/relay.ts`.
+ * THE FAN-OUT CORE, STATICALLY IMPORTED — and the dynamic import that used to
+ * stand here is DELETED rather than repaired.
  *
- * The adapter rather than `relayFanOut` itself, because `relayFanOut` cannot be
- * called with what a poll has: it needs `runs` (worker → run, which this console
- * has four of) and `transport` (the four host effects over `controlCall`,
- * `harvestTask` and `writeReply`). It lives in `relay.ts` rather than in a
- * module of this file's invention because `RelayTransport` is declared there,
- * and the adapter's whole job is to satisfy that interface — splitting a type
- * from its only implementation across two modules is how they drift.
+ * It resolved `src/run/relay.ts` inside the action and caught the failure, so
+ * that *"a tree in which `src/run/relay.ts` has not landed still loads the CLI
+ * — a static import would make `pifleet --help` fail for every command"*. That
+ * premise was true when it was written and `f39722f` destroyed it silently:
+ * closing T5's depth hole required `dispatch-request.ts` to consult
+ * `isCollationTaskId`, so that module now imports `./relay.ts` AT RUNTIME, this
+ * module imports `dispatch-request.ts` statically for `readDispatchRequest`, and
+ * `cli/index.ts` loads every command module under one `Promise.all`. A tree
+ * without `relay.ts` therefore already takes down `pifleet --help` for every
+ * command, three imports before this one is reached.
  *
- * A CONSTANT because it is a name two branches have to agree on and only one of
- * them can see this file. Spelled once here and quoted in the refusal below, so
- * an operator who hits the refusal is told the exact symbol that is missing.
+ * **So the catch could not fire, and a defence that cannot fire is worse than
+ * none** — it reads as protection, it is untested (neither branch had a test),
+ * and it costs a reader the time to work out why it is there. The honest
+ * options were to restore the premise, which means unpicking the depth bound's
+ * import in a module that is not this change's to touch, or to delete the
+ * guard. Deleted.
+ *
+ * The static import is also strictly stronger than what it replaces. The old
+ * `typeof fanOut !== "function"` check existed because a dynamic import returns
+ * a bag of unknowns and the two modules had to agree on a NAME across a boundary
+ * the compiler could not see. Importing the binding makes that agreement a
+ * compile error instead of a runtime refusal — the same trade
+ * `MAX_RELAY_TASK_ID_CHARS` makes one file over, and the reason the constant
+ * that spelled the name is gone too.
  */
-const FAN_OUT_EXPORT = "consoleFanOut";
-
-/**
- * The fan-out core, resolved at ACTION time.
- *
- * Dynamic so that a tree in which `src/run/relay.ts` has not landed still loads
- * the CLI — a static import would make `pifleet --help` fail for every command —
- * and so that the failure, when it comes, names the module rather than arriving
- * as a resolution error from the loader.
- *
- * **There is deliberately no fallback.** A stub that dispatched nothing and
- * returned success would be indistinguishable from a working relay on every
- * observable this console has, which is §6.4's own failure shape: *"a collator
- * that dispatched three reviews is indistinguishable from one that dispatched
- * none"*. Refusing loudly is the only behaviour here that cannot be mistaken for
- * working.
- *
- * `EXIT.INTERNAL` and not `EXIT.USAGE`: nothing the operator typed can cause it
- * and nothing they can type will fix it. Reporting a build gap as a usage error
- * tells a machine caller to rewrite its arguments and try again, forever
- * (ISC-216).
- */
-async function loadFanOut(): Promise<RelayFanOut> {
-  let mod: Record<string, unknown>;
-  try {
-    mod = (await import("../../run/relay.ts")) as Record<string, unknown>;
-  } catch (err) {
-    throw new CliError(
-      `the relay's fan-out core (src/run/relay.ts) is not present in this build: ${String(err)}. ` +
-        `\`relay\` polls, validates and journals, and deliberately performs no dispatch of its own.`,
-      EXIT.INTERNAL,
-    );
-  }
-  const fanOut = mod[FAN_OUT_EXPORT];
-  if (typeof fanOut !== "function") {
-    throw new CliError(
-      `src/run/relay.ts does not export \`${FAN_OUT_EXPORT}\`, so this build has a fan-out core ` +
-        `(\`relayFanOut\`) with nothing to drive it. That function takes two values a poll does ` +
-        `not have — \`runs\` (worker -> run; this console is four runs) and \`transport\` (the ` +
-        `four host effects over controlCall, harvestTask and writeReply) — and supplying them is ` +
-        `what \`${FAN_OUT_EXPORT}\` is for. \`relay\` refuses rather than dispatching nothing ` +
-        `quietly, because those two outcomes are indistinguishable from the outside.`,
-      EXIT.INTERNAL,
-    );
-  }
-  return fanOut as RelayFanOut;
-}
-
 /**
  * How long to wait between passes, in seconds.
  *
@@ -576,8 +601,9 @@ export function register(program: Command): void {
         opts.run === undefined
           ? await resolveCollatorRun(REVIEW_CONSOLE_ROSTER)
           : await resolveRunPaths(opts.run);
-      const fanOut = await loadFanOut();
+      const fanOut: RelayFanOut = consoleFanOut;
       const cache: InboxWorkerCache = new Map();
+      const ledger = new LedgerWriter(run, `cli-relay-${process.pid}`);
 
       /**
        * The exit code is about the PASS, not about any request in it.
@@ -589,6 +615,26 @@ export function register(program: Command): void {
        * orchestrator that treated it as a failed poll would restart a relay that
        * is doing exactly its job.
        */
+      /**
+       * D2: `already_done` IS PRINTED ONCE PER REQUEST, NOT ONCE PER POLL.
+       *
+       * `relayPass` pushes an outcome for every journalled request on every
+       * pass, and a non-empty list is printed — so at a 2 s interval a console
+       * with three settled requests emitted three lines every two seconds,
+       * forever. That defeats this module's own rule: `missing` is deliberately
+       * NOT an outcome so that *"the one row that means something"* is not
+       * buried in thousands that do not, and `already_done` then buried it
+       * anyway. It is also the mechanism by which a `collation_failed` reason,
+       * printed exactly once, scrolls out of reach within seconds — which is
+       * half of why that reason is now also written to the ledger.
+       *
+       * Suppression is per (worker, task) and lives in the COMMAND rather than
+       * in `relayPass`, because the pass's return value is an API — `--json` and
+       * `--once` still carry every outcome — and only the human-facing stream is
+       * noisy. A row that CHANGES (a rewrite, a fresh dispatch) is a different
+       * kind and prints normally.
+       */
+      const quiet = new Set<string>();
       const emit = (result: RelayPassResult): void => {
         if (opts.json === true) {
           process.stdout.write(`${JSON.stringify({ schema: "pifleet.relaypass/v1", ...result })}\n`);
@@ -605,20 +651,56 @@ export function register(program: Command): void {
           }
           return;
         }
-        process.stdout.write(`${result.outcomes.map(renderOutcome).join("\n")}\n`);
+        const worth = result.outcomes.filter((o) => {
+          if (o.kind !== "already_done") return true;
+          const key = `${o.worker}\u0000${o.task_id}`;
+          if (quiet.has(key)) return false;
+          quiet.add(key);
+          return true;
+        });
+        if (worth.length === 0) return;
+        process.stdout.write(`${worth.map(renderOutcome).join("\n")}\n`);
       };
 
       if (opts.once === true) {
-        emit(await relayPass({ run, fanOut, cache }));
+        emit(await relayPass({ run, fanOut, cache, ledger }));
         return;
       }
 
-      // The loop, and it is the whole of it. Everything that could be wrong is
-      // in `relayPass`, which is why this is `while (true)` and not a state
-      // machine: a poller whose loop has interesting logic has two places where
-      // a pass can be skipped.
+      /**
+       * D1: THE LOOP SURVIVES A THROWN PASS, because nothing restarts it.
+       *
+       * This was `for(;;) { emit(await relayPass(...)) }` with no catch, and
+       * `cli/index.ts` catches at `main` and returns an exit code — so any throw
+       * ENDED the actor. §6.5 chose a restartable host-side process on the
+       * argument that *"a process that derives its state from the run tree needs
+       * no supervision beyond being started again"*, and that argument holds
+       * only where something starts it again. Nothing does: it has no pane, no
+       * supervisor, and `scripts/review` does not mention it.
+       *
+       * The throws are not exotic. The missing-`/replies` diagnosis says in its
+       * own docblock *"Nothing was journalled; the pass retries"* — it did not;
+       * the process died. Any non-ENOENT `writeReply`, any fs failure inside
+       * `recordDispatch`, and every `RelayAspectError` did the same.
+       *
+       * So a failed pass is logged and the loop continues. That is the same
+       * judgement the pass makes internally about one request — a refusal is
+       * data, not a reason to stop — applied to the pass itself.
+       *
+       * **`--once` deliberately does NOT get this.** A single pass is somebody
+       * asking a question, and swallowing the answer would make the exit code
+       * lie. The resilience belongs to the daemon shape, not to the verb.
+       */
       for (;;) {
-        emit(await relayPass({ run, fanOut, cache }));
+        try {
+          emit(await relayPass({ run, fanOut, cache, ledger }));
+        } catch (err) {
+          // stderr, not stdout: `--json` consumers parse stdout line by line and
+          // a diagnostic in that stream is a parse error at the caller.
+          process.stderr.write(
+            `pifleet relay: pass failed, continuing: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
         await new Promise((r) => setTimeout(r, pollS * 1_000));
       }
     });
