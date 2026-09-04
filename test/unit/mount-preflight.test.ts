@@ -36,6 +36,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +48,8 @@ import {
 } from "../../src/container/mount-preflight.ts";
 import { isExitCoded, EXIT } from "../../src/contracts.ts";
 import type { Exec, ExecResult } from "../../src/container/run.ts";
+
+announceMissingHostDeps();
 
 const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 
@@ -506,7 +509,7 @@ describe("probeBindMountSources reports rather than throws (ISC-292)", () => {
    * would be worse than no guard, so this pins that the default shape reads
    * clean against a truthful runtime.
    */
-  test("the default-shaped roots under $HOME are not refused", async () => {
+  test.if(hostHas("host-home"))("the default-shaped roots under $HOME are not refused", async () => {
     const dir = await mkdtemp(join(homedir(), ".pifleet-isc292-"));
     try {
       await writeFile(join(dir, "f"), "x");

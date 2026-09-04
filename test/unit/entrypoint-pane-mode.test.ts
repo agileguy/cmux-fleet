@@ -26,10 +26,13 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+announceMissingHostDeps();
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ENTRYPOINT = join(REPO_ROOT, "docker", "entrypoint.sh");
@@ -201,7 +204,7 @@ describe("PIFLEET_PANE_MODE selects the stdin contract (SRD §3.5)", () => {
     expect(r.code).not.toBe(71);
   });
 
-  test("an rpc worker still receives the container's stdin", async () => {
+  test.if(hostHas("exec-tmpdir"))("an rpc worker still receives the container's stdin", async () => {
     const r = await runEntrypoint("rpc", "HELLO-RPC\n");
     expect(r.evidence).toBe("stdin=HELLO-RPC\n");
   });
@@ -211,7 +214,7 @@ describe("PIFLEET_PANE_MODE selects the stdin contract (SRD §3.5)", () => {
    * nothing, and so do `image verify`, the acceptance containers and the
    * honeypot probes — all of which must keep the plumbing they have.
    */
-  test("an unset pane mode is rpc, not a refusal", async () => {
+  test.if(hostHas("exec-tmpdir"))("an unset pane mode is rpc, not a refusal", async () => {
     const r = await runEntrypoint(undefined, "HELLO-DEFAULT\n");
     expect(r.code).toBe(0);
     expect(r.evidence).toBe("stdin=HELLO-DEFAULT\n");

@@ -70,6 +70,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { mkdtemp, mkdir, readFile, rm, writeFile, chmod, symlink, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -79,6 +80,8 @@ import { LlmSchema } from "../../src/config/schema.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
 import { buildPiArgv } from "../../src/config/render.ts";
 import { buildWorkerEnv, secretContainerPath } from "../../src/run/worker-env.ts";
+
+announceMissingHostDeps();
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const ENTRYPOINT = join(REPO_ROOT, "docker", "entrypoint.sh");
@@ -313,7 +316,7 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
    * The value is deliberately not a plausible key: if this string appears, it
    * came from the file this test wrote and from nowhere else.
    */
-  test("the credential is read from the file the pointer names", async () => {
+  test.if(hostHas("exec-tmpdir"))("the credential is read from the file the pointer names", async () => {
     const path = await keyFile("KEY-FROM-THE-FILE");
     const r = await render(baseDoc(), {}, { PIFLEET_LLM_API_KEY_FILE: path });
     expect(r.code).toBe(0);
@@ -351,7 +354,7 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
    * worker with the wrong credential — a 401 strictly harder to diagnose than
    * the empty-key one ISC-406 fixed.
    */
-  test("the credential no longer travels in the environment at all", async () => {
+  test.if(hostHas("exec-tmpdir"))("the credential no longer travels in the environment at all", async () => {
     const r = await render(
       baseDoc(),
       { OMLX_API_KEY: "KEY-FROM-THE-ENVIRONMENT" },
@@ -376,7 +379,7 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
    * that preferred the environment, or that concatenated the two, is red here
    * while the previous test could still be green.
    */
-  test("a populated api_key_env cannot override the file", async () => {
+  test.if(hostHas("exec-tmpdir"))("a populated api_key_env cannot override the file", async () => {
     const path = await keyFile("KEY-FROM-THE-FILE");
     const r = await render(
       baseDoc({ llm: { model: "TestModel", api_key_env: "OLLAMA_API_KEY" } }),
@@ -444,7 +447,7 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
    * A pointer that IS set and cannot be honoured is the opposite event and is
    * treated as such below: it means the host wrote a promise it did not keep.
    */
-  test("no pointer at all is a keyless fleet, not a failure", async () => {
+  test.if(hostHas("exec-tmpdir"))("no pointer at all is a keyless fleet, not a failure", async () => {
     const r = await render(baseDoc(), {});
     expect(r.code).toBe(0);
     expect(r.models!.providers["omlx"]!.apiKey).toBe("");

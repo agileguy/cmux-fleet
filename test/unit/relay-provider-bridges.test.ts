@@ -24,6 +24,7 @@
  * two listeners, which is the decision §6.3 records as rejected.
  */
 import { afterAll, describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { stringify } from "yaml";
 import { realExec } from "../../src/container/run.ts";
 import { parseConfig, resolveWorker } from "../../src/config/load.ts";
@@ -52,6 +53,8 @@ import {
 import { assertDockerName } from "../../src/security/docker-names.ts";
 import { EXIT, isExitCoded } from "../../src/contracts.ts";
 import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
+
+announceMissingHostDeps();
 
 const NET = "pifleet-egress";
 
@@ -1061,7 +1064,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * by any constant that happens to match it — which is exactly how `"omlx"`
    * survived.
    */
-  test("each provider's relay is stamped with its own name", async () => {
+  test.if(hostHas("docker"))("each provider's relay is stamped with its own name", async () => {
     for (const provider of ["ollama-cloud", "spare-vendor"]) {
       const { calls, exec } = daemon();
       const status = await ensureBridgeRelay(await planFor(provider), exec);
@@ -1080,7 +1083,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * The host and port were always right — this pins that the fix did not trade
    * one derivation for another that gets the name right and the address wrong.
    */
-  test("the stamped target still carries this provider's own upstream", async () => {
+  test.if(hostHas("docker"))("the stamped target still carries this provider's own upstream", async () => {
     const { calls, exec } = daemon();
     await ensureBridgeRelay(await planFor("ollama-cloud"), exec);
     const stamped = stampedTargets(calls);
@@ -1100,7 +1103,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * fix a label. `egressBridgePlan` chooses `omlxRelayTarget` for a flat fleet
    * for exactly this reason, and this is the test that says so.
    */
-  test("a flat fleet's relay is still stamped omlx, byte for byte", async () => {
+  test.if(hostHas("docker"))("a flat fleet's relay is still stamped omlx, byte for byte", async () => {
     const flat: FleetRelayConfigView = {
       llm: { base_url: "http://omlx.pifleet.internal:8000/v1", relay_upstream: null },
       egress: { google_hosts: [], allow: [] },
@@ -1124,7 +1127,7 @@ describe("a relay is stamped with ITS provider's target name, not omlx", () => {
    * so there is nothing for `up` to omit, and this test is what fails if
    * someone unwinds it back to a two-argument call.
    */
-  test("calling the relay WITHOUT the plan's target is what reintroduces omlx", async () => {
+  test.if(hostHas("docker"))("calling the relay WITHOUT the plan's target is what reintroduces omlx", async () => {
     const bridge = await planFor("ollama-cloud");
     const viaSeam = daemon();
     await ensureBridgeRelay(bridge, viaSeam.exec);

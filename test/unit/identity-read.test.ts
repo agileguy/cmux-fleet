@@ -55,6 +55,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,6 +67,8 @@ import {
   isPinnedIdentity,
   processStartTime,
 } from "../../src/run/registry.ts";
+
+announceMissingHostDeps();
 
 /**
  * The pid handed to the shimmed `ps`, and it is THIS PROCESS on purpose.
@@ -185,7 +188,7 @@ describe("processStartTime distinguishes gone from unreadable", () => {
     expect(await processStartTime(await reapedPid())).toBeNull();
   });
 
-  test("a pid `ps` REFUSES to read throws instead of reporting absence", async () => {
+  test.if(hostHas("exec-tmpdir"))("a pid `ps` REFUSES to read throws instead of reporting absence", async () => {
     let caught: unknown;
     await withBrokenPs(async () => {
       try {
@@ -224,7 +227,7 @@ describe("processStartTime distinguishes gone from unreadable", () => {
    * `pkill`, this returning `null` deletes the checkout of a supervisor that
    * is alive and mid-write.
    */
-  test("a `ps` killed by a signal is a failed read, not an absent process", async () => {
+  test.if(hostHas("exec-tmpdir"))("a `ps` killed by a signal is a failed read, not an absent process", async () => {
     const err = await withKilledPs(() =>
       processStartTime(UNREADABLE_PID).catch((e: unknown) => e),
     );

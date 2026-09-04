@@ -17,6 +17,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import type { EgressPolicy } from "../../src/security/egress.ts";
 import { policyFromConfig } from "../../src/security/egress.ts";
 import {
@@ -52,6 +53,8 @@ import {
 } from "../../src/security/relay.ts";
 import { hostReachableBaseUrl } from "../../src/security/model-probe.ts";
 import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
+
+announceMissingHostDeps();
 
 const NET = "pifleet-egress";
 
@@ -1180,7 +1183,7 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
      * adding a second piece of enforced state without extending the check
      * would have reintroduced it beside the fix.
      */
-    test("a relay enforcing a STALE policy is rebuilt, though its targets match", async () => {
+    test.if(hostHas("docker"))("a relay enforcing a STALE policy is rebuilt, though its targets match", async () => {
       // Targets identical, so the existing comparison sees nothing — the ONLY
       // difference is the policy, which is what makes this a controlled test
       // of the new check rather than a second way to observe the old one.
@@ -1208,7 +1211,7 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       expect(relayPolicyDrifted(null, forward)).toBe(true);
     });
 
-    test("a relay forwarding somewhere ELSE is removed and rebuilt, with no manual rm -f", async () => {
+    test.if(hostHas("docker"))("a relay forwarding somewhere ELSE is removed and rebuilt, with no manual rm -f", async () => {
       // THE criterion: changing `llm.relay_upstream` takes effect on its own.
       const { calls, exec } = daemon(liveRelay([T(LAN_OMLX)]));
       const status = await ensureEgressRelay(
@@ -1232,7 +1235,7 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       ]);
     });
 
-    test("a relay whose targets cannot be read is replaced, not trusted", async () => {
+    test.if(hostHas("docker"))("a relay whose targets cannot be read is replaced, not trusted", async () => {
       const { calls, exec } = daemon(inspectWith([]));
       const status = await ensureEgressRelay(cfg(DEFAULT_BASE_URL), NET, exec);
       expect(status.created).toBe(true);
@@ -1242,7 +1245,7 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       expect(verbs(calls)).toContain("rm");
     });
 
-    test("a STOPPED relay is still rebuilt, and reports nothing displaced", async () => {
+    test.if(hostHas("docker"))("a STOPPED relay is still rebuilt, and reports nothing displaced", async () => {
       // Drift is only asked of a running relay; a stopped one is our own litter
       // and is cleared regardless, so `replaced` must stay null there.
       const stopped = JSON.stringify([
@@ -1263,7 +1266,7 @@ describe("an adopted relay is compared, not assumed (ISC-265)", () => {
       expect(verbs(calls)).toEqual(["inspect", "probe", "rm", "run", "network connect", "inspect"]);
     });
 
-    test("the drift removal names both postures when the daemon refuses it", async () => {
+    test.if(hostHas("docker"))("the drift removal names both postures when the daemon refuses it", async () => {
       // An operator who hits this needs to know which way the swap was going.
       const calls: string[][] = [];
       const exec = (async (argv: string[]) => {

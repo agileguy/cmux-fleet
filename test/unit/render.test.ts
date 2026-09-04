@@ -9,6 +9,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -52,6 +53,8 @@ import {
   workerOutboxDir,
   workerPaths, workerWorktree,
 } from "../../src/run/paths.ts";
+
+announceMissingHostDeps();
 
 /**
  * Run `fn` and hand back what it threw, or `null` if it did not throw.
@@ -521,7 +524,7 @@ describe("docker argv (SRD §5.6)", () => {
    * `buildDockerArgv` (§5.6's mount table) turns this red — see the ISA
    * close-out for the confirmed run.
    */
-  test("no rendered docker argv ever mounts the host gcloud config directory (ISC-44)", async () => {
+  test.if(hostHas("host-home"))("no rendered docker argv ever mounts the host gcloud config directory (ISC-44)", async () => {
     const { loaded } = await fixture((doc) => {
       doc["cloud"] = { adc: true, adc_mode: "token", kubeconfig: "./kube/filtered.yaml" };
       (doc["roles"] as Record<string, Record<string, unknown>>)["eng"]!["cloud_access"] = true;

@@ -33,6 +33,7 @@
  * a name every host answers from `/etc/hosts` with no network at all.
  */
 import { afterAll, describe, expect, test } from "bun:test";
+import { announceMissingHostDeps, hostHas } from "../support/host-deps.ts";
 import { realExec } from "../../src/container/run.ts";
 import {
   chooseUpstreamAddress,
@@ -50,6 +51,8 @@ import {
 } from "../../src/security/relay.ts";
 import { egressRelayReadyDetail } from "../../src/cli/commands/up.ts";
 import { answerMountProbe, isMountProbe } from "../support/mount-probe-fake.ts";
+
+announceMissingHostDeps();
 
 /**
  * A network name no fleet uses, per process.
@@ -477,7 +480,7 @@ describe("ISC-426: the literal is what reaches the container's env", () => {
    * re-derived its own target. This reads the value out of the argv the daemon
    * would actually be handed.
    */
-  test("PIFLEET_RELAY_TARGETS carries the literal and not the name", async () => {
+  test.if(hostHas("docker"))("PIFLEET_RELAY_TARGETS carries the literal and not the name", async () => {
     const { lookup } = fakeResolver(answersOllama);
     const plan = await egressBridgePlan(fleet(), NET, ["ollama-cloud"], lookup);
     const { calls, exec } = daemon();
@@ -516,7 +519,7 @@ describe("ISC-426: the literal is what reaches the container's env", () => {
     expect(connect!.join(" ")).toContain("ollama.com");
   });
 
-  test("a hosted upstream on the Docker-host alias still gets --add-host", async () => {
+  test.if(hostHas("docker"))("a hosted upstream on the Docker-host alias still gets --add-host", async () => {
     const cfg = fleet();
     cfg.llm.providers!["ollama-cloud"]!.relay_upstream = `${RELAY_DEFAULT_DIAL_HOST}:443`;
     const plan = await egressBridgePlan(cfg, NET, ["ollama-cloud"], forbiddenResolver);

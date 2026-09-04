@@ -17,6 +17,13 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
       - name: Unit tests
+        # Fail on an absent host capability instead of skipping it. `test/unit`
+        # has tests that need `docker`, an executable temp dir and a real
+        # `$HOME`; they gate on probes (test/support/host-deps.ts) so they still
+        # run on every laptop. A probe that broke would skip them everywhere,
+        # silently and greenly — this is the lever that makes CI notice.
+        env:
+          PIFLEET_REQUIRE_HOST_DEPS: "1"
         run: bun test test/unit
       - name: Integration tests
         run: bun test test/integration
