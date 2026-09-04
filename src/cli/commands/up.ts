@@ -44,6 +44,7 @@ import {
   cloneSourceMount,
   makeWorkerAccessible,
   resolveCloneSource,
+  resolveLaunchRepo,
 } from "../../container/mounts.ts";
 import { assertBindMountsVisible } from "../../container/mount-preflight.ts";
 import { assertImagesReady, requiredImages } from "../../container/image.ts";
@@ -919,6 +920,13 @@ export function register(program: Command): void {
       let harnessPatterns: readonly string[] | null = null;
       let egressNetwork: string | null = null;
       let repoRoot: string | null = null;
+      /**
+       * The launch directory when it overrode `run.repo`, else `null`.
+       *
+       * Declared beside `repoRoot` and for the same reason: it is set inside
+       * the config-load block and read after it, by the side-mount decision.
+       */
+      let launchRepo: string | null = null;
       let loadedConfig: LoadedConfig | null = null;
 
       /**
@@ -1010,6 +1018,38 @@ export function register(program: Command): void {
         proseTurnsBeforeFail = effectiveProseTurnsBeforeFail(loadedConfig.config);
         harnessPatterns = effectiveHarnessPatterns(loadedConfig.config.harness);
         egressNetwork = loadedConfig.config.docker.network;
+
+        /**
+         * THE LAUNCH DIRECTORY IS THE REPOSITORY.
+         *
+         * A console launched from `~/repos/rally-cli` is a console whose
+         * workers work on rally-cli — `/workspace` is a worktree of it, the
+         * harvest reads its diff, and `bun test`/`pytest` in the obvious place
+         * is the right thing to run.
+         *
+         * Before this, `run.repo` won unconditionally, so those workers got
+         * cmux-fleet at `/workspace` and rally-cli only as a read-only
+         * side-mount they had to be instructed to find. Measured twice: they
+         * did not find it, and ran cmux-fleet's own suite instead. See
+         * `resolveLaunchRepo` for the evidence and why documenting the
+         * side-mount could not repair it.
+         *
+         * `null` — the launch directory IS the fleet repo, or is not a git
+         * checkout — leaves the configured value untouched, so the ordinary
+         * `cd ~/repos/cmux-fleet && ./scripts/development` is unchanged.
+         *
+         * Assigned BEFORE `repoRoot` and before the hazard scan, disclosure and
+         * ADC checks, all of which read `run.repo`: they must grade the
+         * repository that will actually be mounted, not the one in the file.
+         */
+        launchRepo = await resolveLaunchRepo(loadedConfig, process.cwd());
+        if (launchRepo !== null) {
+          loadedConfig.config.run.repo = launchRepo;
+          process.stderr.write(
+            `pifleet: launch directory ${launchRepo} is the workspace repository ` +
+              `for this run (fleet.yaml's run.repo is not used)\n`,
+          );
+        }
         repoRoot = expandPath(loadedConfig.config.run.repo, loadedConfig.dir);
 
         /**
@@ -1970,7 +2010,15 @@ export function register(program: Command): void {
          * preview and must describe the run that WILL happen, not the directory
          * the preview was typed in (ISC-188).
          */
-        const cloneSource = await resolveCloneSource(loadedConfig, process.cwd());
+        /*
+         * `launchRepo` has already made this directory `/workspace`, and the
+         * docblock above says why mounting it a second time under another name
+         * is wrong: one repository, two identities in one container, only one
+         * of them harvested. So the side-mount survives only for the case it
+         * was actually for — a clone source that is NOT the workspace.
+         */
+        const cloneSource =
+          launchRepo !== null ? null : await resolveCloneSource(loadedConfig, process.cwd());
         if (cloneSource !== null) {
           process.stderr.write(
             `pifleet: workers may clone ${cloneSource} from ` +

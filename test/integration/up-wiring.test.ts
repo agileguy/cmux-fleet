@@ -34,6 +34,7 @@
 import { spawnCli } from "../support/spawn-cli.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
@@ -219,7 +220,13 @@ afterAll(async () => {
   // hook's own docstring above exists to prevent: a timed-out `afterAll`
   // truncates the loop mid-way and leaks detached supervisors onto the
   // developer's machine, which this project has already paid for.
-}, cliBudget(57));
+  //
+  // RE-COUNTED at 66 when the launch-repo block landed, by running
+  // `grep -c 'await makeRig('` on the merged tree rather than by adding 4 to
+  // 57. The command's answer is 66; an increment would have written 61, so the
+  // number had ALREADY drifted by one again before this block was touched.
+  // Fifth time. The instruction is still a command, not an increment.
+}, cliBudget(66));
 
 /**
  * A `docker` that answers the whole egress surface `up` touches, without a
@@ -6161,4 +6168,149 @@ describe("the §5.9 spend gate is reachable on a config alone (ISC-430)", () => 
     // ISC-274 audit: one `up` spawn from this body, so `cliBudget(1)`.
     cliBudget(1),
   );
+});
+
+/**
+ * THE LAUNCH DIRECTORY IS THE WORKSPACE REPOSITORY.
+ *
+ * ## What was broken, and how it was found
+ *
+ * `run.repo` in `fleet.yaml` won unconditionally, and `buildDockerArgv` mounts
+ * a worktree of it at `/workspace`. So a development console launched from
+ * `~/repos/rally-cli` — for the express purpose of testing rally-cli — handed
+ * every worker **cmux-fleet** as its workspace, and offered rally-cli only as a
+ * read-only side-mount at `/repos-src/rally-cli`.
+ *
+ * The worker was then asked to test rally-cli. Measured three times, across two
+ * images and three freshly recreated sessions, it did the same thing each time:
+ *
+ *     THINK : Likely need to run tests in repository. Let's inspect repository.
+ *     CALL  : ls /workspace
+ *     CALL  : read /workspace/package.json    -> "name": "cmux-fleet"
+ *     CALL  : bash bun test
+ *
+ * On the third run it even noticed — *"The task description says 'rally-cli
+ * tests'"* — and continued into cmux-fleet's suite anyway. That suite spawns
+ * fleets, so the worker recursively started nested pifleet runs inside its own
+ * container.
+ *
+ * ## Why this is a test and not a paragraph in a skill
+ *
+ * The first two repairs attempted were documentation: a `/repos-src` section in
+ * the mounted `skills/pifleet-worker/SKILL.md`, then a stronger one. Both were
+ * present and readable in the containers that failed — verified on disk in the
+ * run's own skills directory. **The worker was not disobeying.** `/workspace`
+ * was cmux-fleet, so cmux-fleet is what "the repository" meant; the side-mount
+ * was the anomaly, and no amount of prose makes an anomaly the obvious choice.
+ *
+ * A behaviour that three prompt revisions could not move, and one config line
+ * fixed, belongs where a config line can be checked.
+ */
+describe("the launch directory is the workspace repository", () => {
+  /**
+   * The repository a completed run actually used, from its own `run.json`.
+   *
+   * Realpathed, and so is every expectation compared against it: this suite's
+   * scratch lives under `/var/folders/...`, which on macOS is a symlink into
+   * `/private/var`, and `up` records the resolved form. Comparing the two
+   * spellings is the bug the control test below caught in production code —
+   * see `resolveCloneSource` — and a test that papered over it here would have
+   * hidden it.
+   */
+  async function repoOfRun(rig: Rig, runId: string): Promise<string | null> {
+    const { repo } = await readRunWorktrees(runPaths(runId, rig.root));
+    return repo === null ? null : realpathSync(repo);
+  }
+
+  /** The same normalisation, for the side of the comparison the test builds. */
+  function real(p: string): string {
+    return realpathSync(p);
+  }
+
+  /** `up` from `cwd`, asserted successful, returning its run id. */
+  async function upFrom(rig: Rig, cwd: string): Promise<{ runId: string; stderr: string }> {
+    const up = await runCli(
+      rig,
+      ["up", "--workers", "eng-1", "--config", rig.configPath, "--backend", "headless", "--json"],
+      { cwd },
+    );
+    expect(up.code, `up failed from ${cwd}:\n${up.stderr}`).toBe(EXIT.SUCCESS);
+    const parsed = JSON.parse(up.stdout.trim()) as { run_id: string };
+    rig.runId = parsed.run_id;
+    return { runId: parsed.run_id, stderr: up.stderr };
+  }
+
+  test("a run launched from another checkout uses THAT checkout, not fleet.yaml's", async () => {
+    const rig = await makeRig();
+    const launch = join(rig.base, "rally-cli");
+    await seedGitRepo(launch, { files: { "pyproject.toml": '[project]\nname = "rally-tui"\n' } });
+
+    const { runId, stderr } = await upFrom(rig, launch);
+
+    expect(await repoOfRun(rig, runId)).toBe(real(launch));
+    // The negative is the whole point: before this change the answer was
+    // `rig.repo` for every cwd, and an assertion that only named `launch`
+    // would still have read as a pass if both paths happened to coincide.
+    expect(await repoOfRun(rig, runId)).not.toBe(real(rig.repo));
+    // And it is announced, because an operator who typed `cd` somewhere
+    // deliberate should be told which repository that bought them.
+    expect(stderr).toContain(real(launch));
+  }, cliBudget(3));
+
+  test("the worktree really holds the launch checkout's files", async () => {
+    /*
+     * `run.json` records an intention. This reads the checkout the worker
+     * would have been handed, because the failure being pinned is about what
+     * `ls /workspace` answers — the recorded path and the mounted content
+     * disagreeing is precisely the shape that would keep the bug alive with
+     * the test above still green.
+     */
+    const rig = await makeRig();
+    const launch = join(rig.base, "rally-cli-2");
+    await seedGitRepo(launch, { files: { "pyproject.toml": "[project]\n", "tests/test_x.py": "" } });
+
+    const { runId } = await upFrom(rig, launch);
+    const tree = join(rig.root, runId, "worktrees", "eng-1");
+
+    expect(await Bun.file(join(tree, "pyproject.toml")).exists()).toBe(true);
+    // `makeRig` seeds run.repo with a root AGENTS.md hazard and nothing else
+    // seeds one here, so its absence is the fleet repo's absence.
+    expect(await Bun.file(join(tree, "AGENTS.md")).exists()).toBe(false);
+  }, cliBudget(3));
+
+  test("launching from a SUBDIRECTORY of run.repo still uses run.repo — the control", async () => {
+    /*
+     * The control against "always use cwd", which would break the ordinary
+     * `cd ~/repos/cmux-fleet && ./scripts/development`.
+     *
+     * It launches from a SUBDIRECTORY on purpose. The first version of this
+     * test launched from `rig.repo` itself and survived BOTH mutations —
+     * never-wins and always-wins — because when cwd IS run.repo the two
+     * answers coincide and the assertion cannot tell them apart. A control
+     * every mutation passes is not a control. From `scripts/`, "use cwd"
+     * answers `<repo>/scripts` and this test reddens.
+     */
+    const rig = await makeRig();
+    const sub = join(rig.repo, "scripts");
+    await mkdir(sub, { recursive: true });
+
+    const { runId } = await upFrom(rig, sub);
+    expect(await repoOfRun(rig, runId)).toBe(real(rig.repo));
+    expect(await repoOfRun(rig, runId)).not.toBe(real(sub));
+  }, cliBudget(2));
+
+  test("a launch directory that is not a git checkout is ignored, not refused", async () => {
+    /*
+     * `up` builds worktrees from `run.repo`, so a non-git cwd cannot become
+     * one — and the right answer is to fall back to the configured repository
+     * rather than to fail a console the operator opened from their downloads
+     * folder.
+     */
+    const rig = await makeRig();
+    const plain = join(rig.base, "not-a-repo");
+    await mkdir(plain, { recursive: true });
+
+    const { runId } = await upFrom(rig, plain);
+    expect(await repoOfRun(rig, runId)).toBe(real(rig.repo));
+  }, cliBudget(2));
 });

@@ -42,7 +42,7 @@
 
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { realExec, type Exec } from "./run.ts";
 
@@ -366,13 +366,68 @@ export async function probeWriteThrough(
  * check is for existence and not for a directory — a linked worktree is a
  * working directory and refusing it would be arbitrary.
  */
+/**
+ * The repository the workers should actually work in: the launch directory.
+ *
+ * WHAT WAS BROKEN. `run.repo` in `fleet.yaml` is the fleet's own checkout, and
+ * `buildDockerArgv` mounts a worktree of it at `/workspace`. So a console
+ * launched from `~/repos/rally-cli` to test rally-cli handed every worker
+ * **cmux-fleet** as its workspace, and offered rally-cli only as a read-only
+ * side-mount under `/repos-src` that the worker had to be told to go and find.
+ *
+ * Measured twice, on two different images and two fresh sessions: the worker
+ * read the brief, thought *"Likely need to run tests in repository. Let's
+ * inspect repository"*, listed `/workspace`, found cmux-fleet's `package.json`
+ * and ran **cmux-fleet's** suite — the second time even noticing the brief said
+ * rally-cli and talking itself past it. It was not being careless. `/workspace`
+ * is the repository the fleet gave it; the side-mount was the anomaly.
+ *
+ * Documentation did not fix it and could not: the SKILL.md section naming
+ * `/repos-src` was mounted and present in both runs. **The launch directory
+ * has to BE the workspace**, not a second identity beside it.
+ *
+ * Returns `null` when the launch directory is the fleet's own repo (or inside
+ * it), which is the normal case and leaves `run.repo` exactly as configured,
+ * and when it is not a git checkout, because `up` builds worktrees from it.
+ */
+export async function resolveLaunchRepo(
+  loaded: { config: { run: { repo: string } }; dir: string },
+  cwd: string,
+): Promise<string | null> {
+  return resolveCloneSource(loaded, cwd);
+}
+
 export async function resolveCloneSource(
   loaded: { config: { run: { repo: string } }; dir: string },
   cwd: string,
 ): Promise<string | null> {
   const { expandPath } = await import("../config/load.ts");
-  const here = resolve(cwd);
-  const repo = resolve(expandPath(loaded.config.run.repo, loaded.dir));
+  /*
+   * REALPATH BOTH SIDES BEFORE COMPARING.
+   *
+   * `resolve()` cleans a path but does not follow symlinks, so the two
+   * operands could spell the same directory differently and the "is this
+   * already the workspace?" check would answer no. macOS is the case that
+   * caught it: `/var` and `/tmp` are symlinks into `/private`, and a shell's
+   * `process.cwd()` reports the resolved form while a config file spells the
+   * unresolved one. The launch-repo control test measured
+   * `/private/var/.../repo` against `/var/.../repo` and treated the fleet's
+   * OWN repository as a foreign launch directory — which would have mounted
+   * the fleet repo over itself under a second identity.
+   *
+   * `realpathSync` throws on a path that does not exist. `cwd` always does,
+   * but `run.repo` is operator-configured and may not, and a misconfigured
+   * repo must reach the config error that names it rather than an ENOENT
+   * from here — so the repo side falls back to its unresolved form.
+   */
+  const here = realpathSync(resolve(cwd));
+  const configured = resolve(expandPath(loaded.config.run.repo, loaded.dir));
+  let repo = configured;
+  try {
+    repo = realpathSync(configured);
+  } catch {
+    // Left as configured; the caller's own check reports a missing repo.
+  }
   if (here === repo || here.startsWith(`${repo}/`)) return null;
   if (!existsSync(join(here, ".git"))) return null;
   return here;

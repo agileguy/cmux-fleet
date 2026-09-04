@@ -254,18 +254,40 @@ describe("the worker is told about the paths it can clone from and into", () => 
     expect(SKILL).toContain(decl![1]!);
   });
 
-  test("it is told to clone rather than work in the read-only source", () => {
-    expect(SKILL).toMatch(/git clone \/repos-src\//);
-  });
-
   test("it is told NOT to clone from a URL", () => {
     // Egress is an allowlist and a forge is not on it; and a remote clone
     // would fetch the pushed state rather than the working copy under test.
     expect(SKILL).toMatch(/Do not `git clone` from a URL/);
   });
 
-  test("grepping /workspace for the project name is called out as not doing the task", () => {
-    // The exact shape of the measured failure.
-    expect(SKILL).toMatch(/Searching your own `\/workspace`/);
+  /*
+   * TWO GUARDS WERE REMOVED HERE, AND THE REASON MATTERS.
+   *
+   * They required the document to say `git clone /repos-src/...` and
+   * "Searching your own `/workspace` ... is not doing the task". Both pinned
+   * the FIRST repair attempted for a worker testing the wrong repository:
+   * mount the real project read-only beside `/workspace` and instruct the
+   * worker to go and find it.
+   *
+   * That repair did not work. Measured three times across two images and three
+   * fresh sessions, the worker read the brief, listed `/workspace`, found
+   * cmux-fleet and tested cmux-fleet — with the `/repos-src` section present
+   * and readable in its own mounted skill each time. The launch directory is
+   * now the run's repository (see the launch-repo block in
+   * `test/integration/up-wiring.test.ts`), so `/workspace` IS the project and
+   * the second guard asserted the exact opposite of the correct behaviour.
+   *
+   * Deleted rather than inverted-and-kept, because a guard that survives the
+   * design it was written for is how a document keeps its stalest sentence.
+   */
+  test("a host path in a brief is explained as naming /workspace", () => {
+    expect(SKILL).toMatch(/names \*\*your `\/workspace`\*\*/);
+  });
+
+  test("the wrong-project case is a `blocked` result, not a hunt for a better repo", () => {
+    // The failure this replaces was a worker that kept looking until it found
+    // SOMETHING testable. Stopping has to be the named action.
+    expect(SKILL).toMatch(/stop and say so/);
+    expect(SKILL).toMatch(/launched from the wrong directory/);
   });
 });
