@@ -266,23 +266,37 @@ describe("the size cap", () => {
 });
 
 describe("the gate holds the drop to the same integrity bar as the other two", () => {
-  test("every /policy file the gate declares is a path its integrity loop checks", async () => {
+  /**
+   * WHAT WOULD BREAK IF THIS WERE DELETED: a gated surface could be declared in
+   * the shim and left out of the integrity loop, which is a mount whose `:ro`
+   * has nothing checking it — and a dropped `:ro` is one character with no other
+   * symptom.
+   */
+  test("every read-only surface the gate declares is a path its integrity loop checks", async () => {
     const gate = await readFile("docker/verbgate", "utf8");
 
     // DERIVED, not counted: the failure D4 records is a mount added without a
     // check, and a probe that asserted "three paths" would go green again the
     // moment a fourth was declared and not looped. So the expected set comes
-    // from the gate's own `*_file="/policy/..."` declarations.
-    const declared = [...gate.matchAll(/^(\w+)="(\/policy\/[A-Za-z0-9._-]+)"$/gm)].map(
-      (m) => m[1]!,
-    );
+    // from the gate's own declarations of the surfaces it is handed read-only.
+    //
+    // The alternation is ENUMERATED rather than widened to "any absolute path",
+    // and that is what keeps it a probe. `ledger="/outbox/ledger/verbgate.jsonl"`
+    // is a declaration too, and it is on a mount the worker legitimately WRITES
+    // — a pattern loose enough to catch it would demand the loop refuse every
+    // verb on every fleet. Adding a fifth surface therefore costs one word here,
+    // deliberately, so that the addition is a decision rather than a default.
+    const declared = [
+      ...gate.matchAll(/^(\w+)="(\/(?:policy\/[A-Za-z0-9._-]+|replies))"$/gm),
+    ].map((m) => m[1]!);
     const loop = gate.match(/^for policy_path in (.+); do$/m);
     expect(loop, "the integrity loop was not found — the probe has rotted").not.toBeNull();
     const covered = [...loop![1]!.matchAll(/\$\{(\w+)\}/g)].map((m) => m[1]!);
 
-    // CONTROL: three today — allow, task, drop. The equality below is the
-    // assertion; this line is what stops both extractors matching nothing.
-    expect(declared.length).toBe(3);
+    // CONTROL: four today — allow, task, drop, and the reply plane
+    // (SRD-REVIEW-CONSOLE D6). The equality below is the assertion; this line
+    // is what stops both extractors matching nothing.
+    expect(declared.length).toBe(4);
     expect([...covered].sort()).toEqual([...declared].sort());
   });
 

@@ -40,6 +40,7 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { BRIEFING_MOUNT, renderWorker } from "../../src/config/render.ts";
 import { DISPATCH_POLICY_MOUNT } from "../../src/run/dispatch-policy.ts";
+import { REPLIES_MOUNT } from "../../src/run/replies.ts";
 import { TASK_POLICY_MOUNT } from "../../src/run/task-policy.ts";
 import { SECRETS_MOUNT } from "../../src/run/worker-env.ts";
 import { DEFAULT_BRANCH_PREFIX } from "../../src/config/schema.ts";
@@ -3072,6 +3073,29 @@ describe("up materializes every host path its containers would mount (SRD §5.5)
     // create a DIRECTORY at the host path, which is why `directory: false` is
     // the interesting half of this row rather than the mode.
     [DISPATCH_POLICY_MOUNT]: { directory: false, mode: 0o444 },
+    /*
+     * The reply plane, present for EVERY worker on the same argument the two
+     * rows above carry: the `-v` is unconditional, so the source has to be
+     * unconditional too, and only a collator will ever have anything in it
+     * (SRD-REVIEW-CONSOLE §6.4, D6).
+     *
+     * A DIRECTORY, which is the interesting half of this row — the mount is one
+     * `<child-task-id>.json` per child and the set of names is open-ended, so
+     * unlike the two policy files above there is no single inode to pin. What
+     * this row therefore proves is that `materialize.ts` created it: a source
+     * `createRepliesDir` never made would have Docker invent the directory at
+     * launch, with the daemon's ownership and mode rather than
+     * `makeWorkerAccessible`'s — and `stat` here is the only thing between that
+     * and a silently-wrong reply surface.
+     *
+     * 0755 and not the outbox's 0777, and the difference is the whole design:
+     * the execute bit lets uid 10001 traverse in and read a reply, the owner
+     * write bit lets the host actor deliver one, and the worker's inability to
+     * write is carried by `:ro` rather than by the mode — the macOS VM squashes
+     * ownership to the container user, so inside the container uid 10001 reads
+     * as this directory's owner and the mode says nothing at all.
+     */
+    [REPLIES_MOUNT]: { directory: true, mode: 0o755 },
     /*
      * The secret store, present for EVERY worker since D8 — this rig's workers
      * request no `secrets:` and still carry it, because the Class 1 provider

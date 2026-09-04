@@ -42,12 +42,14 @@ import {
   runsRoot,
   workerOutboxDir,
   workerPaths,
+  workerRepliesDir,
   workerWorktree,
   workerContainerName,
   type RunPaths,
   type WorkerPaths,
 } from "../run/paths.ts";
 import { DISPATCH_POLICY_MOUNT, DISPATCH_TRIGGER_PATH } from "../run/dispatch-policy.ts";
+import { REPLIES_MOUNT } from "../run/replies.ts";
 import { TASK_POLICY_MOUNT } from "../run/task-policy.ts";
 import { workerEgressNetwork } from "../security/relay.ts";
 import { SECRETS_MOUNT } from "../run/worker-env.ts";
@@ -477,6 +479,37 @@ export function buildDockerArgv(
   }
 
   argv.push("-v", `${workerOutboxDir(opts.run.root, w.id)}:/outbox`);
+  /*
+   * The REPLY PLANE, pinned IMMEDIATELY after the outbox because the two are the
+   * two directions of ONE exchange (SRD-REVIEW-CONSOLE §6.4, D6).
+   *
+   * The collator's request travels OUT through `/outbox` — which needs no new
+   * mount, is already worker-scoped, and is already the untrusted-content
+   * boundary — and each child's harvested result comes BACK through here. A
+   * reader debugging what a console was told reads the pair together, which is
+   * the same argument that puts `/policy/dispatch` beside `/policy/task` rather
+   * than at the end of the table.
+   *
+   * `:ro` IS THE WHOLE POINT and it is not decoration. The reply is the evidence
+   * the collator is graded against, and delivering it into the worker's own
+   * writable `/outbox` — the obvious symmetry — would let the subject edit the
+   * evidence before quoting it. That is exactly the inversion the verbgate
+   * policy comment above records ("it used to be read out of /outbox, which the
+   * worker owns"). The host directory is 0755 and each file 0444, and the macOS
+   * Docker VM squashes bind-mount ownership to the container user — so inside
+   * the container those files read as OWNED by uid 10001 and the mount flag is
+   * the only thing left. `docker/verbgate`'s integrity loop refuses every verb
+   * when a reply is writable, which means a dropped `:ro` costs the whole worker
+   * rather than one forged reply.
+   *
+   * UNCONDITIONAL, like `/policy/dispatch` and `/secrets` and for their reason.
+   * Only a collator is ever sent a reply, but the mount is not what decides that
+   * — the actor is (§6.5) — and a `-v` behind a predicate `materialize.ts` would
+   * have to spell a second time is the ISC-188 shape this file keeps closing. A
+   * worker that is never replied to reads an empty directory, which is a true
+   * statement and costs one inode.
+   */
+  argv.push("-v", `${workerRepliesDir(opts.run.root, w.id)}:${REPLIES_MOUNT}:ro`);
   argv.push("-v", `${opts.run.sessionsDir}:/sessions`);
   argv.push("-v", `${roleSkillsDir(opts.run.root, w.role)}:/skills:ro`);
   // The verbgate policy is mounted READ-ONLY and separately from /outbox. It

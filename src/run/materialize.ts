@@ -96,10 +96,12 @@ import {
   skillsSourceRoot,
   workerOutboxDir,
   workerPaths,
+  workerRepliesDir,
   type RunPaths,
   workerContainerName,
 } from "./paths.ts";
 import { clearDispatchPolicy } from "./dispatch-policy.ts";
+import { createRepliesDir } from "./replies.ts";
 import { writeTaskPolicy } from "./task-policy.ts";
 import { writeJsonAtomic } from "../util/jsonl.ts";
 import {
@@ -798,6 +800,39 @@ export async function materializeWorkerInputs(
       await refuseSymlinkDestination(outboxDir);
       await mkdir(outboxDir, { recursive: true });
       await makeWorkerAccessible(outboxDir, true);
+    });
+
+    /**
+     * The REPLY PLANE's host directory, established empty so the bind mount has
+     * something to pin from launch (SRD-REVIEW-CONSOLE §6.4, D6).
+     *
+     * The other direction of the exchange the block above sets up, and it is
+     * created in its own `establishing` step rather than folded into that one
+     * because the two differ in the property that matters: the outbox is widened
+     * for WRITING and this is not. A copy-paste that carried `true` down here
+     * would hand the worker write permission on the evidence it is graded
+     * against, and — through the verbgate's integrity loop, which checks the
+     * containing directory as well as the file — would then refuse every verb
+     * the worker attempts. Loud, but nowhere near its cause.
+     *
+     * Established for EVERY worker, not only for a collator, for the reason the
+     * task drop above is: `config/render.ts` emits the `-v` unconditionally, and
+     * a mount whose source this module skipped would have Docker create the
+     * directory itself — the divergence ISC-188 keeps closing, and the one the
+     * `/secrets` gate was removed to stop reintroducing. Docker's version would
+     * also be created with the daemon's own ownership rather than through
+     * `makeWorkerAccessible`, so the mode this whole surface depends on would be
+     * whatever the runtime felt like.
+     *
+     * The symlink guards are the same pair the outbox gets and for the same
+     * reason: `mkdir -p` through a symlinked `<run>/replies` would build the
+     * directory inside the link's target and chmod THAT.
+     */
+    const repliesDir = workerRepliesDir(run.root, workerId);
+    await establishing(`the reply directory for ${workerId}`, async () => {
+      await refuseSymlinkDestination(dirname(repliesDir));
+      await refuseSymlinkDestination(repliesDir);
+      await createRepliesDir(repliesDir);
     });
 
     let skillsDir = skillsByRole.get(w.role);

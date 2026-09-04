@@ -59,6 +59,19 @@ task_file="/policy/task"
 # report success on the one it wrote, and this loop's exit 78 is the only thing
 # enforcing that.
 drop_file="/policy/dispatch"
+# The REPLY PLANE: one file per child task, holding that child's harvested
+# result, mounted read-only for the collator that asked for the work
+# (SRD-REVIEW-CONSOLE §6.4, D6). Declared beside the three above, never READ
+# here, and named for the same reason the drop is — so the integrity loop can
+# hold it to the same read-only bar.
+#
+# It is a DIRECTORY and the three above are files, which is why the loop below
+# reaches it through a glob rather than as a fourth literal. The set of names is
+# open-ended — one per child task — so there is no fixed path to spell, and a
+# check on the directory alone would pass while every reply inside it was 0644.
+# The distinction is exactly the one the criterion probes: chmod one reply, get
+# exit 78.
+replies_dir="/replies"
 # Line 1 task id, line 2 epoch. Every read is defensive: an unreadable or
 # truncated file must degrade to <none>/0, never to a broken ledger row. The
 # gate does not trust this file even though the host writes it — a gate that
@@ -141,7 +154,44 @@ log_ledger() {
 # for. Adding the path here is the one cost D4 records for the sibling mount,
 # and it is deliberately spelled as a THIRD element of a list rather than as a
 # second condition, so a fourth policy file is one word.
-for policy_path in "${allow_file}" "${task_file}" "${drop_file}"; do
+#
+# The reply plane is the fourth, and it is the one that is not a word, because it
+# is a DIRECTORY rather than a file (SRD-REVIEW-CONSOLE §6.4, D6). A reply says
+# what a child worker actually found; a collator that can rewrite one can put
+# words in another worker's mouth and then collate them — the drop's hazard
+# aimed sideways instead of backwards. The cheaper spellings all lose:
+#
+#   - `"${replies_dir}"` as a fourth literal checks the DIRECTORY only, so it
+#     passes with every reply inside it at 0644 — the exact state the criterion
+#     probes for.
+#   - `find` or `ls` piped into a loop puts an external binary and a pipeline on
+#     the refusal path, in a script whose whole posture is that it decides before
+#     it trusts anything.
+#   - a recursive descent buys nothing: the actor writes one flat file per child,
+#     and a nested tree here would be tampering that the directory's own write
+#     bit already refuses.
+#
+# GLOBBING IS ON FOR EXACTLY ONE WORD EXPANSION. `set -f` holds for the whole
+# script (see the header) because verb classification iterates unquoted token
+# words, and an argument of `*` re-expanded against the CWD: a worker could drop
+# a file named `describe` beside itself and have a `delete` classified as a read.
+# That hazard is real and it is not this one. The expansion below is a `for`
+# list, which POSIX expands ONCE before the first iteration, and the body's first
+# statement puts `-f` back — so no argv token is ever expanded with globbing on.
+# The list carries three quoted words besides the pattern, so it can never be
+# empty and that statement always runs.
+#
+# AN UNMATCHED GLOB IS THE ABSENT AND THE EMPTY CASE TOGETHER, and it degrades
+# into the right check rather than into luck. POSIX sh leaves an unmatched
+# pattern as a literal, so the iteration tests `[ -w "/replies/*" ]` — false, no
+# such file — and then `[ -w "$(dirname "/replies/*")" ]`, which is
+# `[ -w /replies ]`: the directory check, which is exactly what should happen
+# when there is nothing inside it. A worker with no `/replies` mount at all fails
+# both tests and passes the loop, so this stays inert for every fleet that is not
+# a review console.
+set +f
+for policy_path in "${allow_file}" "${task_file}" "${drop_file}" "${replies_dir}"/*; do
+  set -f
   if [ -w "${policy_path}" ] || [ -w "$(dirname "${policy_path}")" ]; then
     log_ledger policy_writable "(policy-integrity)" "$@"
     printf "verbgate: policy file %s is writable by uid %s — refusing every verb\n" \
