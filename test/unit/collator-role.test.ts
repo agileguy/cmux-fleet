@@ -344,3 +344,74 @@ describe("the house rule on attribution holds in the document itself", () => {
     expect(ROLE).toContain("github.com/dan-elliott-appneta/");
   });
 });
+
+/**
+ * TURN ONE SCOPES; IT DOES NOT REVIEW.
+ *
+ * ## The failure this was written from
+ *
+ * A live collator on this console, briefed to fan out a review of a 3742-line
+ * deletion, spent turn one reading the change instead of scoping it. Its own
+ * transcript recorded the moment it had enough — *"Actually, I have enough to
+ * write good briefs"* — and it kept reading anyway, then degenerated into an
+ * exact repeat: the same `read` and the same `grep`, same arguments, nine times
+ * in twenty seconds. 40 tool calls, 21 reads, 19 greps, ZERO writes; context
+ * grew by exactly +4046 tokens per iteration, 64K to 207K, until it was killed.
+ * No `dispatch-request.json` was ever written and no reviewer was ever
+ * dispatched.
+ *
+ * The prior document invited this. Turn one's step 1 read *"Read what is under
+ * review"* with no bound and no stopping rule, and its example of a good brief —
+ * *"naming the two functions that touch untrusted input"* — is an act of review.
+ * The document asked the collator to do the analysis and then not report it.
+ *
+ * ## What these probes see, and what they cannot
+ *
+ * They are STRING probes over prose, and prose is the collator's only control
+ * surface — it has no bash and nothing host-side bounds its reading. So state
+ * the limit plainly rather than implying coverage:
+ *
+ * - They see whether the RULES ARE PRESENT and are inside turn one, which is the
+ *   regression that matters: these paragraphs are long, they read as commentary,
+ *   and the next person to tighten this file will be tempted to cut them.
+ * - They CANNOT see whether a collator obeys them. Only a live run does that,
+ *   and `Docs/SRD-REVIEW-CONSOLE.md` records the run this came from.
+ * - The independence probe is the strongest of the three because it is a
+ *   CONSISTENCY check between two parts of the document rather than a quotation
+ *   of one: the file claims three-vendor agreement is evidence, and that claim is
+ *   only true if the briefs did not carry the answer. Deleting the independence
+ *   argument while keeping the consensus claim is the silent way to break this,
+ *   and it is the arm a single grep for either sentence alone would miss.
+ */
+describe("turn one scopes the change rather than reviewing it", () => {
+  const turnOne = (): string => ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+
+  test("turn one denies the collator standing to make findings", () => {
+    expect(turnOne()).toContain("findings are not yours");
+  });
+
+  test("turn one bounds the reading with a stopping rule", () => {
+    const t = turnOne();
+    expect(t, "no stopping rule").toContain("stop reading and write the file");
+    expect(t, "nothing refuses a repeated tool call").toContain(
+      "Never issue a tool call you have already issued with the same arguments",
+    );
+  });
+
+  /**
+   * The consistency arm. `ROLE` asserts that agreement between the three vendors
+   * is evidence; that assertion is FALSE if the collator seeds them with its own
+   * conclusion. Both halves must be present, so removing either reddens.
+   */
+  test("the consensus claim is paired with the independence that makes it true", () => {
+    expect(ROLE, "the document no longer claims agreement is evidence").toContain(
+      "that agreement is evidence",
+    );
+    expect(turnOne(), "turn one no longer says why the reads must be independent").toContain(
+      "independent",
+    );
+    expect(turnOne(), "turn one no longer refuses a brief that carries a conclusion").toContain(
+      "is not a brief; it is a prior",
+    );
+  });
+});
