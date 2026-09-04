@@ -217,5 +217,18 @@
       "fleet.yaml is gitignored, so both new config fields are documented in the TRACKED fleet.example.yaml instead",
       "SRD section 9 updated: Q1, Q8, Q9, Q10 answered; Q4 marked built-but-unprobed"
     ]
+  },
+  "q4_probe_2026_09_04": {
+    "arm_1_children_settle": "ANSWERED YES. The actor was SIGKILLed with the fan-out complete; all three reviewers had already settled idle and written result envelopes. Children are independently dispatched tasks with their own supervisors, so the actor's death does not touch them.",
+    "arm_2_replies_partial": "NOT CLEANLY MEASURED, and saying so rather than claiming it. /replies did end 2-of-3 and the restart did not repair it - but the third reply was never going to land for an unrelated reason (see the defect below), and lang had settled 3m37s BEFORE the kill. So this run cannot separate 'the actor died before carrying a reply' from 'there was no reply to carry'. A clean measurement needs the kill to land between a child settling with a VALID envelope and its reply being copied.",
+    "arm_3_replay_or_redispatch": "ANSWERED: REPLAY, cleanly. After the restart every child's inbox envelope was still epoch=2 attempt=1 - no re-dispatch - and the relay logged 'already dispatched, unchanged' on every subsequent pass. The SRD's bar ('a design that cannot answer the third has no idempotency') is met.",
+    "L6_detached": "ANSWERED: REAL. The relay's launching shell had exited; ps showed PPID=1 and PGID=self, so it was reparented and is its own process-group leader. Engineer B fixed this in code and could not probe it.",
+    "defect_found": {
+      "what": "An unparseable result envelope silently deletes an entire lens, and the collation then blames the reviewer for it.",
+      "evidence": "rev-lang-1 wrote a real 3906-byte review ('five findings, worst being partial credential reda...') into result.json containing `[\\w\\\\-_]+` - a regex quoted into a JSON string, so `\\w` is an invalid JSON escape. The harvester could not parse it, the verdict became `unknown`, the relay's collation brief said 'lang settled unknown and produced no report', and the collation recorded reported:false with that note.",
+      "why_it_matters": "Every layer behaved correctly and the record is still wrong: the note attributes to the LENS a failure that was a serialisation error, and the operator reading `partial` learns the wrong thing. Nothing logged the parse failure - the relay log mentions it zero times.",
+      "why_it_is_structural": "The language reviewer is the seat most likely to hit it, because it is the one whose job is quoting code. A regex in a JSON string needs double-escaping and this one had no reason to know that.",
+      "fix_direction": "Two, and they are separable: (1) the harvester must distinguish 'no envelope' from 'an envelope that would not parse', and say which - the second is a worker-authored file that exists and can be named with its parse error; (2) the collation's lens note must not attribute a transport or serialisation failure to the reviewer."
+    }
   }
 }
