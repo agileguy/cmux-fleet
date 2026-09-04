@@ -116,6 +116,12 @@ import { z } from "zod";
 
 import { EXIT, SESSION_ID_RE, workerId } from "../contracts.ts";
 import { workerOutboxDir } from "./paths.ts";
+// The DEPTH half of D7. `relay.ts` mints collation ids and this module must
+// refuse a fan-out dispatched FROM one, so the predicate is imported rather
+// than re-spelled — see `checkDepth`. The dependency runs one way only:
+// `relay.ts` takes its `DispatchRequest` from here as a TYPE, which erases, so
+// the pair is not a runtime cycle.
+import { isCollationTaskId } from "./relay.ts";
 
 /** The wire tag, so a reader can refuse a shape it does not know. */
 export const DISPATCH_REQUEST_SCHEMA = "pifleet.dispatchrequest/v1";
@@ -669,6 +675,7 @@ export type DispatchRefusal =
   | "not_json"
   | "schema"
   | "parent_task_mismatch"
+  | "collation_parent"
   | "collator_target"
   | "worker_not_in_console"
   | "duplicate_target";
@@ -815,6 +822,64 @@ function checkSender(sender: string, roster: ConsoleRoster): DispatchRequestRead
   };
 }
 
+/**
+ * D7's DEPTH arm: a fan-out may not be dispatched FROM a collation.
+ *
+ * **The measured hole this closes.** D7 as shipped bounds BREADTH — `checkRoster`
+ * refuses a collator target, a worker outside the console, and a repeated one.
+ * Nothing bounded depth over time. On the collation turn the collator holds all
+ * three replies AND its `write` grant, so it can write
+ * `<outbox>/<parent>-collate/dispatch-request.json` naming the same three
+ * reviewers with reviewer A's findings pasted into reviewer B's brief. Every
+ * other check in this file passes that document — the sender is a collator, the
+ * targets are reviewers, none repeats, the parent id matches its directory, no
+ * forbidden field appears — and the actor fans out a second time. That reopens
+ * exactly what D7 exists to prevent, and it defeats §6.6's concurrency
+ * anti-criterion on round two, which §10's probe only covers on round one.
+ *
+ * **Why this and not a per-run fan-out budget**, which was the other candidate:
+ *
+ *  - A budget is HISTORY, so it needs durable per-run state, and that state has
+ *    exactly one correct writer — `relay-journal.ts`. A counter here would be a
+ *    second writer of one fact, and two components that stay individually
+ *    consistent while disagreeing is a failure nobody sees.
+ *  - A budget bounds how MANY fan-outs, not how DEEP. A collator still under
+ *    budget can paste A's findings into B's brief on round two, and the
+ *    contamination is the damage — the consensus arithmetic dies from that, not
+ *    from the count.
+ *  - The parent id is already in hand and already held to a grammar. A rule over
+ *    a NAME, checked before anything is believed, is the posture of every other
+ *    rule in this file, and it costs no state at all.
+ *
+ * **It is asked of `ctx.taskId`, the DIRECTORY, and not of the body.** The
+ * directory was created by the host and the body is a claim; the equality check
+ * below makes them agree, but agreeing is a property of two checks standing
+ * where they stand today. The structural identity is the one that cannot be
+ * edited from inside a container.
+ *
+ * **What it does not close.** A collator that rewrites the ORIGINAL parent's
+ * request on a later tick is refused by nothing here, because that id is legal
+ * and this module has no memory. That is the REPEAT arm — §6.10's "at most one
+ * unsettled fan-out per parent" — and it belongs to the journal. Depth is a
+ * property of an id; repetition is a property of history, and only one of the
+ * two can be had without state.
+ */
+function checkDepth(taskId: string): DispatchRequestRead | null {
+  if (!isCollationTaskId(taskId)) return null;
+  return {
+    kind: "refused",
+    code: "collation_parent",
+    reason:
+      `the request sits in the outbox directory for "${taskId}", which is a COLLATION task, and ` +
+      `a fan-out may not be dispatched from one (SRD-REVIEW-CONSOLE D7, §6.6). A collation turn ` +
+      `is the one turn on which the collator holds every reviewer's report and its write grant ` +
+      `at the same time, so a request written from here can name the same three reviewers with ` +
+      `one reviewer's findings in another's brief — which passes every other rule in this file ` +
+      `and destroys the independence the console's consensus bands are arithmetic over. The ` +
+      `fan-out for this review has already happened, under "${taskId.slice(0, -"-collate".length)}".`,
+  };
+}
+
 /** First zod issue, rendered with its path so the operator knows which entry. */
 function schemaReason(error: z.ZodError): string {
   const issue = error.issues[0];
@@ -911,6 +976,10 @@ function checkRoster(
  *   0b. **Sender** — before the document is even parsed. A non-collator's
  *      request is refused whatever it says, so nothing is learned by reading
  *      it first and a hostile document goes through one less parser.
+ *   0c. **Depth** — D7's second arm, and it is here for the sender's reason.
+ *      A request from a collation directory is refused whatever it says, so
+ *      the one document written by a collator that has already fanned out
+ *      once never reaches the parser at all.
  *   1. **Parse** — before any field is dereferenced.
  *   2. **Schema, strictly** — before any field is BELIEVED. D11's refusals live
  *      here so a forbidden field is refused by the same pass that refuses a
@@ -929,6 +998,9 @@ export function parseDispatchRequest(body: string, ctx: DispatchRequestContext):
 
   const wrongSender = checkSender(ctx.sender, roster);
   if (wrongSender !== null) return wrongSender;
+
+  const tooDeep = checkDepth(ctx.taskId);
+  if (tooDeep !== null) return tooDeep;
 
   let raw: unknown;
   try {

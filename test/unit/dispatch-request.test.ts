@@ -49,6 +49,7 @@ import { dirname, join } from "node:path";
 
 import { DEFAULT_REVIEW_WORKERS } from "../../src/backends/cmux/operations-plan.ts";
 import { workerOutboxDir } from "../../src/run/paths.ts";
+import { collationTaskId, isCollationTaskId } from "../../src/run/relay.ts";
 import {
   ConsoleRosterError,
   DISPATCH_REQUEST_FILE,
@@ -1270,5 +1271,140 @@ describe("the roster is checked before it is trusted", () => {
     const read = await readDispatchRequest({ runRoot: root, sender: "col-1", taskId: PARENT });
 
     expect(read.kind).toBe("ok");
+  });
+});
+
+/**
+ * D7's DEPTH arm — the hole a security review measured, closed here.
+ *
+ * D7 as shipped bounds the fan-out's BREADTH: a collator may not name a
+ * collator, may not name itself, and may not reach outside its console. Nothing
+ * bounded its DEPTH over time, and the gap is reachable rather than theoretical.
+ *
+ * On the collation turn the collator holds all three replies AND its `write`
+ * grant. So it writes `/outbox/<parent>-collate/dispatch-request.json` naming
+ * the same three reviewers, with reviewer A's findings pasted into reviewer B's
+ * brief. **Every check in this file passes**: the sender is a collator, the
+ * targets are all reviewers, none is a collator, none repeats, the parent id
+ * matches the directory it sits in, and no forbidden field appears. The actor
+ * fans out again — which reopens exactly what D7 exists to prevent, and defeats
+ * §6.6's concurrency anti-criterion on round two, where §10's probe does not
+ * look.
+ *
+ * **Why a derived-parent refusal and not a per-run fan-out budget.** Both were
+ * available and they close different things.
+ *
+ *  - A budget is HISTORY, so it needs durable per-run state, and that state has
+ *    exactly one correct writer — `relay-journal.ts`. A counter here would be a
+ *    second writer of the same fact, and two components that each stay
+ *    internally consistent while disagreeing is the failure this repository
+ *    keeps finding.
+ *  - A budget bounds how MANY fan-outs, not how DEEP. A collator under budget
+ *    can still paste A's findings into B's brief on round two, which is the
+ *    actual damage: the consensus arithmetic is destroyed by the contamination,
+ *    not by the count.
+ *  - The parent id is already in hand and already held to a grammar, and needs
+ *    no state at all. It is the posture the rest of this file already takes — a
+ *    rule over a NAME, checked before anything is believed.
+ *
+ * **What it does NOT close, so the silence is not read as coverage.** A collator
+ * that rewrites `/outbox/<parent>/dispatch-request.json` — the ORIGINAL parent,
+ * under which it has already fanned out once — is refused by nothing here,
+ * because that parent id is legal and this module has no memory. That is the
+ * REPEAT arm, it is §6.10's "at most one unsettled fan-out per parent", and it
+ * is the journal's. The two arms are complementary and neither implies the
+ * other: depth is a property of an id, repetition is a property of history.
+ */
+describe("D7 — a fan-out may not be dispatched from a collation (the depth arm)", () => {
+  /** The same three reviewers, from a collation directory. Valid in every other way. */
+  function fromCollation(): string {
+    return JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: `${PARENT}-collate`,
+      requests: [item("rev-arch-1"), item("rev-ctx-1"), item("rev-lang-1")],
+    });
+  }
+
+  test("a first fan-out is accepted — the control arm", () => {
+    // Without this the refusal below proves nothing: a check that refused every
+    // parent would satisfy it, and would disable the console.
+    const read = parseDispatchRequest(valid(), { sender: "col-1", taskId: PARENT });
+    expect(read.kind).toBe("ok");
+  });
+
+  test("a second fan-out from a collation parent is refused", () => {
+    const read = parseDispatchRequest(fromCollation(), {
+      sender: "col-1",
+      taskId: `${PARENT}-collate`,
+    });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("collation_parent");
+    // The reason names the id and the decision, because the operator reading it
+    // is looking at a collator that did something deliberate.
+    expect(read.reason).toContain(`${PARENT}-collate`);
+    expect(read.reason).toContain("D7");
+  });
+
+  test("the fixture is refused ONLY for its depth — every other rule passes it", () => {
+    // The asymmetry this suite's header demands. The same bytes, the same
+    // sender, the same targets, moved to a non-collation parent: accepted. So
+    // the refusal above is attributable to the parent id and to nothing else.
+    const moved = JSON.stringify({
+      schema: DISPATCH_REQUEST_SCHEMA,
+      parent_task_id: PARENT,
+      requests: [item("rev-arch-1"), item("rev-ctx-1"), item("rev-lang-1")],
+    });
+    expect(parseDispatchRequest(moved, { sender: "col-1", taskId: PARENT }).kind).toBe("ok");
+  });
+
+  test("the DIRECTORY decides, so a body that agrees with it does not help", () => {
+    // `parent_task_id` must equal the directory, and here it does — the request
+    // is internally consistent and still refused. A rule written against the
+    // body alone would be one a worker can edit its way past.
+    const read = parseDispatchRequest(fromCollation(), {
+      sender: "col-1",
+      taskId: `${PARENT}-collate`,
+    });
+    expect(read.kind === "refused" && read.code).toBe("collation_parent");
+  });
+
+  test("the suffix is a whole segment — a parent merely mentioning it is fine", () => {
+    // `includes("collate")` was the cheap spelling. It refuses every task an
+    // operator named after the word, and a bound that fires on legitimate
+    // first-round fan-outs is a bound someone deletes.
+    for (const parent of [`${PARENT}-collated`, "collate", `${PARENT}-collate-2`]) {
+      const body = JSON.stringify({
+        schema: DISPATCH_REQUEST_SCHEMA,
+        parent_task_id: parent,
+        requests: [item("rev-arch-1")],
+      });
+      const read = parseDispatchRequest(body, { sender: "col-1", taskId: parent });
+      expect(read.kind).toBe("ok");
+    }
+  });
+
+  test("the refusal reaches the disk path, which is the one the actor calls", async () => {
+    const root = await runRoot();
+    const parent = `${PARENT}-collate`;
+    await stage(root, "col-1", parent, fromCollation());
+
+    const read = await readDispatchRequest({ runRoot: root, sender: "col-1", taskId: parent });
+
+    expect(read.kind).toBe("refused");
+    if (read.kind !== "refused") return;
+    expect(read.code).toBe("collation_parent");
+  });
+
+  test("the predicate matches exactly what relay derives collation ids as", () => {
+    // Asserted rather than trusted, because the two live in different modules by
+    // necessity: `relay.ts` cannot import this file at runtime without making
+    // the pair a cycle. If relay's derivation changed and this bound did not,
+    // the depth check would silently stop matching anything relay actually
+    // mints, and would keep passing every test that only feeds it literals.
+    expect(isCollationTaskId(collationTaskId(PARENT))).toBe(true);
+    expect(collationTaskId(PARENT)).toBe(`${PARENT}-collate`);
+    expect(isCollationTaskId(PARENT)).toBe(false);
   });
 });
