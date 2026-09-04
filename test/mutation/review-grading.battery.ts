@@ -288,12 +288,12 @@ const MUTATIONS: M[] = [
   },
   {
     id: "H6",
-    what: "WIRING: the ISC-94 wrapper is bypassed for the raw ceiling",
+    what: "WIRING: the call site fabricates a claim the wrapper would have refused",
     file: HARVEST,
     find: "    const collationCap = collationCeilingFor(taskId, claimed, reconciled.collationRead);",
     replace:
       "    const collationCap = collationCeilingFor(taskId, claimed ?? { status: \"success\" }, reconciled.collationRead);",
-    expect: "red",
+    expect: "green",
   },
   // ── S: the worker→run map the script hands the relay (§6.5). ─────────────
   {
@@ -439,10 +439,10 @@ const MUTATIONS: M[] = [
   },
   {
     id: "NC2",
-    what: "NEGATIVE CONTROL: reword a defect sentence no assertion quotes",
+    what: "NEGATIVE CONTROL: reword the backslash sentence, which nothing quotes",
     file: CENSUS,
-    find: "  if (file === \"\") return \"finding carries an empty file path\";",
-    replace: '  if (file === "") return "finding has no file path at all";',
+    find: '  if (bs !== -1) return `finding path contains a backslash (0x5c) at index ${bs}`;',
+    replace: '  if (bs !== -1) return `finding path holds a backslash at ${bs}`;',
     expect: "green",
   },
 ];

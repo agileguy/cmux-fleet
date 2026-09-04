@@ -1482,6 +1482,58 @@ the root-cause classification; this table is the index.
 
 ## Changelog
 
+- **conjectured:** an actor whose state is derived entirely from the run tree needs no
+  supervision beyond being started again — *"idempotency IS the supervision story"*. §6.5's
+  objection to a script-started process is that it has *"no story for what happens when it dies
+  mid-fan-out"*, and the journal answers that completely: nothing is recorded until the children
+  are dispatched, so a killed relay re-dispatches rather than losing a review.
+  **refuted by:** the lifecycle review, reading the code I had just written. The answer was to the
+  wrong question. **The failure is not the actor dying, it is the actor NOT dying.** `startRelay`
+  read its record and returned on `live` before it computed the run it should have been pointing
+  at, so "a live relay is left alone" compared nothing — it asked whether *a* relay was running,
+  never whether it was running against *this* console. Three steps inside the documented workflow
+  reach it: run the script, close the `review` workspace by hand to get the screen back, run it
+  again. Four new runs, and the script prints *"the relay is already running (pid N, run r-1)"*
+  about a process polling an inbox nothing will ever write to again. Four healthy workers, an
+  actor the script has just called healthy, and no route from a request to a review — §6.4's own
+  failure shape, reached THROUGH the idempotency mechanism built to close it.
+  **learned:** idempotency answers "can this be restarted", and supervision answers "should this
+  still be running" — and a design that supplies the first and calls it the second has a liveness
+  property it cannot state. The tell is grammatical and worth keeping: my own docblock said the
+  process *"needs no supervision beyond being started again"*, and the sentence has no subject.
+  Nothing was named as the thing that starts it again, so nothing was, and the mechanism that was
+  supposed to make restarting cheap became the mechanism that prevented it. The repair is two
+  properties neither of which is idempotency: the actor watches the console it serves and exits
+  when that console is gone (which is what makes `pifleet down` authoritative over a process it
+  has never heard of), and the record names the console so that "already running" is a comparison
+  rather than a head-count. Both were listed in §6.5's own table as reasons to PREFER this home —
+  *"correctly scoped to the console"*, *"dies with the console"* — and neither had been built. A
+  virtue claimed in a design table is not a property of the code.
+
+- **conjectured:** a mutation that survives its battery is either a semantic no-op or a declared
+  gap, and the two are told apart by argument. `H4` was filed as the first with a proof: the
+  ceiling is applied under `rank(verdict) > rank(cap)`, a verdict can only exceed `partial` when
+  it IS `success`, and `success` requires the claim to have been `success` — so passing a
+  fabricated claim can only differ where the guard already blocks.
+  **refuted by:** the test-integrity review, which built the fixture the argument said could not
+  exist. **The premise omits ISC-94.** A missing envelope is a NO-OP and not a downgrade, so a
+  task with green harvester-run acceptance and no envelope grades `success` with no claim at all —
+  and my own suite already asserted exactly that four hundred lines away. Measured on a `-collate`
+  task with a worktree and one passing acceptance command: `success` unmutated, `partial` mutated.
+  A document the worker never wrote clamping the one class of evidence a fabricating worker cannot
+  author. `H5` failed the same way in the other direction — filed under *"the mutation genuinely
+  changes nothing"* while its own body said *"untested rather than proven inert"*, which cannot
+  both be true.
+  **learned:** a survivor's classification is a CLAIM and needs the same evidence as a criterion,
+  because "no-op" and "gap" differ only in whether someone tried. The generalisable rule is that a
+  no-op argument must name the fixture that would separate the two branches and say why it cannot
+  be built — if that sentence cannot be written, the row is a gap. Both of mine reasoned forward
+  from the lattice instead, which is how an argument comes to be checked against itself. The
+  cheaper structural fix is to stop reasoning about unreachable expressions at all: `H4`'s guard
+  is now a named function with the ISC-94 argument inside it and eleven assertions on it, so the
+  policy is pinned by construction and only its one call site is left uncovered — a smaller gap,
+  declared, in the column for gaps.
+
 - **conjectured:** §6.8's structural census is a grading change, so its blast radius is the
   harvester. The instrument reads a worker-authored document, produces a ceiling, and touches
   nothing else — `adjudicate` gains a block, `reconcile` gains a selector, and the fact bundle

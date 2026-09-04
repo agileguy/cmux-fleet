@@ -66,7 +66,6 @@ expensive half stays manual; the half that rots is checked on every push.
 | H4 | The ISC-94 guard is removed, so a task with NO ENVELOPE is given a claim of `success` | **This was filed as a semantic no-op and the argument was false.** It claimed a verdict can only exceed `partial` when the claim was `success` — but ISC-94 makes `claimed === null` a NO-OP rather than a downgrade, so a task with green harvester-run acceptance and no envelope grades `success` with no claim at all. Measured: a `-collate` task with a worktree and one passing acceptance command grades `success` unmutated and `partial` mutated. **A document the worker never wrote clamping the one class of evidence a fabricating worker cannot author.** It does not bite in the shipped config only because the collator is `shared-ro` — a config fact, and `isCollationTaskId` also matches any operator task named `*-collate`. |
 | H4b | The ISC-94 guard is inverted, so ONLY envelope-less tasks are graded | The other half of the conjunction; without it, deleting the rule outright would pass H4's assertion. |
 | H5 | The harvester's collation ceiling becomes an assignment | **Also mis-filed as a no-op, in a row whose own body said "untested rather than proven inert" — which cannot both be true.** Measured: a `-collate` repository task with an empty diff, a claim of `success` and no `collation.json` grades `failed` by ISC-93 unmutated, and `partial` mutated. A worker's own MISSING document promoting a verdict the diff already refused, which is A2's defect one module over. The separating fixture builds a real one-commit git repository with `base_ref` at `HEAD`, so `base..HEAD` is empty by construction — no container, no exam, no network. |
-| H6 | The wrapper is bypassed and the raw ceiling is handed a fabricated claim | The wiring half of H4: the guard is only worth having if the call site uses it. |
 | C10 | The empty-path refusal is removed | `withinWorkdir("/workspace","")` already returns false through the `rel === ""` arm, so **both branches agreed** and the fixture — which asserted only `typeof problem === "string"` — could not tell them apart. It now asserts the SENTENCE, which is the only thing that separates them. |
 | C11 | `!Number.isInteger(line)` is dropped from the line check | Every fixture's line was a whole number, so `line: 12.5` counted as located. `findingLocationProblem` is exported and has callers beyond the census, so the bound is its own. |
 | C12 | A refused census publishes `declared: 0` instead of `null` | "This document never told us a count" and "this document declared zero findings" are different claims. The refused arm's published fields were asserted only for `readable` and `refusal`. |
@@ -78,6 +77,21 @@ expensive half stays manual; the half that rots is checked on every push.
 | W6 | The capture-failed sentinel is compared rather than recognised | `""` matches no real start time, so a LIVE relay reads as stale; `--recreate` then deletes its record and tears down the runs it is polling. `isPinnedIdentity` is the repository's own test for "is this comparable at all". |
 | W8 | The start lock drops `O_EXCL` | Two invocations both spawn, and the console has two actors it can account for one of. |
 | I1 | `run/collation.ts` imports the ids from `relay.ts` again | ISC-468. This is the exact edge this change opened once: `monitor -> read/report -> report/collect -> harvest/index -> run/collation -> run/relay -> cli/commands/*` put all 27 CLI command modules in the monitor's closure. |
+
+### H6 survives, and it is the same hole H4 used to sit in
+
+`H6` makes the CALL SITE fabricate `{status: "success"}` for a task with no
+envelope — the wiring half of H4, and the thing the wrapper exists to prevent. It
+is **green**, for exactly the reason H4 was undetectable before: with no envelope
+the verdict is `unknown`, whose rank is below every ceiling, so the fabricated
+claim changes nothing any fixture here can observe. Separating it needs a harvest
+fixture whose verdict EXCEEDS `partial` with no envelope, which means green
+harvester-run acceptance — a worktree, a fresh clone and the exam.
+
+So the guard's POLICY is pinned exhaustively (`H4`, `H4b`, and eleven assertions
+on `collationCeilingFor`) and its USE at the one call site is not. That is a
+smaller gap than the one it replaces and it is still a gap, named here rather
+than left in a green column.
 
 ### C1's anchor covers three arms, and only two are separated
 
@@ -140,6 +154,8 @@ caught by the four files this battery runs.
   output going nowhere would pass everything here.
 - **`signalRelay`.** Never called by a test. Sending a real SIGTERM in a unit
   suite means spawning a process to kill, which is integration-shaped.
+- **The ISC-94 guard's CALL SITE** (`H6` above): the wrapper's policy is pinned,
+  the argument the harvester passes it is not.
 - **The watch's OBSERVATION, as opposed to its policy.** `ConsoleWatch` is
   pinned exhaustively, and the `productionRunSources.isLiveWorker` call that
   feeds it is not — a loop that observed the wrong worker, or inverted the
