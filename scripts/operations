@@ -36,6 +36,7 @@ import {
   ensureOperations,
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
+import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
 import { runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/operations [options]
@@ -48,6 +49,9 @@ const USAGE = `Usage: scripts/operations [options]
   --dry-run         print the pane plan and exit without touching cmux
   --recreate        close an existing operations workspace and rebuild it
   --restart <title> respawn ONE pane by title, leaving the others running
+  --task <path>     with --restart: recreate the worker, then dispatch this
+                    task. Waits for work it already holds; never recreates
+                    over a running or staged task.
   -h, --help        this message
 `;
 
@@ -221,6 +225,45 @@ async function main(argv: string[]): Promise<number> {
    */
   const restartFlag = flag(argv, "--restart");
   if (restartFlag !== undefined) {
+    /*
+     * `--task` makes this recreate-then-dispatch. See the same branch in
+     * `scripts/development` and `src/run/fresh-dispatch.ts`: a tui worker
+     * keeps its session across epochs, so a dispatch can be answered from the
+     * PREVIOUS task's transcript. The waiting and the refusal are in the
+     * module; only the side effects are supplied here.
+     */
+    const taskFlag = flag(argv, "--task");
+    if (taskFlag !== undefined) {
+      const fresh = await recreateThenDispatch(
+        {
+          status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          down: async (runId) => {
+            process.stderr.write(`operations: stopping run ${runId}\n`);
+            await runOutput(repoRoot, ["down", "--run", runId]);
+          },
+          restartPane: async () => {
+            process.stderr.write(`operations: respawning the ${restartFlag} pane\n`);
+            await restartConsolePane(client, OPERATIONS_SPEC, { ...opts, tuiWorkers }, restartFlag);
+          },
+          dispatch: (runId) =>
+            runOutput(repoRoot, [
+              "dispatch", "--worker", restartFlag, "--run", runId,
+              "--task", taskFlag, "--json",
+            ]),
+          sleep: (ms) => Bun.sleep(ms),
+          now: () => Date.now(),
+        },
+        { worker: restartFlag },
+      );
+      process.stdout.write(
+        `operations: recreated ${restartFlag} into run ${fresh.runId} ` +
+          `(waited ${Math.round(fresh.settleWaitMs / 1000)}s, stopped ` +
+          `${fresh.stopped.length === 0 ? "nothing" : fresh.stopped.join(", ")}) ` +
+          `and dispatched ${taskFlag}\n${fresh.dispatched}`,
+      );
+      return EXIT.SUCCESS;
+    }
+
     const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
     for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
       process.stderr.write(`operations: stopping run ${runId} before restarting ${restartFlag}\n`);

@@ -56,6 +56,7 @@ import {
   ensureDevelopment,
   restartConsolePane,
 } from "../src/backends/cmux/operations.ts";
+import { recreateThenDispatch } from "../src/run/fresh-dispatch.ts";
 import { runsHoldingAny } from "../src/run/status-runs.ts";
 
 const USAGE = `Usage: scripts/development [options]
@@ -67,6 +68,9 @@ const USAGE = `Usage: scripts/development [options]
   --dry-run         print the pane plan and exit without touching cmux
   --recreate        close an existing development workspace and rebuild it
   --restart <id>    respawn ONE worker's pane, leaving the others running
+  --task <path>     with --restart: recreate the worker, then dispatch this
+                    task to the run it comes back in. Waits for any task it
+                    is already holding to finish; never recreates over work.
   -h, --help        this message
 `;
 
@@ -199,20 +203,79 @@ async function main(argv: string[]): Promise<number> {
    */
   const restartFlag = flag(argv, "--restart");
   if (restartFlag !== undefined) {
+    const taskFlag = flag(argv, "--task");
+    const restartPane = async (): Promise<string> => {
+      const r = await restartConsolePane(
+        client,
+        DEVELOPMENT_SPEC,
+        { ...opts, tuiWorkers },
+        restartFlag,
+      );
+      return r.surfaceId;
+    };
+
+    /*
+     * `--task` makes this RECREATE-THEN-DISPATCH, which is a different
+     * operation from a restart that happens to be followed by one.
+     *
+     * A `pane_mode: tui` worker keeps its session across epochs, and a model
+     * handed "a task was staged for you" with the previous task still in its
+     * transcript can answer from that instead of opening the new envelope.
+     * Measured 2026-09-04: `tst-1` was staged `T-unit-tests-3` and reported on
+     * `T-unit-tests-2`, reciting the old envelope. Dispatching into a session
+     * that has never seen another task removes the thing it answered from.
+     *
+     * The waiting, the refusal and the ordering live in
+     * `src/run/fresh-dispatch.ts` so they are unit-tested; only the four side
+     * effects are supplied here. The load-bearing rule is that NOTHING is
+     * stopped until the worker is holding no task, staged ones included.
+     */
+    if (taskFlag !== undefined) {
+      const r = await recreateThenDispatch(
+        {
+          status: () => runOutput(repoRoot, ["status", "--all", "--json"]),
+          down: async (runId) => {
+            process.stderr.write(`development: stopping run ${runId}\n`);
+            await runOutput(repoRoot, ["down", "--run", runId]);
+          },
+          restartPane: async () => {
+            process.stderr.write(`development: respawning the ${restartFlag} pane\n`);
+            await restartPane();
+          },
+          dispatch: (runId) =>
+            runOutput(repoRoot, [
+              "dispatch",
+              "--worker",
+              restartFlag,
+              "--run",
+              runId,
+              "--task",
+              taskFlag,
+              "--json",
+            ]),
+          sleep: (ms) => Bun.sleep(ms),
+          now: () => Date.now(),
+        },
+        { worker: restartFlag },
+      );
+      process.stdout.write(
+        `development: recreated ${restartFlag} into run ${r.runId} ` +
+          `(waited ${Math.round(r.settleWaitMs / 1000)}s for it to go idle, ` +
+          `stopped ${r.stopped.length === 0 ? "nothing" : r.stopped.join(", ")}) ` +
+          `and dispatched ${taskFlag}\n${r.dispatched}`,
+      );
+      return EXIT.SUCCESS;
+    }
+
     const json = await runOutput(repoRoot, ["status", "--all", "--json"]);
     for (const runId of runsHoldingAny(json, new Set([restartFlag]))) {
       process.stderr.write(`development: stopping run ${runId} before restarting ${restartFlag}\n`);
       await runOutput(repoRoot, ["down", "--run", runId]);
     }
-    const r = await restartConsolePane(
-      client,
-      DEVELOPMENT_SPEC,
-      { ...opts, tuiWorkers },
-      restartFlag,
-    );
+    const surfaceId = await restartPane();
     process.stdout.write(
-      `development: respawned the ${restartFlag} pane (surface ${r.surfaceId}) ` +
-        `in workspace ${r.workspaceId}; the other panes were not touched\n`,
+      `development: respawned the ${restartFlag} pane (surface ${surfaceId}); ` +
+        `the other panes were not touched\n`,
     );
     return EXIT.SUCCESS;
   }
