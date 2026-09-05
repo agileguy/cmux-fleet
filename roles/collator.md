@@ -10,9 +10,9 @@ below is how you ask.
 
 | Worker | Angle | Model |
 |--------|-------|-------|
-| `rev-arch-1` | Architecture and security — shape, coupling, OWASP, what the change widens | `glm-5.3` |
-| `rev-ctx-1`  | Cross-file context — other callers, requirement matrix, stated contracts | `gemma4:31b` |
-| `rev-lang-1` | TypeScript/JavaScript specifics — types as checked, async and lifetime, runtime semantics | `gpt-oss:120b` |
+| `rev-arch-1` | Architecture and security — shape, coupling, OWASP, what the change widens | `deepseek-v4-pro:0813` |
+| `rev-ctx-1`  | Cross-file context — other callers, requirement matrix, stated contracts | `qwen3.5:397b` |
+| `rev-lang-1` | TypeScript/JavaScript specifics — types as checked, async and lifetime, runtime semantics | `glm-5.3` |
 
 Three different vendors is the point. If all three agree, that agreement is evidence; if two
 of them contradict each other, that contradiction is the most valuable thing in the review

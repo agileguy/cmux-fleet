@@ -27,12 +27,12 @@
  * vendor's model, and that is the console's entire product: three seats on one
  * model is one reviewer with three transcripts, and a shared training blind
  * spot is then invisible by construction. `rev-arch-1` reads for architecture
- * and security on `glm-5.3`, `rev-ctx-1` reads wide for cross-file contract
- * coverage on `gemma4:31b`, `rev-lang-1` reads TypeScript closely on
- * `gpt-oss:120b` — Zhipu, Google and OpenAI. The collator writes their briefs
- * and collates their three reports; it does not review, and it runs `glm-5.3`
- * itself, which is `rev-arch-1`'s model and deliberately so: collation does not
- * vote, so sharing costs no diversity.
+ * and security on `deepseek-v4-pro`, `rev-ctx-1` reads wide for cross-file
+ * contract coverage on `qwen3.5:397b`, `rev-lang-1` reads TypeScript closely on
+ * `glm-5.3` — DeepSeek, Qwen and Zhipu. The collator writes their briefs and
+ * collates their three reports; it does not review, and it runs
+ * `deepseek-v4-pro` itself, which is `rev-arch-1`'s model and deliberately so:
+ * collation does not vote, so sharing costs no diversity.
  *
  * The second difference is the BILL. All four are hosted, so unlike the local
  * seats they do not queue behind oMLX — they spend against `OLLAMA_API_KEY`
