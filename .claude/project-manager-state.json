@@ -31,7 +31,10 @@
   },
   "measurements": {
     "identity_symptom_2026_09_05": "docker exec -u 10001 <eng-1> git commit --allow-empty exits 128: 'fatal: unable to auto-detect email address (got pi@edf6548c4eca.(none))'. HOME=/home/pi is READ-ONLY so --global is unavailable. GIT_CONFIG_COUNT=1. /workspace is drwxrwxrwx, so a repository-local identity IS self-configurable. NOTE: \u00a712 records the symptom as an invented identity (eng-1 <eng-1@pifleet.invalid>); on this operator's image it is a refusal.",
-    "stale_worker_remotes_2026_09_05": "~/repos/cmux-fleet carries worker-eng-1, worker-eng-2 and worker-tst-1 pointing at 2026-09-04 run directories. The live development console is launched from ~/repos/rally-cli, which holds the correct remotes. Both sets resolve under ls-remote, so \u00a712's integration probe as written passes the broken state; it must assert equality with the live run's branch."
+    "stale_worker_remotes_2026_09_05": "~/repos/cmux-fleet carries worker-eng-1, worker-eng-2 and worker-tst-1 pointing at 2026-09-04 run directories. The live development console is launched from ~/repos/rally-cli, which holds the correct remotes. Both sets resolve under ls-remote, so \u00a712's integration probe as written passes the broken state; it must assert equality with the live run's branch.",
+    "dogfood_partition_2026_09_05": "Phase 6's dogfood partitions to ONE engineer, and that is \u00a76.3's rule producing ISC-548's case rather than a shortcut. The only dispatchable SRD task still outstanding is 3.5 (Docs/SRD.md). Task 6.3 touches ISA.md, which is orchestrator-owned and never in an engineer's partition, and the \u00a711 answered-questions edit touches the SRD this run is executing. So eng-2, tst-1 and tst-2 stay idle: D4 accepts idle seats over merge conflicts.",
+    "dogfood_6_1_2026_09_05": "6.1 DONE. Development console recreated from ~/repos/cmux-fleet (was ~/repos/rally-cli); three rally-cli runs stopped, workspace D983A779-8C95-43BD-9FF2-F5EEA4870245 rebuilt with four panes \u2014 and tst-2 materialised for the first time, the phase 1 seat change reaching a running container. /workspace confirmed in eng-1 (worktree of cmux-fleet on fleet/<run>/eng-1, remotes EMPTY = ISC-554 live again) and in rev-arch-1 (shared-ro, shows the gitignored fleet.yaml and coverage/, so it is a live bind of the operator's checkout). Relay record names run 2026-09-05T20-32-27Z-3e93 with all four pinned ids matching the live runs; pid 92589 alive.",
+    "dogfood_6_2_2026_09_05": "6.2 partition->dispatch->integrate DONE. T-3-5 to eng-1, brief VERBATIM from \u00a713 (ISC-549's property checked by hand on collapsed whitespace). Dispatch returned accepted/via:staged; the turn was confirmed from status, not from that payload. eng-1 finished in ~5 min: Docs/SRD.md +10/-0, one commit b7f7a10, acceptance re-run green. THE COMMIT'S AUTHOR IS pifleet <pifleet@pifleet.invalid> \u2014 the container hop ISC-528 was graded [~] for lacking. Merged through mergeWorkerBranch: ce63ece, hazard_refusal empty. Merged tree: unit 4173 pass / 0 fail, tsc clean."
   },
   "phases": [
     {
@@ -67,12 +70,43 @@
     {
       "n": 6,
       "slug": "dogfood",
-      "name": "One phase run through the workflow it specifies"
+      "name": "One phase run through the workflow it specifies",
+      "partition": [
+        {
+          "worker": "eng-1",
+          "task_ids": [
+            "T-3-5"
+          ],
+          "files": [
+            "Docs/SRD.md"
+          ]
+        }
+      ],
+      "dispatched": [
+        {
+          "worker": "eng-1",
+          "task_id": "T-3-5",
+          "run_id": "2026-09-05T21-40-35Z-5c10"
+        }
+      ],
+      "integration": {
+        "record": ".claude/project-manager/phase-6/integration.json"
+      }
     }
   ],
   "pause_point": "OWNER INSTRUCTION 2026-09-05, revised: pause at the end of phase 2. Phase 1 = integrate 1A + 1B; phase 2 = integrate the container-identity branch. Verify both, run the review round, then STOP and report. Do not begin phase 3 integration without the owner's word. Phases 3/4 engineers were already in flight when the instruction arrived; they run to completion and their branches are PARKED unmerged, reported as staged work.",
   "resume_from": "Phase 6, the dogfood run \u2014 BLOCKED ON OWNER PERMISSION. It needs the development console repointed from ~/repos/rally-cli to ~/repos/cmux-fleet, which is a console recreate: four running containers stopped. CLAUDE.md puts that behind explicit approval and it has not been given. Also outstanding: task 3.5, the SRD amendment (\u00a76.2.1 corrections plus \u00a712's missing state-file criterion, now allocated as ISC-557), never dispatched. ISC-547..556 remain [ ] and most need the live run. No PR: D2's pr_policy says ask the owner when all phases are complete. Branch feat/fleet-project-manager is unpushed.",
   "verified_at_pause": "2026-09-05 on the merged tree at phase 5: unit 4173 / integration 651 pass (149 skip, unchanged from baseline) / e2e 17 = 4841 pass, 0 fail. tsc --noEmit clean. Baseline was 4718 across 270 files; now 275 files.",
   "review_round_status": "Phase 1-2 round RUN 2026-09-05, run 2026-09-05T20-32-27Z-3e93. Gate 0 not VOID, Gate 1 3/3 coverage from the run tree, Gate 2 CHANGES_REQUESTED with 10 findings (2 consensus). Iteration 1 of 3. Nine of ten addressed; the tenth (scripts/development's bad --workers id framing) predates this work and is recorded in ISA.md rather than fixed. No second round was run on phases 3-5; the phase 1-2 round's iteration count stands at 1 of 3.",
-  "skill_install": "Tasks 5.1-5.3 installed 2026-09-05. THE FILES NOW LIVE IN THIS REPO: cmux-fleet/.claude/skills/fleet/ (tracked, commit 9a96450), with ~/.claude/skills/fleet a symlink to them. Previously they were untracked in ~/repos/paisley/.claude \u2014 which is also why the phase 5 engineer could not write to the live path and its files had to be carried out of its worktree by hand. Not placed under cmux-fleet/skills/, which is the WORKER tree mounted at /skills:ro; a root SKILLS/ is impossible on a case-insensitive filesystem. Cardinal rule byte-identical across the move (sha256 a5aef928bc68d772). Pre-move backup in the session scratchpad."
+  "skill_install": "Tasks 5.1-5.3 installed 2026-09-05. THE FILES NOW LIVE IN THIS REPO: cmux-fleet/.claude/skills/fleet/ (tracked, commit 9a96450), with ~/.claude/skills/fleet a symlink to them. Previously they were untracked in ~/repos/paisley/.claude \u2014 which is also why the phase 5 engineer could not write to the live path and its files had to be carried out of its worktree by hand. Not placed under cmux-fleet/skills/, which is the WORKER tree mounted at /skills:ro; a root SKILLS/ is impossible on a case-insensitive filesystem. Cardinal rule byte-identical across the move (sha256 a5aef928bc68d772). Pre-move backup in the session scratchpad.",
+  "consoles": {
+    "development": {
+      "launched_from": "/Users/de895996/repos/cmux-fleet",
+      "workspace_id": "D983A779-8C95-43BD-9FF2-F5EEA4870245"
+    },
+    "review": {
+      "launched_from": "/Users/de895996/repos/cmux-fleet",
+      "workspace_id": ""
+    }
+  }
 }

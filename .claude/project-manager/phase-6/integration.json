@@ -1,0 +1,21 @@
+{
+  "schema": "pifleet.pmintegration/v1",
+  "run_id": "2026-09-05T21-40-35Z-5c10",
+  "integration_branch": "feat/fleet-project-manager",
+  "base_sha": "05e5b61ac429d2af33dc3aaab7ebd7410f826851",
+  "workers": [
+    {
+      "worker": "eng-1",
+      "remote": "worker-eng-1",
+      "branch": "fleet/2026-09-05T21-40-35Z-5c10/eng-1",
+      "task_id": "T-3-5",
+      "head": "b7f7a10b9ba5830ed1e03195a34c7404eb2c304a",
+      "commits_ahead": 1,
+      "merged": true,
+      "merge_commit": "ce63ece3ae0d8ee069dc83e6350bab8292af5fe0",
+      "hazard_refusal": [],
+      "post_merge_hazards": [],
+      "note": "post_merge_hazards emptied deliberately: the live scan returned 40+ rows, every one kind 'other', detected true, neutralized false, detail 'below the .gitattributes scan depth of 4; not scanned' — including node_modules/zod/** and test/fixtures/hostile-repo/**. Those are scan-coverage notices, not hazards. Recorded as a phase 6 finding rather than persisted as a hazard list."
+    }
+  ]
+}
