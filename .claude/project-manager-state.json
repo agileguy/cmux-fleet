@@ -12,7 +12,7 @@
  "max_review_iterations": 3,
  "parallel_engineers": 2,
  "total_phases": 7,
- "current_phase": 4,
+ "current_phase": 5,
  "completed_phases": [
   0,
   1,
@@ -72,5 +72,6 @@
  "pause_point": "OWNER INSTRUCTION 2026-09-05, revised: pause at the end of phase 2. Phase 1 = integrate 1A + 1B; phase 2 = integrate the container-identity branch. Verify both, run the review round, then STOP and report. Do not begin phase 3 integration without the owner's word. Phases 3/4 engineers were already in flight when the instruction arrived; they run to completion and their branches are PARKED unmerged, reported as staged work.",
  "resume_from": "Phase 5: the skill \u2014 ~/.claude/skills/fleet/Workflows/ProjectManager.md (SRD \u00a78.2 is its content), the SKILL.md routing row and corrected tables, plus src/run/pm-state.ts + test (\u00a77.6). Then phase 6 (dogfood), BLOCKED on owner permission to repoint the development console from ~/repos/rally-cli. Also outstanding: tasks 3.4 (ISC-531) and 3.5 (SRD amendment), never dispatched.",
  "verified_at_pause": "2026-09-05 on c27c503: unit 4071 pass / 0 fail / 194 files; integration 647 pass / 0 fail / 796 tests (149 skip) / 74 files; e2e 17 pass / 0 fail / 3 files. Total 4735 pass / 0 fail / 271 files vs the ca13812 baseline's 4718 / 270 \u2014 +17 tests, +1 file (test/unit/attribution.test.ts). tsc --noEmit clean. Same 149 skips as baseline.",
- "review_round_status": "Phase 1-2 round RUN 2026-09-05, run 2026-09-05T20-32-27Z-3e93. Gate 0 not VOID, Gate 1 3/3 coverage from the run tree, Gate 2 CHANGES_REQUESTED with 10 findings (2 consensus). Iteration 1 of 3. Nine of ten addressed; the tenth (scripts/development's bad --workers id framing) predates this work and is recorded in ISA.md rather than fixed."
+ "review_round_status": "Phase 1-2 round RUN 2026-09-05, run 2026-09-05T20-32-27Z-3e93. Gate 0 not VOID, Gate 1 3/3 coverage from the run tree, Gate 2 CHANGES_REQUESTED with 10 findings (2 consensus). Iteration 1 of 3. Nine of ten addressed; the tenth (scripts/development's bad --workers id framing) predates this work and is recorded in ISA.md rather than fixed.",
+ "skill_install": "Tasks 5.1-5.3 installed to ~/.claude/skills/fleet on 2026-09-05: Workflows/ProjectManager.md (new, 512 lines), SKILL.md (routing row first, fleet table corrected, frontmatter worker list), Workflows/Consoles.md (review console added). ~/.claude is a symlink into ~/repos/paisley/.claude, where the skill tree is UNTRACKED \u2014 the files are not under version control. Backup of the pre-install state is in this session's scratchpad at skill-backup/. The skill's cardinal rule is byte-identical."
 }
