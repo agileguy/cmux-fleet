@@ -238,15 +238,38 @@ export class IntegrationGitError extends Error {
   }
 }
 
-/** `git diff --name-only <baseRef>..<headRef>` — read-only, writes no working-tree file (§6.2.1 part 1/2). */
+/**
+ * The paths the INCOMING branch changed — read-only, writes no working-tree
+ * file (§6.2.1 parts 1 and 2).
+ *
+ * ## Three dots, and this is the whole correctness of the gate
+ *
+ * §6.2.1 spells the probe `git diff --name-only <base>..FETCH_HEAD`, and for
+ * `git diff` two dots do NOT mean what they mean for `rev-list`: `diff A..B`
+ * is just `diff A B`, a comparison of two ENDPOINTS. On a long-lived
+ * integration branch — which is the model §6.2 describes — the orchestrator
+ * commits between merges, so anything HEAD has gained since the worker's
+ * branch was cut shows up in that comparison as a path the worker "changed".
+ *
+ * Measured, on this branch: inspecting `phase3-pm-integration` against `HEAD`
+ * listed `.claude/project-manager-state.json` — a file that branch never
+ * touched, changed by the orchestrator after the branch was cut — and the
+ * gate refused a clean branch on it. **A gate that refuses good branches gets
+ * turned off**, so this is not a cosmetic bug; and the same asymmetry can
+ * mask, when HEAD already carries an identical hazard edit.
+ *
+ * `A...B` is git's name for "what B changed since the merge base", which is
+ * the question the gate is actually asking. `rev-list --count` above keeps
+ * two dots, where two dots already mean the range.
+ */
 export async function incomingTreeChanges(
   repoRoot: string,
   baseRef: string,
   headRef: string,
 ): Promise<string[]> {
-  const res = await spawnGit(repoRoot, ["diff", "--name-only", `${baseRef}..${headRef}`]);
+  const res = await spawnGit(repoRoot, ["diff", "--name-only", `${baseRef}...${headRef}`]);
   if (res.code !== 0) {
-    throw new IntegrationGitError(`git diff --name-only ${baseRef}..${headRef}`, res);
+    throw new IntegrationGitError(`git diff --name-only ${baseRef}...${headRef}`, res);
   }
   return res.stdout
     .split("\n")

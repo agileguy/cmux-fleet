@@ -24,6 +24,8 @@ import {
   IntegrationRecordSchema,
   IntegrationWorkerRowSchema,
   classifyHazardPath,
+  findHazardTouches,
+  incomingTreeChanges,
   integrationRecordPath,
   mergeWorkerBranch,
   readIntegrationRecord,
@@ -688,5 +690,63 @@ describe("post-merge hazard scanning is recorded in the integration record (§6.
     await writeIntegrationRecord(operator.repo, 3, record);
     const readBack = await readIntegrationRecord(operator.repo, 3);
     expect(readBack.workers[0]?.post_merge_hazards.some((h) => h.path === ".mcp.json")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// The base moves between branches, which is what a long-lived integration
+// branch DOES (§6.2). Measured on this repository's own branch.
+// ===========================================================================
+
+/**
+ * The defect this pins was found by running the gate by hand, not by reading
+ * it: inspecting `phase3-pm-integration` against `HEAD` listed
+ * `.claude/project-manager-state.json` — a file that branch never touched —
+ * and the gate refused a clean branch on it.
+ *
+ * `git diff A..B` compares two ENDPOINTS; only `rev-list` gives `..` range
+ * meaning. So every path the ORCHESTRATOR changed after the worker's branch
+ * was cut appears in the comparison as a path the WORKER changed. On a
+ * long-lived branch the orchestrator commits between every merge, so this is
+ * the normal case, not an edge one.
+ *
+ * Both directions are asserted, because the two-dot form is wrong in two
+ * different ways and a fixture covering only the first would pass on a gate
+ * that had merely been made permissive.
+ */
+describe("the hazard inspection reads the branch's own changes, not the base's (§6.2.1 part 2)", () => {
+  test("a hazard path the ORCHESTRATOR changed after the cut does not refuse a clean branch", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-9", async (dir) => {
+      await writeFile(join(dir, "src", "base.ts"), "export const base = 2;\n");
+    });
+
+    // The orchestrator moves the integration branch, touching a hazard path.
+    // This is exactly `.claude/project-manager-state.json` in the real case.
+    await writeFileDeep(join(operator.repo, ".github", "workflows", "ci.yml"), "name: ci\n");
+    await git(operator.repo, "add", ".");
+    await git(operator.repo, "commit", "-q", "-m", "orchestrator: add CI");
+
+    // The objects arrive with the fetch, exactly as part 1 does it.
+    await git(operator.repo, "fetch", w.remote, w.branch);
+    const changed = await incomingTreeChanges(operator.repo, "HEAD", w.workerHead);
+    expect(changed).toEqual(["src/base.ts"]);
+    expect(findHazardTouches(changed, w.workerHead)).toEqual([]);
+  });
+
+  test("and a hazard path the WORKER changed is still caught after the base moves", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-8", async (dir) => {
+      await writeFileDeep(join(dir, ".github", "workflows", "evil.yml"), "name: evil\n");
+    });
+
+    await writeFile(join(operator.repo, "README.md"), "moved on\n");
+    await git(operator.repo, "add", ".");
+    await git(operator.repo, "commit", "-q", "-m", "orchestrator: unrelated");
+
+    await git(operator.repo, "fetch", w.remote, w.branch);
+    const changed = await incomingTreeChanges(operator.repo, "HEAD", w.workerHead);
+    expect(changed).toEqual([".github/workflows/evil.yml"]);
+    expect(findHazardTouches(changed, w.workerHead)).not.toEqual([]);
   });
 });
