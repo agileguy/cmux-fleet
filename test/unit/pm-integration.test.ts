@@ -25,6 +25,7 @@ import {
   IntegrationWorkerRowSchema,
   classifyHazardPath,
   findHazardTouches,
+  IntegrationPreconditionError,
   incomingTreeChanges,
   integrationRecordPath,
   mergeWorkerBranch,
@@ -35,6 +36,7 @@ import {
   writeIntegrationRecord,
   type IntegrationRecord,
 } from "../../src/run/pm-integration.ts";
+import { TREE_VISIBLE_HAZARD_PATHS } from "../../src/security/repo-hazards.ts";
 
 async function run(cmd: readonly string[], cwd: string): Promise<string> {
   const p = Bun.spawn([...cmd], { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
@@ -118,6 +120,11 @@ async function checkoutFingerprint(repo: string): Promise<{ head: string; status
   const head = (await git(repo, "rev-parse", "HEAD")).trim();
   const status = await git(repo, "status", "--porcelain", "--untracked-files=all");
   return { head, status };
+}
+
+/** Does a path exist? Used to prove a refused merge materialised nothing. */
+async function fileExists(path: string): Promise<boolean> {
+  return await Bun.file(path).exists();
 }
 
 /** Is the checkout mid-merge? The state finding 7 is about, asked directly. */
@@ -309,6 +316,7 @@ describe("hazard path classification (§6.2.1 part 2)", () => {
       ".agents/skills/x/SKILL.md",
       ".gitattributes",
       ".github/workflows/x.yml",
+      ".mcp.json",
     ];
     const seen = new Set(samples.map((s) => classifyHazardPath(s)));
     for (const cls of HAZARD_PATH_CLASSES) expect(seen.has(cls)).toBe(true);
@@ -1230,5 +1238,266 @@ describe("an undetermined commit count is never rendered as a determinate one (r
       commits_ahead: -1,
     };
     expect(() => IntegrationWorkerRowSchema.parse(row)).toThrow();
+  });
+});
+
+// ===========================================================================
+// Phase 6 review, findings 4 / 6 / 9 — the rest of the round.
+// ===========================================================================
+
+describe("the pre-merge gate refuses every tree-visible hazard the post-merge scan knows about (review finding 4)", () => {
+  /**
+   * THE POINT OF THIS BLOCK, and it is not the `.mcp.json` row.
+   *
+   * `repo-hazards.ts` (part 4, after the merge) and `HAZARD_PATH_CLASSES`
+   * (part 2, before it) are two independently maintained lists of the same
+   * subject. Finding 4 found them drifted: `.mcp.json` was scanned by the
+   * first and refused by neither — it landed in the operator's tree and was
+   * neutralized only afterwards.
+   *
+   * What made that invisible is worth more than the fix. `.pi/mcp.json` and
+   * `.pi/settings.json`, the two files named alongside it in the finding, were
+   * refused the whole time by `.pi/**`. So the CLASS looked covered from every
+   * angle a reader would check, and exactly one path of the three was through.
+   *
+   * A single test asserting `.mcp.json` is classified would close this
+   * instance and leave the mechanism — two hand-maintained lists — free to
+   * drift again on the next hazard added. This asserts the RELATION instead,
+   * against the exporting module's own list, which is the remedy
+   * `repo-hazards.ts` was already patched into using twice
+   * (`git-config-forms.test.ts` and the `GIT_HARDENING` superset property).
+   */
+  test("every tree-visible hazard path repo-hazards scans is classified by the pre-merge gate", () => {
+    expect(TREE_VISIBLE_HAZARD_PATHS.length).toBeGreaterThan(5);
+    const unrefused = TREE_VISIBLE_HAZARD_PATHS.filter((p) => classifyHazardPath(p) === null);
+    expect(unrefused).toEqual([]);
+  });
+
+  test("the relation is not vacuous — an ordinary path is still unclassified", () => {
+    expect(classifyHazardPath("src/feature.ts")).toBeNull();
+    expect(classifyHazardPath("docs/mcp.json")).toBeNull();
+  });
+
+  test(".mcp.json is refused at the root and ignored when nested, matching the discovery it models", () => {
+    expect(classifyHazardPath(".mcp.json")).toBe(".mcp.json");
+    // Pi discovers from the workspace root; a nested one is never loaded, and
+    // flagging it would be the detector that flags everything.
+    expect(classifyHazardPath("sub/.mcp.json")).toBeNull();
+  });
+
+  test("a worker branch adding .mcp.json is REFUSED before it can reach the operator's tree", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-10", async (dir) => {
+      await writeFile(join(dir, ".mcp.json"), '{"mcpServers":{"x":{"command":"/tmp/x"}}}\n');
+    });
+    const before = await checkoutFingerprint(operator.repo);
+
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-10",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-4-1",
+    });
+
+    expect(result.outcome.kind).toBe("refused_hazard");
+    if (result.outcome.kind !== "refused_hazard") throw new Error("unreachable");
+    expect(result.outcome.hazards.map((h) => h.hazard_class)).toContain(".mcp.json");
+    // Refused BEFORE materialising: the file never touched the operator's tree.
+    expect(await checkoutFingerprint(operator.repo)).toEqual(before);
+    expect(await fileExists(join(operator.repo, ".mcp.json"))).toBe(false);
+  });
+});
+
+describe("the fetch lands in a ref this call owns, not in shared FETCH_HEAD (review finding 6)", () => {
+  /**
+   * `FETCH_HEAD` is ONE file per repository, rewritten by every fetch in that
+   * checkout from any process. Capturing it immediately defended against this
+   * module's own next fetch and against nothing else. The failure it could not
+   * see: a concurrent fetch between this module's fetch and its `rev-parse`
+   * swaps the SHA, and the gate then inspects, merges and RECORDS a head it
+   * never fetched, under this worker's task_id.
+   *
+   * The test below is that exact interleaving, made deterministic — a foreign
+   * fetch is run into the operator's checkout at the moment the window is
+   * open. `head` must still be the worker's branch tip.
+   */
+  test("a concurrent fetch cannot change the head this merge records", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-11", async (dir) => {
+      await writeFile(join(dir, "src", "own.ts"), "export const own = 1;\n");
+    });
+    // A second, unrelated worker whose fetch will be the interloper.
+    const other = await addWorkerFixture(operator, "eng-12", async (dir) => {
+      await writeFile(join(dir, "src", "other.ts"), "export const other = 1;\n");
+    });
+    expect(w.workerHead).not.toBe(other.workerHead);
+
+    // Open the window by hand: fetch ours, let a foreign fetch land, then ask.
+    await git(operator.repo, "fetch", w.remote, `+${w.branch}:refs/pifleet/incoming/eng-11`);
+    await git(operator.repo, "fetch", other.remote, other.branch); // moves FETCH_HEAD
+    const fetchHead = (await git(operator.repo, "rev-parse", "FETCH_HEAD")).trim();
+    const ownedRef = (await git(operator.repo, "rev-parse", "refs/pifleet/incoming/eng-11")).trim();
+
+    // This is the bug, reproduced: FETCH_HEAD now names the OTHER worker.
+    expect(fetchHead).toBe(other.workerHead);
+    // And the owned ref is untouched by it.
+    expect(ownedRef).toBe(w.workerHead);
+  });
+
+  test("the merge records the head it actually fetched, and parks it under refs/pifleet/", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-13", async (dir) => {
+      await writeFile(join(dir, "src", "parked.ts"), "export const parked = 1;\n");
+    });
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-13",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-6-2",
+    });
+    expect(result.head).toBe(w.workerHead);
+    expect((await git(operator.repo, "rev-parse", "refs/pifleet/incoming/eng-13")).trim()).toBe(w.workerHead);
+    // Not a branch and not a tag, so it cannot collide with either.
+    expect(await git(operator.repo, "branch", "--list")).not.toContain("eng-13");
+    expect(await git(operator.repo, "tag", "--list")).not.toContain("eng-13");
+  });
+
+  test("a second merge of the same worker force-updates the ref rather than failing", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-14", async (dir) => {
+      await writeFile(join(dir, "src", "first.ts"), "export const first = 1;\n");
+    });
+    const first = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-14",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-6-3a",
+    });
+    expect(first.outcome.kind).toBe("merged");
+
+    // The worker rewrites its branch — a non-fast-forward tip, the ordinary
+    // case for a worker that amended or rebased.
+    await git(w.workerDir, "reset", "--hard", "HEAD~1");
+    await writeFile(join(w.workerDir, "src", "second.ts"), "export const second = 1;\n");
+    await git(w.workerDir, "add", ".");
+    await git(w.workerDir, "commit", "-q", "-m", "rewritten");
+    const rewritten = (await git(w.workerDir, "rev-parse", "HEAD")).trim();
+
+    const second = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-14",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-6-3b",
+    });
+    expect(second.head).toBe(rewritten);
+  });
+
+  test("a worker id that could not be a safe ref name is refused before it becomes one", async () => {
+    const operator = await setupOperatorRepo();
+    await expect(
+      mergeWorkerBranch({
+        repoRoot: operator.repo,
+        worker: "../../evil",
+        remote: "worker-x",
+        branch: "fleet/testrun/x",
+        taskId: "T-6-4",
+      }),
+    ).rejects.toThrow(IntegrationPreconditionError);
+  });
+});
+
+describe("the integration-branch precondition is checked, not just documented (review finding 9)", () => {
+  test("a checkout with uncommitted changes to tracked files is refused before anything is fetched", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-15", async (dir) => {
+      await writeFile(join(dir, "src", "clean.ts"), "export const clean = 1;\n");
+    });
+    // The operator's own half-finished edit — the interleaving finding 9 names.
+    await writeFile(join(operator.repo, "README.md"), "operator's uncommitted edit\n");
+
+    await expect(
+      mergeWorkerBranch({
+        repoRoot: operator.repo,
+        worker: "eng-15",
+        remote: w.remote,
+        branch: w.branch,
+        taskId: "T-9-1",
+      }),
+    ).rejects.toThrow(IntegrationPreconditionError);
+
+    // Refused before the fetch: nothing was brought in at all.
+    const refs = await git(operator.repo, "for-each-ref", "--format=%(refname)", "refs/pifleet/");
+    expect(refs.trim()).toBe("");
+    // And the operator's edit is exactly where they left it.
+    expect(await readFile(join(operator.repo, "README.md"), "utf8")).toBe("operator's uncommitted edit\n");
+  });
+
+  test("a staged-but-uncommitted change is refused too", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-16", async (dir) => {
+      await writeFile(join(dir, "src", "s.ts"), "export const s = 1;\n");
+    });
+    await writeFile(join(operator.repo, "README.md"), "staged\n");
+    await git(operator.repo, "add", "README.md");
+
+    await expect(
+      mergeWorkerBranch({
+        repoRoot: operator.repo,
+        worker: "eng-16",
+        remote: w.remote,
+        branch: w.branch,
+        taskId: "T-9-2",
+      }),
+    ).rejects.toThrow(/uncommitted change/);
+  });
+
+  test("a detached HEAD is refused, because a merge there lands on no branch", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-17", async (dir) => {
+      await writeFile(join(dir, "src", "d.ts"), "export const d = 1;\n");
+    });
+    await git(operator.repo, "checkout", "-q", "--detach", "HEAD");
+
+    await expect(
+      mergeWorkerBranch({
+        repoRoot: operator.repo,
+        worker: "eng-17",
+        remote: w.remote,
+        branch: w.branch,
+        taskId: "T-9-3",
+      }),
+    ).rejects.toThrow(/detached HEAD/);
+  });
+
+  /**
+   * THE FALSE-POSITIVE GUARD. Git already refuses a merge that would overwrite
+   * an untracked file — measured: exit 2, no MERGE_HEAD, tree untouched. So a
+   * precondition that ALSO rejected untracked files would block a checkout git
+   * itself considers safe, and an operator with a scratch file in the tree
+   * would be told to clean it for no reason.
+   *
+   * Swap `--untracked-files=no` for `--untracked-files=all` and this test goes
+   * red while the three above stay green.
+   */
+  test("an untracked file does NOT block the merge — git already guards that case itself", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-18", async (dir) => {
+      await writeFile(join(dir, "src", "u.ts"), "export const u = 1;\n");
+    });
+    await writeFile(join(operator.repo, "scratch-notes.txt"), "operator's scratch file\n");
+
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-18",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-9-4",
+    });
+    expect(result.outcome.kind).toBe("merged");
+    expect(await readFile(join(operator.repo, "scratch-notes.txt"), "utf8")).toBe("operator's scratch file\n");
   });
 });

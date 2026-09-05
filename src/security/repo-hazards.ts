@@ -39,7 +39,7 @@
  */
 
 import { chmod, lstat, readdir, readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { RepoHazardSchema, type RepoHazard } from "../contracts.ts";
 import { safeForReport } from "../harvest/outbox.ts";
 
@@ -179,6 +179,37 @@ export const CONFIG_HAZARDS: ReadonlyArray<{
  * describes a loaded gun and omits that it is pointed somewhere.
  */
 const ATTRIBUTE_FILES = [join(".git", "info", "attributes"), ".gitattributes"] as const;
+
+/**
+ * Every hazard path in this module that can arrive through a MERGE — i.e. the
+ * ones that live in the tree, as opposed to under `.git/`, which is never
+ * tracked and cannot be delivered by a branch.
+ *
+ * It exists to be COMPARED, not read. `pm-integration.ts` maintains a second,
+ * independent list — the classes its pre-merge gate refuses *before*
+ * materialising anything — and phase 6's review (finding 4) found the two had
+ * drifted: `.mcp.json` was scanned here and neutralized only AFTER landing in
+ * the operator's tree, while every other tree-visible entry was refused up
+ * front. One missing row, and nothing anywhere could have noticed.
+ *
+ * This module has been patched twice for a docstring claiming a coverage
+ * relationship that did not hold, and the remedy both times was to make the
+ * claim checked rather than written — `git-config-forms.test.ts` asserts the
+ * `GIT_HARDENING` superset property that way. This export is the same remedy
+ * for the same class of defect: `pm-integration.test.ts` asserts every path
+ * here is classified by the pre-merge gate, so a hazard added to this module
+ * and forgotten there fails a test instead of quietly widening the window.
+ *
+ * Separators are normalised to `/` because the comparison is against paths as
+ * `git diff --name-only` reports them, which is `/` on every platform.
+ */
+export const TREE_VISIBLE_HAZARD_PATHS: readonly string[] = [
+  ...INSTRUCTION_FILES,
+  ...MCP_FILES,
+  ...PI_SETTINGS_FILES,
+  ...PI_DIRS.map((d) => d.rel),
+  ".gitattributes",
+].map((p) => p.split(sep).join("/"));
 
 /**
  * How deep to look for nested `.gitattributes`.

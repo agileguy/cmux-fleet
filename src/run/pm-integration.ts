@@ -138,6 +138,13 @@ export const HAZARD_PATH_CLASSES = [
   ".agents/skills/**",
   ".gitattributes",
   ".github/workflows/**",
+  // Added 2026-09-05 for finding 4. `repo-hazards.ts` has scanned `.mcp.json`
+  // all along, so a worker branch adding one was NOT refused before the merge
+  // — it landed in the operator's tree and was only neutralized afterwards.
+  // Its sibling `.pi/mcp.json` was refused the whole time, by `.pi/**`, which
+  // is what made the gap invisible: the class LOOKED covered. The drift is now
+  // a checked relation, not a remembered one — see `TREE_VISIBLE_HAZARD_PATHS`.
+  ".mcp.json",
 ] as const;
 export type HazardPathClass = (typeof HAZARD_PATH_CLASSES)[number];
 
@@ -170,6 +177,11 @@ const HAZARD_PATH_RULES: readonly HazardPathRule[] = [
     hazardClass: ".github/workflows/**",
     matches: (p) => p === ".github/workflows" || p.startsWith(".github/workflows/"),
   },
+  // Root-level only, matching `repo-hazards.ts`'s own reasoning for the
+  // instruction files: discovery runs from the workspace root, so a nested
+  // `.mcp.json` is never loaded and flagging it would be the detector that
+  // flags everything.
+  { hazardClass: ".mcp.json", matches: (p) => p === ".mcp.json" },
 ];
 
 /** Classify one repo-relative path (as `git diff --name-only` reports it), or `null` if it is not a hazard. */
@@ -369,6 +381,79 @@ export interface MergeWorkerBranchResult {
 }
 
 /**
+ * The operator's checkout is not in a state this module may merge into
+ * (§6.2 — finding 9 from phase 6's review round).
+ *
+ * Thrown rather than returned as a per-worker outcome, on
+ * `HostPathOutsideRepositoryError`'s precedent: a checkout that fails this
+ * test fails it for EVERY worker in the batch, so recording one refusal row
+ * and carrying on would produce a record whose remaining rows are all equally
+ * unsafe and none of them says so.
+ */
+export class IntegrationPreconditionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IntegrationPreconditionError";
+  }
+}
+
+/**
+ * Check what the docblock used to only assert (finding 9).
+ *
+ * `MergeWorkerBranchInput.repoRoot` was documented as "the operator's own
+ * checkout — must be sitting ON the integration branch" and nothing verified
+ * a word of it. The review put the consequence precisely: *"A dirty tree
+ * merges whenever paths don't overlap, interleaving worker content with the
+ * operator's uncommitted edits."* An instruction is not a mechanism — the
+ * same sentence ISC-530 was filed over.
+ *
+ * ## Two checks, and why not a third
+ *
+ * **Detached HEAD** — a merge here would land on no branch at all, and the
+ * merge commit would be reachable from nothing the moment anything else is
+ * checked out. `symbolic-ref --quiet HEAD` is the question asked directly.
+ *
+ * **Uncommitted changes to TRACKED files** — staged or unstaged. This is the
+ * interleaving the finding names: the operator's half-finished edit to one
+ * file ends up in the tree on top of a merge commit they did not intend to
+ * author with it.
+ *
+ * **Untracked files are deliberately NOT checked**, and that is not laziness.
+ * Git already refuses a merge that would overwrite one — measured: a merge
+ * whose incoming tree adds a path the operator holds untracked exits 2 and
+ * writes no MERGE_HEAD at all. So untracked files are already protected by
+ * the thing doing the merging, and refusing on them here would reject a
+ * checkout git itself considers safe. `--untracked-files=no` is the whole
+ * difference between a precondition that guards the harm and one that also
+ * blocks the operator for having a scratch file in the tree.
+ *
+ * The integration BRANCH's name is not checked, because this function is not
+ * told it — `mergeWorkerBranch` takes a repo root, and the branch identity
+ * lives in the integration record. "On a branch, and clean" is the part of
+ * the precondition that is both knowable here and load-bearing.
+ */
+async function assertMergePreconditions(repoRoot: string): Promise<void> {
+  const symref = await spawnGit(repoRoot, ["symbolic-ref", "--quiet", "HEAD"]);
+  if (symref.code !== 0) {
+    throw new IntegrationPreconditionError(
+      `refused: ${repoRoot} has a detached HEAD, so a merge here would land on no branch — ` +
+        "check out the integration branch before merging worker branches into it",
+    );
+  }
+  const dirty = await spawnGit(repoRoot, ["status", "--porcelain", "--untracked-files=no"]);
+  if (dirty.code !== 0) throw new IntegrationGitError("git status --porcelain", dirty);
+  const changed = dirty.stdout.split("\n").filter((l) => l.trim().length > 0);
+  if (changed.length > 0) {
+    throw new IntegrationPreconditionError(
+      `refused: ${repoRoot} has ${changed.length} uncommitted change(s) to tracked files, and a ` +
+        "merge would interleave them with the worker's content in a commit you did not author " +
+        `them into — commit or stash first. Changed: ${changed.slice(0, 5).join(", ")}` +
+        (changed.length > 5 ? ` (+${changed.length - 5} more)` : ""),
+    );
+  }
+}
+
+/**
  * The local filesystem path a `worker-<id>` remote points at, or `null` when
  * the remote is not a plain local path.
  *
@@ -376,6 +461,30 @@ export interface MergeWorkerBranchResult {
  * an scp-style `host:path` is somebody else's filesystem, and this module has
  * no business guessing at it.
  */
+/**
+ * The ref this module fetches a worker's branch INTO (finding 6).
+ *
+ * Under `refs/pifleet/` rather than `refs/heads/` or `refs/remotes/` so it
+ * cannot collide with a branch, a remote-tracking ref, or a tag, and so
+ * `git branch`/`git tag` never show it. Per-worker rather than per-call: it
+ * is useful after the fact to see what was last fetched for a worker, and two
+ * concurrent merges of the SAME worker into the same checkout is not a shape
+ * this module supports for reasons that predate the ref.
+ *
+ * The worker id is re-validated here even though callers pass a `workerId`
+ * elsewhere, because this is the one place a worker id becomes part of a git
+ * REF NAME. `mergeWorkerBranch`'s input types it as a bare `string`, so the
+ * boundary is here or nowhere.
+ */
+function incomingRefFor(worker: string): string {
+  if (!SESSION_ID_RE.test(worker) || worker.length > 64) {
+    throw new IntegrationPreconditionError(
+      `refused: "${worker}" is not a usable worker id, and it would become part of a git ref name`,
+    );
+  }
+  return `refs/pifleet/incoming/${worker}`;
+}
+
 export async function workerCloneLocalPath(repoRoot: string, remote: string): Promise<string | null> {
   const res = await spawnGit(repoRoot, ["remote", "get-url", remote]);
   if (res.code !== 0) return null;
@@ -484,26 +593,47 @@ export async function restoreAfterFailedMerge(repoRoot: string): Promise<{ treeR
  * Fetch one worker's branch and either refuse it, merge it, or report a git
  * failure — never leaving the working tree dirtier than it started.
  *
- * `FETCH_HEAD` is captured into a plain SHA immediately after the fetch and
- * used from then on: two workers merged in sequence would otherwise race on
- * the SAME mutable ref, and there is no reason to hold that risk when
- * `rev-parse FETCH_HEAD` costs one more git spawn.
+ * ## The fetch writes to a ref of its own (finding 6)
+ *
+ * This used to fetch with no refspec and read `FETCH_HEAD`. Capturing that
+ * into a plain SHA immediately was a real improvement over re-reading it, and
+ * it defended against exactly one thing: this module's own next fetch. It
+ * could not defend against anybody else's. `FETCH_HEAD` is ONE file per
+ * repository, rewritten by every fetch in that checkout from any process — the
+ * operator's own terminal, a second scratchpad script, an editor's background
+ * sync. A fetch landing in the window between this module's fetch and its
+ * `rev-parse` swaps the SHA, and the gate then inspects, merges and RECORDS a
+ * head that is not the one it fetched, under this worker's task_id. The record
+ * is the artifact §6.4 step 6 is re-derived from, so that is a wrong answer
+ * written down as a right one.
+ *
+ * `+<branch>:refs/pifleet/incoming/<worker>` gives the fetch a destination no
+ * other git command writes by convention, and the `rev-parse` then asks for
+ * that ref by name. A concurrent fetch cannot move it, because nothing else
+ * names it.
  */
 export async function mergeWorkerBranch(input: MergeWorkerBranchInput): Promise<MergeWorkerBranchResult> {
   const { repoRoot, worker, remote, branch, taskId } = input;
   const baseRef = input.baseRef ?? "HEAD";
 
+  // ---- Part -1: the operator's checkout must be fit to merge into. ----
+  await assertMergePreconditions(repoRoot);
+
   // ---- Part 0: look at the clone git is about to run its SERVER side inside. ----
   const preFetchHazards = await scanWorkerCloneBeforeFetch(repoRoot, remote);
 
-  // ---- Part 1: fetch freely. ----
-  const fetchRes = await spawnGit(repoRoot, ["fetch", remote, branch]);
+  // ---- Part 1: fetch freely, into a ref THIS call owns. ----
+  const incomingRef = incomingRefFor(worker);
+  // `+` forces the update: this ref is a scratch pointer for one merge, and a
+  // previous merge of the same worker leaving a non-fast-forward tip behind is
+  // the ordinary case, not an error.
+  const fetchRes = await spawnGit(repoRoot, ["fetch", remote, `+${branch}:${incomingRef}`]);
   if (fetchRes.code !== 0) {
-    throw new IntegrationGitError(`git fetch ${remote} ${branch}`, fetchRes);
+    throw new IntegrationGitError(`git fetch ${remote} +${branch}:${incomingRef}`, fetchRes);
   }
-  const headRes = await spawnGit(repoRoot, ["rev-parse", "FETCH_HEAD"]);
+  const headRes = await spawnGit(repoRoot, ["rev-parse", incomingRef]);
   if (headRes.code !== 0) {
-    throw new IntegrationGitError("git rev-parse FETCH_HEAD", headRes);
+    throw new IntegrationGitError(`git rev-parse ${incomingRef}`, headRes);
   }
   const head = headRes.stdout.trim();
 
