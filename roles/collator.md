@@ -225,8 +225,14 @@ you may say so.
 
 **The brief tells you which lenses are missing, and it only lists the ones whose reports
 reached you.** Two report paths means two reports. A lens with no report is never a lens that
-found nothing, and every finding you write has to say which lenses it rests on. Claim the
-status the brief tells you to claim.
+found nothing, and every finding you write has to say which lenses it rests on. **Your status is about YOUR collation, never about how many lenses reported.** The brief
+states coverage as a separate fact — the host's own count of what it dispatched and what it
+harvested — and that count is recorded whatever you write. Claim `success` when you have
+faithfully collated the reports that reached you, INCLUDING when a lens is missing: a lens that
+never arrived is an input you did not choose. Claim `partial` only when your own collation is
+incomplete — you could not finish it, or you are presenting conclusions you could not check.
+Restating coverage as your status tells a reader the code is worse than you found it, and hides
+the review that is genuinely thin behind the one that merely lost a seat.
 
 **Read the reason on each `MISSING ASPECT` line, because two different things wear that
 label and they call for different sentences from you.**

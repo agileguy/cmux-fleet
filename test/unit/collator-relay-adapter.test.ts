@@ -1066,7 +1066,7 @@ describe("the fan-out adapter's result mapping", () => {
    * using it would be pinning a state the system can no longer reach, which is
    * worse than not testing the case at all — it reads as coverage.
    */
-  test("a single genuine refusal costs one lens and the collation says `partial`", async () => {
+  test("a single genuine refusal costs one lens and the brief reports 2 of 3 coverage", async () => {
     // The override records for itself: the shared recorder is REPLACED by an
     // override, and a fixture that quietly kept recording would be measuring a
     // call this case never made.
@@ -1098,7 +1098,13 @@ describe("the fan-out adapter's result mapping", () => {
     expect(collation).toBeDefined();
     expect(collation!.taskId).toBe("T1-collate");
     expect(collation!.brief).toContain("MISSING ASPECT: context");
-    expect(collation!.brief).toContain('status: "partial"');
+    // §9 Q6: the lost lens is reported as COVERAGE, and the brief no longer
+    // converts that count into the collator's status. The negative below is the
+    // half that matters — a brief that still handed back `status: "partial"`
+    // would also switch `censusCeiling` off, since it declines on any claim
+    // that is not `success`.
+    expect(collation!.brief).toContain("COVERAGE: 2 of 3 lenses reported");
+    expect(collation!.brief).not.toContain('status: "partial"');
     // The lenses that DID report are not announced as missing — the negative is
     // the half that makes the assertion mean anything.
     expect(collation!.brief).not.toContain("MISSING ASPECT: arch");

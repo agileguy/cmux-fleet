@@ -586,10 +586,37 @@ export type RelayOutcome =
   | {
       kind: "collated";
       collation: RelayDispatch;
-      /** What the collator is told to claim: §6.6's table. */
-      claim: "success" | "partial";
+      /**
+       * COVERAGE — how many lenses reported, counted by the HOST.
+       *
+       * This replaces a `claim: "success" | "partial"` that was handed to the
+       * collator as its envelope status, and §9 Q6 is why. Two different
+       * questions were sharing one word: a COMPLETE review of shaky code and a
+       * BROKEN review of sound code both read `partial`, so the field an
+       * operator scans first was the one field that could not separate *the
+       * console failed* from *the code has problems*.
+       *
+       * **The measured consequence was worse than the ambiguity.**
+       * `censusCeiling` declines on any claim that is not `success`
+       * (`harvest/collation-census.ts`), and the old `claim` told the collator
+       * to write `partial` whenever a lens was missing — so the structural
+       * quality check was switched OFF for exactly the reviews most likely to
+       * be thin, the ones that had just lost a lens. Separating the axes is
+       * what lets that ceiling engage where it was always meant to.
+       *
+       * Counted here rather than asked of the model, because the host is the
+       * only party that knows it: it issued the dispatches and harvested the
+       * replies. `finding_count`'s precedent — a worker-authored number
+       * published beside the counted one so a disagreement can be READ — is
+       * deliberately not followed, because coverage was never the worker's to
+       * claim.
+       */
+      coverage: { reported: number; dispatched: number };
       children: readonly RelayChild[];
-      /** The seats that produced no review. Empty exactly when `claim` is `success`. */
+      /**
+       * The seats that produced no review. Empty exactly when
+       * `coverage.reported === coverage.dispatched`.
+       */
       missing: readonly AspectSeat[];
     }
   /**
@@ -620,7 +647,7 @@ export type RelayOutcome =
       kind: "collation_failed";
       /** The dispatch that did not land, so a caller need not parse the reason. */
       collation: RelayDispatch;
-      claim: "success" | "partial";
+      coverage: { reported: number; dispatched: number };
       children: readonly RelayChild[];
       missing: readonly AspectSeat[];
       reason: string;
@@ -917,12 +944,12 @@ async function fanOut<R>(
   }
 
   const missingSeats = missing.map((c) => ({ worker: c.worker, aspect: c.aspect }));
-  const claim = missing.length === 0 ? "success" : "partial";
+  const coverage = { reported: survived.length, dispatched: children.length };
   const collation: RelayDispatch = {
     worker: sender,
     taskId: collationId,
     title: `Collate the review of ${parent}`,
-    brief: collationBrief(parent, children, claim),
+    brief: collationBrief(parent, children, coverage),
   };
 
   // The collation is dispatched to a COLLATOR, which D7 forbids a REQUEST from
@@ -940,7 +967,7 @@ async function fanOut<R>(
     return {
       kind: "collation_failed",
       collation,
-      claim,
+      coverage,
       children,
       missing: missingSeats,
       reason:
@@ -952,7 +979,7 @@ async function fanOut<R>(
     };
   }
 
-  return { kind: "collated", collation, claim, children, missing: missingSeats };
+  return { kind: "collated", collation, coverage, children, missing: missingSeats };
 }
 
 /**
@@ -1033,7 +1060,7 @@ function missingLensNote(verdict: Verdict, envelope: RelayEnvelopeState | null):
 function collationBrief(
   parent: string,
   children: readonly RelayChild[],
-  claim: "success" | "partial",
+  coverage: { reported: number; dispatched: number },
 ): string {
   const survived = children.filter((c) => c.succeeded);
   const missing = children.filter((c) => !c.succeeded);
@@ -1161,7 +1188,28 @@ function collationBrief(
   }
 
   lines.push("");
-  lines.push(`Write your result envelope with status: ${JSON.stringify(claim)}.`);
+  lines.push(
+    `COVERAGE: ${coverage.reported} of ${coverage.dispatched} lenses reported. That is the host's ` +
+      `own count, taken from what it dispatched and what it harvested, and it is recorded whatever ` +
+      `you write.`,
+  );
+  lines.push("");
+  /**
+   * Status is the COLLATION's, never coverage restated — §9 Q6.
+   *
+   * The instruction is spelled as a rule plus its boundary rather than a value
+   * to copy, because the value it used to carry was a coverage fact wearing a
+   * verdict's clothes. A collator that faithfully collates two reports has done
+   * its work; the lens that never arrived is an input it did not choose and is
+   * already recorded twice, on the line above and in `lenses[].reported`.
+   */
+  lines.push(
+    `Write your result envelope with status "success" if you have faithfully collated the reports ` +
+      `that reached you — INCLUDING when a lens did not report. A missing lens is an input fact, ` +
+      `not a failure of yours, and it is already recorded above and in lenses[].reported. Use ` +
+      `"partial" only when YOUR OWN collation is incomplete: you could not finish it, or you are ` +
+      `presenting conclusions you could not check. Do not restate coverage as your status.`,
+  );
   return lines.join("\n");
 }
 

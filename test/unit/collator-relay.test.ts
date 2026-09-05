@@ -444,7 +444,8 @@ describe("the aspect table (T4, D11, §6.9)", () => {
     const t = new FakeTransport();
     const out = collated(await run(okRequest([{ worker: ARCH }]), t));
 
-    expect(out.claim).toBe("partial");
+    expect(out.coverage.reported).toBeLessThan(out.coverage.dispatched);
+    expect(out.coverage.dispatched - out.coverage.reported).toBe(out.missing.length);
     expect(out.missing.map((s) => s.aspect).sort()).toEqual(["context", "lang"]);
     expect(out.collation.brief).toContain("MISSING ASPECT: context");
     expect(out.collation.brief).toContain("MISSING ASPECT: lang");
@@ -531,7 +532,7 @@ describe("the join and the lattice (T2, §6.6)", () => {
     const t = new FakeTransport();
     const out = collated(await run(ALL_THREE(), t));
 
-    expect(out.claim).toBe("success");
+    expect(out.coverage).toEqual({ reported: 3, dispatched: 3 });
     expect(out.missing).toEqual([]);
     expect(out.collation.worker).toBe(COL);
     expect(out.collation.taskId).toBe("T-collate");
@@ -563,7 +564,8 @@ describe("the join and the lattice (T2, §6.6)", () => {
     const t = new FakeTransport({ verdicts: { "T-context": "failed" } });
     const out = collated(await run(ALL_THREE(), t));
 
-    expect(out.claim).toBe("partial");
+    expect(out.coverage.reported).toBeLessThan(out.coverage.dispatched);
+    expect(out.coverage.dispatched - out.coverage.reported).toBe(out.missing.length);
     expect(out.missing.map((s) => s.aspect)).toEqual(["context"]);
 
     // The load-bearing half. "A brief exists" is satisfied by a brief that says
@@ -582,14 +584,24 @@ describe("the join and the lattice (T2, §6.6)", () => {
     expect(out.collation.brief).not.toContain(replyMountPath("T-context"));
   });
 
-  test("the claimed status is carried where the collator will read it", async () => {
+  test("coverage reaches the collator as a fact, and status is not coverage restated", async () => {
     const t = new FakeTransport({ verdicts: { "T-lang": "blocked" } });
     const out = collated(await run(ALL_THREE(), t));
-    // `partial` can never be lifted back to `success` by anything downstream
-    // (`adjudicate.ts:14`, the combination is `min`), so the honest claim in the
-    // brief is the whole mechanism — there is no second chance to correct it.
-    expect(out.collation.brief).toContain('status: "partial"');
-    expect(out.collation.brief).not.toContain('status: "success"');
+
+    // The host's own count, stated where the collator will read it. Counted
+    // here rather than asked of the model, because the host is the only party
+    // that knows it — it issued the dispatches and harvested the replies.
+    expect(out.coverage).toEqual({ reported: 2, dispatched: 3 });
+    expect(out.collation.brief).toContain("COVERAGE: 2 of 3 lenses reported");
+
+    // §9 Q6: the brief must NOT hand back a status derived from that count.
+    // The old instruction did exactly that — `status: "partial"` whenever any
+    // lens was missing — and the cost was not only that one word answered two
+    // questions. `censusCeiling` declines on any claim that is not `success`,
+    // so a lost lens ALSO switched the structural quality check off, on the
+    // review most likely to need it.
+    expect(out.collation.brief).not.toContain('status: "partial"');
+    expect(out.collation.brief).toContain("Do not restate coverage as your status.");
   });
 
   test("zero succeeded: nothing is collated and the actor records why", async () => {
@@ -624,7 +636,8 @@ describe("the join and the lattice (T2, §6.6)", () => {
     const t = new FakeTransport({ verdicts: { "T-arch": "timed_out", "T-context": "aborted" } });
     const out = collated(await run(ALL_THREE(), t));
 
-    expect(out.claim).toBe("partial");
+    expect(out.coverage.reported).toBeLessThan(out.coverage.dispatched);
+    expect(out.coverage.dispatched - out.coverage.reported).toBe(out.missing.length);
     expect(out.missing.map((s) => s.aspect).sort()).toEqual(["arch", "context"]);
     // Carried through verbatim. Folding a supervisor verdict to `failed` on the
     // way in is the shape of the bug, and it is invisible: it makes the value a
@@ -638,7 +651,8 @@ describe("the join and the lattice (T2, §6.6)", () => {
     const t = new FakeTransport({ dispatchFails: ["T-lang"] });
     const out = collated(await run(ALL_THREE(), t));
 
-    expect(out.claim).toBe("partial");
+    expect(out.coverage.reported).toBeLessThan(out.coverage.dispatched);
+    expect(out.coverage.dispatched - out.coverage.reported).toBe(out.missing.length);
     expect(out.missing.map((s) => s.aspect)).toEqual(["lang"]);
     expect(out.collation.brief).toContain("MISSING ASPECT: lang");
     // The other two were still ISSUED — one pass, not an abort on first error.
@@ -999,6 +1013,6 @@ describe("idempotency is not relay's (the seam)", () => {
 
     expect(second.dispatched.map((d) => d.taskId)).toEqual(first.dispatched.map((d) => d.taskId));
     expect(b.collation.brief).toBe(a.collation.brief);
-    expect(b.claim).toBe(a.claim);
+    expect(b.coverage).toEqual(a.coverage);
   });
 });
