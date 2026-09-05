@@ -767,6 +767,53 @@ describe("SHOULD FIX E: an unreadable run.json must not read as UNBOUNDED", () =
     }
   });
 
+  test("a NEGATIVE ceiling is refused rather than read as no ceiling", async () => {
+    /**
+     * The asymmetric case, and the one the truncation test above cannot reach.
+     * A truncated file fails to PARSE; `-1` parses perfectly and then falls
+     * through `ceiling >= 0` to `null`, which on this axis means UNBOUNDED. So
+     * the run dispatched with no ceiling at all — the exact outcome the reader
+     * refuses for a file it cannot parse, arriving through a file it can.
+     */
+    const base = await mkdtemp(join(tmpdir(), "pifleet-budget-policy-"));
+    try {
+      const run = runPaths("r6-neg", base);
+      await mkdir(dirname(run.runJson), { recursive: true });
+      await writeFile(
+        run.runJson,
+        JSON.stringify({ schema: "pifleet.run/v1", budget: { tokens_ceiling: -1 } }),
+      );
+      const err = await readRunBudgetPolicy(run).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(RunPolicyUnreadableError);
+      expect(String(err)).toContain("UNBOUNDED");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("a ZERO ceiling is a real ceiling and is kept", async () => {
+    /**
+     * The boundary the fix must not swallow. `0` is a budget of nothing, which
+     * is a coherent thing to set, and it is NOT absence — folding it in with
+     * the negatives would refuse a run whose operator budgeted deliberately.
+     */
+    const base = await mkdtemp(join(tmpdir(), "pifleet-budget-policy-"));
+    try {
+      const run = runPaths("r6-zero", base);
+      await mkdir(dirname(run.runJson), { recursive: true });
+      await writeFile(
+        run.runJson,
+        JSON.stringify({ schema: "pifleet.run/v1", budget: { tokens_ceiling: 0 } }),
+      );
+      expect((await readRunBudgetPolicy(run)).tokensCeiling).toBe(0);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
   test("an ABSENT run.json is still unbounded, with nothing to report", async () => {
     // The distinction the refusal above turns on, pinned from the other side.
     // Absence is a legitimate state — a run dir written before these fields

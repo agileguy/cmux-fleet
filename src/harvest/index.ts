@@ -209,6 +209,20 @@ export interface TaskHarvest {
    */
   envelopeRead: OutboxRead["kind"] | null;
   /**
+   * WHY a `refused` envelope was refused — the harvester's own sentence.
+   *
+   * `envelopeRead` alone cannot carry this one arm. A refusal is raised AFTER a
+   * clean parse, so the document exists, is well-formed, and was rejected for
+   * what it SAYS — a task id that is not the one dispatched, a stale epoch, a
+   * path that climbs out of the outbox. Which of those it was is the whole
+   * content of the fact, and a consumer holding only the word `refused` can say
+   * that something was wrong and nothing about what.
+   *
+   * `null` for every other kind, including `refused`'s absence — this is the
+   * reason field for one arm, not a general note.
+   */
+  envelopeRefusal: string | null;
+  /**
    * What `<outbox>/<task-id>/` holds that no reader here opens — names and
    * sizes, never contents. See `harvest/task-outbox.ts` for the measurement.
    *
@@ -296,6 +310,7 @@ function unavailableHarvest(taskId: string, reason: string): TaskHarvest {
     // and held no envelope, which is a claim about the WORKER. This harvest
     // never got that far, so it has no claim to make about one.
     envelopeRead: null,
+    envelopeRefusal: null,
     // Same restraint, same reason. This harvest has no dispatch record, so it
     // never learned which worker's outbox to look in — there is no directory it
     // could have listed. `unlistable` claims nothing, which is the only claim
@@ -1100,6 +1115,7 @@ export async function harvestTask(
       harvestStatus,
       unreadableEnvelope,
       envelopeRead: outbox.kind,
+      envelopeRefusal: outbox.kind === "refused" ? outbox.reason : null,
       taskOutbox,
     };
   });

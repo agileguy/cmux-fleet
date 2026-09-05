@@ -82,7 +82,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { existsSync } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { runsRoot as runsRootEager, runPaths as runPathsEager } from "./paths.ts";
 
 import { SESSION_ID_RE, type Verdict } from "../contracts.ts";
@@ -374,12 +374,30 @@ export function planInlineBudget(
 function relayEnvelopeState(bundle: {
   readonly unreadableEnvelope?: RelayUnreadableEnvelope | null;
   readonly envelopeRead?: "ok" | "missing" | "unreadable" | "refused" | null;
+  readonly envelopeRefusal?: string | null;
 }): RelayEnvelopeState | undefined {
   if (bundle.unreadableEnvelope != null) {
     return { kind: "unreadable", ...bundle.unreadableEnvelope };
   }
   if (bundle.envelopeRead === "missing") return { kind: "absent" };
   if (bundle.envelopeRead === "ok") return { kind: "present" };
+  /**
+   * `refused` USED TO LAND HERE AS `undefined`, and that was the same defect
+   * the `absent` arm was written to fix, one arm over.
+   *
+   * `undefined` on this field means NOTHING LOOKED, and a refusal is the
+   * opposite of that: an envelope was found, parsed, and rejected for what it
+   * said. Collapsing the two gave the strongest signal the console has — a
+   * document that exists and is wrong — the weakest sentence it prints. The
+   * docblock above said the two silences were deliberate, and a docblock does
+   * not bind a reader who branches on `undefined`; the type does.
+   *
+   * `null` still maps to nothing, and that one IS deliberate: no reader looked,
+   * so there is no fact to report.
+   */
+  if (bundle.envelopeRead === "refused") {
+    return { kind: "refused", reason: bundle.envelopeRefusal ?? null };
+  }
   return undefined;
 }
 
@@ -396,7 +414,18 @@ export type RelayEnvelopeState =
    * carrying only a reason string would be prose with a type annotation, and the
    * note built from it would be as unfalsifiable as the one this replaces.
    */
-  | ({ readonly kind: "unreadable" } & RelayUnreadableEnvelope);
+  | ({ readonly kind: "unreadable" } & RelayUnreadableEnvelope)
+  /**
+   * An envelope EXISTS, PARSED, and was rejected for what it says.
+   *
+   * Distinct from `unreadable` on the axis that decides what an operator does
+   * next: an unreadable envelope is a transport or serialisation fault and the
+   * review may be recoverable off disk, while a refused one is a well-formed
+   * document making a claim the console will not accept — a foreign task id, a
+   * stale epoch, a path climbing out of the outbox. `reason` is the harvester's
+   * own sentence and is `null` only when the refusal reached here without one.
+   */
+  | { readonly kind: "refused"; readonly reason: string | null };
 
 /**
  * THE HARVESTER'S OWN DESCRIPTION OF AN UNREADABLE ENVELOPE, spelled
@@ -1174,6 +1203,13 @@ function missingLensNote(
         `it settled \`${verdict}\` and produced no report — no result envelope exists for it` +
         `${outboxClause(outbox)}`
       );
+    case "refused":
+      return (
+        `it settled \`${verdict}\` and its report WAS WRITTEN AND WAS REFUSED` +
+        `${envelope.reason === null ? "" : `: ${envelope.reason}`}. The document parsed — this is ` +
+        `a review the console declined to accept, not a reviewer that found nothing and not a ` +
+        `file it could not read${outboxClause(outbox)}`
+      );
     case "present":
       return (
         `it settled \`${verdict}\`; its result envelope was readable, and no report reached the ` +
@@ -1523,13 +1559,25 @@ export interface RelayHarvestView {
    * outcome — `harvest/outbox.ts` keeps it separate precisely because a
    * traversal attempt or a stale epoch is a document rejected for WHAT IT IS,
    * not one that could not be read — and none of `present`, `absent` or
-   * `unreadable` is true of it. Declining there is the same discipline that
-   * kept `absent` unreached until it could be earned.
+   * `unreadable` is true of it.
+   *
+   * **IT NOW HAS ITS OWN ARM RATHER THAN BEING DECLINED**, and the correction
+   * is worth keeping because the first version of this comment argued the
+   * opposite. Declining was right about the taxonomy — a refusal really is none
+   * of the other three — and wrong about what to do next: mapping it to
+   * `undefined` did not record "no arm fits", it recorded "nothing looked",
+   * which is the one thing that is definitely false about a document the
+   * console read and rejected. The fix was a fourth arm, not a fourth silence.
    *
    * Optional so `TaskHarvest` satisfies this interface both before and after the
    * field landed.
    */
   readonly envelopeRead?: "ok" | "missing" | "unreadable" | "refused" | null;
+  /**
+   * `TaskHarvest.envelopeRefusal` — the reason behind a `refused`, by its own
+   * name. Optional on the same terms as the field above.
+   */
+  readonly envelopeRefusal?: string | null;
   /**
    * `TaskHarvest.taskOutbox` — the harvester's own field, by its own name.
    *
@@ -2645,15 +2693,50 @@ export const productionRelayEffects: RelayEffects = {
     }
     let handle: Awaited<ReturnType<typeof import("node:fs/promises").open>> | null = null;
     try {
-      const st = await lstat(hostPath);
-      if (st.isSymbolicLink()) return { text: "", unreadable: "it is a symlink" };
+      /**
+       * ONE RESOLUTION OF THIS PATH, NOT TWO — and that is the whole change.
+       *
+       * This used to `lstat` for a symlink and then `open` the same path. The
+       * two calls resolve the name INDEPENDENTLY, and the directory between
+       * them belongs to the worker whose artifact this is: a container that
+       * replaces its own `review.md` with a symlink after the `lstat` and
+       * before the `open` is read at the target instead. `isPathUnder` does not
+       * catch it, because that check is over the path the manifest NAMED, not
+       * over whatever the name resolves to at open time. The reachable target
+       * that matters is `control-auth.json` at the run root, which a relative
+       * link climbs to with `..` — the control-socket credential, inlined into
+       * a brief and handed to whichever vendor holds the collator seat.
+       *
+       * The window cannot be narrowed into safety, because the attacker sets
+       * the pace: renaming in a loop costs a container nothing and it only has
+       * to win once. So the window is REMOVED instead. `O_NOFOLLOW` refuses a
+       * final component that is a symlink at the moment of the open, and every
+       * fact used afterwards comes from `fstat` on the returned handle — the
+       * inode that was actually opened, which nothing can swap under us. There
+       * is no second name resolution left to race.
+       *
+       * `O_NONBLOCK` stays, and stays for its original reason: `open` on a FIFO
+       * blocks forever, which would wedge the actor exactly the way the
+       * unbounded join would have.
+       *
+       * ELOOP is mapped back to the original sentence rather than surfaced as
+       * an errno, because the refusal is a VALUE the brief prints and "it is a
+       * symlink" is what a reader needs. A raw `ELOOP` would also be the one
+       * refusal whose wording depended on which kernel ran it.
+       */
+      handle = await open(
+        hostPath,
+        constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+      );
+      const st = await handle.stat();
       if (!st.isFile()) return { text: "", unreadable: "it is not a regular file" };
-      // O_NONBLOCK so a FIFO answers instead of blocking the actor forever.
-      handle = await open(hostPath, constants.O_RDONLY | constants.O_NONBLOCK);
       const buf = Buffer.alloc(maxBytes);
       const { bytesRead } = await handle.read(buf, 0, maxBytes, 0);
       return { text: buf.subarray(0, bytesRead).toString("utf8"), unreadable: null };
     } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ELOOP") {
+        return { text: "", unreadable: "it is a symlink" };
+      }
       return { text: "", unreadable: err instanceof Error ? err.message : String(err) };
     } finally {
       await handle?.close().catch(() => undefined);

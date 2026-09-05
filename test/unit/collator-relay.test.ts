@@ -792,10 +792,12 @@ describe("an unreadable envelope is a transport failure, not a silent reviewer",
      * `fanOut` publishes a reply only for a lens that SUCCEEDED, so a lens with
      * a perfectly readable envelope and a `failed` verdict has a report that
      * exists and did not travel. *"Produced no report"* is false there too —
-     * the same defect in its second-most-likely form. The production adapter
-     * cannot emit `present` today (see `RelayHarvestView.unreadableEnvelope`),
-     * so this probe grades the core's vocabulary rather than a live path, and
-     * is what stops that vocabulary rotting before the seam widens.
+     * the same defect in its second-most-likely form. **This probe used to say
+     * the production adapter could not emit `present`; that stopped being true
+     * when `envelopeRead` began carrying the harvester's own taxonomy, and the
+     * arm now has live traffic.** It is kept because the vocabulary is still
+     * what it grades, and a probe that outlives the seam it was written ahead
+     * of is the cheap half of not letting that vocabulary rot.
      */
     const t = new FakeTransport({
       verdicts: { "T-lang": "failed" },
@@ -822,6 +824,34 @@ describe("an unreadable envelope is a transport failure, not a silent reviewer",
     // harvest looked for and did not find, "produced no report" is a FACT and
     // weakening it everywhere would be the opposite over-correction.
     expect(ctxLine).toContain("produced no report");
+  });
+
+  test("a REFUSED envelope says so, and borrows neither neighbour's wording", async () => {
+    /**
+     * The fourth arm, graded against both of its neighbours at once.
+     *
+     * A refusal is a document that EXISTS and PARSED and was rejected for what
+     * it claims. Saying "produced no report" of it is false in the same way as
+     * for `unreadable`; saying "could not be read" is false in a new way, and
+     * would send an operator to fix a parser when the file parses. The reason
+     * has to survive, because "refused" without it names a problem and not the
+     * problem.
+     */
+    const t = new FakeTransport({
+      verdicts: { "T-lang": "failed" },
+      envelopes: {
+        "T-lang": { kind: "refused", reason: "epoch 2 is stale; the run is on epoch 3" },
+      },
+    });
+    const lang = collated(await run(ALL_THREE(), t)).children.find((c) => c.aspect === "lang");
+
+    expect(lang?.note).toContain("WAS REFUSED");
+    expect(lang?.note).toContain("epoch 2 is stale; the run is on epoch 3");
+    // Not the absent sentence: something WAS produced.
+    expect(lang?.note).not.toContain("produced no report");
+    // Not the unreadable sentence: it parsed. This is the assertion that fails
+    // if someone folds `refused` back in with `unreadable` for convenience.
+    expect(lang?.note).not.toContain("COULD NOT BE READ");
   });
 
   test("the two lines differ, and the verdict cannot be what told them apart", async () => {

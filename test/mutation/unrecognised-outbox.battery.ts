@@ -255,10 +255,8 @@ const MUTATIONS: M[] = [
     id: "M18",
     what: "WIRING: the listing is computed and never attached, so the relay gets nothing",
     file: HARV,
-    find:
-      "    return { harvest, facts: factsWithHarness, harvestStatus, unreadableEnvelope, taskOutbox };",
-    replace:
-      "    return {\n      harvest,\n      facts: factsWithHarness,\n      harvestStatus,\n      unreadableEnvelope,\n      taskOutbox: { kind: \"unlistable\" as const },\n    };",
+    find: "      taskOutbox,",
+    replace: "      taskOutbox: { kind: \"unlistable\" as const },",
     expect: "red",
   },
   {

@@ -191,28 +191,25 @@ const MUTATIONS: M[] = [
     id: "E12",
     what: "ADAPTER: the harvester's envelope classification is dropped on the floor",
     file: CORE,
-    find:
-      "        envelope:\n          bundle.unreadableEnvelope != null\n            ? { kind: \"unreadable\", ...bundle.unreadableEnvelope }\n            : undefined,",
-    replace: "        envelope: undefined,",
+    find: "envelope: relayEnvelopeState(bundle),",
+    replace: "envelope: undefined,",
     expect: "red",
   },
   {
     id: "E13",
     what: "ADAPTER: `null` is turned into manufactured evidence that no envelope existed",
     file: CORE,
-    find:
-      "            ? { kind: \"unreadable\", ...bundle.unreadableEnvelope }\n            : undefined,",
-    replace:
-      "            ? { kind: \"unreadable\", ...bundle.unreadableEnvelope }\n            : { kind: \"absent\" as const },",
+    find: "  return undefined;",
+    replace: "  return { kind: \"absent\" as const };",
     expect: "red",
   },
   {
     id: "E14",
     what: "ADAPTER: the harvester's fields are paraphrased instead of carried",
     file: CORE,
-    find: "            ? { kind: \"unreadable\", ...bundle.unreadableEnvelope }",
+    find: "    return { kind: \"unreadable\", ...bundle.unreadableEnvelope };",
     replace:
-      "            ? {\n                kind: \"unreadable\" as const,\n                path: bundle.unreadableEnvelope.path,\n                bytes: 0,\n                code: bundle.unreadableEnvelope.code,\n                detail: bundle.unreadableEnvelope.detail,\n              }",
+      "    return {\n      kind: \"unreadable\" as const,\n      path: bundle.unreadableEnvelope.path,\n      bytes: 0,\n      code: bundle.unreadableEnvelope.code,\n      detail: bundle.unreadableEnvelope.detail,\n    };",
     expect: "red",
   },
   {

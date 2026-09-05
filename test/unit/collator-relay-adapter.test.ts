@@ -60,6 +60,13 @@
  */
 import { describe, expect, test } from "bun:test";
 
+import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { stripComments } from "../support/source-structure.ts";
+
 import type { Verdict } from "../../src/contracts.ts";
 import type { RunPaths } from "../../src/run/paths.ts";
 import {
@@ -75,6 +82,7 @@ import {
   MAX_REPLY_ARTIFACT_BYTES,
   MAX_REPLY_INLINE_BYTES,
   planInlineBudget,
+  productionRelayEffects,
   relayFanOut,
   resolveConsoleRuns,
   type InlinedArtifact,
@@ -796,15 +804,58 @@ describe("harvest", () => {
     expect(got.envelope).toEqual({ kind: "present" });
   });
 
-  test("a refusal is none of the three states, so it claims nothing", async () => {
+  test("a refusal gets its OWN arm, and is never reported as nothing-looked", async () => {
     /**
-     * `harvest/outbox.ts` keeps `refused` separate BECAUSE it is not a
-     * readability outcome: a traversal attempt, an oversized file or a stale
-     * epoch is a document rejected for what it is, not one that could not be
-     * read. None of `present`, `absent` or `unreadable` is true of it, so the
-     * adapter declines — the same discipline that kept `absent` unreached until
-     * a fact could earn it.
+     * **THIS TEST USED TO ASSERT THE DEFECT.** It required `undefined` on the
+     * ground that a refusal is none of `present`, `absent` or `unreadable` —
+     * correct about the taxonomy, wrong about the consequence. `undefined` on
+     * this field is not a neutral "no arm fits"; it is read downstream as
+     * NOTHING LOOKED, so the strongest signal the console has — a document it
+     * read, parsed and rejected — printed the weakest sentence it owns. The
+     * answer to a fact that fits no arm is a new arm, not a silence.
      */
+    const { fx } = effects({
+      async harvestTask() {
+        return {
+          harvest: { verdict: "failed" as Verdict },
+          unreadableEnvelope: null,
+          envelopeRead: "refused" as const,
+          envelopeRefusal: "task_id names R-other, not the dispatched task",
+        };
+      },
+    });
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+
+    expect(got.envelope).toEqual({
+      kind: "refused",
+      reason: "task_id names R-other, not the dispatched task",
+    });
+    // The distinction the arm exists to make: still not the other three, and
+    // emphatically not the silence that means no reader ever looked.
+    expect(got.envelope).not.toBeUndefined();
+    expect(got.envelope).not.toEqual({ kind: "absent" });
+    expect(got.envelope).not.toEqual({ kind: "present" });
+  });
+
+  test("`null` STILL means nothing looked — the silence that survives", async () => {
+    /**
+     * The control for the test above. Widening `refused` into an arm must not
+     * widen the genuine no-information case with it, or the fix trades one
+     * conflation for another.
+     */
+    const { fx } = effects({
+      async harvestTask() {
+        return {
+          harvest: { verdict: "failed" as Verdict },
+          unreadableEnvelope: null,
+          envelopeRead: null,
+        };
+      },
+    });
+    expect((await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref)).envelope).toBeUndefined();
+  });
+
+  test("a refusal that arrived without a reason still gets the arm", async () => {
     const { fx } = effects({
       async harvestTask() {
         return {
@@ -815,10 +866,7 @@ describe("harvest", () => {
       },
     });
     const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
-
-    expect(got.envelope).toBeUndefined();
-    expect(got.envelope).not.toEqual({ kind: "absent" });
-    expect(got.envelope).not.toEqual({ kind: "present" });
+    expect(got.envelope).toEqual({ kind: "refused", reason: null });
   });
 });
 
@@ -2007,5 +2055,84 @@ describe("truncation in the collation brief", () => {
     expect(brief).not.toContain("Do not present a conclusion drawn from a truncated");
     // The brief is otherwise intact.
     expect(brief).toContain("3 produced a report");
+  });
+});
+
+/**
+ * `readArtifact` resolves the artifact's path ONCE.
+ *
+ * **THE RACE THIS CLOSES CANNOT BE FORCED FROM A UNIT TEST, AND THAT IS STATED
+ * RATHER THAN DISGUISED.** The defect was `lstat`-then-`open` on the same
+ * name: two independent resolutions with a worker-writable directory between
+ * them, so a container that swaps its own artifact for a symlink in the gap is
+ * read at the target. Every STATIC input gives the old code and the new code
+ * the same answer — a symlink is refused either way, once by `lstat` and once
+ * by `O_NOFOLLOW` — because the fix changes only what happens when the name
+ * changes mid-call, and a test cannot schedule itself into that window.
+ *
+ * So the behavioural cases below are REGRESSION cover: they pin that removing
+ * the `lstat` did not widen any refusal. What pins the fix itself is the
+ * structural assertion, on `monitor-density.test.ts`'s precedent in this repo —
+ * a weaker check that fails on exactly the regression that matters, chosen
+ * deliberately over a stronger one that cannot be written.
+ */
+describe("readArtifact resolves the path once", () => {
+  const outboxFor = async (): Promise<{ root: string; dir: string }> => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-artifact-"));
+    const dir = join(root, "outbox", "rev-lang-1", "T-1", "files");
+    await mkdir(dir, { recursive: true });
+    return { root, dir };
+  };
+  const read = (root: string, p: string) =>
+    productionRelayEffects.readArtifact({ root } as RunPaths, "rev-lang-1", p, 4096);
+
+  test("a regular file in the worker's own outbox is read", async () => {
+    const { root, dir } = await outboxFor();
+    const p = join(dir, "review.md");
+    await writeFile(p, "the review body");
+    expect(await read(root, p)).toEqual({ text: "the review body", unreadable: null });
+  });
+
+  test("a symlink is refused and the target's bytes do not escape", async () => {
+    const { root, dir } = await outboxFor();
+    const secret = join(root, "control-auth.json");
+    await writeFile(secret, '{"token":"SHOULD-NEVER-BE-INLINED"}');
+    const p = join(dir, "review.md");
+    // The relative climb a container writes from inside its own /outbox.
+    await symlink("../../../../control-auth.json", p);
+
+    const got = await read(root, p);
+    expect(got.unreadable).toBe("it is a symlink");
+    expect(got.text).toBe("");
+    expect(JSON.stringify(got)).not.toContain("SHOULD-NEVER-BE-INLINED");
+  });
+
+  test("a directory is refused as not a regular file", async () => {
+    const { root, dir } = await outboxFor();
+    expect((await read(root, dir)).unreadable).toBe("it is not a regular file");
+  });
+
+  test("a path outside the worker's outbox is refused before anything is opened", async () => {
+    const { root } = await outboxFor();
+    const secret = join(root, "control-auth.json");
+    await writeFile(secret, '{"token":"SHOULD-NEVER-BE-INLINED"}');
+    const got = await read(root, secret);
+    expect(got.unreadable).toBe("it is not inside rev-lang-1's outbox");
+    expect(JSON.stringify(got)).not.toContain("SHOULD-NEVER-BE-INLINED");
+  });
+
+  test("the open carries O_NOFOLLOW and nothing stats the NAME beforehand", () => {
+    const src = readFileSync("src/run/relay.ts", "utf8");
+    const start = src.indexOf("async readArtifact(");
+    const body = stripComments(src.slice(start, src.indexOf("async writeReply(", start)));
+    expect(start).toBeGreaterThan(0);
+    // The flag is what refuses a swapped name at the moment of the open.
+    expect(body).toContain("O_NOFOLLOW");
+    // The FIFO refusal this inherited must not be lost to the rewrite.
+    expect(body).toContain("O_NONBLOCK");
+    // A second resolution of the same name is the defect itself; every fact
+    // after the open must come from the HANDLE.
+    expect(body).not.toContain("lstat");
+    expect(body).toContain("handle.stat()");
   });
 });
