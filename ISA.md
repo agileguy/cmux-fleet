@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 501/514
+progress: 502/515
 retired: 2
 mode: build
 started: 2026-07-27
@@ -4735,3 +4735,65 @@ for want of one, and a block that inherited that wall would be a block that coul
 - [x] ISC-521: A refusal a caller must act on is recognisable as a RULE, not as a sentence. *Probe: a `writeReply` into a run whose collator has no replies directory rejects with a `RelayReplyError` carrying the collator, the child task id and the directory as FIELDS, with the original `ENOENT` as `cause` — asserted on the fields, so a rewrite of the message cannot break the test and cannot silently break a caller either.* **[FILED AND CLOSED 2026-09-05, from the second dogfood run's reading of the publish path.]** D6 has exactly one failure mode and the console is right to let it propagate: `pifleet up` creates the `/replies` source before `docker run` because **Docker CREATES a missing bind-mount source instead of refusing**, so an adapter that helpfully made the directory would deliver three reports into somewhere nothing is mounted from — the host would record a delivered fan-out, the collator would read an empty `/replies`, and every observable would say it worked. That reasoning is unchanged. What changed is that the refusal threw a bare `Error` carrying a paragraph, so the only way to recognise it was to substring-match the paragraph — **the exact practice `RelayDispatchError`'s own docblock forbids two hundred lines up**, in a module that states the rule and had not applied it to itself. The paragraph is the part most likely to be rewritten; the type and its three fields are not.
 - [x] ISC-522: A LENS THE HOST COULD NOT READ IS QUARANTINED WITH A POINTER, never merely mourned. *Probe: a harvest that throws rejects with a `RelayHarvestError` carrying a task-outbox listing taken at the moment of failure; the child gets `harvestFailed: true` and that listing; the note names the entries and sends a reader to `result.json` and `files/`; the collation brief emits its own HARVEST FAILED block once, distinct from the unreadable and refused blocks, each naming its own aspect. Twelve mutations, 0 unexpected, including the reuse of the successful-harvest clause and a successful harvest flagged as failed.* **[FILED AND CLOSED 2026-09-05.]** This is the third link of ISC-517's chain and the arm where NOTHING is read — a torn `state.json`, an unreadable inbox record, a `git` that would not run. The console recorded why the lens was lost and stopped: `envelope: null`, `outbox: null`, one sentence, and a review possibly sitting complete in a directory nothing named. **The asymmetry is what makes it obvious in hindsight:** a REFUSED envelope has carried an outbox listing all along, because its harvest succeeds and the listing arrives with the bundle — so the one case where nothing at all was read was the one case that named nothing at all. **The listing is possible precisely because it shares no input with the thing that failed:** `listTaskOutbox` reads `workerOutboxDir` and `taskId` and touches neither the inbox envelope, the epoch, nor the worktree, so it answers when the harvester cannot. It is taken in the ADAPTER, since deriving a host path is what `relay.ts`'s header keeps out of the core, and rides back on the rejection as a field. **A RETRY IS DELIBERATELY NOT THE FIX**: `relayPass` re-runs, ids are derived and an unjournalled pass re-issues, so the retry exists one layer up, and doing it here would spend a second 30-minute settle on a serial actor. **AND THE FIRST VERSION OF THE NOTE WAS WRONG IN THE REASSURING DIRECTION** — it reused `outboxClause`, whose `empty` arm says the outbox "holds nothing besides what the harvest already reads, so there is no other file to look in". `listTaskOutbox` filters the recognised names out, so `empty` means *no unexpected entries*, and after a failed harvest the likeliest thing sitting unread is `result.json` itself. One clause told an operator not to look at the exact moment they should; H4/H5/H6 grade the three arms it corrupted.
 - [x] ISC-523: THE ARTIFACT A REVIEWER WROTE REACHES THE READER, not only its digest. *Probe: the harvester's own bundle type must satisfy the relay's view at the level `HarvestSchema` puts artifacts — a compiler-only assignment, so a move or rename reddens rather than empties; plus the inline round trip over a fixture shaped like the real schema.* **[FILED AND CLOSED 2026-09-05, from the review console's own reading of this branch — its "what was not covered" section rather than any finding.]** `RelayHarvestView` declared the list at `harvest.artifacts?`, one level too high and OPTIONAL. `HarvestSchema` puts artifacts under `derived`, beside `files_changed`, because they are the harvester's measurement of the filesystem rather than the worker's claim — so every real bundle answered `undefined`, `?? []` turned that into an empty list, and **the inline path had never carried a byte in any run this console has done.** The docblock over it says *"a digest is what you carry when the thing itself is somewhere the reader can get to; here it is not, so the thing itself travels"*; three reviewers wrote 10,021, 10,743 and 11,863 bytes and the collator was handed three `sha256`es. Confirmed on the live reply before changing anything. **THE `?` IS WHY THE COMPILER WAS SILENT** — an optional field a real bundle simply lacks satisfies the interface — **and the FIXTURES are why the tests were**: every one of them spelled the list at the same wrong level the adapter read it from, so fixture and code agreed with each other and neither agreed with the schema. That is this branch's recurring defect class exactly, found in the mechanism written to defeat it. Both levels are required now, sixteen fixtures were re-shaped to the schema, and the seam is pinned by a compiler-only assignment on `RelayUnreadableEnvelope`'s precedent.
+
+- [x] ISC-524: THE PYTHON TOOLCHAIN IMAGE CARRIES A FUNCTIONAL BUN, not merely an installed one. *Probe: `docker run --rm --entrypoint bun <tag> --version` prints a bun version, and the same override prints versions for `python3`, `uv`, `ruff`, `mypy` and `node` — six overrides, because the claim is that `python` is a strict SUPERSET of `node` and a probe that checks only python cannot see the half that regressed.* **[FILED AND CLOSED 2026-09-05, Phase 0.1 of SRD-FLEET-PM-001.]** Measured on `pifleet/pi-worker:0.79.6-python-c3a3a1fe1e2e`: bun 1.3.12, Python 3.11.2, uv 0.12.9, ruff 0.16.6, mypy 2.3.1, node v24.20.0. `docker/Dockerfile:145` is `FROM toolchain-node AS toolchain-python`, so the superset is structural rather than a coincidence of ordering, and `:118-119`'s explicit postinstall is what makes bun functional rather than present. **THE SRD'S OWN ACCEPTANCE FOR THIS TASK IS A DECORATIVE PROBE AND WAS REPLACED.** §13 task 0.1 specifies `docker run --rm <tag> bun --version`; the image declares `ENTRYPOINT ["/usr/bin/tini","--","/usr/local/bin/pifleet-entrypoint"]` and `CMD=null`, so the arguments are consumed by the entrypoint and the command prints **`0.79.6`** — pifleet's version — for `bun --version`, for `python3 --version` and for `uv --version` alike. Three different tools, one identical answer, and every one of them "a version". The criterion passes unchanged on an image with no bun in it at all; `--entrypoint` is what makes it a measurement.
+
+## 2026-09-05 — SRD-FLEET-PM-001 Phase 0: two measurements the design rests on
+
+**Phase 0 writes no product code.** It exists so that later phases argue from measurement rather
+than from this document's prose. Both measurements below contradict something the SRD asserts, which
+is the point of taking them.
+
+### 0.2 — the container git-identity symptom is a REFUSAL, not an invented identity
+
+Measured against the live `eng-1` container (`pifleet-2026-09-05T01-15-33Z-9253-eng-1`), uid 10001:
+
+```
+git -C /workspace config --get user.email   -> exit 1, no output
+git -C /workspace config --get user.name    -> exit 1, no output
+git commit --allow-empty (throwaway /tmp repo):
+  fatal: unable to auto-detect email address (got 'pi@edf6548c4eca.(none)')
+  exit 128
+HOME=/home/pi, NOT writable   -> `git config --global` is unavailable
+GIT_CONFIG_COUNT=1            -> worker-env.ts delivers safe.directory and nothing else
+/workspace is drwxrwxrwx      -> a repository-local identity IS self-configurable by the worker
+```
+
+**What this settles.** D13's two arms both remain available: the worker can set a repo-local identity
+today (arm 1, no code), and `GIT_CONFIG_COUNT` can carry one (arm 2, the durable fix). What it
+*changes* is the symptom a reader will have seen. **SRD §12 records the failure as an invented
+identity — *"a probe worker committed as `eng-1 <eng-1@pifleet.invalid>`"*.** On this operator's
+image no commit is written at all: git refuses at 128 and the tree is untouched. The distinction
+matters for Phase 2's criterion, because a criterion asserting only *that a commit exists* passes
+the invented-identity failure and fails this one — the two symptoms need the same probe for opposite
+reasons, and only an assertion on the **exact author value** covers both.
+
+### 0.3 — the `worker-<id>` remotes in this repository point at yesterday's clones
+
+§6.2's integration path is *"the host fetches the worker's branch through `worker-<id>`"*. Measured
+in `~/repos/cmux-fleet` on 2026-09-05:
+
+```
+worker-eng-1 -> ~/.pifleet/runs/2026-09-04T03-04-12Z-ce9f/worktrees/eng-1
+worker-eng-2 -> ~/.pifleet/runs/2026-09-04T03-04-12Z-5a52/worktrees/eng-2
+worker-tst-1 -> ~/.pifleet/runs/2026-09-04T03-51-39Z-2583/worktrees/tst-1
+
+live development console runs:  2026-09-05T01-15-{33,34,36}Z
+live eng-1 clone contains:      pyproject.toml, tests/, LICENSE.md  (rally-cli, not cmux-fleet)
+~/repos/rally-cli remotes:      worker-eng-1 -> .../2026-09-05T01-15-33Z-9253/worktrees/eng-1
+```
+
+**`registerWorkerRemote` is not at fault.** It replaces an existing remote unconditionally
+(`src/run/worktree.ts:478-491`) and registers against the *launch* repository. The development
+console is currently launched from `~/repos/rally-cli`, so rally-cli holds the live remotes and
+cmux-fleet holds three left over from the last launch here. Nothing removes a remote when a console
+moves to a different repository, and the leftovers still **resolve**: `git ls-remote worker-eng-1`
+returns refs, from a clone made a day earlier, of a different project.
+
+**What this does to §12's integration criterion.** As written it is
+*"`git -C <repo> ls-remote worker-<id>` resolves the branch `pifleet worktrees --json` reports"* —
+and `ls-remote` resolves here. The criterion passes on the broken state. It is the *equality* with
+the live run's branch that fails, and a probe checking only resolution cannot see it: both operands
+are individually well-formed and only their relationship is wrong. **This is the degenerate-fixture
+shape** — the same family as a filter whose every fixture makes the two sets equal. ISC-531 is
+written on the equality, not on the resolution.
