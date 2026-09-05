@@ -174,3 +174,95 @@ describe("ISC-530: no AI or assistant attribution on the integration branch or i
   // inventing one that could not fail, which is the shape of test this
   // phase's own design constraints warn against.
 });
+
+/**
+ * ISC-530, the half the fixtures above cannot supply: the probe pointed at
+ * THIS repository's own integration branch.
+ *
+ * Everything above proves the MECHANISM — a grep that can catch an
+ * attribution line, proven able to fail before it is trusted to pass. None of
+ * it proves this branch is clean, and §12's criterion is about what this
+ * system PRODUCES, not about whether a grep function works. A mechanism with
+ * no live subject is documentation.
+ *
+ * ## Why this half cannot reuse `FORBIDDEN_PATTERNS`
+ *
+ * It was written to, and the first run failed — on a commit of our own:
+ *
+ *     c7f9b87  Phase 2 (2.2-2.4): deliver a configured git identity ...
+ *
+ * whose body describes the very check this file implements ("a PR-body string
+ * for Co-Authored-By / Claude / AI-generated / Generated with"). The substring
+ * probe §12 specifies cannot tell an attribution from a sentence ABOUT
+ * attributions, so the commit that implements the criterion is the first thing
+ * the criterion rejects. Loosening it to an allowlist of known-good hashes
+ * would make the guard rot the first time history is rewritten.
+ *
+ * What CLAUDE.md actually forbids is narrower and has a shape: a trailer line
+ * (`Co-Authored-By:` in trailer position) or a generated-by footer. Both are
+ * line-anchored, and neither can appear inside prose describing them without
+ * the author going out of their way. So the live guard matches POSITION, not
+ * mere presence — and `a mention in prose is not an attribution` below pins
+ * that distinction so a future widening back to substrings has to delete a
+ * test rather than quietly re-break on the next meta-commit.
+ */
+const ATTRIBUTION_LINE = /^\s*(?:Co-Authored-By:|Claude-Session:|🤖\s*Generated with)/im;
+
+/**
+ * The commits this branch added — never the whole history. `main` is the
+ * merge base every integration branch here is cut against, so `main..HEAD` is
+ * exactly "what this system produced", which is the criterion's subject.
+ */
+async function integrationBranchMessages(): Promise<{ hash: string; body: string }[]> {
+  const p = Bun.spawn(["git", "log", "main..HEAD", "--format=%H%x00%B%x01"], {
+    cwd: import.meta.dir + "/../..",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = await new Response(p.stdout).text();
+  const stderr = await new Response(p.stderr).text();
+  if ((await p.exited) !== 0) throw new Error(`git log main..HEAD failed: ${stderr}`);
+  return out
+    .split("\x01")
+    .map((r) => r.trim())
+    .filter((r) => r.length > 0)
+    .map((r) => {
+      const [hash, ...rest] = r.split("\x00");
+      return { hash: hash ?? "", body: rest.join("\x00") };
+    });
+}
+
+describe("ISC-530 (live): this branch's own commits carry no attribution", () => {
+  test("no commit on main..HEAD carries an attribution line", async () => {
+    const offenders = (await integrationBranchMessages())
+      .filter((c) => ATTRIBUTION_LINE.test(c.body))
+      .map((c) => `${c.hash.slice(0, 8)} ${c.body.split("\n")[0]}`);
+    expect(offenders).toEqual([]);
+  });
+
+  test("the live guard is not vacuous — it catches each forbidden trailer", () => {
+    for (const line of [
+      "Co-Authored-By: Someone <x@example.com>",
+      "Claude-Session: https://example.invalid/s",
+      "🤖 Generated with [a tool](https://example.invalid)",
+    ]) {
+      expect(ATTRIBUTION_LINE.test(`A real subject\n\nA body.\n\n${line}`)).toBe(true);
+    }
+  });
+
+  test("a mention in prose is not an attribution", () => {
+    // The exact shape that broke the substring probe: our own c7f9b87.
+    const body =
+      "Phase 2: deliver a configured git identity\n\n" +
+      "Grep-based probe over real git history and a PR-body string for\n" +
+      "Co-Authored-By / Claude / AI-generated / Generated with. Includes a\n" +
+      "fixture that commits an actual forbidden line.";
+    expect(ATTRIBUTION_LINE.test(body)).toBe(false);
+    // ...and the broad substring probe DOES flag it, which is the finding.
+    expect(attributionHitsInText(body)).toContain("Co-Authored-By");
+  });
+
+  test("the range is non-empty, so a green result is not an empty set", async () => {
+    expect((await integrationBranchMessages()).length).toBeGreaterThan(0);
+  });
+});
