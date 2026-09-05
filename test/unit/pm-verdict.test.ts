@@ -478,3 +478,64 @@ describe("toRepoRelativePath", () => {
     expect(toRepoRelativePath("/etc/passwd")).toBe("/etc/passwd");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Anti-vacuity: a fan-out that dispatched NOTHING.
+// ---------------------------------------------------------------------------
+
+/**
+ * The degenerate input every coverage gate has to survive, and the one no
+ * fixture above supplies: a round where no lens was dispatched at all.
+ *
+ * `reported === dispatched` is then `0 === 0`, so a gate written as "did
+ * everyone who was asked report?" answers YES on a round where nobody was
+ * asked. Read together with an empty `findings[]` — what a collator with no
+ * lens replies would naturally produce — that is the worst output this
+ * function has available: **APPROVED, on a review that never happened.**
+ *
+ * Writing the fixture found that TWO independent things already prevent it,
+ * and neither was pinned. Both are asserted here, because either one alone
+ * would leave the other free to rot:
+ *
+ * 1. `CollationSchema` will not construct the record. `lenses[]` carries a
+ *    `.min(1)` whose message is about the denominator a finding's `2/3` needs
+ *    — written for a different reason entirely, and load-bearing here.
+ * 2. `deriveReviewVerdict` orders its `reported === 0` arm AHEAD of the
+ *    `reported < dispatched` comparison, so an empty journal lands on
+ *    `NO_COLLATION/not_collated` and never reaches Gate 2. That ordering is
+ *    the whole defence, and hoisting the comparison — the obvious tidy — is
+ *    the refactor that would have been green before this block existed.
+ */
+describe("anti: a fan-out that dispatched no lens is never APPROVED", () => {
+  test("the collation schema refuses a lens-less record outright", () => {
+    expect(() => buildCollation({ parentTaskId: "T-rv-empty", lenses: [], findings: [] })).toThrow(
+      /lenses\[\] is empty/,
+    );
+  });
+
+  test("an empty journal is NO_COLLATION even when a well-formed collation exists", () => {
+    // The collation is the ordinary three-lens one; only the RUN TREE is
+    // empty. This is the case §7.5 cares about — coverage comes from the
+    // journal, never from what the collator claims about itself.
+    const verdict = deriveReviewVerdict(
+      input({
+        coverage: journalCoverage([], []),
+        collation: buildCollation({ parentTaskId: "T-rv-empty", findings: [] }),
+      }),
+    );
+    expect(verdict.kind).toBe("NO_COLLATION");
+    if (verdict.kind === "NO_COLLATION") expect(verdict.reason).toBe("not_collated");
+    expect(verdict.countsAgainstIterationBudget).toBe(false);
+  });
+
+  test("and with no collation at all it is still NO_COLLATION, never APPROVED", () => {
+    const verdict = deriveReviewVerdict(input({ coverage: journalCoverage([], []), collation: null }));
+    expect(verdict.kind).toBe("NO_COLLATION");
+  });
+
+  test("the fixture is genuinely empty — otherwise this whole block is vacuous", () => {
+    const coverage = journalCoverage([], []);
+    expect(coverage.kind).toBe("journal");
+    if (coverage.kind === "journal") expect(coverage.children).toHaveLength(0);
+  });
+});
