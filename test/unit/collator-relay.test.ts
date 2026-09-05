@@ -75,6 +75,7 @@ import {
   MAX_RELAY_TASK_ID_CHARS,
   REVIEW_CONSOLE_ASPECTS,
   RelayAspectError,
+  RelayHarvestError,
   childTaskId,
   collationTaskId,
   isCollationTaskId,
@@ -83,6 +84,7 @@ import {
   type RelayDispatch,
   type RelayEnvelopeState,
   type RelayHarvest,
+  type RelayOutboxListing,
   type RelayOutcome,
   type RelayTaskRef,
   type RelayTransport,
@@ -204,6 +206,17 @@ interface FakeOptions {
   readonly envelopes?: Readonly<Record<string, RelayEnvelopeState>>;
   /** Child task ids whose dispatch call rejects. */
   readonly dispatchFails?: readonly string[];
+  /**
+   * Child task ids whose HARVEST rejects.
+   *
+   * Distinct from `dispatchFails` and not a variation on it: there, nothing was
+   * ever sent. Here the task landed, the reviewer may well have done the work,
+   * and the HOST could not read the result — the one arm in which nothing at
+   * all was read, and therefore the only one whose recovery is "go and look".
+   */
+  readonly harvestFails?: readonly string[];
+  /** The outbox listing a rejected harvest carries back, per child task id. */
+  readonly harvestOutbox?: Readonly<Record<string, RelayOutboxListing>>;
   /** Hold every dispatch until this many are inside it at once. */
   readonly gate?: ReturnType<typeof barrier>;
 }
@@ -269,6 +282,17 @@ class FakeTransport implements RelayTransport<Run> {
 
   async harvest(_run: Run, t: RelayTaskRef): Promise<RelayHarvest> {
     this.log.push(`harvest:${t.taskId}`);
+    if (this.opts.harvestFails?.includes(t.taskId)) {
+      this.log.push(`harvest:fail:${t.taskId}`);
+      // The production adapter's shape: `harvestTask` throws, and the listing —
+      // which shares none of its inputs — rides back on the rejection.
+      throw new RelayHarvestError(
+        t.worker,
+        t.taskId,
+        this.opts.harvestOutbox?.[t.taskId] ?? null,
+        "state.json is torn",
+      );
+    }
     return {
       verdict: this.opts.verdicts?.[t.taskId] ?? "success",
       reply: { task: t.taskId, finding: FakeTransport.marker(t.taskId) },
@@ -965,6 +989,207 @@ describe("an unreadable envelope is a transport failure, not a silent reviewer",
    * the file, and claiming a path it does not have would send a person to a
    * filename that does not exist.
    */
+  /**
+   * ── THE HALF OF ISC-517 THAT STAYED OPEN ─────────────────────────────────
+   *
+   * A harvest that throws costs one lens. The console recorded WHY and stopped
+   * there: `outbox: null`, one sentence, and a review that may be sitting
+   * complete in a directory nothing pointed at. This is the arm where NOTHING
+   * was read, so it is the arm with the most to gain from an inventory, and it
+   * was the only one that had none.
+   */
+  test("a failed harvest carries the outbox listing, so the review is findable", async () => {
+    const t = new FakeTransport({
+      harvestFails: ["T-lang"],
+      harvestOutbox: {
+        "T-lang": {
+          kind: "unrecognised",
+          total: 2,
+          named: [
+            { name: "artifact.json", kind: "file", bytes: 12759 },
+            { name: "scratch", kind: "directory", bytes: null },
+          ],
+        },
+      },
+    });
+    const out = collated(await run(ALL_THREE(), t));
+    const lang = out.children.find((c) => c.aspect === "lang");
+
+    // The discriminator, on the child rather than only in prose.
+    expect(lang?.harvestFailed).toBe(true);
+    expect(lang?.issued).toBe(true);
+    // The listing reaches the child. `null` here is the old behaviour.
+    expect(lang?.outbox).not.toBeNull();
+    // And the note names what a person would go and open.
+    expect(lang?.note).toContain("harvest FAILED");
+    expect(lang?.note).toContain("artifact.json");
+    expect(lang?.note).toContain("12759 bytes");
+    expect(lang?.note).toContain("result.json");
+    // It must not borrow the successful-harvest clause, which claims the
+    // listed files are ones "the harvest does not read" — here nothing read
+    // anything, and that sentence would be false in the reassuring direction.
+    expect(lang?.note).not.toContain("does not read");
+  });
+
+  /**
+   * The `empty` arm, which is where reusing `outboxClause` would have gone
+   * wrong quietly. `listTaskOutbox` filters the RECOGNISED names out, so
+   * `empty` means "no unexpected entries" — and after a failed harvest the
+   * likeliest thing sitting unread is `result.json` itself. The success-path
+   * clause says an empty listing means "there is no other file to look in",
+   * which would tell an operator not to go and look at the exact moment they
+   * should.
+   */
+  test("an empty listing after a failed harvest still sends a person to the usual places", async () => {
+    const t = new FakeTransport({
+      harvestFails: ["T-lang"],
+      harvestOutbox: { "T-lang": { kind: "empty" } },
+    });
+    const lang = collated(await run(ALL_THREE(), t)).children.find((c) => c.aspect === "lang");
+
+    expect(lang?.note).toContain("no unexpected entries");
+    expect(lang?.note).toContain("still on disk");
+    expect(lang?.note).toContain("files/");
+    expect(lang?.note).not.toContain("no other file to look in");
+  });
+
+  test("a listing that could not be taken says so, rather than saying nothing", async () => {
+    const t = new FakeTransport({
+      harvestFails: ["T-lang"],
+      harvestOutbox: { "T-lang": { kind: "unlistable" } },
+    });
+    const lang = collated(await run(ALL_THREE(), t)).children.find((c) => c.aspect === "lang");
+
+    // Two failed reads in a row. An operator told nothing concludes the
+    // reviewer wrote nothing, which is the substitution this area exists to
+    // prevent — so `unlistable` is reported here even though the success-path
+    // clause drops it.
+    expect(lang?.note).toContain("could not be listed");
+    expect(lang?.note).toContain("still on disk");
+  });
+
+  test("a rejection that carries no listing invents none", async () => {
+    // The `null` arm: no listing was attempted. It is not `empty` and it is not
+    // `unlistable`, and manufacturing either would assert something about a
+    // directory nothing looked at.
+    const t = new FakeTransport({ harvestFails: ["T-lang"] });
+    const lang = collated(await run(ALL_THREE(), t)).children.find((c) => c.aspect === "lang");
+
+    expect(lang?.harvestFailed).toBe(true);
+    expect(lang?.outbox).toBeNull();
+    expect(lang?.note).toContain("harvest FAILED");
+    expect(lang?.note).not.toContain("task outbox");
+  });
+
+  test("the collator is told an unread lens may still be on disk", async () => {
+    const t = new FakeTransport({
+      harvestFails: ["T-lang"],
+      harvestOutbox: { "T-lang": { kind: "empty" } },
+    });
+    const brief = briefOf(await run(ALL_THREE(), t));
+
+    expect(brief).toContain("HARVEST FAILED");
+    expect(brief.match(/HARVEST FAILED/g)).toHaveLength(1);
+    // The semantics, as phrases: this console does not know, the row stays
+    // false, and somebody should go and look.
+    expect(brief).toContain('"reported": false');
+    expect(brief).toContain("does not know either way");
+    expect(brief).toContain("sitting there complete");
+    // Not the other two blocks: no envelope was read, so neither applies.
+    expect(brief).not.toContain("UNREADABLE ENVELOPE");
+    expect(brief).not.toContain("REFUSED ENVELOPE");
+  });
+
+  test("no failed harvest means no HARVEST FAILED block at all", async () => {
+    const t = new FakeTransport({
+      verdicts: { "T-lang": "failed" },
+      envelopes: { "T-lang": { kind: "absent" } },
+    });
+    const brief = briefOf(await run(ALL_THREE(), t));
+
+    expect(brief).toContain("MISSING ASPECT: lang");
+    expect(brief).not.toContain("HARVEST FAILED");
+  });
+
+  /**
+   * The asymmetric fixture. Two lenses sharing a state would let a filter that
+   * ignores the state entirely pass every positive assertion above, so each of
+   * these carries a different one — and `arch` is left to SUCCEED, because a
+   * fan-out in which nothing survives is `not_collated` and writes no brief at
+   * all. The third state is graded on the notes in the test below, which is the
+   * surface that survives having no collation.
+   */
+  test("a refused lens and an unharvested one get their own blocks, not each other's", async () => {
+    const t = new FakeTransport({
+      verdicts: { "T-context": "failed" },
+      harvestFails: ["T-lang"],
+      harvestOutbox: { "T-lang": { kind: "empty" } },
+      envelopes: {
+        "T-context": { kind: "refused", reason: "epoch 2 is stale; the run is on epoch 3" },
+      },
+    });
+    const brief = briefOf(await run(ALL_THREE(), t));
+
+    expect(brief.match(/REFUSED ENVELOPE/g)).toHaveLength(1);
+    expect(brief.match(/HARVEST FAILED/g)).toHaveLength(1);
+    const line = (p: string) => brief.split("\n").find((l) => l.startsWith(p)) ?? "";
+    expect(line("REFUSED ENVELOPE")).toContain("context");
+    expect(line("REFUSED ENVELOPE")).not.toContain("(lang)");
+    expect(line("HARVEST FAILED")).toContain("lang");
+    expect(line("HARVEST FAILED")).not.toContain("(context)");
+    // Nothing was unreadable, so that block must not appear.
+    expect(brief).not.toContain("UNREADABLE ENVELOPE");
+  });
+
+  /**
+   * All three states at once, graded on the NOTES.
+   *
+   * When every lens fails there is no collation and no brief — `not_collated`
+   * carries the per-lens notes instead, and that reason string is what an
+   * operator reads. The three sentences must stay distinguishable there too:
+   * this is the surface the brief cannot cover, and the one where a collapse
+   * would be least visible.
+   */
+  test("the three failure sentences stay distinct when nothing survives", async () => {
+    const t = new FakeTransport({
+      verdicts: { "T-arch": "failed", "T-context": "failed" },
+      harvestFails: ["T-lang"],
+      harvestOutbox: { "T-lang": { kind: "empty" } },
+      envelopes: {
+        "T-arch": {
+          kind: "unreadable",
+          path: LANG_ENVELOPE,
+          bytes: 3906,
+          code: "not_json",
+          detail: PARSE_DETAIL,
+        },
+        "T-context": { kind: "refused", reason: "epoch 2 is stale; the run is on epoch 3" },
+      },
+    });
+    const out = await run(ALL_THREE(), t);
+    if (out.kind !== "not_collated") throw new Error(`expected not_collated, got ${out.kind}`);
+
+    const note = (aspect: string) =>
+      out.children.find((c) => c.aspect === aspect)?.note ?? "";
+    // Read: would not parse.
+    expect(note("arch")).toContain("COULD NOT BE READ");
+    expect(note("arch")).not.toContain("WAS REFUSED");
+    expect(note("arch")).not.toContain("harvest FAILED");
+    // Read: parsed, and declined.
+    expect(note("context")).toContain("WAS REFUSED");
+    expect(note("context")).not.toContain("COULD NOT BE READ");
+    expect(note("context")).not.toContain("harvest FAILED");
+    // Not read at all — and the only one that says where to go looking.
+    expect(note("lang")).toContain("harvest FAILED");
+    expect(note("lang")).toContain("still on disk");
+    expect(note("lang")).not.toContain("COULD NOT BE READ");
+    expect(note("lang")).not.toContain("WAS REFUSED");
+    // All three reach the operator's reason string, not just the children.
+    for (const phrase of ["COULD NOT BE READ", "WAS REFUSED", "harvest FAILED"]) {
+      expect(out.reason).toContain(phrase);
+    }
+  });
+
   test("an unreadable lens with no details still gets the re-run instruction", async () => {
     const t = new FakeTransport({
       verdicts: { "T-lang": "unknown" },

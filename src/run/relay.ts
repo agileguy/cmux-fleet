@@ -659,6 +659,20 @@ export interface RelayChild {
   /** The derived id, or `null` for a seat the request never named. */
   readonly taskId: string | null;
   /**
+   * The task was dispatched and the HARVEST ITSELF threw.
+   *
+   * Distinct from every other way a lens comes back empty, and it needs its own
+   * flag because none of the other fields separate it. `issued: true` with
+   * `envelope: null` is also what a transport that never inspected envelopes
+   * produces — a legitimate state with its own probe — so branching on that
+   * pair would describe a working transport as a broken harvest.
+   *
+   * What follows from it is an INSTRUCTION rather than a row: nothing was read,
+   * so the review may be intact on disk, and the person reading the collation
+   * should be told to go and look. `reported` stays false either way.
+   */
+  readonly harvestFailed: boolean;
+  /**
    * The harvester's or supervisor's verdict, VERBATIM.
    *
    * `unknown` for a seat that was never dispatched, which is the lattice
@@ -993,6 +1007,21 @@ async function fanOut<R>(
    * is told why, which is the difference this console spent a branch learning.
    */
   const failedHarvest = new Map<string, string>();
+  /**
+   * AND WHAT THAT TASK'S OUTBOX HELD — the half of ISC-517 that stayed open.
+   *
+   * Recording the reason told an operator why the lens was lost. It did not
+   * tell them the review was still on disk, because this arm set `outbox: null`
+   * and the note had nothing to append. A refused envelope, whose harvest
+   * SUCCEEDS, has carried a listing all along; the one case where nothing was
+   * read at all was the one case that named nothing at all.
+   *
+   * `RelayHarvestError` carries it, so the core reads a FIELD rather than
+   * re-deriving a host path it is the point of this module never to know. A
+   * rejection of any other shape leaves `undefined` here and the note is exactly
+   * what it was — there is no guess to make.
+   */
+  const failedHarvestOutbox = new Map<string, RelayOutboxListing>();
   landed.forEach((p, i) => {
     const h = harvests[i];
     if (h?.status === "fulfilled") {
@@ -1001,6 +1030,9 @@ async function fanOut<R>(
     }
     const err: unknown = h?.reason;
     failedHarvest.set(p.seat.aspect, err instanceof Error ? err.message : String(err));
+    if (err instanceof RelayHarvestError && err.outbox !== null) {
+      failedHarvestOutbox.set(p.seat.aspect, err.outbox);
+    }
   });
 
   // ── The lattice, and what is NOT put into it ──────────────────────────────
@@ -1026,6 +1058,7 @@ async function fanOut<R>(
         verdict: "unknown",
         succeeded: false,
         issued: false,
+        harvestFailed: false,
         inlined: [],
         envelope: null,
         outbox: null,
@@ -1043,6 +1076,7 @@ async function fanOut<R>(
         // PLANNED but never issued — see `RelayChild.issued`. The id is kept so
         // an operator can correlate the refusal; it is not evidence of a dispatch.
         issued: false,
+        harvestFailed: false,
         inlined: [],
         envelope: null,
         outbox: null,
@@ -1058,10 +1092,16 @@ async function fanOut<R>(
         verdict: "unknown",
         succeeded: false,
         issued: true,
+        harvestFailed: true,
         inlined: [],
         envelope: null,
-        outbox: null,
-        note: harvestFailureNote(failedHarvest.get(seat.aspect)),
+        // The listing off the rejection, or `null` when there was none. NEVER
+        // an invented `empty`: this arm exists because nothing was read.
+        outbox: failedHarvestOutbox.get(seat.aspect) ?? null,
+        note: harvestFailureNote(
+          failedHarvest.get(seat.aspect),
+          failedHarvestOutbox.get(seat.aspect) ?? null,
+        ),
       };
     }
     const envelope = harvested.envelope ?? null;
@@ -1073,6 +1113,9 @@ async function fanOut<R>(
       verdict: harvested.verdict,
       succeeded: harvested.verdict === "success",
       issued: true,
+      // The harvest RETURNED. Whatever it found, it did not throw, so the
+      // review's whereabouts are not the open question here.
+      harvestFailed: false,
       inlined: harvested.inlined ?? [],
       envelope,
       outbox,
@@ -1240,11 +1283,73 @@ async function fanOut<R>(
  * A reason is included when there is one, and the sentence stays whole when
  * there is not: `undefined` here means the harvest resolved and produced no
  * entry, which is a different fact from a harvest that threw.
+ *
+ * ## And what the outbox held, which is the recovery
+ *
+ * This arm is the one where NOTHING was read — no envelope, no artifacts, no
+ * verdict — so it is the arm with the most to gain from an inventory and the
+ * one that had none.
+ *
+ * **`outboxClause` is NOT reused, and the reason is worth stating because
+ * reusing it was the first thing I wrote.** That clause is built for a harvest
+ * that SUCCEEDED: its `empty` arm says the outbox "holds nothing besides what
+ * the harvest already reads", and its entry arm says the listed files are ones
+ * "the harvest does not read — it reads only the result envelope and the files/
+ * directory". Both sentences are true there and false here. `listTaskOutbox`
+ * filters out the recognised names, so `empty` means *no unexpected entries* —
+ * and after a failed harvest the most likely thing sitting unread is
+ * `result.json` itself, which `empty` would have told an operator not to bother
+ * looking for. A clause that is accurate in one arm and inverted in another is
+ * worse than two clauses.
+ *
+ * `null` appends nothing, in the same way the `envelope` arms treat it: no
+ * listing was attempted, so there is nothing to report and a sentence about an
+ * empty outbox would be manufactured.
  */
-export function harvestFailureNote(reason: string | undefined): string {
-  return reason === undefined
-    ? "it was dispatched but could not be harvested"
-    : `it was dispatched and its harvest FAILED: ${reason}`;
+export function harvestFailureNote(
+  reason: string | undefined,
+  outbox: RelayOutboxListing | null = null,
+): string {
+  const head =
+    reason === undefined
+      ? "it was dispatched but could not be harvested"
+      : `it was dispatched and its harvest FAILED: ${reason}`;
+  return `${head}${unreadOutboxClause(outbox)}`;
+}
+
+/**
+ * The inventory for a lens whose harvest returned NOTHING.
+ *
+ * Every arm says the same underlying thing in a different amount of detail:
+ * *the review may be on disk and nothing here has looked at it*. The point is
+ * the operator's next action, so each arm ends with somewhere to go.
+ *
+ * `unlistable` is reported rather than dropped, unlike in `outboxClause`. There,
+ * a failed listing sits beside an envelope that WAS read and adds nothing; here
+ * it is the second failure in a row and the only honest thing to say is that
+ * both reads failed — an operator who is told nothing concludes the reviewer
+ * wrote nothing, which is the substitution this whole area exists to prevent.
+ */
+function unreadOutboxClause(outbox: RelayOutboxListing | null): string {
+  if (outbox === null) return "";
+  const usual =
+    `Nothing here read the outbox, so if this reviewer reported at all its report is still ` +
+    `on disk, in the usual places — result.json in the task root and the files/ directory ` +
+    `beside it`;
+  if (outbox.kind === "unlistable") {
+    return `. Its task outbox could not be listed either, so nothing here can say what is in it. ${usual}`;
+  }
+  if (outbox.kind === "empty") {
+    return `. Its task outbox holds no unexpected entries. ${usual}`;
+  }
+  const more = outbox.total - outbox.named.length;
+  return (
+    `. Its task outbox also holds ${outbox.total} ` +
+    `entr${outbox.total === 1 ? "y" : "ies"} outside the usual names, listed by name and size ` +
+    `ONLY — nothing here opened them: ` +
+    `${outbox.named.map(describeOutboxEntry).join(", ")}` +
+    `${more > 0 ? `, and ${more} more not named` : ""}. ${usual}`
+  );
 }
 
 function missingLensNote(
@@ -1494,6 +1599,44 @@ function collationBrief(
      * can be named in `raised_by`, which is the §6.8 fabrication. What changes
      * is the REASON and the recovery, not the row.
      */
+    /**
+     * ── AND THE LENSES NOBODY MANAGED TO READ AT ALL ────────────────────────
+     *
+     * The third instruction, and the one with the widest gap between what the
+     * console knows and what it used to say. An unreadable envelope was read
+     * and would not parse; a refused one was read and was declined. This lens
+     * was not read: the harvest threw, so no envelope, no artifact and no
+     * verdict came back, and until this block existed the collator was told
+     * only that the harvest failed.
+     *
+     * **The recovery is the whole content.** Nothing here opened the outbox, so
+     * a review written perfectly well is sitting in it, and the person reading
+     * the collation is the one who can go and look. The note above carries the
+     * inventory; this carries what to do with it.
+     *
+     * It comes LAST of the three because it is the weakest claim about the
+     * review's existence — the other two know a document is there, and this one
+     * knows only that nothing looked. Saying so in that order keeps a reader
+     * from reading a maybe as a certainty.
+     *
+     * `reported` stays false, for the third time and the same reason: the
+     * collator has not read this review either, and a lens credited without
+     * being read can be named in `raised_by` — the §6.8 fabrication.
+     */
+    const unharvestedLenses = missing.filter((c) => c.harvestFailed);
+    for (const c of unharvestedLenses) {
+      lines.push("");
+      lines.push(
+        `HARVEST FAILED: ${c.aspect} (${c.worker}) was dispatched and the host could not read ` +
+          `its result at all — no envelope, no artifacts, no verdict. Record it as "reported": ` +
+          `false, with the reason above in its note. Do NOT record it as a lens that found ` +
+          `nothing or was not applied: this console does not know either way, because nothing ` +
+          `opened its outbox. Say in your prose report that this lens was dispatched and never ` +
+          `read, and repeat what its note says the outbox holds, so that a person can look for a ` +
+          `review that may be sitting there complete.`,
+      );
+    }
+
     const refusedLenses = missing.filter((c) => c.envelope?.kind === "refused");
     for (const c of refusedLenses) {
       lines.push("");
@@ -1792,6 +1935,25 @@ export interface RelayEffects {
   /** `harvestTask(run, taskId)` — harvest/index.ts. */
   harvestTask(run: RunPaths, taskId: string): Promise<RelayHarvestView>;
   /**
+   * List what `<outbox>/<worker>/<task-id>/` HOLDS — names and kinds, never
+   * contents — independently of any harvest.
+   *
+   * **A separate effect rather than a field of `harvestTask`'s bundle, and the
+   * independence is the entire point.** The bundle already carries a listing
+   * and it is the right source whenever there IS a bundle. This exists for the
+   * case where there is not: a harvest that REJECTED. `listTaskOutbox` needs
+   * `workerOutboxDir` and `taskId` and nothing else — not the inbox envelope,
+   * not the epoch, not the worktree — so every input it has is one the caller
+   * already holds and none of them is an input the failed harvest needed. That
+   * is what makes a lens recoverable at the exact moment the harvester could
+   * not read it.
+   *
+   * It opens nothing. A `readdir` and the dirent kinds, which is the same
+   * promise `harvest/task-outbox.ts` makes and the reason this is safe to run
+   * over a directory a container owns and a harvest just failed on.
+   */
+  listTaskOutbox(run: RunPaths, worker: string, taskId: string): Promise<RelayOutboxListing>;
+  /**
    * Read up to `maxBytes` of one artifact, or explain why not.
    *
    * An EFFECT rather than a `readFile` inline, for the reason every other effect
@@ -1952,6 +2114,52 @@ export class RelayReplyError extends Error {
   ) {
     super(detail, options);
     this.name = "RelayReplyError";
+  }
+}
+
+/**
+ * A HARVEST REJECTED — and what the task's outbox held when it did.
+ *
+ * ## The half of ISC-517 that stayed open
+ *
+ * The lost-review chain had three links and this is the last of them. A harvest
+ * that throws costs one lens, and until now the console recorded WHY and stopped
+ * there: `envelope: null`, `outbox: null`, one sentence, and a complete review
+ * left sitting in a directory nothing pointed at. The refused-envelope path,
+ * next door, has carried an outbox listing all along — because its harvest
+ * SUCCEEDED, so a listing came back with the bundle. The one case where nothing
+ * at all was read is the one case that named nothing at all.
+ *
+ * ## Why a listing is the recovery, and a retry is not
+ *
+ * Retrying inside the pass is the wrong layer twice over. `relayPass` already
+ * re-runs, child ids are derived so a re-issued fan-out rewrites the same files
+ * in place, and an unjournalled pass re-issues by construction — so the retry
+ * exists and is somewhere else. Doing it here would also spend a second
+ * `RELAY_SETTLE_DEADLINE_MS` on a serial actor.
+ *
+ * What the pass cannot recover on its own is a POINTER. `listTaskOutbox` needs
+ * only the worker's outbox directory and the task id, neither of which the
+ * failed harvest supplied, so it answers when the harvester could not — and the
+ * lens goes from lost to quarantined with an operator's next action attached.
+ *
+ * `outbox` is `null` only when the listing itself could not be attempted;
+ * `{kind: "unlistable"}` is the different fact that it was attempted and failed,
+ * and neither is `{kind: "empty"}`. Collapsing any two of those manufactures
+ * evidence about what a reviewer left behind, which is the failure this whole
+ * area is a repair of.
+ */
+export class RelayHarvestError extends Error {
+  constructor(
+    readonly worker: string,
+    readonly taskId: string,
+    /** What the task outbox held, or `null` when no listing was attempted. */
+    readonly outbox: RelayOutboxListing | null,
+    detail: string,
+    options?: { readonly cause?: unknown },
+  ) {
+    super(detail, options);
+    this.name = "RelayHarvestError";
   }
 }
 
@@ -2206,7 +2414,41 @@ export function consoleTransport(
     },
 
     async harvest(run: RunPaths, task: RelayTaskRef): Promise<RelayHarvest> {
-      const bundle = await effects.harvestTask(run, task.taskId);
+      /**
+       * ── A FAILED HARVEST STILL LEAVES A POINTER ───────────────────────────
+       *
+       * `harvestTask` throws for a torn `state.json`, an unreadable inbox
+       * record, a `git` that would not run — and until this catch existed, that
+       * throw travelled with nothing but its message. The review the reviewer
+       * actually wrote stayed in its outbox, unread and unnamed, and the lens
+       * was gone for the pass.
+       *
+       * The listing is taken HERE and not in the core because it is a host
+       * read, and it is possible at all because it shares no input with the
+       * thing that just failed — see `RelayEffects.listTaskOutbox`. Best
+       * effort: if the listing throws too, `outbox` is `null`, which is the
+       * value for *no listing was attempted* and is not `unlistable`.
+       *
+       * The rejection is preserved as a rejection. Returning a `RelayHarvest`
+       * with an `unknown` verdict would make a failed harvest indistinguishable
+       * from a successful harvest of a task nothing could grade, and those are
+       * different facts for everything downstream.
+       */
+      let bundle: RelayHarvestView;
+      try {
+        bundle = await effects.harvestTask(run, task.taskId);
+      } catch (err) {
+        const outbox = await effects
+          .listTaskOutbox(run, task.worker, task.taskId)
+          .catch(() => null);
+        throw new RelayHarvestError(
+          task.worker,
+          task.taskId,
+          outbox,
+          err instanceof Error ? err.message : String(err),
+          { cause: err },
+        );
+      }
 
       /**
        * ── INLINE THE ARTIFACTS, because a digest is not a document ──────────
@@ -2702,6 +2944,7 @@ let effectModules: Promise<{
   ledger: typeof import("./ledger.ts");
   registry: typeof import("./registry.ts");
   interrupt: typeof import("../container/interrupt.ts");
+  taskOutbox: typeof import("../harvest/task-outbox.ts");
 }> | null = null;
 
 function loadEffectModules(): NonNullable<typeof effectModules> {
@@ -2714,6 +2957,7 @@ function loadEffectModules(): NonNullable<typeof effectModules> {
     ledger: await import("./ledger.ts"),
     registry: await import("./registry.ts"),
     interrupt: await import("../container/interrupt.ts"),
+    taskOutbox: await import("../harvest/task-outbox.ts"),
   }))();
   return effectModules;
 }
@@ -2833,6 +3077,29 @@ export const productionRelayEffects: RelayEffects = {
   async harvestTask(run, taskId) {
     const m = await loadEffectModules();
     return m.harvest.harvestTask(run, taskId);
+  },
+  /**
+   * The listing, derived from the two paths the caller already holds.
+   *
+   * `listTaskOutbox` reads `workerOutboxDir` and `taskId` off the location and
+   * touches none of its other fields, so the epoch and the worktree are passed
+   * as the values that say NOTHING was assumed about them: an epoch of `0` and
+   * a `null` host workdir. Filling them with plausible guesses would put two
+   * invented facts into a structure whose whole job, in the one case that calls
+   * this, is to be the part that was not invented.
+   *
+   * `containerWorkdir` is the schema's own default spelling and is likewise
+   * unread here.
+   */
+  async listTaskOutbox(run, worker, taskId) {
+    const m = await loadEffectModules();
+    return m.taskOutbox.listTaskOutbox({
+      workerOutboxDir: m.paths.workerOutboxDir(run.root, worker),
+      taskId,
+      epoch: 0,
+      containerWorkdir: "/workspace",
+      hostWorkdir: null,
+    });
   },
   /**
    * One artifact's bytes, bounded, with containment re-checked HERE.

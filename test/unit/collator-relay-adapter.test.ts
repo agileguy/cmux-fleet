@@ -84,6 +84,7 @@ import {
   harvestFailureNote,
   planInlineBudget,
   productionRelayEffects,
+  RelayHarvestError,
   RelayReplyError,
   relayFanOut,
   resolveConsoleRuns,
@@ -253,6 +254,18 @@ function effects(
     async harvestTask(_run, taskId) {
       rec.harvested.push(taskId);
       return { harvest: { verdict: "success" as Verdict, task_id: taskId } };
+    },
+    /**
+     * The DEFAULT is `unlistable` and deliberately not `empty`.
+     *
+     * `empty` is a claim — *the reviewer left nothing unexpected behind* — and a
+     * fixture default is the last place a claim belongs: every probe that did
+     * not think about the outbox would silently assert it. `unlistable` is the
+     * one arm that asserts nothing about the directory's contents, so a test
+     * that means to say something about them has to say it.
+     */
+    async listTaskOutbox() {
+      return { kind: "unlistable" as const };
     },
     async writeReply(run, collator, child, reply) {
       rec.replies.push({ run: run.runId, collator, child, reply });
@@ -2157,6 +2170,93 @@ describe("truncation in the collation brief", () => {
  * `RelayDispatchError` docblock forbids in as many words. The paragraph is the
  * part most likely to be rewritten; the type and its three fields are not.
  */
+/**
+ * THE LISTING IS TAKEN WHERE THE HARVEST FAILED, and this is the seam that
+ * makes ISC-517's second route closable at all.
+ *
+ * `listTaskOutbox` needs the worker's outbox directory and the task id. Neither
+ * is an input the failed harvest supplied — no inbox envelope, no epoch, no
+ * worktree — so it can answer at the exact moment `harvestTask` could not. The
+ * core cannot take it itself: deriving a host path is the thing `relay.ts`'s
+ * header keeps out of that module, which is why it rides back on the rejection.
+ */
+describe("a failed harvest carries a pointer to what it could not read", () => {
+  const ref = { worker: "rev-lang-1", taskId: "T1-lang" };
+  const LISTING = {
+    kind: "unrecognised" as const,
+    total: 1,
+    named: [{ name: "artifact.json", kind: "file" as const, bytes: 12759 }],
+  };
+
+  test("the rejection is a RelayHarvestError carrying the listing and the cause", async () => {
+    const torn = Object.assign(new Error("state.json is torn"), { code: "EBADF" });
+    const asked: Array<{ worker: string; taskId: string }> = [];
+    const { fx } = effects({
+      async harvestTask() {
+        throw torn;
+      },
+      async listTaskOutbox(_run, worker, taskId) {
+        asked.push({ worker, taskId });
+        return LISTING;
+      },
+    });
+
+    const p = consoleTransport("col-1", fx).harvest(LANG_RUN, ref);
+    await expect(p).rejects.toBeInstanceOf(RelayHarvestError);
+    const err = (await p.catch((e: unknown) => e)) as RelayHarvestError;
+
+    expect(err.worker).toBe("rev-lang-1");
+    expect(err.taskId).toBe("T1-lang");
+    expect(err.outbox).toEqual(LISTING);
+    // The original throw, by identity — the errno survives the wrap.
+    expect(err.cause).toBe(torn);
+    // Asked about the task that failed, not some other one.
+    expect(asked).toEqual([{ worker: "rev-lang-1", taskId: "T1-lang" }]);
+  });
+
+  test("a listing that throws too leaves null, which is not `unlistable`", async () => {
+    const { fx } = effects({
+      async harvestTask() {
+        throw new Error("state.json is torn");
+      },
+      async listTaskOutbox() {
+        throw new Error("the outbox directory is gone as well");
+      },
+    });
+
+    const p = consoleTransport("col-1", fx).harvest(LANG_RUN, ref);
+    const err = (await p.catch((e: unknown) => e)) as RelayHarvestError;
+
+    // Three states, and this is the first: no listing was ATTEMPTED
+    // successfully, so there is nothing to say. `unlistable` would claim a
+    // readdir ran and failed; `empty` would claim the directory was read.
+    expect(err.outbox).toBeNull();
+    // The harvest's own reason is still the one reported — a second failure
+    // must not overwrite the first.
+    expect(err.message).toContain("state.json is torn");
+  });
+
+  test("a harvest that RETURNS never asks for the recovery listing", async () => {
+    // The listing exists for the arm where nothing was read. Taking it on the
+    // success path would be a second answer to a question the bundle already
+    // answers, and the two could disagree.
+    let asked = 0;
+    const { fx } = effects({
+      async harvestTask() {
+        return { harvest: { verdict: "success" as Verdict }, taskOutbox: { kind: "empty" } };
+      },
+      async listTaskOutbox() {
+        asked += 1;
+        return LISTING;
+      },
+    });
+
+    const got = await consoleTransport("col-1", fx).harvest(LANG_RUN, ref);
+    expect(asked).toBe(0);
+    expect(got.outbox).toEqual({ kind: "empty" });
+  });
+});
+
 describe("writeReply refuses a missing replies mount, by type", () => {
   test("a missing replies directory throws RelayReplyError carrying the facts", async () => {
     const root = await mkdtemp(join(tmpdir(), "pifleet-replies-"));
@@ -2175,6 +2275,51 @@ describe("writeReply refuses a missing replies mount, by type", () => {
     expect((err.cause as NodeJS.ErrnoException | undefined)?.code).toBe("ENOENT");
     // And the sentence still tells an operator whose job the directory is.
     expect(err.message).toContain("pifleet up");
+  });
+});
+
+/**
+ * The production listing, over a real directory.
+ *
+ * The unit probes above inject it, so nothing there would notice if the effect
+ * derived the wrong host path — and the path is exactly what it exists to
+ * supply. This drives the real `listTaskOutbox` against a real outbox and
+ * checks the two properties that make the recovery worth anything: it finds the
+ * task's OWN directory, and it says `unlistable` rather than inventing `empty`
+ * for one that is not there.
+ */
+describe("the production listTaskOutbox derives the task's own outbox", () => {
+  test("it lists the unexpected entries a reviewer left in its task root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-listing-"));
+    const taskRoot = join(root, "outbox", "rev-lang-1", "T1-lang");
+    await mkdir(join(taskRoot, "files"), { recursive: true });
+    // The shape the live console actually hit: a complete review filed under a
+    // name neither reader recognises.
+    await writeFile(join(taskRoot, "artifact.json"), "x".repeat(120));
+    await writeFile(join(taskRoot, "result.json"), "{}");
+
+    const got = await productionRelayEffects.listTaskOutbox(
+      { root } as RunPaths,
+      "rev-lang-1",
+      "T1-lang",
+    );
+
+    if (got.kind !== "unrecognised") throw new Error(`expected unrecognised, got ${got.kind}`);
+    // `result.json` and `files/` are recognised and filtered out; the review
+    // filed under an invented name is the entry that survives.
+    expect(got.named.map((e) => e.name)).toEqual(["artifact.json"]);
+    expect(got.named[0]!.bytes).toBe(120);
+  });
+
+  test("a task root that is not there is `unlistable`, never `empty`", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pifleet-listing-"));
+    const got = await productionRelayEffects.listTaskOutbox(
+      { root } as RunPaths,
+      "rev-lang-1",
+      "T1-nothing",
+    );
+    // `empty` is a claim about what a reviewer left behind. Nothing was read.
+    expect(got).toEqual({ kind: "unlistable" });
   });
 });
 

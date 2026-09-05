@@ -482,6 +482,12 @@ describe("consoleTransport carries the harvester's outbox listing", () => {
       async deliveryPlane() {
         return "staged";
       },
+      async listTaskOutbox() {
+        // This file's subject is the listing that rides on a SUCCESSFUL
+        // harvest; the failed-harvest listing is a different seam and asserting
+        // nothing about it here keeps the two probes from sharing a fixture.
+        return { kind: "unlistable" as const };
+      },
       async readTaskRecord() {
         return null;
       },
