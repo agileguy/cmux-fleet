@@ -60,6 +60,12 @@ inference from exactly that silence.
 | N1 | Negative control: the local binding is renamed | green | green |
 | N2 | Negative control: a never-dispatched seat keeps the `null` it already had | green | green |
 | N3 | Negative control: the block is reworded and every semantic clause survives | green | green |
+| E18 | The detail-less unreadable arm is dropped from the block's filter | red | red |
+| E19 | The refused block never emits | red | red |
+| E20 | The refused block emits for every missing lens | red | red |
+| E21 | The refused block is present and its instruction is truncated away | red | red |
+| E22 | The refused lens is told its envelope was UNREADABLE | red | red |
+| N4 | Negative control: the refused block is reworded and every semantic clause survives | green | green |
 
 ## What the battery changed about the probes
 
@@ -72,12 +78,31 @@ the lens"* — which leaves the prose around them free. `N3` was then rewritten 
 a genuine reword that preserves all three, and it stays green. That pair is the
 evidence that the probes discriminate meaning rather than text.
 
+## The refused block, added after the console reviewed its own fix
+
+The second dogfood run raised it: the brief had an instruction block for an
+UNREADABLE lens and none for a REFUSED one, so a lens whose complete review was
+declined got the generic missing-aspect line and nothing else. `E22` is the
+mutation that matters most of the five. It does not delete anything — it hands
+the refused lens the unreadable block's wording, which is the mistake a person
+would actually make, and which reads perfectly. The difference is operational:
+an unreadable envelope may be damaged, a refused one parsed and is legible on
+disk, so the recovery is to open the file and read the findings rather than to
+go looking for corruption in an intact document. `N4` rewords the block freely
+and stays green, so what is pinned is that distinction rather than the prose.
+
+`E18` covers the same shape one arm over: `unreadable_unspecified` is the state
+for an envelope the harvester called unreadable whose details did not survive
+the transport. It shares the unreadable INSTRUCTION — the lens was applied and
+should be re-run — and only its note differs, because it cannot name a file.
+Narrowing the filter back to the detailed arm alone silently drops the block.
+
 ## What this battery does NOT measure, stated plainly
 
 - **Whether the harvester's absent/unreadable classification is correct.** That
   is `harvest-outbox-contract`'s, and its own asymmetric probe. Everything here
   takes the classification as a fixture value, so a harvester that reported every
-  absent envelope as unreadable would leave all twenty of these as they are.
+  absent envelope as unreadable would leave all twenty-six of these as they are.
 - **Whether the collator obeys the brief.** These read the bytes dispatched. The
   role file is graded by `collator-role.test.ts`; nothing grades the model.
 - **The `\w` failure end to end.** No JSON is parsed anywhere in this battery.

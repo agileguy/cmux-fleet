@@ -163,7 +163,8 @@ const MUTATIONS: M[] = [
     id: "E9",
     what: "BRIEF: the unreadable block never emits — the collator is never told to re-run",
     file: CORE,
-    find: "    const unreadableLenses = missing.filter((c) => c.envelope?.kind === \"unreadable\");",
+    find:
+      "    const unreadableLenses = missing.filter(\n      (c) => c.envelope?.kind === \"unreadable\" || c.envelope?.kind === \"unreadable_unspecified\",\n    );",
     replace: "    const unreadableLenses: typeof missing = [];",
     expect: "red",
   },
@@ -171,8 +172,19 @@ const MUTATIONS: M[] = [
     id: "E10",
     what: "BRIEF: the block emits for EVERY missing lens, so naming one means nothing",
     file: CORE,
-    find: "    const unreadableLenses = missing.filter((c) => c.envelope?.kind === \"unreadable\");",
+    find:
+      "    const unreadableLenses = missing.filter(\n      (c) => c.envelope?.kind === \"unreadable\" || c.envelope?.kind === \"unreadable_unspecified\",\n    );",
     replace: "    const unreadableLenses = missing;",
+    expect: "red",
+  },
+  {
+    id: "E18",
+    what: "BRIEF: the detail-less unreadable arm loses the block, so an applied lens reads as one that was never re-runnable",
+    file: CORE,
+    find:
+      "    const unreadableLenses = missing.filter(\n      (c) => c.envelope?.kind === \"unreadable\" || c.envelope?.kind === \"unreadable_unspecified\",\n    );",
+    replace:
+      "    const unreadableLenses = missing.filter((c) => c.envelope?.kind === \"unreadable\");",
     expect: "red",
   },
   {
@@ -259,6 +271,51 @@ const MUTATIONS: M[] = [
     find: "          `not reach you. Record it as \"reported\": false — you have not read it — with the ` +",
     replace: "          `not reach you. Record it however you see fit, with the ` +",
     expect: "red",
+  },
+  {
+    id: "E19",
+    what: "REFUSED BRIEF: the refused block never emits — a complete review on disk goes unmentioned",
+    file: CORE,
+    find: "    const refusedLenses = missing.filter((c) => c.envelope?.kind === \"refused\");",
+    replace: "    const refusedLenses: typeof missing = [];",
+    expect: "red",
+  },
+  {
+    id: "E20",
+    what: "REFUSED BRIEF: the block emits for EVERY missing lens, so naming one means nothing",
+    file: CORE,
+    find: "    const refusedLenses = missing.filter((c) => c.envelope?.kind === \"refused\");",
+    replace: "    const refusedLenses = missing;",
+    expect: "red",
+  },
+  {
+    id: "E21",
+    what: "REFUSED BRIEF: the block is present and says nothing — the instruction is truncated away",
+    file: CORE,
+    find:
+      "          `record it as a lens that found nothing, was not applied, or could not be read: the ` +\n          `review is complete and legible on disk. Say in your prose report that this lens' ` +\n          `review was written and rejected, and name the reason, so that a person can open the ` +\n          `file and read the findings this collation does not contain.`,",
+    replace: "          `record it however you see fit.`,",
+    expect: "red",
+  },
+  {
+    id: "E22",
+    what: "REFUSED BRIEF: the refused lens is told it was UNREADABLE, sending a person to look for damage in an intact file",
+    file: CORE,
+    find:
+      "        `REFUSED ENVELOPE: ${c.aspect} (${c.worker}) reviewed the change and wrote a report that ` +\n          `PARSED and was then declined by the console for the reason above. Record it as ` +",
+    replace:
+      "        `UNREADABLE ENVELOPE: ${c.aspect} (${c.worker}) reviewed the change and its report was ` +\n          `not readable. Record it as ` +",
+    expect: "red",
+  },
+  {
+    id: "N4",
+    what: "NEGATIVE CONTROL: the refused block's prose is reworded and every semantic clause survives",
+    file: CORE,
+    find:
+      "        `REFUSED ENVELOPE: ${c.aspect} (${c.worker}) reviewed the change and wrote a report that ` +\n          `PARSED and was then declined by the console for the reason above. Record it as ` +",
+    replace:
+      "        `REFUSED ENVELOPE: ${c.aspect} (${c.worker}) reviewed the change and produced a report ` +\n          `that PARSED and that the console then turned down, for the reason above. Record it as ` +",
+    expect: "green",
   },
   {
     id: "N3",
