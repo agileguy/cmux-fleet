@@ -43,14 +43,14 @@ describe("the development console is a 2x2 of agent panes", () => {
     expect(DEVELOPMENT_WORKSPACE).not.toBe("operations");
   });
 
-  it("names two engineers on top and a tester and reviewer below", () => {
-    expect([...DEFAULT_DEVELOPMENT_WORKERS]).toEqual(["eng-1", "eng-2", "tst-1", "rev-1"]);
+  it("names two engineers on top and two testers below", () => {
+    expect([...DEFAULT_DEVELOPMENT_WORKERS]).toEqual(["eng-1", "eng-2", "tst-1", "tst-2"]);
   });
 
   it("titles panes by WORKER ID, because two of them share a role", () => {
     // A role title would print `engineer` on both top panes. The id is also
     // what `dispatch --worker` takes, so the title is the argument.
-    expect(fourAttended().map((p) => p.title)).toEqual(["eng-1", "eng-2", "tst-1", "rev-1"]);
+    expect(fourAttended().map((p) => p.title)).toEqual(["eng-1", "eng-2", "tst-1", "tst-2"]);
   });
 
   /**
@@ -93,7 +93,7 @@ describe("the development console is a 2x2 of agent panes", () => {
    * flag the operator never typed.
    */
   it("gives a worker that is NOT tui the viewer, not an attach", () => {
-    const panes = developmentPanes({ ...BASE, tuiWorkers: ["eng-1", "eng-2", "rev-1"] });
+    const panes = developmentPanes({ ...BASE, tuiWorkers: ["eng-1", "eng-2", "tst-2"] });
     const tester = panes.find((p) => p.title === "tst-1")!;
     expect(tester.command).not.toContain("'--attach-here'");
     expect(tester.command).not.toContain("'--attach-clear'");
@@ -131,7 +131,7 @@ describe("the development console is a 2x2 of agent panes", () => {
 describe("the development console refuses what it cannot lay out", () => {
   it("refuses a fifth worker rather than stacking a third row", () => {
     expect(() =>
-      developmentPanes({ ...BASE, workers: ["eng-1", "eng-2", "tst-1", "rev-1", "sre-1"] }),
+      developmentPanes({ ...BASE, workers: ["eng-1", "eng-2", "tst-1", "tst-2", "sre-1"] }),
     ).toThrow(/2x2 and holds at most 4/);
   });
 

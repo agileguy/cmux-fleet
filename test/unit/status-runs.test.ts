@@ -35,7 +35,7 @@ function doc(runs: { id: string; workers: string[] }[]): string {
   });
 }
 
-const DEV = new Set(["eng-1", "eng-2", "tst-1", "rev-1"]);
+const DEV = new Set(["eng-1", "eng-2", "tst-1", "tst-2"]);
 
 describe("only this console's runs are named", () => {
   it("returns the run holding a named worker", () => {
