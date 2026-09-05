@@ -1,5 +1,13 @@
 /**
- * Mutation battery — the wedged seat (`status.ts`'s `classifyWorkerSilence`).
+ * Mutation battery — everything `status.ts` JUDGES rather than merely prints.
+ *
+ * Two rules live in that file and this battery covers both, because they share a
+ * source file, a rendering discipline and a failure mode:
+ *
+ * - **the wedged seat** (`classifyWorkerSilence`) — a worker that is busy,
+ *   heartbeating and has nothing behind it;
+ * - **the unconsumed dispatch-request** (`classifyDispatchRequest`) — a review a
+ *   collator asked for that no actor ever consumed.
  *
  * Runs entirely inside a throwaway worktree; the live checkout is never written
  * to. Restore-first before every step, checksum verified after every restore,
@@ -19,6 +27,7 @@
  *   ln -s "$PWD/node_modules" /tmp/wt/node_modules
  *   cp src/cli/commands/status.ts /tmp/wt/src/cli/commands/
  *   cp test/unit/status-wedged-seat.test.ts /tmp/wt/test/unit/
+ *   cp test/unit/status-unconsumed-dispatch.test.ts /tmp/wt/test/unit/
  *   bun run test/mutation/wedged-seat.battery.ts /tmp/wt
  */
 import { spawn } from "node:child_process";
@@ -39,7 +48,11 @@ if (W === undefined || W === "" || W.endsWith("/cmux-fleet")) {
 }
 
 const STATUS = `${W}/src/cli/commands/status.ts`;
-const TESTFILES = ["test/unit/status-wedged-seat.test.ts", "test/unit/status-transcript-activity.test.ts"];
+const TESTFILES = [
+  "test/unit/status-wedged-seat.test.ts",
+  "test/unit/status-transcript-activity.test.ts",
+  "test/unit/status-unconsumed-dispatch.test.ts",
+];
 
 /** The describe block that must survive EVERY mutation below. */
 const CONTROL = "negative control: the pre-existing transcript column is untouched";
@@ -248,6 +261,188 @@ const MUTATIONS: M[] = [
     expect: "red",
   },
 
+  // ── The unconsumed dispatch-request: the journal is the discriminator. ───
+  //
+  // D1 and D2 are the ASYMMETRIC PAIR as mutations. One makes every request read
+  // consumed, the other makes every request read unconsumed. A fixture whose two
+  // candidates both lacked a journal entry would survive D2 — it would prove the
+  // rule notices SOMETHING without proving it notices the journal — so both
+  // directions are run and both must redden.
+  {
+    id: "D1",
+    what: "the journal is ignored: every request reads consumed and the alarm never fires",
+    catches: "an unjournalled request past the window is unconsumed, and carries the span",
+    file: STATUS,
+    find: '  if (input.journal.kind === "ok") return { taskId: input.taskId, verdict: "consumed" };',
+    replace: '  if (true) return { taskId: input.taskId, verdict: "consumed" };',
+    expect: "red",
+  },
+  {
+    id: "D2",
+    what: "the consumed arm is deleted: a request that WAS acted on is alarmed about too",
+    catches: "the consumed request is NOT named — the journal entry is the whole difference",
+    file: STATUS,
+    find:
+      '  if (input.journal.kind === "ok") return { taskId: input.taskId, verdict: "consumed" };\n' +
+      "  if (input.waitingMs >= input.unconsumedAfterMs) {",
+    replace: "  if (input.waitingMs >= input.unconsumedAfterMs) {",
+    expect: "red",
+  },
+  {
+    id: "D3",
+    what: "the window is dropped — a request written a second ago is called stranded",
+    catches: "an unjournalled request inside the window is WAITING, not unconsumed",
+    file: STATUS,
+    find: "  if (input.waitingMs >= input.unconsumedAfterMs) {",
+    replace: "  if (input.waitingMs >= 0) {",
+    expect: "red",
+  },
+  {
+    id: "D4",
+    what: "the boundary is exclusive, so the borrowed threshold itself never fires",
+    catches: "the boundary is the fleet's own number: one ms under waits, the number itself alarms",
+    file: STATUS,
+    find:
+      "  if (input.waitingMs >= input.unconsumedAfterMs) {\n" +
+      '    return { taskId: input.taskId, verdict: "unconsumed", waitingMs: input.waitingMs };',
+    replace:
+      "  if (input.waitingMs > input.unconsumedAfterMs) {\n" +
+      '    return { taskId: input.taskId, verdict: "unconsumed", waitingMs: input.waitingMs };',
+    expect: "red",
+  },
+  {
+    id: "D5",
+    what: "the threshold is invented instead of borrowed from the fan-out's own deadline",
+    catches: "it is RELAY_SETTLE_DEADLINE_MS, the longest a fan-out may legitimately hold a request",
+    file: STATUS,
+    find: "export const UNCONSUMED_AFTER_MS = RELAY_SETTLE_DEADLINE_MS;",
+    replace: "export const UNCONSUMED_AFTER_MS = 10_000;",
+    expect: "red",
+  },
+  {
+    id: "D6",
+    what: "an unreadable journal entry collapses into `consumed`",
+    catches: "an unreadable journal entry is a third fact, carrying the reader's own sentence",
+    file: STATUS,
+    find:
+      '    return { taskId: input.taskId, verdict: "journal_unreadable", reason: input.journal.reason };',
+    replace: '    return { taskId: input.taskId, verdict: "consumed" };',
+    expect: "red",
+  },
+
+  // ── What an operator sees, and the honest edge inside it. ────────────────
+  {
+    id: "D7",
+    what: "the message asserts ONE cause — a confident accusation the evidence cannot support",
+    catches: "the line states BOTH causes and neither is asserted over the other",
+    file: STATUS,
+    find:
+      "        `${coarseDuration(oldest.waitingMs)} (nothing has read it, or something read it and ` +",
+    replace:
+      "        `${coarseDuration(oldest.waitingMs)} (no relay actor is running for this console; ` +",
+    expect: "red",
+  },
+  {
+    id: "D8",
+    what: "the note also shouts for `waiting` — every fresh request becomes a false alarm",
+    catches: "a request still inside the window gets nothing either — the false alarm avoided",
+    file: STATUS,
+    find:
+      '    (r): r is Extract<DispatchReading, { verdict: "unconsumed" }> => r.verdict === "unconsumed",',
+    replace:
+      '    (r): r is Extract<DispatchReading, { verdict: "unconsumed" }> =>\n' +
+      '      r.verdict === "unconsumed" || r.verdict === "waiting",',
+    expect: "red",
+  },
+  {
+    id: "D9",
+    what: "the named request is the first rather than the oldest",
+    catches: "several unconsumed requests collapse to a count and the OLDEST, not a wall of ids",
+    file: STATUS,
+    find: "    const oldest = stuck.reduce((a, b) => (b.waitingMs > a.waitingMs ? b : a));",
+    replace: "    const oldest = stuck[0]!;",
+    expect: "red",
+  },
+  {
+    id: "D10",
+    what: "the alarm drops the task id, so the operator is told a review is stranded but not which",
+    catches: "an unconsumed request gets a loud line naming the request and the span",
+    file: STATUS,
+    find: "      `UNCONSUMED dispatch-request${many} ${oldest.taskId} unjournalled ` +",
+    replace: "      `UNCONSUMED dispatch-request${many} unjournalled ` +",
+    expect: "red",
+  },
+
+  // ── The id source: whose names become the question. ──────────────────────
+  {
+    id: "D11",
+    what: "the outbox is trusted as the id source — a worker can forge a permanent alarm",
+    catches: "a task the host never dispatched is invisible, so a worker cannot forge an alarm",
+    file: STATUS,
+    find: "    if (!dispatched.has(taskId)) continue;",
+    replace: "    if (false) continue;",
+    expect: "red",
+  },
+  {
+    id: "N5",
+    what: "NEGATIVE CONTROL: delete the empty-inbox fast path, which is speed and not the gate",
+    catches:
+      "nothing — proves the inbox gate D11 removes is the `has` test, not the early return, " +
+      "so the two guards are not one guard written twice",
+    file: STATUS,
+    find: "  if (dispatched.size === 0) return [];",
+    replace: "  if (dispatched.size < 0) return [];",
+    expect: "green",
+  },
+
+  // ── Wiring: correctness that never reaches an operator. ──────────────────
+  {
+    id: "D12",
+    what: "the journal file is never opened, so every request reads unjournalled",
+    catches: "the consumed request is NOT named — the journal entry is the whole difference",
+    file: STATUS,
+    find: "    const journal = await readJournalEntry(run.root, worker, taskId);",
+    replace: '    void readJournalEntry;\n    const journal = { kind: "missing" } as const;',
+    expect: "red",
+  },
+  {
+    id: "D13",
+    what: "the request's age is taken as `now`, so nothing is ever old enough to alarm",
+    catches: "the collator's line carries the alarm, naming the orphaned task and its age",
+    file: STATUS,
+    find: "      mtimeMs = (await stat(file)).mtimeMs;",
+    replace: "      await stat(file);\n      mtimeMs = nowMs;",
+    expect: "red",
+  },
+  {
+    id: "D14",
+    what: "the note is computed and never printed",
+    catches: "the collator's line carries the alarm, naming the orphaned task and its age",
+    file: STATUS,
+    find: "            const stranded = dispatchNote(w.requests, runId);",
+    replace: "            const stranded = null;",
+    expect: "red",
+  },
+  {
+    id: "D15",
+    what: "`--json` drops the field, leaving machine readers to parse the human line",
+    catches: "`--json` carries every request, its verdict, its span and the window judged against",
+    file: STATUS,
+    find: "                dispatch_requests: {",
+    replace: "                dispatch_requests_omitted: {",
+    expect: "red",
+  },
+  {
+    id: "D16",
+    what: "the reader is never called: the snapshot carries an empty list for every worker",
+    catches: "the collator's line carries the alarm, naming the orphaned task and its age",
+    file: STATUS,
+    find: "          const requests = await readDispatchRequests(run, id, dispatched, nowMs);",
+    replace:
+      "          void readDispatchRequests;\n          const requests: DispatchReading[] = [];",
+    expect: "red",
+  },
+
   // ── Negative controls: behaviour-preserving edits that must stay GREEN. ──
   {
     id: "N1",
@@ -274,6 +469,30 @@ const MUTATIONS: M[] = [
     file: STATUS,
     find: "      `(container may be gone)`",
     replace: "      `(its container may already be gone)`",
+    expect: "green",
+  },
+  {
+    id: "N3",
+    what: "NEGATIVE CONTROL: rename the `many` local without changing a byte of output",
+    catches: "nothing — proves the dispatch arm is aimed at behaviour, not at text",
+    file: STATUS,
+    find:
+      '    const many = stuck.length === 1 ? "" : `s x${stuck.length}, oldest`;\n' +
+      "    parts.push(\n" +
+      "      `UNCONSUMED dispatch-request${many} ${oldest.taskId} unjournalled ` +",
+    replace:
+      '    const plural = stuck.length === 1 ? "" : `s x${stuck.length}, oldest`;\n' +
+      "    parts.push(\n" +
+      "      `UNCONSUMED dispatch-request${plural} ${oldest.taskId} unjournalled ` +",
+    expect: "green",
+  },
+  {
+    id: "N4",
+    what: "NEGATIVE CONTROL: reword the message's tail, keeping both causes and the command",
+    catches: "nothing — proves the two-cause probe asserts facts, not one exact sentence",
+    file: STATUS,
+    find: "        `says which)`,",
+    replace: "        `tells the operator which)`,",
     expect: "green",
   },
 ];
