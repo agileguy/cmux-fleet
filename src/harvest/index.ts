@@ -25,6 +25,7 @@ import { Deadline } from "../util/clock.ts";
 import {
   DerivedFactsSchema,
   HarvestSchema,
+  RESULT_ENVELOPE_NAME,
   TaskEnvelopeSchema,
   rank,
   type DerivedFacts,
@@ -38,6 +39,7 @@ import { readTaskRecord, readWorkerLaunch, readWorkerState } from "../run/state.
 import { worktreeContentHash } from "../run/treehash.ts";
 import { deriveGitFacts, type GitFacts } from "./git.ts";
 import {
+  OUTBOX_FILES_DIR,
   describeUnreadableEnvelope,
   readResultEnvelope,
   safeForReport,
@@ -47,6 +49,11 @@ import {
   type UnreadableEnvelope,
 } from "./outbox.ts";
 import { dispatchedTaskIds, unexplainedOutboxDirs } from "./layout.ts";
+import {
+  describeUnrecognisedEntry,
+  listTaskOutbox,
+  type TaskOutboxListing,
+} from "./task-outbox.ts";
 import { resolveWorkerNeedles } from "./needles.ts";
 import { collationCeilingFor } from "./collation-census.ts";
 import { reconcileArtifactClaims } from "./reconcile.ts";
@@ -172,6 +179,32 @@ export interface TaskHarvest {
    * out of a discrepancy line.
    */
   unreadableEnvelope: UnreadableEnvelope | null;
+  /**
+   * What `<outbox>/<task-id>/` holds that no reader here opens — names and
+   * sizes, never contents. See `harvest/task-outbox.ts` for the measurement.
+   *
+   * ## Why a harvest that read an envelope perfectly still carries this
+   *
+   * It is computed on EVERY harvest, not only the ones that came up empty, so
+   * that the field means one thing: *what is in the task root that the harvest
+   * does not read*. Making its presence depend on how the envelope went would
+   * turn `unlistable` into two different facts — "nothing could be listed" and
+   * "nobody bothered" — and a consumer would have to know which harvest it was
+   * holding to tell them apart. That is the ambiguity `unreadableEnvelope`'s
+   * own `null` documents as a cost; there is no reason to buy it twice.
+   *
+   * ## It is beside `harvest`, not inside it
+   *
+   * `harvest` validates against `HarvestSchema`, a versioned wire contract.
+   * This is a fact about the HARVEST — which regions were read — rather than
+   * about the task, which is exactly `harvestStatus`'s and
+   * `unreadableEnvelope`'s orthogonality, and it sits with them for that reason.
+   * The RENDERED form of the interesting case is published in
+   * `harvest.discrepancies`, so `pifleet artifacts` and `pifleet report` show it
+   * with no further change; the STRUCTURED form is here for the relay, which
+   * must not recover facts by substring-matching English out of a discrepancy.
+   */
+  taskOutbox: TaskOutboxListing;
 }
 
 /**
@@ -229,6 +262,12 @@ function unavailableHarvest(taskId: string, reason: string): TaskHarvest {
     // is the honest answer and not a default: this harvest never reached an
     // outbox.
     unreadableEnvelope: null,
+    // Same restraint, same reason. This harvest has no dispatch record, so it
+    // never learned which worker's outbox to look in — there is no directory it
+    // could have listed. `unlistable` claims nothing, which is the only claim
+    // available. It must NOT be `empty`: that would assert a reviewer left
+    // nothing behind, on the strength of a lookup that never happened.
+    taskOutbox: { kind: "unlistable" },
   };
 }
 
@@ -302,6 +341,15 @@ export async function harvestTask(
     hostWorkdir: hasWorktree ? envelope.host_workdir : null,
   };
   const outbox: OutboxRead = await readResultEnvelope(loc);
+  /**
+   * What the task root holds that neither reader above nor the scan below
+   * opens. One `readdir` and at most eight `lstat`s — see `task-outbox.ts`.
+   *
+   * Taken UNCONDITIONALLY and before the branches, so the field means the same
+   * thing on every harvest; the branches decide what to SAY about it, not
+   * whether to look.
+   */
+  const taskOutbox: TaskOutboxListing = await listTaskOutbox(loc);
   /** Set only by the `unreadable` branch; published on `TaskHarvest`. */
   let unreadableEnvelope: UnreadableEnvelope | null = null;
   if (outbox.kind === "refused") {
@@ -378,6 +426,47 @@ export async function harvestTask(
         `/outbox/${safeForReport(taskId)}/result.json; the worker's own account of what it did ` +
         `is absent, so nothing it claims was checked`,
     );
+    /**
+     * AND WHETHER THE OUTBOX IS ACTUALLY EMPTY, which the line above cannot say.
+     *
+     * `rev-lang-1` wrote 12,759 bytes of review to
+     * `/outbox/<task>/artifact.json` — the task ROOT, under a name it invented —
+     * and no `result.json`. The finding above fired, correctly, and every word
+     * of it was true. It was also indistinguishable from the finding for a
+     * worker that wrote nothing at all, because the harvest's two readers look
+     * at `result.json` and `files/` and neither one can see a third name.
+     *
+     * ONLY IN THIS BRANCH. Where the envelope is unreadable, `refused`, or
+     * `ok`, the harvest HAS the worker's account and the operator's next action
+     * is about that file; a second inventory of the directory would be noise
+     * beside a finding that already names the thing to open. The structured
+     * field on `TaskHarvest` is carried in every one of those cases regardless,
+     * for a consumer that wants it — what is scoped here is the SENTENCE.
+     *
+     * ## What this line may and may not claim
+     *
+     * Names and sizes, and no interpretation. It must stay true of an outbox
+     * holding `notes.txt` and an outbox holding a complete review, because from
+     * here those two are identical — the bytes were never read and must not be.
+     * So it says what was found and explicitly does not say what it is.
+     *
+     * NO CLAMP, for the reason the line above does not clamp either (ISC-94): a
+     * missing envelope is not a failure, and a file of unknown content beside it
+     * is not evidence about the work. What was missing was never a verdict; it
+     * was a STATEMENT.
+     */
+    if (taskOutbox.kind === "unrecognised") {
+      const named = taskOutbox.named.map(describeUnrecognisedEntry).join(", ");
+      const more = taskOutbox.total - taskOutbox.named.length;
+      discrepancies.push(
+        `and its outbox is NOT EMPTY: /outbox/${safeForReport(taskId)}/ holds ` +
+          `${taskOutbox.total} entr${taskOutbox.total === 1 ? "y" : "ies"} that no reader here ` +
+          `opens — the harvest reads only ${RESULT_ENVELOPE_NAME} and ${OUTBOX_FILES_DIR}/. ` +
+          `Listed by name and size ONLY; nothing was opened, so nothing here can say what any ` +
+          `of it contains — a person has to look: ${named}` +
+          `${more > 0 ? `, and ${more} more not named` : ""}`,
+      );
+    }
   }
 
   /**
@@ -971,7 +1060,7 @@ export async function harvestTask(
     // The returned facts are the ones the verdict was actually reached from —
     // harness surface included. Returning `git.facts` here would hand callers a
     // bundle whose hash does not match the `facts_hash` beside it.
-    return { harvest, facts: factsWithHarness, harvestStatus, unreadableEnvelope };
+    return { harvest, facts: factsWithHarness, harvestStatus, unreadableEnvelope, taskOutbox };
   });
 }
 

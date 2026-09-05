@@ -185,6 +185,11 @@ const ENFORCED = new Set([
   "test/mutation/review-grading.battery.ts",
   "test/mutation/collation-contract.battery.ts",
   "test/mutation/wedged-seat.battery.ts",
+  // Enforced from the commit that introduced it. A battery that is merely
+  // *reported* on the day it lands is one that quietly rots from the next day,
+  // and its author exempting their own work would be worth nothing at all —
+  // the same argument this list already records for the two entries above.
+  "test/mutation/unrecognised-outbox.battery.ts",
 ]);
 
 describe("every mutation battery still anchors to the code it claims to mutate", () => {

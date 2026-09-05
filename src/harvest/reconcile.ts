@@ -84,6 +84,7 @@ import {
 } from "../run/collation.ts";
 import { censusFromRead } from "./collation-census.ts";
 import {
+  OUTBOX_FILES_DIR,
   containerPathToHost,
   resolvedWithin,
   safeForReport,
@@ -591,7 +592,7 @@ export async function reconcileArtifactClaims(
   // worker may legitimately reference a file it edited — is a repository full
   // of things (`.env`, credentials a build wrote) that this module has no
   // business digesting into a report.
-  const filesRoot = resolve(join(loc.workerOutboxDir, loc.taskId, "files"));
+  const filesRoot = resolve(join(loc.workerOutboxDir, loc.taskId, OUTBOX_FILES_DIR));
 
   /**
    * The accepted set, keyed by resolved host path.

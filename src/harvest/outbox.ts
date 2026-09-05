@@ -64,6 +64,25 @@ export const MAX_ENVELOPE_BYTES = 4 * 1024 * 1024;
 export const MAX_OUTBOX_ENTRIES = 10_000;
 
 /**
+ * The ONE directory under a task's outbox whose contents the harvest reads.
+ *
+ * NAMED rather than spelled at each use, and the reason is `layout.ts`'s
+ * `ledgerDirName` argument arriving at a second path. This string was written
+ * out three times — here in `scanOutboxFiles`, again in `reconcile.ts` — and a
+ * fourth reader has just been added in `task-outbox.ts` whose whole job is to
+ * report every task-root entry that is NOT this one. That reader fails in the
+ * worst available direction if it disagrees: were the scanner to move to some
+ * other directory and this spelling not follow, the listing would keep calling
+ * `files/` recognised and go silent about the very region nothing was reading —
+ * a detector that reports correct behaviour as fine and the defect as fine too.
+ *
+ * Container-side and host-side are the same name by construction: `/outbox` is
+ * a bind mount of `<run>/outbox/<worker>`, so the worker's `files/` and the
+ * harvester's `files/` are one directory under two paths.
+ */
+export const OUTBOX_FILES_DIR = "files";
+
+/**
  * Validated artifacts HELD OPEN at once before the scan refuses to hold more.
  *
  * This bound exists because `safe` holds descriptors (ISC-246, as restated)
@@ -717,7 +736,7 @@ export async function readResultEnvelope(loc: OutboxLocation): Promise<OutboxRea
  */
 export async function scanOutboxFiles(loc: OutboxLocation): Promise<OutboxFileScan> {
   const taskOutbox = join(loc.workerOutboxDir, loc.taskId);
-  const filesRoot = join(taskOutbox, "files");
+  const filesRoot = join(taskOutbox, OUTBOX_FILES_DIR);
   const out: OutboxFileScan = { safe: [], refused: [] };
 
   /**

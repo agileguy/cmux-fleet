@@ -407,6 +407,70 @@ export interface RelayUnreadableEnvelope {
   readonly detail: string;
 }
 
+/**
+ * ONE ENTRY IN A SILENT LENS' OUTBOX — a name, what it is, and a size.
+ *
+ * **The field names are `harvest/task-outbox.ts`'s, deliberately**, for
+ * `RelayUnreadableEnvelope`'s reason exactly: a translation is a second
+ * vocabulary for one fact, and the day the two drift the console reports a size
+ * that no longer means what this module thinks it means. Spelling them
+ * identically makes the adapter a pass-through.
+ *
+ * **THERE IS NO FOURTH FIELD AND THERE MUST NEVER BE ONE THAT CAME FROM THE
+ * ENTRY'S CONTENTS.** This value is rendered into a collation brief, which is a
+ * prompt handed to a model, and everything under a worker's outbox is
+ * worker-authored (§12.5). A preview, a first line, a "detected schema" — any of
+ * them would carry attacker-controlled text into the collator's context through
+ * a channel that today cannot carry it at all. The producer takes a `readdir`
+ * and an `lstat` and nothing else; this shape is what makes that boundary
+ * visible from here.
+ */
+export interface RelayOutboxEntry {
+  /** The entry's own name, already swept for control characters by the harvester. */
+  readonly name: string;
+  /** `file`, `directory`, `symlink` or `other` — a value, not a paraphrase. */
+  readonly kind: string;
+  /** Size for a REGULAR FILE only; `null` for everything else. Never inferred. */
+  readonly bytes: number | null;
+}
+
+/**
+ * WHAT A LENS' TASK OUTBOX HELD, when the harvest listed it.
+ *
+ * ## The fact this type exists to carry
+ *
+ * `rev-lang-1` wrote a complete 12,759-byte review to
+ * `/outbox/<task>/artifact.json` — the task ROOT, under a name it invented —
+ * and wrote no `result.json` and no `files/`. The harvest's two readers look at
+ * exactly those two names, so both missed it, and the brief said the lens
+ * *"settled `unknown` and no report reached the collator"*. True, and the whole
+ * of what anybody was told.
+ *
+ * `empty` and `unrecognised` are the distinction that was missing. Keeping them
+ * apart is the entire value: `empty` is what licenses the strong claim that a
+ * reviewer left nothing behind, and `unrecognised` withdraws it.
+ *
+ * ## What a consumer may NOT conclude from `unrecognised`
+ *
+ * That a review was found. An outbox holding `notes.txt` and an outbox holding
+ * a complete review are IDENTICAL through this type, because the bytes were
+ * never read — so every sentence built from it has to be true of both. Saying
+ * what was found is the whole permission; saying what it means is not granted.
+ */
+export type RelayOutboxListing =
+  /** Nothing could be listed — no directory, or a failed read. Claims NOTHING. */
+  | { readonly kind: "unlistable" }
+  /** Listed, and holding nothing the harvest does not already read. */
+  | { readonly kind: "empty" }
+  /** Listed, and holding entries in neither place the harvest reads. */
+  | {
+      readonly kind: "unrecognised";
+      /** Bounded by the harvester; `total` is what says whether it was cut. */
+      readonly named: readonly RelayOutboxEntry[];
+      /** EVERY unrecognised entry, counted — including any not named. */
+      readonly total: number;
+    };
+
 export interface RelayHarvest {
   /**
    * The harvester's verdict — `harvestTask(...).harvest.verdict`.
@@ -453,6 +517,17 @@ export interface RelayHarvest {
    * The live console asserted the strong claim from exactly this state.
    */
   readonly envelope?: RelayEnvelopeState;
+  /**
+   * What this task's outbox held, when the transport listed it.
+   *
+   * **Optional for `envelope`'s reason, and `undefined` means the same thing:
+   * NOBODY LOOKED.** It is deliberately not the same value as `unlistable`,
+   * which means somebody looked and could not list — and neither of them is
+   * `empty`, which is the only one that supports a claim about what a reviewer
+   * left behind. Three states, because collapsing any two of them manufactures
+   * evidence, which is the failure this whole area is a repair of.
+   */
+  readonly outbox?: RelayOutboxListing;
 }
 
 /**
@@ -549,6 +624,20 @@ export interface RelayChild {
    * to find them would be pinning a sentence rather than a fact.
    */
   readonly envelope: RelayEnvelopeState | null;
+  /**
+   * What this lens' task outbox held, or `null` when no harvest listed it.
+   *
+   * `null` is a FOURTH state beside the listing's own three and is not
+   * `unlistable` — a seat the request never named and a dispatch that was
+   * refused never reached an outbox at all, so nothing here even attempted the
+   * `readdir` that `unlistable` reports the failure of.
+   *
+   * Carried as a FIELD and not left only in `note` for `envelope`'s reason: a
+   * consumer that had to recover "this outbox was not empty" by matching
+   * English would be pinning a sentence rather than a fact, and the sentence is
+   * the part that gets rewritten.
+   */
+  readonly outbox: RelayOutboxListing | null;
   /** Why this lens is missing, in a form the collation brief can print. */
   readonly note: string;
 }
@@ -839,6 +928,7 @@ async function fanOut<R>(
         issued: false,
         inlined: [],
         envelope: null,
+        outbox: null,
         note: "the request never named this reviewer, so the lens was not applied",
       };
     }
@@ -855,6 +945,7 @@ async function fanOut<R>(
         issued: false,
         inlined: [],
         envelope: null,
+        outbox: null,
         note: dispatchNote,
       };
     }
@@ -869,10 +960,12 @@ async function fanOut<R>(
         issued: true,
         inlined: [],
         envelope: null,
+        outbox: null,
         note: "it was dispatched but could not be harvested",
       };
     }
     const envelope = harvested.envelope ?? null;
+    const outbox = harvested.outbox ?? null;
     return {
       worker: seat.worker,
       aspect: seat.aspect,
@@ -882,8 +975,11 @@ async function fanOut<R>(
       issued: true,
       inlined: harvested.inlined ?? [],
       envelope,
+      outbox,
       note:
-        harvested.verdict === "success" ? "" : missingLensNote(harvested.verdict, envelope),
+        harvested.verdict === "success"
+          ? ""
+          : missingLensNote(harvested.verdict, envelope, outbox),
     };
   });
 
@@ -1015,10 +1111,36 @@ async function fanOut<R>(
  * The verdict is quoted in every arm because it is the harvester's own word and
  * an operator correlating a lens against `report` needs it. What changed is that
  * it is no longer the SOURCE of the claim about the report.
+ *
+ * ## THE OUTBOX CLAUSE — a fact ADDED to two arms, not a fifth arm
+ *
+ * A second live review lost a second lens and every sentence above stayed true.
+ * `rev-lang-1` wrote a complete 12,759-byte review to
+ * `/outbox/<task>/artifact.json` — the task ROOT, under a name it invented —
+ * and no `result.json`. The harvest looks at `result.json` and at `files/`, so
+ * both of its readers missed it, and this function said *"it settled `unknown`
+ * and no report reached the collator"*. That is HONEST and it is the whole
+ * finding: nothing said that 12,759 bytes were sitting one directory from a
+ * reader.
+ *
+ * So `outboxClause` is appended to the two arms where NO ENVELOPE EXISTS —
+ * `null` and `absent` — and to no others. It does not re-decide the taxonomy
+ * and it does not weaken an arm:
+ *
+ *   - **`absent` keeps *"produced no report"***, because it stays a fact: no
+ *     result envelope exists. The clause reports a DIFFERENT region and lets a
+ *     reader see the tension for themselves rather than resolving it here.
+ *   - **`unreadable` and `present` get nothing**, because there the harvest HAS
+ *     the worker's account and already names the file to open. A second
+ *     inventory beside it would dilute the one actionable path.
  */
-function missingLensNote(verdict: Verdict, envelope: RelayEnvelopeState | null): string {
+function missingLensNote(
+  verdict: Verdict,
+  envelope: RelayEnvelopeState | null,
+  outbox: RelayOutboxListing | null,
+): string {
   if (envelope === null) {
-    return `it settled \`${verdict}\` and no report reached the collator`;
+    return `it settled \`${verdict}\` and no report reached the collator${outboxClause(outbox)}`;
   }
   switch (envelope.kind) {
     case "unreadable":
@@ -1029,13 +1151,91 @@ function missingLensNote(verdict: Verdict, envelope: RelayEnvelopeState | null):
         `that found nothing — the review exists on disk and no report reached the collator`
       );
     case "absent":
-      return `it settled \`${verdict}\` and produced no report — no result envelope exists for it`;
+      return (
+        `it settled \`${verdict}\` and produced no report — no result envelope exists for it` +
+        `${outboxClause(outbox)}`
+      );
     case "present":
       return (
         `it settled \`${verdict}\`; its result envelope was readable, and no report reached the ` +
         `collator because a reply is published only for a lens that succeeded`
       );
   }
+}
+
+/**
+ * ONE ENTRY, rendered. `artifact.json (12759 bytes)`.
+ *
+ * Deliberately carries NO adjective. Not "large", not "substantial", not
+ * "likely the report" — every one of those is a claim about content nothing
+ * read. The size is a measurement; an adjective is an interpretation, and the
+ * whole discipline here is that the interpretation is the reader's.
+ *
+ * A size is printed for a regular file and NOTHING is printed in its place for
+ * anything else. A number beside a symlink would be read as a measurement of
+ * its target, and `lstat` never looked at one.
+ */
+function describeOutboxEntry(e: RelayOutboxEntry): string {
+  if (e.kind === "directory") return `${e.name}/ (directory, not descended)`;
+  if (e.kind === "symlink") return `${e.name} (symlink, not followed)`;
+  if (e.kind !== "file") return `${e.name} (not a regular file)`;
+  return e.bytes === null ? `${e.name} (size unavailable)` : `${e.name} (${e.bytes} bytes)`;
+}
+
+/**
+ * WHETHER THE SILENT LENS' OUTBOX WAS EMPTY — appended to the note, or nothing.
+ *
+ * ## Every clause has to be true of `notes.txt` AND of a complete review
+ *
+ * That is the honest edge and it is what most of the wording below is arranged
+ * around. The listing is names and sizes taken by `readdir` and `lstat`; the
+ * bytes were never read, and must not be, because this sentence is rendered
+ * into a prompt handed to a model and everything under a worker's outbox is
+ * worker-authored (§12.5). From here, an outbox holding a stray scratch file
+ * and one holding the lost review are INDISTINGUISHABLE. So the clause states
+ * what was found, states that nothing opened it, and stops — the reader is told
+ * where to look and is not told what they will find.
+ *
+ * ## Silence for the two states that are not evidence
+ *
+ * `null` (nobody looked) and `unlistable` (somebody looked and could not list)
+ * both yield the empty string, so the note is byte-identical to what it was
+ * before this clause existed. Neither says anything about the reviewer, and
+ * manufacturing a sentence from either would be the original defect committed
+ * again at a new seam.
+ *
+ * ## The empty arm earns its words
+ *
+ * It is tempting to say nothing when there is nothing there. But *"produced no
+ * report"* is a claim someone has to be able to trust, and an operator reading
+ * a note with no clause cannot tell whether the outbox was checked and found
+ * bare or was never checked at all — which is precisely the ambiguity this
+ * whole change exists to remove. So the empty case says so out loud.
+ *
+ * ## Bounded, and it declares the bound
+ *
+ * A worker can fill its task root. The harvester caps what it NAMES and carries
+ * the true `total`, and this says how many were left unnamed rather than
+ * truncating in silence — a reader must never be left inferring that the list
+ * is complete.
+ */
+function outboxClause(outbox: RelayOutboxListing | null): string {
+  if (outbox === null || outbox.kind === "unlistable") return "";
+  if (outbox.kind === "empty") {
+    return (
+      `. Its task outbox WAS checked and holds nothing besides what the harvest already ` +
+      `reads, so there is no other file to look in`
+    );
+  }
+  const more = outbox.total - outbox.named.length;
+  return (
+    `. Its task outbox is NOT EMPTY: the task root holds ${outbox.total} ` +
+    `entr${outbox.total === 1 ? "y" : "ies"} that the harvest does not read — it reads only ` +
+    `the result envelope and the files/ directory. Listed by name and size ONLY; nothing here ` +
+    `opened them, so nothing here can say what any of it contains — a person has to look: ` +
+    `${outbox.named.map(describeOutboxEntry).join(", ")}` +
+    `${more > 0 ? `, and ${more} more not named` : ""}`
+  );
 }
 
 /**
@@ -1290,6 +1490,27 @@ export interface RelayHarvestView {
    * that field lands; see `RelayHarvest.envelope` for what silence means.
    */
   readonly unreadableEnvelope?: RelayUnreadableEnvelope | null;
+  /**
+   * `TaskHarvest.taskOutbox` — the harvester's own field, by its own name.
+   *
+   * **This is the bit the seam above says it is missing, arriving for a
+   * different question.** `unreadableEnvelope` cannot tell absent from present
+   * and the adapter therefore declines to guess; this one has no such gap,
+   * because the harvester computes it on EVERY harvest and its three states are
+   * exhaustive over what a `readdir` can find. So it is carried straight
+   * through, and the adapter's only decision is `null`/absent → `undefined`,
+   * which is the same "nobody looked" that `RelayHarvest.outbox` documents.
+   *
+   * It does NOT close the `absent` gap and must not be read as closing it. This
+   * says what is in the task root; it says nothing about whether `result.json`
+   * was looked for — a `result.json` present but unreadable and one that was
+   * never there both leave the listing identical. Two different questions about
+   * one directory.
+   *
+   * Optional so `TaskHarvest` satisfies this interface both before and after the
+   * field landed.
+   */
+  readonly taskOutbox?: RelayOutboxListing | null;
 }
 
 /**
@@ -1806,6 +2027,20 @@ export function consoleTransport(
           bundle.unreadableEnvelope != null
             ? { kind: "unreadable", ...bundle.unreadableEnvelope }
             : undefined,
+        /**
+         * THE SECOND ADAPTER POINT, and it is a pass-through rather than a
+         * classification for the reason the first one is a spread: the
+         * harvester decided what "unrecognised" means and re-deriving it here
+         * would be a second answer to a question `harvest/task-outbox.ts` spends
+         * its header on.
+         *
+         * `?? undefined` and NEVER `?? { kind: "empty" }`. A bundle that carries
+         * no listing is one where nobody looked, and manufacturing `empty` from
+         * it would assert that a reviewer left nothing behind on the strength of
+         * a `readdir` that never ran — the original defect, one seam further
+         * down, in the one direction that reads as helpful.
+         */
+        outbox: bundle.taskOutbox ?? undefined,
       };
     },
 
