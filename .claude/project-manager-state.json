@@ -12,27 +12,56 @@
  "max_review_iterations": 3,
  "parallel_engineers": 2,
  "total_phases": 7,
- "current_phase": 0,
+ "current_phase": 1,
  "completed_phases": [],
  "status": "in_progress",
- "prior_run_state": ".claude/project-manager-state-review-console.json — the SRD-REVIEW-CONSOLE run this file's shape is copied from; §2.7 cites it, so it was moved rather than overwritten",
+ "prior_run_state": ".claude/project-manager-state-review-console.json \u2014 the SRD-REVIEW-CONSOLE run this file's shape is copied from; \u00a72.7 cites it, so it was moved rather than overwritten",
  "decisions": {
   "base_branch": "Based on docs/srd-fleet-project-manager rather than main: the SRD is unmerged, and the review console's /workspace is a live read-only mount of this checkout, so the spec must be present on the branch for a lens to read it.",
   "isa_is_orchestrator_owned": "ISA.md is never in an engineer's partition. Every branch in this repo edits it, so it is the whole conflict surface; the orchestrator writes it after each phase's merge.",
   "fleet_yaml_is_not_dispatchable": "fleet.yaml and fleet-development.yaml are gitignored (.gitignore:9). A worker told to edit them produces an empty diff, which ISC-93 grades as a fabrication. Task 1.1a is the operator's by hand.",
-  "engineer_isolation": "Parallel engineers work in git worktrees and the orchestrator merges each branch. This is §6.2's model, so phases 1-5 exercise the integration path rather than deferring it to Phase 6."
+  "engineer_isolation": "Parallel engineers work in git worktrees and the orchestrator merges each branch. This is \u00a76.2's model, so phases 1-5 exercise the integration path rather than deferring it to Phase 6."
  },
  "measurements": {
-  "identity_symptom_2026_09_05": "docker exec -u 10001 <eng-1> git commit --allow-empty exits 128: 'fatal: unable to auto-detect email address (got pi@edf6548c4eca.(none))'. HOME=/home/pi is READ-ONLY so --global is unavailable. GIT_CONFIG_COUNT=1. /workspace is drwxrwxrwx, so a repository-local identity IS self-configurable. NOTE: §12 records the symptom as an invented identity (eng-1 <eng-1@pifleet.invalid>); on this operator's image it is a refusal.",
-  "stale_worker_remotes_2026_09_05": "~/repos/cmux-fleet carries worker-eng-1, worker-eng-2 and worker-tst-1 pointing at 2026-09-04 run directories. The live development console is launched from ~/repos/rally-cli, which holds the correct remotes. Both sets resolve under ls-remote, so §12's integration probe as written passes the broken state; it must assert equality with the live run's branch."
+  "identity_symptom_2026_09_05": "docker exec -u 10001 <eng-1> git commit --allow-empty exits 128: 'fatal: unable to auto-detect email address (got pi@edf6548c4eca.(none))'. HOME=/home/pi is READ-ONLY so --global is unavailable. GIT_CONFIG_COUNT=1. /workspace is drwxrwxrwx, so a repository-local identity IS self-configurable. NOTE: \u00a712 records the symptom as an invented identity (eng-1 <eng-1@pifleet.invalid>); on this operator's image it is a refusal.",
+  "stale_worker_remotes_2026_09_05": "~/repos/cmux-fleet carries worker-eng-1, worker-eng-2 and worker-tst-1 pointing at 2026-09-04 run directories. The live development console is launched from ~/repos/rally-cli, which holds the correct remotes. Both sets resolve under ls-remote, so \u00a712's integration probe as written passes the broken state; it must assert equality with the live run's branch."
  },
  "phases": [
-  {"n": 0, "slug": "prerequisites", "name": "The python image and the identity symptom"},
-  {"n": 1, "slug": "seat-model", "name": "rev-1 becomes tst-2 across config, plan and tests"},
-  {"n": 2, "slug": "container-identity", "name": "A worker commits under a configured identity"},
-  {"n": 3, "slug": "integration-path", "name": "Fetch, hazard-gate and merge a worker's branch"},
-  {"n": 4, "slug": "verdict-mapping", "name": "collation.json to APPROVED / CHANGES_REQUESTED / REVIEW_INCOMPLETE / VOID"},
-  {"n": 5, "slug": "the-skill", "name": "Workflows/ProjectManager.md, the routing row, the corrected tables"},
-  {"n": 6, "slug": "dogfood", "name": "One phase run through the workflow it specifies"}
- ]
+  {
+   "n": 0,
+   "slug": "prerequisites",
+   "name": "The python image and the identity symptom"
+  },
+  {
+   "n": 1,
+   "slug": "seat-model",
+   "name": "rev-1 becomes tst-2 across config, plan and tests"
+  },
+  {
+   "n": 2,
+   "slug": "container-identity",
+   "name": "A worker commits under a configured identity"
+  },
+  {
+   "n": 3,
+   "slug": "integration-path",
+   "name": "Fetch, hazard-gate and merge a worker's branch"
+  },
+  {
+   "n": 4,
+   "slug": "verdict-mapping",
+   "name": "collation.json to APPROVED / CHANGES_REQUESTED / REVIEW_INCOMPLETE / VOID"
+  },
+  {
+   "n": 5,
+   "slug": "the-skill",
+   "name": "Workflows/ProjectManager.md, the routing row, the corrected tables"
+  },
+  {
+   "n": 6,
+   "slug": "dogfood",
+   "name": "One phase run through the workflow it specifies"
+  }
+ ],
+ "pause_point": "OWNER INSTRUCTION 2026-09-05, revised: pause at the end of phase 2. Phase 1 = integrate 1A + 1B; phase 2 = integrate the container-identity branch. Verify both, run the review round, then STOP and report. Do not begin phase 3 integration without the owner's word. Phases 3/4 engineers were already in flight when the instruction arrived; they run to completion and their branches are PARKED unmerged, reported as staged work."
 }
