@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 520/547
+progress: 521/547
 retired: 2
 mode: build
 started: 2026-07-27
@@ -4834,7 +4834,7 @@ written on the equality, not on the resolution.
 - [x] ISC-543: **Anti: a collator's `lenses[]` disagreeing with the journal is reported, not silently preferred.** *Probe: the same fixture asserts the report names the disagreement.* It is the only signal available that a collator is not copying its brief faithfully.
 - [x] ISC-544: **Anti: the gate does not depend on `censusCeiling`.** *Probe: a `partial` collation still yields a verdict.* `src/harvest/collation-census.ts:490` returns null unless the claim is `success`, **so the one instrument that bounds a collation's shape is switched off for exactly the status this gate exists to handle.**
 - [x] ISC-545: A review round records the SHA its lenses read, and a moved checkout voids the round. *Probe: a fixture where `HEAD` differs between dispatch and collation; assert the verdict is `VOID`, that it is neither APPROVED nor `REVIEW_INCOMPLETE`, and that the iteration counter is unchanged.* §7.5 Gate 0. The reviewers did nothing wrong, so the round must not be charged to them.
-- [ ] ISC-546: Every review parent id derives four children inside 64 characters. *Probe: for phases 1..99, `childTaskId(parentFor(n), aspect)` succeeds for every aspect and for `collate`.* **Asserts the grammar rather than the current phase count** — a limit that holds for this document's seven phases and fails at phase 12 is a limit nobody will find.
+- [x] ISC-546: Every review parent id derives four children inside 64 characters. *Probe: for phases 1..99, `childTaskId(parentFor(n), aspect)` succeeds for every aspect and for `collate`.* **Asserts the grammar rather than the current phase count** — a limit that holds for this document's seven phases and fails at phase 12 is a limit nobody will find. **[x] 2026-09-05 — `pm-verdict.test.ts`, against the grammar the workflow file actually fixes**: `Workflows/ProjectManager.md` spells the parent `T-rv-p<N>` with children `-arch`, `-context`, `-lang` and collation `-collate`. Asserted over phases 1..99, with two anti-vacuity halves — that `childTaskId` still refuses an over-long parent (otherwise the loop proves nothing), and that the worst case leaves at least 40 characters of margin, stated as a number so a future grammar has to change it here rather than discover it at phase 12.
 - [ ] ISC-547: **Anti: a refused dispatch is never reported as a landed one.** *Probe: wire the dispatch dep to a runner that returns empty, and assert the workflow reports a failure.* `fb38fc8`'s property re-asserted at the workflow layer.
 - [ ] ISC-548: A phase whose tasks cannot be partitioned disjointly is dispatched to one engineer. *Probe: a fixture phase whose every task names one file produces a one-worker partition, not two.* D4 accepts idle seats over merge conflicts, and this is that acceptance made mechanical.
 - [ ] ISC-549: **Anti: a brief is not the orchestrator's prose.** *Probe: every dispatched `brief` appears as a substring of the SRD file the run names.* §8.3 — the `/fleet` cardinal rule made checkable, and **the only mechanism this design has for it.**

@@ -80,7 +80,7 @@ job, an `omlx-live` job and a `load` job, none of which are counted above.
 | 6 | Attended mode | done — `steer` / `abort` / `exec`, `tui` pane hand-off, voided-requirements table |
 | — | `pane_mode: tui` | done 2026-08-31 — the pane runs `docker attach` on Pi's own pty; no RPC control plane, keystroke dispatch, transcript-derived completion, `docker kill --signal=INT` for `abort`, and guards in `up` and `depends_on`. There is no `--mode tui`: Pi's TUI is its default mode plus a real terminal. |
 
-**Eleven criteria are unattempted `[ ]`: ISC-546..ISC-556** — the
+**Ten criteria are unattempted `[ ]`: ISC-547..ISC-556** — the
 SRD-FLEET-PM-001 block, filed 2026-09-05 ahead of its own build for the same reason the
 monitor block below was. Everything outside that block has been attempted. The block
 ISC-468..ISC-493 was filed 2026-09-02 as
@@ -193,7 +193,7 @@ and Phase 8 closed ISC-421, ISC-429 and ISC-430 — a hosted provider's Class 1 
 harvest sweep's needle set without `secret_names` claiming it was ever granted, the `up-wiring`
 shim reaches a successful container-path run rather than always refusing, and `up`'s spend gate
 states the dependency it actually has instead of one it merely appeared to.
-The only `[ ]` criteria are ISC-546..ISC-556, filed ahead of their build; every criterion
+The only `[ ]` criteria are ISC-547..ISC-556, filed ahead of their build; every criterion
 outside that block has been attempted. Sixteen are graded `[~]`
 (see `ISA.md`), which in this repo means the behaviour is built and re-checked but the *evidence*
 falls short of the standard — with one exception, added 2026-09-05 and worth stating plainly:

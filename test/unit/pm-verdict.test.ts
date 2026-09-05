@@ -23,7 +23,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 
 import { COLLATION_SCHEMA, CollationSchema, type Collation } from "../../src/run/collation.ts";
-import { childTaskId } from "../../src/run/task-ids.ts";
+import {
+  MAX_RELAY_TASK_ID_CHARS,
+  REVIEW_CONSOLE_ASPECTS,
+  childTaskId,
+} from "../../src/run/task-ids.ts";
 
 import {
   deriveReviewVerdict,
@@ -600,5 +604,53 @@ describe("ISC-544 (anti): the verdict does not depend on censusCeiling", () => {
       // Handed back unchanged rather than fabricated into a repo path.
       expect(verdict.findings[0]?.file).toBe("/etc/passwd");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISC-546 — the review parent id grammar fits inside the relay's 64 chars.
+// ---------------------------------------------------------------------------
+
+/**
+ * `Workflows/ProjectManager.md` fixes the review parent id as `T-rv-p<N>`,
+ * whose children are `-arch`, `-context`, `-lang` and whose collation is
+ * `-collate`. `childTaskId` refuses anything over
+ * `MAX_RELAY_TASK_ID_CHARS`, so a grammar that fits today and not at some
+ * later phase number is a limit nobody will find until the run stops.
+ *
+ * Asserted over phases 1..99, not over this document's seven, because that is
+ * the difference between grading the GRAMMAR and grading the current phase
+ * count. The anti-vacuity half matters as much: a fixture that only ever
+ * builds short ids cannot fail, so the same loop confirms that a parent long
+ * enough to overflow IS refused — otherwise `childTaskId` could have stopped
+ * enforcing the limit entirely and this block would stay green.
+ */
+describe("ISC-546: every review parent id derives four children inside 64 characters", () => {
+  const aspects = [...REVIEW_CONSOLE_ASPECTS.map((a) => a.aspect), "collate"];
+
+  test("phases 1 through 99, every aspect and the collation", () => {
+    expect(aspects.length).toBe(4);
+    for (let n = 1; n <= 99; n++) {
+      const parent = `T-rv-p${n}`;
+      for (const aspect of aspects) {
+        const child = childTaskId(parent, aspect);
+        expect(child.startsWith(`${parent}-`)).toBe(true);
+        expect(child.length).toBeLessThanOrEqual(MAX_RELAY_TASK_ID_CHARS);
+      }
+    }
+  });
+
+  test("the limit is still enforced — otherwise the loop above proves nothing", () => {
+    const tooLong = `T-rv-${"x".repeat(MAX_RELAY_TASK_ID_CHARS)}`;
+    expect(() => childTaskId(tooLong, "collate")).toThrow();
+  });
+
+  test("the grammar's longest child is comfortably inside the limit, with the margin stated", () => {
+    // p99 + the longest aspect is the worst case the loop reaches.
+    const longest = Math.max(...aspects.map((a) => childTaskId("T-rv-p99", a).length));
+    expect(longest).toBeLessThan(MAX_RELAY_TASK_ID_CHARS);
+    // Stated rather than implied: a future grammar that eats this margin
+    // should have to change a number here, not discover it at phase 12.
+    expect(MAX_RELAY_TASK_ID_CHARS - longest).toBeGreaterThanOrEqual(40);
   });
 });
