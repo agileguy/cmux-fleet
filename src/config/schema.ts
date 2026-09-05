@@ -78,6 +78,29 @@ export type Isolation = z.infer<typeof IsolationSchema>;
 
 const shortStr = z.string().min(1).max(4096);
 
+/**
+ * A `shortStr` that also refuses a newline, for the two `run.git_identity`
+ * fields (SRD §6.8 — ISC-528).
+ *
+ * These values are delivered through `GIT_CONFIG_VALUE_1`/`_2` in the
+ * container's env FILE, and docker's `--env-file` has no escaping: a newline
+ * does not escape, it terminates the declaration. `worker-env.ts:1199`
+ * already refuses one, so nothing unsanitised has ever reached a container —
+ * but it refuses at `up`, naming `GIT_CONFIG_VALUE_1`, the env key the value
+ * landed in rather than `run.git_identity.name`, the line the operator wrote.
+ * Tracing one to the other means knowing the `GIT_CONFIG_*` mapping by heart.
+ *
+ * Refusing here moves the same failure to `config validate`, where the field
+ * name is what the message can say. The check is a duplicate of a check that
+ * already works, deliberately: this one is about DIAGNOSIS, and the one in
+ * `worker-env.ts` is the one that must never be removed.
+ */
+const gitIdentityStr = shortStr.refine((v) => !/[\r\n]/.test(v), {
+  message:
+    "a git identity may not contain a newline: it is delivered through the container's env file, " +
+    "and docker's --env-file has no escaping, so a newline would terminate the declaration",
+});
+
 // ---------------------------------------------------------------------------
 // Role-level fields — shared by `defaults`, `roles.*`, and worker overrides
 // ---------------------------------------------------------------------------
@@ -380,8 +403,8 @@ export const RunSchema = z
      */
     git_identity: z
       .object({
-        name: shortStr.default("pifleet"),
-        email: shortStr.default("pifleet@pifleet.invalid"),
+        name: gitIdentityStr.default("pifleet"),
+        email: gitIdentityStr.default("pifleet@pifleet.invalid"),
       })
       .strict()
       .prefault({}),

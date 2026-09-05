@@ -233,6 +233,46 @@ describe("ISC-528: a worker's commit carries the exact configured identity", () 
    * carries, not merely that a commit succeeds — a criterion of the second
    * shape would have passed the invented identity too.
    */
+  /**
+   * The refusal an operator can act on, raised by the review round's F2.
+   *
+   * `serializeEnvFile` has always refused a newline in an env value — docker's
+   * `--env-file` has no escaping, so a newline terminates the declaration —
+   * and that refusal is what keeps anything unsanitised out of a container.
+   * But it fires at `up` and names `GIT_CONFIG_VALUE_1`, the env key, not
+   * `run.git_identity.name`, the line the operator wrote. The schema now
+   * refuses first, so `config validate` is where a bad identity is caught and
+   * the message can name the field. Both refusals are asserted: the schema
+   * one here, and the env-file one in the block below, because the second is
+   * the one that must never be removed.
+   */
+  test("a newline in run.git_identity is refused by the schema, naming the field", async () => {
+    await expect(
+      load(
+        baseDoc({
+          run: {
+            repo: "./repo",
+            budget: { tokens_ceiling: 1_000_000 },
+            git_identity: { name: "fixture-fleet\nAlso-Trailer: x", email: "a@b.invalid" },
+          },
+        }),
+      ),
+    ).rejects.toThrow(/git identity may not contain a newline/);
+
+    // and a carriage return, which docker treats the same way
+    await expect(
+      load(
+        baseDoc({
+          run: {
+            repo: "./repo",
+            budget: { tokens_ceiling: 1_000_000 },
+            git_identity: { name: "ok", email: "a@b.invalid\rx" },
+          },
+        }),
+      ),
+    ).rejects.toThrow(/git identity may not contain a newline/);
+  });
+
   test("git log -1 --format='%an <%ae>' equals the configured run.git_identity", async () => {
     const loaded = await load(
       baseDoc({

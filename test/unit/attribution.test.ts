@@ -244,8 +244,15 @@ describe("ISC-530: no AI or assistant attribution on the integration branch or i
  *
  * Neither arm alone is sufficient, which is why both are asserted below and
  * why removing either reddens a test.
+ *
+ * `[ \t]*`, not `\s*`: `\s` matches a newline, so `^\s*` under the `m` flag
+ * could anchor on one line and consume blank lines to reach a match on
+ * another — "leading whitespace" where the claim is "leading spaces on THIS
+ * line". Raised by the review round's F3. The `i` flag stays: git's own
+ * `interpret-trailers` matches trailer keys case-insensitively, so
+ * `co-authored-by:` is a trailer git and GitHub would both honour.
  */
-const ATTRIBUTION_LINE = /^\s*(?:Co-Authored-By:|Claude-Session:|🤖\s*Generated with)/im;
+const ATTRIBUTION_LINE = /^[ \t]*(?:Co-Authored-By:|Claude-Session:|🤖[ \t]*Generated with)/im;
 
 /**
  * The last blank-line-separated paragraph of a commit message — where git's
