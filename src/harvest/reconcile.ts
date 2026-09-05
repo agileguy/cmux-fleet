@@ -85,7 +85,7 @@ import {
 import { censusFromRead } from "./collation-census.ts";
 import {
   OUTBOX_FILES_DIR,
-  containerPathToHost,
+  artifactClaimToHost,
   resolvedWithin,
   safeForReport,
   type OutboxFile,
@@ -611,10 +611,22 @@ export async function reconcileArtifactClaims(
     // Rendered, never reproduced: the claim is worker-authored text on its way
     // into an operator's terminal (§12.6).
     const named = `${safeForReport(ref.path)} (kind ${ref.kind})`;
-    const host = containerPathToHost(ref.path, loc);
+    /**
+     * THE SAME RESOLUTION THE VALIDATOR USED, and it must stay the same one.
+     *
+     * These two passes disagreed once. `artifactPathProblem` learned that a
+     * relative artifact path means "relative to the task outbox"; this line
+     * still called `containerPathToHost`, which answers null for anything
+     * non-absolute. So an ACCEPTED claim fell into the branch below and the
+     * report said the file was outside the mount table — then the reverse pass,
+     * finding it unmatched, said the outbox held a file the envelope never
+     * mentioned. One artifact, two false statements, both about a file the
+     * envelope had named correctly.
+     */
+    const host = artifactClaimToHost(ref.path, loc);
     if (host === null) {
-      // Outside the mount table entirely — the §12.5 primitive. Nothing about
-      // this path has been or will be dereferenced.
+      // An absolute path outside the mount table — the §12.5 primitive.
+      // Nothing about this path has been or will be dereferenced.
       discrepancies.push(
         `envelope claims artifact ${named}, which is outside the container mount table; not read`,
       );

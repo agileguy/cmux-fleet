@@ -254,6 +254,30 @@ beforeAll(async () => {
     }),
   );
 
+  // T-refused: a well-formed envelope refused for what it SAYS. The artifact
+  // path is outside the container mount table, which voids the whole document
+  // — verdict, summary, findings and all — exactly as one misspelled pointer
+  // did to a real reviewer's fourteen findings. The fixture exists so the CLI
+  // can be asked whether it says so in a form a program can read.
+  await writeFile(
+    join(runDir, "inbox", "T-refused.json"),
+    JSON.stringify(taskEnvelope("T-refused", "w1", worktree)),
+  );
+  await mkdir(join(runDir, "outbox", "w1", "T-refused"), { recursive: true });
+  await writeFile(
+    join(runDir, "outbox", "w1", "T-refused", "result.json"),
+    JSON.stringify({
+      schema: "pifleet.result/v1",
+      task_id: "T-refused",
+      epoch: 1,
+      worker: "w1",
+      status: "success",
+      summary: "a perfectly good review, pointed somewhere it may not point",
+      files_changed: [],
+      artifacts: [{ kind: "file", path: "/etc/passwd" }],
+    }),
+  );
+
   // T-harness: a worker whose diff edits the test runner's own config. The
   // ISC-150 cap must refuse to certify success over a suite the graded actor
   // could have rewritten.
@@ -622,6 +646,40 @@ describe("pifleet artifacts — the harvest API (§8.4)", () => {
     // stays on the claimed side, so the report holds both without translating.
     expect(h.derived.artifacts[0]!.path.startsWith("/outbox/")).toBe(false);
     expect(h.claimed!.artifacts[0]!.path).toBe("/outbox/T-1/files/note.md");
+  }, cliBudget(2));
+
+  /**
+   * A REFUSED ENVELOPE MUST BE MACHINE-READABLE AS REFUSED.
+   *
+   * The rendered form was never the gap: a refusal has pushed its own
+   * `discrepancies` line for some time, and the human output prints it. What a
+   * program could get was `claimed: null` — the same value a task whose worker
+   * wrote nothing at all produces. Silence and a discarded document looked
+   * identical, and that ambiguity is what made a lost review take a day to
+   * diagnose. Recovering it by matching English out of a discrepancy string is
+   * the practice every one of these fields is documented to prevent.
+   *
+   * The `null` control in the same test is the point: `envelope_read` must
+   * distinguish "refused" from "read cleanly", so a fixture that merely
+   * carries the key would not be enough.
+   */
+  test("a refused envelope names its refusal in the JSON, in structure", async () => {
+    const r = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-refused", "--json"]);
+    expect(r.code).toBe(0);
+    const obj = JSON.parse(r.stdout) as Record<string, unknown>;
+    HarvestSchema.parse(obj); // the extra keys ride alongside; ISC-88 still holds
+    expect(obj["envelope_read"]).toBe("refused");
+    expect(String(obj["envelope_refusal"])).toContain("mount table");
+    // Not an unreadable envelope: it parsed. The two arms stay distinct.
+    expect(obj["unreadable_envelope"]).toBeNull();
+    // The document really was discarded, which is what makes the field needed.
+    expect((obj as { claimed: unknown }).claimed).toBeNull();
+
+    // Control: a task whose envelope read cleanly must not say "refused".
+    const ok = await runCli(["artifacts", "--run", RUN_ID, "--task", "T-1", "--json"]);
+    const okObj = JSON.parse(ok.stdout) as Record<string, unknown>;
+    expect(okObj["envelope_read"]).toBe("ok");
+    expect(okObj["envelope_refusal"]).toBeNull();
   }, cliBudget(2));
 
   // ISC-90 at the CLI: --include diff must carry git's diff, not a summary

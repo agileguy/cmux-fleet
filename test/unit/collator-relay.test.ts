@@ -914,6 +914,111 @@ describe("an unreadable envelope is a transport failure, not a silent reviewer",
     expect(brief).not.toContain("UNREADABLE ENVELOPE");
   });
 
+  /**
+   * The refused lens gets its own instruction, for the same reason the
+   * unreadable one does: the ACTION differs. A refused envelope parsed — the
+   * review is complete and legible on disk — so the recovery is "open it and
+   * read the findings", not "it may be damaged". The measured cost of not
+   * saying so was a review with fourteen findings described everywhere
+   * downstream as a reviewer who wrote nothing.
+   */
+  test("the collator is told a refused lens was written, parsed and declined", async () => {
+    const t = new FakeTransport({
+      verdicts: { "T-lang": "failed" },
+      envelopes: {
+        "T-lang": { kind: "refused", reason: "artifact path files/review.md is outside the mount table" },
+      },
+    });
+    const brief = briefOf(await run(ALL_THREE(), t));
+
+    expect(brief).toContain("REFUSED ENVELOPE");
+    expect(brief.match(/REFUSED ENVELOPE/g)).toHaveLength(1);
+    // The semantics, as phrases — the prose around them stays free to change.
+    expect(brief).toContain("PARSED");
+    expect(brief).toContain('"reported": false');
+    expect(brief).toContain("legible on disk");
+    // And the reason travels with it, so a person knows what to go and fix.
+    expect(brief).toContain("outside the mount table");
+    // NOT the unreadable block: this document is not damaged, and an operator
+    // sent looking for damage in an intact file wastes the trip.
+    expect(brief).not.toContain("UNREADABLE ENVELOPE");
+  });
+
+  test("no refused envelope means no refused block at all", async () => {
+    // The same guard the unreadable block needed. An unconditional block warns
+    // every brief about a hazard it does not have, and a warning on every
+    // brief is one a reader learns to skip past.
+    const t = new FakeTransport({
+      verdicts: { "T-lang": "failed" },
+      envelopes: { "T-lang": { kind: "absent" } },
+    });
+    const brief = briefOf(await run(ALL_THREE(), t));
+
+    expect(brief).toContain("MISSING ASPECT: lang");
+    expect(brief).not.toContain("REFUSED ENVELOPE");
+  });
+
+  /**
+   * The detail-less unreadable arm gets the same INSTRUCTION and a different
+   * NOTE. Same instruction because the recovery is identical — the lens was
+   * applied and should be re-run. Different note because this one cannot name
+   * the file, and claiming a path it does not have would send a person to a
+   * filename that does not exist.
+   */
+  test("an unreadable lens with no details still gets the re-run instruction", async () => {
+    const t = new FakeTransport({
+      verdicts: { "T-lang": "unknown" },
+      envelopes: { "T-lang": { kind: "unreadable_unspecified" } },
+    });
+    const out = collated(await run(ALL_THREE(), t));
+    const lang = out.children.find((c) => c.aspect === "lang");
+    const brief = briefOf(out);
+
+    expect(brief).toContain("UNREADABLE ENVELOPE");
+    expect(brief).toContain("re-run the lens");
+    // The note is honest about what it does not know, and does NOT use the
+    // sentence written for a reviewer that produced nothing.
+    expect(lang?.note).toContain("COULD NOT BE READ");
+    expect(lang?.note).toContain("did not reach the collator");
+    expect(lang?.note).not.toContain("produced no report");
+    // And it is not the refused block: nothing here parsed.
+    expect(brief).not.toContain("REFUSED ENVELOPE");
+  });
+
+  /**
+   * The asymmetric fixture, and the reason it is written this way: with one
+   * lens in each state, a block that fired on both — or on neither — is red.
+   * Two lenses in the SAME state would let a filter that ignores the kind
+   * entirely pass every assertion above.
+   */
+  test("an unreadable lens and a refused lens each get their own block, not each other's", async () => {
+    const t = new FakeTransport({
+      verdicts: { "T-lang": "failed", "T-context": "failed" },
+      envelopes: {
+        "T-lang": {
+          kind: "unreadable",
+          path: LANG_ENVELOPE,
+          bytes: 3906,
+          code: "not_json",
+          detail: PARSE_DETAIL,
+        },
+        "T-context": { kind: "refused", reason: "epoch 2 is stale; the run is on epoch 3" },
+      },
+    });
+    const brief = briefOf(await run(ALL_THREE(), t));
+
+    expect(brief.match(/UNREADABLE ENVELOPE/g)).toHaveLength(1);
+    expect(brief.match(/REFUSED ENVELOPE/g)).toHaveLength(1);
+    // Each names ITS OWN aspect. A block that took the whole missing set would
+    // name both lenses twice and pass a bare presence check.
+    const unreadableLine = brief.split("\n").find((l) => l.startsWith("UNREADABLE ENVELOPE")) ?? "";
+    const refusedLine = brief.split("\n").find((l) => l.startsWith("REFUSED ENVELOPE")) ?? "";
+    expect(unreadableLine).toContain("lang");
+    expect(unreadableLine).not.toContain("(context)");
+    expect(refusedLine).toContain("context");
+    expect(refusedLine).not.toContain("(lang)");
+  });
+
   test("a transport that says nothing about envelopes claims nothing about them", async () => {
     /**
      * The THIRD state, and it is not the same as `absent`.

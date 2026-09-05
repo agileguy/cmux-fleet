@@ -399,6 +399,33 @@ export function containerPathToHost(p: string, loc: OutboxLocation): string | nu
 }
 
 /**
+ * Resolve one envelope-claimed artifact path to a host path, under the single
+ * reading the contract gives it: an absolute path is a CONTAINER path and goes
+ * through the mount table; a relative one is relative to the task outbox.
+ *
+ * SHARED DELIBERATELY, between `artifactPathProblem` — which decides whether
+ * the envelope is admissible at all — and the reconciler, which decides
+ * whether a claim matches a file on disk.
+ *
+ * **MEASURED, and the reason this is a function rather than two lines.** The
+ * two passes were independent spellings of one rule. When the validator
+ * learned to accept a relative path, the reconciler did not, and an ACCEPTED
+ * claim then produced two false discrepancies about the same file: "outside
+ * the container mount table" from the forward pass, for a file that was
+ * sitting right there, and "the outbox holds a file the envelope never
+ * mentioned" from the reverse pass, for that same file. A report that
+ * contradicts itself twice about one artifact is worse than one that refuses
+ * it. Both passes now ask this function, so they cannot drift apart again.
+ *
+ * Lexical throughout — nothing here is opened, stat'd or dereferenced. Returns
+ * null only for an ABSOLUTE path outside the mount table; a relative path
+ * always resolves, and is then contained by the caller's escape check.
+ */
+export function artifactClaimToHost(p: string, loc: OutboxLocation): string | null {
+  return isAbsolute(p) ? containerPathToHost(p, loc) : join(loc.workerOutboxDir, loc.taskId, p);
+}
+
+/**
  * Characters that make a path mean one thing to this validator and another to
  * whatever eventually opens it.
  *
@@ -496,29 +523,14 @@ function artifactPathProblem(p: string, loc: OutboxLocation): string | null {
   if (separator !== null) return separator;
   const taskOutbox = join(loc.workerOutboxDir, loc.taskId);
   /**
-   * A RELATIVE ARTIFACT PATH IS RESOLVED AGAINST THE TASK OUTBOX, and this is
-   * the fix for a lost review rather than a convenience.
-   *
-   * **MEASURED.** Three reviewers wrote the same review to the same place. Two
-   * named it `/outbox/<task-id>/files/review.md` and were accepted; the third
-   * named it `files/review.md` and its ENTIRE envelope was refused — verdict,
-   * summary and fourteen findings, two of them HIGH, discarded over the
-   * spelling of one pointer. `containerPathToHost` matches only against the
-   * mount table, a relative path matches no mount, and the refusal that came
-   * back said "outside the mount table" of a file sitting inside the outbox.
-   *
-   * **This widens nothing that can be READ.** The resolution is lexical, and
-   * the escape check below is unchanged and still runs: `../../etc/passwd`
-   * resolves and is then refused by `resolvedWithin`, with the accurate message
-   * rather than the mount-table one. What changes is only which SPELLING of an
-   * in-outbox path is accepted — and the worker's own skill doc says the
-   * requirement is that a path "resolve inside your outbox", which this one
-   * does under the single reading a relative path has.
-   *
-   * The task outbox is the right base and not `/outbox`: `files/` is the
-   * directory the skill tells a worker to write into, and it is per-task.
+   * `artifactClaimToHost` carries the relative-path rule and the measurement
+   * behind it. What belongs here is the reason accepting that spelling widens
+   * nothing READABLE: the resolution is lexical, and the escape check below is
+   * unchanged and still runs. `../../etc/passwd` resolves, then `resolvedWithin`
+   * refuses it — with the accurate message rather than the mount-table one.
+   * Only which SPELLING of an in-outbox path is accepted changes.
    */
-  const host = isAbsolute(p) ? containerPathToHost(p, loc) : join(taskOutbox, p);
+  const host = artifactClaimToHost(p, loc);
   if (host === null) return `artifact path ${p} is outside the mount table`;
   const inOutbox = resolvedWithin(taskOutbox, host);
   const inWorktree = loc.hostWorkdir !== null && resolvedWithin(loc.hostWorkdir, host);

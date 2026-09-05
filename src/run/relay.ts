@@ -398,6 +398,15 @@ function relayEnvelopeState(bundle: {
   if (bundle.envelopeRead === "refused") {
     return { kind: "refused", reason: bundle.envelopeRefusal ?? null };
   }
+  /**
+   * The harvester said UNREADABLE and the structure did not arrive.
+   *
+   * Ordered last on purpose: the arm above it consumes the same word when the
+   * structure IS present, so this is reached only by the inconsistent bundle.
+   * Falling through to `undefined` here would say nothing looked, about an
+   * envelope a reader looked at and failed to parse.
+   */
+  if (bundle.envelopeRead === "unreadable") return { kind: "unreadable_unspecified" };
   return undefined;
 }
 
@@ -425,7 +434,31 @@ export type RelayEnvelopeState =
    * stale epoch, a path climbing out of the outbox. `reason` is the harvester's
    * own sentence and is `null` only when the refusal reached here without one.
    */
-  | { readonly kind: "refused"; readonly reason: string | null };
+  | { readonly kind: "refused"; readonly reason: string | null }
+  /**
+   * An envelope EXISTS and could not be read, and the DETAILS did not reach
+   * here — a seam-integrity arm, and the reason it is a state rather than a
+   * silence.
+   *
+   * `relayEnvelopeState` takes two independent fields: the harvester's own
+   * verdict word, and the structure describing an unreadable one. Today's only
+   * producer sets both together, so this arm carries no traffic. The type
+   * permitted the combination anyway, and what it used to produce for it was
+   * `undefined` — the value that means NOTHING LOOKED. That is the exact
+   * substitution that cost a day: a document that exists, described with the
+   * sentence for a reviewer who wrote nothing.
+   *
+   * It is deliberately NOT the `unreadable` arm with blanked fields. Every
+   * field there is load-bearing — the path is what a person opens — and a
+   * placeholder path is worse than an admission. This arm says the true thing:
+   * the lens was applied, its report is unreadable, and where it sits is not
+   * known from here. The recovery instruction is unchanged, which is why the
+   * brief treats the two together.
+   *
+   * A transport that serialises `envelopeRead` and drops the nested structure
+   * makes this reachable. That is the transport this exists for.
+   */
+  | { readonly kind: "unreadable_unspecified" };
 
 /**
  * THE HARVESTER'S OWN DESCRIPTION OF AN UNREADABLE ENVELOPE, spelled
@@ -1230,6 +1263,13 @@ function missingLensNote(
         `(${envelope.code}: ${envelope.detail}). This is a transport failure, not a reviewer ` +
         `that found nothing — the review exists on disk and no report reached the collator`
       );
+    case "unreadable_unspecified":
+      return (
+        `it settled \`${verdict}\` and its report WAS WRITTEN AND COULD NOT BE READ. Where the ` +
+        `file sits and why it failed to parse did not reach the collator, so this note cannot ` +
+        `name them — but the review exists and this is a transport failure, not a reviewer that ` +
+        `found nothing${outboxClause(outbox)}`
+      );
     case "absent":
       return (
         `it settled \`${verdict}\` and produced no report — no result envelope exists for it` +
@@ -1411,7 +1451,12 @@ function collationBrief(
      * which is the 3/3 fabrication §6.8 exists to make impossible. What changes
      * is the stated REASON, not the row.
      */
-    const unreadableLenses = missing.filter((c) => c.envelope?.kind === "unreadable");
+    // Both unreadable arms, because the INSTRUCTION is the same one: the lens
+    // was applied and its review should be re-run. Only the note above differs,
+    // and it differs by naming a file or admitting it cannot.
+    const unreadableLenses = missing.filter(
+      (c) => c.envelope?.kind === "unreadable" || c.envelope?.kind === "unreadable_unspecified",
+    );
     for (const c of unreadableLenses) {
       lines.push("");
       lines.push(
@@ -1420,6 +1465,46 @@ function collationBrief(
           `reason above in its note. Do NOT record it as a lens that found nothing or was not ` +
           `applied: it was applied. Say in your prose report that this lens' review exists and ` +
           `was not readable, so that a person can open the file and re-run the lens.`,
+      );
+    }
+
+    /**
+     * ── AND THE REFUSED LENSES, WHICH ARE NOT THE UNREADABLE ONES ───────────
+     *
+     * The block above exists because "absent" and "unreadable" call for
+     * different actions. `refused` is a third action, and collapsing it into
+     * either of the other two states something false about a real document.
+     *
+     * **The distinction is the recovery.** An unreadable envelope is damaged:
+     * the reviewer's work may be partly or wholly unrecoverable. A refused one
+     * PARSED — it is complete, well-formed, and sitting on disk exactly as the
+     * reviewer wrote it. The console declined it over something in what it
+     * said, which is usually one field. A person can open that file and read
+     * the entire review, and telling them the report was "not readable" would
+     * send them looking for damage in a file that has none.
+     *
+     * **MEASURED, and this is the wording that failed.** A reviewer's envelope
+     * carrying a verdict, a summary and fourteen findings — two of them HIGH —
+     * was refused over the spelling of a single artifact path. Every surface
+     * downstream described that lens the way it describes a reviewer who wrote
+     * nothing. The whole cost of the incident was in that description.
+     *
+     * `reported` stays false here for the same reason it does above: the
+     * collator has not read the review, and a lens credited without being read
+     * can be named in `raised_by`, which is the §6.8 fabrication. What changes
+     * is the REASON and the recovery, not the row.
+     */
+    const refusedLenses = missing.filter((c) => c.envelope?.kind === "refused");
+    for (const c of refusedLenses) {
+      lines.push("");
+      lines.push(
+        `REFUSED ENVELOPE: ${c.aspect} (${c.worker}) reviewed the change and wrote a report that ` +
+          `PARSED and was then declined by the console for the reason above. Record it as ` +
+          `"reported": false — you have not read it — with that reason in its note. Do NOT ` +
+          `record it as a lens that found nothing, was not applied, or could not be read: the ` +
+          `review is complete and legible on disk. Say in your prose report that this lens' ` +
+          `review was written and rejected, and name the reason, so that a person can open the ` +
+          `file and read the findings this collation does not contain.`,
       );
     }
   }
@@ -1814,8 +1899,25 @@ export class RelayDispatchError extends Error {
     /** The supervisor's refusal code, or `null` when the socket itself failed. */
     readonly refusal: string | null,
     detail: string,
+    /**
+     * THE ORIGINAL THROW, when there was one.
+     *
+     * Only one of the five sites that raise this has an underlying error: the
+     * `catch` around `sendTask`, where a socket failed, a launch record would
+     * not read, or a terminal had gone. That site used to keep `err.message`
+     * and drop the object, which discards the `errno`, the `syscall`, the
+     * stack that says WHERE, and any cause chain beneath it.
+     *
+     * The cost is the same one this module argues about everywhere else: the
+     * paraphrase survives and the evidence does not. `SocketRequestError` reads
+     * identically whether the socket path was wrong, the supervisor was gone or
+     * the peer hung up mid-write, and telling those apart is the whole content
+     * of the diagnosis. `cause` is where a reader who wants the original goes,
+     * and it does not change what the message says to a reader who does not.
+     */
+    options?: { readonly cause?: unknown },
   ) {
-    super(`dispatch of ${taskId} to ${worker} did not land: ${detail}`);
+    super(`dispatch of ${taskId} to ${worker} did not land: ${detail}`, options);
     this.name = "RelayDispatchError";
   }
 }
@@ -1987,6 +2089,8 @@ export function consoleTransport(
           d.taskId,
           null,
           err instanceof Error ? err.message : String(err),
+          // The message is the paraphrase; this is the evidence. See the field.
+          { cause: err },
         );
       }
 

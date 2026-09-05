@@ -514,6 +514,31 @@ async function collectDispatched(
     try {
       const t = await harvestTask(run, taskId, { harnessPatterns });
       verdict = t.harvest.verdict;
+      /**
+       * A DISCARDED DOCUMENT IS A NOTE, because this report is the thing an
+       * operator runs when something went wrong and a verdict alone cannot
+       * say what.
+       *
+       * Only the verdict is taken from the harvest, which is right — the
+       * harvester is the only door a claim may enter through. But a refused
+       * envelope reaches this line as `unknown`, and so does a worker that
+       * never wrote one. The row was identical for "the reviewer said nothing"
+       * and "the reviewer said everything and we threw it away", and the
+       * second of those took a day to find precisely because every surface it
+       * touched rendered it as the first.
+       *
+       * `notes` is the existing channel for a collection-level fact about a
+       * row, and this is one: it says nothing about the task's outcome, only
+       * about how much of the task's own account survived. The reason string
+       * is the harvester's, unmodified.
+       */
+      if (t.envelopeRead === "refused") {
+        notes.push(
+          `result envelope for ${taskId} was REFUSED and its claims discarded: ${t.envelopeRefusal ?? "no reason recorded"}`,
+        );
+      } else if (t.envelopeRead === "unreadable") {
+        notes.push(`result envelope for ${taskId} exists and could not be read`);
+      }
     } catch (err) {
       // One task that cannot be harvested is one degraded row, not the loss
       // of the whole report (the same stance harvestAll takes).

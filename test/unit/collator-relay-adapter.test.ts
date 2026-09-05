@@ -544,6 +544,39 @@ describe("dispatch, over THE dispatch path", () => {
     const p = consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
     await expect(p).rejects.toBeInstanceOf(RelayDispatchError);
   });
+
+  /**
+   * THE ORIGINAL THROW SURVIVES THE WRAP.
+   *
+   * Of the five sites that raise `RelayDispatchError`, exactly one has an
+   * underlying error, and it used to keep the message and drop the object.
+   * `SocketRequestError` reads the same whether the socket path was wrong, the
+   * supervisor had gone, or the peer hung up mid-write — the `errno`, the
+   * `syscall` and the stack are what tell those apart, and they were the part
+   * being discarded. Asserted through `cause` identity rather than through a
+   * message substring, because a message can be reconstructed and the object
+   * cannot.
+   */
+  test("a thrown send keeps the original error as its cause", async () => {
+    const original = Object.assign(new Error("connect ENOENT /run/sock"), {
+      code: "ENOENT",
+      syscall: "connect",
+    });
+    const { fx } = effects({
+      async sendTask() {
+        throw original;
+      },
+    });
+
+    const p = consoleTransport("col-1", fx).dispatch(ARCH_RUN, seat);
+    await expect(p).rejects.toBeInstanceOf(RelayDispatchError);
+    const err = await p.catch((e: unknown) => e);
+    // The same object, not a copy of its text: `errno` and stack come with it.
+    expect((err as Error).cause).toBe(original);
+    expect(((err as Error).cause as { code?: string }).code).toBe("ENOENT");
+    // And the message still says the useful thing on its own.
+    expect((err as Error).message).toContain("did not land");
+  });
 });
 // ---------------------------------------------------------------------------
 // 3. `awaitSettled` — the poll that had no helper to import, and its bound.
@@ -706,6 +739,39 @@ describe("harvest", () => {
       code: "not_json",
       detail: "Invalid escape character w in JSON at position 1487",
     });
+  });
+
+  /**
+   * THE INCONSISTENT BUNDLE, which the type permits and today's producer never
+   * emits: the harvester's word says the envelope was unreadable, and the
+   * structure describing it did not arrive.
+   *
+   * What this used to produce was `undefined`, and `undefined` on this field
+   * means NOTHING LOOKED — the sentence written for a reviewer that produced
+   * no report. That substitution is the whole shape of the incident this
+   * console was fixed for: a document that existed, described as silence.
+   *
+   * The arm carries no production traffic. It exists because a transport that
+   * serialises the harvester's verdict word and drops the nested structure —
+   * anything crossing a wire — makes the combination reachable, and the failure
+   * mode would be silent.
+   */
+  test("unreadable without its structure is still not silence", async () => {
+    const { fx } = effects({
+      async harvestTask() {
+        return {
+          harvest: { verdict: "unknown" as Verdict },
+          unreadableEnvelope: null,
+          envelopeRead: "unreadable" as const,
+        };
+      },
+    });
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+
+    expect(got.envelope).toEqual({ kind: "unreadable_unspecified" });
+    // The two failures this must not be confused with.
+    expect(got.envelope).not.toBeUndefined();
+    expect(got.envelope).not.toEqual({ kind: "absent" });
   });
 
   /**
