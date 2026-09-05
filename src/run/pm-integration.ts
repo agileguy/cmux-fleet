@@ -261,20 +261,51 @@ export class IntegrationGitError extends Error {
  * `A...B` is git's name for "what B changed since the merge base", which is
  * the question the gate is actually asking. `rev-list --count` above keeps
  * two dots, where two dots already mean the range.
+ *
+ * ## `-z`, and this is the OTHER half of the gate's correctness
+ *
+ * The listing is the gate's only input, and **its shape is chosen by the party
+ * being gated.** `git diff --name-only` C-quotes any path holding a non-ASCII
+ * byte (`core.quotePath` defaults on) or a control character, and wraps it in
+ * double quotes. Measured:
+ *
+ * ```
+ * ".github/workflows/deploy-caf\303\251.yml"
+ * .github/workflows/plain.yml
+ * ".pi/ext\303\251nsion.json"
+ * ```
+ *
+ * Every rule in `HAZARD_PATH_RULES` is an `===`, a `startsWith` or an
+ * `endsWith` against a raw repo-relative path, so an entry beginning with `"`
+ * matches none of them. **A worker wanting `.pi/**` or `.github/workflows/**`
+ * past the gate needed one accented character in the filename** — verified as
+ * a merge, not as a mismatch: the fixture branch whose only hazard was an
+ * accented workflow file came back `merged`. A newline is worse still, because
+ * it does not merely fail to match: it breaks the line format, and one path
+ * becomes two entries that are not paths.
+ *
+ * `-z` is NUL-delimited, and NUL is the one byte a path cannot contain. This
+ * was already the convention everywhere else in this repository that reads a
+ * path listing — `harvest/git.ts:396`, `report/merge.ts:132`,
+ * `worktree.ts:261` — and `parseNameStatusZ`'s docblock gives the same reason
+ * in the same words. The gate was the single reader that had not adopted it,
+ * which is the one place it mattered most.
+ *
+ * Found by `rev-lang-1` in phase 6's review round, as finding 3.
  */
 export async function incomingTreeChanges(
   repoRoot: string,
   baseRef: string,
   headRef: string,
 ): Promise<string[]> {
-  const res = await spawnGit(repoRoot, ["diff", "--name-only", `${baseRef}...${headRef}`]);
+  const res = await spawnGit(repoRoot, ["diff", "--name-only", "-z", `${baseRef}...${headRef}`]);
   if (res.code !== 0) {
-    throw new IntegrationGitError(`git diff --name-only ${baseRef}...${headRef}`, res);
+    throw new IntegrationGitError(`git diff --name-only -z ${baseRef}...${headRef}`, res);
   }
-  return res.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+  // NUL-delimited and NOT trimmed. `-z` turns the quoting off at the source, so
+  // every byte between two NULs is the path; trimming it would be this function
+  // deciding that a path git reported is not the path git reported.
+  return res.stdout.split("\0").filter((path) => path.length > 0);
 }
 
 // ---------------------------------------------------------------------------

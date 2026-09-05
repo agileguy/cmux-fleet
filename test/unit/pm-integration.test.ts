@@ -750,3 +750,114 @@ describe("the hazard inspection reads the branch's own changes, not the base's (
     expect(findHazardTouches(changed, w.workerHead)).not.toEqual([]);
   });
 });
+
+/**
+ * The gate's input is a LISTING, and the shape of that listing is chosen by
+ * the party being gated (review finding 3, phase 6's round, raised by
+ * `rev-lang-1`).
+ *
+ * `git diff --name-only` C-quotes any path containing non-ASCII bytes
+ * (`core.quotePath` defaults to true) or a control character, and wraps it in
+ * double quotes. Measured with real git before this was written:
+ *
+ * ```
+ * $ git diff --name-only <base>...<head>
+ * ".github/workflows/deploy-caf\303\251.yml"
+ * .github/workflows/plain.yml
+ * ".pi/ext\303\251nsion.json"
+ * ```
+ *
+ * Every rule in `HAZARD_PATH_RULES` is a `===`, `startsWith` or `endsWith`
+ * against a raw repo-relative path, so a listing entry beginning with `"`
+ * matches NONE of them. A worker that wants `.github/workflows/**` or `.pi/**`
+ * through the gate only has to put one accented character in the filename.
+ *
+ * A newline is worse than an escape: it does not merely fail to match, it
+ * breaks the line-oriented format itself, so one path becomes two listing
+ * entries and neither is the path.
+ *
+ * `-z` is the fix, and it is the convention this repository already had
+ * everywhere else — `harvest/git.ts:396`, `report/merge.ts:132` and
+ * `worktree.ts:261` all pass it, and `parseNameStatusZ`'s docblock states the
+ * reason in the same words: "paths are worker-controlled ... and NUL cannot
+ * appear in a path". The gate was the one reader that did not.
+ *
+ * ## Why each fixture carries a PLAIN hazard path beside the quoted one
+ *
+ * A plain `.github/workflows/plain.yml` matches with or without `-z`. So a
+ * test asserting only "some hazard was found" passes on the broken gate, and
+ * an assertion that the merge was refused passes too — refused for the wrong
+ * path, by the one rule the attacker did not need to defeat. Every assertion
+ * below names the QUOTED path specifically.
+ */
+describe("the hazard listing is NUL-delimited, because the path is worker-controlled (review finding 3)", () => {
+  /** A non-ASCII byte and a control character: the two things git quotes. */
+  const ACCENTED = ".github/workflows/deploy-caf\u00e9.yml";
+  const NESTED_ACCENTED = ".pi/ext\u00e9nsion.json";
+
+  test("a hazard path git would C-quote is listed RAW, and classified", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-q1", async (dir) => {
+      await writeFileDeep(join(dir, ACCENTED), "name: evil\n");
+      await writeFileDeep(join(dir, NESTED_ACCENTED), "{}\n");
+      // The anti-degeneracy path: this one matches even on the broken gate.
+      await writeFileDeep(join(dir, ".github", "workflows", "plain.yml"), "name: plain\n");
+    });
+
+    await git(operator.repo, "fetch", w.remote, w.branch);
+    const changed = await incomingTreeChanges(operator.repo, "HEAD", w.workerHead);
+
+    // Raw, not quoted — no entry may begin with the quote git would add.
+    expect(changed.filter((p) => p.startsWith('"'))).toEqual([]);
+    expect(changed).toContain(ACCENTED);
+    expect(changed).toContain(NESTED_ACCENTED);
+
+    // And the classifier reaches them. Named individually: asserting only that
+    // the hazard list is non-empty would pass on `plain.yml` alone.
+    const hazards = findHazardTouches(changed, w.workerHead);
+    const byPath = new Map(hazards.map((h) => [h.path, h.hazard_class]));
+    expect(byPath.get(ACCENTED)).toBe(".github/workflows/**");
+    expect(byPath.get(NESTED_ACCENTED)).toBe(".pi/**");
+  });
+
+  test("a path containing a NEWLINE stays one entry", async () => {
+    const operator = await setupOperatorRepo();
+    // A line-oriented reader turns this into two entries, neither of which is
+    // a path — the failure `-z` exists for, and the reason NUL is the only
+    // safe delimiter: it is the one byte a path cannot contain.
+    const withNewline = ".pi/two\nlines.json";
+    const w = await addWorkerFixture(operator, "eng-q2", async (dir) => {
+      await writeFileDeep(join(dir, withNewline), "{}\n");
+    });
+
+    await git(operator.repo, "fetch", w.remote, w.branch);
+    const changed = await incomingTreeChanges(operator.repo, "HEAD", w.workerHead);
+
+    expect(changed).toEqual([withNewline]);
+    expect(findHazardTouches(changed, w.workerHead).map((h) => h.hazard_class)).toEqual([".pi/**"]);
+  });
+
+  test("and the MERGE refuses such a branch, naming the quoted path", async () => {
+    const operator = await setupOperatorRepo();
+    const w = await addWorkerFixture(operator, "eng-q3", async (dir) => {
+      await writeFileDeep(join(dir, ACCENTED), "name: evil\n");
+    });
+    // Deliberately the ONLY hazard in this fixture: if the gate cannot see
+    // this path there is nothing else for it to refuse on, so a `merged`
+    // outcome here is the bypass happening rather than a near miss.
+    const before = await checkoutFingerprint(operator.repo);
+
+    const result = await mergeWorkerBranch({
+      repoRoot: operator.repo,
+      worker: "eng-q3",
+      remote: w.remote,
+      branch: w.branch,
+      taskId: "T-q3",
+    });
+
+    expect(result.outcome.kind).toBe("refused_hazard");
+    if (result.outcome.kind !== "refused_hazard") throw new Error("expected a refusal");
+    expect(result.outcome.hazards.map((h) => h.path)).toEqual([ACCENTED]);
+    expect(await checkoutFingerprint(operator.repo)).toEqual(before);
+  });
+});
