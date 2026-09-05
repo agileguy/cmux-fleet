@@ -379,5 +379,15 @@
       "ctx_collationCeiling_naming": "REAL, LOW. The guard relies on a naming convention rather than a structural check, so a renamed field bypasses the ceiling."
     },
     "pm_own_errors": "THREE probe/mutation misfires this round, each caught by checking rather than assuming: (1) grep for join(\"\") found nothing because the byte was 0x01, which nearly made me 'fix' correct code; (2) a mutation script matched no text because I guessed 8 spaces of indentation where the source has 6, making a sound test look degenerate; (3) a python heredoc turned \\n escapes into real newlines and broke a test file's compilation, which surfaced as 0 pass / 1 fail."
+  },
+  "tooling_hazard_2026_09_05": {
+    "FINDING": "grep in this shell silently returns NOTHING on files where a direct read finds matches. Demonstrated: `grep -c console-relay test/mutation/review-grading.battery.ts` printed no output at all (not even 0) while a bun read of the same file found 2 occurrences and the `\"wx\"` anchor. `cat` is aliased to `bat`, and CLAUDE.md documents an rtk hook that rewrites commands, so shell text tools here are proxied and lossy.",
+    "cost": "Searches I relied on across this session were unreliable. It nearly made me 'fix' correct code (the servesConsole separator, where grep's silence agreed with a misreading), and it hid the W8 battery anchor while I hunted for it with four different patterns.",
+    "practice": "For anything load-bearing \u2014 anchor hunting, uniqueness checks, verifying a string is or is not present \u2014 read the file with python/bun instead of grep. Treat an empty grep result as 'unknown', never as 'absent'."
+  },
+  "ci_discipline_2026_09_05": {
+    "error": "I pushed 43433b5 and reported it done before CI ran, and CI went RED: the start-lock fix restructured the code that review-grading.battery.ts's W8 anchors, so the anchor matched nothing. SECOND TIME TODAY for this exact class.",
+    "cause": "mutation-anchors.test.ts reads batteries AND targets at HEAD via git show, so a broken anchor is invisible in the working tree and only fires once the commit exists. A pre-commit suite run cannot see it by construction.",
+    "rule": "After any commit that touches a file a battery anchors to, re-run `bun test test/unit` AFTER committing and before pushing. Green before the commit proves nothing about the guard."
   }
 }
