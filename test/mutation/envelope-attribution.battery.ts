@@ -92,7 +92,8 @@ const MUTATIONS: M[] = [
     id: "E2",
     what: "NOTE: the envelope is ignored entirely — one sentence for every missing lens",
     file: CORE,
-    find: "        harvested.verdict === \"success\" ? \"\" : missingLensNote(harvested.verdict, envelope),",
+    find:
+      "        harvested.verdict === \"success\"\n          ? \"\"\n          : missingLensNote(harvested.verdict, envelope, outbox),",
     replace:
       "        harvested.verdict === \"success\"\n          ? \"\"\n          : `it settled \\`${harvested.verdict}\\` and produced no report`,",
     expect: "red",
@@ -101,8 +102,13 @@ const MUTATIONS: M[] = [
     id: "E3",
     what: "SILENCE READ AS EVIDENCE: no envelope info still claims the reviewer produced nothing",
     file: CORE,
-    find: "    return `it settled \\`${verdict}\\` and no report reached the collator`;",
-    replace: "    return `it settled \\`${verdict}\\` and produced no report`;",
+    // The outbox clause is KEPT by the mutation, deliberately: what E3 measures
+    // is the CLAIM about the reviewer, and dropping the clause as well would
+    // make a red here ambiguous between two different regressions.
+    find:
+      "    return `it settled \\`${verdict}\\` and no report reached the collator${outboxClause(outbox)}`;",
+    replace:
+      "    return `it settled \\`${verdict}\\` and produced no report${outboxClause(outbox)}`;",
     expect: "red",
   },
   {
@@ -110,7 +116,7 @@ const MUTATIONS: M[] = [
     what: "OVER-CORRECTION: the ABSENT lens borrows the unreadable claim that a file exists",
     file: CORE,
     find:
-      "    case \"absent\":\n      return `it settled \\`${verdict}\\` and produced no report — no result envelope exists for it`;",
+      "    case \"absent\":\n      return (\n        `it settled \\`${verdict}\\` and produced no report — no result envelope exists for it` +\n        `${outboxClause(outbox)}`\n      );",
     replace:
       "    case \"absent\":\n      return (\n        `it settled \\`${verdict}\\` and its report WAS WRITTEN AND COULD NOT BE READ: ` +\n        `unknown is 0 bytes and did not parse (unknown: unknown)`\n      );",
     expect: "red",
@@ -225,9 +231,9 @@ const MUTATIONS: M[] = [
     what: "NEGATIVE CONTROL: the local binding is renamed and nothing else changes",
     file: CORE,
     find:
-      "    const envelope = harvested.envelope ?? null;\n    return {\n      worker: seat.worker,",
+      "    const envelope = harvested.envelope ?? null;\n    const outbox = harvested.outbox ?? null;\n    return {\n      worker: seat.worker,",
     replace:
-      "    const envelopeState = harvested.envelope ?? null;\n    const envelope = envelopeState;\n    return {\n      worker: seat.worker,",
+      "    const envelopeState = harvested.envelope ?? null;\n    const envelope = envelopeState;\n    const outbox = harvested.outbox ?? null;\n    return {\n      worker: seat.worker,",
     expect: "green",
   },
   {
@@ -235,9 +241,9 @@ const MUTATIONS: M[] = [
     what: "NEGATIVE CONTROL: a seat never dispatched keeps `null`, which is already its value",
     file: CORE,
     find:
-      "        issued: false,\n        inlined: [],\n        envelope: null,\n        note: \"the request never named this reviewer, so the lens was not applied\",",
+      "        issued: false,\n        inlined: [],\n        envelope: null,\n        outbox: null,\n        note: \"the request never named this reviewer, so the lens was not applied\",",
     replace:
-      "        issued: false,\n        inlined: [],\n        envelope: null as RelayEnvelopeState | null,\n        note: \"the request never named this reviewer, so the lens was not applied\",",
+      "        issued: false,\n        inlined: [],\n        envelope: null as RelayEnvelopeState | null,\n        outbox: null,\n        note: \"the request never named this reviewer, so the lens was not applied\",",
     expect: "green",
   },
   {

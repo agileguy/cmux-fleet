@@ -190,6 +190,24 @@ const ENFORCED = new Set([
   // and its author exempting their own work would be worth nothing at all —
   // the same argument this list already records for the two entries above.
   "test/mutation/unrecognised-outbox.battery.ts",
+  /*
+   * `envelope-attribution.battery.ts` joined on 2026-09-04, re-anchored by the
+   * change that broke it.
+   *
+   * It measures `missingLensNote` and the collation brief, and adding the
+   * outbox clause moved FIVE of its anchors at once — the note expression, the
+   * `null` arm, the `absent` arm, and both negative controls' child literals.
+   * That is precisely the case this list exists for: the anchors were stale the
+   * moment the clause landed, and its rot would have been printed to a stderr
+   * nobody reads while the battery measured nothing.
+   *
+   * Re-anchored and RE-RUN in the same change: 20/20 as expected, 0 findings —
+   * so this is a claim about the anchors that is backed, this once, by a claim
+   * about the battery too. E3's mutation deliberately KEEPS the new clause and
+   * changes only the claim about the reviewer, so a red there still means what
+   * it meant before.
+   */
+  "test/mutation/envelope-attribution.battery.ts",
 ]);
 
 describe("every mutation battery still anchors to the code it claims to mutate", () => {
