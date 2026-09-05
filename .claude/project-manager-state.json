@@ -17,13 +17,16 @@
     "target_repo": "/Users/de895996/repos/rally-cli",
     "console": "review",
     "workspace_id": "EC23CD87-CF25-46F6-8262-E6D70A1ACD51",
-    "rule": "NEVER --recreate the review workspace. Restart workers only: scripts/review --restart <id>"
+    "rule": "NEVER --recreate the review workspace. Restart workers only: scripts/review --restart <id>",
+    "one_time_recreate_authorised_2026_09_05": "The owner authorised recreating the REVIEW console ONCE, pointed at ~/repos/cmux-fleet, for the dogfood run. Reason it is needed: each pane's launch argv hardcodes '-v /Users/de895996/repos/rally-cli:/workspace:ro', so --restart cannot repoint it. The standing rule otherwise stands: restart workers, never the workspace."
   },
   "answered_questions": {
     "Q1": "ANSWERED by owner 2026-09-04: rally-cli is cleared for hosted multi-vendor review.",
     "Q4": "SETTLED: `pifleet relay`, a restartable host-side actor whose state is derived entirely from the run tree, so idempotency is the supervision story.",
     "D8/Q9": "ANSWERED by owner 2026-09-04: WEAK VERDICT, the SRD's own recommendation. Grade structurally (required shape + consensus counts) and record an ordinary success/partial/failed. No new terminal state, no coverage datum. Accepted cost, stated in D8: the verdict is substantially the worker's own claim and this design does not fix that; it bounds the claim's SHAPE and records who said what.",
-    "Q10": "ANSWERED 2026-09-04 by the phase-2 review, not by a separate probe: Q10's own criterion was 'if the surface-unavailable case gives a first-class \"here is the line, I could not type it\" answer, tui is fine and D13 should be withdrawn'. stageForAdoptedTerminal returns accepted:true WITH error:trigger.reason (dispatch.ts:1812-1837) - exactly that answer. CONDITIONAL on the P2 fix landing, since the adapter currently discards the field. => tui seats stand; D13 withdrawn."
+    "Q10": "ANSWERED 2026-09-04 by the phase-2 review, not by a separate probe: Q10's own criterion was 'if the surface-unavailable case gives a first-class \"here is the line, I could not type it\" answer, tui is fine and D13 should be withdrawn'. stageForAdoptedTerminal returns accepted:true WITH error:trigger.reason (dispatch.ts:1812-1837) - exactly that answer. CONDITIONAL on the P2 fix landing, since the adapter currently discards the field. => tui seats stand; D13 withdrawn.",
+    "Q3": "ANSWERED 2026-09-05 by measurement: a host unix socket bind-mounted into a container is INVISIBLE inside it on this host. Host holds srwxr-xr-x and a host nc -U returns the greeting; the container gets an empty dir and 'cannot statx'. Docker Desktop's VM does not project a socket inode across its shared filesystem, so classifyPeer is never reached and 4.3's fail-open worry is unreachable by this route. On Linux it would read a real uid and DENY a worker's 10001 against the operator's uid, which is fail-closed.",
+    "Q6": "ANSWERED 2026-09-05 by the owner: SPLIT THE AXES. IMPLEMENTED same day (4d889f0). relay.ts's claim:'success'|'partial' is replaced on both outcome arms by coverage:{reported,dispatched}, counted by the HOST. The brief states coverage as fact and gives status as a RULE. SUPERSEDES the 'no coverage datum' clause of the D8/Q9 entry above, which was answered 2026-09-04 and is now only correct about the VERDICT LATTICE: no new terminal state was added, but coverage IS now a datum beside the verdict. Second defect found while implementing: censusCeiling declines on any claim that is not success (collation-census.ts:490), so the old coverage-derived 'partial' switched the structural quality check OFF for exactly the reviews that had lost a lens."
   },
   "phases": [
     {
@@ -230,5 +233,44 @@
       "why_it_is_structural": "The language reviewer is the seat most likely to hit it, because it is the one whose job is quoting code. A regex in a JSON string needs double-escaping and this one had no reason to know that.",
       "fix_direction": "Two, and they are separable: (1) the harvester must distinguish 'no envelope' from 'an envelope that would not parse', and say which - the second is a worker-authored file that exists and can be named with its parse error; (2) the collation's lens note must not attribute a transport or serialisation failure to the reviewer."
     }
+  },
+  "phase_3_session_2026_09_05": {
+    "merged_tree_green": "4602 pass / 149 skip / 0 fail across 266 files; tsc clean",
+    "engineers_landed": {
+      "A_4bcbe7c": "G2 closed with a three-conjunct prose rule judged on the WORKDIR-RELATIVE name (raw-string judging would have let /workspace/<sentence> through). H6 closed, not deferred. 51 mutations, 0 survivors.",
+      "B_0266f60": "Wedged seat detectable without shelling out; heartbeat minus transcript growth, both stamps from the same process and clock. Thresholds borrowed from the run's own stall window; the whole warn band is silent, which is where a slow reviewer lives. 17/17, 0 survivors after fixing 2 self-inflicted ones.",
+      "C_2e78b8b": "Review moved into a file artifact; turn one now says what done looks like; language seat reads the target's language. Caught and corrected a false claim of its own before shipping it.",
+      "D_770a7eb": "Re-delivery cause established: ONE dispatch, TWO doorbells (host STAGED_TRIGGER_LINE + container AUTO_TRIGGER_TEXT delivered as a queued follow-up). Ruled OUT the journal-after-dispatch hypothesis across 289 runs."
+    },
+    "pm_work": [
+      "Q4 arm 2 answered host-side: /replies IS left partial by a kill inside writeReply (truncated, 0644) but is INERT - publish-before-collate is probe-enforced, an unjournalled pass re-issues, ids are derived so the same file is rewritten in place, and the mount is :ro. a82e5aa",
+      "Q3 answered by measurement. 608a15e",
+      "Q6 implemented. 4d889f0",
+      "monitor-density guard was satisfiable AND breakable by prose; now reads comment-stripped source. da6223c",
+      "wedged-seat.battery.ts parsed to ZERO anchors, failing the drift guard's vacuity check for EVERY battery in the tree; conformed to the shared file:CONST schema and ENFORCED. 9f2bc57, bccf89b",
+      "Unobservable-actor defect recorded against Q4. 9065d76"
+    ],
+    "validation_run_6": {
+      "outcome": "Full loop ran: fan-out, three reviews, replies, collation with files/collation.json and files/review.md. 11 findings, 2 of 3 lenses.",
+      "confirmed_live": [
+        "D's doorbell fix: exactly one stage_trigger_delegated, no second trigger. This is the check D declined to run because it needed a worker the owner was not using.",
+        "C's language seat: rev-lang-1 settled the language ITSELF from pyproject.toml, unprompted, after the brief deliberately withheld it (run 5's brief had to be told)."
+      ],
+      "new_finding": "rev-lang-1 wrote a complete 12,759-byte review into artifact.json at the TASK ROOT with an invented schema pifleet.ticketops/v1, and no result.json. Both readers miss it: the envelope read looks for result.json, scanOutboxFiles scans <task>/files/ only. Console said 'no report reached the collator' - honest, but never mentioned the bytes on disk. DELEGATED."
+    },
+    "pm_own_errors": [
+      "Commit a82e5aa swept in another engineer's staged deletion: I path-scoped the git add but not the commit, and the index already held their git rm. Now using 'git commit -F <file> -- <paths>'.",
+      "Reported the relay healthy from a bad check (grepped [r]elay and counted matches loosely, got 2, no relay process existed).",
+      "Filtered the console's own warning out of my own output: grepped for 'refus' when the message says 'the relay was NOT started'.",
+      "First Q6 mutation broke the file's syntax, so it failed to compile rather than failing the assertion. Discarded and redone as valid code.",
+      "Briefly misread rev-lang-1's prompt as carrying the wrong aspect; it was correct, the 'cross-file' hit was prose telling it NOT to work the other lenses' angles."
+    ],
+    "open": [
+      "Engineer running: status cannot report a console with no actor.",
+      "Engineer running: an outbox file that is not result.json and not under files/ is invisible to the harvest.",
+      "Dogfood run against cmux-fleet, pending the engineers landing and a one-time console recreate.",
+      "ISA pass on the MERGED tree (progress: must be recounted there, never per-branch).",
+      "Then ask the owner about the PR."
+    ]
   }
 }
