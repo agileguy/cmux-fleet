@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 503/547
+progress: 505/547
 retired: 2
 mode: build
 started: 2026-07-27
@@ -4813,9 +4813,9 @@ written on the equality, not on the resolution.
      adoption"), so they are allocated here, centrally, on ISC-297's convention. ISC-524 is Phase 0's
      and is filed above. -->
 
-- [ ] ISC-525: The `development` console's roster is `eng-1`, `eng-2`, `tst-1`, `tst-2`, and no worker in it holds `role: reviewer`. *Probe: assert `DEFAULT_DEVELOPMENT_WORKERS` and assert the RESOLVED ROLE of each; a `reviewer` in this console fails.* The role assertion is the half that matters — a roster check alone passes a `tst-2` declared on `role: reviewer`, which is the seat change not happening under the name of it happening.
-- [ ] ISC-526: `roles/reviewer.md` still reaches three workers. *Probe: resolve each `review` console worker and assert its `append_system_prompt_file` chain contains both the role file and the lens file.* **This is what stops a future edit retiring the role** on the reasoning §0.5 correction 1 refutes: the development console dropping its reviewer is not evidence the `reviewer` role is unused.
-- [ ] ISC-527: **Anti: no seat in either console shares a theme with another attended worker.** *Probe: the existing `config.test.ts` uniqueness grade, re-run over the changed roster — it must still NAME THE OFFENDING PAIR on failure, so mutate one theme and assert the message.* A uniqueness check that fails without saying which two collided sends a reader to a fourteen-worker file with no pointer.
+- [x] ISC-525: The `development` console's roster is `eng-1`, `eng-2`, `tst-1`, `tst-2`, and no worker in it holds `role: reviewer`. *Probe: assert `DEFAULT_DEVELOPMENT_WORKERS` and assert the RESOLVED ROLE of each; a `reviewer` in this console fails.* The role assertion is the half that matters — a roster check alone passes a `tst-2` declared on `role: reviewer`, which is the seat change not happening under the name of it happening. **[x] 2026-09-05:** `config.test.ts` asserts `DEFAULT_DEVELOPMENT_WORKERS` equals the four ids AND resolves each against the real `fleet.example.yaml`, failing any that comes back `reviewer`. Both halves, in CI at `ci.yml:27`.
+- [~] ISC-526: `roles/reviewer.md` still reaches three workers. *Probe: resolve each `review` console worker and assert its `append_system_prompt_file` chain contains both the role file and the lens file.* **This is what stops a future edit retiring the role** on the reasoning §0.5 correction 1 refutes: the development console dropping its reviewer is not evidence the `reviewer` role is unused. **[~] 2026-09-05:** the probe reads the real `roles/reviewer.md`, the three real lens files and the real `REVIEW_CONSOLE_ROSTER`, and asserts the briefing chain carries BOTH the role file and the lens file for each of the three. What it cannot read is the console it is about: the `review` seats are declared only in the untracked `fleet.yaml`, so the test resolves a fixture SHAPED like that console rather than the console. The layering mechanism is graded; that the live console still uses it is not, and no tracked test can grade it while the roster lives in a gitignored file.
+- [x] ISC-527: **Anti: no seat in either console shares a theme with another attended worker.** *Probe: the existing `config.test.ts` uniqueness grade, re-run over the changed roster — it must still NAME THE OFFENDING PAIR on failure, so mutate one theme and assert the message.* A uniqueness check that fails without saying which two collided sends a reader to a fourteen-worker file with no pointer. **[x] 2026-09-05:** the named probe is what runs — `config.test.ts`'s uniqueness grade over the changed roster, now extracted into `assertDistinctThemes` so a collision fixture can inspect the MESSAGE, which is asserted to name both ids. Mutation-proved by neutering the helper to a no-op. Scope limit worth stating: it grades `fleet.example.yaml`, which declares only development seats; the `review` console's themes live in the untracked `fleet.yaml` and are checked by `config validate` at run time (exit 0, 2026-09-05) rather than by CI.
 - [~] ISC-528: Every commit a worker makes carries the configured identity — **asserted as an exact value, not as "a commit succeeded"**. *Probe: after a dispatched task, `git log -1 --format='%an <%ae>'` on the worker's branch equals the configured value.* **The exactness is the point, and Phase 0's measurement is why**: the uninstructed symptom is a refusal (exit 128, nothing written) and the instructed one is a silent invention (`eng-1 <eng-1@pifleet.invalid>`). A criterion phrased as "a commit exists" passes the invention and fails the refusal — precisely backwards. **[~] 2026-09-05:** `worker-env.test.ts` spawns real `git` with the exact `GIT_CONFIG_*` vars `buildWorkerEnv` produced and asserts `%an <%ae>` equals the configured value, hermetically (`HOME=/dev/null`, both config scopes blanked), and CI re-runs it at `ci.yml:27`. What it does NOT re-check is the container hop: nothing proves those variables reach a worker's git. `grep -rn GIT_CONFIG test/integration test/e2e` returns only the hermetic-harness uses — no test asserts `GIT_CONFIG_COUNT=3` inside a running container. So the env PLAN is graded and the DELIVERY is not, and the criterion says "every commit a worker makes".
 - [~] ISC-529: **Anti: no worker commits under the operator's own address.** *Probe: the same `%ae` is not the operator's.* The operator's authorship legitimately enters at the host's integration merge; a hosted model committing as the operator is a provenance claim nobody made. **[~] 2026-09-05:** the DEFAULT is structurally safe and asserted so — `DEFAULT_GIT_IDENTITY.email` must end `@pifleet.invalid`, a TLD RFC 2606 reserves so it can never be anyone's. The configured path is not: `run.git_identity.email` is a `shortStr`, so a run that sets it to the operator's address is accepted, and the only test standing between is an inequality against one hardcoded stand-in (`j.operator@example.com`) that a real operator's address would not match. The anti-criterion is about what the fleet CANNOT do; what is graded is what one fixture happens not to do.
 - [x] ISC-530: **Anti: no commit message, code comment, PR body or generated document produced by this system contains an AI or assistant attribution.** *Probe: grep every commit on the integration branch and the PR body for `Co-Authored-By`, `Claude`, `AI-generated`, `Generated with`; any hit fails.* `roles/engineer.md:28` and `roles/collator.md:419` both instruct it, **and an instruction is not a mechanism** — which is the entire reason this is graded rather than documented. **[x] 2026-09-05, and the probe §12 specifies had to be narrowed to get there.** The four-substring grep was written, pointed at `main..HEAD`, and failed on `c7f9b87` — our own commit, whose body describes this check and so contains all four strings. A substring probe cannot separate an attribution from a sentence about attributions, so the commit implementing the criterion is the first thing it rejects; an allowlist of blessed hashes would rot on the first rebase. The live guard in `test/unit/attribution.test.ts` matches POSITION instead — a trailer or a generated-by footer, both line-anchored — over `main..HEAD` in this repository, with the range asserted non-empty so a green result can never be an empty set. Mutation-proved by emptying the range. The four-substring form is kept beside it as the mechanism test, and `a mention in prose is not an attribution` pins the difference so a widening back has to delete a test.
@@ -4845,3 +4845,45 @@ written on the equality, not on the resolution.
 - [ ] ISC-554: **Anti: a worker's clone has no remotes.** *Probe: after `up`, `git -C <clone> remote` is empty for every worker.* Pins `worktree.ts:730-731`'s deliberate `origin` strip — which is what makes a brief telling a worker to fetch or rebase unimplementable, the defect v0.2's §6.2 contained. **Confirmed live on 2026-09-05: `git -C /workspace remote` in the eng-1 container returns nothing.**
 - [ ] ISC-555: **Anti: a tester dispatched without a restart is refused or flagged.** *Probe: dispatch into an existing tester session after an integration merge and assert the workflow reports the clone is older than the merge.* A green result about the previous phase's tree is the failure being prevented.
 - [ ] ISC-556: **Anti: no criterion in the SRD-FLEET-PM-001 block requires a real terminal, a real model, or the network.** *Probe: the criteria above run under `bun test` with no `PIFLEET_DOCKER`, no live console and no egress; a criterion that cannot be graded in CI is graded `[~]` under this ISA's strictness rule rather than counted.*
+
+## 2026-09-05 — SRD-FLEET-PM-001 Phases 1 and 2: what integration cost the SRD
+
+Both phases are merged onto `feat/fleet-project-manager`. Three things the work
+falsified, recorded here because each one is a claim the SRD makes and none of
+them is a criterion that would have caught it.
+
+**1. `core.attributesFile=/dev/null` does not do what §6.2.1 part 3 says.** The
+gate's third part disables hooks and attribute drivers before merging a worker's
+branch. `core.hooksPath=/dev/null` genuinely suppresses a base-configured hook —
+reproduced. `core.attributesFile=/dev/null` does **not** suppress a `filter=`
+driver already resident in the base repository's tracked `.gitattributes`: that
+variable only ever names an *additional* global attributes file, and was never a
+switch for the tracked one. So part 3 covers a driver arriving in a worker's
+diff (part 2 already refuses those) and leaves one already sitting in the
+operator's checkout untouched. Every merge in phases 1 and 2 was made with both
+flags; this repository has no `.gitattributes`, no `filter.*`/`diff.*` config and
+no non-sample hook, so nothing here was exposed — checked, not assumed. The gap
+is real and narrow, and it belongs to phase 3's `ISC-536`, which is written on it.
+
+**2. §12's attribution probe rejects the commit that implements it.** Written as
+four substrings and pointed at `main..HEAD`, it fails on `c7f9b87` — a commit of
+ours whose body describes the check. A substring grep cannot separate an
+attribution from a sentence about one. The live guard matches trailer/footer
+POSITION instead; the substring form is kept beside it as the mechanism test. See
+`ISC-530`.
+
+**3. Task 1.7's touch list renamed four dated records.** `client.ts:107`,
+`console-restart.test.ts:10`, `registry.ts:93` and `scripts/development:195` each
+open with a measurement or an incident pinned to a date on which the fourth
+development seat was `rev-1`. The SRD names all four lines for the rename, and
+renaming them states measurements nobody took. They now carry the id that was
+live when measured. **The general shape: a touch list built by grepping for an
+identifier cannot tell a live reference from a historical one, and this SRD's
+lists were built that way** — worth knowing before phases 3-6 apply theirs.
+
+**And one gap phase 1 opened that is documented rather than closed.** Retiring
+`rev-1` leaves the development console with no in-loop review: a defect an
+engineer writes is not read by any reviewer until end-of-phase, after the host
+has merged it. The `review` console's three lenses are `shared-ro` and read the
+INTEGRATED tree, so they cannot substitute. This is stated on the seat's own
+declaration in `fleet.example.yaml` and is not covered by any criterion.
