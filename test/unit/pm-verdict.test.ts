@@ -539,3 +539,66 @@ describe("anti: a fan-out that dispatched no lens is never APPROVED", () => {
     if (coverage.kind === "journal") expect(coverage.children).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ISC-544 — the gate does not depend on `censusCeiling`.
+// ---------------------------------------------------------------------------
+
+/**
+ * The criterion is about a DEPENDENCY, so it is asserted two ways: what this
+ * module imports, and what it does on the input the dependency would have
+ * mattered for.
+ *
+ * `harvest/collation-census.ts` returns null unless a claim is fully
+ * locatable, which is a grade about whether findings can be pointed at — a
+ * different question from whether the review happened. A verdict that
+ * silently required it would turn "one finding cites a path I cannot resolve"
+ * into "no verdict", and the loop would stall on a review that ran fine. The
+ * docblock says this module does not import it; this makes that checkable.
+ */
+describe("ISC-544 (anti): the verdict does not depend on censusCeiling", () => {
+  test("the module's source imports nothing from harvest/", () => {
+    const src = readFileSync(new URL("../../src/run/pm-verdict.ts", import.meta.url), "utf8");
+    const imports = [...src.matchAll(/^\s*import\s[^;]*?from\s+"([^"]+)"/gm)].map((m) => m[1]);
+    expect(imports.length).toBeGreaterThan(0);
+    expect(imports.filter((i) => i !== undefined && /harvest\//.test(i))).toEqual([]);
+    expect(imports.filter((i) => i !== undefined && /collation-census/.test(i))).toEqual([]);
+  });
+
+  test("a finding whose file cannot be placed under the workdir still yields a verdict", () => {
+    // The exact input a locatability grade refuses: a citation that is not
+    // under the container workdir at all. The verdict must still be reached.
+    const parent = "T-rv-544";
+    const a = childTaskId(parent, "arch");
+    const c = childTaskId(parent, "context");
+    const l = childTaskId(parent, "lang");
+    const verdict = deriveReviewVerdict(
+      input({
+        coverage: journalCoverage(
+          [a, c, l],
+          [
+            [a, reported()],
+            [c, reported()],
+            [l, reported()],
+          ],
+        ),
+        collation: buildCollation({
+          parentTaskId: parent,
+          findings: [
+            {
+              file: "/etc/passwd",
+              line: 1,
+              statement: "a citation nothing can place under the workdir",
+              raised_by: ["rev-arch-1", "rev-ctx-1"],
+            },
+          ],
+        }),
+      }),
+    );
+    expect(verdict.kind).toBe("CHANGES_REQUESTED");
+    if (verdict.kind === "CHANGES_REQUESTED") {
+      // Handed back unchanged rather than fabricated into a repo path.
+      expect(verdict.findings[0]?.file).toBe("/etc/passwd");
+    }
+  });
+});
