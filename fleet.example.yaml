@@ -598,10 +598,23 @@ workers:
   # The `tester` role existed with no worker to run it; the development
   # console is what it was waiting for.
   - {id: tst-1,  role: tester,   pane_mode: tui, theme: everforest-dark}
-  # reviewer carries NO bash (§12.1) and that is unchanged here: a tui pane is
-  # a person's keyboard on Pi's own interface, not a widening of the agent's
-  # tool grant. `pifleet shell` still reaches the container, because that is
-  # the FLEET exec'ing in, not a tool the reviewer may call.
+  # THIS SEAT WAS `rev-1` ON `role: reviewer`, AND THE SWAP IS A PRIVILEGE
+  # WIDENING, NOT A RENAME. The comment that stood here said "reviewer carries
+  # NO bash (§12.1)" — true of the seat that is gone, false of the one that
+  # replaced it, and a comment that survives the line it describes is worse
+  # than none. What actually changed:
+  #
+  #   isolation  shared-ro  ->  worktree   (a writable clone on its own branch)
+  #   tools      write      ->  bash       (a shell writes AND executes)
+  #   egress     none       ->  true       (a route to the egress allowlist)
+  #
+  # So this console goes from three bash seats to four, and from one egress
+  # seat to two. It is a deliberate trade: review moved to the `review`
+  # console, whose three lenses are `shared-ro` and read the INTEGRATED tree,
+  # and this console gains a second seat that can actually run a suite. The
+  # cost is that nothing here reviews in-loop any more — a defect eng-1 writes
+  # is not read by a reviewer until the end of the phase, after the host has
+  # merged it. Stated because it is a real gap, not because it is fixed.
   - {id: tst-2,  role: tester,   pane_mode: tui, theme: nord}
   # One, not two. A second concurrent writer against the same ticket system is
   # a way to interleave two workers' edits on one object, and nothing in the

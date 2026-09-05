@@ -6,8 +6,8 @@
  *   ./scripts/development --workers eng-1,eng-2
  *   ./scripts/development --dry-run                # print the plan, touch nothing
  *
- * Four EQUAL panes, two engineers across the top and a tester and a reviewer
- * beneath them, each one running Pi's own interface for its worker:
+ * Four EQUAL panes, two engineers across the top and two testers beneath
+ * them, each one running Pi's own interface for its worker:
  *
  * ```
  * +---------------+---------------+
@@ -191,8 +191,9 @@ async function main(argv: string[]): Promise<number> {
    * The narrow sibling of `--recreate`. `--recreate` is the only tool the
    * console had for a worker that did not come back, and it costs the other
    * three: it stops every run this console holds and rebuilds four panes to
-   * fix one. Measured 2026-09-04 — a `--recreate` returned eng-1, eng-2 and
-   * tst-1 and left tst-2 with no run and no container, and the only sanctioned
+   * fix one. Measured 2026-09-04, when the fourth seat was still `rev-1` — a
+   * `--recreate` returned eng-1, eng-2 and tst-1 and left the fourth pane with
+   * no run and no container, and the only sanctioned
    * repair was a second `--recreate` that would have torn down the three that
    * had just come back.
    *
