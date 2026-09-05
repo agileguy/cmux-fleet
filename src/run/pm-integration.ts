@@ -20,16 +20,28 @@
  * operator's git identity. The gate below is implemented in the four parts
  * §6.2.1 specifies, in order, and none is optional:
  *
+ *   0. Before either: the operator's checkout is verified fit to merge into
+ *      (on a branch, no uncommitted changes to tracked files — finding 9),
+ *      and the worker's CLONE is scanned read-only, because a local-path
+ *      fetch runs `git-upload-pack` inside it (finding 5). Neither is in
+ *      §6.2.1's original four; both were added from phase 6's review round,
+ *      and they are numbered 0 rather than renumbering the four the SRD names.
  *   1. Fetch freely — `git fetch` moves objects and updates a ref; it writes
  *      no working-tree file and runs no filter. The exposure begins at merge,
- *      so nothing here gates the fetch itself.
+ *      so nothing here gates the fetch itself. It fetches into
+ *      `refs/pifleet/incoming/<worker>` rather than reading the shared
+ *      `FETCH_HEAD`, which any other process in the checkout can move
+ *      (finding 6).
  *   2. Inspect the incoming tree BEFORE materialising it — `git diff
  *      --name-only <base>..<fetched-head>` lists what the merge would write
  *      without writing it. A path matching a hazard CLASS (`AGENTS.md`,
  *      `CLAUDE.md`, `.pi/**`, `.agents/skills/**`, `.gitattributes`, anything
- *      under `.github/workflows/`) refuses the merge outright — a legitimate
- *      edit to one of these is an edit the operator approves by hand, and
- *      must not be approved by this loop's silence.
+ *      under `.github/workflows/`, `.mcp.json`) refuses the merge outright — a
+ *      legitimate edit to one of these is an edit the operator approves by
+ *      hand, and must not be approved by this loop's silence. That the class
+ *      list covers every tree-visible path part 4 scans is a CHECKED relation
+ *      (`TREE_VISIBLE_HAZARD_PATHS`), not a remembered one: the two lists had
+ *      drifted by exactly one entry when phase 6's review looked (finding 4).
  *   3. Merge with hooks and the global/user attributes file disabled —
  *      `-c core.hooksPath=/dev/null -c core.attributesFile=/dev/null`.
  *   4. `neutralizeRepoHazards` (imported, never re-implemented — see below)
