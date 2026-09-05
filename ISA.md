@@ -3,7 +3,7 @@ project: cmux-fleet
 task: Implement the pifleet SRD as a working Bun/TypeScript CLI, phase by phase
 effort: E4
 phase: build
-progress: 502/515
+progress: 502/547
 retired: 2
 mode: build
 started: 2026-07-27
@@ -4759,14 +4759,24 @@ GIT_CONFIG_COUNT=1            -> worker-env.ts delivers safe.directory and nothi
 /workspace is drwxrwxrwx      -> a repository-local identity IS self-configurable by the worker
 ```
 
-**What this settles.** D13's two arms both remain available: the worker can set a repo-local identity
-today (arm 1, no code), and `GIT_CONFIG_COUNT` can carry one (arm 2, the durable fix). What it
-*changes* is the symptom a reader will have seen. **SRD §12 records the failure as an invented
-identity — *"a probe worker committed as `eng-1 <eng-1@pifleet.invalid>`"*.** On this operator's
-image no commit is written at all: git refuses at 128 and the tree is untouched. The distinction
-matters for Phase 2's criterion, because a criterion asserting only *that a commit exists* passes
-the invented-identity failure and fails this one — the two symptoms need the same probe for opposite
-reasons, and only an assertion on the **exact author value** covers both.
+**What this settles, stated more carefully than the first draft of this entry did.** The measurement
+reproduces §6.8's *uninstructed* arm exactly — exit 128, no commit written, `pi@<container-id>.(none)`
+— on this operator's own image, a month after §6.8 took the same reading on a different one. **The
+first draft of this entry claimed the measurement contradicted the SRD. It does not.** §6.8 records
+BOTH symptoms and their order: an uninstructed worker is refused, and an *instructed* one improvises
+and commits as `eng-1 <eng-1@pifleet.invalid>`. What is loose is §12's one-line summary of that —
+*"the measured failure is not a refusal but an invented identity"* — which names only the second and
+reads as a correction of the first. Recording the over-claim rather than deleting it, because the
+habit it comes from is the one this ISA exists to catch: a measurement that agrees with the document
+is less interesting to write up than one that does not, and that is exactly when the write-up drifts.
+
+D13's two arms both remain available and both are confirmed reachable here: `HOME` is read-only so
+`--global` is out, and `/workspace` is `drwxrwxrwx` so a repository-local identity is
+self-configurable (arm 1), while `GIT_CONFIG_COUNT=1` is the block arm 2 extends. **The consequence
+for Phase 2's criterion is unchanged and is the reason the measurement was worth taking**: arm 1's
+failure mode is a *silent* invented identity that lands on the integration branch, so ISC-528 asserts
+the author's **exact value** rather than that a commit succeeded — a criterion phrased the second way
+passes the improvising worker and fails the refused one, which is precisely backwards.
 
 ### 0.3 — the `worker-<id>` remotes in this repository point at yesterday's clones
 
@@ -4797,3 +4807,41 @@ the live run's branch that fails, and a probe checking only resolution cannot se
 are individually well-formed and only their relationship is wrong. **This is the degenerate-fixture
 shape** — the same family as a filter whose every fixture makes the two sets equal. ISC-531 is
 written on the equality, not on the resolution.
+
+<!-- SRD-FLEET-PM-001 §12 — allocated 2026-09-05. §12 refuses to allocate ids itself
+     ("two criteria sharing a number is a worse outcome than a list that needs ids assigned on
+     adoption"), so they are allocated here, centrally, on ISC-297's convention. ISC-524 is Phase 0's
+     and is filed above. -->
+
+- [ ] ISC-525: The `development` console's roster is `eng-1`, `eng-2`, `tst-1`, `tst-2`, and no worker in it holds `role: reviewer`. *Probe: assert `DEFAULT_DEVELOPMENT_WORKERS` and assert the RESOLVED ROLE of each; a `reviewer` in this console fails.* The role assertion is the half that matters — a roster check alone passes a `tst-2` declared on `role: reviewer`, which is the seat change not happening under the name of it happening.
+- [ ] ISC-526: `roles/reviewer.md` still reaches three workers. *Probe: resolve each `review` console worker and assert its `append_system_prompt_file` chain contains both the role file and the lens file.* **This is what stops a future edit retiring the role** on the reasoning §0.5 correction 1 refutes: the development console dropping its reviewer is not evidence the `reviewer` role is unused.
+- [ ] ISC-527: **Anti: no seat in either console shares a theme with another attended worker.** *Probe: the existing `config.test.ts` uniqueness grade, re-run over the changed roster — it must still NAME THE OFFENDING PAIR on failure, so mutate one theme and assert the message.* A uniqueness check that fails without saying which two collided sends a reader to a fourteen-worker file with no pointer.
+- [ ] ISC-528: Every commit a worker makes carries the configured identity — **asserted as an exact value, not as "a commit succeeded"**. *Probe: after a dispatched task, `git log -1 --format='%an <%ae>'` on the worker's branch equals the configured value.* **The exactness is the point, and Phase 0's measurement is why**: the uninstructed symptom is a refusal (exit 128, nothing written) and the instructed one is a silent invention (`eng-1 <eng-1@pifleet.invalid>`). A criterion phrased as "a commit exists" passes the invention and fails the refusal — precisely backwards.
+- [ ] ISC-529: **Anti: no worker commits under the operator's own address.** *Probe: the same `%ae` is not the operator's.* The operator's authorship legitimately enters at the host's integration merge; a hosted model committing as the operator is a provenance claim nobody made.
+- [ ] ISC-530: **Anti: no commit message, code comment, PR body or generated document produced by this system contains an AI or assistant attribution.** *Probe: grep every commit on the integration branch and the PR body for `Co-Authored-By`, `Claude`, `AI-generated`, `Generated with`; any hit fails.* `roles/engineer.md:28` and `roles/collator.md:419` both instruct it, **and an instruction is not a mechanism** — which is the entire reason this is graded rather than documented.
+- [ ] ISC-531: Every worker's clone is reachable from the operator's repository by its recorded remote, **resolving the LIVE run's branch**. *Probe: `git -C <repo> ls-remote worker-<id>` resolves the branch `pifleet worktrees --json` reports, for every worker — asserted as EQUALITY with the live run, never as "the remote resolves".* **§12 phrases this on resolution and the Phase 0 measurement shows why that is not enough**: this repository's three `worker-*` remotes point at 2026-09-04 clones of a different project, and every one of them resolves. Both operands are individually well-formed and only their relationship is wrong, which is the degenerate-narrowing shape this repo has shipped before.
+- [ ] ISC-532: An engineer's commits reach the integration branch without its result envelope. *Probe: harvest a task whose `result.json` is deleted before harvest, then fetch and merge its branch and assert the commits are ancestors of the integration branch.* §9.2's recovery, asserted rather than described: the branch is the durable artifact and the envelope is a report about it.
+- [ ] ISC-533: **Anti: the integration step never authors a commit.** *Probe: every commit on the integration branch is either a merge commit or has a worker branch as an ancestor; a commit authored directly onto it fails.* D3's cost bounded as a property — the host integrates and does not write.
+- [ ] ISC-534: **Anti: a merge whose incoming tree adds `CLAUDE.md`, `AGENTS.md`, `.pi/extensions/*`, a `.gitattributes` `filter=` driver or a `core.hooksPath` is REFUSED, not merged.** *Probe: ONE FIXTURE PER HAZARD CLASS, each a worker branch carrying that file; assert the merge is refused and the operator's checkout is unchanged; plus a clean branch that merges, without which a gate mutated to "always refuse" passes the battery.* **A fixture per class, because a gate that catches `CLAUDE.md` and misses `.pi/extensions` is the gate that matters least catching the thing that matters most.**
+- [ ] ISC-535: The operator's checkout is hazard-scanned after every merge. *Probe: assert `neutralizeRepoHazards` ran against the checkout and its findings are recorded in the integration record.* Part 2 of §6.2.1's gate is a host-side list this design maintains; part 4 is the list `src/security/repo-hazards.ts` maintains. Keeping both is the point — the second is the one that gets updated when a new hazard class is found.
+- [ ] ISC-536: **Anti: the merge runs with hooks and attribute drivers disabled.** *Probe: a base tree carrying a `.gitattributes` `filter=` driver and a `core.hooksPath` script that writes a sentinel file; merge and assert the sentinel does not exist.* The hazard need not arrive in the incoming tree to fire during the checkout that materialises it.
+- [ ] ISC-537: The loop reads the collation from the `-collate` task, never from the fan-out parent. *Probe: a fixture where the parent settles `success` and no collation exists; the loop must not report APPROVED.* **The criterion that would catch the most expensive misreading in the design** — `pifleet wait` has already returned `verdict: success, reason: transcript_quiesced` for a parent that had merely gone quiet after writing its fan-out.
+- [ ] ISC-538: A collation with `reported < total` yields `REVIEW_INCOMPLETE`. *Probe: a fixture collation with one `reported: false` row and an empty `findings[]`; assert the verdict is neither APPROVED nor CHANGES_REQUESTED, **and** assert the round does not increment the iteration counter.* Both halves, because charging a transport defect to the phase's iteration budget is D8's rejected arm.
+- [ ] ISC-539: The two kinds of missing lens are reported differently. *Probe: two fixtures — one whose `MISSING ASPECT` line says no envelope exists, one whose line names a written-but-unreadable envelope and its path — and assert the loop's report names the path in the second and not the first.* §9.4. A lens sitting complete in a directory nobody names is ISC-522's whole subject.
+- [ ] ISC-540: Consensus findings drive the fix brief. *Probe: a fixture collation with one 2-of-3 finding and one single-lens finding; assert both reach the fix brief and the consensus one is ranked first.* Independent agreement across vendors is the strongest signal this console produces.
+- [ ] ISC-541: **Anti: the loop never reads the collator's `status` as the review's verdict.** *Probe: a fixture whose collation is well-formed with zero findings and whose collator envelope claims `partial`; assert APPROVED.* `roles/collator.md:228-235` — the collator's status is about the COLLATION, not about the code.
+- [ ] ISC-542: The loop's coverage numbers come from the run tree, never from the collation. *Probe: a fixture in which `collation.json` claims three lenses reported while the run tree holds a journal with three `children[]` and only two reply files; assert the verdict is `REVIEW_INCOMPLETE`.* **A gate reading `lenses[]` passes this fixture and is exactly the defect being pinned** — v0.1 called those numbers "the host's number, not the model's" and they are collator-authored, copied out of a brief the relay writes as text.
+- [ ] ISC-543: **Anti: a collator's `lenses[]` disagreeing with the journal is reported, not silently preferred.** *Probe: the same fixture asserts the report names the disagreement.* It is the only signal available that a collator is not copying its brief faithfully.
+- [ ] ISC-544: **Anti: the gate does not depend on `censusCeiling`.** *Probe: a `partial` collation still yields a verdict.* `src/harvest/collation-census.ts:490` returns null unless the claim is `success`, **so the one instrument that bounds a collation's shape is switched off for exactly the status this gate exists to handle.**
+- [ ] ISC-545: A review round records the SHA its lenses read, and a moved checkout voids the round. *Probe: a fixture where `HEAD` differs between dispatch and collation; assert the verdict is `VOID`, that it is neither APPROVED nor `REVIEW_INCOMPLETE`, and that the iteration counter is unchanged.* §7.5 Gate 0. The reviewers did nothing wrong, so the round must not be charged to them.
+- [ ] ISC-546: Every review parent id derives four children inside 64 characters. *Probe: for phases 1..99, `childTaskId(parentFor(n), aspect)` succeeds for every aspect and for `collate`.* **Asserts the grammar rather than the current phase count** — a limit that holds for this document's seven phases and fails at phase 12 is a limit nobody will find.
+- [ ] ISC-547: **Anti: a refused dispatch is never reported as a landed one.** *Probe: wire the dispatch dep to a runner that returns empty, and assert the workflow reports a failure.* `fb38fc8`'s property re-asserted at the workflow layer.
+- [ ] ISC-548: A phase whose tasks cannot be partitioned disjointly is dispatched to one engineer. *Probe: a fixture phase whose every task names one file produces a one-worker partition, not two.* D4 accepts idle seats over merge conflicts, and this is that acceptance made mechanical.
+- [ ] ISC-549: **Anti: a brief is not the orchestrator's prose.** *Probe: every dispatched `brief` appears as a substring of the SRD file the run names.* §8.3 — the `/fleet` cardinal rule made checkable, and **the only mechanism this design has for it.**
+- [ ] ISC-550: A review is not dispatched unless its target is readable from `/workspace`. *Probe: with the operator's checkout on a different ref than the integration branch, the workflow refuses rather than dispatching.* **The criterion the round that reviewed v0.1 would have failed** — three `shared-ro` lenses with no bash were told to `git show` a branch that had no host-side checkout, and the collation still reported 1 of 3.
+- [ ] ISC-551: A dispatch is confirmed started from `status`, never from `dispatch --json`. *Probe: a fixture where the dispatch payload is `{accepted: true, via: "staged"}` and the worker remains `idle` with a `staged_task_id`; assert the workflow reports the turn as not started.* **The accepted payload carries no `error` field**, so a loop reading only the dispatch result cannot tell these apart.
+- [ ] ISC-552: **Anti: no task in a phase declares `depends_on`, and `--auto` is never invoked.** *Probe: assert over the generated envelopes; either would be refused by `graph.ts` at exit 2 or rejected as `pane_mode_tui_is_not_auto_schedulable`.*
+- [ ] ISC-553: A restarted worker's clone contains whatever the host merged before the restart. *Probe: merge a commit into the launch directory, restart a worker, and assert the commit is an ancestor of that worker's new clone's `HEAD`.* **The property both the tester sequencing and the conflict recovery depend on, and neither says so without it.**
+- [ ] ISC-554: **Anti: a worker's clone has no remotes.** *Probe: after `up`, `git -C <clone> remote` is empty for every worker.* Pins `worktree.ts:730-731`'s deliberate `origin` strip — which is what makes a brief telling a worker to fetch or rebase unimplementable, the defect v0.2's §6.2 contained. **Confirmed live on 2026-09-05: `git -C /workspace remote` in the eng-1 container returns nothing.**
+- [ ] ISC-555: **Anti: a tester dispatched without a restart is refused or flagged.** *Probe: dispatch into an existing tester session after an integration merge and assert the workflow reports the clone is older than the merge.* A green result about the previous phase's tree is the failure being prevented.
+- [ ] ISC-556: **Anti: no criterion in the SRD-FLEET-PM-001 block requires a real terminal, a real model, or the network.** *Probe: the criteria above run under `bun test` with no `PIFLEET_DOCKER`, no live console and no egress; a criterion that cannot be graded in CI is graded `[~]` under this ISA's strictness rule rather than counted.*
