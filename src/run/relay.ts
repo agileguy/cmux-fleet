@@ -364,6 +364,25 @@ export function planInlineBudget(
  * "unreadable" means — a relay that re-derived that judgement would be a second
  * answer to a question `harvest/outbox.ts` already spends its header on.
  */
+/**
+ * The harvester's two envelope fields, resolved into one state.
+ *
+ * A function rather than a ternary because the mapping now has four inputs and
+ * two of them deliberately produce nothing; a conditional expression that has to
+ * explain two silences is a conditional expression nobody edits correctly.
+ */
+function relayEnvelopeState(bundle: {
+  readonly unreadableEnvelope?: RelayUnreadableEnvelope | null;
+  readonly envelopeRead?: "ok" | "missing" | "unreadable" | "refused" | null;
+}): RelayEnvelopeState | undefined {
+  if (bundle.unreadableEnvelope != null) {
+    return { kind: "unreadable", ...bundle.unreadableEnvelope };
+  }
+  if (bundle.envelopeRead === "missing") return { kind: "absent" };
+  if (bundle.envelopeRead === "ok") return { kind: "present" };
+  return undefined;
+}
+
 export type RelayEnvelopeState =
   | { readonly kind: "present" }
   /** The harvest looked for an envelope and there was none. */
@@ -1491,6 +1510,27 @@ export interface RelayHarvestView {
    */
   readonly unreadableEnvelope?: RelayUnreadableEnvelope | null;
   /**
+   * `TaskHarvest.envelopeRead` — the bit the seam above says it is missing,
+   * arriving for the SAME question at last.
+   *
+   * `unreadableEnvelope` cannot tell absent from present, so the adapter
+   * declined to guess and `RelayEnvelopeState`'s `absent` arm carried no
+   * production traffic: it was written, documented and probed, and nothing
+   * could ever reach it. This says which outcome the harvester's own reader
+   * reached, so `absent` is now reachable by fact rather than by inference.
+   *
+   * `"refused"` maps to NOTHING, deliberately. A refusal is not a readability
+   * outcome — `harvest/outbox.ts` keeps it separate precisely because a
+   * traversal attempt or a stale epoch is a document rejected for WHAT IT IS,
+   * not one that could not be read — and none of `present`, `absent` or
+   * `unreadable` is true of it. Declining there is the same discipline that
+   * kept `absent` unreached until it could be earned.
+   *
+   * Optional so `TaskHarvest` satisfies this interface both before and after the
+   * field landed.
+   */
+  readonly envelopeRead?: "ok" | "missing" | "unreadable" | "refused" | null;
+  /**
    * `TaskHarvest.taskOutbox` — the harvester's own field, by its own name.
    *
    * **This is the bit the seam above says it is missing, arriving for a
@@ -2018,15 +2058,23 @@ export function consoleTransport(
          * `harvest/outbox.ts` owns. If that type changes shape, this line stops
          * compiling — which is the property the structural spelling buys.
          *
-         * `null` becomes `undefined`, NOT `absent`. The field says only whether
-         * the envelope was unreadable, so `null` is "absent or present" and this
-         * module declines to pick one. That is the whole discipline the defect
-         * being fixed here was a failure of.
+         * `unreadableEnvelope`'s `null` STILL does not decide anything on its
+         * own — it means "absent or present" and always did. What decides is
+         * `envelopeRead`, the harvester's own outcome, which is why this is a
+         * lookup rather than an inference. Before that field existed this arm
+         * returned `undefined` for both worlds and `absent` was unreachable.
+         *
+         * Only `missing` and `ok` are mapped. `refused` and `null` return
+         * `undefined` — see `RelayHarvestView.envelopeRead` for why a refusal is
+         * none of the three, and why "nobody looked" must not become "looked and
+         * found none".
+         *
+         * `ok` is `present` and not a contradiction: this note is built only for
+         * a lens that did NOT succeed, so a readable envelope here is exactly
+         * `present`'s case — the reviewer reported and the report did not
+         * travel.
          */
-        envelope:
-          bundle.unreadableEnvelope != null
-            ? { kind: "unreadable", ...bundle.unreadableEnvelope }
-            : undefined,
+        envelope: relayEnvelopeState(bundle),
         /**
          * THE SECOND ADAPTER POINT, and it is a pass-through rather than a
          * classification for the reason the first one is a spread: the

@@ -180,6 +180,35 @@ export interface TaskHarvest {
    */
   unreadableEnvelope: UnreadableEnvelope | null;
   /**
+   * WHICH OUTCOME `readResultEnvelope` REACHED, by its own taxonomy's own name.
+   *
+   * ## The gap this closes, which was measured rather than predicted
+   *
+   * `unreadableEnvelope` answers exactly one question — *was there a document
+   * that would not parse?* — and its `null` deliberately spans two different
+   * worlds: an envelope that was never there, and one that read cleanly. Both
+   * consumers say so rather than hiding it. The field above calls that ambiguity
+   * a cost; `run/relay.ts` declines to guess and maps `null` to `undefined`.
+   *
+   * The consequence was not theoretical. `RelayEnvelopeState`'s `absent` arm —
+   * written, documented and probed — carried **no production traffic at all**,
+   * because nothing could ever say "looked, and there was none". So a lens whose
+   * reviewer wrote nothing and a lens whose envelope was perfectly fine were
+   * both described by the weaker `null` sentence, and the taxonomy that exists
+   * to tell those apart could not.
+   *
+   * ## Why a copy of `OutboxRead["kind"]` and not a boolean
+   *
+   * Because `refused` is neither `missing` nor `unreadable`, and a boolean would
+   * force whoever adds the next arm to pick which of two lies to tell. This
+   * carries the harvester's own answer and lets each consumer map it — which is
+   * the same reason `unreadableEnvelope` is a structure and not a sentence.
+   *
+   * `null` means NOTHING LOOKED, the same "this harvest never reached an outbox"
+   * its two neighbours here use, and it is not the same as `missing`.
+   */
+  envelopeRead: OutboxRead["kind"] | null;
+  /**
    * What `<outbox>/<task-id>/` holds that no reader here opens — names and
    * sizes, never contents. See `harvest/task-outbox.ts` for the measurement.
    *
@@ -262,6 +291,11 @@ function unavailableHarvest(taskId: string, reason: string): TaskHarvest {
     // is the honest answer and not a default: this harvest never reached an
     // outbox.
     unreadableEnvelope: null,
+    // Nothing looked, so this is `null` and NOT `"missing"`. The difference is
+    // the whole point of the field: `missing` asserts that an outbox was read
+    // and held no envelope, which is a claim about the WORKER. This harvest
+    // never got that far, so it has no claim to make about one.
+    envelopeRead: null,
     // Same restraint, same reason. This harvest has no dispatch record, so it
     // never learned which worker's outbox to look in — there is no directory it
     // could have listed. `unlistable` claims nothing, which is the only claim
@@ -1060,7 +1094,14 @@ export async function harvestTask(
     // The returned facts are the ones the verdict was actually reached from —
     // harness surface included. Returning `git.facts` here would hand callers a
     // bundle whose hash does not match the `facts_hash` beside it.
-    return { harvest, facts: factsWithHarness, harvestStatus, unreadableEnvelope, taskOutbox };
+    return {
+      harvest,
+      facts: factsWithHarness,
+      harvestStatus,
+      unreadableEnvelope,
+      envelopeRead: outbox.kind,
+      taskOutbox,
+    };
   });
 }
 

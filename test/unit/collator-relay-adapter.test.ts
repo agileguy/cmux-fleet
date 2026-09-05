@@ -749,6 +749,77 @@ describe("harvest", () => {
     expect(got.envelope).toBeUndefined();
     expect(got.envelope).not.toEqual({ kind: "absent" });
   });
+
+  /**
+   * THE OTHER HALF OF THAT ASYMMETRY, and the reason `absent` exists at all.
+   *
+   * The test above pins that silence must not become a claim. This one pins that
+   * a claim must not stay silent. Until `envelopeRead` landed only the first was
+   * enforceable, and the cost was exact: `RelayEnvelopeState.absent` was written,
+   * documented and probed at the note layer, and NOTHING COULD REACH IT — every
+   * lens with no envelope was described by the weaker "nobody looked" sentence.
+   *
+   * The two tests share a fixture that differs in ONE field. That is deliberate:
+   * a pair where the bundles also differed in verdict, or in `unreadableEnvelope`,
+   * would pass against an implementation that keyed off either of those instead.
+   */
+  test("an envelope that was looked for and was not there is `absent`", async () => {
+    const { fx } = effects({
+      async harvestTask() {
+        return {
+          harvest: { verdict: "failed" as Verdict },
+          unreadableEnvelope: null,
+          envelopeRead: "missing" as const,
+        };
+      },
+    });
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+
+    expect(got.envelope).toEqual({ kind: "absent" });
+  });
+
+  test("a readable envelope on a lens that did not succeed is `present`", async () => {
+    // `ok` is not a contradiction here: this state is only ever built for a lens
+    // that did NOT succeed, which is exactly what `present` describes — the
+    // reviewer reported and the report did not travel.
+    const { fx } = effects({
+      async harvestTask() {
+        return {
+          harvest: { verdict: "failed" as Verdict },
+          unreadableEnvelope: null,
+          envelopeRead: "ok" as const,
+        };
+      },
+    });
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+
+    expect(got.envelope).toEqual({ kind: "present" });
+  });
+
+  test("a refusal is none of the three states, so it claims nothing", async () => {
+    /**
+     * `harvest/outbox.ts` keeps `refused` separate BECAUSE it is not a
+     * readability outcome: a traversal attempt, an oversized file or a stale
+     * epoch is a document rejected for what it is, not one that could not be
+     * read. None of `present`, `absent` or `unreadable` is true of it, so the
+     * adapter declines — the same discipline that kept `absent` unreached until
+     * a fact could earn it.
+     */
+    const { fx } = effects({
+      async harvestTask() {
+        return {
+          harvest: { verdict: "failed" as Verdict },
+          unreadableEnvelope: null,
+          envelopeRead: "refused" as const,
+        };
+      },
+    });
+    const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
+
+    expect(got.envelope).toBeUndefined();
+    expect(got.envelope).not.toEqual({ kind: "absent" });
+    expect(got.envelope).not.toEqual({ kind: "present" });
+  });
 });
 
 // ---------------------------------------------------------------------------
