@@ -255,6 +255,31 @@ fi
 # served. Measured 2026-09-04: deepseek-v4-pro:0813 and kimi-k3 serve 1,048,576.
 # `rev-arch-1` therefore auto-compacted at 152,447 tokens — 12% of its window —
 # and then could not resume at all, losing a completed review.
+#
+# `reasoning: true` IS THE OTHER HALF OF THE THINKING LEVEL, and without it the
+# settings.json key below is inert. Pi's `getSupportedThinkingLevels(model)`
+# opens with `if (!model.reasoning) return ["off"]`, and every level is then run
+# through `clampThinkingLevel`, which can only return a level the model supports.
+# So a model entry that does not declare `reasoning` pins the session at `off`
+# no matter what `defaultThinkingLevel` says.
+#
+# MEASURED, and it is why this paragraph exists rather than a one-line fix:
+# `defaultThinkingLevel: "high"` was written into settings.json, confirmed
+# present in the container, and the very next session still opened at
+# `thinkingLevel: "off"`. The setting was correct and the model was not
+# eligible for it. Two facts, one of them silent.
+#
+# TIED TO THE SAME VARIABLE ON PURPOSE. The condition is "config asked for a
+# level above off", not a per-model capability table: the operator names
+# `thinking:` per role, the allowlist above already refuses a model whose vendor
+# does not attest `thinking` (that is what excluded mistral-large-3), and a
+# second source of truth here could disagree with the first. One variable
+# decides both halves, so they cannot drift apart.
+#
+# `xhigh` is the one level this does not fully buy. Pi keeps it only when the
+# model declares a `thinkingLevelMap` entry for it, which we do not write, so a
+# role asking `xhigh` is clamped down to `high` rather than refused. Recorded
+# rather than fixed: the fleet has no seat asking for it.
 if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
   jq -n \
     --arg provider "${PIFLEET_LLM_PROVIDER:-omlx}" \
@@ -262,6 +287,7 @@ if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
     --arg apiKey "${api_key}" \
     --arg models "${PIFLEET_LLM_MODELS}" \
     --arg contextWindow "${PIFLEET_LLM_CONTEXT_WINDOW:-}" \
+    --arg thinking "${PIFLEET_PI_THINKING:-}" \
     '{
       providers: {
         ($provider): {
@@ -272,6 +298,7 @@ if [ -n "${PIFLEET_LLM_BASE_URL:-}" ] && [ -n "${PIFLEET_LLM_MODELS:-}" ]; then
           models: ($models | split(",") | map(select(length > 0)) | map(
             {id: ., name: .}
             + (if $contextWindow == "" then {} else {contextWindow: ($contextWindow | tonumber)} end)
+            + (if $thinking == "" or $thinking == "off" then {} else {reasoning: true} end)
           ))
         }
       }

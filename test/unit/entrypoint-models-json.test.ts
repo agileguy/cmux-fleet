@@ -174,7 +174,13 @@ async function render(
    * under test rather than the fixture for it.
    */
   envOverride: Record<string, string | undefined> = {},
-): Promise<{ argvProvider: string; models: ModelsJson | null; code: number; stderr: string }> {
+): Promise<{
+  argvProvider: string;
+  models: ModelsJson | null;
+  settings: Record<string, unknown> | null;
+  code: number;
+  stderr: string;
+}> {
   const loaded = await parseConfig(stringify(doc), "/tmp/fleet.yaml");
   const w = resolveWorker(loaded, "w1");
   const plan = buildWorkerEnv(loaded, w, hostEnv);
@@ -244,7 +250,26 @@ async function render(
   });
   const [stderr, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
   const raw = await readFile(join(dir, ".pi", "agent", "models.json"), "utf8").catch(() => null);
-  return { argvProvider, models: raw === null ? null : (JSON.parse(raw) as ModelsJson), code, stderr };
+  /*
+   * `settings.json` comes back too, because the thinking level is a JOIN across
+   * BOTH files and this file's whole argument is that a join must be asserted as
+   * one. `defaultThinkingLevel` lives in settings.json; `reasoning` lives on the
+   * model entry in models.json; and Pi's `getSupportedThinkingLevels` opens with
+   * `if (!model.reasoning) return ["off"]`, so the first is inert without the
+   * second. Measured: settings.json carried "high", the container had it, and
+   * the next session still opened at `off`.
+   */
+  const rawSettings = await readFile(join(dir, ".pi", "agent", "settings.json"), "utf8").catch(
+    () => null,
+  );
+  return {
+    argvProvider,
+    models: raw === null ? null : (JSON.parse(raw) as ModelsJson),
+    settings:
+      rawSettings === null ? null : (JSON.parse(rawSettings) as Record<string, unknown>),
+    code,
+    stderr,
+  };
 }
 
 describe("ISC-401: the resolved provider reaches Pi's argv AND models.json", () => {
@@ -657,5 +682,94 @@ describe("D8/§6.6: models.json carries the key read from PIFLEET_LLM_API_KEY_FI
       expect(r.success, `schema accepted api_key_env: ${bad}`).toBe(false);
     }
     expect(LlmSchema.safeParse({ model: "m", api_key_env: "OLLAMA_API_KEY" }).success).toBe(true);
+  });
+});
+
+/**
+ * THE THINKING LEVEL IS A JOIN ACROSS TWO FILES, and it was broken in both.
+ *
+ * `thinking` is declared per role in `fleet.yaml`, resolved by `resolveWorker`,
+ * printed by `doctor` — and for the whole life of the field it was handed to no
+ * container at all. Every worker ran at Pi's own `DEFAULT_THINKING_LEVEL`, and
+ * the review console's four hosted seats, every one configured `thinking: high`
+ * on the argument that a reviewer must think longest per token read, were
+ * measured opening their sessions at `thinkingLevel: "off"`.
+ *
+ * ## Fixing the obvious half was not enough, which is why this lives here
+ *
+ * The first fix carried `PIFLEET_PI_THINKING` and merged `defaultThinkingLevel`
+ * into `settings.json`. That is the key Pi reads, it was confirmed present in a
+ * live container — and the very next session still opened at `off`. Pi's
+ * `getSupportedThinkingLevels(model)` opens with
+ * `if (!model.reasoning) return ["off"]`, and every requested level is run
+ * through `clampThinkingLevel`, which can only return a supported one. The
+ * model entry in `models.json` did not declare `reasoning`, so the setting was
+ * correct and the model was not eligible for it.
+ *
+ * Two facts in two files, either of which silently pins the session at `off`.
+ * That is the join, and it is asserted as one below rather than as two files
+ * that each look right on their own.
+ */
+describe("a role's thinking level survives the trip into the container", () => {
+  const thinker = (level?: string) =>
+    baseDoc({ roles: { eng: level === undefined ? {} : { thinking: level } } });
+
+  test("both halves land: the level in settings, the eligibility on the model", async () => {
+    const r = await render(thinker("high"), {});
+
+    expect(r.settings?.["defaultThinkingLevel"]).toBe("high");
+    const models = Object.values(r.models?.providers ?? {})[0]?.models ?? [];
+    expect(models.length).toBeGreaterThan(0);
+    for (const m of models) {
+      expect(
+        (m as Record<string, unknown>)["reasoning"],
+        `${(m as Record<string, unknown>)["id"]} is not declared reasoning, so Pi clamps it to off`,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * `off` IS A REQUEST, NOT AN ABSENCE, and the two must not render the same.
+   *
+   * A role that says `thinking: off` is asking for no reasoning; a role that
+   * says nothing is leaving the pane alone. Both end with the session at `off`,
+   * which is exactly why an implementation could conflate them and look right:
+   * the observable session behaviour is identical. What differs is the FILES —
+   * `off` writes the level and withholds `reasoning`, absent writes neither —
+   * and that is what keeps `settings.json` from being overwritten on a volume
+   * where an operator set the level by hand inside the pane.
+   */
+  test("an explicit off asks for no reasoning without claiming the model has none", async () => {
+    const r = await render(thinker("off"), {});
+
+    expect(r.settings?.["defaultThinkingLevel"]).toBe("off");
+    const models = Object.values(r.models?.providers ?? {})[0]?.models ?? [];
+    for (const m of models) {
+      expect((m as Record<string, unknown>)["reasoning"]).toBeUndefined();
+    }
+  });
+
+  test("a role that names no level writes neither half", async () => {
+    const r = await render(thinker(), {});
+
+    expect(r.settings?.["defaultThinkingLevel"]).toBeUndefined();
+    const models = Object.values(r.models?.providers ?? {})[0]?.models ?? [];
+    for (const m of models) {
+      expect((m as Record<string, unknown>)["reasoning"]).toBeUndefined();
+    }
+  });
+
+  /**
+   * The asymmetric arm. Two levels that are both "on" must arrive as THEMSELVES
+   * — an implementation that hardcodes a level, or that writes `reasoning` and
+   * lets Pi pick, passes every test above and fails this one.
+   */
+  test("two different levels arrive as two different levels", async () => {
+    const high = await render(thinker("high"), {});
+    const low = await render(thinker("low"), {});
+
+    expect(high.settings?.["defaultThinkingLevel"]).toBe("high");
+    expect(low.settings?.["defaultThinkingLevel"]).toBe("low");
+    expect(high.settings?.["defaultThinkingLevel"]).not.toBe(low.settings?.["defaultThinkingLevel"]);
   });
 });

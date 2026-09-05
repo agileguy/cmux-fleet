@@ -990,14 +990,26 @@ describe("a worker's reasoning effort reaches its container", () => {
    * falls back to `DEFAULT_THINKING_LEVEL` when it is absent. A misspelling
    * here is silent: the file is still valid JSON, Pi still starts, and the
    * level is still the default.
+   *
+   * ## The assertion is the jq OBJECT, and the first draft was degenerate
+   *
+   * It read `expect(entrypoint).toContain("defaultThinkingLevel")`. Misspelling
+   * the key in the jq expression left that GREEN, because the paragraph of
+   * comment above the code spells it correctly four times — the probe was
+   * matching the prose that explains the code rather than the code. Measured:
+   * the mutation survived, and it was the only survivor of five.
+   *
+   * So the string below is the object construction itself, `$k` included. That
+   * cannot be satisfied by a comment describing it, and it fails on exactly the
+   * edit that would break the plumbing while leaving every other test green.
    */
   test("the entrypoint consumes the variable and writes Pi's own settings key", () => {
     const entrypoint = readFileSync(new URL("../../docker/entrypoint.sh", import.meta.url).pathname, "utf8");
     expect(entrypoint, "entrypoint.sh never reads PIFLEET_PI_THINKING").toContain(
-      "PIFLEET_PI_THINKING",
+      '--arg k "${PIFLEET_PI_THINKING:-}"',
     );
-    expect(entrypoint, "entrypoint.sh never writes defaultThinkingLevel").toContain(
-      "defaultThinkingLevel",
+    expect(entrypoint, "entrypoint.sh does not write the key Pi reads").toContain(
+      "{defaultThinkingLevel: $k}",
     );
   });
 });
