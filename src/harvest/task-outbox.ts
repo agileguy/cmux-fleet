@@ -228,7 +228,23 @@ function kindOf(e: Dirent): UnrecognisedEntryKind {
  * worker-authored and an unlistable one is an expected input, not an
  * exceptional one. Every failure answers `unlistable`, which claims nothing.
  */
-export async function listTaskOutbox(loc: OutboxLocation): Promise<TaskOutboxListing> {
+/**
+ * What this function needs, spelled as what it needs.
+ *
+ * **Narrowed from the full `OutboxLocation` on a reviewer's finding.** The body
+ * reads `workerOutboxDir` and `taskId` and nothing else, and `relay.ts`'s
+ * recovery path relies on exactly that — it calls this at the moment a harvest
+ * has failed, when the epoch and the worktree are not known and are passed as
+ * `0` and `null`. That was safe by INSPECTION, which is the wrong kind of safe:
+ * a future reader of `epoch` here would silently receive an invented value.
+ *
+ * With the parameter narrowed, adding such a read is a compile error at every
+ * call site instead. A full `OutboxLocation` still satisfies it, so nothing
+ * else changes.
+ */
+export type TaskOutboxLocation = Pick<OutboxLocation, "workerOutboxDir" | "taskId">;
+
+export async function listTaskOutbox(loc: TaskOutboxLocation): Promise<TaskOutboxListing> {
   const taskRoot = join(loc.workerOutboxDir, loc.taskId);
 
   let entries: Dirent[];

@@ -253,7 +253,7 @@ function effects(
     },
     async harvestTask(_run, taskId) {
       rec.harvested.push(taskId);
-      return { harvest: { verdict: "success" as Verdict, task_id: taskId } };
+      return { harvest: { verdict: "success" as Verdict, task_id: taskId, derived: { artifacts: [] } } };
     },
     /**
      * The DEFAULT is `unlistable` and deliberately not `empty`.
@@ -673,7 +673,7 @@ describe("harvest", () => {
     test(`carries \`${verdict}\` through unchanged`, async () => {
       const { fx } = effects({
         async harvestTask() {
-          return { harvest: { verdict: verdict as Verdict } };
+          return { harvest: { verdict: verdict as Verdict, derived: { artifacts: [] } } };
         },
       });
       const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
@@ -685,7 +685,13 @@ describe("harvest", () => {
     const bundle = {
       harvest: {
         verdict: "success" as Verdict,
-        artifacts: [{ path: "/runs/r/outbox/rev-arch-1/T1-arch/files/review.md", bytes: 11 }],
+        // `derived`, which is where HarvestSchema actually puts them. This
+        // fixture used to spell it one level up — the same place the adapter
+        // read it from — so the two agreed with each other and neither agreed
+        // with the schema. That is why the inline path could ship empty.
+        derived: {
+          artifacts: [{ path: "/runs/r/outbox/rev-arch-1/T1-arch/files/review.md", bytes: 11 }],
+        },
       },
       facts: { n: 1 },
       harvestStatus: "ok",
@@ -732,7 +738,7 @@ describe("harvest", () => {
     const { fx } = effects({
       async harvestTask() {
         return {
-          harvest: { verdict: "unknown" as Verdict },
+          harvest: { verdict: "unknown" as Verdict, derived: { artifacts: [] } },
           unreadableEnvelope: {
             path: "/runs/r/outbox/rev-lang-1/T1-lang/result.json",
             bytes: 3906,
@@ -774,7 +780,7 @@ describe("harvest", () => {
     const { fx } = effects({
       async harvestTask() {
         return {
-          harvest: { verdict: "unknown" as Verdict },
+          harvest: { verdict: "unknown" as Verdict, derived: { artifacts: [] } },
           unreadableEnvelope: null,
           envelopeRead: "unreadable" as const,
         };
@@ -819,6 +825,39 @@ describe("harvest", () => {
     expect(typeof _bundle).toBe("object");
   });
 
+  /**
+   * THE SAME SEAM, FOR THE FIELD THAT PROVED IT WAS NEEDED.
+   *
+   * **MEASURED on a live run, and the inlining had never carried a byte.**
+   * `RelayHarvestView` declared the artifacts as `harvest.artifacts?` — one
+   * level too high, and OPTIONAL. `HarvestSchema` puts them at
+   * `derived.artifacts`, so every real bundle answered `undefined`, `?? []`
+   * turned that into an empty list, and the mechanism whose docblock says *"the
+   * thing itself travels"* travelled nothing. A reviewer wrote 10,021 bytes of
+   * review and the collator received its `sha256`.
+   *
+   * **The `?` is exactly why the compiler said nothing**, and it is why every
+   * probe in this file stayed green: an optional field a real bundle does not
+   * have satisfies the interface, and the hand-built fixtures spelled it at the
+   * same wrong level the adapter read it from. The fixture and the code agreed
+   * with each other and neither agreed with the schema.
+   *
+   * This assignment is what makes that impossible to repeat. Both levels are
+   * required, so `TaskHarvest` satisfies the view only while the field is
+   * actually where the schema puts it; move or rename it and `tsc` names it
+   * here rather than the console silently shipping digests.
+   */
+  test("the harvester's artifact list still satisfies the relay's, at the level it lives", () => {
+    const _bundle: {
+      readonly harvest: {
+        readonly derived: {
+          readonly artifacts: readonly { readonly path: string; readonly bytes: number }[];
+        };
+      };
+    } = null as unknown as TaskHarvest;
+    expect(typeof _bundle).toBe("object");
+  });
+
   test("`null` is not evidence of an absent envelope", async () => {
     /**
      * THE ASYMMETRY. `unreadableEnvelope` surfaces ONE of the harvester's four
@@ -830,7 +869,7 @@ describe("harvest", () => {
      */
     const { fx } = effects({
       async harvestTask() {
-        return { harvest: { verdict: "failed" as Verdict }, unreadableEnvelope: null };
+        return { harvest: { verdict: "failed" as Verdict, derived: { artifacts: [] } }, unreadableEnvelope: null };
       },
     });
     const got = await consoleTransport("col-1", fx).harvest(ARCH_RUN, ref);
@@ -856,7 +895,7 @@ describe("harvest", () => {
     const { fx } = effects({
       async harvestTask() {
         return {
-          harvest: { verdict: "failed" as Verdict },
+          harvest: { verdict: "failed" as Verdict, derived: { artifacts: [] } },
           unreadableEnvelope: null,
           envelopeRead: "missing" as const,
         };
@@ -874,7 +913,7 @@ describe("harvest", () => {
     const { fx } = effects({
       async harvestTask() {
         return {
-          harvest: { verdict: "failed" as Verdict },
+          harvest: { verdict: "failed" as Verdict, derived: { artifacts: [] } },
           unreadableEnvelope: null,
           envelopeRead: "ok" as const,
         };
@@ -898,7 +937,7 @@ describe("harvest", () => {
     const { fx } = effects({
       async harvestTask() {
         return {
-          harvest: { verdict: "failed" as Verdict },
+          harvest: { verdict: "failed" as Verdict, derived: { artifacts: [] } },
           unreadableEnvelope: null,
           envelopeRead: "refused" as const,
           envelopeRefusal: "task_id names R-other, not the dispatched task",
@@ -927,7 +966,7 @@ describe("harvest", () => {
     const { fx } = effects({
       async harvestTask() {
         return {
-          harvest: { verdict: "failed" as Verdict },
+          harvest: { verdict: "failed" as Verdict, derived: { artifacts: [] } },
           unreadableEnvelope: null,
           envelopeRead: null,
         };
@@ -940,7 +979,7 @@ describe("harvest", () => {
     const { fx } = effects({
       async harvestTask() {
         return {
-          harvest: { verdict: "failed" as Verdict },
+          harvest: { verdict: "failed" as Verdict, derived: { artifacts: [] } },
           unreadableEnvelope: null,
           envelopeRead: "refused" as const,
         };
@@ -1204,7 +1243,7 @@ describe("the fan-out adapter's result mapping", () => {
   test("zero survivors still reports `dispatched` with the three children", async () => {
     const { fx, rec } = effects({
       async harvestTask() {
-        return { harvest: { verdict: "timed_out" as Verdict } };
+        return { harvest: { verdict: "timed_out" as Verdict, derived: { artifacts: [] } } };
       },
     });
     const got = await fanOutWith(fx)({
@@ -1457,7 +1496,7 @@ describe("a collation that does not land", () => {
   test("a zero-survivor pass is not a collation failure and carries no reason", async () => {
     const { fx } = effects({
       async harvestTask() {
-        return { harvest: { verdict: "timed_out" as Verdict } };
+        return { harvest: { verdict: "timed_out" as Verdict, derived: { artifacts: [] } } };
       },
     });
     const got = await makeConsoleFanOut({
@@ -1560,7 +1599,7 @@ describe("a fan-out where nothing landed", () => {
     // Nothing survived: every dispatch LANDS, every harvest is timed_out.
     const survivedNone = effects({
       async harvestTask() {
-        return { harvest: { verdict: "timed_out" as Verdict } };
+        return { harvest: { verdict: "timed_out" as Verdict, derived: { artifacts: [] } } };
       },
     }).fx;
     const landedNone = nothingLands().fx;
@@ -1925,7 +1964,7 @@ describe("inlining artifact contents", () => {
         return {
           harvest: {
             verdict: "success" as Verdict,
-            artifacts: sizes.map((bytes, i) => ({ path: paths[i]!, bytes })),
+            derived: { artifacts: sizes.map((bytes, i) => ({ path: paths[i]!, bytes })) },
           },
         };
       },
@@ -2076,7 +2115,7 @@ describe("truncation in the collation brief", () => {
             verdict: "success" as Verdict,
             // Only the arch lens has an artifact, so the brief's lines are
             // attributable to one aspect rather than to "some reviewer".
-            artifacts: taskId === "T1-arch" ? [{ path, bytes }] : [],
+            derived: { artifacts: taskId === "T1-arch" ? [{ path, bytes }] : [] },
           },
         };
       },
@@ -2243,7 +2282,7 @@ describe("a failed harvest carries a pointer to what it could not read", () => {
     let asked = 0;
     const { fx } = effects({
       async harvestTask() {
-        return { harvest: { verdict: "success" as Verdict }, taskOutbox: { kind: "empty" } };
+        return { harvest: { verdict: "success" as Verdict, derived: { artifacts: [] } }, taskOutbox: { kind: "empty" } };
       },
       async listTaskOutbox() {
         asked += 1;

@@ -493,7 +493,7 @@ describe("consoleTransport carries the harvester's outbox listing", () => {
       },
       async harvestTask() {
         return {
-          harvest: { verdict: "unknown" as const, artifacts: [] },
+          harvest: { verdict: "unknown" as const, derived: { artifacts: [] } },
           unreadableEnvelope: null,
           ...(taskOutbox === undefined ? {} : { taskOutbox }),
         };

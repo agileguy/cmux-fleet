@@ -1281,8 +1281,16 @@ async function fanOut<R>(
  * What to say about a lens whose harvest did not return.
  *
  * A reason is included when there is one, and the sentence stays whole when
- * there is not: `undefined` here means the harvest resolved and produced no
- * entry, which is a different fact from a harvest that threw.
+ * there is not.
+ *
+ * **`undefined` IS NOT REACHABLE FROM THE CORE TODAY, and the docblock used to
+ * imply otherwise.** `landed.forEach` sets either `result` or `failedHarvest`
+ * for every plan, and this note is built only where `result` has no entry — so
+ * `failedHarvest` always does. The parameter is `string | undefined` because the
+ * call site is a `Map.get`, which is a fact about the lookup rather than about
+ * the world. The arm stays for the day those two maps diverge, and it says the
+ * weaker thing on purpose: a harvest that produced no entry is a different fact
+ * from one that threw, and must not borrow its wording.
  *
  * ## And what the outbox held, which is the recovery
  *
@@ -1332,23 +1340,45 @@ export function harvestFailureNote(
  */
 function unreadOutboxClause(outbox: RelayOutboxListing | null): string {
   if (outbox === null) return "";
-  const usual =
-    `Nothing here read the outbox, so if this reviewer reported at all its report is still ` +
-    `on disk, in the usual places — result.json in the task root and the files/ directory ` +
-    `beside it`;
+  /**
+   * The tail is PER ARM, and a shared one was the defect a reviewer caught.
+   *
+   * It read *"if this reviewer reported at all its report is still on disk, in
+   * the usual places"* and was appended to every arm — including
+   * `unrecognised`, the arm that exists precisely to flag entries OUTSIDE the
+   * usual names. A reader taking "reported" to mean "wrote a review" then takes
+   * the sentence to mean the review is in the usual places, which is false in
+   * exactly the case that arm is raised for. Same failure direction as the
+   * `empty` clause this function was written to replace: reassuring, and wrong.
+   *
+   * `opened` rather than `read`, too. The listing DID `readdir` the directory;
+   * what nothing did was open any file in it, which is the distinction the
+   * whole clause turns on.
+   */
+  const unopened =
+    `Nothing here opened any of it, so if this reviewer reported at all its report is still ` +
+    `on disk and unread`;
+  const usualPlaces = `result.json in the task root and the files/ directory beside it`;
   if (outbox.kind === "unlistable") {
-    return `. Its task outbox could not be listed either, so nothing here can say what is in it. ${usual}`;
+    return (
+      `. Its task outbox could not be listed either, so nothing here can say what is in it. ` +
+      `${unopened} — look in the usual places, ${usualPlaces}`
+    );
   }
   if (outbox.kind === "empty") {
-    return `. Its task outbox holds no unexpected entries. ${usual}`;
+    return (
+      `. Its task outbox holds no entries outside the usual names. ${unopened} — look in the ` +
+      `usual places, ${usualPlaces}`
+    );
   }
   const more = outbox.total - outbox.named.length;
   return (
     `. Its task outbox also holds ${outbox.total} ` +
-    `entr${outbox.total === 1 ? "y" : "ies"} outside the usual names, listed by name and size ` +
-    `ONLY — nothing here opened them: ` +
-    `${outbox.named.map(describeOutboxEntry).join(", ")}` +
-    `${more > 0 ? `, and ${more} more not named` : ""}. ${usual}`
+    `entr${outbox.total === 1 ? "y" : "ies"} OUTSIDE the usual names, listed by name and size ` +
+    `only: ${outbox.named.map(describeOutboxEntry).join(", ")}` +
+    `${more > 0 ? `, and ${more} more not named` : ""}. ${unopened} — look at those entries AND ` +
+    `at the usual places, ${usualPlaces}, because a report filed under an unexpected name is ` +
+    `not in the usual places at all`
   );
 }
 
@@ -1771,11 +1801,34 @@ export interface RelayHarvestView {
   readonly harvest: {
     readonly verdict: Verdict;
     /**
-     * `HarvestedArtifactSchema` narrowed to what the budget needs: a host path
-     * and a size. Optional because a task may produce no file artifacts at all,
-     * which is a kind of task rather than a degraded harvest.
+     * ── WHERE THE ARTIFACTS ACTUALLY LIVE, and the reason this is `derived` ──
+     *
+     * **MEASURED, and the inlining mechanism had never carried a byte.** This
+     * was declared as `harvest.artifacts?` — one level too high and OPTIONAL.
+     * `HarvestSchema` puts them at `derived.artifacts`, beside `files_changed`,
+     * because they are the harvester's own measurement of the filesystem rather
+     * than the worker's claim. So `bundle.harvest.artifacts` was `undefined` on
+     * every real bundle, `?? []` turned that into an empty list, and the whole
+     * inline path — the one whose docblock says *"a digest is what you carry
+     * when the thing itself is somewhere the reader can get to; here it is not,
+     * so the thing itself travels"* — inlined nothing, in every run this console
+     * has ever done. A reviewer wrote 10,021 bytes and the collator was handed
+     * its `sha256`.
+     *
+     * **The `?` is why the compiler was silent.** An optional field that a real
+     * bundle simply does not have satisfies the interface, so `TaskHarvest`
+     * type-checked against a shape it has never matched. Both levels are
+     * REQUIRED now: `derived` and `artifacts` alike, so `HarvestSchema`'s own
+     * defaults are what satisfies them, and moving or renaming either field
+     * stops this file compiling instead of quietly emptying it.
+     *
+     * `HarvestedArtifactSchema` narrowed to what the budget needs — a host path
+     * and a size. An empty array is the honest spelling of a task that produced
+     * no file artifacts, which is a kind of task rather than a degraded harvest.
      */
-    readonly artifacts?: readonly { readonly path: string; readonly bytes: number }[];
+    readonly derived: {
+      readonly artifacts: readonly { readonly path: string; readonly bytes: number }[];
+    };
   };
   /**
    * `TaskHarvest.unreadableEnvelope` — the harvester's own field, by its own
@@ -2434,6 +2487,18 @@ export function consoleTransport(
        * from a successful harvest of a task nothing could grade, and those are
        * different facts for everything downstream.
        */
+      /*
+       * SCOPED TO `harvestTask` ALONE, deliberately and not by oversight.
+       *
+       * The inlining loop below is outside it. That is right: once a bundle
+       * exists it already carries `taskOutbox`, so a failure there has a
+       * listing without this recovery and taking a second one would be two
+       * answers to one question. The loop is also contractually
+       * non-throwing — `readArtifact` returns a refusal as a VALUE, by its own
+       * docblock, so that an unreadable artifact costs its contents and never
+       * the lens. Widening this `try` would hide a break in that contract
+       * rather than handle it.
+       */
       let bundle: RelayHarvestView;
       try {
         bundle = await effects.harvestTask(run, task.taskId);
@@ -2462,7 +2527,7 @@ export function consoleTransport(
        * A digest is what you carry when the thing itself is somewhere the reader
        * can get to. Here it is not, so the thing itself travels.
        */
-      const artifacts = bundle.harvest.artifacts ?? [];
+      const artifacts = bundle.harvest.derived.artifacts;
       const budgets = planInlineBudget(artifacts.map((a: { bytes: number }) => a.bytes));
       const inlined: InlinedArtifact[] = [];
       for (const [i, a] of artifacts.entries()) {
@@ -3081,24 +3146,20 @@ export const productionRelayEffects: RelayEffects = {
   /**
    * The listing, derived from the two paths the caller already holds.
    *
-   * `listTaskOutbox` reads `workerOutboxDir` and `taskId` off the location and
-   * touches none of its other fields, so the epoch and the worktree are passed
-   * as the values that say NOTHING was assumed about them: an epoch of `0` and
-   * a `null` host workdir. Filling them with plausible guesses would put two
-   * invented facts into a structure whose whole job, in the one case that calls
-   * this, is to be the part that was not invented.
-   *
-   * `containerWorkdir` is the schema's own default spelling and is likewise
-   * unread here.
+   * **The location is the two fields and no others, and that is now the TYPE
+   * rather than a promise.** This used to pass a full `OutboxLocation` with an
+   * epoch of `0` and a `null` host workdir, on the true observation that
+   * `listTaskOutbox` reads neither — safe by inspection, which is the wrong
+   * kind of safe. A reviewer named the trap: a future `listTaskOutbox` that
+   * did read them would silently receive invented values, at the exact moment
+   * a harvest has failed and nothing else is known. `TaskOutboxLocation` makes
+   * such a read a compile error here instead.
    */
   async listTaskOutbox(run, worker, taskId) {
     const m = await loadEffectModules();
     return m.taskOutbox.listTaskOutbox({
       workerOutboxDir: m.paths.workerOutboxDir(run.root, worker),
       taskId,
-      epoch: 0,
-      containerWorkdir: "/workspace",
-      hostWorkdir: null,
     });
   },
   /**

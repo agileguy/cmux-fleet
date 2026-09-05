@@ -1025,6 +1025,10 @@ describe("an unreadable envelope is a transport failure, not a silent reviewer",
     expect(lang?.note).toContain("artifact.json");
     expect(lang?.note).toContain("12759 bytes");
     expect(lang?.note).toContain("result.json");
+    // The unrecognised arm must NOT imply the review is in the usual places:
+    // the entries it names are precisely the ones that are not.
+    expect(lang?.note).toContain("OUTSIDE the usual names");
+    expect(lang?.note).toContain("not in the usual places at all");
     // It must not borrow the successful-harvest clause, which claims the
     // listed files are ones "the harvest does not read" — here nothing read
     // anything, and that sentence would be false in the reassuring direction.
@@ -1047,7 +1051,7 @@ describe("an unreadable envelope is a transport failure, not a silent reviewer",
     });
     const lang = collated(await run(ALL_THREE(), t)).children.find((c) => c.aspect === "lang");
 
-    expect(lang?.note).toContain("no unexpected entries");
+    expect(lang?.note).toContain("no entries outside the usual names");
     expect(lang?.note).toContain("still on disk");
     expect(lang?.note).toContain("files/");
     expect(lang?.note).not.toContain("no other file to look in");
@@ -1066,6 +1070,8 @@ describe("an unreadable envelope is a transport failure, not a silent reviewer",
     // clause drops it.
     expect(lang?.note).toContain("could not be listed");
     expect(lang?.note).toContain("still on disk");
+    // "opened", not "read": the listing DID readdir the directory.
+    expect(lang?.note).toContain("opened any of it");
   });
 
   test("a rejection that carries no listing invents none", async () => {
