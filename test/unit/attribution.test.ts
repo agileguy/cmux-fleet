@@ -198,15 +198,80 @@ describe("ISC-530: no AI or assistant attribution on the integration branch or i
  * the criterion rejects. Loosening it to an allowlist of known-good hashes
  * would make the guard rot the first time history is rewritten.
  *
- * What CLAUDE.md actually forbids is narrower and has a shape: a trailer line
- * (`Co-Authored-By:` in trailer position) or a generated-by footer. Both are
- * line-anchored, and neither can appear inside prose describing them without
- * the author going out of their way. So the live guard matches POSITION, not
- * mere presence — and `a mention in prose is not an attribution` below pins
- * that distinction so a future widening back to substrings has to delete a
- * test rather than quietly re-break on the next meta-commit.
+ * ## What replaced it, after a review round found the first attempt too narrow
+ *
+ * The first live guard was position-only: a line starting `Co-Authored-By:`,
+ * `Claude-Session:`, or the emoji-prefixed `🤖 Generated with`. Two of the
+ * three review lenses independently found the same hole, and the case they
+ * built is decisive — `ATTRIBUTION_LINE.test("Generated with Claude Code")`
+ * was FALSE. Requiring the robot emoji meant the plainest generated-by footer
+ * there is walked straight through, and `AI-generated`, which §12 names, had
+ * no alternative at all. The guard enforced a strict subset of the criterion
+ * while claiming to enforce the criterion.
+ *
+ * The fix keeps both halves rather than choosing between them, because the
+ * two failure modes live in different PLACES:
+ *
+ *   - **All four of §12's substrings, in the TRAILER BLOCK.** A real
+ *     attribution is a footer: it is the last paragraph of the message, which
+ *     is exactly where `Co-Authored-By`, `Claude`, `AI-generated` and
+ *     `Generated with` mean what §12 says they mean. c7f9b87's mention sits
+ *     in its BODY — its trailer block is a `bun test ...` result line — so
+ *     the false positive that forced the narrowing does not recur, and no
+ *     allowlist of hashes is needed to avoid it. This arm restores the bare
+ *     `Claude` coverage the position-only guard dropped.
+ *   - **Unambiguous forms line-anchored, ANYWHERE in the message.** An
+ *     attribution that is not last — because a later paragraph was appended
+ *     after it — is still an attribution. This arm carries only the forms
+ *     that cannot occur by accident: the two trailer keys, and the
+ *     emoji-prefixed footer.
+ *
+ * ### Why the line arm does NOT simply make the emoji optional
+ *
+ * That is the fix one lens proposed, and it was tried first. It reddens on
+ * c7f9b87 — the same commit that motivated the whole exercise — because its
+ * body wraps as:
+ *
+ *     and a PR-body string for Co-Authored-By / Claude / AI-generated /
+ *     Generated with. Includes a fixture that commits an actual forbidden line
+ *
+ * and `^\s*Generated with` matches line 2 of a hard-wrapped sentence. A bare
+ * generated-by phrase at the start of a line is a LINE BREAK, not a footer.
+ * The phrase only means attribution in trailer position, and the trailer arm
+ * is what covers it there — including the lens's own case,
+ * `liveAttributionHits("Generated with Claude Code")`, which is a
+ * single-paragraph message and therefore its own trailer block.
+ *
+ * Neither arm alone is sufficient, which is why both are asserted below and
+ * why removing either reddens a test.
  */
 const ATTRIBUTION_LINE = /^\s*(?:Co-Authored-By:|Claude-Session:|🤖\s*Generated with)/im;
+
+/**
+ * The last blank-line-separated paragraph of a commit message — where git's
+ * own trailers live, and where an attribution footer lands. A single-paragraph
+ * message is its own trailer block, which is the safe direction: it makes the
+ * substring arm STRICTER on short messages, not laxer.
+ */
+function trailerBlockOf(body: string): string {
+  const paras = body
+    .trim()
+    .split(/\n\s*\n/)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+  return paras.length === 0 ? "" : (paras[paras.length - 1] ?? "");
+}
+
+/** Both arms. Returns the reasons, empty when clean. */
+function liveAttributionHits(body: string): string[] {
+  const hits: string[] = [];
+  const trailer = trailerBlockOf(body);
+  for (const p of FORBIDDEN_PATTERNS) {
+    if (trailer.includes(p)) hits.push(`trailer block contains "${p}"`);
+  }
+  if (ATTRIBUTION_LINE.test(body)) hits.push("a line begins with an attribution form");
+  return hits;
+}
 
 /**
  * The commits this branch added — never the whole history. `main` is the
@@ -233,32 +298,69 @@ async function integrationBranchMessages(): Promise<{ hash: string; body: string
 }
 
 describe("ISC-530 (live): this branch's own commits carry no attribution", () => {
-  test("no commit on main..HEAD carries an attribution line", async () => {
+  test("no commit on main..HEAD carries an attribution", async () => {
     const offenders = (await integrationBranchMessages())
-      .filter((c) => ATTRIBUTION_LINE.test(c.body))
-      .map((c) => `${c.hash.slice(0, 8)} ${c.body.split("\n")[0]}`);
+      .map((c) => ({ c, hits: liveAttributionHits(c.body) }))
+      .filter((x) => x.hits.length > 0)
+      .map((x) => `${x.c.hash.slice(0, 8)} ${x.c.body.split("\n")[0]} — ${x.hits.join("; ")}`);
     expect(offenders).toEqual([]);
   });
 
-  test("the live guard is not vacuous — it catches each forbidden trailer", () => {
+  test("the trailer arm catches every substring §12 names, including a bare Claude", () => {
     for (const line of [
       "Co-Authored-By: Someone <x@example.com>",
-      "Claude-Session: https://example.invalid/s",
+      "Claude wrote the second half.",
+      "This patch was AI-generated.",
+      "Generated with [a tool](https://example.invalid)",
       "🤖 Generated with [a tool](https://example.invalid)",
     ]) {
-      expect(ATTRIBUTION_LINE.test(`A real subject\n\nA body.\n\n${line}`)).toBe(true);
+      expect(liveAttributionHits(`A real subject\n\nA body paragraph.\n\n${line}`)).not.toEqual([]);
     }
   });
 
+  /**
+   * The review round's concrete case, kept as a test so the narrowing that
+   * dropped it cannot come back quietly. Both were FALSE under the
+   * position-only guard.
+   */
+  test("the two forms the first live guard let through are caught now", () => {
+    // The review round's decisive case. The LINE arm still says false for
+    // both — deliberately, see the docblock — and the composed guard, which
+    // is what grades a commit, says caught.
+    expect(ATTRIBUTION_LINE.test("Generated with Claude Code")).toBe(false);
+    expect(liveAttributionHits("Generated with Claude Code")).not.toEqual([]);
+    expect(liveAttributionHits("AI-generated, and proud of it")).not.toEqual([]);
+  });
+
+  test("a hard-wrapped sentence is not a footer, even when a line starts with the phrase", () => {
+    const wrapped =
+      "Subject\n\n" +
+      "and a PR-body string for Co-Authored-By / Claude / AI-generated /\n" +
+      "Generated with. Includes a fixture that commits an actual forbidden line.\n\n" +
+      "bun test: 9 pass.";
+    expect(liveAttributionHits(wrapped)).toEqual([]);
+  });
+
+  test("the line arm catches an attribution that is not the last paragraph", () => {
+    const body =
+      "A real subject\n\nA body.\n\nCo-Authored-By: Someone <x@example.com>\n\n" +
+      "A later paragraph appended after the footer.";
+    expect(trailerBlockOf(body)).not.toContain("Co-Authored-By");
+    expect(liveAttributionHits(body)).toEqual(["a line begins with an attribution form"]);
+  });
+
   test("a mention in prose is not an attribution", () => {
-    // The exact shape that broke the substring probe: our own c7f9b87.
+    // The exact shape that broke the substring probe: our own c7f9b87. The
+    // mention is in the BODY and the trailer block is a test result, so
+    // neither arm fires — while the whole-message substring probe still
+    // flags it, which is the finding that forced this design.
     const body =
       "Phase 2: deliver a configured git identity\n\n" +
       "Grep-based probe over real git history and a PR-body string for\n" +
       "Co-Authored-By / Claude / AI-generated / Generated with. Includes a\n" +
-      "fixture that commits an actual forbidden line.";
-    expect(ATTRIBUTION_LINE.test(body)).toBe(false);
-    // ...and the broad substring probe DOES flag it, which is the finding.
+      "fixture that commits an actual forbidden line.\n\n" +
+      "bun test test/unit/attribution.test.ts: 9 pass, 0 fail.";
+    expect(liveAttributionHits(body)).toEqual([]);
     expect(attributionHitsInText(body)).toContain("Co-Authored-By");
   });
 
