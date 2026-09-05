@@ -324,5 +324,15 @@
   },
   "housekeeping_2026_09_05": {
     "leaked_test_supervisors": "The full suite left 58 supervisor processes alive across 23 /var/folders pifleet-wiring-* temp roots. They are idle, not busy-looping, and point at throwaway roots rather than ~/.pifleet/runs. My cleanup was blocked by the auto-mode classifier and I did not work around it; they need an operator kill or a reboot, and the wiring tests should reap their own supervisors."
+  },
+  "triage_2026_09_05": {
+    "decision": "Owner: triage the HIGHs, then ask about the PR. ISA numbers: allocate from ISC-511.",
+    "A_readArtifact_symlink": "CONFIRMED and FIXED (85996f8). lstat-then-open resolved the path twice with the worker's own directory between the calls; O_NOFOLLOW plus fstat-on-the-handle removes the window rather than narrowing it. Two mutations, two kills \u2014 dropping the flag reddens the behavioural test too, because the credential really does inline.",
+    "B_negative_tokens_ceiling": "CONFIRMED and FIXED (85996f8). -1 parsed, fell through `ceiling >= 0` to null, and null means UNBOUNDED. Bound moved into the schema so the existing fail-closed path handles it; zero pinned as a real ceiling by a second test. One mutation, killed.",
+    "C_fresh_dispatch_teardown": "CONFIRMED AS A CLASS, MAGNITUDE WRONG, DELIBERATELY NOT FIXED. The reviewer said the teardown acts on a status read 'up to one poll old'; it does not \u2014 the loop exits on a fresh read, so the window is the function-call gap. A re-read before the down would shrink an already-minimal window while making the code look safer than it is. The honest close is a fence in `down()` that refuses a run holding staged work, which is a design change beyond triage.",
+    "D_refused_arm": "CONFIRMED and FIXED (85996f8). Lands on my own 0c21634. `refused` mapped to undefined, and undefined downstream means nothing looked. Now its own arm carrying the harvester's reason, with a new sentence that borrows neither neighbour's wording. Three mutations, three kills.",
+    "pm_own_error": "0c21634 SHIPPED TWO DEAD MUTATION BATTERIES. It reformatted code that envelope-attribution and unrecognised-outbox anchor to, so their anchors had been matching nothing since; I reported that commit's suite green. Found only because today's edits made the guard fire again. Both re-anchored and RE-RUN in an isolated worktree: E12/E13/E14 and M18 all still kill. M16 remains the known pre-existing survivor \u2014 and it is the same TOCTOU class as finding A, at the listing call site.",
+    "second_degenerate_probe": "My anchor-checking script matched ZERO anchors and then reported '0 bad'. Discarded. That is twice in one session that a probe of mine reported success by measuring nothing.",
+    "isa_filed": "ISC-511..517 appended; frontmatter 489/501 -> 495/508, updated 2026-09-05. ISC-517 is the [~] tripwire for the lost lens, pinned to the ABSENCE of the harvest swallow so fixing it forces the re-grade."
   }
 }
