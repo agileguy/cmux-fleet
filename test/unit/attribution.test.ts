@@ -280,20 +280,61 @@ function liveAttributionHits(body: string): string[] {
   return hits;
 }
 
+const REPO_ROOT = import.meta.dir + "/../..";
+
+/**
+ * Where this branch was cut from, tried in order.
+ *
+ * `main` is the local branch a developer has; `origin/main` is what a CI
+ * checkout has, and often the developer too. **Neither is guaranteed**, and
+ * that is not hypothetical: `actions/checkout@v4` defaults to `fetch-depth: 1`,
+ * so the job held ONE commit, no `main`, no `origin/main`, and this guard
+ * failed every pull request with `fatal: ambiguous argument 'main..HEAD'`.
+ * **A guard that reddens on every PR is a guard somebody deletes**, which is
+ * the same way the two-dot hazard inspect nearly went. CI now asks for the
+ * full history (`.github/workflows/ci.yml`), and this list is the belt to that
+ * braces: a checkout configured differently degrades to a NAMED failure.
+ */
+const BASE_REF_CANDIDATES = ["origin/main", "main"] as const;
+
+async function git(args: readonly string[]): Promise<{ code: number; out: string; err: string }> {
+  const p = Bun.spawn(["git", ...args], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  const [out, err, code] = await Promise.all([
+    new Response(p.stdout).text(),
+    new Response(p.stderr).text(),
+    p.exited,
+  ]);
+  return { code, out, err };
+}
+
+/**
+ * The first candidate that resolves, or a throw naming every one it tried.
+ *
+ * **It deliberately does not fall back to `HEAD`.** That would make the guard
+ * grade the repository's entire history — green today, and red the first time
+ * anyone imports an old commit, for a reason with nothing to do with this
+ * criterion. An unresolvable base is a broken checkout, and the honest report
+ * is to say so.
+ */
+async function resolveBaseRef(): Promise<string> {
+  for (const ref of BASE_REF_CANDIDATES) {
+    if ((await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).code === 0) return ref;
+  }
+  throw new Error(
+    `none of ${BASE_REF_CANDIDATES.join(", ")} resolves in ${REPO_ROOT}, so "what this branch added" ` +
+      "has no second end. A shallow checkout is the usual cause — CI needs fetch-depth: 0.",
+  );
+}
+
 /**
  * The commits this branch added — never the whole history. `main` is the
- * merge base every integration branch here is cut against, so `main..HEAD` is
- * exactly "what this system produced", which is the criterion's subject.
+ * merge base every integration branch here is cut against, so `<base>..HEAD`
+ * is exactly "what this system produced", which is the criterion's subject.
  */
 async function integrationBranchMessages(): Promise<{ hash: string; body: string }[]> {
-  const p = Bun.spawn(["git", "log", "main..HEAD", "--format=%H%x00%B%x01"], {
-    cwd: import.meta.dir + "/../..",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const out = await new Response(p.stdout).text();
-  const stderr = await new Response(p.stderr).text();
-  if ((await p.exited) !== 0) throw new Error(`git log main..HEAD failed: ${stderr}`);
+  const base = await resolveBaseRef();
+  const { code, out, err } = await git(["log", `${base}..HEAD`, "--format=%H%x00%B%x01"]);
+  if (code !== 0) throw new Error(`git log ${base}..HEAD failed: ${err}`);
   return out
     .split("\x01")
     .map((r) => r.trim())
@@ -305,7 +346,7 @@ async function integrationBranchMessages(): Promise<{ hash: string; body: string
 }
 
 describe("ISC-530 (live): this branch's own commits carry no attribution", () => {
-  test("no commit on main..HEAD carries an attribution", async () => {
+  test("no commit this branch added carries an attribution", async () => {
     const offenders = (await integrationBranchMessages())
       .map((c) => ({ c, hits: liveAttributionHits(c.body) }))
       .filter((x) => x.hits.length > 0)
@@ -371,7 +412,7 @@ describe("ISC-530 (live): this branch's own commits carry no attribution", () =>
     expect(attributionHitsInText(body)).toContain("Co-Authored-By");
   });
 
-  test("the range is non-empty, so a green result is not an empty set", async () => {
+  test("the range resolves and is non-empty, so a green result is not an empty set", async () => {
     expect((await integrationBranchMessages()).length).toBeGreaterThan(0);
   });
 });
