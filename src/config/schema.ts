@@ -350,13 +350,22 @@ export const RunSchema = z
      * operator's address"). Nested, not two flat keys, so the pair defaults
      * and travels together — the same shape `timers` and `budget` above use.
      *
-     * The measured alternative to this field existing is not a refusal, it is
-     * an invention: a worker with no configured identity and a writable clone
-     * self-configures one to get past git's identity check, and the probe
-     * behind D13 caught one doing exactly that — committing as
-     * `eng-1 <eng-1@pifleet.invalid>`, a value nothing in the fleet
-     * constrained or recorded. This field is what the fleet constrains and
-     * records it WITH instead.
+     * The measured alternative to this field existing is BOTH a refusal and
+     * an invention, in that order, and the order is the point. Task 2.0's
+     * probe was re-taken on this operator's own image on 2026-09-05:
+     * `docker exec -u 10001 <eng-1> git commit --allow-empty` exits 128 with
+     * `fatal: unable to auto-detect email address (got 'pi@<cid>.(none)')`,
+     * because the container's hostname has no domain and `HOME=/home/pi` is
+     * read-only so `--global` is not even available. That refusal is where it
+     * stops for a script. It is NOT where it stops for an agent: a worker
+     * with a writable clone reads the refusal, runs `git config` against
+     * `/workspace` (mode 0777, so a repository-local identity is
+     * self-configurable) and commits anyway — D13's probe caught one doing
+     * exactly that, as `eng-1 <eng-1@pifleet.invalid>`, a value nothing in
+     * the fleet constrained or recorded. So the failure this field closes is
+     * not "commits fail"; it is "commits succeed under a name the fleet
+     * never chose". This field is what the fleet constrains and records them
+     * WITH instead.
      *
      * The default is deliberately not a person's name or a plausible one —
      * `pifleet`, not `pi-worker` or a role name — so a reviewer reading
