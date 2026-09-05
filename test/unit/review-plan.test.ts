@@ -311,4 +311,53 @@ describe.skipIf(!HAVE_CONFIG)("the three reviewers run three different vendors",
       expect(resolveWorker(loaded(), id).paneMode, `${id} must be attended`).toBe("tui");
     }
   });
+
+  /**
+   * NO SEAT PRE-COMMITS TO A LANGUAGE — not in its angle, and not in its image.
+   *
+   * ## The defect, and why the config half is the half that lasted
+   *
+   * `rev-lang-1` carried `toolchain: node` and an aspect file called
+   * `typescript-language.md` while this console's integration target,
+   * `~/repos/rally-cli`, is a Python project. The angle was fixed in the same
+   * commit as this probe; the toolchain is the part that would have survived it,
+   * because nothing reads like a defect about an image tag.
+   *
+   * ## Why `toolchain` was removed rather than swapped for `python`
+   *
+   * Its stated justification was language-specific — *"the angle is types as the
+   * typechecker actually checks them, and base carries no typechecker"* — and
+   * that argument dies with the TypeScript angle. It was also already paying
+   * nothing: this seat holds no `bash`, so it could never invoke a toolchain at
+   * all, which the config comment itself conceded. Swapping it to `python` would
+   * repeat the original mistake one language over. The seat whose whole job is to
+   * NOT assume the language must not have a language chosen for it before anyone
+   * has looked at the repository, so it takes the `reviewer` role's `base`.
+   *
+   * Asserted against `resolveWorker`, which applies worker → role → default
+   * precedence, so this reddens both if the override comes back and if the ROLE's
+   * own toolchain is changed out from under it.
+   */
+  it("gives the language seat no toolchain of its own — the target picks the language", () => {
+    expect(
+      resolveWorker(loaded(), "rev-lang-1").toolchain,
+      "rev-lang-1 has a language-specific image again; it has no bash to use one and " +
+        "its angle is whatever the target is written in",
+    ).toBe("base");
+  });
+
+  it("points the language seat at the target-neutral aspect file", () => {
+    const files = resolveWorker(loaded(), "rev-lang-1")
+      .briefing.filter((b) => b.kind === "file")
+      .map((b) => b.value);
+    expect(
+      files.some((f) => f.endsWith("roles/review/implementation-language.md")),
+      `rev-lang-1's aspect fragment is ${JSON.stringify(files)}`,
+    ).toBe(true);
+    // And the old one is gone rather than merely unreferenced by this seat.
+    expect(
+      files.some((f) => f.includes("typescript-language")),
+      "rev-lang-1 still carries the TypeScript-named aspect file",
+    ).toBe(false);
+  });
 });

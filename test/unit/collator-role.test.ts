@@ -40,6 +40,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { StatusSchema } from "../../src/contracts.ts";
+import { findingLocationProblem } from "../../src/harvest/collation-census.ts";
 import {
   COLLATION_ARTIFACT_NAME,
   COLLATION_SCHEMA,
@@ -148,6 +149,80 @@ describe("the collator document names only paths that exist", () => {
   test("both artifact names come from the code", () => {
     expect(ROLE).toContain(`/outbox/<task-id>/files/${ARTIFACT_NAMES.structural}`);
     expect(ROLE).toContain(`/outbox/<task-id>/files/${ARTIFACT_NAMES.prose}`);
+  });
+});
+
+/**
+ * THE `file` FIELD IS A PATH, AND THE DOCUMENT'S TWO EXAMPLES ARE RUN THROUGH
+ * THE REAL PREDICATE.
+ *
+ * `collation-census.ts` added a SHAPE rule: a `file` carrying whitespace, no
+ * directory separator and no extension on its final component is read as prose,
+ * and the finding stops counting as located. It closes a real hole — a relative
+ * `file` is JOINED onto the workdir, so the sentence "the error handling could
+ * be tightened" resolved inside `/workspace` and was counted as an anchor for a
+ * finding that points at nothing.
+ *
+ * The refusal message teaches a collator this AFTER it has spent the turn. The
+ * briefing teaches it before, which is the only one of the two that prevents the
+ * cost.
+ *
+ * ## Why the examples are EXECUTED rather than quoted
+ *
+ * A probe asserting the document contains the sentence "file must be a path"
+ * pins prose to prose. These assertions instead run `findingLocationProblem`
+ * over the exact strings the document offers as its counted and uncounted
+ * examples, so the guidance and the grader cannot drift: loosen or tighten the
+ * rule and the document's own worked example becomes wrong here, in this file,
+ * rather than in a live review six weeks from now.
+ */
+describe("the document's account of a usable location matches the grader's", () => {
+  const WORKDIR = "/workspace";
+
+  test("the rule is stated where the collator writes findings", () => {
+    const rules = ROLE.slice(ROLE.indexOf("Field rules"), ROLE.indexOf("### `/outbox/<task-id>/files/review.md`"));
+    expect(rules, "nothing tells the collator `file` must be a path").toContain(
+      "`file` MUST NAME A PATH",
+    );
+    expect(rules, "the collator is not told where prose goes instead").toContain(
+      "**Prose belongs in `statement`**",
+    );
+    expect(rules, "the collator is not told the 1-based line rule").toContain("at least 1");
+  });
+
+  /** The example the document says COUNTS really is accepted by the grader. */
+  test("the document's counted example is one the census counts", () => {
+    expect(ROLE).toContain("`/workspace/src/run/relay.ts` with `line: 800` counts");
+    expect(findingLocationProblem("/workspace/src/run/relay.ts", 800, WORKDIR)).toBeNull();
+  });
+
+  /** And the one it says does NOT is really refused, for the reason given. */
+  test("the document's uncounted example is one the census refuses", () => {
+    expect(ROLE).toContain("`the error handling could be tightened` does not");
+    const problem = findingLocationProblem("the error handling could be tightened", 12, WORKDIR);
+    expect(problem, "the census now counts the sentence the document says it will not").not.toBeNull();
+    expect(problem).toContain("is a sentence, not a path");
+  });
+
+  /**
+   * CONTROL for the three conjuncts the document summarises. Stating "whitespace,
+   * no directory separator and no extension" is only honest if all three are
+   * required — a document that said "whitespace" alone would have the collator
+   * believe `docs/design notes` and `design notes.md` are refused, and it would
+   * stop writing locations it is entitled to write.
+   */
+  test("CONTROL: the rescues the document implies really are rescued", () => {
+    for (const rescued of ["Makefile", "docs/design notes", "design notes.md"]) {
+      expect(
+        findingLocationProblem(rescued, 1, WORKDIR),
+        `${rescued} is refused, so the document's three-conjunct summary is wrong`,
+      ).toBeNull();
+    }
+  });
+
+  test("the line rule the document states is the one the census applies", () => {
+    expect(findingLocationProblem("/workspace/src/a.ts", 0, WORKDIR)).toContain("1-based");
+    expect(findingLocationProblem("/workspace/src/a.ts", 1, WORKDIR)).toBeNull();
   });
 });
 
@@ -413,5 +488,94 @@ describe("turn one scopes the change rather than reviewing it", () => {
     expect(turnOne(), "turn one no longer refuses a brief that carries a conclusion").toContain(
       "is not a brief; it is a prior",
     );
+  });
+});
+
+/**
+ * TURN ONE ENDS, AND THE DOCUMENT SAYS WHAT ENDING LOOKS LIKE.
+ *
+ * ## The failure this was written from, measured on run 5
+ *
+ * A collator wrote `dispatch-request.json` and `result.json` correctly and then
+ * spent its LAST TWELVE TOOL CALLS looking for something to do: `ls /replies`,
+ * `find /replies`, `ls /`, `ls /briefing`, `ls /policy`, and re-reads of its own
+ * briefing and its own task. It settled on its own, so the cost was tokens and a
+ * confusing transcript rather than a wrong review — but the document had claimed
+ * that behaviour would not happen, and it happened.
+ *
+ * ## Why the old wording did not land, which is what these probes pin
+ *
+ * The document already said *"You never wait"* and *"there is no version of this
+ * where you sit and poll for the reports."* Both are PROHIBITIONS, and both sit
+ * in the protocol preamble as description. What turn one never carried was:
+ *
+ *  - **What done looks like** — that the envelope is the last tool call, after
+ *    which there is nothing.
+ *  - **What happens next and who does it** — that the second dispatch arrives as
+ *    a NEW PROMPT, so the model is not being left to work out its own next move.
+ *  - **Why looking is futile rather than merely forbidden** — that the reply
+ *    mount is legitimately empty during turn one, so an empty listing confirms
+ *    nothing and a model checking it learns nothing either way.
+ *
+ * A model that has just written a file and holds no next instruction will go and
+ * look for one. Telling it not to is weaker than telling it there is nothing to
+ * find, and weaker again than telling it what is coming instead.
+ *
+ * **These are string probes over prose and cannot see whether a collator obeys.**
+ * Only a live run does that. What they catch is the regression: these paragraphs
+ * are long, they read as commentary, and the next person to tighten this file
+ * will be tempted to cut them.
+ */
+describe("turn one tells the collator what DONE looks like, not just what not to do", () => {
+  const turnOne = (): string => ROLE.slice(ROLE.indexOf("Turn one"), ROLE.indexOf("Turn two"));
+
+  test("the envelope is named as the last tool call of the turn", () => {
+    expect(turnOne(), "turn one never says the envelope ends it").toContain("LAST TOOL CALL");
+  });
+
+  /**
+   * THE POSITIVE HALF, and the one the prohibitions never had. A collator told
+   * only "do not poll" still has an unanswered question about what becomes of
+   * its request; a collator told the second turn arrives as a new prompt has
+   * been answered and has no reason to look.
+   */
+  test("it says the second dispatch arrives as a NEW PROMPT, so nothing here is missing", () => {
+    const t = turnOne();
+    expect(t, "turn one never says how the collator is dispatched again").toContain(
+      "arrives as a NEW PROMPT",
+    );
+    expect(t, "turn one never says that prompt is the next instruction").toContain(
+      "your next instruction",
+    );
+  });
+
+  /**
+   * THE FUTILITY, which is the arm that makes the rule survivable under budget
+   * pressure. "Do not check" is a rule to be broken when a model feels uncertain;
+   * "checking returns the same thing whether it worked or not" removes the
+   * uncertainty that motivates the check.
+   *
+   * Matched on the clause the wrap does not split.
+   */
+  test("it says why checking is uninformative, not merely that it is forbidden", () => {
+    const t = turnOne();
+    expect(t, "turn one never says an empty reply mount is the correct state").toContain(
+      "empty is the\nCORRECT state",
+    );
+    expect(t, "turn one never says no observation distinguishes the two outcomes").toContain(
+      "observation available in this turn that separates a fan-out that worked from one that did",
+    );
+  });
+
+  /**
+   * SCOPED TO TURN ONE, for the reason the collation-id probe above is scoped:
+   * the whole document is long and these strings must be where the collator is
+   * when it finishes, not merely somewhere in the file. An instruction about
+   * ending turn one that lived in turn two would be green here and useless
+   * there.
+   */
+  test("the stop instruction is inside turn one, where the collator will be reading", () => {
+    const turnTwo = ROLE.slice(ROLE.indexOf("Turn two"));
+    expect(turnTwo, "the stop instruction drifted out of turn one").not.toContain("LAST TOOL CALL");
   });
 });

@@ -36,28 +36,66 @@ container's workdir. A relative string is JOINED onto that workdir, so anything 
 "inside" it and the check proves nothing; an absolute path under `/workspace` is the only
 spelling that can fail when it is wrong.
 
-## PUT YOUR WHOLE REVIEW IN THE ENVELOPE'S `notes`
+## THE LONG REVIEW GOES IN A FILE; `notes` CARRIES A SUMMARY OF IT
 
-**Not in a separate file. This is the instruction most likely to be ignored and the one
-whose failure is invisible.**
+**You write two things and they are not alternatives.**
 
-On a review console your report is read by a collator in another container. Your `/outbox` is
-yours alone and nothing else can open it, so the collator never sees your files directly —
-the host copies them across for you. It copies them **under a size cap**: 64 KiB per file and
-256 KiB in total. A file over that arrives cut off, and the collator is told which file was
-cut and by how much, so a long review does not silently become a short one.
+1. **`/outbox/<task-id>/files/review.md` — the whole review.** Every finding, its tier, its
+   reasoning and its location. This is the document, and there is no length you have to
+   squeeze it into.
+2. **`/outbox/<task-id>/result.json` — your result envelope**, with a SHORT `notes`: one line
+   per finding, worst first, and a sentence saying the full review is in the artifact. Keep
+   the envelope to about a page.
 
-Put the findings, the reasoning and the locations in `notes`. Write the long-form file at
-`/outbox/<task-id>/files/review.md` too if it helps a person later — you have the `write` to do
-it, and it will now reach the collator as well — but `notes` is what you can count on arriving
-whole, because only the copied files are capped.
+**And DECLARE the file in the envelope's `artifacts` array**, or the harvest records an outbox
+holding a document your own report says you did not produce.
 
-**Why both.** The reply plane used to carry only a path, a size and a checksum for your files,
-never their contents, and a review filed as `review.md` with a two-line `summary` beside it was
-a document nothing in the console could read — with every status green while the findings
-evaporated. That is fixed. This instruction stays anyway, because a failure that shows no red
-deserves two defences rather than one, and because `notes` is the only channel with no cap on
-it at all. If your brief also tells you this, that is deliberate.
+### Why the review must not be one long string inside the envelope
+
+**Because it has been lost twice, and both times the review was intact and the envelope was
+destroyed around it.**
+
+- A 3906-byte envelope quoted a regex into its `notes`. The backslash sequence was not one
+  JSON accepts, the envelope would not parse, and the lens was recorded as one that never
+  reported. **Its review file was on disk, 4849 bytes, whole.**
+- A 7099-byte envelope was cut short mid-write. `notes` was complete; the object around it was
+  never closed. That reviewer had written no review file, so nothing survived at all.
+
+**The shape is the cause rather than the two accidents.** A 7–10 KB review inside a single JSON
+string makes the envelope's structure depend on every byte of the prose: one bad escape
+anywhere, or one interruption anywhere, and the failure lands on the ENVELOPE rather than on
+the review. Nothing arrives truncated; the whole report ceases to exist. In a file an
+interruption costs you the tail of a document and no more, and a quoted regex costs you
+nothing at all — a file has no escaping rules to violate.
+
+**The file survives an envelope that does not — for a person, not for the collator, and the
+difference is worth being exact about.** Your outbox is inventoried on its own terms, so a
+review filed as a file is found and digested even when no envelope parsed, and an operator can
+open it. That is why the first review above was recoverable and the second was not. **It does
+not rescue the lens.** An envelope that will not parse settles the task `unknown`, and a lens
+that did not settle `success` has no reply published for it at all — so writing the file does
+not by itself get your review to the collator.
+
+**What the split actually buys is that the envelope stops being the fragile part.** Both losses
+happened because the envelope was carrying 4–7 KB of prose: that is where the mis-escaped regex
+was, and that is why the interrupted write had so much left to go. A one-page envelope of plain
+summary lines has no code quoted into it to escape wrongly and is a much smaller target for a
+write that stops early. Keep the review out of the envelope and the envelope parses; the
+envelope parses and the review reaches the collator.
+
+### What the file route costs, because it is not free
+
+The host copies your artifacts into the collator's reply **under a size cap: 64 KiB per file
+and 256 KiB across all of them.** A file over that arrives cut off, and the collator is told
+which file was cut and by how many bytes, so a long review does not silently become a short
+one. For scale, 64 KiB of prose is roughly ten thousand words.
+
+**`notes` is bounded too, at the same 65536 bytes, and it fails differently.** A `notes` past
+that does not arrive short — it fails the envelope's schema, and the envelope fails whole.
+**Same ceiling, opposite failure:** past the cap a file loses its tail and says so, while
+`notes` loses your status, your summary, your blockers and your review together, and grades as
+a lens that never reported. That asymmetry is the whole argument for the split. Both channels
+have a limit; only one of them degrades.
 
 ### The envelope is a FILE, and `notes` is a FIELD INSIDE IT
 
@@ -72,7 +110,8 @@ field within it — **not a file, not a directory, not a filename.**
   "worker": "<your worker id>",
   "status": "success",
   "summary": "One or two sentences.",
-  "notes": "YOUR ENTIRE REVIEW GOES HERE, as one string.",
+  "notes": "The findings, one line each, worst first. The full review is the artifact below.",
+  "artifacts": [{"kind": "file", "path": "/outbox/<task-id>/files/review.md"}],
   "blockers": []
 }
 ```
@@ -88,9 +127,14 @@ its task directory instead of in the envelope. It wrote no envelope at all, and 
 collation recorded `reported: false` beside its name and rested on one reader instead of two.
 
 So: `status: success` when the change is sound, `blocked` when you could not complete the
-review. Write the envelope last, and check that what you wrote is a file whose name ends
-`result.json`. An envelope you never wrote does not fail your task — it removes you from the
-grading, and your findings grade as unchecked.
+review. Write the review file first and the envelope last, and check that what you wrote is a
+file whose name ends `result.json`. An envelope you never wrote does not fail your task — it
+removes you from the grading, and your findings grade as unchecked.
+
+**If your brief tells you all of this as well, that is deliberate.** The failure this splits
+apart shows no red in any direction — nothing changes colour, no status moves, and the review
+simply is not there — so it is worth two defences rather than one, and the brief's copy is the
+one that survives you being dispatched some other way.
 
 ## THE REFUSAL THAT IS NOT YOURS TO MAKE
 

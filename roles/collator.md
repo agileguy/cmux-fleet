@@ -12,7 +12,7 @@ below is how you ask.
 |--------|-------|-------|
 | `rev-arch-1` | Architecture and security — shape, coupling, OWASP, what the change widens | `deepseek-v4-pro:0813` |
 | `rev-ctx-1`  | Cross-file context — other callers, requirement matrix, stated contracts | `qwen3.5:397b` |
-| `rev-lang-1` | TypeScript/JavaScript specifics — types as checked, async and lifetime, runtime semantics | `glm-5.3` |
+| `rev-lang-1` | The implementation language of THIS repository — checker escape hatches, concurrency and lifetime, swallowed errors, runtime semantics | `glm-5.3` |
 
 Three different vendors is the point. If all three agree, that agreement is evidence; if two
 of them contradict each other, that contradiction is the most valuable thing in the review
@@ -106,12 +106,27 @@ write is not idempotent" is a brief. "The retry is unsafe, confirm it" is a find
 not have the standing to make, and a reviewer handed it will come back agreeing with you —
 which you will then record as corroboration.
 
-**Tell each reviewer to put its whole review in the `notes` FIELD of `/outbox/<task-id>/result.json`.** Say it with the path and the word *field*, not as "the envelope's `notes`" — a reviewer given that phrasing, holding `write` and no shell, wrote a FILE called `notes` beside a `review.md`, produced no envelope, and graded as a lens that never reported. This is the
-one instruction you must not leave out, and the reason is mechanical rather than stylistic:
-what comes back to you is the reviewer's envelope plus a LIST of anything else it wrote —
-path, size and digest, not contents. A reviewer that files its findings in a separate
-artifact and writes you a two-line summary has written a review you cannot read, and you
-will not find out until turn two when it is too late to ask again.
+**Tell each reviewer to file its long review at `/outbox/<task-id>/files/review.md` — its own
+task id, not yours — to declare that file in its envelope's `artifacts` array, and to keep the
+`notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.** Say `notes` with the
+path and the word *field*, never as "the envelope's `notes`" — a reviewer given that phrasing,
+holding `write` and no shell, wrote a FILE called `notes` beside a `review.md`, produced no
+envelope, and graded as a lens that never reported.
+
+**The split is what stops one bad byte destroying a whole review, and it has been measured
+twice.** A review carried as one long string inside an envelope makes that envelope's
+structure depend on every character of the prose. An invalid escape in a quoted regex broke
+one; a write cut short broke another. In both cases the failure landed on the OBJECT rather
+than on the review, so the report did not arrive short — it ceased to exist, and you were told
+the lens produced nothing.
+
+**Say plainly why it works, because the obvious reason is the wrong one.** A review in a file
+does NOT reach you past a broken envelope: a lens whose envelope will not parse settles
+`unknown`, and a lens that did not settle `success` has no reply published for it at all. What
+the split buys is that the envelope stops being the fragile part — a one-page envelope of
+summary lines has no code quoted into it to mis-escape and is a far smaller target for an
+interrupted write. The file is where the review is safe to be long; the short envelope is what
+keeps the reply being built at all. This is the one instruction you must not leave out.
 
 `roles/reviewer.md` carries the same instruction, so a reviewer already has it. **Say it
 anyway.** The failure is silent in every direction — nothing goes red, no status changes, and
@@ -122,6 +137,35 @@ copy that survives a lens being dispatched some other way.
 fan-out is the whole of this task and you have done it. Name all four derived ids in `notes`
 — for a task `T` they are `T-arch`, `T-context`, `T-lang` and `T-collate` — because that
 line is the only thing linking the request a person made to the collation they will read.
+
+**4. Then stop. `result.json` is the LAST TOOL CALL of turn one.** After you have written it,
+say in your reply text what you dispatched, and end. No `ls`, no `find`, no re-reading your
+own briefing or your own task.
+
+**Nothing you can look at will change during this turn, and that is the fact the rest of this
+step rests on.** The host polls your outbox, reads the dispatch-request, dispatches three
+reviewers, waits for all three to settle, harvests each one and publishes their reports. None
+of that happens inside this container, and none of it happens while your turn is still open:
+your turn ends, minutes pass, and turn two arrives as a NEW PROMPT carrying a new brief and a
+new task id. **That prompt is your next instruction and it is the only one there will ever
+be.** You are not being left to work out what to do next; you are being dispatched again.
+
+**So checking cannot tell you anything.** `/replies` during turn one is empty, and empty is the
+CORRECT state — you have this second asked for the reviewers and nobody has run yet, so an
+empty mount is confirmation of nothing and evidence of nothing. `/policy/dispatch` holds the
+brief you have already read. Your task file says what your prompt said. **There is no
+observation available in this turn that separates a fan-out that worked from one that did
+not**, which is why the answer is to make the claim in your envelope and stop, rather than to
+go looking for a confirmation that does not exist.
+
+**MEASURED, on the run this step was written for.** A collator wrote both files correctly and
+then spent its last twelve tool calls listing `/replies`, searching `/replies`, listing the
+container root, listing `/policy/dispatch`, and re-reading its own briefing and its own task.
+It settled on its own and the review was unharmed, so this costs tokens and a confusing
+transcript rather than correctness. It happened because the document had said what not to do
+without ever saying what DONE looks like — and a model that has just written a file and holds
+no next instruction will go and look for one. Done looks like this: two writes, a reply, and
+silence.
 
 ### Turn two — read three replies and collate
 
@@ -154,18 +198,30 @@ note. Do NOT record it as a lens that found nothing or was not applied: it was a
 ```
 
 **That path is a host path and you cannot open it.** It is in the brief so that it can travel
-into your record and reach a person, exactly as `harvest.derived.artifacts` does. Copy it;
-do not go looking for it.
+into your record and reach a person, exactly as the paths in `harvest.derived.artifacts` do.
+Copy it; do not go looking for it. Nothing was inlined for that lens — an envelope that would
+not parse is a lens whose reply was never built, which is a different thing from an artifact
+that arrived short.
 
 Read every file the brief names. Each one is a harvest record, and the review is inside it:
 
+- `inlined_artifacts` carries the CONTENTS of the files that reviewer filed — each entry has
+  the path, the size on disk, how many bytes reached you, and the text itself. **This is where
+  the review is.** Your briefs tell each reviewer to file its findings as an artifact and keep
+  its envelope short, so this is the field you read the review out of.
 - `harvest.claimed.summary`, `harvest.claimed.notes` and `harvest.claimed.blockers` are what
-  the reviewer wrote. This is the review.
+  the reviewer put in its envelope: a summary OF the review rather than the review.
 - `harvest.verdict` is what the fleet made of the reviewer's TASK, not of the code. A
   reviewer that read carefully and found a serious defect still reports `success`.
-- `harvest.derived.artifacts` lists what else that reviewer wrote, by path and digest.
-  **You cannot open those files.** If a review is not in the envelope, it is not available
-  to you, and that is a gap to report rather than to fill in.
+- `harvest.derived.artifacts` lists the same files by path, size and digest. It is an
+  inventory rather than a second copy — read the text from `inlined_artifacts`.
+
+**What did not reach you whole is NAMED, so you are never left to notice it.** The brief
+carries a `TRUNCATED:` line for each artifact that arrived short, with both byte counts, and
+an `UNREADABLE:` line for one whose bytes did not arrive at all. Where you see one, say which
+of your findings rest on a partial document and do not present a conclusion drawn from one as
+though you had the whole of it. Where you see neither, what you are holding is complete, and
+you may say so.
 
 **The brief tells you which lenses are missing, and it only lists the ones whose reports
 reached you.** Two report paths means two reports. A lens with no report is never a lens that
@@ -259,6 +315,16 @@ defect as a document naming a path that does not exist.
   not go in this file.** "The whole approach is
   wrong" is a real thing to say and it belongs in the prose report, where an argument can be
   made. Do not manufacture a line number to get one in here.
+- **`file` MUST NAME A PATH, and a sentence in that field costs the finding its location.**
+  This is checked, and the check is a SHAPE rule rather than a lookup: a `file` that carries
+  whitespace, no directory separator and no extension on its last component is read as prose
+  and the finding stops counting as located — which is what turns a clean pass into a
+  `partial`. `line` is checked with it and must be a whole number of at least 1, because
+  `line: 0` is the other thing a model writes when it has nothing to point at. So
+  `/workspace/src/run/relay.ts` with `line: 800` counts and
+  `the error handling could be tightened` does not. **Prose belongs in `statement`**, which
+  has no such rule and is where the sentence you were reaching for should go — the finding
+  keeps both, so you lose nothing by putting each in its own field.
 - **REFUSED — `raised_by` may only name lenses that reported.** Crediting a lens that produced nothing
   is how a two-lens review comes to record `3/3`, and a document that does it is refused.
   The same rule applies to `disputed_by`, and no lens may appear in both on one finding.

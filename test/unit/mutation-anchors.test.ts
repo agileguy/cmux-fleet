@@ -157,8 +157,26 @@ const BATTERIES = batteryPaths();
  * `review-grading.battery.ts` is enforced from the commit that introduced this
  * guard, because a guard whose author exempted their own work would be worth
  * nothing at all.
+ *
+ * `collation-contract.battery.ts` joined it on 2026-09-05, when its author
+ * re-anchored it. It had ONE stale anchor, printed on every run and read by
+ * nobody: it pointed at *"Tell each reviewer to put its whole review in its
+ * result envelope's `notes`"*, an instruction that had already been partly
+ * rewritten under it — so the mutation it names had not been applied for some
+ * time and the battery was reporting a finding for its own rot. Rewriting that
+ * contract broke three more anchors at once, which is the case this list exists
+ * for: a battery is re-anchored in the same commit as the code it measures, and
+ * enforcing it is what makes that true next time rather than this time only.
+ *
+ * **Being on this list is a claim about the anchors, not about the battery.**
+ * It says every `find` still matches its target exactly once. It does not say
+ * the battery still measures the right thing — only running it says that, and
+ * `collation-contract.mutations.md` is where that result is written down.
  */
-const ENFORCED = new Set(["test/mutation/review-grading.battery.ts"]);
+const ENFORCED = new Set([
+  "test/mutation/review-grading.battery.ts",
+  "test/mutation/collation-contract.battery.ts",
+]);
 
 describe("every mutation battery still anchors to the code it claims to mutate", () => {
   /**

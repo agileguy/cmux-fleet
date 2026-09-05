@@ -143,6 +143,66 @@ Both were found by grepping each claim rather than by reading the prose again.
 | R9 | The derived collation id dropped from the turn-one instruction | D5's whole mitigation: the link between the request a person made and the collation they will read. |
 | R10 | The D8 statement is removed from the grading section | The schema still refuses an `acceptance` field, but only after a turn spent writing one — and the collator is left believing its review was accepted. |
 
+#### Turn one ENDS — the polling defect, measured on run 5
+
+The collator wrote both files correctly and then spent its **last twelve tool
+calls** looking for something to do: `ls /replies`, `find /replies`, `ls /`,
+`ls /briefing`, `ls /policy`, and re-reads of its own briefing and its own task.
+It settled on its own, so the cost was tokens and a confusing transcript rather
+than a wrong review — but the document already said *"You never wait"* and *"there
+is no version of this where you sit and poll"*, and it happened anyway.
+
+**Both of those are prohibitions, and prohibitions were not the missing thing.**
+What turn one never carried was what DONE looks like, what happens next and who
+does it, and why looking is futile rather than merely disallowed. A model that has
+just written a file and holds no next instruction will go and look for one; telling
+it not to is weaker than telling it there is nothing to find, and weaker again than
+telling it what is coming instead. The three rows mutate one of those each, because
+a document keeping only one of them is the document that produced the defect.
+
+| # | Mutation | Catches |
+|---|---|---|
+| R11 | The envelope stops being named as the turn's last tool call | "Done" has no definition, which is the state the measured run was in. |
+| R12 | The collator is no longer told turn two arrives as a NEW PROMPT | The positive half. Without it the model has an open question about what became of its request, and checking is the only way it has to answer one. |
+| R13 | Polling is forbidden but no longer shown to be pointless | `/replies` is legitimately empty during turn one, so an empty listing confirms nothing either way. A rule with no reason is one a model breaks the moment it feels uncertain. |
+
+#### The language seat's angle is the TARGET's language
+
+`rev-lang-1` ran `roles/review/typescript-language.md` — an angle whose every
+example was TypeScript — while this console's integration target, `~/repos/rally-cli`,
+is a Python project. The collator had been steering around it inside each brief,
+which is a workaround in the one place the console has no leverage: the brief is
+written fresh every run by a model, so the correction was re-derived or forgotten
+each time. This console reviews whatever repository it is launched from, so a
+language fixed in config is wrong for every target but one.
+
+| # | Mutation | Catches |
+|---|---|---|
+| R14 | The seat pre-commits to a language again (UPPER CASE) | **SURVIVED ITS FIRST RUN.** The probe tested `\bTypeScript\b` case-SENSITIVELY; headings in that file are upper case, so restoring the literal historical heading was invisible to it. The probe was blind to the exact defect it was written for, in the exact form that defect had on disk. |
+| R14b | The seat pre-commits in MIXED case | The form the broken probe DID catch, so a regression that only restores case-sensitivity still reddens. |
+| R14c | The seat pre-commits to Python | The mistake this seat would make NEXT, once someone assumes the current target is permanent. |
+| R15 | The seat is no longer told to settle the language from evidence | "Consider the language" is the old defect wearing a different name. |
+| R16 | The seat stops having to say which language it settled on | A determination nobody states is one nobody can find wrong. |
+| R17 | The angle collapses with no defect classes | A reviewer told to "consider the language" is worthless next to one told what to look for; the four classes are the floor on specificity. |
+| R18 | The config points back at the TypeScript aspect file | The other half. A fix to the document alone leaves the console loading the old angle. |
+| R19 | `toolchain: node` returns to the seat | It pins a language-specific image onto the one seat whose job is not to assume the language — and the seat has no `bash`, so it could never invoke a toolchain anyway. **`fleet.yaml` is gitignored, so this is an UNTRACKED target: the anchors guard skips it by design and this battery is the only thing that checks it.** |
+| R20 | The sibling aspect files still call seat three a TypeScript seat | Each reviewer reads only its own aspect file, so a stale cross-reference in the other two is invisible to everything else. |
+
+#### `file` is a path, not a sentence
+
+`collation-census.ts` stopped counting a prose `file` as located: a value carrying
+whitespace, no directory separator and no extension on its last component is read
+as a phrase. It closes a real hole — a relative `file` is JOINED onto the workdir,
+so "the error handling could be tightened" resolved inside `/workspace` and counted
+as an anchor for a finding that points at nothing. The refusal teaches a collator
+this after the turn is spent; the briefing teaches it before.
+
+| # | Mutation | Catches |
+|---|---|---|
+| R21 | The brief stops saying `file` must be a path | The collator learns the rule from a refusal instead of from its instructions. |
+| R22 | The document's uncounted example is one the census actually counts | **The arm that matters.** The probes RUN `findingLocationProblem` over the document's own worked examples, so guidance and grader cannot drift — a document offering an example the census refuses is worse than one that says nothing. |
+| R23 | Prose is no longer directed to `statement` | The collator is told what not to put in `file` and not where to put it instead, so it drops the observation rather than relocating it. |
+
 ### The reviewer's briefing, and the mitigation that has to hold at both ends
 
 The gap these guard is the one `src/run/collation.ts`'s header spends a section
@@ -154,12 +214,38 @@ the reviewer's role and every brief the collator writes — because a guard whos
 failure is silent is worth two copies, and a probe that asserted only one would
 survive half of it being deleted.
 
+**REWRITTEN 2026-09-05, because the contract changed.** The instruction is no
+longer "put the whole review in `notes`". It is a SPLIT: the long review goes to
+`/outbox/<task-id>/files/review.md` and is declared in the envelope's `artifacts`
+array, and `notes` carries a short summary. Two measured losses forced it, and
+both had the review intact with the envelope destroyed around it — a 3906-byte
+envelope holding a mis-escaped regex (its `files/review.md` was on disk, 4849
+bytes, whole) and a 7099-byte envelope cut short mid-write (no artifact; nothing
+survived). RV1–RV4 were re-anchored onto the new instruction rather than repointed
+at the old sentence, and RV3's anchor had already rotted to 0x under a partial fix.
+
+**The reason the split works is not the obvious one, and RV4 pins the correction.**
+A file does NOT reach the collator past a broken envelope: `relay.ts` sets
+`succeeded: harvested.verdict === "success"`, an unparseable envelope settles
+`unknown`, and only surviving lenses have a reply published. What the split buys is
+that the envelope stops being the fragile part. A reviewer that believed otherwise
+would treat the artifact as a safety net and go back to writing long envelopes.
+
 | # | Mutation | Catches |
 |---|---|---|
-| RV1 | The instruction is deleted from `roles/reviewer.md` | Back to one prompt, and the surviving copy looks like a complete guard. |
-| RV2 | The WHY is dropped — "not the contents" removed | An instruction with no mechanism behind it is a style preference, and a model under budget pressure drops style preferences first. |
-| RV3 | The collator's copy is dropped | The other end of the same guard. |
-| RV4 | The mitigation stops being labelled a mitigation | The next person to read the reply plane concludes the gap was closed. The coordinator asked for this specifically and it is asserted rather than trusted. |
+| RV1 | The review's destination is unnamed — "file it wherever suits you" | The reviewer has nothing to write to, and the artifact half of the split evaporates while the summary half still reads as a complete instruction. |
+| RV2 | The two caps stop failing differently | `MAX_TEXT` and `MAX_REPLY_ARTIFACT_BYTES` are the SAME 65536, so a document stating both caps and stopping there gives no reason to prefer either channel. The asymmetry — an over-cap artifact truncates and is NAMED, an over-cap `notes` fails the whole envelope — is the entire argument. |
+| RV3 | The collator's copy of the split instruction is dropped | The other end of the same guard. The collator repeats this in every brief, so its copy alone can re-create the defect on a fleet whose reviewer role is already fixed. |
+| RV4 | The file is promised to rescue a broken envelope | **The plausible lie**, and the one this change nearly shipped. It reads as reassurance, it is false, and believing it puts the long review back in the envelope. |
+| RV21 | The envelope may hold the whole review again | The pre-fix contract restored in one clause. |
+| RV22 | The review file need not be declared | `reconcile.ts` grades an empty `artifacts` array against the files actually in the outbox, so an undeclared review is a discrepancy on the reviewer's own record. |
+| RV23 | The stated per-file cap drifts from `MAX_REPLY_ARTIFACT_BYTES` | **SURVIVED ITS FIRST RUN.** The probe asserted `toContain("64 KiB")` over the whole section, and the section says the number twice — once as the cap, once as "64 KiB of prose is roughly ten thousand words". Mutating the cap left the second occurrence satisfying the match. The number is now pinned inside the clause that states it. |
+| RV23b | The stated per-reply cap drifts from `MAX_REPLY_INLINE_BYTES` | The other number, because a fix that reached only one of the two would look identical from here. |
+| RV24 | The `notes` ceiling is dropped | Both channels then look unbounded, and the asymmetry has nothing to stand on. |
+| RV25 | The collator's brief stops requiring the declaration | RV22's other end. |
+| RV26 | The collator's copy promises the file survives a broken envelope | RV4's other end. |
+| RV27 | The worked envelope stops claiming the review file | The example is the part of a prompt a model copies most literally; one that writes an artifact and declares nothing teaches exactly the shape `reconcile.ts` flags. |
+| RV28 | The worked envelope carries a wire tag the schema refuses | The example is now PARSED against `ResultEnvelopeSchema` rather than eyeballed. |
 | RV5 | The design note stops naming a recommendation | "Here are two options" leaves the decision to whoever is in a hurry. |
 | RV6 | The design note drops the recommendation's cost | Fix A is only correct WITH a byte cap; a recommendation with no cost is one nobody can weigh. |
 | RV7 | The false diff premise restored in `roles/reviewer.md` | The defect this change repairs. |

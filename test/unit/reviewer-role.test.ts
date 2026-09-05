@@ -1,4 +1,4 @@
-import { RESULT_ENVELOPE_NAME } from "../../src/contracts.ts";
+import { MAX_TEXT, RESULT_ENVELOPE_NAME, ResultEnvelopeSchema } from "../../src/contracts.ts";
 /**
  * `roles/reviewer.md` says only things that are true, and the one instruction
  * holding the review console together is pinned at BOTH ends.
@@ -44,7 +44,12 @@ import { RESULT_ENVELOPE_NAME } from "../../src/contracts.ts";
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
+import {
+  MAX_REPLY_ARTIFACT_BYTES,
+  MAX_REPLY_INLINE_BYTES,
+} from "../../src/run/relay.ts";
 import { REPLIES_MOUNT } from "../../src/run/replies.ts";
+import { childTaskId } from "../../src/run/task-ids.ts";
 import {
   ROOT,
   exampleConfig,
@@ -55,7 +60,7 @@ import {
 
 const REVIEWER = readFileSync(`${ROOT}roles/reviewer.md`, "utf8");
 const COLLATOR = readFileSync(`${ROOT}roles/collator.md`, "utf8");
-const ASPECTS = ["architecture-security", "cross-file-contracts", "typescript-language"].map(
+const ASPECTS = ["architecture-security", "cross-file-contracts", "implementation-language"].map(
   (n) => [n, readFileSync(`${ROOT}roles/review/${n}.md`, "utf8")] as const,
 );
 
@@ -72,43 +77,178 @@ const REVIEWER_BRIEFING: ReadonlyArray<readonly [string, string]> = [
   ...ASPECTS.map(([n, t]) => [`roles/review/${n}.md`, t] as const),
 ];
 
-describe("the whole review reaches the collator, and both ends say so", () => {
-  test("the reviewer is told to put its review in the envelope's notes", () => {
-    expect(REVIEWER).toContain("`notes`");
+/**
+ * THE REVIEW IS A FILE AND `notes` IS A SUMMARY OF IT — rewritten 2026-09-05,
+ * and the instruction it replaces is recorded rather than quietly dropped.
+ *
+ * The document used to say *"put your whole review in the envelope's `notes`"*.
+ * That cost a lens in two of five live runs, from two different causes and one
+ * shared shape:
+ *
+ * - `rev-lang-1` quoted the regex `[\w\-_]+` into `notes`. `\w` is not a legal
+ *   JSON escape, the 3906-byte envelope would not parse, and the lens was graded
+ *   as one that never reported. **Its `files/review.md` was on disk, 4849 bytes,
+ *   whole** — measured, in the run directory, after the fact.
+ * - `rev-ctx-1` wrote 7099 bytes and the object was never closed. `notes` was
+ *   complete; the envelope around it was not. That reviewer had written no
+ *   artifact, so nothing survived at all.
+ *
+ * A 7-10 KB review inside one JSON string makes the ENVELOPE's structure depend
+ * on every byte of the prose, so any fault anywhere destroys the envelope rather
+ * than truncating the review — and a destroyed envelope is a lens that reports
+ * nothing, not a lens that reports less.
+ *
+ * ## The reason the split works is NOT the obvious one, and the probes pin the
+ * real one
+ *
+ * The tempting claim is "the file survives the broken envelope, so the review
+ * gets through anyway". **That is false and the document must not say it.**
+ * `relay.ts` sets `succeeded: harvested.verdict === "success"`, an unparseable
+ * envelope settles `unknown`, and only surviving lenses have a reply published —
+ * so a lens with a broken envelope contributes nothing to the collator, artifact
+ * or no artifact. What the split actually buys is that the envelope stops being
+ * the fragile part: a one-page envelope of summary lines carries no quoted code
+ * to mis-escape and is a far smaller target for an interrupted write.
+ *
+ * The file's survival is real but its beneficiary is a PERSON — the outbox is
+ * inventoried whether or not an envelope parsed, which is the only reason the
+ * first review above was recoverable at all.
+ */
+describe("the review is a file, notes is a summary, and both ends say so", () => {
+  test("the reviewer is told to file the long review AND to keep notes short", () => {
+    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
     expect(
-      REVIEWER.includes("PUT YOUR WHOLE REVIEW IN THE ENVELOPE"),
+      block.length,
       "roles/reviewer.md no longer carries the instruction in its own right",
-    ).toBe(true);
+    ).toBeGreaterThan(0);
+    // Both halves. A probe on either alone stays green through the other being
+    // deleted, and either half alone re-creates one of the two measured losses.
+    expect(block, "the review's destination is not named").toContain(
+      "/outbox/<task-id>/files/review.md",
+    );
+    expect(block, "nothing tells the reviewer to keep the envelope short").toContain(
+      "SHORT `notes`",
+    );
   });
 
   /**
-   * **Rewritten when the plane was fixed, and the old assertion deleted rather
-   * than kept green.** It required the document to say the contents "do not
-   * cross", which stopped being true: `relay.ts` inlines each artifact under
-   * `MAX_REPLY_ARTIFACT_BYTES` / `MAX_REPLY_INLINE_BYTES`. A probe that still
-   * demanded that sentence would have forced the document to keep describing a
-   * defect the code no longer has — coverage in appearance, misinformation in
-   * fact.
-   *
-   * What must still be true is the part that did not change: there IS a bound,
-   * and the reviewer is told what it costs.
+   * The artifact has to be CLAIMED, not merely written. `reconcile.ts` grades an
+   * empty `artifacts` array against the files actually in the outbox — "the
+   * worker wrote an envelope and said it produced nothing, so every file in the
+   * outbox contradicts it" — so a review filed and not declared is a discrepancy
+   * on the reviewer's own record.
    */
-  test("the reviewer is told the copy is CAPPED, and what happens past the cap", () => {
-    const block = REVIEWER.slice(REVIEWER.indexOf("PUT YOUR WHOLE REVIEW"));
-    expect(block).toContain("64 KiB");
-    expect(block).toContain("256 KiB");
+  test("the reviewer is told to DECLARE the review file in the envelope", () => {
+    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
+    expect(block).toContain("`artifacts` array");
+  });
+
+  /**
+   * THE NUMBERS ARE DERIVED, so the document cannot drift from the code that
+   * enforces them. The previous version of this probe hard-coded "64 KiB" and
+   * "256 KiB" as string literals, which pins the prose to itself: raising a cap
+   * in `relay.ts` would leave the document confidently wrong and every probe
+   * green.
+   */
+  /**
+   * MATCHED IN THE SENTENCE THAT STATES THE CAP, not anywhere in the block —
+   * and a mutation is why.
+   *
+   * The first version asserted `toContain("64 KiB")`. The battery changed
+   * *"cap: 64 KiB per file"* to *"cap: 32 KiB per file"* and this stayed GREEN,
+   * because the block also says *"64 KiB of prose is roughly ten thousand
+   * words"* one sentence later and that occurrence satisfied the match. A
+   * document stating a cap the fleet does not enforce is exactly what this probe
+   * exists to refuse, and it could not see one. So the number is now pinned
+   * where it is load-bearing — inside the clause that tells the reviewer what
+   * the limit IS.
+   */
+  test("the caps the document states are the caps the code actually enforces", () => {
+    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
+    expect(block, "the per-file cap is not the one relay.ts applies").toContain(
+      `size cap: ${MAX_REPLY_ARTIFACT_BYTES / 1024} KiB per file`,
+    );
+    expect(block, "the per-reply cap is not the one relay.ts applies").toContain(
+      `and ${MAX_REPLY_INLINE_BYTES / 1024} KiB across all of them`,
+    );
+    expect(block, "the notes cap is not the one the envelope schema applies").toContain(
+      `at the same ${MAX_TEXT} bytes`,
+    );
     // The consequence, not just the number.
     expect(block).toContain("cut off");
-    expect(block).toContain("/outbox/<task-id>/files/review.md");
+  });
+
+  /**
+   * THE ASYMMETRY, which is the whole argument and the one sentence a model
+   * under budget pressure would drop first.
+   *
+   * `MAX_TEXT` and `MAX_REPLY_ARTIFACT_BYTES` are the SAME 65536, so a document
+   * that stated both caps and stopped there would have given the reviewer no
+   * reason to prefer either channel. What separates them is what happens at the
+   * ceiling: an over-cap artifact arrives truncated and is NAMED in the
+   * collation brief, while an over-cap `notes` fails `ResultEnvelopeSchema` and
+   * takes the status, the summary, the blockers and the review with it.
+   */
+  test("the document states the ASYMMETRY, not merely the two caps", () => {
+    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
+    expect(block, "the document does not say the two caps fail differently").toContain(
+      "Same ceiling, opposite failure",
+    );
+    // The premise that makes the asymmetry the point rather than a curiosity.
+    expect(MAX_TEXT).toBe(MAX_REPLY_ARTIFACT_BYTES);
+  });
+
+  /**
+   * THE CLAIM THE DOCUMENT MUST NOT MAKE, asserted positively.
+   *
+   * A negative assertion ("does not say the file rescues the lens") is
+   * unfalsifiable prose-matching — every rewording escapes it. So the probe
+   * requires the TRUE mechanism to be present instead: the document must state
+   * that a lens whose envelope will not parse has no reply published for it.
+   * Deleting that leaves the reviewer believing the artifact is a safety net it
+   * is not, which is the more dangerous of the two errors.
+   */
+  test("the document says plainly that the file does NOT rescue a broken envelope", () => {
+    const block = REVIEWER.slice(REVIEWER.indexOf("THE LONG REVIEW GOES IN A FILE"));
+    expect(block, "the document does not say a broken envelope loses the lens").toContain(
+      "It does\nnot rescue the lens",
+    );
+    expect(block, "the document does not name the mechanism").toContain(
+      "no reply published for it",
+    );
+  });
+
+  /**
+   * THE WORKED EXAMPLE IS PARSED, not eyeballed — `collator-role.test.ts`'s
+   * discipline applied to the other end. An example a model copies literally is
+   * the most load-bearing prose in the file, and one the real schema refuses
+   * teaches exactly the shape the harvester throws away.
+   */
+  test("the example envelope validates, and declares the review as an artifact", () => {
+    const blocks = [...REVIEWER.matchAll(/```json\n([\s\S]*?)```/g)].map((m) => m[1]!);
+    expect(blocks.length, "the document has no worked envelope").toBeGreaterThanOrEqual(1);
     /*
-     * And WHY `notes` is still the channel to prefer now that files do arrive:
-     * only the copied files are capped. Without this the instruction survives as
-     * a rule with no reason, which is the first thing a model under budget
-     * pressure drops. Added because a battery removed the sentence and nothing
-     * reddened.
+     * THE TWO ID PLACEHOLDERS ARE SUBSTITUTED, and only those two.
+     *
+     * `task_id` and `worker` are held to `SESSION_ID_RE`, which no angle-bracket
+     * placeholder can satisfy — so validating the block verbatim would fail on
+     * the document's own teaching device rather than on anything wrong with it.
+     * The substitutes are the REAL ids this seat uses, not filler, so the example
+     * is checked against values the fleet would actually produce. Everything else
+     * — schema tag, status, and the artifact claim this probe exists for — is
+     * validated exactly as written.
      */
-    // Matched on the clause the wrap does not split.
-    expect(block).toContain("only the copied files are capped");
+    const filled = blocks[0]!
+      .replace("<your task id>", childTaskId("T", "lang"))
+      .replace("<your worker id>", "rev-lang-1");
+    const doc = JSON.parse(filled);
+    const r = ResultEnvelopeSchema.safeParse(doc);
+    expect(r.error?.message ?? "accepted").toBe("accepted");
+    const parsed = ResultEnvelopeSchema.parse(doc);
+    expect(
+      parsed.artifacts.map((a) => a.path),
+      "the worked envelope does not claim the review file",
+    ).toContain("/outbox/<task-id>/files/review.md");
   });
 
   /**
@@ -132,24 +272,44 @@ describe("the whole review reaches the collator, and both ends say so", () => {
     expect(COLLATOR, "the collator does not say `notes` is a field").toContain("`notes` FIELD");
   });
 
-  test("the collator is told the reviewer role carries it too, and to say it anyway", () => {
-    const block = COLLATOR.slice(COLLATOR.indexOf("put its whole review"));
+  /**
+   * BOTH ENDS SAY THE SAME THING, which is the part a single-ended probe cannot
+   * see. The collator repeats this instruction in every brief it writes, so a
+   * collator still telling reviewers to put the whole review in `notes` would
+   * re-create the defect on a fleet whose reviewer role had already been fixed.
+   */
+  test("the collator's copy instructs the same split the reviewer's does", () => {
+    const block = COLLATOR.slice(COLLATOR.indexOf("file its long review"));
+    expect(block.length, "the collator no longer instructs the file split").toBeGreaterThan(0);
+    expect(block, "the collator does not name the review's destination").toContain(
+      "/outbox/<task-id>/files/review.md",
+    );
+    expect(block, "the collator does not require the artifact to be declared").toContain(
+      "`artifacts` array",
+    );
     expect(block).toContain("roles/reviewer.md");
     expect(block).toContain("Say it");
   });
 
   /**
-   * The label, asserted. A mitigation that stops being described as one is a
-   * mitigation that gets counted as a fix, and the next person to read the
-   * reply plane concludes the gap was closed.
+   * And the collator's copy carries the same correction about WHY, for the same
+   * reason the reviewer's does: a collator that believes the artifact rescues a
+   * broken envelope writes briefs that say so.
    */
+  test("the collator's copy does not promise the file survives a broken envelope", () => {
+    const block = COLLATOR.slice(COLLATOR.indexOf("file its long review"));
+    expect(block, "the collator's brief does not name the mechanism").toContain(
+      "no reply published for it at all",
+    );
+  });
+
   /**
    * The mitigation SURVIVES the fix, and the document must say why rather than
    * reading as a leftover. Belt and braces is the deliberate posture for a
    * failure whose whole character is that nothing goes red.
    */
-  test("the notes instruction stays, and is justified rather than orphaned", () => {
-    expect(REVIEWER).toContain("This instruction stays anyway");
+  test("the doubled instruction is justified rather than orphaned", () => {
+    expect(REVIEWER).toContain("If your brief tells you all of this as well, that is deliberate");
     expect(REVIEWER).toContain("two defences rather than one");
   });
 
@@ -337,6 +497,130 @@ describe("the reviewer is not told to use capabilities it does not have", () => 
 
   test("it names the channel that DOES carry the brief on a staged task", () => {
     expect(REVIEWER).toContain("/policy/dispatch");
+  });
+});
+
+/**
+ * THE LANGUAGE SEAT'S ANGLE IS DERIVED FROM THE TARGET, NOT NAMED IN ADVANCE.
+ *
+ * ## The defect, measured
+ *
+ * `rev-lang-1` ran `roles/review/typescript-language.md` — an angle whose every
+ * example was TypeScript — while the console's integration target,
+ * `~/repos/rally-cli`, is a Python project. The seat was reading Python and
+ * briefed about `any`, `as` and non-null assertions. The collator had been
+ * steering around it inside each brief it wrote, which is a workaround in the
+ * one place the console has no leverage: the brief is written fresh every run by
+ * a model, so the correction was re-derived or forgotten each time.
+ *
+ * This console reviews whatever repository it is launched from, so a language
+ * fixed in config is wrong for every target but one.
+ *
+ * ## What these probes hold, and what they deliberately do not
+ *
+ * They CANNOT check that the angle is sharp — that is judgement, and
+ * `review-plan.test.ts` already refuses the shape of the lazy fix by requiring
+ * three DIFFERENT aspect files, so the angle cannot be collapsed into the shared
+ * discipline. What they can check is that the seat is told to SETTLE the
+ * language from evidence and to SAY which one it settled on, because an angle
+ * that merely says "consider the language" is the failure this replaces wearing
+ * a different name, and a determination nobody states is one nobody can find
+ * wrong.
+ */
+describe("the language seat takes its angle from the repository, not from config", () => {
+  const LANG = ASPECTS.find(([n]) => n === "implementation-language")?.[1];
+
+  test("the aspect file exists under its target-neutral name", () => {
+    expect(LANG, "roles/review/implementation-language.md is not in the briefing").toBeDefined();
+  });
+
+  /**
+   * NO LANGUAGE IN THE ANGLE STATEMENT. The heading and the paragraph under it
+   * are what a model reads as "what am I for"; a language named there re-creates
+   * the defect however even-handed the body is. The body MUST name many
+   * languages — that is where the sharpness lives — so the assertion is scoped
+   * to the opening, and the boundary is the sentence that hands the choice to
+   * the repository.
+   *
+   * Word-bounded rather than substring: `Go` and `Java` are substrings of
+   * ordinary prose, and a probe that reddened on the word "Going" would be
+   * deleted by the first person it inconvenienced.
+   *
+   * CASE-INSENSITIVE, and a mutation is why. The first version used a
+   * case-sensitive `\bTypeScript\b`; the battery restored the old heading
+   * — `## Your angle: THE TYPESCRIPT AND JAVASCRIPT LANGUAGE SPECIALIST` — and
+   * this stayed GREEN, because headings in this file are upper case and
+   * `TYPESCRIPT` is not `TypeScript`. The probe was blind to the exact defect it
+   * was written for, in the exact form the defect had.
+   */
+  test("the angle statement names no language, so no target is assumed", () => {
+    const cut = LANG!.indexOf("**Which language that is");
+    expect(cut, "the angle statement's boundary sentence is gone").toBeGreaterThan(0);
+    const opening = LANG!.slice(0, cut);
+    for (const named of ["TypeScript", "JavaScript", "Python", "Go", "Rust", "Java", "Kotlin"]) {
+      expect(
+        new RegExp(`\\b${named}\\b`, "i").test(opening),
+        `the angle statement pre-commits the seat to ${named}`,
+      ).toBe(false);
+    }
+  });
+
+  test("the seat is told to SETTLE the language, and from what evidence", () => {
+    // The instruction, and the cheap evidence that bounds it — an angle that
+    // said "work out the language" without saying how invites the unbounded
+    // reading that turn one's stopping rule exists to refuse.
+    expect(LANG!, "nothing tells the seat to determine the language").toContain(
+      "first thing you do is settle it",
+    );
+    for (const manifest of ["pyproject.toml", "package.json", "go.mod", "Cargo.toml"]) {
+      expect(LANG!, `the seat is not told to look at ${manifest}`).toContain(manifest);
+    }
+  });
+
+  /**
+   * AND TO SAY WHICH ONE. A determination the reviewer never states is one the
+   * collator cannot attribute and a person cannot find wrong — the same argument
+   * `roles/collator.md` makes for attributing every finding to a lens.
+   */
+  test("the seat is told to state which language it settled on", () => {
+    expect(LANG!, "the seat never has to declare the language it chose").toContain(
+      "Say which language\nyou settled on in the first line of your review",
+    );
+  });
+
+  /**
+   * THE ANGLE IS STILL SHARP, checked the only way a string probe can: the four
+   * defect classes are named as headings. "Consider the language" would pass
+   * every assertion above and is worthless; a seat told which four things to
+   * look for is not. This is a floor on specificity rather than a measure of it.
+   */
+  test("the angle names concrete defect classes rather than a general instruction", () => {
+    for (const cls of [
+      "escape hatches that switch the checker off",
+      "Concurrency, and lifetime",
+      "Errors that become values instead of stops",
+      "Runtime semantics that read wrong",
+    ]) {
+      expect(LANG!, `the angle no longer names the defect class "${cls}"`).toContain(cls);
+    }
+  });
+
+  /**
+   * THE SIBLINGS AGREE. Both other aspect files open by telling the reviewer
+   * what the other two cover, so a rename that left them saying "TypeScript/
+   * JavaScript specifics" would put a stale claim in two of the three briefings
+   * — and each reviewer reads its own file, so nothing else would notice.
+   */
+  test("the other two seats describe this one by its new angle", () => {
+    for (const [name, text] of ASPECTS) {
+      if (name === "implementation-language") continue;
+      expect(text, `${name} still describes the third seat as a TypeScript seat`).not.toContain(
+        "TypeScript/JavaScript specifics",
+      );
+      expect(text, `${name} does not name the third seat's angle at all`).toContain(
+        "the implementation language",
+      );
+    }
   });
 });
 

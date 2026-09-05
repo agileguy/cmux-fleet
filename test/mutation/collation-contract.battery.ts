@@ -48,6 +48,18 @@ const ROLE = `${W}/roles/collator.md`;
 const REVIEWER = `${W}/roles/reviewer.md`;
 const XFILE = `${W}/roles/review/cross-file-contracts.md`;
 /**
+ * The LANGUAGE seat's aspect file, which is a third briefing fragment for the
+ * same reason `XFILE` is a second: `load.ts` concatenates role and worker
+ * briefings, so this file and `roles/reviewer.md` are read as one instruction.
+ *
+ * It is mutable here because its angle is now DERIVED FROM THE TARGET rather
+ * than named in advance, and that is a claim about the fleet that can rot. It
+ * was `typescript-language.md` while this console's integration target is a
+ * Python project — a seat briefed on the wrong language for every run, which
+ * the collator had been working around inside each brief it wrote.
+ */
+const LANGFILE = `${W}/roles/review/implementation-language.md`;
+/**
  * The TRACKED config, which is the one CI grades against and therefore the one a
  * capability probe must be mutated in. `fleet.yaml` is gitignored, so a mutation
  * there proves nothing about a clean checkout.
@@ -59,6 +71,21 @@ const TESTFILES = [
   "test/unit/collation.test.ts",
   "test/unit/collator-role.test.ts",
   "test/unit/reviewer-role.test.ts",
+  /**
+   * ADDED with the language-seat mutations. It is the only suite that reads the
+   * resolved WORKER config — `resolveWorker`'s worker → role → default
+   * precedence — so it is the only one that can see a `toolchain` override come
+   * back onto `rev-lang-1`. Without it that mutation would be applied and
+   * reported green for want of anything looking.
+   *
+   * It is GATED on `fleet.yaml` existing (`describe.skipIf`), and the battery
+   * copies the operator's own into the worktree, so the guarded block runs here.
+   * On a machine with no `fleet.yaml` those assertions skip and the mutations
+   * that depend on them would report green — which is the same gap the anchors
+   * guard records for untracked targets, and is why `FLEET` mutations are
+   * declared as such rather than trusted.
+   */
+  "test/unit/review-plan.test.ts",
 ];
 
 /**
@@ -71,6 +98,7 @@ const PRISTINE: Record<string, string> = {
   [ROLE]: readFileSync(ROLE, "utf8"),
   [REVIEWER]: readFileSync(REVIEWER, "utf8"),
   [XFILE]: readFileSync(XFILE, "utf8"),
+  [LANGFILE]: readFileSync(LANGFILE, "utf8"),
   [FLEET]: readFileSync(FLEET, "utf8"),
   [EXAMPLE]: readFileSync(EXAMPLE, "utf8"),
 };
@@ -483,36 +511,60 @@ const MUTATIONS: M[] = [
     expect: "red",
   },
   // ── The reviewer's briefing, and the mitigation pinned at both ends. ─────
+  //
+  // RE-ANCHORED 2026-09-05, when the contract these four measure was rewritten:
+  // the long review now goes in `files/review.md` and `notes` carries a summary
+  // of it. The previous anchors pointed at "put your whole review in the
+  // envelope's `notes`", which is the instruction that was REMOVED — RV3's had
+  // already rotted to 0x against a partial fix and was reported on every run.
+  //
+  // Re-anchored to the INSTRUCTIONS rather than to their headings. A heading is
+  // reworded by anyone tightening prose; a destination path, a declaration
+  // requirement and the sentence stating why the two channels fail differently
+  // are things a reviewer executes, and changing any of them changes what the
+  // console does.
   {
     id: "RV1",
-    what: "REVIEWER: the notes instruction is deleted from the reviewer's own role",
+    what: "REVIEWER: the review's destination is unnamed — 'file it somewhere'",
     file: REVIEWER,
-    find: "## PUT YOUR WHOLE REVIEW IN THE ENVELOPE'S `notes`",
-    replace: "## On writing it up",
+    find: "1. **`/outbox/<task-id>/files/review.md` — the whole review.**",
+    replace: "1. **The whole review, filed wherever suits you.**",
     expect: "red",
   },
   {
     id: "RV2",
-    what: "REVIEWER: the reason to still prefer `notes` is dropped",
+    what: "REVIEWER: the two caps stop failing differently — the reason for the split",
     file: REVIEWER,
-    find: "`notes` is what you can count on arriving\nwhole, because only the copied files are capped.",
-    replace: "Use whichever you prefer.",
+    find: "**Same ceiling, opposite failure:**",
+    replace: "**Both are capped:**",
     expect: "red",
   },
   {
     id: "RV3",
-    what: "REVIEWER: the collator's copy of the instruction is dropped (the braces)",
+    what: "REVIEWER: the collator's copy of the split instruction is dropped",
     file: ROLE,
-    find: "**Tell each reviewer to put its whole review in its result envelope's `notes`.**",
+    find: "**Tell each reviewer to file its long review at `/outbox/<task-id>/files/review.md` — its own\ntask id, not yours — to declare that file in its envelope's `artifacts` array, and to keep the\n`notes` FIELD of `/outbox/<task-id>/result.json` to a short summary.**",
     replace: "**Tell each reviewer to write a thorough review.**",
     expect: "red",
   },
+  /**
+   * THE FALSE CLAIM, pinned by requiring its correction.
+   *
+   * The tempting thing to write here is that the file survives a broken
+   * envelope, so the review gets through regardless. It does not:
+   * `relay.ts` sets `succeeded: harvested.verdict === "success"`, an unparseable
+   * envelope settles `unknown`, and only surviving lenses have a reply
+   * published. A reviewer that believed otherwise would treat the artifact as a
+   * safety net and go back to writing long envelopes, which is the defect this
+   * whole change removes — arriving by way of a sentence that reads like
+   * reassurance.
+   */
   {
     id: "RV4",
-    what: "REVIEWER: the surviving mitigation stops being justified and reads as a leftover",
+    what: "REVIEWER: the file is promised to rescue a broken envelope — the plausible lie",
     file: REVIEWER,
-    find: "This instruction stays anyway",
-    replace: "This instruction is legacy",
+    find: "**It does\nnot rescue the lens.**",
+    replace: "**It also rescues the lens.**",
     expect: "red",
   },
   {
@@ -607,6 +659,275 @@ const MUTATIONS: M[] = [
     file: EXAMPLE,
     find: "    tools: [read, write, grep, find, ls]",
     replace: "    tools: [read, write, grep, find, ls, bash]",
+    expect: "red",
+  },
+  // ── The file/summary split, added 2026-09-05 with the contract it measures. ─
+  {
+    id: "RV21",
+    what: "SPLIT: the envelope may hold the whole review again — the pre-fix contract",
+    file: REVIEWER,
+    find: "with a SHORT `notes`: one line",
+    replace: "with the whole review in `notes`: one line",
+    expect: "red",
+  },
+  {
+    id: "RV22",
+    what: "SPLIT: the review file need not be declared, so the harvest contradicts it",
+    file: REVIEWER,
+    find: "**And DECLARE the file in the envelope's `artifacts` array**",
+    replace: "**The file needs no further mention**",
+    expect: "red",
+  },
+  /**
+   * THE CAPS DRIFT FROM THE CODE. The document's numbers are asserted against
+   * `MAX_REPLY_ARTIFACT_BYTES`, `MAX_REPLY_INLINE_BYTES` and `MAX_TEXT` rather
+   * than as string literals, so a doc that states a cap the fleet does not
+   * enforce reddens. The previous probe hard-coded "64 KiB", which pinned the
+   * prose to itself and would have stayed green through exactly this edit.
+   */
+  /**
+   * RV23 SURVIVED ON ITS FIRST RUN, and the probe was the defect.
+   *
+   * `reviewer-role.test.ts` asserted `toContain("64 KiB")` over the whole
+   * section. The section says the number TWICE — once as the cap and once as
+   * *"64 KiB of prose is roughly ten thousand words"* — so mutating the cap to
+   * 32 KiB left the second occurrence satisfying the match and the suite stayed
+   * green. A document stating a limit the fleet does not enforce is precisely
+   * what that probe exists to refuse, and it could not see one. The probe now
+   * pins the number inside the clause that states the cap; RV23b is the same
+   * mutation on the other cap, because one fix that only reached one of the two
+   * numbers would look identical from here.
+   */
+  {
+    id: "RV23",
+    what: "CAPS: the document states a per-file cap the relay does not enforce",
+    file: REVIEWER,
+    find: "cap: 64 KiB per file",
+    replace: "cap: 32 KiB per file",
+    expect: "red",
+  },
+  {
+    id: "RV23b",
+    what: "CAPS: the per-reply cap drifts instead of the per-file one",
+    file: REVIEWER,
+    find: "and 256 KiB across all of them",
+    replace: "and 512 KiB across all of them",
+    expect: "red",
+  },
+  {
+    id: "RV24",
+    what: "CAPS: the `notes` ceiling is dropped, so the two channels look unbounded",
+    file: REVIEWER,
+    find: "at the same 65536 bytes",
+    replace: "at some size or other",
+    expect: "red",
+  },
+  {
+    id: "RV25",
+    what: "SPLIT: the collator's brief stops requiring the artifact declaration",
+    file: ROLE,
+    find: "to declare that file in its envelope's `artifacts` array",
+    replace: "and nothing more",
+    expect: "red",
+  },
+  {
+    id: "RV26",
+    what: "SPLIT: the collator's copy promises the file survives a broken envelope",
+    file: ROLE,
+    find: "has no reply published for it at all",
+    replace: "still reaches you through its artifacts",
+    expect: "red",
+  },
+  /**
+   * THE WORKED ENVELOPE, which is the part of a prompt a model copies most
+   * literally. An example that the real schema refuses teaches the exact shape
+   * the harvester throws away — and this one is now parsed against
+   * `ResultEnvelopeSchema` rather than eyeballed.
+   */
+  {
+    id: "RV27",
+    what: "EXAMPLE: the worked envelope stops claiming the review file",
+    file: REVIEWER,
+    find: '  "artifacts": [{"kind": "file", "path": "/outbox/<task-id>/files/review.md"}],\n',
+    replace: "",
+    expect: "red",
+  },
+  {
+    id: "RV28",
+    what: "EXAMPLE: the worked envelope carries a wire tag the schema refuses",
+    file: REVIEWER,
+    find: '  "schema": "pifleet.result/v1",',
+    replace: '  "schema": "pifleet.review/v1",',
+    expect: "red",
+  },
+  // ── Turn one ENDS: the polling defect, measured on run 5. ────────────────
+  /**
+   * The collator wrote both files correctly and then spent its last twelve tool
+   * calls looking for something to do. The document already forbade polling; what
+   * it lacked was a statement of what DONE looks like, what happens next, and why
+   * looking is uninformative rather than merely disallowed. These three mutate
+   * each of those in turn, because a document that keeps only one of them is the
+   * document that produced the defect.
+   */
+  {
+    id: "R11",
+    what: "TURN ONE: the envelope stops being named as the turn's last tool call",
+    file: ROLE,
+    find: "**4. Then stop. `result.json` is the LAST TOOL CALL of turn one.**",
+    replace: "**4. Then stop.**",
+    expect: "red",
+  },
+  {
+    id: "R12",
+    what: "TURN ONE: the collator is no longer told the second turn arrives as a prompt",
+    file: ROLE,
+    find: "turn two arrives as a NEW PROMPT carrying a new brief and a\nnew task id",
+    replace: "turn two happens later",
+    expect: "red",
+  },
+  {
+    id: "R13",
+    what: "TURN ONE: polling is forbidden but no longer shown to be pointless",
+    file: ROLE,
+    find: "`/replies` during turn one is empty, and empty is the\nCORRECT state",
+    replace: "Do not look at `/replies`",
+    expect: "red",
+  },
+  // ── The language seat's angle is the TARGET's language. ──────────────────
+  /**
+   * `rev-lang-1` ran a TypeScript-named angle against a Python target for the
+   * whole of this console's life so far. Both halves are mutated: the aspect
+   * file that carries the angle, and the WORKER CONFIG that chooses the file and
+   * the image. A fix to either alone leaves the console wrong.
+   */
+  /**
+   * R14 SURVIVED ON ITS FIRST RUN, and the probe was the defect again — this
+   * time in the arm that matters most.
+   *
+   * The probe tested `\bTypeScript\b` CASE-SENSITIVELY against the angle
+   * statement. Headings in that file are upper case, so restoring the literal
+   * old heading — `THE TYPESCRIPT AND JAVASCRIPT LANGUAGE SPECIALIST` — was
+   * invisible to it. The probe was blind to the exact defect it was written for,
+   * in the exact form that defect actually had on disk for the life of this
+   * console.
+   *
+   * Three arms now, because one is not enough to tell a fixed probe from a lucky
+   * one: R14 is the historical heading verbatim, R14b is mixed case (the form
+   * the broken probe DID catch, so a regression that only restored
+   * case-sensitivity still reddens here), and R14c names a different language
+   * entirely — the mistake this seat would make NEXT, once someone assumes the
+   * Python target is permanent.
+   */
+  {
+    id: "R14",
+    what: "ANGLE: the language seat pre-commits to a language again (UPPER CASE)",
+    file: LANGFILE,
+    find: "## Your angle: THE IMPLEMENTATION LANGUAGE OF THE REPOSITORY IN FRONT OF YOU",
+    replace: "## Your angle: THE TYPESCRIPT AND JAVASCRIPT LANGUAGE SPECIALIST",
+    expect: "red",
+  },
+  {
+    id: "R14b",
+    what: "ANGLE: the seat pre-commits in MIXED case, the form the broken probe DID catch",
+    file: LANGFILE,
+    find: "## Your angle: THE IMPLEMENTATION LANGUAGE OF THE REPOSITORY IN FRONT OF YOU",
+    replace: "## Your angle: the TypeScript language specialist",
+    expect: "red",
+  },
+  {
+    id: "R14c",
+    what: "ANGLE: the seat pre-commits to Python — the mistake this seat would make NEXT",
+    file: LANGFILE,
+    find: "## Your angle: THE IMPLEMENTATION LANGUAGE OF THE REPOSITORY IN FRONT OF YOU",
+    replace: "## Your angle: THE PYTHON LANGUAGE SPECIALIST",
+    expect: "red",
+  },
+  {
+    id: "R15",
+    what: "ANGLE: the seat is no longer told to settle the language from evidence",
+    file: LANGFILE,
+    find: "first thing you do is settle it",
+    replace: "first thing to bear in mind is the language",
+    expect: "red",
+  },
+  {
+    id: "R16",
+    what: "ANGLE: the seat stops having to say which language it settled on",
+    file: LANGFILE,
+    find: "**Say which language\nyou settled on in the first line of your review**",
+    replace: "**Get on with it**",
+    expect: "red",
+  },
+  {
+    id: "R17",
+    what: "ANGLE: the angle collapses to 'consider the language' with no defect classes",
+    file: LANGFILE,
+    find: "### 3. Errors that become values instead of stops",
+    replace: "### 3. Anything else worth saying",
+    expect: "red",
+  },
+  /**
+   * THE CONFIG HALF, and it is mutated in `fleet.yaml` rather than
+   * `fleet.example.yaml` because the example declares none of this console's
+   * seats — `review-plan.test.ts` says so in its own header. That makes this an
+   * UNTRACKED target: the anchors guard skips it by design, and the battery is
+   * the only thing that checks it. Recorded here so the gap is named rather than
+   * discovered.
+   */
+  {
+    id: "R18",
+    what: "CONFIG: the language seat is pointed back at the TypeScript aspect file",
+    file: FLEET,
+    find: "     append_system_prompt_file: ./roles/review/implementation-language.md}",
+    replace: "     append_system_prompt_file: ./roles/review/typescript-language.md}",
+    expect: "red",
+  },
+  {
+    id: "R19",
+    what: "CONFIG: `toolchain: node` returns to the seat whose job is not to assume a language",
+    file: FLEET,
+    find: "     model: ollama-cloud/glm-5.3,\n     append_system_prompt_file:",
+    replace: "     model: ollama-cloud/glm-5.3, toolchain: node,\n     append_system_prompt_file:",
+    expect: "red",
+  },
+  {
+    id: "R20",
+    what: "SIBLINGS: the other aspect files still describe seat three as a TypeScript seat",
+    file: XFILE,
+    find: "architecture/security and the implementation language.",
+    replace: "architecture/security and TypeScript/JavaScript specifics.",
+    expect: "red",
+  },
+  // ── `file` is a path, not a sentence — the census shape rule, in the brief. ─
+  /**
+   * The grader stopped counting a prose `file` as located. The refusal teaches a
+   * collator that after the turn is spent; the briefing teaches it before. R21
+   * removes the rule, and R22 makes the document's worked example DISAGREE with
+   * the grader — which is the failure that matters, because a document offering
+   * an example the census refuses is worse than one that says nothing.
+   */
+  {
+    id: "R21",
+    what: "LOCATION: the brief stops saying `file` must be a path, not prose",
+    file: ROLE,
+    find: "- **`file` MUST NAME A PATH, and a sentence in that field costs the finding its location.**",
+    replace: "- **Fill in `file` as best you can.**",
+    expect: "red",
+  },
+  {
+    id: "R22",
+    what: "LOCATION: the document's uncounted example is one the census actually counts",
+    file: ROLE,
+    find: "`the error handling could be tightened` does not",
+    replace: "`src/relay.ts` does not",
+    expect: "red",
+  },
+  {
+    id: "R23",
+    what: "LOCATION: prose is no longer directed to `statement`, so it stays in `file`",
+    file: ROLE,
+    find: "**Prose belongs in `statement`**",
+    replace: "Prose is fine anywhere",
     expect: "red",
   },
   // ── G1: the denominator, checked against config. ─────────────────────────
@@ -787,6 +1108,33 @@ const MUTATIONS: M[] = [
     replace: "function describeIssue(err: z.ZodError): string {",
     expect: "green",
     also: [{ find: "reason: firstIssue(result.error)", replace: "reason: describeIssue(result.error)" }],
+  },
+  /**
+   * CONTROLS FOR THE TWO PROBES THAT WERE JUST TIGHTENED, and the reason they
+   * are worth their runtime.
+   *
+   * RV23's and R14's fixes both made a probe match MORE narrowly — one pinned a
+   * number to the clause that states it, the other went case-insensitive. The
+   * failure mode of that kind of repair is over-fitting: a probe so tight that
+   * ordinary rewording reddens it gets loosened again by the next person, and
+   * the coverage is lost for good. These two reword prose in exactly the
+   * sections those probes guard, and must stay GREEN.
+   */
+  {
+    id: "NC3",
+    what: "NEGATIVE CONTROL: reword the angle's closing advice, changing nothing checkable",
+    file: LANGFILE,
+    find: "**Prefer the demonstrable.**",
+    replace: "**Favour the demonstrable.**",
+    expect: "green",
+  },
+  {
+    id: "NC4",
+    what: "NEGATIVE CONTROL: reword prose in the caps section, leaving every number alone",
+    file: REVIEWER,
+    find: "For scale, 64 KiB of prose is roughly ten thousand words.",
+    replace: "That is a great deal of prose.",
+    expect: "green",
   },
   // ── Semantic no-ops: the mutation genuinely changes nothing. ─────────────
   {
