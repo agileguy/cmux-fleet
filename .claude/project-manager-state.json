@@ -389,5 +389,25 @@
     "error": "I pushed 43433b5 and reported it done before CI ran, and CI went RED: the start-lock fix restructured the code that review-grading.battery.ts's W8 anchors, so the anchor matched nothing. SECOND TIME TODAY for this exact class.",
     "cause": "mutation-anchors.test.ts reads batteries AND targets at HEAD via git show, so a broken anchor is invisible in the working tree and only fires once the commit exists. A pre-commit suite run cannot see it by construction.",
     "rule": "After any commit that touches a file a battery anchors to, re-run `bun test test/unit` AFTER committing and before pushing. Green before the commit proves nothing about the guard."
+  },
+  "dogfood_run_8_2026_09_05": {
+    "purpose": "Validate nine fixes end to end after the review console lost a lens in run 7. Console recreated; fresh relay; all four seats mounting cmux-fleet.",
+    "RESULT": "3 OF 3 LENSES REPORTED, collator status success, 9 findings. No lens lost. Run 7 was 2 of 3.",
+    "IMPORTANT_CAVEAT": "All three seats spelled their artifact path ABSOLUTELY this run, so the relative-path defect was NOT re-exercised. This run shows the loop works when nothing goes wrong; the artifact-path fix remains proven by fix-and-recheck against run 7's tree, not by this run.",
+    "findings_against_my_own_fixes": 9,
+    "regressions_I_INTRODUCED_and_have_now_fixed": [
+      "console-relay.ts takeover was rm-then-claim, which is NOT atomic: two starters that both judge the lock stale can interleave as A-removes, A-claims, B-removes-A's-fresh-lock, B-claims, and both believe they hold it \u2014 the concurrent-actor bug the lock exists to prevent, reached through its own recovery path. My comment claimed 'the winner is decided by the kernel' and that was false. Raised by rev-arch-1 AND rev-lang-1 independently. Now the stale lock is moved aside with rename(), which succeeds for exactly one caller and gives every later one ENOENT.",
+      "console-relay.ts open('wx')-then-writeFile leaves a ZERO-BYTE lock if the claim dies between the two, and my takeover parsed no holder from it and refused forever \u2014 reintroducing the permanent deadlock the takeover was written to end. Now published by link() from a fully-written temp file, so the name never appears before the content; and an EMPTY lock is treated as naming no holder (safe to take over) while a non-empty unparseable one stays refused.",
+      "relay.ts O_NOFOLLOW protects only the FINAL component while isPathUnder is purely lexical, so a worker could turn its own files/ directory into a symlink to the run root and still have control-auth.json inlined. Containment now runs on the realpath against the realpath of the outbox root. Deliberate semantic change recorded: a link that stays INSIDE the outbox is now followed, which grants nothing the worker did not already have."
+    ],
+    "still_open_from_this_run": [
+      "harvest/outbox.ts:521 \u2014 artifactPathProblem now accepts relative artifact paths but the RECONCILER still uses containerPathToHost, which is null for a relative path, so an accepted claim is reported 'outside the mount table; not read' and the file 'unclaimed'. Two false discrepancies, and mine.",
+      "cli/commands/artifacts.ts \u2014 serialize()/printHuman() do not expose envelopeRead, envelopeRefusal or unreadableEnvelope, so an operator still cannot tell an unreadable envelope from an absent one at the CLI.",
+      "report/collect.ts:516 \u2014 collectDispatched() reads only harvest.verdict and ignores envelope state.",
+      "relay.ts:1955 \u2014 RelayDispatchError wraps and loses the original cause.",
+      "relay.ts:377 \u2014 relayEnvelopeState maps an unreadable-WITHOUT-structure envelope to undefined.",
+      "relay.ts:1409 \u2014 the collation brief's record-instruction block skips refused lenses."
+    ],
+    "lesson": "Pointing the console at the diff that changed it caught three defects in fixes written hours earlier, two of them regressions that made the system worse than before the fix. Cross-vendor agreement on the lock race (arch and lang independently) is the strongest signal this console has produced."
   }
 }

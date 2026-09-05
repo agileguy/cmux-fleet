@@ -82,7 +82,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { existsSync } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, realpath } from "node:fs/promises";
 import { runsRoot as runsRootEager, runPaths as runPathsEager } from "./paths.ts";
 
 import { SESSION_ID_RE, type Verdict } from "../contracts.ts";
@@ -2756,8 +2756,52 @@ export const productionRelayEffects: RelayEffects = {
        * symlink" is what a reader needs. A raw `ELOOP` would also be the one
        * refusal whose wording depended on which kernel ran it.
        */
+      /**
+       * EVERY COMPONENT, NOT ONLY THE LAST ONE — and the first version of this
+       * fix only did the last one.
+       *
+       * `O_NOFOLLOW` refuses a final component that is a symlink and says
+       * nothing about the directories above it, while `isPathUnder` is purely
+       * LEXICAL: it compares strings and never asks the filesystem. So a worker
+       * that turns `files/` into a symlink to the run root still passes the
+       * containment check and still gets its target opened. The review console
+       * found this in the commit that introduced it, which is the whole
+       * argument for having pointed it at its own diff.
+       *
+       * `realpath` resolves every component, so the containment test is applied
+       * to the path that will actually be read rather than to the one that was
+       * typed. **THIS NARROWS RATHER THAN CLOSES, and the difference is stated
+       * because the last comment here over-claimed.** Fully closing it needs a
+       * component-wise `openat(O_NOFOLLOW)` walk, which node does not expose;
+       * what remains is a race between `realpath` and `open`, which is far
+       * harder to win than a lexical check that never looks at the disk at all.
+       * `O_NOFOLLOW` stays for the final component, where the guarantee IS
+       * absolute.
+       */
+      const real = await realpath(hostPath);
+      /**
+       * CONTAINMENT IS TESTED ON THE RESOLVED PATH, against the RESOLVED root.
+       *
+       * Comparing the resolved path to the typed one — "no symlinks anywhere" —
+       * was tried first and is wrong on this platform: macOS makes `/var` a
+       * symlink to `/private/var`, so every path under the system temp
+       * directory differs from its own realpath and every read would be refused
+       * as a symlink. The system's links are not the worker's.
+       *
+       * So the test is the one that matches the threat. A link that ESCAPES the
+       * outbox is refused wherever in the path it sits, including an
+       * intermediate directory that `O_NOFOLLOW` cannot see and that
+       * `isPathUnder` — purely lexical — never looked at the disk to check. A
+       * link that stays INSIDE the outbox is now followed, which is a real
+       * change to this function's old "refuse every symlink" rule and is
+       * accepted deliberately: that subtree is the worker's own, so resolving
+       * within it grants nothing it did not already have.
+       */
+      if (!m.paths.isPathUnder(real, await realpath(root))) {
+        return { text: "", unreadable: `it resolves outside ${worker}'s outbox` };
+      }
       handle = await open(
-        hostPath,
+        real,
         constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
       );
       const st = await handle.stat();

@@ -391,35 +391,44 @@ export function servesConsole(
  * record behind. The caller releases it in a `finally`.
  */
 export async function acquireRelayLock(path: string): Promise<{ release: () => Promise<void> } | null> {
+  const { link, rename, rm, unlink, writeFile } = await import("node:fs/promises");
+  const { randomUUID } = await import("node:crypto");
+
+  /**
+   * THE LOCK IS PUBLISHED WHOLE OR NOT AT ALL, and `open(path, "wx")` could not
+   * do that.
+   *
+   * The previous version created the file and then wrote its identity into it,
+   * which leaves a window where the lock EXISTS and is EMPTY. A crash there —
+   * and a crash is the only reason this recovery path exists — left a zero-byte
+   * lock that the takeover below cannot parse, so it refused forever and the
+   * console was permanently actorless: the exact failure the takeover was
+   * written to end, reintroduced by its own guard. Found by this repository's
+   * review console reading this function hours after it was written.
+   *
+   * Writing to a temp name and `link`ing it into place fixes both halves at
+   * once. `link` fails with EEXIST when the target exists, so it is the same
+   * atomic exclusion `wx` gave, and the content is already in the inode before
+   * the name appears — there is no moment at which a reader can see an
+   * incomplete lock. Nothing holds a file descriptor afterwards either, so the
+   * descriptor leak on a failed write is gone by construction rather than by a
+   * `finally`.
+   */
   const claim = async (): Promise<{ release: () => Promise<void> } | null> => {
-    let handle: Awaited<ReturnType<typeof open>>;
+    const started = await processStartTime(process.pid).catch(() => null);
+    const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+    await writeFile(tmp, `${process.pid}\n${started ?? ""}\n`);
     try {
-      handle = await open(path, "wx");
+      await link(tmp, path);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
       throw err;
-    }
-    /**
-     * THE HANDLE IS CLOSED ON A FAILED WRITE, and it was not before.
-     *
-     * `open` succeeded, so a throw from `writeFile` — a full disk is the
-     * ordinary one — used to escape past the only reference to the descriptor.
-     * The file it leaks is also the LOCK, so the leak and the stale lock below
-     * are the same incident: the section is abandoned holding a lock nothing
-     * can release.
-     */
-    try {
-      const started = await processStartTime(process.pid).catch(() => null);
-      await handle.writeFile(`${process.pid}\n${started ?? ""}\n`);
-    } catch (err) {
-      await handle.close().catch(() => {});
-      await (await import("node:fs/promises")).rm(path, { force: true }).catch(() => {});
-      throw err;
+    } finally {
+      await unlink(tmp).catch(() => {});
     }
     return {
       release: async () => {
-        await handle.close().catch(() => {});
-        await (await import("node:fs/promises")).rm(path, { force: true }).catch(() => {});
+        await rm(path, { force: true }).catch(() => {});
       },
     };
   };
@@ -431,55 +440,84 @@ export async function acquireRelayLock(path: string): Promise<{ release: () => P
    * A LOCK WHOSE HOLDER IS GONE IS TAKEN OVER, and refusing to look was a
    * defect this module's own header describes.
    *
-   * The old code answered `EEXIST` with `null` and never opened the file — so
-   * the pid it wrote on the line above was read by nobody, and ONE hard crash
-   * (SIGKILL, a panic, a lost machine) left `review-relay.lock` behind forever.
-   * From then on `scripts/review` could not start an actor until a person
-   * deleted the file by hand: the *"permanently, silently actorless"* console
-   * this file exists to prevent, reached through the guard meant to prevent it.
+   * Before this, `EEXIST` was answered with `null` and the file was never
+   * opened — so the pid written above was read by nobody, and ONE hard crash
+   * left the lock behind forever until a person deleted it by hand.
    *
-   * **The identity is `(pid, start time)`, not a bare pid**, for the reason the
-   * relay RECORD already carries that pair: pids are recycled, and a lock
-   * broken because some unrelated process inherited the number is worse than
-   * the stale lock it replaces.
-   *
-   * **UNREADABLE IS NOT STALE.** A lock we cannot parse, or a `ps` we cannot
-   * run, leaves the refusal exactly where it was — the same posture
-   * `readRelayRecord` takes with `unverifiable`, and `down.ts` before it. Only
-   * a holder positively established as gone loses its lock.
-   *
-   * The takeover is a REMOVE AND RE-CLAIM, so the winner is decided by the
-   * kernel: two processes may both judge the lock stale, and only one of them
-   * can then succeed at `open(path, "wx")`.
+   * **The identity is `(pid, start time)`**, for the reason the relay RECORD
+   * already carries that pair: pids are recycled, and a lock broken because an
+   * unrelated process inherited the number is worse than the stale lock it
+   * replaces. **UNREADABLE IS NOT STALE** — a lock we cannot parse, or a `ps`
+   * we cannot run, leaves the refusal where it was, which is
+   * `readRelayRecord`'s posture and `down.ts`'s before it.
    */
   let holder: { pid: number; started: string } | null = null;
+  let empty = false;
   try {
-    const fh = await open(path, "r");
-    const text = await fh.readFile("utf8");
-    await fh.close().catch(() => {});
-    const [pidLine = "", startedLine = ""] = text.split("\n");
-    const pid = Number.parseInt(pidLine.trim(), 10);
-    if (Number.isInteger(pid) && pid > 0) holder = { pid, started: startedLine.trim() };
+    const text = await (await import("node:fs/promises")).readFile(path, "utf8");
+    /**
+     * AN EMPTY LOCK RECORDS NO HOLDER, WHICH IS NOT THE SAME AS ONE WE CANNOT
+     * READ — and collapsing the two is what made a zero-byte lock permanent.
+     *
+     * "Unreadable is not stale" protects a holder we cannot identify. A file of
+     * zero bytes identifies nobody and never did: it is the residue of a claim
+     * that died between creating the name and writing into it, which older
+     * builds of this function could produce and any interrupted copy still can.
+     * There is no process whose lock we would be breaking, so the refusal
+     * protected nothing and cost the console its actor permanently.
+     *
+     * Non-empty and unparseable stays refused. That one names SOMETHING, and
+     * not understanding it is exactly the case where guessing is unsafe.
+     */
+    if (text.trim() === "") empty = true;
+    else {
+      const [pidLine = "", startedLine = ""] = text.split("\n");
+      const pid = Number.parseInt(pidLine.trim(), 10);
+      if (Number.isInteger(pid) && pid > 0) holder = { pid, started: startedLine.trim() };
+    }
   } catch {
     return null;
   }
-  if (holder === null) return null;
+  if (!empty && holder === null) return null;
 
-  let live: string | null;
+  let live: string | null = null;
   try {
-    live = await processStartTime(holder.pid);
+    if (holder !== null) live = await processStartTime(holder.pid);
   } catch {
     // The measuring instrument is broken; say nothing about the holder.
     return null;
   }
-  if (live !== null) {
+  if (holder !== null && live !== null) {
     // Present. Stale only if this is a DIFFERENT process wearing the pid, and
     // that is answerable only when both sides are comparable.
     if (!isPinnedIdentity(holder.started) || !isPinnedIdentity(live)) return null;
     if (holder.started === live) return null;
   }
 
-  await (await import("node:fs/promises")).rm(path, { force: true }).catch(() => {});
+  /**
+   * THE TAKEOVER IS DECIDED BY `rename`, AND THE PREVIOUS COMMENT CLAIMING THE
+   * KERNEL DECIDED WAS FALSE.
+   *
+   * That version did `rm(path)` and then re-claimed. Two starters that both
+   * judge the lock stale then interleave as: A removes, A claims, B removes A's
+   * FRESH lock, B claims — and both believe they hold it, which is the
+   * concurrent-actor bug the lock exists to prevent, reached through its
+   * recovery path. Re-reading the file afterwards does not fix it either: each
+   * side can read its own token before the other overwrites.
+   *
+   * Moving the stale lock ASIDE is the atomic step. `rename` succeeds for
+   * exactly one caller and every later one gets ENOENT, because the source name
+   * is gone — so the right to replace the lock is won once, by the kernel, and
+   * the claim that follows is an ordinary uncontended `link`.
+   */
+  const sidelined = `${path}.stale-${process.pid}-${randomUUID()}`;
+  try {
+    await rename(path, sidelined);
+  } catch {
+    // Someone else won the takeover, or the holder released it in the meantime.
+    return null;
+  }
+  await rm(sidelined, { force: true }).catch(() => {});
   return await claim();
 }
 

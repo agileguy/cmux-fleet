@@ -61,7 +61,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -2103,8 +2103,35 @@ describe("readArtifact resolves the path once", () => {
     await symlink("../../../../control-auth.json", p);
 
     const got = await read(root, p);
-    expect(got.unreadable).toBe("it is a symlink");
+    // The message changed when containment moved onto the RESOLVED path: an
+    // escaping link is now named for what makes it dangerous — where it lands —
+    // rather than for its type. Either way the target's bytes never appear.
+    expect(got.unreadable).toContain("resolves outside");
     expect(got.text).toBe("");
+    expect(JSON.stringify(got)).not.toContain("SHOULD-NEVER-BE-INLINED");
+  });
+
+  /**
+   * THE INTERMEDIATE COMPONENT, which the first version of this fix missed.
+   *
+   * `O_NOFOLLOW` refuses only the FINAL component, and `isPathUnder` compares
+   * strings without ever asking the filesystem — so a worker that turns its own
+   * `files/` directory into a symlink to the run root passed containment and
+   * had the target opened. The console found this in the same commit that
+   * introduced the final-component fix.
+   */
+  test("a symlinked INTERMEDIATE directory cannot reach the run root", async () => {
+    const { root, dir } = await outboxFor();
+    const secret = join(root, "control-auth.json");
+    await writeFile(secret, '{"token":"SHOULD-NEVER-BE-INLINED"}');
+    // Replace <task>/files with a link to the run root, then name a real file
+    // through it. Every component of the string is inside the outbox.
+    await rm(dir, { recursive: true, force: true });
+    await symlink(root, dir);
+
+    const got = await read(root, join(dir, "control-auth.json"));
+    expect(got.text).toBe("");
+    expect(got.unreadable).toContain("resolves outside");
     expect(JSON.stringify(got)).not.toContain("SHOULD-NEVER-BE-INLINED");
   });
 

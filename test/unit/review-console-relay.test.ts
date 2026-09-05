@@ -28,7 +28,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -549,6 +549,32 @@ describe("the record is durable, comparable, and singly held", () => {
    * UNREADABLE IS NOT STALE — `readRelayRecord`'s posture, and `down.ts`'s
    * before it. A lock we cannot parse names a holder we cannot rule out.
    */
+  /**
+   * THE ZERO-BYTE LOCK, which the FIRST version of the takeover reintroduced.
+   *
+   * `open(path, "wx")` then `writeFile` leaves a window where the lock exists
+   * and is empty, and a crash there is the only reason the takeover exists at
+   * all. An empty lock parses to no holder, the takeover refused it forever,
+   * and the console was permanently actorless again. Publishing by `link` from
+   * a fully-written temp file closes the window: the name never appears before
+   * the content. Found by this repository's own review console.
+   */
+  test("a ZERO-BYTE lock is taken over, because it names no holder", async () => {
+    const env = await tempRunsDir();
+    const lockPath = join(env["PIFLEET_RUNS_DIR"]!, "..", "lock-empty");
+    // The residue of a claim that died between creating the name and writing
+    // into it. Older builds of acquireRelayLock could produce exactly this.
+    await writeFile(lockPath, "");
+
+    const taken = await acquireRelayLock(lockPath);
+    expect(taken).not.toBeNull();
+    // And what it published is complete, not another empty file.
+    expect(Number.parseInt((await readFile(lockPath, "utf8")).split("\n")[0]!, 10)).toBe(
+      process.pid,
+    );
+    await taken!.release();
+  });
+
   test("a lock whose contents make no sense is refused, not stolen", async () => {
     const env = await tempRunsDir();
     const lockPath = join(env["PIFLEET_RUNS_DIR"]!, "..", "lock-junk");
