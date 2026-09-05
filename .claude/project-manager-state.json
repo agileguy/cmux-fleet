@@ -272,5 +272,57 @@
       "ISA pass on the MERGED tree (progress: must be recounted there, never per-branch).",
       "Then ask the owner about the PR."
     ]
+  },
+  "dogfood_run_7_2026_09_05": {
+    "what": "First review of cmux-fleet's OWN branch through the live review console. Console recreated once (owner-authorised) from ~/repos/cmux-fleet; all four seats verified mounting /Users/de895996/repos/cmux-fleet -> /workspace ro via docker inspect.",
+    "target": "feature/collator-dispatch, 82 commits off a4c4337; review scoped to the ~8,000-line collator-dispatch production surface (10 files) because the full branch diff is 60,844 insertions across 204 files.",
+    "language_withheld": "The brief deliberately did NOT state the implementation language, repeating run 6's test from the other side. Run 6 settled Python for rally-cli; this run the lang seat settled TypeScript unaided.",
+    "loop": "Fan-out landed inside ~20s; three seats ran; collation.json + review.md written; col-1 through epochs [1,2].",
+    "q6_proved_live": "THE CHANGE WORKED UNDER THE EXACT CONDITION IT WAS WRITTEN FOR. 2 of 3 lenses reported. Collate brief carried 'COVERAGE: 2 of 3 lenses reported' as a host-counted fact, and the collator wrote status 'success'. Pre-Q6 this same run would have forced 'partial', which disabled censusCeiling on precisely the reviews that lost a lens.",
+    "sec_6_5_proved_live": "The PREVIOUS relay self-terminated with the correct reason when its console was rebuilt ('col-1 has not been live ... for 5 consecutive passes'). That behaviour was previously only unit-probed.",
+    "findings_total": 23,
+    "findings_collated": 9,
+    "findings_lost_with_lang_lens": 14,
+    "highest_severity": [
+      "rev-arch-1, relay.ts:2647 \u2014 readArtifact re-opens a worker-owned path with lstat-then-open and no O_NOFOLLOW, so a reviewer container can swap an artifact for a symlink to control-auth.json and have the relay INLINE IT into the collation brief. Credential exfil across the one boundary the console exists to police.",
+      "rev-lang-1 F1 (HIGH), state.ts \u2014 a negative tokens_ceiling in run.json silently becomes UNBOUNDED in readRunBudgetPolicy; fail-open in the direction its own RunPolicyUnreadableError argument forbids.",
+      "rev-lang-1 F2 (HIGH), fresh-dispatch.ts \u2014 tears down runs from a status read up to one poll old, so work staged in that window is destroyed despite the never-while-busy rule.",
+      "rev-arch-1, relay.ts:1968 \u2014 stage_trigger_deferred is documented retryable but the journal's already_done means the retry never happens, so a lens is PERMANENTLY LOST.",
+      "rev-ctx-1, relay.ts:377 \u2014 envelopeRead:'refused' loses structural identity crossing harvest->relay. This lands directly on 0c21634, written the same day: relayEnvelopeState maps 'refused' to undefined, and a downstream reader takes undefined to mean nothing looked."
+    ],
+    "artifacts": {
+      "collation": "~/.pifleet/runs/2026-09-05T03-17-32Z-8429/outbox/col-1/R-cmux-collator-1-collate/files/",
+      "lost_lang_review_30373_bytes": "~/.pifleet/runs/2026-09-05T03-17-34Z-2cd6/outbox/rev-lang-1/R-cmux-collator-1-lang/files/review.md"
+    }
+  },
+  "open_defect_lost_lens_2026_09_05": {
+    "severity": "HIGH \u2014 this is the exact failure class the branch exists to prevent",
+    "symptom": "rev-lang-1 wrote a VALID result.json (1676 B, schema pifleet.result/v1, epoch 1, status success, correct path) at 03:25:54Z plus a 30,373-byte review, and its task record recorded verdict success at 03:26:05.156Z. No reply was ever written. The collation recorded the lens as reported:false with the note 'settled unknown; no report reached the collator'. 14 findings, two of them HIGH, were lost \u2014 60% of the review's total output.",
+    "recurrence": "SECOND CONSECUTIVE RUN in which the lang seat's report failed to reach the collator. Run 6's loss was attributed to an invented schema at the task root; that cause did NOT recur here, so the run-6 diagnosis was incomplete rather than wrong.",
+    "hypotheses_falsified": [
+      "Relay stdout buffering \u2014 FALSIFIED by probe: bun flushes stdout to a file immediately (30 bytes visible mid-sleep). The fan-out line is late because recordDispatch runs after the settle-join, which is by design.",
+      "awaitSettled returning before the envelope is durable \u2014 FALSIFIED by measurement: the result envelope PRECEDES the task record in all three seats, by 8, 18 and 11 seconds respectively.",
+      "An artifact size cap throwing \u2014 planInlineBudget truncates rather than throws."
+    ],
+    "leading_lead": "rev-arch-1 and rev-lang-1 INDEPENDENTLY named mechanisms while reviewing this code, without knowing a lens had just been lost in the run that dispatched them: relay.ts:1968 (stage_trigger_deferred journalled already_done, retry never happens) and rev-lang-1 F7 (a rejected transport.harvest discards its reason entirely \u2014 Promise.allSettled with `if fulfilled` at relay.ts:915-920 makes a thrown harvest indistinguishable from a lens that reported nothing).",
+    "timing_evidence": "lang settled 03:26:05.156Z; relay journal dispatched_at 03:26:05.249Z \u2014 a 93 ms window for join-return, three harvests, reply writes and the collate dispatch. Too short for three harvests, so the harvests ran BEFORE lang settled.",
+    "pm_own_error": "My direct probe of productionRelayEffects.harvestTask was DEGENERATE \u2014 it returned the identical 'no dispatch record at inbox/...' for rev-arch-1, the seat that DID land, so it could not distinguish the two cases and its result was discarded. The control is what caught it. rev-lang-1's F10 (harvestTask's inbox catch conflates absent with present-but-unreadable) is why the probe reported that message at all \u2014 the degenerate probe was unwittingly demonstrating F10."
+  },
+  "isa_pass_2026_09_05": {
+    "arithmetic": "progress: 489/501 is CORRECT and self-checking \u2014 489 [x] + 12 [~] = 501 live, 2 retired excluded from both sides, enforced by isa-frontmatter.test.ts which is green in the 4534-pass suite.",
+    "tripwires_unchanged": "None of the 12 [~] criteria touch the review console (they are oMLX, ticketing, tui abort/attach, verbgate ledger and monitor repaint), so nothing this session did promotes or demotes one.",
+    "FINDING": "THE REVIEW CONSOLE HAS NO ISA COVERAGE AT ALL. ISA.md tops out at ISC-510 and every one of ISC-503..510 is fleet-monitor work. 'review console' appears 0 times; SRD-REVIEW-CONSOLE is never referenced. An 82-commit branch implementing a whole SRD has landed with no recorded done-condition.",
+    "why_not_self_allocated": "The ISA's own convention, quoted in test/support/isa-claims.ts from ISC-297's filing note, is that numbers are 'allocated centrally, not picked on the branch'. Minting ISC-511..517 here would break the system of record's own rule, so the set is PREPARED and the allocation is the owner's.",
+    "criteria_this_session_would_support": {
+      "[x] wedged seat detectable without shelling out": "engineer B, 0266f60 \u2014 B suggested ISC-511",
+      "[x] the doorbell is delivered exactly once": "engineer D, 770a7eb \u2014 proved live in run 6",
+      "[x] status shows a review nobody picked up": "bf0673a",
+      "[x] coverage and verdict are separate axes": "4d889f0 \u2014 PROVED LIVE in run 7 at 2-of-3",
+      "[x] the absent arm carries production traffic": "0c21634 \u2014 three valid-TS mutations, each killed",
+      "[~] a lens that wrote a valid report is never lost": "TRIPWIRE \u2014 falsified live in run 7. Pin its probe to the absence of the relay.ts:915-920 swallow, so fixing that turns the guard red."
+    }
+  },
+  "housekeeping_2026_09_05": {
+    "leaked_test_supervisors": "The full suite left 58 supervisor processes alive across 23 /var/folders pifleet-wiring-* temp roots. They are idle, not busy-looping, and point at throwaway roots rather than ~/.pifleet/runs. My cleanup was blocked by the auto-mode classifier and I did not work around it; they need an operator kill or a reboot, and the wiring tests should reap their own supervisors."
   }
 }
