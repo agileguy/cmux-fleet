@@ -101,13 +101,17 @@ export function transcriptNote(
 // The wedged seat — busy, heartbeating, and nothing behind it
 //
 // A NOTE ON THE PROSE BELOW, in the style `reaper.ts` uses for the same reason:
-// the container runtime's CLI is never named in this file, and that is
-// deliberate rather than coy. `monitor-density.test.ts:202` pins the claim that
-// `status` never shells out to it by grepping this source for the name — over
-// RAW text, not comment-stripped — so a docblock that spelled it out would
-// satisfy the probe with prose and leave it unable to notice the day the code
-// really did shell out. `run -d`, `ps -a` and `inspect` below all refer to that
-// CLI's subcommands.
+// this file may now NAME the container runtime's CLI, and the docblocks below
+// that say `run -d`, `ps -a` and `inspect` mean exactly those subcommands.
+// That was not always safe, and the reason it is safe now is worth keeping.
+// `monitor-density.test.ts` pins the claim that `status` never shells out by
+// scanning this source for the name, and it used to scan RAW text: documenting
+// why a container fact is absent here tripped a guard whose property was still
+// true, so the file's working lesson became *avoid a word* rather than *avoid a
+// call*, and the guard could equally have been satisfied by deleting the prose
+// instead of the call. It now reads comment-stripped source
+// (`test/support/source-structure.ts`), so it is satisfied only by code and
+// broken only by code. Explain freely — the guard watches what its name says.
 // ---------------------------------------------------------------------------
 
 /**

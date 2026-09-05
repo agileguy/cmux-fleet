@@ -55,6 +55,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 import { renderFleet } from "../../src/monitor/render.ts";
+import { stripComments } from "../support/source-structure.ts";
 import {
   never,
   ok,
@@ -82,6 +83,29 @@ const STATUS_SRC = readFileSync(
   new URL("../../src/cli/commands/status.ts", import.meta.url).pathname,
   "utf8",
 );
+
+/**
+ * `STATUS_SRC` with its comments removed — and every assertion below reads THIS
+ * rather than the raw file.
+ *
+ * The two are not interchangeable, and reading the raw source is a defect
+ * rather than a shortcut. `not.toContain("docker")` defends the claim that
+ * `status` never shells out, which is a claim about CODE; against raw text it
+ * is also satisfied — or broken — by prose. Measured: documenting why a
+ * container fact is absent here tripped this test while the property it guards
+ * stayed true, so the file taught the next author to avoid a WORD instead of
+ * to avoid a call. A guard that can be satisfied by rewording is not guarding
+ * the thing its name says.
+ *
+ * `toContain` is the mirror of the same fault and is stripped for the same
+ * reason: a format string that survived only inside a comment would satisfy a
+ * raw-text probe while the line that prints it was gone.
+ *
+ * `stripComments` and not a local regex — `test/support/source-structure.ts`
+ * owns this and keeps string and template literals intact, so a `"//"` inside
+ * a printed format is not mistaken for a comment.
+ */
+const STATUS_CODE = stripComments(STATUS_SRC);
 
 /** What `status.ts` asserts about ONE worker, in the order it prints them. */
 const INCUMBENT_FIELDS = ["worker id", "phase", "task", "supervisor liveness", "transcript age"];
@@ -150,7 +174,7 @@ describe("ISC-495 (Q9): the density figure, measured rather than asserted", () =
    */
   test("the incumbent asserts exactly five field kinds per worker", () => {
     // `  ${w.id}: ${phase} task=${task}${staged} supervisor=${live}${suffix}`
-    expect(STATUS_SRC).toContain("task=${task}${staged} supervisor=${live}${suffix}");
+    expect(STATUS_CODE).toContain("task=${task}${staged} supervisor=${live}${suffix}");
     // `staged` and `suffix` are CONDITIONAL — omitted entirely for a worker
     // with nothing staged and no transcript note (`status.ts` says so at both
     // sites), so neither is a field every row carries. Five is the row's floor
@@ -199,7 +223,7 @@ describe("ISC-495 (Q9): the density figure, measured rather than asserted", () =
 
     // 1. Container presence — the docker join (§6.7). `status` never shells out.
     expect(fleet).toContain("Up");
-    expect(STATUS_SRC).not.toContain("docker");
+    expect(STATUS_CODE).not.toContain("docker");
 
     // 2. Per-region staleness (§6.4). The incumbent prints no age for its own read.
     expect(fleet).toMatch(/as of \d+s/);
