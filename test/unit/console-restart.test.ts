@@ -50,7 +50,7 @@ const FAKE_PANES: ReadonlyArray<{ pane: string; surface: string; title: string |
   { pane: "pane-a", surface: "surf-eng-1", title: "eng-1" },
   { pane: "pane-b", surface: "surf-tst-1", title: "tst-1" },
   { pane: "pane-c", surface: "surf-eng-2", title: "eng-2" },
-  { pane: "pane-d", surface: "surf-rev-1", title: "rev-1" },
+  { pane: "pane-d", surface: "surf-tst-2", title: "tst-2" },
 ];
 
 function fakeCmux(
@@ -139,11 +139,11 @@ describe("parsing one pane's surfaces", () => {
     const out = parsePaneSurfaces(
       JSON.stringify({
         surfaces: [
-          { id: "s-1", index: 0, selected: true, title: "rev-1", type: "terminal" },
+          { id: "s-1", index: 0, selected: true, title: "tst-2", type: "terminal" },
         ],
       }),
     );
-    expect(out).toEqual([{ surfaceId: "s-1", title: "rev-1", selected: true }]);
+    expect(out).toEqual([{ surfaceId: "s-1", title: "tst-2", selected: true }]);
   });
 
   test("an untitled surface is KEPT with a null title, not dropped", () => {
@@ -163,7 +163,7 @@ describe("a pane is found by its title, never by its position", () => {
   test("every pane resolves to the worker whose title it carries", async () => {
     const { client } = fakeCmux();
     const panes = await titledPanes(client, "ws-dev");
-    expect(panes.map((p) => p.title)).toEqual(["eng-1", "tst-1", "eng-2", "rev-1"]);
+    expect(panes.map((p) => p.title)).toEqual(["eng-1", "tst-1", "eng-2", "tst-2"]);
   });
 
   test("eng-2 resolves to its own surface, NOT to the pane at the plan's index 1", async () => {
@@ -182,14 +182,14 @@ describe("a pane is found by its title, never by its position", () => {
 });
 
 describe("restarting one pane touches exactly one pane", () => {
-  test("it respawns rev-1's surface and no other", async () => {
+  test("it respawns tst-2's surface and no other", async () => {
     const { client, calls } = fakeCmux();
-    const r = await restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "rev-1");
-    expect(r.surfaceId).toBe("surf-rev-1");
+    const r = await restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "tst-2");
+    expect(r.surfaceId).toBe("surf-tst-2");
 
     const respawns = calls.filter((c) => c[0] === "respawn-pane");
     expect(respawns.length).toBe(1);
-    expect(respawns[0]?.[respawns[0]!.indexOf("--surface") + 1]).toBe("surf-rev-1");
+    expect(respawns[0]?.[respawns[0]!.indexOf("--surface") + 1]).toBe("surf-tst-2");
   });
 
   test("asking for eng-2 respawns eng-2's surface, not the second pane's", async () => {
@@ -204,16 +204,16 @@ describe("restarting one pane touches exactly one pane", () => {
 
   test("the command respawned is the plan's command for that worker", async () => {
     const { client, calls } = fakeCmux();
-    await restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "rev-1");
+    await restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "tst-2");
     const respawn = calls.find((c) => c[0] === "respawn-pane")!;
     const command = respawn[respawn.indexOf("--command") + 1] ?? "";
-    expect(command).toContain("rev-1");
+    expect(command).toContain("tst-2");
     expect(command).toContain("up");
   });
 
   test("nothing is created, split or closed", async () => {
     const { client, calls } = fakeCmux();
-    await restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "rev-1");
+    await restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "tst-2");
     const verbs = calls.map((c) => (c[0] === "workspace" ? `workspace ${c[1]}` : c[0]));
     expect(verbs).not.toContain("new-split");
     expect(verbs).not.toContain("workspace create");
@@ -238,14 +238,14 @@ describe("a restart that cannot name its pane refuses, and says what is there", 
         { pane: "pane-b", surface: "surf-tst-1", title: "tst-1" },
       ],
     });
-    await expect(restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "rev-1")).rejects.toThrow(
+    await expect(restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "tst-2")).rejects.toThrow(
       /which holds eng-1, tst-1/,
     );
   });
 
   test("no open console is refused before any pane call is made", async () => {
     const { client, calls } = fakeCmux({ workspaces: [] });
-    await expect(restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "rev-1")).rejects.toThrow(
+    await expect(restartConsolePane(client, DEVELOPMENT_SPEC, OPTS, "tst-2")).rejects.toThrow(
       /no development workspace is open/,
     );
     expect(calls.map((c) => c[0])).not.toContain("respawn-pane");

@@ -207,6 +207,22 @@ describe("worked example", () => {
       "rev-ctx-1": join(REPO_ROOT, "roles", "review", "cross-file-contracts.md"),
       "rev-lang-1": join(REPO_ROOT, "roles", "review", "implementation-language.md"),
     };
+    // Not `lensFiles[id]` inline: that is `string | undefined`, and a
+    // `toContain(undefined)` on a roster that grew a fourth reviewer would
+    // report a missing FILE rather than a missing MAPPING — the wrong defect,
+    // pointing at the wrong file. Drift between the roster constant and this
+    // map fails here, by name, before any config is written.
+    const lensOf = (id: string): string => {
+      const f = lensFiles[id];
+      if (f === undefined) {
+        throw new Error(
+          `REVIEW_CONSOLE_ROSTER names reviewer "${id}" with no lens file in this fixture; ` +
+            `known: ${Object.keys(lensFiles).join(", ")}`,
+        );
+      }
+      return f;
+    };
+
     const doc = baseDoc();
     doc["roles"] = { eng: {}, reviewer: { append_system_prompt_file: roleFile } };
     doc["workers"] = [
@@ -214,7 +230,7 @@ describe("worked example", () => {
       ...REVIEW_CONSOLE_ROSTER.reviewers.map((id) => ({
         id,
         role: "reviewer",
-        append_system_prompt_file: lensFiles[id],
+        append_system_prompt_file: lensOf(id),
       })),
     ];
     const loaded = await writeAndLoad(doc);
@@ -223,7 +239,7 @@ describe("worked example", () => {
         .briefing.filter((f) => f.kind === "file")
         .map((f) => f.value);
       expect(files, `${id} briefing files: ${JSON.stringify(files)}`).toContain(roleFile);
-      expect(files).toContain(lensFiles[id]);
+      expect(files).toContain(lensOf(id));
     }
   });
 
