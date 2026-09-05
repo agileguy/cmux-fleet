@@ -434,5 +434,37 @@
   "suite": "4035 unit pass / 0 fail, tsc clean",
   "batteries": "envelope-attribution run in a throwaway worktree: 26 mutations, 0 unexpected, all files restored",
   "open": "PR #146 merge decision is the owner's."
+ },
+ "harvest_recovery_branch_2026_09_05": {
+  "branch": "feature/harvest-recovery",
+  "base": "main @ 2ccf851 (PR #146 merged, CI green)",
+  "pr": "NOT OPENED YET \u2014 next step",
+  "commits": [
+   "f610761 ISC-522 failed harvest points at the review it could not read",
+   "61bd084 re-anchor envelope-attribution N2",
+   "fb38fc8 a dispatch that did not land is no longer reported as one",
+   "<head> ISC-523 the inlining had never carried a byte + 4 review nits",
+   "<head+1> re-anchor harvest-recovery H5/H6"
+  ],
+  "what_landed": {
+   "ISC-522": "RelayEffects.listTaskOutbox + RelayHarvestError carry an outbox listing taken at the moment a harvest throws; RelayChild.harvestFailed; unreadOutboxClause; HARVEST FAILED brief block. harvest-recovery.battery.ts 12 mutations 0 unexpected, ENFORCED.",
+   "unlanded_dispatch": "recreateThenDispatch now reads dispatch's payload (empty / unparseable / accepted:false). scripts/review gets runChecked for the dispatch dep only. Found by the dogfood: the script printed 'and dispatched <path>' and exited 0 with an empty inbox.",
+   "ISC-523": "RelayHarvestView.harvest.artifacts? was one level too high and optional; artifacts live at derived.artifacts. The inline path had NEVER carried a byte. Both levels now required, 16 fixtures re-shaped, compiler-only seam test added."
+  },
+  "dogfood_run_9": {
+   "run": "col-1 2026-09-05T13-16-49Z-7daf; reviewers 13-16-15Z-b057 / 13-16-17Z-b4cd / 13-16-19Z-69b4",
+   "outcome": "3 of 3 lenses reported, 5 findings, all minor; consensus that the change is sound.",
+   "the_real_finding": "the collation's 'what was not covered' section, not a finding: inlined_artifacts empty for all three lenses -> ISC-523.",
+   "all_five_findings_addressed": true,
+   "collation": "~/.pifleet/runs/2026-09-05T13-16-49Z-7daf/outbox/col-1/R-cmux-harvest-1-collate/files/{collation.json,review.md}"
+  },
+  "next_steps": [
+   "1. push the last two commits (ISA + re-anchor) \u2014 DONE before parking if the log says so",
+   "2. open the PR against main (ready-for-review, never --draft; no AI attribution)",
+   "3. OPTIONAL second dogfood: the reviews now actually inline, so a re-run would be the first collation ever made from full review text rather than summaries. Worth doing before merge.",
+   "4. ISC-517 still [~]: a fan-out that collates is journalled, so a lens lost to a failed harvest never re-enters that collation. Closing it needs a re-harvest before the journal, or a collation deferred until every dispatched lens is read or declared unreadable."
+  ],
+  "isa": "progress 500/513 -> 501/514; 13 [~] unchanged",
+  "suite": "4054 unit pass / 0 fail, tsc clean, anchors green post-commit"
  }
 }

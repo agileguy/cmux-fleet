@@ -208,6 +208,20 @@ const ENFORCED = new Set([
    * it meant before.
    */
   "test/mutation/envelope-attribution.battery.ts",
+  /*
+   * `harvest-recovery.battery.ts` is enforced from the commit that introduces
+   * it, on the same argument the entry three above records: a battery that is
+   * only REPORTED on the day it lands is one that quietly rots from the next
+   * day, and its own author exempting their own work would be worth nothing at
+   * all.
+   *
+   * It anchors ten expressions in `relay.ts` — the adapter's recovery listing,
+   * the core's capture off the rejection, both arms of the note clause, the
+   * brief block and its filter, and the success arm's flag. Every one of them
+   * is code a later edit to this area passes straight through, which is what
+   * makes the anchors worth watching rather than the mutations alone.
+   */
+  "test/mutation/harvest-recovery.battery.ts",
 ]);
 
 describe("every mutation battery still anchors to the code it claims to mutate", () => {

@@ -241,10 +241,78 @@ export async function recreateThenDispatch(
     }
   }
 
+  /*
+   * PHASE 4 — dispatch, AND CHECK THAT IT LANDED.
+   *
+   * **MEASURED, and the reason this is not just `await deps.dispatch(...)`.**
+   * `scripts/review` wires this dep to a helper whose own docblock says it runs
+   * a subcommand "swallowing failure", with `stderr: "ignore"` so the reason is
+   * discarded too. A task envelope this function never sees was refused by the
+   * validator, `dispatch` exited 2, the helper returned `""`, and the console
+   * printed *"recreated col-1 into run <id> ... and dispatched <path>"* and
+   * exited 0. Nothing was in the inbox. The operator waited for a review that
+   * could never run.
+   *
+   * The check belongs HERE rather than in the wrapper for the reason the relay's
+   * own dispatch path already records one layer up: *"`accepted` alone does not
+   * answer whether it actually happened"* — and neither does a caller's choice
+   * of subprocess helper. This function's whole promise is *recreate, then
+   * dispatch*; returning a payload it never inspects makes the second half a
+   * hope. Any caller wiring any runner now gets the same guarantee.
+   *
+   * The refusal names what was ALREADY DONE, because by this line the previous
+   * runs are stopped and the pane has been respawned. A message that said only
+   * "dispatch failed" would leave an operator guessing whether the fleet had
+   * been touched.
+   */
+  const dispatched = await deps.dispatch(fresh.runId);
+  const problem = dispatchProblem(dispatched);
+  if (problem !== null) {
+    throw new Error(
+      `${opts.worker} was recreated into run ${fresh.runId} and the dispatch DID NOT LAND: ` +
+        `${problem}. The worker is up and holding nothing; re-run the dispatch once the task ` +
+        `envelope is fixed, or run this script again with the same --task.`,
+    );
+  }
+
   return {
     settleWaitMs,
     stopped: previous,
     runId: fresh.runId,
-    dispatched: await deps.dispatch(fresh.runId),
+    dispatched,
   };
+}
+
+/**
+ * Why `dispatch`'s stdout does not show a task that landed, or `null`.
+ *
+ * Three failures, and each one is a real observation rather than a defensive
+ * arm. **Empty** is what a runner that swallows a non-zero exit returns, which
+ * is the measured case. **Unparseable** is what `--json` cannot produce and a
+ * runner that merged stderr into stdout can. **`accepted: false`** is the
+ * supervisor's own refusal — a stale epoch, a worker already holding the id —
+ * which exits 0 and is the one a status check would miss entirely.
+ *
+ * Deliberately tolerant about everything else in the payload: this asks whether
+ * the task landed, and `dispatch`'s schema is not this module's to police.
+ */
+function dispatchProblem(stdout: string): string | null {
+  const text = stdout.trim();
+  if (text === "") {
+    return "it produced no output at all, which is what a runner that discards a failing exit status returns";
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return `its output is not the JSON --json promises: ${text.slice(0, 200)}`;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return `its output is JSON but not an object: ${text.slice(0, 200)}`;
+  }
+  const accepted = (parsed as { accepted?: unknown }).accepted;
+  if (accepted !== true) {
+    return `it was refused — accepted is ${JSON.stringify(accepted)}: ${text.slice(0, 200)}`;
+  }
+  return null;
 }

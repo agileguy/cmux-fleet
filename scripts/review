@@ -295,8 +295,10 @@ async function main(argv: string[]): Promise<number> {
             process.stderr.write(`review: respawning the ${restartFlag} pane\n`);
             await restartPane();
           },
+          // `runChecked`, not `runOutput`: a dispatch's exit status is the only
+          // evidence the task landed, and the wrapper above discards it.
           dispatch: (runId) =>
-            runOutput(repoRoot, [
+            runChecked(repoRoot, [
               "dispatch",
               "--worker",
               restartFlag,
@@ -621,6 +623,42 @@ async function runOutput(repoRoot: string, args: readonly string[]): Promise<str
   } catch {
     return "";
   }
+}
+
+/**
+ * The same subcommand, with the FAILURE KEPT — for `dispatch` and nothing else.
+ *
+ * `runOutput` above swallows a non-zero exit and discards stderr, which is the
+ * right stance for `status` (the caller parses JSON and an empty read is a
+ * legitimate mid-restart answer) and for `down` (best effort, by its own
+ * comment). It is the wrong stance for a dispatch, where the exit status is the
+ * only evidence the task landed.
+ *
+ * **MEASURED.** A task envelope was refused by the validator, `dispatch` exited
+ * 2, `runOutput` returned `""`, and this script printed *"recreated col-1 into
+ * run <id> ... and dispatched <path>"* and exited 0. Nothing reached the inbox.
+ * `recreateThenDispatch` now refuses an unlanded dispatch whatever runner it is
+ * handed — that is the guarantee, and it belongs there. This is what makes the
+ * refusal SAY SOMETHING: without stderr the only honest message is "it produced
+ * no output", and with it the operator gets the validator's own complaint.
+ */
+async function runChecked(repoRoot: string, args: readonly string[]): Promise<string> {
+  const proc = Bun.spawn(["bun", "run", `${repoRoot}/src/cli/index.ts`, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [out, err] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const code = await proc.exited;
+  if (code !== 0) {
+    // Returned rather than thrown: the caller's own check turns a non-landing
+    // into its refusal, and it names what the recreate already did. Throwing
+    // here would lose that half.
+    return `${out.trim()}\n${err.trim()}`.trim();
+  }
+  return out;
 }
 
 try {
